@@ -12,18 +12,102 @@ use super::{
     MEMORY_SELECT_COLUMNS_QUALIFIED,
 };
 
-fn wiki_corpus_sql_clause(wiki_scoped: bool, qualified: bool) -> String {
-    if !wiki_scoped {
+/// The internal-row exclusion spliced into a retrieval query, or the empty
+/// string when the gate does not apply (which keeps the generated query text
+/// byte-identical to a build without this clause).
+///
+/// `allow_recall_cache` is the SQL half of the escape hatch
+/// [`crate::namespace::is_namespace_search_noise`] has always honoured: a
+/// caller that names `/recall-cache` in `path_prefix` asked for those rows on
+/// purpose. tachi#1569 froze this: while the gate keyed on `path_prefix`
+/// alone, the escape could never collide with it (a `/recall-cache` prefix is
+/// not a `/wiki` prefix, so the clause simply never ran); keying the gate on
+/// store identity makes the clause run on *every* read of the Wiki store,
+/// including an opted-in one, so without this the SQL would delete rows in
+/// the database before the Rust classifier could hand them back.
+fn wiki_corpus_sql_clause(gated: bool, qualified: bool, allow_recall_cache: bool) -> String {
+    if !gated {
         String::new()
-    } else if qualified {
-        format!(" AND ({})", crate::namespace::USER_FACING_WIKI_SQL_WHERE_M)
     } else {
-        format!(" AND ({})", crate::namespace::USER_FACING_WIKI_SQL_WHERE)
+        format!(
+            " AND ({})",
+            crate::namespace::user_facing_wiki_sql_where(qualified, allow_recall_cache)
+        )
+    }
+}
+
+/// Whether a retrieval query must exclude the Wiki store's internal rows, and
+/// whether the caller opted back into the recall-cache class.
+///
+/// Resolved once per query at the leg entry point and carried to wherever the
+/// SQL is built, so a leg cannot answer the question two different ways in two
+/// of its branches.
+#[derive(Clone, Copy)]
+pub(crate) struct WikiCorpusGate {
+    gated: bool,
+    allow_recall_cache: bool,
+}
+
+impl WikiCorpusGate {
+    /// `wiki_corpus_store` is the store-identity half (tachi#1569) —
+    /// authoritative, and the reason an unscoped search routed into the Wiki
+    /// store by project-name inference is now filtered in SQL instead of
+    /// relying on a downstream `retain`. The `path_prefix` half stays because
+    /// a `/wiki`-prefixed query against a store that merely *holds* wiki rows
+    /// (the legacy global DB, a bound project DB) still asks for the wiki
+    /// corpus.
+    fn resolve(wiki_corpus_store: bool, path_prefix: Option<&str>) -> Self {
+        Self {
+            gated: wiki_corpus_store || path_prefix_is_wiki_scope(path_prefix),
+            allow_recall_cache: crate::namespace::path_prefix_opts_into_recall_cache(path_prefix),
+        }
+    }
+
+    /// The gate a caller that is not reading the Wiki store and passes no
+    /// path prefix would resolve: no clause at all.
+    fn off() -> Self {
+        Self {
+            gated: false,
+            allow_recall_cache: false,
+        }
+    }
+
+    /// Store identity only, `path_prefix` deliberately ignored as a gate
+    /// trigger (it still supplies the recall-cache opt-in).
+    ///
+    /// For the typo-fallback prefilter in `search::candidates`, a fourth
+    /// candidate source with its own hand-built SQL that has never carried
+    /// this clause — not even for a `/wiki` `path_prefix`. tachi#1569 closes
+    /// the store-identity hole there (a wiki-store read must not smuggle
+    /// internal rows in through the typo leg) without silently also changing
+    /// what a `/wiki`-prefixed typo query returns, which is a pre-existing
+    /// asymmetry and a separate decision.
+    fn store_keyed_only(wiki_corpus_store: bool, path_prefix: Option<&str>) -> Self {
+        Self {
+            gated: wiki_corpus_store,
+            allow_recall_cache: crate::namespace::path_prefix_opts_into_recall_cache(path_prefix),
+        }
+    }
+
+    fn splice(self, qualified: bool) -> String {
+        wiki_corpus_sql_clause(self.gated, qualified, self.allow_recall_cache)
     }
 }
 
 fn path_prefix_is_wiki_scope(path_prefix: Option<&str>) -> bool {
     path_prefix.is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"))
+}
+
+/// The Wiki clause for a query built outside this module that must respect
+/// store identity — see [`WikiCorpusGate::store_keyed_only`] for why the
+/// `path_prefix` trigger is not applied. Returns the empty string when the
+/// store is not the Wiki corpus, leaving the caller's query text unchanged.
+pub(crate) fn wiki_corpus_store_sql_splice(
+    wiki_corpus_store: bool,
+    path_prefix: Option<&str>,
+    qualified: bool,
+) -> String {
+    WikiCorpusGate::store_keyed_only(wiki_corpus_store, path_prefix).splice(qualified)
 }
 
 /// sqlite-vec's vec0 virtual table picks its nearest-`k` window FIRST, from
@@ -73,9 +157,10 @@ pub fn search_vec(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
     surface: Option<Surface>,
+    wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let blob = serialize_f32(query_vec);
-    let wiki_scoped = path_prefix_is_wiki_scope(path_prefix);
+    let wiki_gate = WikiCorpusGate::resolve(wiki_corpus_store, path_prefix);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
 
@@ -89,7 +174,7 @@ pub fn search_vec(
         path_like.as_deref(),
         as_of_utc.as_deref(),
         surface,
-        wiki_scoped,
+        wiki_gate,
     )?;
 
     // Widen unconditionally whenever the current pass came up short --
@@ -122,7 +207,7 @@ pub fn search_vec(
                 path_like.as_deref(),
                 as_of_utc.as_deref(),
                 surface,
-                wiki_scoped,
+                wiki_gate,
             )?;
         }
     }
@@ -157,14 +242,14 @@ fn run_search_vec_query(
     path_like: Option<&str>,
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
-    wiki_scoped: bool,
+    wiki_gate: WikiCorpusGate,
 ) -> Result<Vec<(String, f64)>, MemoryError> {
     // `surface` gates an extra `AND (...)` predicate mirroring [`Surface`]'s
     // Rust classifier (`surface_sql_splice`). `None` produces an empty
     // string -- the query text is byte-identical to before this parameter
     // existed, preserving the fused-pool behavior exactly.
     let surface_clause = surface_sql_splice(surface, true);
-    let wiki_clause = wiki_corpus_sql_clause(wiki_scoped, true);
+    let wiki_clause = wiki_gate.splice(true);
     let mut stmt = conn.prepare(&format!(
         r#"SELECT v.id, v.distance
            FROM memories_vec v
@@ -214,6 +299,7 @@ pub fn search_fts(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
     surface: Option<Surface>,
+    wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let safe_query = simple_query_input(query);
 
@@ -231,6 +317,7 @@ pub fn search_fts(
         path_prefix,
         as_of,
         surface,
+        WikiCorpusGate::resolve(wiki_corpus_store, path_prefix),
     )
 }
 
@@ -244,6 +331,7 @@ pub(crate) fn search_fts_raw_match(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
     surface: Option<Surface>,
+    wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     if match_query.trim().is_empty() {
         return Ok(HashMap::new());
@@ -258,6 +346,7 @@ pub(crate) fn search_fts_raw_match(
         path_prefix,
         as_of,
         surface,
+        WikiCorpusGate::resolve(wiki_corpus_store, path_prefix),
     )
 }
 
@@ -272,6 +361,7 @@ fn search_fts_match(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
     surface: Option<Surface>,
+    wiki_gate: WikiCorpusGate,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
@@ -285,7 +375,7 @@ fn search_fts_match(
     // string -- the query text is byte-identical to before this parameter
     // existed, preserving the fused-pool behavior exactly.
     let surface_clause = surface_sql_splice(surface, true);
-    let wiki_clause = wiki_corpus_sql_clause(path_prefix_is_wiki_scope(path_prefix), true);
+    let wiki_clause = wiki_gate.splice(true);
     // The ordinary path uses simple_query() for automatic CJK segmentation.
     // Raw match mode is only for internally constructed, sanitized FTS expressions.
     let mut stmt = conn.prepare(&format!(
@@ -360,6 +450,7 @@ pub fn search_symbolic_candidates(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
     surface: Option<Surface>,
+    wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     search_symbolic_candidates_with_relevance(
         conn,
@@ -371,6 +462,7 @@ pub fn search_symbolic_candidates(
         path_prefix,
         as_of,
         surface,
+        wiki_corpus_store,
     )
 }
 
@@ -388,6 +480,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
     surface: Option<Surface>,
+    wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let terms = symbolic_terms(query);
 
@@ -398,7 +491,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     register_symbolic_score_function(conn)?;
 
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
-    let wiki_scoped = path_prefix_is_wiki_scope(path_prefix);
+    let wiki_gate = WikiCorpusGate::resolve(wiki_corpus_store, path_prefix);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
 
     // Prefer the trigram index when every term is trigram-eligible (#1331).
@@ -423,7 +516,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
             path_like.as_deref(),
             as_of_utc.as_deref(),
             surface,
-            wiki_scoped,
+            wiki_gate,
         );
     }
 
@@ -437,7 +530,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
         path_like.as_deref(),
         as_of_utc.as_deref(),
         surface,
-        wiki_scoped,
+        wiki_gate,
     )
 }
 
@@ -472,20 +565,30 @@ pub const SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE: &str = "SELECT {columns}
          LIMIT ?7";
 
 /// Build the production trigram SELECT statement for the given column list
-/// and surface scope. `surface = None` reproduces the pre-surface query text.
+/// and surface scope, with the Wiki gate OFF. `surface = None` reproduces the
+/// pre-surface query text.
+///
+/// tachi#1569 checked the callers before touching this default: the only one
+/// outside this module is the receipts harness's `EXPLAIN QUERY PLAN`
+/// assertion (`crates/memcore/examples/receipts_workloads.rs:993`), which
+/// wants the *plan shape* of the ungated statement and passes `None` for
+/// surface for the same reason. Production retrieval does not come through
+/// here — it calls `symbolic_trigram_select_sql_with_gate` with the gate the
+/// leg resolved — so the default stays off rather than becoming a third
+/// answer to "is this the Wiki store" that no store ever supplied.
 pub fn symbolic_trigram_select_sql(columns: &str, surface: Option<Surface>) -> String {
-    symbolic_trigram_select_sql_with_wiki_scope(columns, surface, false)
+    symbolic_trigram_select_sql_with_gate(columns, surface, WikiCorpusGate::off())
 }
 
-fn symbolic_trigram_select_sql_with_wiki_scope(
+fn symbolic_trigram_select_sql_with_gate(
     columns: &str,
     surface: Option<Surface>,
-    wiki_scoped: bool,
+    wiki_gate: WikiCorpusGate,
 ) -> String {
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE
         .replace("{columns}", columns)
         .replace("{surface_clause}", &surface_sql_splice(surface, true))
-        .replace("{wiki_clause}", &wiki_corpus_sql_clause(wiki_scoped, true))
+        .replace("{wiki_clause}", &wiki_gate.splice(true))
 }
 
 /// Trigram-accelerated symbolic candidate retrieval (#1331).
@@ -508,14 +611,11 @@ fn search_symbolic_via_trigram(
     path_like: Option<&str>,
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
-    wiki_scoped: bool,
+    wiki_gate: WikiCorpusGate,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let match_query = symbolic_trigram_match_query(terms);
-    let sql = symbolic_trigram_select_sql_with_wiki_scope(
-        MEMORY_SELECT_COLUMNS_QUALIFIED,
-        surface,
-        wiki_scoped,
-    );
+    let sql =
+        symbolic_trigram_select_sql_with_gate(MEMORY_SELECT_COLUMNS_QUALIFIED, surface, wiki_gate);
 
     let params: Vec<Value> = vec![
         (include_archived as i64).into(),
@@ -560,12 +660,12 @@ fn search_symbolic_via_table_scan(
     path_like: Option<&str>,
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
-    wiki_scoped: bool,
+    wiki_gate: WikiCorpusGate,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     // Unqualified (`qualified = false`): this path SELECTs from bare
     // `memories`, no `m.` join alias.
     let surface_clause = surface_sql_splice(surface, false);
-    let wiki_clause = wiki_corpus_sql_clause(wiki_scoped, false);
+    let wiki_clause = wiki_gate.splice(false);
     let mut sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS} FROM memories
          WHERE (?1 = 1 OR archived = 0)
@@ -706,4 +806,90 @@ fn escape_like_pattern(value: &str) -> String {
         escaped.push(ch);
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// tachi#1569 (c): with the gate off — which is what every non-Wiki store
+    /// resolves — the generated query text is byte-identical to a build with
+    /// no Wiki clause at all. The clause is spliced, not conditionally
+    /// formatted, so "off" has to mean *zero characters*, not a harmless
+    /// `AND 1=1`.
+    #[test]
+    fn a_non_wiki_store_adds_no_query_text() {
+        for path_prefix in [None, Some("/notes"), Some("/recall-cache")] {
+            let gate = WikiCorpusGate::resolve(false, path_prefix);
+            assert_eq!(
+                gate.splice(true),
+                "",
+                "qualified splice must be empty for a non-wiki store ({path_prefix:?})"
+            );
+            assert_eq!(
+                gate.splice(false),
+                "",
+                "unqualified splice must be empty for a non-wiki store ({path_prefix:?})"
+            );
+        }
+        assert_eq!(WikiCorpusGate::off().splice(true), "");
+        assert_eq!(
+            symbolic_trigram_select_sql("m.id", None),
+            SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE
+                .replace("{columns}", "m.id")
+                .replace("{surface_clause}", "")
+                .replace("{wiki_clause}", ""),
+            "the ungated trigram statement (receipts EXPLAIN harness) must keep its exact text"
+        );
+    }
+
+    /// The store-identity half is sufficient on its own: no `path_prefix`
+    /// needed, which is the whole point of tachi#1569.
+    #[test]
+    fn store_identity_alone_turns_the_gate_on() {
+        let gate = WikiCorpusGate::resolve(true, None);
+        assert!(gate.splice(true).starts_with(" AND ("));
+        assert!(
+            gate.splice(true).contains("m.path != '/wiki/_log'"),
+            "the qualified form must use m.-qualified columns"
+        );
+        assert!(
+            gate.splice(false).contains("path != '/wiki/_log'")
+                && !gate.splice(false).contains("m.path"),
+            "the unqualified form must not reference the join alias"
+        );
+
+        // …and the request-shape half still works for a wiki-prefixed query
+        // against a store that merely holds wiki rows.
+        assert!(!WikiCorpusGate::resolve(false, Some("/wiki"))
+            .splice(true)
+            .is_empty());
+    }
+
+    /// The recall-cache opt-in drops exactly the cache terms and nothing else.
+    #[test]
+    fn the_opt_in_drops_only_the_recall_cache_terms() {
+        let opted_in = WikiCorpusGate::resolve(true, Some("/recall-cache")).splice(true);
+        assert!(!opted_in.is_empty(), "the gate still fires when opted in");
+        assert!(
+            !opted_in.contains("recall_rerank_cache"),
+            "the cache terms must be gone: {opted_in}"
+        );
+        assert!(
+            opted_in.contains("m.path != '/wiki/_log'") && opted_in.contains("anchor:*"),
+            "every other internal class must survive the opt-in: {opted_in}"
+        );
+
+        let strict = WikiCorpusGate::resolve(true, Some("/wiki")).splice(true);
+        assert!(strict.contains("recall_rerank_cache"));
+    }
+
+    /// The typo-fallback prefilter is store-keyed only (see
+    /// `WikiCorpusGate::store_keyed_only`): a `/wiki` prefix does not turn it
+    /// on, store identity does.
+    #[test]
+    fn the_typo_prefilter_splice_is_store_keyed_only() {
+        assert_eq!(wiki_corpus_store_sql_splice(false, Some("/wiki"), true), "");
+        assert!(!wiki_corpus_store_sql_splice(true, None, true).is_empty());
+    }
 }

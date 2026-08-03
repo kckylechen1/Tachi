@@ -269,11 +269,24 @@ pub struct ReadStorePool {
 }
 
 impl ReadStorePool {
-    pub fn open_read_only(db_path: &str, size: usize) -> Result<Self, memcore::MemoryError> {
+    /// Open `size` read-only handles on `db_path`, every one of them carrying
+    /// `db_label`.
+    ///
+    /// tachi#1569: `db_label` must be the same manifest label the write store
+    /// for this path was opened with (`global`, `wiki`, the project name).
+    /// Pooled read stores used to be born unlabelled, which is why read-side
+    /// gates could not be keyed on store identity at all.
+    pub fn open_read_only(
+        db_path: &str,
+        size: usize,
+        db_label: &str,
+    ) -> Result<Self, memcore::MemoryError> {
         let size = size.clamp(1, MAX_MEMORY_READ_POOL_SIZE);
         let mut stores = Vec::with_capacity(size);
         for _ in 0..size {
-            stores.push(StdMutex::new(MemoryStore::open_read_only(db_path)?));
+            stores.push(StdMutex::new(MemoryStore::open_read_only_with_label(
+                db_path, db_label,
+            )?));
         }
         Ok(Self {
             inner: Arc::new(ReadPoolInner {
@@ -771,12 +784,7 @@ impl DbRuntime {
         db_path: &Path,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let label = db_path
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|os| os.to_str())
-            .unwrap_or("path");
-        self.with_path_store_with_label(db_path, label, f)
+        self.with_path_store_with_label(db_path, path_store_label(db_path), f)
     }
 
     pub fn with_path_store_read<T>(
@@ -784,25 +792,24 @@ impl DbRuntime {
         db_path: &Path,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.with_path_store_read_with_label(db_path, "path", f)
+        // tachi#1569 (cross-vendor review): this route takes an arbitrary
+        // path and has no caller-declared role for it, so the label is
+        // *inferred* from the directory name and must stay diagnostic-only.
+        // Promoting a guess to identity would make any database that happens
+        // to sit in a directory called `wiki` filter its own rows out of
+        // reads — a false positive that deletes data from a caller's view
+        // instead of merely leaking, and one nobody would think to look for.
+        self.with_path_store_read_labelled(db_path, StoreLabel::inferred(db_path), f)
     }
 
-    pub fn with_path_store_with_label<T>(
+    /// Shared body of [`Self::with_path_store_read`] and
+    /// [`Self::with_path_store_read_with_label`]; the two differ only in
+    /// whether the label is authoritative enough to become the handle's
+    /// `db_label` (see [`StoreLabel`]).
+    fn with_path_store_read_labelled<T>(
         &self,
         db_path: &Path,
-        label: &str,
-        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let state = self.attached_project_state(db_path)?;
-        let _gate = write_or_recover(&state.rw_gate, "path_db_rw_gate");
-        let mut store = lock_or_recover(&state.store, label);
-        f(&mut store)
-    }
-
-    pub fn with_path_store_read_with_label<T>(
-        &self,
-        db_path: &Path,
-        label: &str,
+        label: StoreLabel<'_>,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         let key = project_db_read_cache_key(db_path)?;
@@ -817,12 +824,37 @@ impl DbRuntime {
             });
         if let Some(state) = cached {
             let _gate = read_or_recover(&state.rw_gate, "path_db_rw_gate");
-            return state.read_pool.with_store(label, f);
+            return state.read_pool.with_store(label.text(), f);
         }
 
         let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
         let mut store = open_read_store(&key, label)?;
         f(&mut store)
+    }
+
+    pub fn with_path_store_with_label<T>(
+        &self,
+        db_path: &Path,
+        label: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let state = self.attached_project_state(db_path)?;
+        let _gate = write_or_recover(&state.rw_gate, "path_db_rw_gate");
+        let mut store = lock_or_recover(&state.store, label);
+        f(&mut store)
+    }
+
+    /// Read a DB whose manifest role the caller has already resolved (the
+    /// global store, or a `validate_named_project`-checked project name whose
+    /// path was derived *from* that name). Only such a declared label becomes
+    /// the handle's `db_label` — see [`StoreLabel`].
+    pub fn with_path_store_read_with_label<T>(
+        &self,
+        db_path: &Path,
+        label: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.with_path_store_read_labelled(db_path, StoreLabel::Declared(label), f)
     }
 
     /// Open one read-only store for a request that targets a currently
@@ -833,6 +865,9 @@ impl DbRuntime {
     /// read-pool routing and LRU touch behavior remain unchanged. The direct
     /// branch only validates an existing DB and opens it read-only; it never
     /// initializes, migrates, or attaches the path.
+    ///
+    /// `label` is a *declared* role (see [`StoreLabel`]): its one caller
+    /// resolved the path from a validated named project.
     pub fn open_unattached_path_store_read_session_with_label(
         &self,
         db_path: &Path,
@@ -854,7 +889,7 @@ impl DbRuntime {
         // read closure does. It is dropped before the request session escapes.
         let store = {
             let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
-            open_read_store(&key, label)?
+            open_read_store(&key, StoreLabel::Declared(label))?
         };
         Ok(Some(RequestScopedReadStore { store }))
     }
@@ -1349,6 +1384,30 @@ impl ProjectDbState {
     /// operational data, never a fresh-provisioning target here. Authority is
     /// normally the deploy-time value; dynamic named-project write attachment
     /// may instead pass the exact v22-to-v23 guard-migration authority above.
+    ///
+    /// # Known narrow face: the label here is inferred, not resolved
+    ///
+    /// `project_label` below is the parent directory's name. That predates
+    /// tachi#1569 and is already the identity the **write** path enforces
+    /// against (`path_router::validate_path_for_db`), so a DB placed at
+    /// `.../wiki/memory.db` has always been allowed to accept `/wiki` writes.
+    /// #1569 gives the read pool the *same* label, so reads and writes agree —
+    /// which also means a false positive here now over-filters reads instead
+    /// of only over-permitting writes.
+    ///
+    /// It is left inferred deliberately. This function receives a `PathBuf`
+    /// and a `MigrationAuthority`; the authoritative mapping (manifest role /
+    /// validated named project) lives in `tachi-server` and is not passed in,
+    /// and both ways of plumbing it here are worse than the current rule:
+    /// taking the label from whichever caller happens to create the cached
+    /// state first is order-dependent and fails *open* (a wiki read that lost
+    /// the race would silently skip the gate), and defaulting the unlabelled
+    /// callers to `unknown` would change write-side path routing for stores
+    /// that rely on today's derivation. Under the shipped layout the two
+    /// agree anyway: attached paths are `~/.tachi/projects/<validated
+    /// name>/memory.db` (`path_utils::alias::plan_c_global_db_path_in_home`),
+    /// so parent-directory == project name. Giving a database a real
+    /// self-describing identity is its own issue.
     pub fn open(
         db_path: PathBuf,
         read_pool_size: usize,
@@ -1374,7 +1433,7 @@ impl ProjectDbState {
         let store = MemoryStore::open_with_label_and_context(db_str, &project_label, &ctx)
             .map_err(|e| format!("open project db: {e}"))?;
         let vec_available = store.vec_available;
-        let read_pool = ReadStorePool::open_read_only(db_str, read_pool_size)
+        let read_pool = ReadStorePool::open_read_only(db_str, read_pool_size, &project_label)
             .map_err(|e| format!("open project read db: {e}"))?;
         Ok(Self {
             store: Arc::new(StdMutex::new(store)),
@@ -1561,16 +1620,76 @@ fn record_read_store_open(db_path: &Path) {
     }
 }
 
-fn open_read_store(db_path: &Path, label: &str) -> Result<MemoryStore, String> {
+/// Name for a DB addressed by path: the directory that holds it
+/// (`.../wiki/memory.db` -> `wiki`), the same rule `ProjectDbState::open`
+/// uses. This is a *guess* about the store's role, fit for diagnostics; see
+/// [`StoreLabel`] for why it must not become the store's identity.
+fn path_store_label(db_path: &Path) -> &str {
+    db_path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|os| os.to_str())
+        .unwrap_or("path")
+}
+
+/// How much authority a caller has over a store's manifest identity
+/// (tachi#1569, cross-vendor review).
+///
+/// Only a caller that *resolved* the store's role may confer it. A name read
+/// off the filesystem is evidence about a directory, not about a database:
+/// treating it as identity means an unrelated DB under a directory called
+/// `wiki` silently starts filtering wiki-internal rows out of its own reads.
+/// A leak is visible to whoever reads the output; over-filtering is not
+/// visible to anyone.
+#[derive(Clone, Copy)]
+enum StoreLabel<'a> {
+    /// The caller knows this store's manifest role: the global store, or a
+    /// named project whose path was derived from its validated name. Becomes
+    /// the handle's `db_label`.
+    Declared(&'a str),
+    /// Guessed from the path. Used for lock names and error text only; the
+    /// handle stays unlabelled, exactly as every read store was before
+    /// tachi#1569.
+    Inferred(&'a str),
+}
+
+impl<'a> StoreLabel<'a> {
+    fn inferred(db_path: &'a Path) -> Self {
+        Self::Inferred(path_store_label(db_path))
+    }
+
+    /// The human-facing name, whatever its authority.
+    fn text(self) -> &'a str {
+        match self {
+            Self::Declared(label) | Self::Inferred(label) => label,
+        }
+    }
+
+    /// The label that may become `MemoryStore::db_label`.
+    fn identity(self) -> &'a str {
+        match self {
+            Self::Declared(label) => label,
+            Self::Inferred(_) => memcore::path_router::UNKNOWN_DB_LABEL,
+        }
+    }
+}
+
+/// Open one read-only store. The label names the store in error text; only
+/// its [`StoreLabel::identity`] half becomes the handle's `db_label`, so
+/// read-side identity predicates (`is_wiki_corpus_store`) see the same
+/// identity the write path uses for the same file — and see *nothing* when
+/// the caller was only guessing.
+fn open_read_store(db_path: &Path, label: StoreLabel<'_>) -> Result<MemoryStore, String> {
+    let name = label.text();
     let db_str = db_path.to_str().ok_or_else(|| {
         format!(
             "{} DB path contains invalid UTF-8: {}",
-            label,
+            name,
             db_path.display()
         )
     })?;
-    let store =
-        MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))?;
+    let store = MemoryStore::open_read_only_with_label(db_str, label.identity())
+        .map_err(|e| format!("open {name} read store: {e}"))?;
     #[cfg(feature = "test-support")]
     record_read_store_open(db_path);
     Ok(store)
@@ -1609,7 +1728,7 @@ mod tests {
             global_store: Arc::new(StdMutex::new(
                 MemoryStore::open_with_label(global_db_str, "global").expect("global store"),
             )),
-            global_read_pool: ReadStorePool::open_read_only(global_db_str, 1)
+            global_read_pool: ReadStorePool::open_read_only(global_db_str, 1, "global")
                 .expect("global read pool"),
             global_rw_gate: Arc::new(StdRwLock::new(())),
             global_contention_recorder: Arc::new(OnceLock::new()),
@@ -1783,7 +1902,7 @@ mod tests {
                 .expect("seed db"),
         );
         let db_str = db_path.to_str().expect("db path utf8").to_string();
-        let pool = ReadStorePool::open_read_only(&db_str, 4).expect("open pool");
+        let pool = ReadStorePool::open_read_only(&db_str, 4, "test-pool").expect("open pool");
 
         let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
         let (occupier_entered_tx, occupier_entered_rx) = std::sync::mpsc::channel();
@@ -1932,7 +2051,7 @@ mod tests {
                 .expect("seed db"),
         );
         let db_str = db_path.to_str().expect("db path utf8").to_string();
-        let pool = ReadStorePool::open_read_only(&db_str, 1).expect("open pool");
+        let pool = ReadStorePool::open_read_only(&db_str, 1, "test-pool").expect("open pool");
 
         let panicker_gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
         let (panicker_entered_tx, panicker_entered_rx) = std::sync::mpsc::channel();
@@ -2434,6 +2553,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp);
     }
 
+    /// tachi#1569 (cross-vendor review, CONCERN 5): a directory name is not a
+    /// store identity. An unrelated database that happens to live under a
+    /// directory called `wiki` must not start filtering wiki-internal rows out
+    /// of its own reads — over-filtering is invisible to the caller, so it is
+    /// the worse failure direction. Only a caller that resolved the store's
+    /// role (`with_path_store_read_with_label`) confers identity.
+    #[test]
+    fn an_inferred_directory_name_never_confers_wiki_identity() {
+        let temp = unique_temp_dir("inferred-label");
+        let global_db = temp.join("global/memory.db");
+        // A perfectly ordinary project DB that merely sits in a `wiki` dir.
+        let impostor_db = temp.join("wiki/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        std::fs::create_dir_all(impostor_db.parent().expect("impostor parent"))
+            .expect("impostor dir");
+        drop(
+            MemoryStore::open_with_label(impostor_db.to_str().expect("impostor utf8"), "seed")
+                .expect("seed impostor db"),
+        );
+        let runtime = test_runtime(global_db);
+
+        runtime
+            .with_path_store_read(&impostor_db, |store| {
+                assert!(
+                    !store.is_wiki_corpus_store(),
+                    "a guessed directory name must not make this the wiki corpus"
+                );
+                Ok(())
+            })
+            .expect("inferred-label read");
+
+        // The same file, opened by a caller that declares the role, does carry
+        // it — that is the half the gate is allowed to trust.
+        runtime
+            .with_path_store_read_with_label(&impostor_db, "wiki", |store| {
+                assert!(
+                    store.is_wiki_corpus_store(),
+                    "a declared role must reach the store handle"
+                );
+                Ok(())
+            })
+            .expect("declared-label read");
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
     #[test]
     fn missing_path_store_read_does_not_create_parent_dir() {
         let temp = unique_temp_dir("path-store-missing-read");
@@ -2720,8 +2885,9 @@ mod bench {
             MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
                 .expect("seed db"),
         );
-        let pool = ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4)
-            .expect("open pool");
+        let pool =
+            ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4, "test-pool")
+                .expect("open pool");
 
         const ITERATIONS: usize = 500;
         let mut checkout_wait_us = Vec::with_capacity(ITERATIONS);
@@ -2786,8 +2952,9 @@ mod bench {
             MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
                 .expect("seed db"),
         );
-        let pool = ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4)
-            .expect("open pool");
+        let pool =
+            ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4, "test-pool")
+                .expect("open pool");
 
         const HOLD_DURATION: Duration = Duration::from_millis(200);
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();

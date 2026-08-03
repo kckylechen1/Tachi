@@ -127,7 +127,7 @@ fn archived_rows_do_not_starve_live_candidates() {
     );
 
     let top_k = 3;
-    let results = search_vec(&conn, &query, top_k, false, true, None, None, None).unwrap();
+    let results = search_vec(&conn, &query, top_k, false, true, None, None, None, false).unwrap();
 
     assert_eq!(
         results.len(),
@@ -182,7 +182,7 @@ fn fewer_live_rows_than_top_k_returns_all_of_them_without_looping_forever() {
     insert_vec_row(&mut conn, "live-b", 0.525, false);
 
     let top_k = 5; // more than the 2 live rows that exist
-    let results = search_vec(&conn, &query, top_k, false, true, None, None, None).unwrap();
+    let results = search_vec(&conn, &query, top_k, false, true, None, None, None, false).unwrap();
 
     assert_eq!(
         results.len(),
@@ -220,6 +220,7 @@ fn widening_stops_at_sqlite_vec_knn_limit_when_filtered_corpus_is_smaller_than_t
         Some("/timeline"),
         None,
         None,
+        false,
     )
     .expect("bounded widening must not ask sqlite-vec for k > 4096");
 
@@ -246,7 +247,7 @@ fn no_filter_active_returns_naive_top_k_unchanged() {
     insert_vec_row(&mut conn, "live-near", 0.52, false);
 
     let top_k = 3;
-    let results = search_vec(&conn, &query, top_k, true, true, None, None, None).unwrap();
+    let results = search_vec(&conn, &query, top_k, true, true, None, None, None, false).unwrap();
 
     assert_eq!(
         results.len(),
@@ -310,7 +311,7 @@ fn anchor_rows_do_not_starve_live_candidates_even_when_every_flag_is_permissive(
     // Every flag maximally permissive: include_archived=true,
     // include_superseded=true, no path/as_of filter. Only the unconditional
     // anchor exclusion can drop a row here.
-    let results = search_vec(&conn, &query, top_k, true, true, None, None, None).unwrap();
+    let results = search_vec(&conn, &query, top_k, true, true, None, None, None, false).unwrap();
 
     assert_eq!(
         results.len(),

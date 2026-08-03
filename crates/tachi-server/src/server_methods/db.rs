@@ -559,17 +559,22 @@ impl MemoryServer {
     }
 
     /// Open a named project's DB for a read-only operation.
+    ///
+    /// The label is the bare project name, exactly what
+    /// [`Self::with_named_project_store`] passes on the write side.
+    /// tachi#1569: it used to be `named-project:<name>` here and `<name>`
+    /// there, so the two doors onto one store disagreed about its identity —
+    /// and since the label is now the store's `db_label`, that disagreement
+    /// would make `is_wiki_corpus_store()` answer differently for a read than
+    /// for a write of the same file.
     pub(crate) fn with_named_project_store_read<T>(
         &self,
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         let db_path = self.resolve_named_project_db_open_path(project_name)?;
-        self.db.with_path_store_read_with_label(
-            &db_path,
-            &format!("named-project:{project_name}"),
-            f,
-        )
+        self.db
+            .with_path_store_read_with_label(&db_path, project_name, f)
     }
 
     /// Read a named project through its cached runtime handle while proving
@@ -581,10 +586,10 @@ impl MemoryServer {
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         let db_path = self.resolve_named_project_db_open_path(project_name)?;
-        self.db.with_path_store_read_with_label(
-            &db_path,
-            &format!("named-project:{project_name}"),
-            |store| {
+        // Bare project name, matching the write side — see
+        // `with_named_project_store_read` (tachi#1569).
+        self.db
+            .with_path_store_read_with_label(&db_path, project_name, |store| {
                 run_identity_checked_store_action(
                     store,
                     &db_path,
@@ -592,8 +597,7 @@ impl MemoryServer {
                     "read",
                     f,
                 )
-            },
-        )
+            })
     }
 
     /// Open a named project's DB for a write operation.

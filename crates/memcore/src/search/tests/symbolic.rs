@@ -364,6 +364,7 @@ fn symbolic_pre_cap_legacy_null_json_columns_fall_back_to_empty_arrays() {
         None,
         None,
         None,
+        false,
     )
     .expect("legacy NULL JSON columns must not fail symbolic search");
     let candidate = candidates.first().expect("legacy row remains searchable");
@@ -417,6 +418,7 @@ fn symbolic_pre_cap_timestamp_tie_break_uses_real_instants() {
         None,
         None,
         None,
+        false,
     )
     .expect("symbolic candidate query succeeds");
     assert_eq!(
@@ -456,6 +458,7 @@ fn symbolic_pre_cap_id_tie_break_is_stable() {
         None,
         None,
         None,
+        false,
     )
     .expect("symbolic candidate query succeeds");
 
@@ -474,9 +477,10 @@ fn symbolic_single_cjk_char_keeps_like_eligibility() {
     let mut conn = setup();
     insert(&mut conn, "cjk-note", "今日要记一件重要的事", &["journal"]);
 
-    let hits =
-        crate::db::search_symbolic_candidates(&conn, "记", 10, false, false, None, None, None)
-            .expect("CJK symbolic search succeeds");
+    let hits = crate::db::search_symbolic_candidates(
+        &conn, "记", 10, false, false, None, None, None, false,
+    )
+    .expect("CJK symbolic search succeeds");
     assert!(
         hits.iter().any(|e| e.id == "cjk-note"),
         "single-CJK query must still retrieve via the LIKE path; got ids: {:?}",

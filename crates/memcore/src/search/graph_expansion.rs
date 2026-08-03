@@ -58,8 +58,13 @@ pub(super) fn append_graph_expansion(
     let rel_filter = opts.graph_relation_filter.as_deref();
 
     // Graph expansion is a best-effort enrichment; failures are non-fatal.
-    let Ok(expand_result) = graph_expand(conn, &seed_ids, opts.graph_expand_hops, rel_filter)
-    else {
+    let Ok(expand_result) = graph_expand(
+        conn,
+        &seed_ids,
+        opts.graph_expand_hops,
+        rel_filter,
+        opts.wiki_corpus_store,
+    ) else {
         let receipt = phase_start.map(|s| GraphPhaseReceipt {
             enabled: true,
             failed: true,

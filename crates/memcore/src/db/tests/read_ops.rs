@@ -85,7 +85,7 @@ fn get_all_returns_ordered_by_timestamp() {
     upsert(&mut conn, &make_entry("ga-1", "first memory"), false).unwrap();
     upsert(&mut conn, &make_entry("ga-2", "second memory"), false).unwrap();
 
-    let all = get_all(&conn, 10, false).unwrap();
+    let all = get_all(&conn, 10, false, false).unwrap();
     assert_eq!(all.len(), 2);
 }
 
@@ -100,7 +100,7 @@ fn get_all_respects_limit() {
         )
         .unwrap();
     }
-    let limited = get_all(&conn, 2, false).unwrap();
+    let limited = get_all(&conn, 2, false, false).unwrap();
     assert_eq!(limited.len(), 2);
 }
 
@@ -115,7 +115,7 @@ fn list_by_path_filters_prefix() {
     e2.path = "/docs/beta".into();
     upsert(&mut conn, &e2, false).unwrap();
 
-    let project_entries = list_by_path(&conn, "/project", 10, false).unwrap();
+    let project_entries = list_by_path(&conn, "/project", 10, false, false).unwrap();
     assert_eq!(project_entries.len(), 1);
     assert_eq!(project_entries[0].id, "lp-1");
 }
@@ -125,7 +125,7 @@ fn list_by_path_empty_prefix_returns_all() {
     let mut conn = make_conn();
     upsert(&mut conn, &make_entry("lbe-1", "any"), false).unwrap();
     upsert(&mut conn, &make_entry("lbe-2", "any other"), false).unwrap();
-    let all = list_by_path(&conn, "/", 10, false).unwrap();
+    let all = list_by_path(&conn, "/", 10, false, false).unwrap();
     assert_eq!(all.len(), 2);
 }
 
@@ -145,7 +145,7 @@ fn list_by_path_active_unsuperseded_excludes_superseded_without_changing_generic
     )
     .unwrap();
 
-    let current = list_by_path_active_unsuperseded(&conn, "/wiki/engineering", 10).unwrap();
+    let current = list_by_path_active_unsuperseded(&conn, "/wiki/engineering", 10, false).unwrap();
     let current_ids = current
         .into_iter()
         .map(|entry| entry.id)
@@ -156,7 +156,7 @@ fn list_by_path_active_unsuperseded_excludes_superseded_without_changing_generic
         "active-unsuperseded path listing must not surface historical superseded rows"
     );
 
-    let generic = list_by_path(&conn, "/wiki/engineering", 10, false).unwrap();
+    let generic = list_by_path(&conn, "/wiki/engineering", 10, false, false).unwrap();
     let generic_ids = generic
         .into_iter()
         .map(|entry| entry.id)
@@ -571,13 +571,13 @@ fn archive_excluded_from_default_fetch() {
     .unwrap();
     archive_memory(&conn, "arch-fetch-1").unwrap();
 
-    let active = get_all(&conn, 10, false).unwrap();
+    let active = get_all(&conn, 10, false, false).unwrap();
     assert!(
         !active.iter().any(|e| e.id == "arch-fetch-1"),
         "archived entry should not appear in default get_all"
     );
 
-    let with_archived = get_all(&conn, 10, true).unwrap();
+    let with_archived = get_all(&conn, 10, true, false).unwrap();
     assert!(
         with_archived.iter().any(|e| e.id == "arch-fetch-1"),
         "archived entry should appear when include_archived=true"

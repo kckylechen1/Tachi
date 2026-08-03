@@ -1169,6 +1169,7 @@ fn measure_symbolic_cell(
                 None,
                 None,
                 None,
+                false,
             )
             .expect("fresh symbolic scan");
             let elapsed_us = start.elapsed().as_micros() as u64;
@@ -1185,6 +1186,7 @@ fn measure_symbolic_cell(
                     None,
                     None,
                     None,
+                    false,
                 )
                 .expect("warmup symbolic scan");
             }
@@ -1201,6 +1203,7 @@ fn measure_symbolic_cell(
                     None,
                     None,
                     None,
+                    false,
                 )
                 .expect("measured symbolic scan");
                 samples.push(start.elapsed().as_micros() as u64);
@@ -1253,6 +1256,7 @@ mod grid_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("oldest-target symbolic scan");
 
@@ -1291,6 +1295,7 @@ mod grid_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("absent-term symbolic scan");
 
@@ -1333,6 +1338,7 @@ mod grid_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("newest-dense symbolic scan");
 
@@ -1377,6 +1383,7 @@ mod grid_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("recent-hit-200 symbolic scan");
 
@@ -1414,6 +1421,7 @@ mod grid_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("register scorer fn via a real symbolic scan");
 

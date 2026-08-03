@@ -49,6 +49,10 @@ pub(crate) async fn handle_find_similar_memory(
         graph_relation_filter: None,
         domain: None,
         surface: None,
+        // Overwritten by `MemoryStore::search` from the store's own
+        // identity (tachi#1569); stated here only because this literal
+        // is exhaustive.
+        wiki_corpus_store: false,
         as_of: None,
         precision_matchers: Vec::new(),
         recall_config: None,
@@ -81,6 +85,10 @@ pub(crate) async fn handle_find_similar_memory(
             graph_relation_filter: None,
             domain: None,
             surface: None,
+            // Overwritten by `MemoryStore::search` from the store's own
+            // identity (tachi#1569); stated here only because this literal
+            // is exhaustive.
+            wiki_corpus_store: false,
             as_of: None,
             precision_matchers: Vec::new(),
             recall_config: None,
@@ -117,6 +125,10 @@ pub(crate) async fn handle_find_similar_memory(
             graph_relation_filter: None,
             domain: None,
             surface: None,
+            // Overwritten by `MemoryStore::search` from the store's own
+            // identity (tachi#1569); stated here only because this literal
+            // is exhaustive.
+            wiki_corpus_store: false,
             as_of: None,
             precision_matchers: Vec::new(),
             recall_config: None,

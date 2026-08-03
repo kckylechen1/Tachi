@@ -82,13 +82,26 @@ impl MemoryStore {
     }
 
     /// BFS expansion from seed IDs through the memory graph.
+    ///
+    /// tachi#1569: on the Wiki corpus store the expanded entries carry the
+    /// internal-row exclusion. This surface has no post-expansion Rust filter
+    /// of its own (unlike `hybrid_search`'s graph phase, which re-filters with
+    /// `is_search_noise_entry`), so without the gate a public seed that
+    /// neighbours a `wiki-rem:` draft or an operation-log row handed that row
+    /// back verbatim.
     pub fn graph_expand(
         &self,
         seed_ids: &[String],
         max_hops: u32,
         relation_filter: Option<&str>,
     ) -> Result<GraphExpandResult, MemoryError> {
-        db::graph_expand(&self.conn, seed_ids, max_hops, relation_filter)
+        db::graph_expand(
+            &self.conn,
+            seed_ids,
+            max_hops,
+            relation_filter,
+            self.is_wiki_corpus_store(),
+        )
     }
 
     /// Expand the graph with a global edge ceiling enforced in SQLite batches.
@@ -99,7 +112,14 @@ impl MemoryStore {
         relation_filter: Option<&str>,
         edge_limit: usize,
     ) -> Result<GraphExpandResult, MemoryError> {
-        db::graph_expand_limited(&self.conn, seed_ids, max_hops, relation_filter, edge_limit)
+        db::graph_expand_limited(
+            &self.conn,
+            seed_ids,
+            max_hops,
+            relation_filter,
+            edge_limit,
+            self.is_wiki_corpus_store(),
+        )
     }
 
     /// Count active contradiction edges connected to a memory entry.

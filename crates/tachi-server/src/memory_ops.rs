@@ -46,6 +46,14 @@ fn readable_entry(entry: Option<MemoryEntry>) -> Option<MemoryEntry> {
 /// The `retain` call stays at each site (the surfaces differ in how they
 /// obtain the prefix and in what they wrap the entry in); only the predicate
 /// is shared, so there is still exactly one definition of "listable".
+///
+/// tachi#1569 made this the **second** line, not the only one: the list
+/// routes in `memcore` now exclude the Wiki store's internal rows in SQL,
+/// keyed on store identity, so those rows no longer consume the caller's
+/// `LIMIT` before this filter runs. This filter is deliberately kept — it is
+/// wider (kanban, handoff and continuity projections are noise on a listing
+/// surface but are not Wiki-corpus bookkeeping), and it is the only line for
+/// stores that are not the Wiki corpus.
 pub(crate) fn is_listable_row(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
     !memcore::is_namespace_search_noise(entry, path_prefix)
 }
@@ -170,6 +178,9 @@ pub(crate) async fn handle_list_memories(
         combined_entries.extend(project_entries.into_iter().map(|e| (e, DbScope::Project)));
         // tachi#1561 (L2): drop internal rows *before* the limit, so a prefix
         // dense in bookkeeping rows cannot starve the caller's budget.
+        // tachi#1569 moved the Wiki-corpus half of that job into SQL (the
+        // named-project store above is where `project = "wiki"` lands); this
+        // remains as the wider second line — see `is_listable_row`.
         combined_entries
             .retain(|(entry, _)| is_listable_row(entry, Some(params.path_prefix.as_str())));
         combined_entries.sort_by(|a, b| b.0.timestamp.cmp(&a.0.timestamp));

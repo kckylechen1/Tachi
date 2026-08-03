@@ -4,7 +4,13 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::{db, db::DbOpenContext, error::MemoryError, path_router, MemoryEntry, MemoryStore};
+use crate::{
+    db,
+    db::DbOpenContext,
+    error::MemoryError,
+    path_router::{self, UNKNOWN_DB_LABEL},
+    MemoryEntry, MemoryStore,
+};
 
 #[cfg(unix)]
 fn has_stable_unix_file_identity(device: u64, inode: u64) -> bool {
@@ -376,7 +382,13 @@ impl MemoryStore {
     /// deploy-time migrator, or that are provisioning a brand-new DB, use
     /// [`Self::open_with_context`] with an explicit context.
     pub fn open(db_path: &str) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, "unknown", false, &DbOpenContext::default(), None)
+        Self::open_with_label_inner(
+            db_path,
+            UNKNOWN_DB_LABEL,
+            false,
+            &DbOpenContext::default(),
+            None,
+        )
     }
 
     /// Open (or create) a memory database with a known manifest label.
@@ -391,7 +403,7 @@ impl MemoryStore {
     /// Open (or create) with an explicit [`DbOpenContext`] and no manifest
     /// label (path-routing validation disabled, like [`Self::open`]).
     pub fn open_with_context(db_path: &str, ctx: &DbOpenContext) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, "unknown", false, ctx, None)
+        Self::open_with_label_inner(db_path, UNKNOWN_DB_LABEL, false, ctx, None)
     }
 
     /// Open an existing store under an explicit SQLite busy budget while
@@ -407,7 +419,7 @@ impl MemoryStore {
         ctx: &DbOpenContext,
         busy_timeout: Duration,
     ) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, "unknown", false, ctx, Some(busy_timeout))
+        Self::open_with_label_inner(db_path, UNKNOWN_DB_LABEL, false, ctx, Some(busy_timeout))
     }
 
     /// Open (or create) with an explicit manifest label AND an explicit
@@ -601,7 +613,24 @@ impl MemoryStore {
     /// for legacy/foreign/possibly-corrupt files, by design (see that
     /// module's doc comment).
     pub fn open_read_only(db_path: &str) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, None)
+        Self::open_read_only_inner(db_path, None, UNKNOWN_DB_LABEL)
+    }
+
+    /// [`Self::open_read_only`] for a caller that knows which store this is.
+    ///
+    /// tachi#1569: read stores used to be born `db_label: "unknown"`, so every
+    /// read-side decision that should have been keyed on store identity had to
+    /// be keyed on the shape of the request instead (`path_prefix`) — see
+    /// `db::memory_crud::search`'s wiki clause. `db_label` must be the *same*
+    /// label the write path uses for the same file (the manifest role, e.g.
+    /// `global`/`wiki`/a project name), because predicates like
+    /// [`Self::is_wiki_corpus_store`] and `path_router::validate_path_for_db`
+    /// compare against one set of label constants for both sides.
+    ///
+    /// Path-routing validation stays off (as for every read-only open): it is
+    /// a write-time guard, and a read-only SQLite handle cannot write anyway.
+    pub fn open_read_only_with_label(db_path: &str, db_label: &str) -> Result<Self, MemoryError> {
+        Self::open_read_only_inner(db_path, None, db_label)
     }
 
     /// Open an existing DB read-only while tolerating a stamped older schema.
@@ -618,12 +647,13 @@ impl MemoryStore {
         db_path: &str,
         operation: ReadOnlyBackfillOperation,
     ) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, Some(operation))
+        Self::open_read_only_inner(db_path, Some(operation), UNKNOWN_DB_LABEL)
     }
 
     fn open_read_only_inner(
         db_path: &str,
         compat_operation: Option<ReadOnlyBackfillOperation>,
+        db_label: &str,
     ) -> Result<Self, MemoryError> {
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
@@ -672,7 +702,7 @@ impl MemoryStore {
             conn,
             reserved_reference_write,
             vec_available,
-            db_label: "unknown".to_string(),
+            db_label: db_label.to_string(),
             path_validation: false,
             opened_physical_db_identity,
         })
@@ -726,7 +756,7 @@ impl MemoryStore {
             conn,
             reserved_reference_write,
             vec_available,
-            db_label: "unknown".to_string(),
+            db_label: UNKNOWN_DB_LABEL.to_string(),
             path_validation: false,
             opened_physical_db_identity,
         })
@@ -755,7 +785,7 @@ impl MemoryStore {
             conn,
             reserved_reference_write,
             vec_available,
-            db_label: "unknown".to_string(),
+            db_label: UNKNOWN_DB_LABEL.to_string(),
             path_validation: false,
             opened_physical_db_identity: None,
         })
@@ -763,6 +793,22 @@ impl MemoryStore {
 
     pub fn opened_physical_db_identity(&self) -> Option<&str> {
         self.opened_physical_db_identity.as_deref()
+    }
+
+    /// Whether this handle addresses the Wiki corpus database.
+    ///
+    /// tachi#1569: the single typed answer to "is this read touching the Wiki
+    /// corpus", used by [`Self::search`] and the list routes to decide the
+    /// Wiki row gate from *store identity* instead of from the shape of the
+    /// request. `path_router::validate_path_for_db` asks the same question on
+    /// the write side, through the same function.
+    ///
+    /// A store opened without a label (`open`, `open_read_only`,
+    /// `open_in_memory`) answers `false` — an unlabelled handle is not proof
+    /// of anything, and answering `true` there would silently filter rows for
+    /// CLI diagnostics and fixtures that never asked.
+    pub fn is_wiki_corpus_store(&self) -> bool {
+        path_router::db_label_is_wiki_corpus(&self.db_label)
     }
 
     /// Verify that this already-open connection still addresses the physical

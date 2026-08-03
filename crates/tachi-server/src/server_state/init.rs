@@ -182,7 +182,10 @@ impl MemoryServer {
         let global_store =
             MemoryStore::open_with_label_and_context(global_db_str, "global", &global_open_ctx)?;
         let read_pool_size = configured_memory_read_pool_size();
-        let global_read_pool = ReadStorePool::open_read_only(global_db_str, read_pool_size)?;
+        // Same label as the write store two lines up (tachi#1569): the read
+        // pool's handles must not disagree with it about which store this is.
+        let global_read_pool =
+            ReadStorePool::open_read_only(global_db_str, read_pool_size, "global")?;
         let global_vec_available = global_store.vec_available;
 
         let project_db_state = if let Some(ref p) = project_db_path {

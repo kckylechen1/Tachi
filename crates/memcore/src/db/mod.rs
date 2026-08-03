@@ -107,14 +107,15 @@ pub(crate) use memory_crud::record_access_with_updates;
 pub(crate) use memory_crud::search_fts_raw_match;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
 pub(crate) use memory_crud::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals;
+pub(crate) use memory_crud::wiki_corpus_store_sql_splice;
 #[cfg(test)]
 pub(crate) use memory_crud::AccessUpdate;
 pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;
 pub use memory_crud::{
     access_event_density, archive_memory, archive_memory_if_revision, delete,
-    delete_memories_symbolic_fts, fetch_by_ids, find_active_wiki_entry_by_path,
-    find_exact_path_text_id, get_access_times, get_all, get_use_access_times,
-    is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
+    delete_memories_symbolic_fts, fetch_by_ids, fetch_by_ids_excluding_store_internal,
+    find_active_wiki_entry_by_path, find_exact_path_text_id, get_access_times, get_all,
+    get_use_access_times, is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
     list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
     list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
     normalize_for_write, record_enrichment_failure, record_memory_use, release_event_claim,

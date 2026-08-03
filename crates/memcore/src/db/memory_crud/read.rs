@@ -9,13 +9,81 @@ use super::{
     MEMORY_SELECT_COLUMNS_QUALIFIED,
 };
 
+/// The Wiki internal-row exclusion for a list route, or `None` when this store
+/// is not the Wiki corpus.
+///
+/// tachi#1569: the list/get family never reached the Wiki clause at all, which
+/// is why tachi#1561 had to filter these rows server-side after the fact —
+/// after they had already consumed the caller's `LIMIT`. Keying it on store
+/// identity puts the exclusion back where the budget is spent. `path_prefix`
+/// carries only the recall-cache opt-in
+/// ([`crate::namespace::path_prefix_opts_into_recall_cache`]), the same escape
+/// hatch the search legs and the Rust classifier honour; it is deliberately
+/// *not* a second trigger, because a `/wiki`-prefixed list against a non-wiki
+/// store behaved as it does today and this change is about store identity.
+fn wiki_list_predicate(
+    wiki_corpus_store: bool,
+    path_prefix: Option<&str>,
+    qualified: bool,
+) -> Option<String> {
+    wiki_corpus_store.then(|| {
+        crate::namespace::user_facing_wiki_sql_where(
+            qualified,
+            crate::namespace::path_prefix_opts_into_recall_cache(path_prefix),
+        )
+    })
+}
+
+/// [`wiki_list_predicate`] spliced onto a query that already has a `WHERE`.
+/// Empty when the gate does not apply, so the query text of every non-Wiki
+/// store stays byte-identical.
+fn wiki_list_and_clause(
+    wiki_corpus_store: bool,
+    path_prefix: Option<&str>,
+    qualified: bool,
+) -> String {
+    match wiki_list_predicate(wiki_corpus_store, path_prefix, qualified) {
+        Some(predicate) => format!(" AND ({predicate})"),
+        None => String::new(),
+    }
+}
+
 /// Fetch multiple entries by their IDs in one query.
 /// Also hydrates vectors from memories_vec if available.
 /// Handles batching internally to stay under SQLite's 999 parameter limit.
+///
+/// Ungated by design (tachi#1569): an id-addressed read is the caller naming a
+/// row, and the store's own machinery names its bookkeeping rows this way —
+/// see `MemoryStore::get_with_options`. A caller that hands out rows *it*
+/// chose (graph expansion) must use
+/// [`fetch_by_ids_excluding_store_internal`] instead.
 pub fn fetch_by_ids(
     conn: &Connection,
     ids: &[String],
     include_archived: bool,
+) -> Result<HashMap<String, MemoryEntry>, MemoryError> {
+    fetch_by_ids_excluding_store_internal(conn, ids, include_archived, false)
+}
+
+/// [`fetch_by_ids`] for a caller that is handing back rows the *system* chose,
+/// not rows the caller addressed by id.
+///
+/// tachi#1569 (cross-vendor review): `graph_expand` fetches its traversal
+/// results through this family, so on the Wiki store an ordinary seed that
+/// happens to neighbour a `wiki-rem:` draft or an operation-log row put those
+/// rows straight into `GraphExpandResult.entries`. `hybrid_search`'s graph
+/// phase re-filters with the Rust classifier after expansion
+/// (`search::graph_expansion`), which is why the search surface never showed
+/// it — the public `MemoryStore::graph_expand` has no such second pass.
+///
+/// Expansion results are the same kind of thing as search results: nobody
+/// asked for them by name, so there is no opt-in shape to honour and store
+/// identity decides alone.
+pub fn fetch_by_ids_excluding_store_internal(
+    conn: &Connection,
+    ids: &[String],
+    include_archived: bool,
+    wiki_corpus_store: bool,
 ) -> Result<HashMap<String, MemoryEntry>, MemoryError> {
     if ids.is_empty() {
         return Ok(HashMap::new());
@@ -58,6 +126,13 @@ pub fn fetch_by_ids(
                 sql.push_str(" AND archived = 0");
             }
         }
+        // Empty unless the caller both is the Wiki store and asked for the
+        // system-chosen variant, so `fetch_by_ids`' query text is unchanged.
+        sql.push_str(&wiki_list_and_clause(
+            wiki_corpus_store,
+            None,
+            has_vector_table,
+        ));
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
@@ -101,12 +176,24 @@ pub fn get_all(
     conn: &Connection,
     limit: usize,
     include_archived: bool,
+    wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
+    // tachi#1569: no `path_prefix` exists here, so there is no recall-cache
+    // opt-in shape either — an unfiltered "newest rows" sweep of the Wiki
+    // store gets the full internal-row exclusion or none at all.
     let sql = if include_archived {
-        format!("SELECT {MEMORY_SELECT_COLUMNS} FROM memories ORDER BY timestamp DESC LIMIT ?")
+        match wiki_list_predicate(wiki_corpus_store, None, false) {
+            Some(wiki_predicate) => format!(
+                "SELECT {MEMORY_SELECT_COLUMNS} FROM memories WHERE ({wiki_predicate}) ORDER BY timestamp DESC LIMIT ?"
+            ),
+            None => {
+                format!("SELECT {MEMORY_SELECT_COLUMNS} FROM memories ORDER BY timestamp DESC LIMIT ?")
+            }
+        }
     } else {
+        let wiki_clause = wiki_list_and_clause(wiki_corpus_store, None, false);
         format!(
-            "SELECT {MEMORY_SELECT_COLUMNS} FROM memories WHERE archived = 0 ORDER BY timestamp DESC LIMIT ?"
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM memories WHERE archived = 0{wiki_clause} ORDER BY timestamp DESC LIMIT ?"
         )
     };
     let mut stmt = conn.prepare(&sql)?;
@@ -164,14 +251,16 @@ pub fn list_by_path(
     path_prefix: &str,
     limit: usize,
     include_archived: bool,
+    wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
+    let wiki_clause = wiki_list_and_clause(wiki_corpus_store, Some(path_prefix), false);
 
     let sql = if include_archived {
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE path = ?1 OR path LIKE ?2
+         WHERE (path = ?1 OR path LIKE ?2){wiki_clause}
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
         )
@@ -179,7 +268,7 @@ pub fn list_by_path(
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
+         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0{wiki_clause}
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
         )
@@ -204,14 +293,16 @@ pub fn list_by_path_active_unsuperseded(
     conn: &Connection,
     path_prefix: &str,
     limit: usize,
+    wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
+    let wiki_clause = wiki_list_and_clause(wiki_corpus_store, Some(path_prefix), false);
     let sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
          WHERE (path = ?1 OR path LIKE ?2)
            AND archived = 0
-           AND superseded_by IS NULL
+           AND superseded_by IS NULL{wiki_clause}
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
     );
@@ -240,7 +331,7 @@ pub fn list_user_facing_wiki_entries(
     } else {
         "AND archived = 0 AND superseded_by IS NULL"
     };
-    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
+    let wiki_predicate = crate::namespace::user_facing_wiki_sql_where(false, false);
     let sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
@@ -277,14 +368,16 @@ pub fn list_by_path_recent(
     path_prefix: &str,
     limit: usize,
     include_archived: bool,
+    wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
+    let wiki_clause = wiki_list_and_clause(wiki_corpus_store, Some(path_prefix), false);
 
     let sql = if include_archived {
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE path = ?1 OR path LIKE ?2
+         WHERE (path = ?1 OR path LIKE ?2){wiki_clause}
          ORDER BY timestamp DESC
          LIMIT ?3"
         )
@@ -292,7 +385,7 @@ pub fn list_by_path_recent(
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
+         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0{wiki_clause}
          ORDER BY timestamp DESC
          LIMIT ?3"
         )
@@ -349,7 +442,7 @@ pub fn list_wiki_duplicate_candidates(
     let guide_corpus = path == "/guide" || path.starts_with("/guide/");
     let corpus_root = if guide_corpus { "/guide" } else { "/wiki" };
     let corpus_like = format!("{corpus_root}/%");
-    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
+    let wiki_predicate = crate::namespace::user_facing_wiki_sql_where(false, false);
     let sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
@@ -400,7 +493,7 @@ pub fn find_active_wiki_entry_by_path(
     conn: &Connection,
     path: &str,
 ) -> Result<Option<MemoryEntry>, MemoryError> {
-    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
+    let wiki_predicate = crate::namespace::user_facing_wiki_sql_where(false, false);
     let sql = format!(
         r#"SELECT {MEMORY_SELECT_COLUMNS}
            FROM memories
@@ -431,7 +524,7 @@ pub fn list_active_wiki_ingest_predecessors(
     path: &str,
     topic: &str,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
-    let wiki_predicate = crate::namespace::USER_FACING_WIKI_SQL_WHERE;
+    let wiki_predicate = crate::namespace::user_facing_wiki_sql_where(false, false);
     let sql = format!(
         r#"SELECT {MEMORY_SELECT_COLUMNS}
            FROM memories

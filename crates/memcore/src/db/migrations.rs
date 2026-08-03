@@ -3078,6 +3078,7 @@ mod tests {
             Some("/handoff/unknown"),
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(

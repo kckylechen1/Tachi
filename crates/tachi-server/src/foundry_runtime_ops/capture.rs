@@ -220,6 +220,10 @@ pub(super) fn capture_search_options(
         record_access: false,
         domain: None,
         surface: None,
+        // Overwritten by `MemoryStore::search` from the store's own
+        // identity (tachi#1569); stated here only because this literal
+        // is exhaustive.
+        wiki_corpus_store: false,
         recall_config: None,
         decay_policy: None,
     }

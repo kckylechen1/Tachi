@@ -50,22 +50,35 @@ pub const RECALL_CACHE_SQL_WHERE_M: &str = r#"
     OR COALESCE(json_extract(m.metadata, '$.cache_key'), '') = 'foundry_recall_rerank_cache'
 "#;
 
-/// SQL classifier for the user-facing Wiki corpus. Keep this aligned with
-/// [`is_user_facing_wiki_entry`].
+/// Non-recall-cache half of the SQL classifier for the user-facing Wiki
+/// corpus. Compose it through [`user_facing_wiki_sql_where`]; keep it aligned
+/// with [`is_user_facing_wiki_entry`].
 ///
 /// The anchor terms (`id GLOB 'anchor:*'`, `path = '/anchors'`, `path GLOB
-/// '/anchors/*'`) are the negation of `vector_backfill::ANCHOR_SQL_WHERE` and
-/// are spelled out inline because Rust `const` string concatenation is
-/// literal-only (`concat!` takes literals, not const idents). They are
-/// deliberately **case-sensitive** `GLOB`, not `lower(id) GLOB`, so they match
-/// [`is_anchor_entry`]'s `id.starts_with("anchor:")` byte-for-byte — the same
-/// case-sensitivity `vector_backfill`'s
+/// '/anchors/*'`) are the negation of `vector_backfill::ANCHOR_SQL_WHERE`.
+/// They are deliberately **case-sensitive** `GLOB`, not `lower(id) GLOB`, so
+/// they match [`is_anchor_entry`]'s `id.starts_with("anchor:")` byte-for-byte
+/// — the same case-sensitivity `vector_backfill`'s
 /// `anchor_membership_is_case_sensitive_like_the_rust_classifier` freezes.
-/// (Contrast the `wiki-rem:` term above, which *is* `lower(...)`-folded
-/// because [`is_reserved_wiki_rem_id`] is ASCII-case-insensitive by design.)
+/// (Contrast the `wiki-rem:` term, which *is* `lower(...)`-folded because
+/// [`is_reserved_wiki_rem_id`] is ASCII-case-insensitive by design.)
 /// `namespace::tests::anchor_sql_and_rust_classifiers_agree` asserts the two
 /// sides cannot drift.
-pub const USER_FACING_WIKI_SQL_WHERE: &str = r#"
+///
+/// tachi#1569: the predicate is authored as two halves because the
+/// recall-cache half is separately escapable. [`is_namespace_search_noise`]
+/// has always let a caller opt back into recall-cache rows by naming them in
+/// `path_prefix` ([`path_prefix_opts_into_recall_cache`]); the SQL side had
+/// no such escape, which was harmless only while the clause fired on
+/// `path_prefix` alone (a `/recall-cache` prefix is not a `/wiki` prefix, so
+/// the clause never ran on an opted-in query). Once the clause is keyed on
+/// *store identity* it runs on every read of the wiki store, including an
+/// opted-in one, so it must honour the same escape or it would delete rows
+/// in SQL that the Rust classifier was about to hand back. Composition is
+/// done by [`user_facing_wiki_sql_where`] rather than by `const` string
+/// concatenation, which Rust only allows over literals (`concat!` takes
+/// literals, not const idents).
+pub const USER_FACING_WIKI_SQL_WHERE_EXCEPT_RECALL_CACHE: &str = r#"
     path != '/wiki/_log'
     AND path NOT GLOB '/wiki/_log/*'
     AND lower(topic) != 'wiki_log'
@@ -73,21 +86,12 @@ pub const USER_FACING_WIKI_SQL_WHERE: &str = r#"
     AND id NOT GLOB 'anchor:*'
     AND path != '/anchors'
     AND path NOT GLOB '/anchors/*'
-    AND lower(id) != 'foundry_recall_rerank_cache'
-    AND lower(id) NOT GLOB 'foundry:recall-cache:*'
-    AND path NOT GLOB '*/recall-cache'
-    AND path NOT GLOB '*/recall-cache/*'
-    AND instr(path, 'foundry_recall_rerank_cache') = 0
-    AND lower(source) != 'foundry_recall_rerank_cache'
-    AND lower(topic) != 'foundry_recall_rerank_cache'
-    AND lower(topic) != 'recall_rerank_cache'
     AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.wiki_log'), 0) != 1
-    AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.recall_rerank_cache'), 0) != 1
-    AND lower(COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.cache_key'), '')) != 'foundry_recall_rerank_cache'
 "#;
 
-/// `m.`-qualified counterpart to [`USER_FACING_WIKI_SQL_WHERE`].
-pub const USER_FACING_WIKI_SQL_WHERE_M: &str = r#"
+/// `m.`-qualified counterpart to
+/// [`USER_FACING_WIKI_SQL_WHERE_EXCEPT_RECALL_CACHE`].
+pub const USER_FACING_WIKI_SQL_WHERE_EXCEPT_RECALL_CACHE_M: &str = r#"
     m.path != '/wiki/_log'
     AND m.path NOT GLOB '/wiki/_log/*'
     AND lower(m.topic) != 'wiki_log'
@@ -95,7 +99,31 @@ pub const USER_FACING_WIKI_SQL_WHERE_M: &str = r#"
     AND m.id NOT GLOB 'anchor:*'
     AND m.path != '/anchors'
     AND m.path NOT GLOB '/anchors/*'
-    AND lower(m.id) != 'foundry_recall_rerank_cache'
+    AND COALESCE(json_extract(CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END, '$.wiki_log'), 0) != 1
+"#;
+
+/// The recall-cache exclusion half of the user-facing Wiki predicate. Keep
+/// aligned with [`is_recall_cache_entry`] — this is its SQL negation, and it
+/// is deliberately `lower(...)`-folded because that classifier compares with
+/// `eq_ignore_ascii_case`. (It is therefore *stricter* than
+/// [`RECALL_CACHE_SQL_WHERE`], which is case-sensitive; the two are not
+/// interchangeable.)
+pub const NOT_RECALL_CACHE_SQL_WHERE: &str = r#"
+    lower(id) != 'foundry_recall_rerank_cache'
+    AND lower(id) NOT GLOB 'foundry:recall-cache:*'
+    AND path NOT GLOB '*/recall-cache'
+    AND path NOT GLOB '*/recall-cache/*'
+    AND instr(path, 'foundry_recall_rerank_cache') = 0
+    AND lower(source) != 'foundry_recall_rerank_cache'
+    AND lower(topic) != 'foundry_recall_rerank_cache'
+    AND lower(topic) != 'recall_rerank_cache'
+    AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.recall_rerank_cache'), 0) != 1
+    AND lower(COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.cache_key'), '')) != 'foundry_recall_rerank_cache'
+"#;
+
+/// `m.`-qualified counterpart to [`NOT_RECALL_CACHE_SQL_WHERE`].
+pub const NOT_RECALL_CACHE_SQL_WHERE_M: &str = r#"
+    lower(m.id) != 'foundry_recall_rerank_cache'
     AND lower(m.id) NOT GLOB 'foundry:recall-cache:*'
     AND m.path NOT GLOB '*/recall-cache'
     AND m.path NOT GLOB '*/recall-cache/*'
@@ -103,10 +131,37 @@ pub const USER_FACING_WIKI_SQL_WHERE_M: &str = r#"
     AND lower(m.source) != 'foundry_recall_rerank_cache'
     AND lower(m.topic) != 'foundry_recall_rerank_cache'
     AND lower(m.topic) != 'recall_rerank_cache'
-    AND COALESCE(json_extract(CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END, '$.wiki_log'), 0) != 1
     AND COALESCE(json_extract(CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END, '$.recall_rerank_cache'), 0) != 1
     AND lower(COALESCE(json_extract(CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END, '$.cache_key'), '')) != 'foundry_recall_rerank_cache'
 "#;
+
+/// The user-facing Wiki corpus predicate.
+///
+/// `qualified` picks the `m.`-qualified column names for queries that join
+/// `memories AS m`; both forms must classify identically.
+/// `allow_recall_cache` drops the recall-cache half — the SQL mirror of
+/// [`is_namespace_search_noise`]'s `path_prefix` opt-in. With it set, the
+/// result is the SQL counterpart of
+/// [`is_user_facing_wiki_entry_allowing_recall_cache`]; without it, of
+/// [`is_user_facing_wiki_entry`].
+pub fn user_facing_wiki_sql_where(qualified: bool, allow_recall_cache: bool) -> String {
+    let (base, cache) = if qualified {
+        (
+            USER_FACING_WIKI_SQL_WHERE_EXCEPT_RECALL_CACHE_M,
+            NOT_RECALL_CACHE_SQL_WHERE_M,
+        )
+    } else {
+        (
+            USER_FACING_WIKI_SQL_WHERE_EXCEPT_RECALL_CACHE,
+            NOT_RECALL_CACHE_SQL_WHERE,
+        )
+    };
+    if allow_recall_cache {
+        base.to_string()
+    } else {
+        format!("{base}    AND{cache}")
+    }
+}
 
 fn metadata_bool(entry: &MemoryEntry, key: &str) -> bool {
     entry
@@ -180,7 +235,7 @@ pub fn is_wiki_log_entry(entry: &MemoryEntry) -> bool {
         || metadata_bool_or_one(entry, "wiki_log")
 }
 
-/// Rust counterpart of [`USER_FACING_WIKI_SQL_WHERE`]. Every internal class the
+/// Rust counterpart of [`user_facing_wiki_sql_where`]. Every internal class the
 /// SQL predicate excludes must be excluded here too, or a row filtered out of
 /// the SQL projection can still walk back in through a Rust-side `.filter()`
 /// (and vice versa).
@@ -192,10 +247,16 @@ pub fn is_wiki_log_entry(entry: &MemoryEntry) -> bool {
 /// built on it: browse, read, lint, obsidian export) still projected anchor
 /// plumbing rows.
 pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
-    !is_reserved_wiki_rem_id(&entry.id)
-        && !is_wiki_log_entry(entry)
-        && !is_recall_cache_entry(entry)
-        && !is_anchor_entry(entry)
+    is_user_facing_wiki_entry_allowing_recall_cache(entry) && !is_recall_cache_entry(entry)
+}
+
+/// [`is_user_facing_wiki_entry`] with the recall-cache class allowed through:
+/// the Rust counterpart of `user_facing_wiki_sql_where(_, true)`, and the
+/// classifier a caller who explicitly addressed `/recall-cache` in
+/// `path_prefix` is entitled to (tachi#1569 — same escape hatch
+/// [`is_namespace_search_noise`] has always honoured).
+pub fn is_user_facing_wiki_entry_allowing_recall_cache(entry: &MemoryEntry) -> bool {
+    !is_reserved_wiki_rem_id(&entry.id) && !is_wiki_log_entry(entry) && !is_anchor_entry(entry)
 }
 
 pub fn is_wiki_entry(entry: &MemoryEntry) -> bool {
@@ -401,7 +462,7 @@ pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>)
         || is_anchor_entry(entry)
         // Generic-surface backstop for reserved Wiki REM operation rows. The
         // wiki-scoped surface already excludes these via
-        // `USER_FACING_WIKI_SQL_WHERE`, but that clause only fires when a
+        // `user_facing_wiki_sql_where`, but that clause only fires when a
         // `/wiki` path_prefix is in play; an unscoped search routed into the
         // wiki store by project-name inference has no such filter, so this
         // function is the only remaining backstop.
@@ -511,10 +572,17 @@ mod tests {
 
     /// Evaluate a wiki-corpus SQL classifier over `entries` in a throwaway
     /// in-memory table, returning the ids the predicate keeps. `qualified`
-    /// picks [`USER_FACING_WIKI_SQL_WHERE_M`] over
-    /// [`USER_FACING_WIKI_SQL_WHERE`] — both forms must classify identically,
+    /// picks the `m.`-qualified form — both forms must classify identically,
     /// and both must match the Rust classifier.
     fn wiki_sql_kept_ids(entries: &[MemoryEntry], qualified: bool) -> Vec<String> {
+        wiki_sql_kept_ids_with_recall_cache(entries, qualified, false)
+    }
+
+    fn wiki_sql_kept_ids_with_recall_cache(
+        entries: &[MemoryEntry],
+        qualified: bool,
+        allow_recall_cache: bool,
+    ) -> Vec<String> {
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
         conn.execute_batch(
             "CREATE TABLE memories (
@@ -544,15 +612,16 @@ mod tests {
                 .expect("insert classifier fixture row");
             }
         }
+        let predicate = user_facing_wiki_sql_where(qualified, allow_recall_cache);
         let sql = if qualified {
             format!(
                 "SELECT m.id FROM memories AS m
-                 WHERE ({USER_FACING_WIKI_SQL_WHERE_M}) ORDER BY m.id"
+                 WHERE ({predicate}) ORDER BY m.id"
             )
         } else {
             format!(
                 "SELECT id FROM memories
-                 WHERE ({USER_FACING_WIKI_SQL_WHERE}) ORDER BY id"
+                 WHERE ({predicate}) ORDER BY id"
             )
         };
         let mut stmt = conn.prepare(&sql).expect("prepare wiki classifier");
@@ -637,13 +706,88 @@ mod tests {
         assert_eq!(
             wiki_sql_kept_ids(&rows, false),
             expected,
-            "USER_FACING_WIKI_SQL_WHERE must agree with is_user_facing_wiki_entry"
+            "the unqualified wiki predicate must agree with is_user_facing_wiki_entry"
         );
         assert_eq!(
             wiki_sql_kept_ids(&rows, true),
             expected,
-            "USER_FACING_WIKI_SQL_WHERE_M must agree with is_user_facing_wiki_entry"
+            "the m.-qualified wiki predicate must agree with is_user_facing_wiki_entry"
         );
+    }
+
+    /// tachi#1569 frozen decision: the SQL clause honours the same
+    /// recall-cache opt-in [`is_namespace_search_noise`] does. Without the
+    /// opt-in a cache row is filtered in SQL; with it the row survives SQL —
+    /// and the *other* internal classes stay filtered either way, so the
+    /// escape hatch cannot be used to fish out REM drafts or the wiki log.
+    #[test]
+    fn recall_cache_opt_in_is_honoured_by_sql_and_rust_alike() {
+        let mut cache_by_source = fixture_entry(
+            "83a3f7d1-cache-by-source",
+            "/wiki/notes/cached",
+            "rendered recall rows",
+        );
+        cache_by_source.source = FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+        let rows = vec![
+            fixture_entry(
+                "0c1d5b2a-cache-by-path",
+                "/recall-cache/2026-07-28",
+                "rendered recall rows",
+            ),
+            cache_by_source,
+            fixture_entry(
+                "wiki-rem:pending",
+                "/wiki/drafts/pending",
+                "unreviewed draft",
+            ),
+            fixture_entry("2b7e6f90-wiki-log", "/wiki/_log", "wiki operation log"),
+            fixture_entry(
+                "d290f1ee-6c54-4b01-90e6-d701748f0851",
+                "/wiki/xxx",
+                "ordinary user-facing wiki content",
+            ),
+        ];
+
+        // Rust side: the opt-in moves exactly the two cache rows.
+        for entry in &rows[..2] {
+            assert!(is_recall_cache_entry(entry), "fixture must be cache row");
+            assert!(!is_user_facing_wiki_entry(entry));
+            assert!(is_user_facing_wiki_entry_allowing_recall_cache(entry));
+            assert!(
+                is_namespace_search_noise(entry, None),
+                "cache rows are noise when nobody asked for them"
+            );
+            assert!(
+                !is_namespace_search_noise(entry, Some("/recall-cache")),
+                "an explicit /recall-cache prefix opts back in"
+            );
+        }
+        for entry in &rows[2..4] {
+            assert!(
+                !is_user_facing_wiki_entry_allowing_recall_cache(entry),
+                "the cache opt-in must not release REM drafts or the wiki log: {entry:?}"
+            );
+        }
+
+        let ordinary = vec![rows[4].id.clone()];
+        let with_cache = {
+            let mut ids = vec![rows[0].id.clone(), rows[1].id.clone(), rows[4].id.clone()];
+            ids.sort();
+            ids
+        };
+        for qualified in [false, true] {
+            assert_eq!(
+                wiki_sql_kept_ids_with_recall_cache(&rows, qualified, false),
+                ordinary,
+                "without the opt-in the SQL clause filters cache rows (qualified={qualified})"
+            );
+            assert_eq!(
+                wiki_sql_kept_ids_with_recall_cache(&rows, qualified, true),
+                with_cache,
+                "with the opt-in the SQL clause must return cache rows, and only those \
+                 (qualified={qualified})"
+            );
+        }
     }
 
     /// The anchor terms are case-sensitive `GLOB`, matching

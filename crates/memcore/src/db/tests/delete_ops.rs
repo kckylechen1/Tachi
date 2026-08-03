@@ -20,7 +20,8 @@ fn delete_existing() {
     assert_eq!(count, 0);
 
     // Verify it's gone from FTS
-    let fts_results = search_fts(&conn, "deleted", 5, false, false, None, None, None).unwrap();
+    let fts_results =
+        search_fts(&conn, "deleted", 5, false, false, None, None, None, false).unwrap();
     assert!(!fts_results.contains_key("del-1"));
 }
 

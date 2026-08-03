@@ -5,7 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::{
-    db::{fetch_by_ids, search_symbolic_candidates_with_relevance, search_vec},
+    db::{
+        fetch_by_ids, search_symbolic_candidates_with_relevance, search_vec,
+        wiki_corpus_store_sql_splice,
+    },
     error::MemoryError,
     namespace::surface_sql_splice,
     recall_config::TypoFallbackConfig,
@@ -82,6 +85,7 @@ pub(super) fn collect_candidates(
                 opts.path_prefix.as_deref(),
                 as_of_utc,
                 opts.surface,
+                opts.wiki_corpus_store,
             )?
         } else {
             HashMap::new()
@@ -116,6 +120,7 @@ pub(super) fn collect_candidates(
         recall_config(opts),
         sample,
         opts.surface,
+        opts.wiki_corpus_store,
     )?;
     let fts_candidate_count = fts_scores.len();
 
@@ -136,6 +141,7 @@ pub(super) fn collect_candidates(
         opts.path_prefix.as_deref(),
         as_of_utc,
         opts.surface,
+        opts.wiki_corpus_store,
     )?;
     let symbolic_elapsed = symbolic_start.map(|s| s.elapsed());
     let symbolic_candidate_count = symbolic_candidate_entries.len();
@@ -394,6 +400,13 @@ fn typo_prefilter_ids(
         .join(" OR ");
     let path_like = opts.path_prefix.as_ref().map(|prefix| format!("{prefix}%"));
     let surface_clause = surface_sql_splice(opts.surface, true);
+    // tachi#1569: the typo prefilter is a fourth candidate source with its own
+    // SQL, and it has never carried the Wiki internal-row clause. Store
+    // identity closes it here so a read of the Wiki store cannot import
+    // internal rows through this leg; the `/wiki`-`path_prefix` asymmetry with
+    // the other three legs is pre-existing and left alone on purpose.
+    let wiki_clause =
+        wiki_corpus_store_sql_splice(opts.wiki_corpus_store, opts.path_prefix.as_deref(), true);
     let sql = format!(
         "SELECT m.id
            FROM memories_symbolic_fts
@@ -403,7 +416,7 @@ fn typo_prefilter_ids(
             AND (?3 IS NULL OR m.path LIKE ?3)
             AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
             AND m.id NOT LIKE 'anchor:%'
-            AND memories_symbolic_fts MATCH ?5{surface_clause}
+            AND memories_symbolic_fts MATCH ?5{surface_clause}{wiki_clause}
           ORDER BY bm25(memories_symbolic_fts), m.id
           LIMIT ?6"
     );

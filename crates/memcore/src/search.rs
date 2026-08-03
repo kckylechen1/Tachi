@@ -67,6 +67,19 @@ pub struct SearchOptions {
     /// This is memcore ranking rework Phase 2 PIECE 1: the foundation only,
     /// ranking itself stays fused until a later piece opts in.
     pub surface: Option<Surface>,
+    /// Whether this search is reading the Wiki corpus database.
+    ///
+    /// tachi#1569: the internal-row gate in the three retrieval legs is a fact
+    /// about the *store*, not about the request. Set by
+    /// [`crate::MemoryStore::search`] / `search_with_receipt` from
+    /// [`crate::MemoryStore::is_wiki_corpus_store`] — the one layer where both
+    /// the store and the options are in scope. Bare-connection callers
+    /// (`hybrid_search` on a raw `&Connection`) must set it themselves or
+    /// state, by leaving it `false`, that they are not reading the Wiki store.
+    ///
+    /// Default `false` reproduces the pre-#1569 query text byte for byte: the
+    /// gate then fires on `path_prefix` alone, exactly as before.
+    pub wiki_corpus_store: bool,
     /// Pre-computed query embedding; if None, skip vector channel.
     pub query_vec: Option<Vec<f32>>,
     /// Whether the sqlite-vec extension is available for vector search.
@@ -121,6 +134,7 @@ impl Default for SearchOptions {
             path_prefix: None,
             domain: None,
             surface: None,
+            wiki_corpus_store: false,
             query_vec: None,
             vec_available: false,
             record_access: true,

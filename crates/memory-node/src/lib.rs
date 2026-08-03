@@ -140,6 +140,29 @@ pub struct JsMemoryStore {
 #[napi]
 impl JsMemoryStore {
     /// Open a store at `db_path`. Creates the file & schema if needed.
+    ///
+    /// # This binding is an UNFILTERED raw store handle — contract, not trivia
+    ///
+    /// It opens with `RustStore::open`, so the handle carries **no manifest
+    /// label**. Path-routing validation is off, and every identity-keyed read
+    /// predicate (`is_wiki_corpus_store`, and with it tachi#1569's Wiki
+    /// internal-row gate on `search` / `get` / `get_all` / `graph_expand`)
+    /// answers "not the Wiki corpus" no matter which database this is.
+    ///
+    /// Consequences a caller must assume:
+    ///
+    /// * Pointed at the Wiki database, every read here returns the raw table,
+    ///   including rows the facade never exposes — `wiki-rem:` review drafts,
+    ///   `/wiki/_log` operation-log rows, recall-cache rows, anchor plumbing.
+    /// * None of `tachi-server`'s server-side filters (`readable_entry`,
+    ///   `is_listable_row`) run either; those live above this layer.
+    ///
+    /// **Do not use this binding to serve reads that reach an end user.** It
+    /// exists for tooling that wants the store verbatim. Anything user-facing
+    /// goes through the facade, which owns the internal-row contract.
+    /// Giving this surface a real identity is tracked separately (tachi#1569
+    /// acceptance item 5) and is deliberately not done here: an unlabelled
+    /// handle has nothing to derive one from.
     #[napi(constructor)]
     pub fn new(db_path: String) -> napi::Result<Self> {
         let store =
