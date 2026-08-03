@@ -78,12 +78,8 @@ pub(crate) async fn run_daemon(
                 }
                 crate::status_ops::DaemonStatus::StalePid { pid, lock_path } => {
                     if force {
-                        clear_stale_lock_record(&lock_path).map_err(|error| {
-                            format!(
-                                "refusing to clear stale daemon lock record {}: {error}",
-                                lock_path.display()
-                            )
-                        })?;
+                        clear_stale_lock_record(&lock_path)
+                            .map_err(|error| stale_lock_cleanup_error(&lock_path, error))?;
                         println!(
                             "[OK] cleared stale lock record {} (pid {pid} was not alive; stable path retained)",
                             lock_path.display()
@@ -112,9 +108,25 @@ pub(crate) async fn run_daemon(
 /// acquired guard clears the record while still holding `flock`, then retains
 /// the stable lock inode for future acquirers.
 fn clear_stale_lock_record(lock_path: &Path) -> Result<(), crate::daemon_lock::DaemonLockError> {
-    let lock = crate::daemon_lock::DaemonLock::acquire(lock_path)?;
+    let lock = crate::daemon_lock::DaemonLock::acquire_existing(lock_path)?;
     drop(lock);
     Ok(())
+}
+
+fn stale_lock_cleanup_error(
+    lock_path: &Path,
+    error: crate::daemon_lock::DaemonLockError,
+) -> String {
+    match error {
+        crate::daemon_lock::DaemonLockError::AlreadyRunning { pid } => format!(
+            "refusing to clear stale daemon lock record {}: lock remains held; --force never bypasses a live lock owner (recorded pid {pid})",
+            lock_path.display()
+        ),
+        error => format!(
+            "refusing to clear stale daemon lock record {}: {error}",
+            lock_path.display()
+        ),
+    }
 }
 
 enum DiscoveryReceiptRemoval {
@@ -134,7 +146,7 @@ fn remove_stale_discovery_receipt(
     pid_path: &Path,
 ) -> Result<DiscoveryReceiptRemoval, DiscoveryReceiptRemovalError> {
     let lock_path = pid_path.with_extension("lock");
-    let _lock = crate::daemon_lock::DaemonLock::acquire(&lock_path)
+    let _lock = crate::daemon_lock::DaemonLock::acquire_existing(&lock_path)
         .map_err(DiscoveryReceiptRemovalError::Lock)?;
     match std::fs::remove_file(pid_path) {
         Ok(()) => Ok(DiscoveryReceiptRemoval::Removed),
@@ -707,8 +719,15 @@ mod tests {
     #[test]
     fn force_stale_lock_cleanup_clears_pid_without_unlinking_path() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let lock_path = dir.path().join("daemon.lock");
-        std::fs::write(&lock_path, "4194300\\n").expect("seed stale lock PID");
+        let global_db_path = dir.path().join("global").join("tachi-memory.db");
+        let lock_path = crate::daemon_lock::legacy_daemon_lock_path(dir.path());
+        let stale_pid = i32::MAX;
+        std::fs::write(&lock_path, format!("{stale_pid}\n")).expect("seed stale lock PID");
+
+        assert!(matches!(
+            crate::status_ops::collect_daemon_status(dir.path(), &global_db_path),
+            crate::status_ops::DaemonStatus::StalePid { pid, .. } if pid == stale_pid
+        ));
 
         clear_stale_lock_record(&lock_path).expect("stale lock cleanup acquires and drops");
 
@@ -717,6 +736,44 @@ mod tests {
             crate::daemon_lock::read_pid_file(&lock_path).is_none(),
             "acquire-and-drop cleanup must clear the stale PID record"
         );
+        assert!(matches!(
+            crate::status_ops::collect_daemon_status(dir.path(), &global_db_path),
+            crate::status_ops::DaemonStatus::None
+        ));
+    }
+
+    #[test]
+    fn force_stale_lock_cleanup_refuses_live_lock_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_db_path = dir.path().join("global").join("tachi-memory.db");
+        let lock_path = crate::daemon_lock::legacy_daemon_lock_path(dir.path());
+        let holder = crate::daemon_lock::DaemonLock::acquire(&lock_path).expect("hold lock");
+        let stale_pid = i32::MAX;
+        std::fs::write(&lock_path, format!("{stale_pid}\n")).expect("replace record with dead PID");
+
+        assert!(matches!(
+            crate::status_ops::collect_daemon_status(dir.path(), &global_db_path),
+            crate::status_ops::DaemonStatus::StalePid { pid, .. } if pid == stale_pid
+        ));
+
+        let error = clear_stale_lock_record(&lock_path)
+            .expect_err("--force must not bypass a held daemon lock");
+        assert!(matches!(
+            &error,
+            crate::daemon_lock::DaemonLockError::AlreadyRunning { pid } if *pid == stale_pid
+        ));
+        let message = stale_lock_cleanup_error(&lock_path, error);
+        assert!(
+            message.contains("--force never bypasses a live lock owner"),
+            "refusal must explain the deliberate no-bypass contract: {message}"
+        );
+        assert_eq!(
+            crate::daemon_lock::read_pid_file(&lock_path),
+            Some(stale_pid),
+            "refused cleanup must leave the stale PID record intact"
+        );
+
+        drop(holder);
     }
 
     #[test]
@@ -746,24 +803,47 @@ mod tests {
     }
 
     #[test]
-    fn stale_discovery_cleanup_removes_receipt_but_retains_lock_path() {
+    fn stale_discovery_cleanup_does_not_create_missing_lock() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pid_path = dir.path().join("daemon-scope.pid");
         let lock_path = pid_path.with_extension("lock");
         std::fs::write(&pid_path, br#"{"pid":4194300}"#).expect("seed stale discovery receipt");
 
+        let result = remove_stale_discovery_receipt(&pid_path);
+
+        assert!(
+            matches!(
+                result,
+                Err(DiscoveryReceiptRemovalError::Lock(
+                    crate::daemon_lock::DaemonLockError::Io(ref error)
+                )) if error.kind() == std::io::ErrorKind::NotFound
+            ),
+            "cleanup without a pre-existing lock must fail as a lock-acquisition error"
+        );
+        assert!(
+            pid_path.exists(),
+            "missing-lock refusal must leave the discovery receipt untouched"
+        );
+        assert!(
+            !lock_path.exists(),
+            "cleanup must never manufacture a missing lock path"
+        );
+    }
+
+    #[test]
+    fn stale_discovery_cleanup_removes_receipt_with_existing_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("daemon-scope.pid");
+        let lock_path = pid_path.with_extension("lock");
+        std::fs::write(&pid_path, br#"{"pid":4194300}"#).expect("seed stale discovery receipt");
+        std::fs::write(&lock_path, []).expect("seed stable lock path");
+
         let result = remove_stale_discovery_receipt(&pid_path)
-            .expect("free matching lock permits stale receipt cleanup");
+            .expect("free existing lock permits stale receipt cleanup");
 
         assert!(matches!(result, DiscoveryReceiptRemoval::Removed));
-        assert!(
-            !pid_path.exists(),
-            "successful cleanup removes only the stale discovery receipt"
-        );
-        assert!(
-            lock_path.exists(),
-            "successful cleanup must retain the stable lock path"
-        );
+        assert!(!pid_path.exists(), "cleanup removes only the stale receipt");
+        assert!(lock_path.exists(), "cleanup retains the stable lock path");
     }
 
     #[test]
@@ -772,6 +852,7 @@ mod tests {
         let pid_path = dir.path().join("daemon-scope.pid");
         let lock_path = pid_path.with_extension("lock");
         std::fs::create_dir(&pid_path).expect("directory-shaped receipt forces remove_file error");
+        std::fs::write(&lock_path, []).expect("seed stable lock path");
 
         let result = remove_stale_discovery_receipt(&pid_path);
 

@@ -108,6 +108,23 @@ impl DaemonLock {
             .truncate(false)
             .open(&path)?;
 
+        Self::acquire_file(file)
+    }
+
+    /// Acquire an already-existing singleton daemon lock without creating the
+    /// path or its parent directories. Cleanup callers use this to avoid
+    /// manufacturing lock files for receipts that have no lock identity.
+    pub fn acquire_existing(path: impl AsRef<Path>) -> Result<Self, DaemonLockError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+
+        Self::acquire_file(file)
+    }
+
+    fn acquire_file(file: File) -> Result<Self, DaemonLockError> {
         // Try non-blocking exclusive lock.
         match try_flock_exclusive(&file)? {
             FlockOutcome::Acquired => {
