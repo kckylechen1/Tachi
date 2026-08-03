@@ -1657,9 +1657,14 @@ fn record_read_store_open(db_path: &Path) {
 }
 
 /// Name for a DB addressed by path: the directory that holds it
-/// (`.../wiki/memory.db` -> `wiki`), the same rule `ProjectDbState::open`
-/// uses. This is a *guess* about the store's role, fit for diagnostics; see
-/// [`StoreLabel`] for why it must not become the store's identity.
+/// (`.../wiki/memory.db` -> `wiki`). This is a *guess* about the store's role,
+/// fit for lock names and error text only; see [`StoreLabel`] for why it must
+/// not become the store's identity.
+///
+/// tachi#1579: `ProjectDbState::open` used to apply this same rule as
+/// *identity*. It no longer derives a label at all — this function is now the
+/// only place the directory name is read, and everything it feeds is
+/// [`StoreLabel::Inferred`], whose [`StoreLabel::identity`] is `unknown`.
 fn path_store_label(db_path: &Path) -> &str {
     db_path
         .parent()
@@ -2621,17 +2626,59 @@ mod tests {
             })
             .expect("inferred-label read");
 
-        // The same file, opened by a caller that declares the role, does carry
-        // it — that is the half the gate is allowed to trust.
-        runtime
-            .with_path_store_read_with_label(&impostor_db, "wiki", |store| {
-                assert!(
-                    store.is_wiki_corpus_store(),
-                    "a declared role must reach the store handle"
-                );
-                Ok(())
-            })
-            .expect("declared-label read");
+        // tachi#1579 SUPERSEDES the second half of this test. It used to assert
+        // that a *declared* role always reaches the store handle — under #1569
+        // a declared label simply became `db_label`. It no longer can: this
+        // file was seeded under the role `seed`, that role is stamped inside
+        // it, and a declared claim of `wiki` now contradicts the store's own
+        // identity. The strictly stronger outcome is a refusal. Answering
+        // "yes, you are the wiki corpus" here is exactly the forgery #1579
+        // closes — the caller's word is a claim, not a conferral.
+        let err = runtime
+            .with_path_store_read_with_label(&impostor_db, "wiki", |_| Ok(()))
+            .expect_err("a declared role that contradicts the stamp must refuse");
+        assert!(
+            err.contains("store role conflict"),
+            "expected a role-conflict refusal, got: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// tachi#1579: the parent-directory inference inside `ProjectDbState::open`
+    /// is GONE. A database opened through the write-side attach path with no
+    /// resolved role gets its identity from its own stamp, or nothing at all —
+    /// never from the directory it happens to sit in.
+    #[test]
+    fn project_db_open_never_infers_identity_from_the_directory_name() {
+        let temp = unique_temp_dir("project-open-no-inference");
+        let global_db = temp.join("global/memory.db");
+        let impostor_db = temp.join("wiki/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        std::fs::create_dir_all(impostor_db.parent().expect("impostor parent"))
+            .expect("impostor dir");
+        // Seeded WITHOUT any label: no role stamp exists in this file at all.
+        drop(
+            MemoryStore::open(impostor_db.to_str().expect("impostor utf8"))
+                .expect("seed unlabelled impostor db"),
+        );
+
+        let state = ProjectDbState::open(
+            impostor_db.clone(),
+            1,
+            &MigrationAuthority::Deny,
+            StoreLabel::inferred(&impostor_db),
+        )
+        .expect("open the impostor project db");
+        {
+            let store = lock_or_recover(&state.store, "impostor");
+            assert_eq!(
+                store.db_label(),
+                memcore::path_router::UNKNOWN_DB_LABEL,
+                "a `wiki` directory must confer nothing"
+            );
+            assert!(!store.is_wiki_corpus_store());
+        }
 
         let _ = std::fs::remove_dir_all(temp);
     }

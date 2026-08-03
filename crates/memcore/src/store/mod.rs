@@ -49,6 +49,8 @@ pub mod llm_usage;
 pub mod maintenance;
 pub mod memory_lifecycle;
 pub mod open;
+#[cfg(test)]
+mod profile_identity_tests;
 pub mod recall_cache;
 pub mod rem;
 #[cfg(feature = "admin")]
