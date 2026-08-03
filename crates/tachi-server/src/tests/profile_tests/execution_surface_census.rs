@@ -7,7 +7,6 @@ const FIXTURE: &str = include_str!(
 );
 const COMPARISON_SURFACES: &[&str] = &[
     "tachi_agent_eval",
-    "tachi_arena",
     "tachi_orchestrator",
     "tachi_staff",
     "tachi_task",
@@ -264,7 +263,7 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
         .as_array()
         .expect("standard tools")
         .iter()
-        .any(|tool| tool == "tachi_arena" || tool == "tachi_agent_eval"));
+        .any(|tool| tool == "tachi_agent_eval"));
 }
 
 #[test]

@@ -187,7 +187,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_task"
             | "tachi_staff"
             | "tachi_orchestrator"
-            | "tachi_arena"
             | "tachi_verify"
             | "tachi_workflow"
             | "tachi_gh"

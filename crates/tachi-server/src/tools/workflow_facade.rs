@@ -38,28 +38,6 @@ impl MemoryServer {
         handle_tachi_gh(self, params).await
     }
 
-    // ─── Tachi Arena: tracked worker mission document ledger ────────────────
-
-    #[tool(
-        description = "Tracked worker mission ledger. The default action='spawn' path uses launch=false: it writes mission prompt.md/status.json and returns a tracked prompt for the host harness's native subagent. launch=true is only for explicit durable/remote/native-unavailable exceptions, requires dispatch_reason for launch-capable lanes, and bridges supported harnesses through Tachi dispatch. action='board' reads compact arena/mission state plus linked dispatch summaries; action='collect' reads worker result.md or a canonical linked dispatch result.md reference and returns a completion draft. The open/abort/close/reap lifecycle actions were removed in [1319-D1] (no real authority); the canonical dispatch run_dir/result.md is the single source of truth. Arena owns run documents; memory owns distilled knowledge."
-    )]
-    pub(crate) async fn tachi_arena(
-        &self,
-        Parameters(params): Parameters<TachiArenaParams>,
-    ) -> Result<String, String> {
-        let action = params.action.to_ascii_lowercase();
-        let format = params.format.clone();
-        let raw = handle_tachi_arena(self, params).await?;
-        format_facade_response(
-            &format!("Tachi arena {}", action),
-            &action,
-            &raw,
-            format.as_deref(),
-            false,
-            false,
-        )
-    }
-
     // ─── Tachi Verify: background verification evidence ledger ─────────────
 
     #[tool(

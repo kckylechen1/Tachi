@@ -129,7 +129,8 @@ pub(super) fn write_intake_instruction(
     body.push_str("- `tachi_task(action='briefing', flow_id=...)`\n");
     body.push_str("- `tachi_task(action='recommend', task=..., doc_paths=[...])`\n");
     body.push_str("- Use the host harness's native subagent for ordinary execution.\n");
-    body.push_str("- Explicit durable/remote exception only: `tachi_task(action='dispatch', dispatch_reason=..., flow_id=..., issue_ref=...)`\n");
+    body.push_str("- Explicit durable/remote exception only: `tachi_staff(action='start', flow_id=..., issue_ref=...)`
+");
     body.push_str("- `tachi_gh(action='pr_handoff', flow_id=...)`\n");
     body.push_str("- `tachi_gh(action='link_pr', flow_id=..., pr_ref=...)`\n");
     body.push_str("- `tachi_gh(action='pr_status', flow_id=..., pr_ref=...)`\n");
