@@ -2486,4 +2486,37 @@ mod golden_tests {
             assert_eq!(matches[0], expected, "wrong schema scope for table {table}");
         }
     }
+
+    /// Sibling to `chunk_scopes_match_the_frozen_table_classification`,
+    /// covering the *second* SQL split point (#1585 review): that test only
+    /// inspected [`BASE_SCHEMA_CHUNKS`], leaving [`MIGRATED_INDEXES_CHUNKS`]'s
+    /// own Product/Portable tags unverified. A mistagged index chunk here has
+    /// the same failure mode as a mistagged table chunk — an index on
+    /// `exec_envs` filed as Portable would crash `CREATE INDEX ... ON
+    /// <missing table>` on a `PortableKernel` store; filed the other way, a
+    /// Portable index would be silently dropped from a `PortableKernel`
+    /// store's schema with no failing assertion anywhere. Per
+    /// [`MIGRATED_INDEXES_CHUNKS`]'s own doc comment, the `hub_capabilities`,
+    /// `exec_envs`, and `session_claims` index chunks are Product; every
+    /// other chunk in this list is Portable.
+    #[test]
+    fn migrated_index_chunk_scopes_match_the_frozen_table_classification() {
+        const PRODUCT_INDEX_TABLES: &[&str] = &["hub_capabilities", "exec_envs", "session_claims"];
+
+        for (i, (scope, sql)) in MIGRATED_INDEXES_CHUNKS.iter().enumerate() {
+            let touches_product_table = PRODUCT_INDEX_TABLES.iter().any(|table| {
+                sql.contains(&format!("ON {table}(")) || sql.contains(&format!("ON {table} ("))
+            });
+            let expected = if touches_product_table {
+                SchemaScope::Product
+            } else {
+                SchemaScope::Portable
+            };
+            assert_eq!(
+                *scope, expected,
+                "MIGRATED_INDEXES_CHUNKS[{i}] is tagged {scope:?} but its SQL touches a table \
+                 classified {expected:?}: {sql}"
+            );
+        }
+    }
 }
