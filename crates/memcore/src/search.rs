@@ -27,7 +27,9 @@ mod rerank_blend;
 
 #[cfg(test)]
 use self::expansion::search_fts_with_expansion_config;
-use self::filtering::{env_truthy, scoped_path_can_surface_superseded};
+#[cfg(feature = "admin")]
+use self::filtering::env_truthy;
+use self::filtering::scoped_path_can_surface_superseded;
 #[cfg(test)]
 use self::filtering::{is_search_noise_entry, quality_multiplier, valid_at};
 pub use rerank_blend::{
@@ -179,8 +181,47 @@ pub(super) fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
 /// Keep this environment read here: callers that need to preserve a stricter
 /// search contract can ask whether the override is active without re-parsing
 /// its truthy vocabulary.
+///
+/// `admin`-gated (kckylechen1/Sigil#1585 review): an ambient
+/// `TACHI_SEARCH_INCLUDE_SUPERSEDED` set on the host process would otherwise
+/// silently loosen search behavior for a `not(admin)` portable-kernel
+/// embedder too — env reads are a Tachi-adapter concern, not something a
+/// portable-kernel host process should be able to steer without going
+/// through `KernelPolicy`. Under `not(admin)` the override is always
+/// inactive: zero env reads, pure.
+#[cfg(feature = "admin")]
 pub(crate) fn include_superseded_env_override_active() -> bool {
     env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED")
+}
+
+/// See the `admin`-gated `include_superseded_env_override_active` above:
+/// under `not(admin)` the override can never be active.
+#[cfg(not(feature = "admin"))]
+pub(crate) fn include_superseded_env_override_active() -> bool {
+    false
+}
+
+/// Portable-kernel pin (kckylechen1/Sigil#1585 review): under `not(admin)`,
+/// `include_superseded_env_override_active()` must ignore
+/// `TACHI_SEARCH_INCLUDE_SUPERSEDED` entirely and stay `false` — unlike
+/// `RecallConfig::load`, this function's `admin` arm has no `cfg!(test)`
+/// escape hatch, so (unlike that pin) this one really does distinguish the
+/// two arms: with the env var set to a truthy sentinel, the `admin` arm would
+/// return `true` here. Only runs under `--no-default-features`, which the
+/// build seat runs.
+#[cfg(all(test, not(feature = "admin")))]
+mod include_superseded_portable_tests {
+    use super::include_superseded_env_override_active;
+
+    #[test]
+    fn include_superseded_override_stays_inactive_under_not_admin_even_with_env_set() {
+        std::env::set_var("TACHI_SEARCH_INCLUDE_SUPERSEDED", "1");
+        assert!(
+            !include_superseded_env_override_active(),
+            "not(admin) must ignore the env var and report the override inactive"
+        );
+        std::env::remove_var("TACHI_SEARCH_INCLUDE_SUPERSEDED");
+    }
 }
 
 // ---------------------------------------------------------------------------

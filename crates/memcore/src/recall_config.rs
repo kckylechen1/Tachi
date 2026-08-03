@@ -1063,6 +1063,17 @@ mod portable_tests {
     }
 
     #[test]
+    // Accepted-weak-with-reason (#1585 review round 2, Task C): this cannot
+    // distinguish "the not(admin) arm is structurally pure" from "we're
+    // running under `cargo test`, and the *admin* arm's own `cfg!(test) ||
+    // env_truthy(...)` short-circuit (see `load()` above) would ALSO return
+    // `default()` here" — deleting the `not(admin)` split entirely and always
+    // compiling the admin `load()` would still pass this exact assertion in
+    // this exact test binary. A real strengthening needs `load()` itself to
+    // drop the `cfg!(test)` escape hatch, which is out of scope here; unlike
+    // `include_superseded_env_override_active`'s pin (search.rs), whose admin
+    // arm has no such escape and which this one is modeled on but cannot
+    // replicate.
     fn get_equals_default_under_not_admin_even_with_env_set() {
         std::env::set_var("TACHI_RECALL_RRF_K", "999");
         let _guard = EnvGuard("TACHI_RECALL_RRF_K");

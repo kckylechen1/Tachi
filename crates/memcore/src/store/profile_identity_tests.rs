@@ -675,10 +675,7 @@ fn store_identity_row_with_expires_at_survives_reap() {
         conn.execute(
             "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
              VALUES ('scratch', 'stale_key', ?1, 1, ?2, ?2)",
-            rusqlite::params![
-                format!(r#"{{"value":"v","expires_at":"{past}"}}"#),
-                past,
-            ],
+            rusqlite::params![format!(r#"{{"value":"v","expires_at":"{past}"}}"#), past,],
         )
         .expect("hand-insert the ordinary expired row");
     }
