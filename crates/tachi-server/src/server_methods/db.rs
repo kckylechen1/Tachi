@@ -370,10 +370,15 @@ impl MemoryServer {
             // the session LABEL; `db_path` is unchanged and the divergent-alias
             // collision guard above still holds, so no isolation guarantee is
             // relaxed.
-            let is_stable_caller_identity = project_name == canonical_name
-                || crate::path_utils::plan_c_legacy_dir_name_from_root(&root).as_deref()
-                    == Some(project_name);
-            if is_stable_caller_identity {
+            // Shared rule (`path_utils::alias::is_stable_caller_identity`), so
+            // the stability *criterion* here and the one the CLI display path
+            // applies are one function. Note what that does and does not buy:
+            // the root derivations are NOT shared — this one has the `.or_else`
+            // Git-root fallback above, `canonical_identity_for_display` does
+            // not. Where only this side derives a root, display falls back to
+            // showing the wire alias rather than a second opinion; see that
+            // function's KNOWN NARROW FACE note.
+            if crate::path_utils::is_stable_caller_identity(project_name, &root, &canonical_name) {
                 project_name.to_string()
             } else {
                 match Self::resolve_existing_named_project_db_path_in_home(

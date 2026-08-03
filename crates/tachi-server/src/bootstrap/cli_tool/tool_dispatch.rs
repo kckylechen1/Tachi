@@ -77,6 +77,34 @@ fn daemon_forward_named_project(
         })
 }
 
+/// Build the stderr notice for the named-project forwarding branch.
+///
+/// `named_project` is the alias this CLI addresses the DB by — it is what
+/// actually rides in `X-Tachi-Project` and in the body's `project=`, and it
+/// is whichever alias generation happens to exist on disk
+/// (`path_utils::named_project_for_db_path` walks the fail-closed anti-orphan
+/// candidate chain, so it can be a deprecated gen-3/gen-2 hash). The daemon
+/// then migrates a deprecated alias to the gen-4 canonical identity before it
+/// labels the session (`server_methods/db.rs`
+/// `resolve_named_project_binding_in_home`), so advertising the wire alias to
+/// a human named a project that no new registration ever emits and that
+/// disagreed with the `effective_named_project` in the same command's output.
+/// Lead with the identity the daemon actually binds; keep the wire alias
+/// visible, marked as the deprecated compatibility spelling it is.
+fn named_project_forward_notice(named_project: &str, canonical_identity: Option<&str>) -> String {
+    match canonical_identity {
+        Some(canonical) => format!(
+            "[cli] daemon project DB scope differs; forwarding via named project \
+             '{canonical}' (addressed on the wire through deprecated compatibility \
+             alias '{named_project}')"
+        ),
+        None => format!(
+            "[cli] daemon project DB scope differs; forwarding via named project \
+             '{named_project}'"
+        ),
+    }
+}
+
 /// CLI-facing tool names (as passed to `dispatch_cli_tool`, i.e. before
 /// `cli_client::tool_map::remap_daemon_tool`'s later action-verb remap) whose
 /// `--project` NAME flag must be forwarded as an `X-Tachi-Project` daemon
@@ -242,8 +270,12 @@ where
                 daemon_args
                     .entry("project".to_string())
                     .or_insert_with(|| json!(named_project.clone()));
+                let canonical_identity = project_db.and_then(|path| {
+                    crate::path_utils::canonical_identity_for_display(path.as_path(), named_project)
+                });
                 eprintln!(
-                    "[cli] daemon project DB scope differs; forwarding via named project '{named_project}'"
+                    "{}",
+                    named_project_forward_notice(named_project, canonical_identity.as_deref())
                 );
                 match crate::cli_client::call_daemon_tool_with_profile(
                     &info,
@@ -307,7 +339,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{cli_tool_allows_read_fallback, daemon_forward_named_project};
+    use super::{
+        cli_tool_allows_read_fallback, daemon_forward_named_project, named_project_forward_notice,
+    };
     use crate::bootstrap::cli_tool::tool_dispatch::{
         dispatch_cli_operate_tool_with_migration_authority, dispatch_cli_tool,
     };
@@ -334,6 +368,36 @@ mod tests {
             "remember --project X with no --project-db must still forward a \
              named-project binding header"
         );
+    }
+
+    /// The user-facing notice must name the identity the daemon actually
+    /// binds. A repo whose only alias dir on disk is the deprecated gen-3
+    /// hash still gets addressed by that hash on the wire (the fail-closed
+    /// candidate chain is unchanged), but `server_methods/db.rs` migrates it
+    /// to the gen-4 canonical name before labelling the session — so the
+    /// canonical name must lead the message and the wire alias must be marked
+    /// deprecated, not advertised as the project's name.
+    #[test]
+    fn named_project_forward_notice_advertises_canonical_identity_not_deprecated_alias() {
+        let notice =
+            named_project_forward_notice("Sigil-ecbdd1fc", Some("Sigil-82fc54652d7d59f09166f0e3"));
+        assert!(
+            notice.contains("named project 'Sigil-82fc54652d7d59f09166f0e3'"),
+            "the canonical identity must be the one advertised: {notice}"
+        );
+        assert!(
+            notice.contains("deprecated compatibility alias 'Sigil-ecbdd1fc'"),
+            "the wire alias stays visible, marked deprecated: {notice}"
+        );
+
+        // Already-canonical (or otherwise stable) binding: unchanged message,
+        // no second name invented for it.
+        let stable = named_project_forward_notice("Sigil-82fc54652d7d59f09166f0e3", None);
+        assert!(
+            stable.ends_with("forwarding via named project 'Sigil-82fc54652d7d59f09166f0e3'"),
+            "a stable identity keeps the plain notice: {stable}"
+        );
+        assert!(!stable.contains("deprecated"), "{stable}");
     }
 
     /// Companion: `tachi remember TEXT` with no `--project` at all must not

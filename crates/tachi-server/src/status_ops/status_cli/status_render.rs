@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::status_ops::status_health;
+use crate::status_ops::{paths_equal, status_health};
 
 pub(crate) async fn run_status(
     watch: bool,
@@ -213,11 +213,28 @@ async fn render_one(
         .collect();
     let hidden_orphans = snapshot.dbs.len() - visible_dbs.len();
 
-    println!("Manifest ({} dbs)", snapshot.dbs.len());
+    // "probed" (not "registered" / "in manifest"): this is the count of
+    // dbs `collect_snapshot_scoped` actually opened and queried this render,
+    // which in scoped mode (`!all_dbs`) can be smaller than "global +
+    // current-project" implies below if one of those two paths has no
+    // matching entry in manifest.json at all (see `snapshot.rs`'s
+    // `collect_snapshot_inner` scoping comment) — that silent drop is what
+    // the omission lines below make explicit instead of leaving the reader
+    // to guess whether a scope was skipped, hidden, or coincides with
+    // another listed entry.
+    println!("Manifest ({} dbs probed)", snapshot.dbs.len());
     if !all_dbs {
         println!("  [i] scoped to global + current-project db; pass --all-dbs for the full fleet");
-    }
-    if snapshot.dbs.is_empty() {
+        for line in scoped_manifest_omissions(&snapshot.dbs, global_db_path, project_db_path) {
+            println!("{line}");
+        }
+        // No generic "manifest empty or missing" here: in scoped mode an empty
+        // `dbs` means *these paths* had no manifest.json row (the manifest
+        // itself may be full of other projects), and
+        // `scoped_manifest_omissions` already collapses that case into one
+        // path-carrying line. Printing both restated the same fact up to three
+        // times.
+    } else if snapshot.dbs.is_empty() {
         println!("  [!] manifest empty or missing — run `tachi doctor` to populate it");
     }
     if hidden_orphans > 0 {
@@ -665,6 +682,61 @@ fn render_disk_volume(volume: &crate::status_ops::disk::DiskVolumeStatus) {
     }
 }
 
+/// Which of the two scopes the "Manifest (N dbs probed)" header implicitly
+/// promises (global, current-project) has no matching entry in `dbs` — i.e.
+/// `collect_snapshot_scoped` found no manifest.json row for that exact path,
+/// so it was silently dropped rather than probed-and-hidden. Pure and
+/// independent of `println!` so the header count, the static scope caption,
+/// and this per-scope truth-telling can be tested without capturing stdout.
+///
+/// When *nothing* was probed the per-scope lines all say the same thing, so
+/// they collapse into one line naming every promised path; the caller relies
+/// on that to not also print a generic "manifest empty or missing".
+fn scoped_manifest_omissions(
+    dbs: &[crate::status_ops::DbStatus],
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> Vec<String> {
+    // Nothing at all was probed: every in-scope path is missing, so per-scope
+    // lines would each restate the same single fact (and the caller's generic
+    // "manifest empty or missing" would restate it a third time). Collapse to
+    // one line that still names every path the reader was promised.
+    if dbs.is_empty() {
+        let mut scopes = vec![format!("global db ({})", global_db_path.display())];
+        if let Some(project_path) = project_db_path {
+            scopes.push(format!("current-project db ({})", project_path.display()));
+        }
+        return vec![format!(
+            "  [!] nothing probed: no matching entry in manifest.json for {} — run `tachi doctor` to register {}, or --all-dbs to see the raw fleet",
+            scopes.join(" or "),
+            if scopes.len() > 1 { "them" } else { "it" },
+        )];
+    }
+
+    let mut lines = Vec::new();
+    let global_scanned = dbs
+        .iter()
+        .any(|db| paths_equal(Path::new(&db.path), global_db_path));
+    if !global_scanned {
+        lines.push(format!(
+            "  [!] global db ({}) not shown: no matching entry in manifest.json — run `tachi doctor` to register it, or --all-dbs to see the raw fleet",
+            global_db_path.display()
+        ));
+    }
+    if let Some(project_path) = project_db_path {
+        let project_scanned = dbs
+            .iter()
+            .any(|db| paths_equal(Path::new(&db.path), project_path));
+        if !project_scanned {
+            lines.push(format!(
+                "  [!] current-project db ({}) not shown: no matching entry in manifest.json — run `tachi doctor` to register it, or --all-dbs to see the raw fleet",
+                project_path.display()
+            ));
+        }
+    }
+    lines
+}
+
 fn render_rotation_group_probes(groups: &[status_health::ProviderRotationGroupProbe]) {
     if groups.is_empty() {
         return;
@@ -693,5 +765,171 @@ fn render_rotation_group_probes(groups: &[status_health::ProviderRotationGroupPr
                     .unwrap_or_default()
             );
         }
+    }
+}
+
+// Regression coverage for the "Manifest (N dbs)" / "scoped to global +
+// current-project db" mismatch: a scoped run (`!all_dbs`) whose manifest.json
+// has no entry for the global DB path silently dropped it from `dbs`, so the
+// header said "1 dbs", the caption said "scoped to global + current-project
+// db", and only the project entry rendered — with no way to tell "global
+// equals project", "global was never scanned", or "global was scanned but
+// hidden" apart. `scoped_manifest_omissions` is the pure function backing
+// the fix; these tests exercise it directly (no stdout capture needed) so
+// the header count (`dbs.len()`), the caption, and the display stay provably
+// in sync with what was actually probed.
+#[cfg(test)]
+mod scoped_manifest_omissions_tests {
+    use super::*;
+
+    fn db_status_at(path: &str) -> crate::status_ops::DbStatus {
+        crate::status_ops::DbStatus {
+            path: path.to_string(),
+            label: "project:fixture".to_string(),
+            orphan: false,
+            memory_total: 0,
+            vector_count: 0,
+            vector_missing: 0,
+            vector_orphans: 0,
+            vector_coverage: 0.0,
+            vector_dimension: None,
+            vector_sweep: None,
+            vector_sweep_error: None,
+            namespace: Default::default(),
+            continuity: Default::default(),
+            pending_enrichment: 0,
+            enrichment_failed_recent: 0,
+            enrichment_failures: Vec::new(),
+            pending: 0,
+            running: 0,
+            active_jobs: 0,
+            completed: 0,
+            failed: 0,
+            dead_lettered: 0,
+            skipped: 0,
+            terminal_jobs: 0,
+            gc_eligible: 0,
+            stuck_in_progress: 0,
+            latest_active_job: None,
+            latest_terminal_job: None,
+            latest_job: None,
+            latest_failed_job: None,
+            error: None,
+        }
+    }
+
+    /// Exact shape of the bug report: manifest.json has no global-DB entry,
+    /// so `dbs` only contains the project DB. The header count
+    /// (`dbs.len() == 1`) is already truthful about what got probed; this
+    /// asserts the omission line makes the *why* explicit instead of leaving
+    /// "global" unexplained next to a caption that promised it.
+    #[test]
+    fn flags_global_omission_when_only_project_db_was_scanned() {
+        let dbs = vec![db_status_at("/home/x/.tachi/projects/sigil/memory.db")];
+        let global = Path::new("/home/x/.tachi/global/memory.db");
+        let project = Path::new("/home/x/.tachi/projects/sigil/memory.db");
+
+        let lines = scoped_manifest_omissions(&dbs, global, Some(project));
+
+        assert_eq!(
+            lines.len(),
+            1,
+            "project db is present in `dbs`, so only the global omission should fire: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("global db")
+                && lines[0].contains("/home/x/.tachi/global/memory.db")
+                && lines[0].contains("not shown"),
+            "expected an explicit, path-carrying global-omission line, got: {lines:?}"
+        );
+    }
+
+    /// Mirror case: project db path missing from `dbs` (e.g. never
+    /// registered by `tachi doctor` for this project) while global is
+    /// present — must be flagged the same way, not silently.
+    #[test]
+    fn flags_project_omission_when_only_global_db_was_scanned() {
+        let dbs = vec![db_status_at("/home/x/.tachi/global/memory.db")];
+        let global = Path::new("/home/x/.tachi/global/memory.db");
+        let project = Path::new("/home/x/.tachi/projects/sigil/memory.db");
+
+        let lines = scoped_manifest_omissions(&dbs, global, Some(project));
+
+        assert_eq!(
+            lines.len(),
+            1,
+            "global db is present, only project should be flagged: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("current-project db")
+                && lines[0].contains("/home/x/.tachi/projects/sigil/memory.db"),
+            "expected an explicit, path-carrying project-omission line, got: {lines:?}"
+        );
+    }
+
+    /// The happy path this whole scope is trying to preserve: both scopes
+    /// present in `dbs` (the normal case) must produce zero omission lines —
+    /// the fix must not start crying wolf on a healthy manifest.
+    #[test]
+    fn no_omissions_when_both_scopes_were_scanned() {
+        let dbs = vec![
+            db_status_at("/home/x/.tachi/global/memory.db"),
+            db_status_at("/home/x/.tachi/projects/sigil/memory.db"),
+        ];
+        let global = Path::new("/home/x/.tachi/global/memory.db");
+        let project = Path::new("/home/x/.tachi/projects/sigil/memory.db");
+
+        let lines = scoped_manifest_omissions(&dbs, global, Some(project));
+
+        assert!(
+            lines.is_empty(),
+            "both scopes present in `dbs`; no omission line should render: {lines:?}"
+        );
+    }
+
+    /// No current-project context at all (`project_db_path: None`) is not an
+    /// omission — there is no project scope to have scanned, so only a
+    /// missing global entry should be flagged, never a phantom project line.
+    #[test]
+    fn no_project_omission_when_there_is_no_project_scope() {
+        let dbs: Vec<crate::status_ops::DbStatus> = Vec::new();
+        let global = Path::new("/home/x/.tachi/global/memory.db");
+
+        let lines = scoped_manifest_omissions(&dbs, global, None);
+
+        assert_eq!(
+            lines.len(),
+            1,
+            "only the global omission applies: {lines:?}"
+        );
+        assert!(lines[0].contains("global db"), "{lines:?}");
+        assert!(
+            !lines[0].contains("current-project"),
+            "there is no project scope; it must not be named: {lines:?}"
+        );
+    }
+
+    /// Nothing probed at all: the pre-collapse rendering emitted a global
+    /// omission line, a current-project omission line, *and* the caller's
+    /// generic "manifest empty or missing" — three restatements of one fact.
+    /// Exactly one line, still carrying both paths, is the contract.
+    #[test]
+    fn nothing_probed_collapses_to_a_single_line_naming_both_paths() {
+        let dbs: Vec<crate::status_ops::DbStatus> = Vec::new();
+        let global = Path::new("/home/x/.tachi/global/memory.db");
+        let project = Path::new("/home/x/.tachi/projects/sigil/memory.db");
+
+        let lines = scoped_manifest_omissions(&dbs, global, Some(project));
+
+        assert_eq!(
+            lines.len(),
+            1,
+            "both scopes absent must collapse into one line, not one per scope: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("/home/x/.tachi/global/memory.db")
+                && lines[0].contains("/home/x/.tachi/projects/sigil/memory.db"),
+            "the collapsed line must still name every promised path: {lines:?}"
+        );
     }
 }

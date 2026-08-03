@@ -98,14 +98,45 @@ pub(crate) async fn handle_tachi_memory(
                     server,
                     search_params.project.as_deref(),
                 );
-                return json_string(&json!({
-                    "status": "completed",
-                    "query": search_params.query,
-                    "scope": scope,
-                    "scope_remapped": scope_remapped,
-                    "sections": sections,
-                    "binding": binding,
-                }));
+                // A binding receipt is a diagnostic, not a result. This
+                // workspace never enables serde_json's `preserve_order`, so a
+                // response `Map` is a `BTreeMap` and `"binding"` sorts ahead
+                // of `"sections"` by key name alone — an unconditional
+                // 15-line receipt therefore buried the answer to every
+                // successful search under a wall of paths. Keep the one-line
+                // provenance summary always, and attach the full receipt only
+                // when it is load-bearing:
+                //   * the receipt itself has news (warned posture / unscoped
+                //     global-only) — `binding_receipt_is_notable`,
+                //   * `scope` was not honored as asked, or
+                //   * nothing came back at all, which is the exact "there is
+                //     no memory" moment the #898 receipts were built for.
+                let empty_results = sections.iter().all(|section| {
+                    section
+                        .get("rows")
+                        .and_then(serde_json::Value::as_array)
+                        .is_none_or(|rows| rows.is_empty())
+                });
+                let mut response = serde_json::Map::new();
+                response.insert("status".to_string(), json!("completed"));
+                response.insert("query".to_string(), json!(search_params.query));
+                response.insert("scope".to_string(), json!(scope));
+                response.insert("scope_remapped".to_string(), json!(scope_remapped));
+                response.insert(
+                    "sections".to_string(),
+                    serde_json::Value::Array(sections),
+                );
+                response.insert(
+                    "binding_summary".to_string(),
+                    json!(crate::memory_search_ops::binding_summary_line(&binding)),
+                );
+                if scope_remapped
+                    || empty_results
+                    || crate::memory_search_ops::binding_receipt_is_notable(&binding)
+                {
+                    response.insert("binding".to_string(), binding);
+                }
+                return json_string(&serde_json::Value::Object(response));
             }
             crate::facade_search_ops::handle_tachi_search(server, search_params).await
         }

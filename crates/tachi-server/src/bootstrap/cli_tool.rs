@@ -268,6 +268,7 @@ pub(super) async fn run_cli_command(
         },
         Commands::Remember {
             text,
+            text_flag,
             tags,
             scope,
             project,
@@ -280,6 +281,11 @@ pub(super) async fn run_cli_command(
             summary,
             force,
         } => {
+            // clap enforces exactly one of `text` (positional) / `text_flag`
+            // (`--text`) is present via `required_unless_present` +
+            // `conflicts_with`; `unwrap_or_default` is unreachable defensive
+            // fallback, not a silent-empty path.
+            let text = text.or(text_flag).unwrap_or_default();
             let mut args = serde_json::Map::new();
             args.insert("text".into(), json!(text));
             if !tags.is_empty() {
