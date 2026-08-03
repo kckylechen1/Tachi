@@ -171,6 +171,11 @@ impl MemoryStore {
     /// no-DDL failure (a missing row, a violated constraint): see
     /// `store/vault.rs`'s
     /// `vault_touch_entries_atomic_rolls_back_every_touch_when_one_name_is_missing`.
+    /// Absent from non-test portable builds (#1585 review round 2): a bare
+    /// `&Connection` is a raw-SQL bypass of the `store_identity` write-once
+    /// guards, so external portable consumers do not get it. Admin builds
+    /// (tachi-server and friends) and in-crate tests keep it.
+    #[cfg(any(feature = "admin", test))]
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -182,6 +187,10 @@ impl MemoryStore {
     /// the blanket DDL denial and the fault-injection guidance documented
     /// there, which is what a test wanting to break one of these transactions
     /// needs to read first.
+    /// Gated identically to [`Self::connection`] and for the same reason
+    /// (#1585 review round 2): a `&mut Connection` is the same raw-SQL bypass
+    /// with strictly more power.
+    #[cfg(any(feature = "admin", test))]
     pub fn connection_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }

@@ -845,7 +845,11 @@ fn run_recall_coverage_probe_internal(
     // `unchecked_transaction` begins a single SQLite read snapshot. The
     // store may itself be read-only; hybrid search stays read-only because the
     // options below set `record_access` false.
-    let transaction = store.connection().unchecked_transaction()?;
+    // In-crate field access rather than `MemoryStore::connection()`: that
+    // accessor is gated out of non-test portable builds (#1585 review round 2
+    // — it is a raw-SQL bypass of the store_identity write-once guards), while
+    // this probe is a legitimate portable read path.
+    let transaction = store.conn.unchecked_transaction()?;
     let all_entries = crate::db::get_all(&transaction, i64::MAX as usize, true, false)?;
     let supersession_links = supersession_links(&transaction)?;
 
