@@ -1,6 +1,8 @@
 use crate::scorer::HybridWeights;
 use std::collections::HashMap;
+#[cfg(any(feature = "admin", test))]
 use std::io::Read;
+#[cfg(any(feature = "admin", test))]
 use std::path::PathBuf;
 use std::sync::OnceLock;
 

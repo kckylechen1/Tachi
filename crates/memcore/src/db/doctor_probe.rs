@@ -9,10 +9,14 @@
 //! and connection-opening mechanics are centralized here; classification
 //! decisions stay in tachi-server.
 
+#[cfg(any(feature = "admin", test))]
 use std::path::Path;
+#[cfg(any(feature = "admin", test))]
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
+#[cfg(any(feature = "admin", test))]
+use rusqlite::OpenFlags;
 
 /// Open a database read-only, disabling WAL writes, via the `immutable=1` URI
 /// flag. `uri` must already be the fully-formed `file:...?mode=ro&immutable=1`
