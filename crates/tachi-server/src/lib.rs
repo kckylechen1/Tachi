@@ -86,10 +86,14 @@ mod agent_registry;
 /// module is its live GitHub probe plus the owner-controlled policy loader.
 ///
 /// **NOT WIRED YET.** #1077 owns the governed precedent establishment /
-/// overturn transition that must call `authorize_governed_mutation` at its
-/// mutation choke point and `revalidate_governed_mutation` immediately before
-/// it writes. No such transition exists in this crate today, so this
-/// declaration is the module's only reference: nothing is gated by it yet.
+/// overturn transition that would call this gate at its mutation choke point
+/// and revalidate immediately before it writes. No such transition exists in
+/// this crate today, so this declaration is the module's only reference:
+/// nothing is gated by it yet. The crate-private choke-point entry points
+/// that used to wrap `tachi_params`'s pure decision functions for that
+/// caller were deleted with the dormant `governed_precedent_establishment`
+/// stack (#1564); #1077's real caller should re-derive them against the code
+/// that exists when it is built, not restore that scaffolding.
 pub mod approver_authority;
 mod arena_ops;
 mod bootstrap;
@@ -140,11 +144,6 @@ mod foundry_scheduler;
 mod gh_ops;
 mod gh_safe_merge;
 pub mod github_corpus_ops;
-// Gated per #1564 pending owner disposition (verified dead: zero production
-// callers, private mod, only its own tests reference it). Owning contract:
-// #1077 (governed precedent establishment).
-#[cfg(feature = "contract-leaves")]
-mod governed_precedent_establishment;
 mod handoff_ops;
 mod host_profile;
 mod host_spawn_bridge;

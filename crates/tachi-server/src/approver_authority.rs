@@ -59,18 +59,27 @@
 //!
 //! ## Not wired yet
 //!
-//! #1077 owns the governed establishment/overturn transition that must call
-//! [`authorize_governed_mutation`] at its mutation choke point and
-//! [`revalidate_governed_mutation`] immediately before it writes. At this
-//! commit no such transition exists in the crate (there is no precedent
-//! *apply* path yet — `precedent_ops` and `precedent_candidate_ops` only
-//! capture caller-supplied rulings as memory rows), so this module has no
-//! production caller. This *module* is declared `pub` (in `lib.rs`) for the
-//! same reason `exec_env_postflight` is: the gate must exist and be
-//! reviewable before the path it gates is built. The choke-point functions
-//! themselves are `pub(crate)`, not `pub`, because they take `&MemoryServer`
-//! — itself `pub(crate)` — so #1077's caller must live inside this crate
-//! regardless of what visibility these functions declare.
+//! #1077 owns the governed establishment/overturn transition that must
+//! authorize at its mutation choke point and revalidate immediately before
+//! it writes. At this commit no such transition exists in the crate (there is
+//! no precedent *apply* path yet — `precedent_ops` and
+//! `precedent_candidate_ops` only capture caller-supplied rulings as memory
+//! rows), so this module has no production caller. This *module* is declared
+//! `pub` (in `lib.rs`) for the same reason `exec_env_postflight` is: the gate
+//! must exist and be reviewable before the path it gates is built.
+//!
+//! This module used to also carry four crate-private choke-point wrappers
+//! (`authorize_governed_mutation` / `revalidate_governed_mutation` and their
+//! probe-taking variants) whose only caller was the dormant
+//! `governed_precedent_establishment` stack; both were deleted together in
+//! #1564. What survives here is the live GitHub probe
+//! ([`GhApproverAuthorityProbe`]) and the policy loader — the parts that a
+//! future caller cannot re-derive cheaply. The wrappers themselves were thin
+//! adapters over `tachi_params`'s pure `resolve_verified_approver` /
+//! `revalidate_approval`, and #1077's caller should write them against the
+//! `&MemoryServer` shape that exists when it is built. Any such wrapper is
+//! `pub(crate)`, not `pub`, because it takes `&MemoryServer` — itself
+//! `pub(crate)` — so #1077's caller must live inside this crate regardless.
 
 use std::cell::OnceCell;
 use std::process::Stdio;
@@ -84,21 +93,13 @@ use tachi_params::{
     TeamMembershipProbeV1, TeamMembershipV1, TeamRoleV1, VerifiedPrincipalV1,
 };
 
-// #1564: inside this crate the choke-point entry points below are the only
-// consumers of the names in the two gated imports. Their sole caller,
-// `governed_precedent_establishment`, is itself gated behind
-// `contract-leaves`, so the entry points are gated the same way rather than
-// deleted — which leaves these imports unused in a default build unless they
-// carry the same gate. `resolve_verified_approver`/`ApprovalTargetV1`/
-// `CallerAssertedContextV1` are additionally named by this module's own
-// `tests`, so those three survive under `test` as well.
-#[cfg(any(feature = "contract-leaves", test))]
+// `#[cfg(test)]`: with the #1564 choke-point wrappers gone, the only
+// remaining consumer of these three names in this crate is this module's own
+// `tests`, which drives the production probe through the pure decision
+// function directly.
+#[cfg(test)]
 use tachi_params::{resolve_verified_approver, ApprovalTargetV1, CallerAssertedContextV1};
-#[cfg(feature = "contract-leaves")]
-use tachi_params::{revalidate_approval, ApprovalReceiptV1, CurrentApprovalContextV1};
 
-#[cfg(feature = "contract-leaves")]
-use crate::gh_ops::resolve_gh_api_context;
 use crate::gh_ops::{gh_api_command_for_context, gh_redact, GhApiContext};
 use crate::MemoryServer;
 
@@ -285,26 +286,16 @@ pub struct GhApproverAuthorityProbe<'a> {
 type GhApiContextResolver<'a> = dyn Fn(&MemoryServer) -> Result<GhApiContext, String> + 'a;
 
 impl<'a> GhApproverAuthorityProbe<'a> {
-    /// `pub(crate)`, not `pub`: `MemoryServer` is itself `pub(crate)`
-    /// (`crates/tachi-server/src/lib.rs`'s `pub(crate) use
-    /// server_state::{..., MemoryServer, ...}`), so a wider visibility here
-    /// would be unreachable from outside the crate anyway and trips
-    /// the rustc `private_interfaces` lint.
-    ///
-    /// `#[cfg(feature = "contract-leaves")]`: the only callers are the two
-    /// choke-point entry points at the bottom of this file, gated per #1564
-    /// with the `governed_precedent_establishment` module that calls them.
-    /// The probe itself stays ungated — `with_context_resolver` builds it in
-    /// this module's tests, which is where its behaviour is covered.
-    #[cfg(feature = "contract-leaves")]
-    pub(crate) fn new(server: &'a MemoryServer) -> Self {
-        Self {
-            server,
-            context_resolver: Box::new(resolve_gh_api_context),
-            pinned_context: OnceCell::new(),
-        }
-    }
-
+    /// The production constructor (`new`, resolving a live
+    /// `gh_ops::GhApiContext`) was deleted with the dormant
+    /// `governed_precedent_establishment` stack in #1564 — it had no other
+    /// caller. #1077's real caller adds one back; any such constructor is
+    /// `pub(crate)`, not `pub`, because `MemoryServer` is itself
+    /// `pub(crate)` (`crates/tachi-server/src/lib.rs`'s `pub(crate) use
+    /// server_state::{..., MemoryServer, ...}`), so a wider visibility would
+    /// be unreachable from outside the crate anyway and trips the rustc
+    /// `private_interfaces` lint. This test constructor keeps the probe's
+    /// behaviour covered meanwhile.
     #[cfg(test)]
     fn with_context_resolver(
         server: &'a MemoryServer,
@@ -724,80 +715,6 @@ pub fn build_policy(
     };
     policy.validate()?;
     Ok(policy)
-}
-
-// ─── the choke-point entry points ───────────────────────────────────────────
-
-/// Issue an approval receipt for a governed mutation, or refuse loudly.
-///
-/// `caller_asserted` is recorded on the receipt and hashed into it; it is
-/// never consulted when deciding authority.
-///
-/// `pub(crate)`, not `pub`: it takes `&MemoryServer`, which is itself
-/// `pub(crate)`, so a wider visibility would be unreachable from outside the
-/// crate and trips the rustc `private_interfaces` lint.
-///
-/// `#[cfg(feature = "contract-leaves")]`: #1077's establishment/overturn
-/// transition (`governed_precedent_establishment`) is the only caller of the
-/// four choke-point entry points in this module, and #1564 gated that module
-/// pending owner disposition. Gating these behind the same feature keeps the
-/// reviewed gate in the tree instead of deleting it, and keeps it compiling
-/// with its caller. Same shape as
-/// `lesson_forge_ops::storage::persist_pending_lesson_candidate`. Gated here
-/// rather than silently suppressed at the module level.
-#[cfg(feature = "contract-leaves")]
-pub(crate) fn authorize_governed_mutation_with_probe<P: ApproverAuthorityProbe + ?Sized>(
-    probe: &P,
-    policy: &ApproverAuthorizationPolicyV1,
-    target: &ApprovalTargetV1,
-    caller_asserted: &CallerAssertedContextV1,
-) -> Result<ApprovalReceiptV1, AuthorityDenialV1> {
-    resolve_verified_approver(probe, policy, target, caller_asserted, chrono::Utc::now())
-}
-
-#[cfg(feature = "contract-leaves")]
-pub(crate) fn authorize_governed_mutation(
-    server: &MemoryServer,
-    policy: &ApproverAuthorizationPolicyV1,
-    target: &ApprovalTargetV1,
-    caller_asserted: &CallerAssertedContextV1,
-) -> Result<ApprovalReceiptV1, AuthorityDenialV1> {
-    let probe = GhApproverAuthorityProbe::new(server);
-    authorize_governed_mutation_with_probe(&probe, policy, target, caller_asserted)
-}
-
-/// Revalidate an approval immediately before a governed mutation writes.
-///
-/// `Ok(())` is the only outcome that may be followed by a write. Every
-/// refusal — a revoked permission, a team removal, a credential swap, a
-/// moved branch, an edited proposal, an unreachable GitHub — leaves the
-/// caller with an [`AuthorityDenialV1`] and nothing mutated.
-///
-/// `pub(crate)`, not `pub`: it takes `&MemoryServer`, which is itself
-/// `pub(crate)`, so a wider visibility would be unreachable from outside the
-/// crate and trips the rustc `private_interfaces` lint.
-///
-/// `#[cfg(feature = "contract-leaves")]`: gated with the rest of the
-/// choke-point entry points — see [`authorize_governed_mutation`]'s note.
-#[cfg(feature = "contract-leaves")]
-pub(crate) fn revalidate_governed_mutation_with_probe<P: ApproverAuthorityProbe + ?Sized>(
-    probe: &P,
-    policy: &ApproverAuthorizationPolicyV1,
-    receipt: &ApprovalReceiptV1,
-    current: &CurrentApprovalContextV1,
-) -> Result<(), AuthorityDenialV1> {
-    revalidate_approval(probe, policy, receipt, current, chrono::Utc::now())
-}
-
-#[cfg(feature = "contract-leaves")]
-pub(crate) fn revalidate_governed_mutation(
-    server: &MemoryServer,
-    policy: &ApproverAuthorizationPolicyV1,
-    receipt: &ApprovalReceiptV1,
-    current: &CurrentApprovalContextV1,
-) -> Result<(), AuthorityDenialV1> {
-    let probe = GhApproverAuthorityProbe::new(server);
-    revalidate_governed_mutation_with_probe(&probe, policy, receipt, current)
 }
 
 #[cfg(test)]

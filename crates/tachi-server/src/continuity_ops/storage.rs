@@ -151,43 +151,6 @@ pub(super) fn write_event(
     }
 }
 
-/// Insert one append-only event through the same routed store selected for
-/// continuity writes. The boolean preserves the ledger's idempotent outcome
-/// for governed transitions that must distinguish a first establishment from
-/// an exact replay.
-///
-/// `#[cfg(feature = "contract-leaves")]`: the only such transition is
-/// `governed_precedent_establishment`, gated per #1564 pending owner
-/// disposition; this writer is gated with it rather than deleted. The
-/// `()`-returning sibling `write_event` stays ungated — `emit`, `pipeline`
-/// and `promotion` all call it.
-#[cfg(feature = "contract-leaves")]
-pub(crate) fn insert_event_if_absent(
-    server: &MemoryServer,
-    target: &ContinuityEventTarget,
-    event: &TachiEventRecord,
-) -> Result<bool, String> {
-    if let Some(project_name) = target.named_project.as_deref() {
-        server.with_named_project_store(project_name, |store| {
-            store
-                .insert_tachi_event_if_absent(event)
-                .map_err(|e| format!("insert continuity event: {e}"))
-        })
-    } else if let Some(db_path) = target.db_path.as_ref() {
-        server.with_path_store(db_path, |store| {
-            store
-                .insert_tachi_event_if_absent(event)
-                .map_err(|e| format!("insert continuity event: {e}"))
-        })
-    } else {
-        server.with_store_for_scope(target.target_db, |store| {
-            store
-                .insert_tachi_event_if_absent(event)
-                .map_err(|e| format!("insert continuity event: {e}"))
-        })
-    }
-}
-
 pub(crate) fn read_events(
     server: &MemoryServer,
     target: &ContinuityEventTarget,

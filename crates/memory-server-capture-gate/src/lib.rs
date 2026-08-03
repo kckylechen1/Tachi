@@ -50,15 +50,16 @@ const BASE_BUCKETS: &[&str] = &[
     // sibling of `precedents`, registered here the same way #950 registered
     // `precedents` itself, not a test-only bypass.
     "precedent_candidates",
-    // #1192 (D2 forge pilot): pending lesson candidates persisted via
-    // `lesson_forge_ops::storage::persist_pending_lesson_candidate`, which
-    // reuses this same `save_eval_memory` → capture-gate path. Landed on
-    // main without registering the bucket; under the default `Warn` gate
-    // mode this was invisible (Warn always accepts), but it fails the same
-    // "not in the allowed set" way as `/precedent_candidates` under
-    // `TACHI_CAPTURE_GATE=enforce`. Registered alongside `precedent_candidates`
-    // here since both are pending-candidate buckets discovered missing by
-    // the same gate audit (#1183).
+    // #1192 (D2 forge pilot): pending lesson candidates. Registered
+    // alongside `precedent_candidates` by the same gate audit (#1183) since
+    // both are pending-candidate buckets that were discovered missing from
+    // the allowed set. The writer that motivated it
+    // (`lesson_forge_ops::storage::persist_pending_lesson_candidate`) was
+    // deleted unwired in #1564; the bucket stays registered because this is
+    // an accept-list over paths that may already exist in a store, and
+    // because the #1073 forge contract still owns this path shape. Removing
+    // it would be a live behavior change under
+    // `TACHI_CAPTURE_GATE=enforce`, not a dead-code cleanup.
     "lesson_candidates",
     "checkpoints",
     "foundry",
