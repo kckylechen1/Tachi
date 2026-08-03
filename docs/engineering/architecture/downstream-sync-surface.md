@@ -6,9 +6,12 @@
 > with admin features disabled, and `portable-server` serves that facade over
 > MCP. The current Tachi Cargo inventory contains no direct ZeroClaw
 > integration.
-> **Future direction, owner-ratified 2026-07-17 (#1195):** retain the portable
-> packages as candidate boundaries for a ZeroClaw-native memory module. The
-> design and direct Cargo integration have not landed.
+> **Current boundary, owner-ratified 2026-08-03 (#1585):** Hypermem is the
+> supported external consumer — it embeds the `portable-kernel` library only,
+> opening explicitly supplied Hyperion-owned databases; Tachi product adapters
+> remain downstream. See `portable-kernel-split.md` § "Supported dependency
+> surface". The 2026-07-17 (#1195) ZeroClaw candidacy stands as a separate,
+> non-exclusive direction; neither design has direct Cargo integration here.
 > **Historical provenance:** the HyperTachi and HyperMemory convergence plan
 > below stopped being the package purpose when the fork separated on
 > 2026-07-14 (Hyperion-HyperTachi `9da2015`). The body remains the 2026-07-09

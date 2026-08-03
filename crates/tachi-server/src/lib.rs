@@ -20,6 +20,8 @@
 //! candidate boundaries for a future ZeroClaw-native memory module. No direct
 //! ZeroClaw Cargo integration has landed, and that direction does not make
 //! this unfinished `tachi-server` feature set a current ZeroClaw runtime.
+//! (The `tachi-server` portable feature itself is tracked at #924; the
+//! library-boundary consumer contract is #1585's, on `portable-kernel`.)
 //!
 //! ## `portable`: what is IN
 //!
