@@ -141,6 +141,46 @@ pub(crate) async fn handle_tachi_feature_briefing(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
+    // #1575 fix-round: this handler serves BOTH action='briefing' and
+    // action='doc_index' (`TachiTaskAction::Briefing | TachiTaskAction::
+    // DocIndex` both route here in `tools/task_router.rs`), and its
+    // memory/eval searches below run `project_only=true` (via
+    // `!params.include_global`, which defaults to `false`) — the same shape
+    // `memory_search_ops::require_named_project_exists`'s doc comment
+    // documents as needing this guard: `project_only` searches fall through
+    // to workspace/bound-store resolution on a miss instead of erroring
+    // (`search_memory/rows.rs`). Apply the same guard `facade_memory_ops::
+    // briefing_ops::handle_memory_briefing` uses for `tachi_memory(action=
+    // 'briefing')`, so an explicit nonexistent `project=` errors here too
+    // instead of silently answering from whichever store the process is
+    // bound to.
+    //
+    // Normalize ONCE at this seam — trim the caller's name, validate the
+    // TRIMMED form (path-based project resolution builds a directory
+    // component from the literal string, so an untrimmed lookup would
+    // itself miss and silently re-trigger the fallback this guard exists to
+    // close), then shadow `params` with a copy whose `.project` is the
+    // trimmed name so every downstream consumer in this function (wiki
+    // plan, the three project_only searches, board/doc-index scoping, the
+    // `scope.project` response echo) resolves the SAME identity the guard
+    // validated. Empty-after-trim is a loud typed error, not a silent
+    // fallback.
+    let normalized_project = match params.project.as_deref() {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err("project name cannot be empty".to_string());
+            }
+            crate::memory_search_ops::require_named_project_exists(server, trimmed)?;
+            Some(trimmed.to_string())
+        }
+        None => None,
+    };
+    let params = &{
+        let mut p = params.clone();
+        p.project = normalized_project;
+        p
+    };
     // #527: omitted compact defaults to true (agent packet). Full board is
     // opt-in. `compact` is the only knob this call site honors for that —
     // `format` here is purely the JSON-vs-markdown response-shape selector
@@ -250,9 +290,17 @@ pub(crate) async fn handle_tachi_feature_briefing(
             !params.include_global,
         ),
     );
-    let wiki_rows = wiki_rows.map(|result| result.rows).unwrap_or_default();
-    let memory_rows = memory_rows.unwrap_or_default();
-    let eval_rows = eval_rows.unwrap_or_default();
+    // #1575 fix-round: these used to swallow any search error (including a
+    // named-project miss) into an empty-rows default, which is exactly the
+    // silent-degrade shape #1575 is about — a caller could not tell "found
+    // nothing" from "the search itself failed" (e.g. an existence-check
+    // error slipping through, or a genuine store error). The
+    // `require_named_project_exists` guard above already turns an explicit
+    // nonexistent `project=` into a loud error before any of these run, so
+    // propagating here surfaces real failures instead of masking them.
+    let wiki_rows = wiki_rows?.rows;
+    let memory_rows = memory_rows?;
+    let eval_rows = eval_rows?;
 
     let skills = recommend_skills_light(server, &query, 5).unwrap_or_default();
     let routing = build_task_brief_routing(&query, &skills);
