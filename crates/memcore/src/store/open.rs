@@ -990,15 +990,30 @@ impl MemoryStore {
     /// ([`Self::validate_write_path`] — the same per-row check ordinary
     /// [`Self::upsert`] runs) and the reserved-reference write authorization
     /// are done before any row is written — an invalid entry anywhere in the
-    /// batch means zero writes happen, not a partial batch. All main rows,
-    /// FTS rows, and vector projections for the whole batch are then written
-    /// inside a single `BEGIN IMMEDIATE` transaction via the same
-    /// [`db::upsert_within_tx`] seam `upsert_batch_with_precommit` and
-    /// (indirectly, through `db::upsert`) ordinary `upsert` both use — same
-    /// main-row/FTS/vector write body, same reserved-metadata merge, same
-    /// `wiki-rem:`/wiki-log id guards; only the outer entry point differs.
-    /// Any row or projection failure rolls back the entire batch. An empty
-    /// slice is a successful no-op: no transaction is opened.
+    /// batch means zero writes happen, not a partial batch. Because this
+    /// method is the ungated public entry point (unlike the admin/test-gated
+    /// [`Self::upsert_batch_with_precommit`]), it also mirrors, in this same
+    /// pre-walk, the two top-level guards single-row [`Self::upsert`] enforces
+    /// via `db::upsert_with_idless_identity`
+    /// (`crates/memcore/src/db/memory_crud.rs:2550-2566`) but
+    /// [`db::upsert_within_tx`] does not repeat: a blank/empty `id`, and an
+    /// `id` in the reserved `anchor:` namespace (reserved for
+    /// `memcore::db::anchor::ensure_anchor`). Without this pre-walk, batching
+    /// through the shared `upsert_within_tx` seam would let the ungated
+    /// portable surface bypass a guard the single-row entry point enforces —
+    /// tachi#1602 tracks folding this parity into the shared
+    /// `upsert_with_idless_identity`/`upsert_within_tx` seam itself so
+    /// `upsert_batch_with_precommit` (still gap-having pending that work)
+    /// stops needing its own copy too. All main rows, FTS rows, and vector
+    /// projections for the whole batch are then written inside a single
+    /// `BEGIN IMMEDIATE` transaction via the same [`db::upsert_within_tx`]
+    /// seam `upsert_batch_with_precommit` and (indirectly, through
+    /// `db::upsert`) ordinary `upsert` both use — same main-row/FTS/vector
+    /// write body, same reserved-metadata merge, same `wiki-rem:`/wiki-log id
+    /// guards (enforced inside `upsert_within_tx`/`upsert_prepared_within_tx`,
+    /// not this pre-walk); only the outer entry point differs. Any row or
+    /// projection failure rolls back the entire batch. An empty slice is a
+    /// successful no-op: no transaction is opened.
     ///
     /// This exists ungated for the same reason
     /// [`Self::upsert_batch_with_precommit`] does not (tachi#1585's class
@@ -1009,6 +1024,25 @@ impl MemoryStore {
     pub fn upsert_batch(&mut self, entries: &[MemoryEntry]) -> Result<(), MemoryError> {
         if entries.is_empty() {
             return Ok(());
+        }
+        // Mirror memory_crud.rs:2550-2566's two single-row top-level guards
+        // (blank id, reserved `anchor:` namespace) before any transaction
+        // opens, since `upsert_within_tx` — what the loop below shares with
+        // `upsert_batch_with_precommit` — does not repeat them. See the doc
+        // comment above and tachi#1602 for why this lives here rather than
+        // in the shared `upsert_batch_in_tx`/`upsert_within_tx` seam.
+        for entry in entries {
+            if entry.id.trim().is_empty() {
+                return Err(MemoryError::InvalidArg(
+                    "entry.id must be provided by caller".to_string(),
+                ));
+            }
+            if entry.id.starts_with("anchor:") {
+                return Err(MemoryError::InvalidArg(format!(
+                    "id '{}' is in the reserved 'anchor:' namespace; use ensure_anchor, not upsert",
+                    entry.id
+                )));
+            }
         }
         self.upsert_batch_in_tx(entries, |_tx| Ok(()))
     }
@@ -1911,6 +1945,87 @@ mod exact_dedupe_open_tests {
         assert_eq!(
             stats.total, 0,
             "a rolled-back batch must leave zero rows behind"
+        );
+    }
+
+    #[test]
+    fn upsert_batch_refuses_an_anchor_namespace_id_and_persists_nothing() {
+        // tachi#1599 checkpoint 4: single-row `upsert` refuses `anchor:`-ids
+        // at the top level (memory_crud.rs:2561-2566, reserved for
+        // `ensure_anchor`); `upsert_batch` must mirror that guard in its
+        // pre-walk instead of silently letting the shared `upsert_within_tx`
+        // seam create/overwrite a reserved anchor row.
+        let mut reference_store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let reference_error = reference_store
+            .upsert(&test_memory_entry("anchor:batch-guard-bad"))
+            .expect_err("single-row upsert must refuse an anchor: id");
+
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let ok_entry = test_memory_entry("batch-anchor-guard-ok");
+        let anchor_entry = test_memory_entry("anchor:batch-guard-bad");
+
+        let error = store
+            .upsert_batch(&[ok_entry, anchor_entry])
+            .expect_err("a batch containing an anchor: id must be refused");
+        assert!(
+            matches!(error, MemoryError::InvalidArg(_)),
+            "unexpected error variant: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            reference_error.to_string(),
+            "batch refusal must match the single-row refusal's error shape"
+        );
+
+        assert!(
+            store.get("batch-anchor-guard-ok").expect("get").is_none(),
+            "the earlier, individually-valid entry must not have been persisted"
+        );
+        let stats = store.stats(true).expect("stats");
+        assert_eq!(
+            stats.total, 0,
+            "a batch refused for an anchor: id must leave zero rows behind, and no \
+             transaction should even have opened"
+        );
+    }
+
+    #[test]
+    fn upsert_batch_refuses_a_blank_id_and_persists_nothing() {
+        // tachi#1599 checkpoint 4: single-row `upsert` refuses a blank/empty
+        // id at the top level (memory_crud.rs:2550-2554); `upsert_batch`
+        // must mirror that guard in its pre-walk for the same reason as the
+        // `anchor:` guard above.
+        let mut reference_store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let reference_error = reference_store
+            .upsert(&test_memory_entry("   "))
+            .expect_err("single-row upsert must refuse a blank id");
+
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let ok_entry = test_memory_entry("batch-blank-guard-ok");
+        let blank_entry = test_memory_entry("   ");
+
+        let error = store
+            .upsert_batch(&[ok_entry, blank_entry])
+            .expect_err("a batch containing a blank id must be refused");
+        assert!(
+            matches!(error, MemoryError::InvalidArg(_)),
+            "unexpected error variant: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            reference_error.to_string(),
+            "batch refusal must match the single-row refusal's error shape"
+        );
+
+        assert!(
+            store.get("batch-blank-guard-ok").expect("get").is_none(),
+            "the earlier, individually-valid entry must not have been persisted"
+        );
+        let stats = store.stats(true).expect("stats");
+        assert_eq!(
+            stats.total, 0,
+            "a batch refused for a blank id must leave zero rows behind, and no \
+             transaction should even have opened"
         );
     }
 }
