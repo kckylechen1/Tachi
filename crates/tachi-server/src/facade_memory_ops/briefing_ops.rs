@@ -15,7 +15,8 @@ use super::evidence_format::{
 };
 use crate::agent_markdown;
 use crate::memory_search_ops::{
-    handle_search_memory, list_available_named_projects, resolve_effective_named_project,
+    handle_search_memory, list_available_named_projects, require_named_project_exists,
+    resolve_effective_named_project,
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -136,6 +137,41 @@ pub(crate) async fn handle_memory_briefing(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
+    // #1575: an explicit `project=` that names a store which does not exist
+    // must fail loudly here — the same shape as the non-`project_only`
+    // search error (`Project '<name>' not found (expected DB at …)`) —
+    // rather than being handed to the `project_only` search below, whose
+    // "no project matched" branch falls back to workspace/bound-store
+    // resolution instead of erroring (`search_memory/rows.rs`). This check
+    // only fires for an explicit name; the no-project (global) and
+    // workspace-inferred-project cases below are unchanged.
+    //
+    // #1575 fix-round: normalize ONCE at this seam — trim the caller's name,
+    // validate the TRIMMED form (path-based project resolution builds a
+    // directory component from the literal string, so an untrimmed lookup
+    // for a name the guard just validated trimmed would itself miss and
+    // silently re-trigger the same fallback this guard exists to close),
+    // then shadow `params` with a copy whose `.project` is the trimmed name
+    // so every downstream consumer in this function (search calls, the
+    // response's `project` echo, checkpoint/board scoping, the binding
+    // receipt) resolves the SAME identity the guard validated. Empty-after-
+    // trim is a loud typed error, not a silent fallback to "unnamed".
+    let normalized_project = match params.project.as_deref() {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err("project name cannot be empty".to_string());
+            }
+            require_named_project_exists(server, trimmed)?;
+            Some(trimmed.to_string())
+        }
+        None => None,
+    };
+    let params = &{
+        let mut p = params.clone();
+        p.project = normalized_project;
+        p
+    };
     let named_project = params
         .project
         .clone()

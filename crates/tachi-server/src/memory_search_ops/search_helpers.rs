@@ -378,6 +378,46 @@ pub(crate) fn resolve_effective_named_project(
     None
 }
 
+/// Validate an explicit, caller-named `project=` request against the same
+/// existence check the non-`project_only` search path already enforces
+/// (`search_memory/rows.rs`'s `Project '<name>' not found (expected DB at …)`
+/// branch). `project_only` searches skip that branch entirely (rows.rs falls
+/// through to workspace-derived resolution instead of erroring), so any
+/// `project_only` caller that resolves a caller-supplied project name must
+/// call this FIRST — at the resolution seam, before the name is handed to
+/// [`resolve_effective_named_project`] or a `project_only` search — so an
+/// explicit nonexistent project fails loudly instead of silently answering
+/// from the workspace/bound store (tachi#1575, child of #1539's invariant:
+/// store/project resolution fails loud, no surface silently answers from the
+/// wrong store).
+///
+/// Centralized here rather than re-derived per surface because
+/// `project_only` is a targeted mode (today: `tachi_memory(action='briefing')`
+/// via `facade_memory_ops::briefing_ops::handle_memory_briefing`, and
+/// `tachi_task(action='briefing'|'doc_index')` via `copilot_ops::
+/// feature_briefing::handlers::handle_tachi_feature_briefing` — both route
+/// through here) whose whole point is to skip the ordinary error branch for
+/// the *inferred* case (no project named — fall back to workspace) while
+/// still needing to reject the *named-but-missing* case the same way the
+/// ordinary path does. `name` must already be trimmed/non-empty (callers
+/// gate on that before invoking this, mirroring
+/// [`resolve_effective_named_project`]'s own `explicit` handling).
+pub(crate) fn require_named_project_exists(
+    server: &crate::MemoryServer,
+    name: &str,
+) -> Result<(), String> {
+    if named_project_db_exists(server, name) {
+        return Ok(());
+    }
+    Err(format!(
+        "Project '{name}' not found (expected DB at {})",
+        server
+            .resolve_server_named_project_db_path(name)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|e| e)
+    ))
+}
+
 /// The daemon's currently-bound project store label, with NO workspace/CWD
 /// inference (unlike [`resolve_effective_named_project`], which is
 /// READ-ONLY-surfaces-only for exactly this reason). Safe to call from a
