@@ -1359,8 +1359,8 @@ pub fn dedupe_preserve_order(items: &mut Vec<String>) {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use tachi_params::TachiDispatchReason;
     use std::sync::{Mutex, OnceLock};
+    use tachi_params::TachiDispatchReason;
 
     struct EnvGuard {
         key: &'static str,
