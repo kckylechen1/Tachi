@@ -1,11 +1,8 @@
 use super::*;
 
-mod convoy;
 mod dispatch;
 mod status;
 
-#[cfg(test)]
-pub(super) use self::convoy::resolve_slice_id;
 use self::dispatch::handle_dispatch_action;
 pub(super) use self::status::handle_status_action;
 

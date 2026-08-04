@@ -40,4 +40,3 @@ fn temp_runs_root() -> RunsRootGuard {
 
 mod flow_lifecycle;
 mod instructions;
-mod slices_convoy;

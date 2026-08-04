@@ -32,20 +32,6 @@ pub(super) fn new_flow_id(title: Option<&str>, task: Option<&str>) -> String {
     format!("flow_{}_{}_{}", stamp, slugify(&basis), suffix)
 }
 
-pub(super) fn validate_slice_id(id: &str) -> Result<(), String> {
-    if id.is_empty()
-        || id.contains('/')
-        || id.contains('\\')
-        || id.contains("..")
-        || !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(format!("Invalid convoy slice id: '{}'", id));
-    }
-    Ok(())
-}
-
 // ─── Status / events helpers ─────────────────────────────────────────────────
 
 pub(super) fn read_status(run_dir: &Path) -> Value {

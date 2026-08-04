@@ -296,34 +296,6 @@ pub struct TachiVerifyParams {
 // ─── Facade: tachi_shell (dispatch packet and flow status) ──────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct TachiShellDispatchSliceParams {
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub task: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default, alias = "dispatch_profile")]
-    pub profile: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub tool_profile: Option<String>,
-    #[serde(default)]
-    pub mcp_access: Option<DispatchMcpAccessParams>,
-    #[serde(default)]
-    pub allowed_mcp_servers: Vec<String>,
-    #[serde(default)]
-    pub notes: Option<String>,
-    #[serde(default)]
-    pub validation: Vec<String>,
-    #[serde(default)]
-    pub allowed_scope: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiShellParams {
     /// Action: "dispatch" | "status"
     #[schemars(schema_with = "tachi_shell_action_schema")]
@@ -400,9 +372,6 @@ pub struct TachiShellParams {
     /// Allowed scope (file globs / module names) to embed in the instruction packet.
     #[serde(default)]
     pub allowed_scope: Vec<String>,
-
-    #[serde(default)]
-    pub slices: Vec<TachiShellDispatchSliceParams>,
 }
 
 // ─── Facade: orchestrator (persistent TODO / handoff) ────────────────────────

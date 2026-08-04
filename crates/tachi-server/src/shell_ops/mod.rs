@@ -14,7 +14,7 @@
 //! or skill discovery — it composes existing infra.
 
 use crate::task_lifecycle::{shell_runs_root, validate_flow_id};
-use crate::{MemoryServer, TachiDispatchParams, TachiShellDispatchSliceParams, TachiShellParams};
+use crate::{MemoryServer, TachiDispatchParams, TachiShellParams};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -29,19 +29,16 @@ mod instruction;
 #[cfg(test)]
 mod tests;
 
-use self::flow::{
-    advance_stage, injection_to_json, read_status_async, resolve_or_create_flow, slugify,
-    validate_slice_id,
-};
+use self::flow::{advance_stage, injection_to_json, read_status_async, resolve_or_create_flow};
 #[cfg(test)]
-use self::flow::{new_flow_id, read_status};
+use self::flow::{new_flow_id, read_status, slugify};
 #[cfg(test)]
 use self::injection::meta_skill_for_stage;
 use self::injection::{inject_meta_skill, InjectionResult};
 use self::instruction::build_instruction_md;
 
-pub(crate) use self::actions::handle_tachi_shell;
 #[cfg(test)]
-use self::actions::{handle_status_action, resolve_slice_id};
+use self::actions::handle_status_action;
+pub(crate) use self::actions::handle_tachi_shell;
 #[cfg(test)]
 pub(crate) use self::flow::tachi_run_root_env_lock;

@@ -23,8 +23,8 @@
             },
             "coordinate": {
                 "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 134444,
-                "max_total_tool_definition_bytes": 153623,
+                "max_total_input_schema_bytes": 133575,
+                "max_total_tool_definition_bytes": 152754,
                 "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
             },
             "operate": {
@@ -35,8 +35,8 @@
             },
             "admin": {
                 "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 199015,
-                "max_total_tool_definition_bytes": 237506,
+                "max_total_input_schema_bytes": 198146,
+                "max_total_tool_definition_bytes": 236637,
                 "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification."
             }
         },
@@ -235,8 +235,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 199015,
-                "total_tool_definition_bytes": 237506,
+                "total_input_schema_bytes": 198146,
+                "total_tool_definition_bytes": 236637,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -345,8 +345,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 134444,
-                "total_tool_definition_bytes": 153623,
+                "total_input_schema_bytes": 133575,
+                "total_tool_definition_bytes": 152754,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -679,8 +679,8 @@
                         ]
                     },
                     "tachi_shell": {
-                        "input_schema_bytes": 5822,
-                        "property_count": 19,
+                        "input_schema_bytes": 4953,
+                        "property_count": 18,
                         "property_names": [
                             "action",
                             "agent",
@@ -696,7 +696,6 @@
                             "notes",
                             "profile",
                             "project",
-                            "slices",
                             "task",
                             "title",
                             "tool_profile",
@@ -895,8 +894,8 @@
                         ]
                     },
                     "tachi_shell": {
-                        "input_schema_bytes": 5822,
-                        "property_count": 19,
+                        "input_schema_bytes": 4953,
+                        "property_count": 18,
                         "property_names": [
                             "action",
                             "agent",
@@ -912,7 +911,6 @@
                             "notes",
                             "profile",
                             "project",
-                            "slices",
                             "task",
                             "title",
                             "tool_profile",

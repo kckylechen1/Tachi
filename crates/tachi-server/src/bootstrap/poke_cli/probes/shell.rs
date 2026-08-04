@@ -29,7 +29,6 @@ pub(in crate::bootstrap::poke_cli) async fn probe_shell_artifact(
             ),
             validation: vec!["echo poke-shell".to_string()],
             allowed_scope: vec!["sandbox".to_string()],
-            slices: Vec::new(),
         },
     )
     .await?;
