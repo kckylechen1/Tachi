@@ -956,7 +956,7 @@ impl crate::MemoryStore {
                 MemoryError::InvalidArg("Wiki operation-log metadata must be an object".to_string())
             })?;
             object.insert(RESERVED_WIKI_LOG_KEY.to_string(), Value::Bool(true));
-            upsert_prepared_within_tx(&tx, &trusted, vec_available, None, false, true)?;
+            upsert_prepared_within_tx(&tx, &trusted, vec_available, None, false, true, false)?;
             tx.commit()?;
             Ok(())
         })
@@ -1122,6 +1122,7 @@ pub(crate) fn upsert_with_validated_reference_mutations_within_tx_and_metadata_r
         vec_available,
         idless_identity,
         allow_near_duplicate_merge,
+        false,
         false,
     )?;
     Ok((result, merged_entry.metadata))
@@ -2547,6 +2548,10 @@ fn upsert_with_idless_identity(
     vec_available: bool,
     idless_identity: Option<&str>,
 ) -> Result<IdlessUpsertResult, MemoryError> {
+    // Both refusals below are now also enforced at the shared transactional
+    // seam (`upsert_prepared_within_tx`, tachi#1602) so batch paths refuse
+    // identically; they are kept here as a cheap pre-transaction check that
+    // never opens a writer transaction for a doomed entry.
     if entry.id.trim().is_empty() {
         return Err(MemoryError::InvalidArg(
             "entry.id must be provided by caller".to_string(),
@@ -2583,15 +2588,60 @@ fn upsert_with_idless_identity(
 /// reduced upsert: ordinary `upsert`/`upsert_idless` behavior (main row, FTS,
 /// vectors, idless semantics) is byte-for-byte identical because both paths
 /// execute this same body; only the commit site differs.
+///
+/// Since tachi#1602 that shared body also carries the blank-id and reserved
+/// `anchor:`-namespace refusals, so every caller of this seam — including the
+/// batch paths — refuses exactly what single-row `upsert` refuses.
 pub(crate) fn upsert_within_tx(
     tx: &rusqlite::Transaction<'_>,
     entry: &MemoryEntry,
     vec_available: bool,
     idless_identity: Option<&str>,
 ) -> Result<IdlessUpsertResult, MemoryError> {
+    upsert_within_tx_inner(tx, entry, vec_available, idless_identity, false)
+}
+
+/// Trusted whole-store-copy variant of [`upsert_within_tx`]: identical body,
+/// except rows already living in the reserved `anchor:` id namespace are
+/// copied verbatim instead of refused (tachi#1602).
+///
+/// This is the anchor analogue of `MemoryStore::upsert_wiki_operation_log`'s
+/// `allow_wiki_operation_log` channel: the refusal is enforced at the shared
+/// seam for every ordinary caller, and exactly one named internal writer opts
+/// out. Its only production caller is tachi-server's tidy migration, which
+/// copies every row of a source database into the target
+/// (`read_source_entries` selects `FROM memories` unfiltered, so an anchor
+/// row in the source is a legitimate row to carry, not a hostile write).
+/// Ordinary callers — including `MemoryStore::upsert`, `upsert_batch`,
+/// `upsert_batch_with_precommit`, and lifecycle-apply — must keep using
+/// [`upsert_within_tx`], which refuses.
+pub(crate) fn upsert_within_tx_allowing_reserved_anchor_ids(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+) -> Result<IdlessUpsertResult, MemoryError> {
+    upsert_within_tx_inner(tx, entry, vec_available, idless_identity, true)
+}
+
+fn upsert_within_tx_inner(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+    allow_reserved_anchor_id: bool,
+) -> Result<IdlessUpsertResult, MemoryError> {
     let mut sanitized = entry.clone();
     sanitized.metadata = merge_ordinary_reserved_metadata(tx, &entry.id, &entry.metadata)?;
-    upsert_prepared_within_tx(tx, &sanitized, vec_available, idless_identity, true, false)
+    upsert_prepared_within_tx(
+        tx,
+        &sanitized,
+        vec_available,
+        idless_identity,
+        true,
+        false,
+        allow_reserved_anchor_id,
+    )
 }
 
 fn upsert_prepared_within_tx(
@@ -2601,7 +2651,34 @@ fn upsert_prepared_within_tx(
     idless_identity: Option<&str>,
     allow_near_duplicate_merge: bool,
     allow_wiki_operation_log: bool,
+    allow_reserved_anchor_id: bool,
 ) -> Result<IdlessUpsertResult, MemoryError> {
+    // tachi#1602: the blank-id and reserved-`anchor:`-namespace refusals live
+    // here, at the shared transactional seam, not only at
+    // `upsert_with_idless_identity`'s top-level entry point. Every write path
+    // that reaches a main row — single-row `upsert`/`upsert_idless`,
+    // lifecycle-apply, immutable supersession, and both batch paths
+    // (`upsert_batch`, admin-gated `upsert_batch_with_precommit`) — funnels
+    // through this body, so enforcing here is what makes single-row and batch
+    // refuse identically. Error text is byte-identical to the top-level
+    // guard's so callers cannot tell which layer refused.
+    if entry.id.trim().is_empty() {
+        return Err(MemoryError::InvalidArg(
+            "entry.id must be provided by caller".to_string(),
+        ));
+    }
+    // tachi#773 item 4 guard (c): `ensure_anchor` (memcore::db::anchor) owns
+    // the `anchor:` namespace via its own `INSERT OR IGNORE`; an ordinary
+    // upsert reaching here with an `anchor:`-prefixed id would create or
+    // silently overwrite an anchor row through `ON CONFLICT DO UPDATE`. The
+    // sole opt-out is `upsert_within_tx_allowing_reserved_anchor_ids`, the
+    // trusted whole-store-copy seam used by tidy migration.
+    if !allow_reserved_anchor_id && entry.id.starts_with("anchor:") {
+        return Err(MemoryError::InvalidArg(format!(
+            "id '{}' is in the reserved 'anchor:' namespace; use ensure_anchor, not upsert",
+            entry.id
+        )));
+    }
     // `wiki-rem:` rows are deterministic insert-once operation records. They
     // are created only through the REM claim + insert_if_absent transaction;
     // allowing ordinary ON CONFLICT upsert would let any caller rewrite the
