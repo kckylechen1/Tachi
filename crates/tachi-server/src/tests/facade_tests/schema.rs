@@ -151,20 +151,127 @@ fn tachi_skill_action_schema_declares_bundle_and_loadout() {
 }
 
 #[test]
-fn tachi_shell_schema_exposes_only_dispatch_and_status() {
-    let schema = rmcp::schemars::schema_for!(crate::tool_params::TachiShellParams);
+fn tachi_staff_schema_exposes_only_start_and_status() {
+    let schema = rmcp::schemars::schema_for!(crate::tool_params::TachiStaffParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
-    let properties = value["properties"].as_object().expect("shell properties");
+    let properties = value["properties"].as_object().expect("staff properties");
     let actions = properties["action"]["enum"]
         .as_array()
-        .expect("shell action enum");
-
-    assert_eq!(actions, &vec![json!("dispatch"), json!("status")]);
-    for removed in ["brainstorm", "plan", "review", "ship", "kanban"] {
-        assert!(!actions.contains(&json!(removed)));
+        .expect("staff action enum");
+    assert_eq!(actions, &vec![json!("start"), json!("status")]);
+    // staffing_reason is present as a top-level property (the flat struct
+    // surfaces it) but is NOT in the schema-level `required` list — it is
+    // OPTIONAL at the schema level precisely so `action='status'` (a read-only
+    // probe) can omit it without fabricating a reason. The `start` admission
+    // gate is enforced by the handler, not by a cross-action required field.
+    assert!(
+        properties.contains_key("staffing_reason"),
+        "staff schema must surface staffing_reason"
+    );
+    let required = value["required"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !required.iter().any(|r| r == "staffing_reason"),
+        "staffing_reason must NOT be schema-level required (status must be able to omit it); required={required:?}"
+    );
+    // No execution-shaped fields leak through the boundary.
+    for removed in ["cwd", "command", "transport", "sandbox", "allowed_tools"] {
+        assert!(
+            !properties.contains_key(removed),
+            "staff schema must not expose execution field {removed}"
+        );
     }
-    assert!(!properties.contains_key("state_filter"));
-    assert!(properties.contains_key("limit"));
+}
+
+/// Discrimination test (blocker fix): a `tachi_staff` STATUS request without
+/// `staffing_reason` deserializes successfully. The bug the blocker caught was
+/// that staffing_reason was schema-level REQUIRED, forcing a read-only status
+/// probe to fabricate a reason. Now staffing_reason is optional at the schema
+/// level (the start handler enforces it), so status carries no admission
+/// pressure.
+#[test]
+fn staff_status_deserializes_without_reason() {
+    use crate::tool_params::TachiStaffParams;
+    let params = serde_json::from_value::<TachiStaffParams>(serde_json::json!({
+        "action": "status",
+        "dispatch_id": "20260804T000000Z-claude-deadbeef",
+    }))
+    .expect("status must deserialize WITHOUT staffing_reason (read-only probe)");
+    assert_eq!(params.action, "status");
+    assert_eq!(
+        params.dispatch_id.as_deref(),
+        Some("20260804T000000Z-claude-deadbeef")
+    );
+    assert!(
+        params.staffing_reason.is_none(),
+        "status probe did not supply a reason, and must not be forced to"
+    );
+}
+
+/// Discrimination test: a START request without staffing_reason still
+/// deserializes (the field is schema-optional), but the reason is None — the
+/// handler-level admission gate (not deserialization) is what rejects it. This
+/// test pins the schema-level optionality so the start gate stays a HANDLER
+/// concern, not a cross-action struct requirement.
+#[test]
+fn staff_start_deserializes_with_reason_none_then_handler_rejects() {
+    use crate::tool_params::TachiStaffParams;
+    let params = serde_json::from_value::<TachiStaffParams>(serde_json::json!({
+        "action": "start",
+        "task": "launch a worker",
+    }))
+    .expect("start deserializes (handler enforces the reason, not serde)");
+    assert_eq!(params.action, "start");
+    assert!(
+        params.staffing_reason.is_none(),
+        "a start request that omitted staffing_reason has None here; the handler must reject it"
+    );
+}
+
+/// Discrimination test: `staffing_reason` is a closed typed enum, not free-form.
+#[test]
+fn staff_start_reason_is_typed_not_free_form() {
+    use crate::tool_params::TachiStaffParams;
+    let admitted = serde_json::from_value::<TachiStaffParams>(serde_json::json!({
+        "action": "start",
+        "task": "typed reason",
+        "staffing_reason": "cross_device_remote",
+    }))
+    .expect("allowlisted reason deserializes");
+    assert_eq!(
+        admitted.staffing_reason,
+        Some(tachi_params::TachiDispatchReason::CrossDeviceRemote)
+    );
+
+    let err = serde_json::from_value::<TachiStaffParams>(serde_json::json!({
+        "action": "start",
+        "task": "free-form rejected",
+        "staffing_reason": "want_parallelism",
+    }))
+    .expect_err("free-form reasons must be rejected at deserialization");
+    assert!(
+        err.to_string().contains("unknown variant"),
+        "free-form reason must be rejected as unknown variant: {err}"
+    );
+}
+
+/// Discrimination test: a STATUS request missing `dispatch_id` is rejected by
+/// the handler (dispatch_id is Option at the schema level, but status requires
+/// it semantically). This pins that the read path requires its own identifier.
+#[test]
+fn staff_status_without_dispatch_id_is_handler_rejected() {
+    use crate::tool_params::TachiStaffParams;
+    // Schema-optional, so this deserializes (None). The handler rejects.
+    let params = serde_json::from_value::<TachiStaffParams>(serde_json::json!({
+        "action": "status",
+    }))
+    .expect("status without dispatch_id deserializes (handler enforces it)");
+    assert!(
+        params.dispatch_id.is_none(),
+        "status without dispatch_id has None here; the handler must reject"
+    );
 }
 
 #[test]

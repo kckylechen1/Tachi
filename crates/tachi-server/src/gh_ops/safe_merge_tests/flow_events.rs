@@ -3,7 +3,7 @@ use super::*;
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -59,7 +59,7 @@ async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -168,7 +168,7 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_persists_observed_merged_pr_without_overwriting_it_blocked() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();

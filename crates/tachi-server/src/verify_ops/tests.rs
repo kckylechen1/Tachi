@@ -25,7 +25,7 @@ fn params(action: &str) -> TachiVerifyParams {
 
 #[test]
 fn record_items_upserts_and_computes_overall() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -55,7 +55,7 @@ fn record_items_upserts_and_computes_overall() {
 
 #[test]
 fn verification_gate_detects_failed_pending_and_stale_items() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -107,7 +107,7 @@ fn verification_gate_detects_failed_pending_and_stale_items() {
 
 #[test]
 fn verification_gate_treats_missing_head_sha_as_stale() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -146,7 +146,7 @@ fn verification_gate_treats_missing_head_sha_as_stale() {
 
 #[test]
 fn verification_gate_treats_skipped_required_without_head_sha_as_stale() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();

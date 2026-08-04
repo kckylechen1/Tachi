@@ -3,7 +3,7 @@ use super::*;
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn dispatch_response_and_flow_card_link_capability_bundle_artifact() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
@@ -78,7 +78,7 @@ async fn dispatch_response_and_flow_card_link_capability_bundle_artifact() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn dispatch_explicit_false_writes_disabled_capability_bundle_artifact() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();

@@ -52,7 +52,7 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
     // reclamation hook, so the cleaner is never invoked and the worktree dir
     // survives the merge. After the fix, the cleaner runs and the worktree is
     // removed.
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -142,7 +142,7 @@ async fn safe_merge_holder_refusal_happens_before_external_cleaner() {
     // RED/GREEN discrimination: before the holder gate, this exact fake
     // cleaner removes the directory and writes its invocation marker. The
     // fixed path reports the durable refusal before spawning the cleaner.
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -209,7 +209,7 @@ async fn safe_merge_dry_run_does_not_reclaim_worktree() {
     // A dry-run (preview) must NOT reclaim — even when a worktree is supplied
     // and reclaim_worktree=true. The merge never executes, so there is nothing
     // terminal to reclaim from.
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -283,7 +283,7 @@ async fn safe_merge_missing_worktree_warns_does_not_fail_merge() {
     // When the supplied worktree does not exist locally (the PR was opened
     // from a non-Tachi checkout), reclamation is skipped with a warning — it
     // must NOT fail the already-succeeded merge.
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();

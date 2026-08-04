@@ -505,7 +505,7 @@ mod tests {
     #[test]
     #[allow(clippy::await_holding_lock)]
     fn incomplete_dispatch_marker_repairs_projections_without_duplicate_event() {
-        let _env_lock = crate::shell_ops::tachi_run_root_env_lock()
+        let _env_lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temp run root");
@@ -645,7 +645,7 @@ mod tests {
     #[test]
     #[allow(clippy::await_holding_lock)]
     fn dispatch_marker_repair_normalizes_legacy_card_aliases_from_stale_map() {
-        let _env_lock = crate::shell_ops::tachi_run_root_env_lock()
+        let _env_lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temp run root");
@@ -717,7 +717,7 @@ mod tests {
     #[test]
     #[allow(clippy::await_holding_lock)]
     fn dispatch_marker_repair_preserves_foreign_card_refs_with_partial_id_list() {
-        let _env_lock = crate::shell_ops::tachi_run_root_env_lock()
+        let _env_lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temp run root");
@@ -839,7 +839,7 @@ mod tests {
     #[test]
     #[allow(clippy::await_holding_lock)]
     fn dispatch_linked_event_lands_before_status_persist_can_fail_it() {
-        let _env_lock = crate::shell_ops::tachi_run_root_env_lock()
+        let _env_lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temp run root");
@@ -924,7 +924,7 @@ mod tests {
     #[test]
     #[allow(clippy::await_holding_lock)]
     fn repeated_dispatch_completion_does_not_duplicate_completed_event() {
-        let _env_lock = crate::shell_ops::tachi_run_root_env_lock()
+        let _env_lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temp run root");

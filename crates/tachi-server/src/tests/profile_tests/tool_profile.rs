@@ -69,7 +69,7 @@ async fn standard_profile_exposes_agent_intents_not_execution_internals() {
     // protocol. Ordinary agents supply semantic completion/adjudication via
     // the work ledger instead of manually relaying system bookkeeping.
     assert!(!tools.contains("`tachi_agent_eval`"));
-    assert!(!tools.contains("`tachi_shell`"));
+    assert!(!tools.contains("`tachi_staff`"));
     assert!(!tools.contains("`tachi_orchestrator`"));
 }
 
@@ -86,7 +86,7 @@ async fn coordinate_profile_exposes_advanced_coordination_facades() {
         .expect("tool discovery should work");
 
     assert!(tools.contains("`tachi_arena`"));
-    assert!(tools.contains("`tachi_shell`"));
+    assert!(tools.contains("`tachi_staff`"));
     assert!(tools.contains("`tachi_orchestrator`"));
 }
 

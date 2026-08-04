@@ -3,7 +3,7 @@ use super::*;
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_task_cycle_status_reads_flow_artifacts_without_github() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp tachi home");

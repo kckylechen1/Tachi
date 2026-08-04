@@ -169,7 +169,7 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_skill",
     "tachi_arena",
     "tachi_verify",
-    "tachi_shell",
+    "tachi_staff",
     // #757 Cut3-S1: folded sandbox verb is mixed read/write (set_rule/
     // set_policy mutate) — invalidate like the legacy sandbox_set_* aliases
     // above, matching the whole-facade invalidation used for tachi_memory.
@@ -338,7 +338,7 @@ pub(crate) fn facade_action_effect(
                 "release_note",
             ],
         ),
-        "tachi_shell" => (&["status"], &[], &["dispatch"]),
+        "tachi_staff" => (&["status"], &[], &["start"]),
         "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
         // Preserve the existing conservative treatment of these facades while
         // making the set exhaustive. Unknown actions receive no metadata.
@@ -566,7 +566,7 @@ mod tests {
             ("tachi_task", "board"),
             ("tachi_gh", "issue_read"),
             ("tachi_gh", "pr_status"),
-            ("tachi_shell", "status"),
+            ("tachi_staff", "status"),
             ("tachi_component", "list"),
         ] {
             assert!(
@@ -587,7 +587,7 @@ mod tests {
             ("tachi_task", "dispatch"),
             ("tachi_task", "complete"),
             ("tachi_task", "merge"),
-            ("tachi_shell", "dispatch"),
+            ("tachi_staff", "start"),
         ] {
             assert!(
                 dlq_unsafe(tool, Some(action)),
@@ -620,7 +620,7 @@ mod tests {
     /// codex review (PR #1213, checkpoint 3): the three inventories this test
     /// enumerated used to be handwritten local mirrors of the private
     /// `tachi_params::facade::{tachi_event_action_schema, tachi_wiki_action_schema}`
-    /// / `orchestration::tachi_shell_action_schema` string literals, with no
+    /// / `orchestration::tachi_staff_action_schema` string literals, with no
     /// shared source to catch drift between the schema and this test. Those
     /// three schema functions — plus `tachi_skill_action_schema`,
     /// `tachi_arena_action_schema`, `tachi_orchestrator_action_schema` — now
@@ -635,7 +635,7 @@ mod tests {
         assert_all_classified("tachi_task", &task_actions);
         assert_all_classified("tachi_event", tachi_params::TACHI_EVENT_ACTIONS);
         assert_all_classified("tachi_wiki", tachi_params::TACHI_WIKI_ACTIONS);
-        assert_all_classified("tachi_shell", tachi_params::TACHI_SHELL_ACTIONS);
+        assert_all_classified("tachi_staff", tachi_params::TACHI_STAFF_ACTIONS);
         // codex checkpoint 3: "Typed TachiVerifyAction::ALL exists in
         // crates/tachi-params but is ignored." These four are in the
         // unaudited/always-Mutating+Unsafe bucket (facade_action_effect's
@@ -683,7 +683,7 @@ mod tests {
             "tachi_wiki",
             "tachi_task",
             "tachi_gh",
-            "tachi_shell",
+            "tachi_staff",
         ] {
             for action in ["search", "status", "read", "query"] {
                 if let Some(meta) = facade_action_effect(tool, Some(action)) {

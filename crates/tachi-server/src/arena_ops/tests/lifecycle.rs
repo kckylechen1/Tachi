@@ -318,7 +318,7 @@ fn arena_collect_refuses_linked_run_dir_symlink_escape() {
     struct TachiHomeRestore(Option<std::ffi::OsString>);
     impl Drop for TachiHomeRestore {
         fn drop(&mut self) {
-            // SAFETY: this test holds tachi_run_root_env_lock for its lifetime.
+            // SAFETY: this test holds global_test_lock for its lifetime.
             unsafe {
                 match self.0.as_ref() {
                     Some(value) => std::env::set_var("TACHI_HOME", value),
@@ -328,12 +328,12 @@ fn arena_collect_refuses_linked_run_dir_symlink_escape() {
         }
     }
 
-    let _run_lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _run_lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let original_home = TachiHomeRestore(std::env::var_os("TACHI_HOME"));
     let tachi_home = tempfile::tempdir().expect("temporary tachi home");
-    // SAFETY: serialized by tachi_run_root_env_lock and restored on drop.
+    // SAFETY: serialized by global_test_lock and restored on drop.
     unsafe {
         std::env::set_var("TACHI_HOME", tachi_home.path());
     }

@@ -96,10 +96,10 @@ pub(super) const TACHI_COMPONENT_ACTIONS: &[&str] = &["list", "show", "check", "
 /// and #1098's `action_effect` completeness test.
 pub const TACHI_SKILL_ACTIONS: &[&str] = &["discover", "run", "bundle", "loadout", "from_pattern"];
 
-/// `tachi_shell` facade actions. Single source for
-/// `orchestration::tachi_shell_action_schema` and #1098's `action_effect`
+/// `tachi_staff` facade actions. Single source for
+/// `orchestration::tachi_staff_action_schema` and #1098's `action_effect`
 /// completeness test.
-pub const TACHI_SHELL_ACTIONS: &[&str] = &["dispatch", "status"];
+pub const TACHI_STAFF_ACTIONS: &[&str] = &["start", "status"];
 
 /// `tachi_arena` facade actions. Single source for
 /// `orchestration::tachi_arena_action_schema` and #1098's `action_effect`

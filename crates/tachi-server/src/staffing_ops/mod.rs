@@ -36,14 +36,6 @@
 //! that attempts to set any of those is silently ignored (no matching field
 //! exists to deserialize into), so the resulting [`TachiDispatchParams`] maps
 //! every execution field to its kernel-side default.
-//
-// `#[allow(dead_code)]` until [1319-B7] wires the `tachi_staff` facade caller.
-// The items ARE exercised by this module's discrimination tests, so
-// `--all-targets` sees them as live and `#[expect(dead_code)]` would go red
-// there as an unfulfilled expectation; only the `--lib` gate reports them.
-// Delete this attribute in the PR that adds the public caller. (Same
-// convention as `governed_precedent_establishment.rs:132-137`.)
-#![allow(dead_code)]
 
 use crate::dispatch_ops::{
     canonical_dir_is_within, dispatch_runs_root, handle_tachi_dispatch, is_valid_dispatch_id,

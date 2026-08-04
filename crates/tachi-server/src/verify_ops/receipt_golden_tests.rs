@@ -34,7 +34,7 @@ fn verify_params(action: &str) -> TachiVerifyParams {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn g1_record_single_check_receipt_ignores_other_checks() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -77,7 +77,7 @@ async fn g1_record_single_check_receipt_ignores_other_checks() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn g2_batch_record_receipt_lists_both_ids() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -154,7 +154,7 @@ async fn g2_batch_record_receipt_lists_both_ids() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn g2b_legacy_commands_receipt_lists_both_derived_ids() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -182,7 +182,7 @@ async fn g2b_legacy_commands_receipt_lists_both_derived_ids() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn f1_status_compact_omits_passed_rows_and_stays_small() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -231,7 +231,7 @@ async fn f1_status_compact_omits_passed_rows_and_stays_small() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn g5_record_receipt_default_under_400_bytes() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -274,7 +274,7 @@ fn strip_volatile_ledger_fields(mut ledger: Value) -> Value {
 
 #[test]
 fn g6_verification_json_matches_expected_structure() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
