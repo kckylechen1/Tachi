@@ -9,6 +9,17 @@ use crate::types::{ExpectedMemoryState, GraphExpandResult, MemoryEdge};
 use super::common::{normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::{fetch_by_ids, fetch_by_ids_excluding_store_internal};
 
+// #1558: MemCore cannot depend on tachi-llm (tachi-llm already depends on
+// MemCore -- see `crates/memcore/src/store/enrichment.rs`'s doc comment on
+// `EnrichmentInvocationReceipts`), so this shadow struct cannot become a
+// shared type; it stays a hand-kept mirror of
+// `tachi_llm::PersistedModelInvocationReceiptV1`'s wire shape, validation-
+// only as the comment at its one call site below explains. `content_hash`
+// / `memory_id` / `revision` are the #1558 binding fields: `#[serde(default)]`
+// (not just `Option<T>`) is required on all three because pre-#1558
+// receipts omit the keys entirely -- `PersistedModelInvocationReceiptV1`
+// skips serializing `None` binding fields, so their absence, not merely a
+// `null` value, must deserialize cleanly here.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContradictionModelInvocationReceiptV1 {
@@ -25,6 +36,12 @@ struct ContradictionModelInvocationReceiptV1 {
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
     latency_ms: Option<u64>,
+    #[serde(default)]
+    content_hash: Option<String>,
+    #[serde(default)]
+    memory_id: Option<String>,
+    #[serde(default)]
+    revision: Option<i64>,
 }
 
 /// Append-only provenance context recorded alongside every edge write (#774).
@@ -330,6 +347,24 @@ fn validate_confirmed_contradiction(
     {
         return Err(MemoryError::InvalidArg(
             "confirmed contradiction receipt contains invalid persisted provenance".to_string(),
+        ));
+    }
+    // #1558: the binding fields are optional (a receipt minted before #1558,
+    // or one whose producer has not wired binding yet, carries none of
+    // them) but must not be blank/negative garbage when present. This does
+    // NOT check the binding against the edge's actual target row content --
+    // this function has no row content in view, only the caller-supplied
+    // metadata blob -- so a present-but-wrong binding is not caught here;
+    // that check belongs to `PersistedModelInvocationReceiptV1::binding_matches`
+    // at the write site that has the real content in hand.
+    if [&receipt.content_hash, &receipt.memory_id]
+        .into_iter()
+        .flatten()
+        .any(|value| value.trim().is_empty())
+        || receipt.revision.is_some_and(|revision| revision < 0)
+    {
+        return Err(MemoryError::InvalidArg(
+            "confirmed contradiction receipt has a malformed content binding".to_string(),
         ));
     }
     let _typed_receipt_metrics = (
