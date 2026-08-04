@@ -219,7 +219,9 @@ fn remove_matching_row_exact(
              which to drop; repair the registry first"
         ));
     }
-    registry.worktrees.retain(|record| record.path != stored_path);
+    registry
+        .worktrees
+        .retain(|record| record.path != stored_path);
     Ok(true)
 }
 
@@ -601,10 +603,7 @@ mod tests {
 
         let err = remove_registry_entry_exact(&dup_path)
             .expect_err("must refuse rather than guess which duplicate row to drop");
-        assert!(
-            err.contains(&dup_path),
-            "refusal must name the path: {err}"
-        );
+        assert!(err.contains(&dup_path), "refusal must name the path: {err}");
         assert!(
             err.contains('2'),
             "refusal must name the count of matching rows: {err}"
