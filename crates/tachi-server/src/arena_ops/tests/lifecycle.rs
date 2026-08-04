@@ -1,5 +1,35 @@
 use super::*;
 
+/// #1319-D1 discriminator: board must NOT write the standalone board.json
+/// ledger — board is a projection over canonical mission status, not a
+/// parallel store. RED pre-D1 (refresh_board wrote board.json), GREEN post.
+#[tokio::test]
+async fn arena_board_does_not_write_board_json() {
+    let _root = temp_arena_root();
+    let server = server();
+    let arena_id = "arena_20260606T000000Z_no_board_json".to_string();
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some(arena_id.clone());
+    spawn.prompt = Some("write a result".into());
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+    let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
+    let arena_dir = mission_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("mission dir lives under <arena>/missions/<mission>");
+    std::fs::write(mission_dir.join("result.md"), "Summary: external result\n").unwrap();
+
+    handle_tachi_arena(&server, params("board")).await.unwrap();
+    let mut collect = params("collect");
+    collect.arena_id = Some(arena_id.clone());
+    handle_tachi_arena(&server, collect).await.unwrap();
+    assert!(
+        !arena_dir.join("board.json").exists(),
+        "board/collect must not write the standalone board.json ledger after [1319-D1]"
+    );
+}
+
 #[tokio::test]
 async fn arena_spawn_collect_reads_tracked_documents() {
     let _root = temp_arena_root();

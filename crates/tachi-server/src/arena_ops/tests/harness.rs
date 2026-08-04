@@ -248,6 +248,19 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         collected["missions"][0]["completion_draft"]["arguments"]["agent"],
         json!("opencode")
     );
+    // [1319-D1] discriminator: collect surfaces the canonical linked dispatch
+    // result WITHOUT copying it into the mission dir — the canonical dispatch
+    // run_dir/result.md stays the single source of truth (the pre-D1 code
+    // wrote a copy into the mission result.md here).
+    let mission_result_path = PathBuf::from(
+        collected["missions"][0]["result_path"]
+            .as_str()
+            .expect("mission result path"),
+    );
+    assert!(
+        !mission_result_path.exists(),
+        "collect must not copy the linked dispatch result into the mission dir ([1319-D1] linked_result_copies floor)"
+    );
 }
 
 #[allow(clippy::await_holding_lock)]
