@@ -15,7 +15,8 @@ use super::evidence_format::{
 };
 use crate::agent_markdown;
 use crate::memory_search_ops::{
-    handle_search_memory, list_available_named_projects, resolve_effective_named_project,
+    handle_search_memory, list_available_named_projects, require_named_project_exists,
+    resolve_effective_named_project,
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -136,6 +137,22 @@ pub(crate) async fn handle_memory_briefing(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
+    // #1575: an explicit `project=` that names a store which does not exist
+    // must fail loudly here — the same shape as the non-`project_only`
+    // search error (`Project '<name>' not found (expected DB at …)`) —
+    // rather than being handed to the `project_only` search below, whose
+    // "no project matched" branch falls back to workspace/bound-store
+    // resolution instead of erroring (`search_memory/rows.rs`). This check
+    // only fires for an explicit, non-empty name; the no-project (global)
+    // and workspace-inferred-project cases below are unchanged.
+    if let Some(explicit) = params
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        require_named_project_exists(server, explicit)?;
+    }
     let named_project = params
         .project
         .clone()
