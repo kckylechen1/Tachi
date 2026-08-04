@@ -712,6 +712,150 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Round-3 cross-vendor review, check 6: the locked precondition check
+    /// in `remove_registry_entry_exact_if_still_gone` must not treat EVERY
+    /// `symlink_metadata` error as "the path is gone" — only `NotFound` is
+    /// decidable as gone. A permission-denied (or any other non-`NotFound`)
+    /// probe failure means the path's existence could not be determined,
+    /// not that it is verifiably absent, so the row must be refused rather
+    /// than deleted.
+    #[cfg(unix)]
+    #[test]
+    fn locked_variant_refuses_when_metadata_probe_errs_non_notfound() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let root = std::env::temp_dir().join(format!(
+            "tachi-clean-locked-eacces-test-{}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let parent = root.join("inaccessible-parent");
+        let registered_path = parent.join("registered-child");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&parent).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let registry_path = registry_path().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let stored_path = registered_path.display().to_string();
+        let registry = WorktreeRegistry {
+            version: 1,
+            worktrees: vec![WorktreeRecord {
+                path: stored_path.clone(),
+                repo_root: root.display().to_string(),
+                branch: "feature/eacces-probe".to_string(),
+                dispatch_id: None,
+                pr: None,
+                created_at: now.clone(),
+                updated_at: now,
+            }],
+        };
+        write_registry(&registry_path, &registry).unwrap();
+
+        // Deny traversal into `parent` so `symlink_metadata` on the child
+        // fails with EACCES, not ENOENT — the exact non-NotFound error
+        // kind this fix must refuse on rather than treat as "gone".
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = remove_registry_entry_exact_if_still_gone(&stored_path);
+
+        // Restore permissions before asserting/cleaning up: if an
+        // assertion below panics, the tempdir cleanup at the bottom must
+        // still be able to walk `parent`, or a masking cleanup failure
+        // would hide the real assertion failure.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.expect_err(
+            "a non-NotFound metadata error must refuse, not be treated as proof of absence",
+        );
+        assert!(
+            err.contains("cannot determine whether"),
+            "refusal must say the existence check itself failed, not that the path is gone: {err}"
+        );
+
+        let remaining = read_registry(&registry_path).unwrap().worktrees;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the row must survive an undecidable metadata probe: {remaining:?}"
+        );
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Round-3 cross-vendor review: pins the legacy exact-mismatch path
+    /// noted as untested — a row registered under a stored spelling that
+    /// differs (here: by a trailing separator) from the planned canonical
+    /// path string must be left in place, not deleted, and the mismatch
+    /// itself must not surface as an error. This is exactly what
+    /// `execute_wt_remove`'s ordinary close path relies on (wt_clean.rs):
+    /// `Ok(false)` becomes a warning, never a close failure.
+    #[test]
+    fn remove_registry_entry_exact_leaves_row_when_stored_spelling_differs() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let root = std::env::temp_dir().join(format!(
+            "tachi-clean-spelling-mismatch-test-{}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let planned_canonical = root.join("wt").display().to_string();
+        let stored_spelling = format!("{planned_canonical}/");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        assert_ne!(
+            stored_spelling, planned_canonical,
+            "test setup must produce two distinct spellings of the same path"
+        );
+
+        let registry_path = registry_path().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let registry = WorktreeRegistry {
+            version: 1,
+            worktrees: vec![WorktreeRecord {
+                path: stored_spelling.clone(),
+                repo_root: root.display().to_string(),
+                branch: "feature/spelling-mismatch".to_string(),
+                dispatch_id: None,
+                pr: None,
+                created_at: now.clone(),
+                updated_at: now,
+            }],
+        };
+        write_registry(&registry_path, &registry).unwrap();
+
+        let result = remove_registry_entry_exact(&planned_canonical);
+        assert_eq!(
+            result.ok(),
+            Some(false),
+            "a spelling mismatch must return Ok(false), not an error — the ordinary close \
+             path treats this as a warning, never a close failure"
+        );
+
+        let remaining = read_registry(&registry_path).unwrap().worktrees;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the row must survive a spelling mismatch untouched: {remaining:?}"
+        );
+        assert_eq!(remaining[0].path, stored_spelling);
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn registry_path_falls_back_to_userprofile() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
