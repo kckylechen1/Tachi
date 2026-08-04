@@ -178,6 +178,43 @@ pub fn remove_registry_entry(worktree_root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Exact-row removal for the registry-only stale-close execute path
+/// (kckylechen1/tachi#1605 fix round, codex review). Unlike
+/// [`remove_registry_entry`], this does **not** canonicalize either side.
+/// Canonicalizing here is exactly the TOCTOU the review flagged: a stale
+/// path can be recreated as a symlink to a DIFFERENT, LIVE registered
+/// worktree between plan and execute, and `paths_equal`'s canonicalizing
+/// comparison would then resolve the stale spelling to the live target's
+/// canonical path and `retain` would drop that row too — silently erasing
+/// live ownership evidence, all of it if multiple rows canonicalize equal.
+///
+/// Byte equality against the row's own stored `path` string (as returned by
+/// [`find_registry_entry`]/[`list_registered_worktrees`]) removes at most
+/// the one row that was actually planned, and never touches any other row
+/// no matter what now lives on disk at that path.
+pub fn remove_registry_entry_exact(stored_path: &str) -> Result<bool, String> {
+    let registry_path = registry_path()?;
+    if !registry_path.exists() {
+        return Ok(false);
+    }
+    let _lock = acquire_registry_lock(&registry_path)?;
+    let mut registry = read_registry(&registry_path)?;
+    let mut removed_one = false;
+    registry.worktrees.retain(|record| {
+        if !removed_one && record.path == stored_path {
+            removed_one = true;
+            false
+        } else {
+            true
+        }
+    });
+    if !removed_one {
+        return Ok(false);
+    }
+    write_registry(&registry_path, &registry)?;
+    Ok(true)
+}
+
 fn upsert_record(registry: &mut WorktreeRegistry, record: WorktreeRecord) {
     if let Some(existing) = registry
         .worktrees
@@ -371,6 +408,89 @@ mod tests {
         assert!(worktree.join(".tachi-worktree.json").exists());
         assert!(remove_registry_entry(&worktree).unwrap());
         assert!(!registry_contains(&worktree));
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// kckylechen1/tachi#1605 fix round (codex review): `remove_registry_entry`'s
+    /// canonicalizing `paths_equal` collapses two rows whose stored path
+    /// strings differ but now canonicalize to the same real directory (the
+    /// exact shape a TOCTOU symlink swap produces) — `retain` drops BOTH.
+    /// `remove_registry_entry_exact` must match only the literal stored
+    /// string of the planned row and leave the other row untouched.
+    #[test]
+    fn remove_registry_entry_exact_matches_only_the_planned_row_when_rows_canonicalize_equal() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let root = std::env::temp_dir().join(format!(
+            "tachi-clean-exact-match-test-{}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let real_dir = root.join("real");
+        let link_path = root.join("link");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_dir, &link_path).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real_dir, &link_path).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let registry_path = registry_path().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let registry = WorktreeRegistry {
+            version: 1,
+            worktrees: vec![
+                WorktreeRecord {
+                    path: real_dir.display().to_string(),
+                    repo_root: root.display().to_string(),
+                    branch: "feature/real".to_string(),
+                    dispatch_id: None,
+                    pr: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+                WorktreeRecord {
+                    path: link_path.display().to_string(),
+                    repo_root: root.display().to_string(),
+                    branch: "feature/link".to_string(),
+                    dispatch_id: None,
+                    pr: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                },
+            ],
+        };
+        write_registry(&registry_path, &registry).unwrap();
+
+        // Sanity: this is precisely the case the OLD `remove_registry_entry`
+        // (canonicalizing `paths_equal`) would collapse into one match —
+        // both stored strings resolve to the same real directory.
+        assert_eq!(
+            std::fs::canonicalize(&real_dir).unwrap(),
+            std::fs::canonicalize(&link_path).unwrap(),
+            "test setup must produce two distinct stored paths that canonicalize equal"
+        );
+
+        assert!(remove_registry_entry_exact(&real_dir.display().to_string()).unwrap());
+
+        let remaining = read_registry(&registry_path).unwrap().worktrees;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "exact-string removal must drop exactly the matched row, not every row \
+             that canonicalizes equal: {remaining:?}"
+        );
+        assert_eq!(
+            remaining[0].branch, "feature/link",
+            "the OTHER row (different stored string) must survive untouched"
+        );
 
         match old_home {
             Some(value) => std::env::set_var("HOME", value),

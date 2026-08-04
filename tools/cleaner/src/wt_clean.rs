@@ -277,8 +277,29 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
         return report;
     };
     if report.registry_only {
-        // #1605: the directory is gone; the only remaining state is the row.
-        match registry::remove_registry_entry(Path::new(&path)) {
+        // #1605 fix round (codex review): re-verify staleness at execute time
+        // before touching the registry. `plan_stale_registry_row_close` ran
+        // at plan time; between plan and execute something may have been
+        // created at this exact path (e.g. a symlink pointed at a
+        // DIFFERENT, LIVE registered worktree). If the path now resolves,
+        // this row is no longer verifiably stale — refuse rather than let a
+        // canonicalizing matcher merge this row into (and delete) a live
+        // one. The operator re-runs planning to see current reality.
+        if std::fs::canonicalize(&path).is_ok() {
+            report.errors.push(format!(
+                "refusing registry-only close: {path} now resolves to something on disk \
+                 (it did not at plan time) — this row may no longer be stale; re-run \
+                 `wt-remove` to re-plan against current state before dropping it"
+            ));
+            return report;
+        }
+        // Exact-row deletion: match the literal stored path string of the
+        // planned row only, no canonicalization, no `paths_equal`. This is
+        // the other half of the TOCTOU fix — even if the path above still
+        // fails to canonicalize, byte-matching only the planned row's own
+        // stored string guarantees at most one row is ever removed, and
+        // never one that merely canonicalizes equal to it.
+        match registry::remove_registry_entry_exact(&path) {
             Ok(true) => {
                 report.removed = true;
                 report.dry_run = false;
@@ -801,6 +822,173 @@ mod tests {
             "the registry row must be gone after the close"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// kckylechen1/tachi#1605 fix round (codex review): TOCTOU pin. A path
+    /// planned as a stale registry-only close must be RE-VERIFIED stale at
+    /// execute time. If something gets created at that exact path between
+    /// plan and execute — here, a symlink pointing at a DIFFERENT, LIVE
+    /// registered worktree — execute must refuse loudly rather than let the
+    /// old canonicalizing matcher resolve the stale spelling onto the live
+    /// row and drop it (or drop both).
+    #[test]
+    fn execute_refuses_registry_only_close_when_path_resolves_again_before_execute() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-toctou");
+        let home = root.join("home");
+        let repo = root.join("repo");
+        let live_wt = root.join("wt-live");
+        let stale_wt = root.join("wt-stale");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.email", "tachi-test@example.com"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.name", "tachi-test"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(repo.join("README"), "hello").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "README"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/toctou-live",
+                live_wt.to_str().unwrap(),
+            ])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/toctou-stale",
+                stale_wt.to_str().unwrap(),
+            ])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let _home_guard = HomeGuard(old_home);
+
+        registry::run_wt_register(RegisterOptions {
+            path: live_wt.clone(),
+            repo_root: repo.clone(),
+            branch: "feature/toctou-live".to_string(),
+            dispatch_id: None,
+            pr: None,
+            output: RegisterOutputFormat::Json,
+        })
+        .unwrap();
+        registry::run_wt_register(RegisterOptions {
+            path: stale_wt.clone(),
+            repo_root: repo.clone(),
+            branch: "feature/toctou-stale".to_string(),
+            dispatch_id: None,
+            pr: None,
+            output: RegisterOutputFormat::Json,
+        })
+        .unwrap();
+
+        let stale_stored_path = registered_path_string(&stale_wt);
+        let live_stored_path = registered_path_string(&live_wt);
+
+        // Remove the stale worktree for real (git-managed + on disk) so
+        // planning against its stored path takes the stale-registry-row
+        // branch (canonicalize fails).
+        assert!(Command::new("git")
+            .args(["worktree", "remove", "--force", stale_wt.to_str().unwrap()])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(!stale_wt.exists());
+
+        let report = plan_wt_remove(
+            Path::new(&stale_stored_path),
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(
+            report.registry_only,
+            "must plan as a stale registry-only row: {:?}",
+            report.errors
+        );
+
+        // TOCTOU: between plan and execute, something is created at the
+        // exact planned path — a symlink pointing at the LIVE registered
+        // worktree, not a re-creation of the stale one.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&live_wt, &stale_wt).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&live_wt, &stale_wt).unwrap();
+
+        let report = execute_wt_remove(report);
+        assert!(
+            !report.removed,
+            "must not remove anything once the planned path resolves again: {report:?}"
+        );
+        assert!(
+            !report.errors.is_empty(),
+            "must refuse loudly, not silently no-op: {report:?}"
+        );
+        let joined = report.errors.join(" | ");
+        assert!(
+            joined.contains("re-run") && joined.contains("resolves"),
+            "refusal must be typed and point the operator at re-planning: {joined}"
+        );
+
+        let listed = registry::list_registered_worktrees().expect("read registry");
+        assert_eq!(
+            listed.len(),
+            2,
+            "BOTH rows must survive the refused close — the stale row wasn't dropped and the \
+             live row wasn't collaterally erased: {listed:?}"
+        );
+        assert!(
+            listed.iter().any(|w| w.path == stale_stored_path),
+            "the stale row must still be present: {listed:?}"
+        );
+        assert!(
+            listed.iter().any(|w| w.path == live_stored_path),
+            "the live row must not have been dropped: {listed:?}"
+        );
+
+        // Symlink first: recursive removal of `root` must not follow it
+        // into `live_wt` and delete the still-registered live worktree.
+        let _ = std::fs::remove_file(&stale_wt);
         let _ = std::fs::remove_dir_all(&root);
     }
 
