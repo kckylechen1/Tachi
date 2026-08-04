@@ -6,7 +6,9 @@
 #
 # Extracts the failed-test set from a nextest JUnit report and diffs it against
 # the `known-deterministic-reds` nextest test-group declared in
-# `.config/nextest.toml` (board_first ×2 + dispatch_confirmation).
+# `.config/nextest.toml` (board_first ×2). The third historical member
+# (dispatch_confirmation) was dropped 2026-08-05 after its test was deleted on
+# main by 280983bea (#1319 C2) — keep this header in sync with the group.
 #
 # #1413 concern 5 — two hardening passes:
 #   * Exact membership: the group is resolved from live nextest config, and the
