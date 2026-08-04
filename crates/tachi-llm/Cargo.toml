@@ -10,6 +10,15 @@ test-support = []
 
 [dependencies]
 memcore = { path = "../memcore" }
+# #1558: content-hash binding for `PersistedModelInvocationReceiptV1`
+# (BLAKE2s-256, matching the existing content-hash convention in
+# `tachi-server`'s exec-env manifest/cards-ledger and `tachi-params`'s
+# issue-refinery hashing). blake2 0.10 is ALREADY resolved in this
+# workspace's dependency graph (via `argon2` in `tachi-server` and the
+# direct edges in `tachi-params`/`tachi-server`, see Cargo.lock), so this
+# adds no new crate to the build, only a direct-dependency edge onto
+# something already compiled.
+blake2 = "0.10"
 chrono = { workspace = true }
 dirs = "5.0"
 reqwest = { package = "reqwest", version = "0.13", default-features = false, features = ["charset", "json", "rustls-no-provider", "system-proxy"] }

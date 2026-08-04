@@ -231,6 +231,21 @@ pub struct PersistedModelInvocationReceiptV1 {
     completion_tokens: Option<i64>,
     total_tokens: Option<i64>,
     latency_ms: Option<u64>,
+    // #1558: binding fields that tie this receipt to the exact durable
+    // content it describes. `None` on every receipt this crate mints
+    // directly -- a call site outside this module can only populate them by
+    // calling `bound_to_content` below, never by field assignment, so the
+    // hash always traces back to content that call site actually passed in.
+    // `skip_serializing_if` keeps an unbound receipt's JSON byte-identical
+    // to the pre-#1558 shape: existing consumers (the memcore contradiction
+    // shadow struct, the enrichment `is_object`-only check) see no new keys
+    // until a caller deliberately binds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<i64>,
 }
 
 impl PersistedModelInvocationReceiptV1 {
@@ -264,6 +279,9 @@ impl PersistedModelInvocationReceiptV1 {
             completion_tokens: nonnegative(receipt.completion_tokens),
             total_tokens: nonnegative(receipt.total_tokens),
             latency_ms: Some(receipt.latency_ms.min(u128::from(u64::MAX)) as u64),
+            content_hash: None,
+            memory_id: None,
+            revision: None,
         }
     }
 
@@ -285,6 +303,9 @@ impl PersistedModelInvocationReceiptV1 {
             completion_tokens: None,
             total_tokens: None,
             latency_ms: Some(latency_ms.min(u128::from(u64::MAX)) as u64),
+            content_hash: None,
+            memory_id: None,
+            revision: None,
         }
     }
 
@@ -348,6 +369,72 @@ impl PersistedModelInvocationReceiptV1 {
 
     pub const fn latency_ms(&self) -> Option<u64> {
         self.latency_ms
+    }
+
+    pub fn content_hash(&self) -> Option<&str> {
+        self.content_hash.as_deref()
+    }
+
+    pub fn memory_id(&self) -> Option<&str> {
+        self.memory_id.as_deref()
+    }
+
+    pub const fn revision(&self) -> Option<i64> {
+        self.revision
+    }
+
+    /// Canonical content-hash algorithm for binding a receipt to the exact
+    /// bytes it describes (BLAKE2s-256 — the same non-`sha2` cryptographic
+    /// digest already used for content fingerprints elsewhere in this
+    /// workspace: `tachi-server`'s exec-env manifest and skill-cards ledger,
+    /// `tachi-params`'s issue-refinery hashing). Cryptographic, not FNV/
+    /// SipHash, so a forged receipt cannot claim a colliding hash for
+    /// different content.
+    pub fn content_hash_for(content: &str) -> String {
+        use blake2::{Blake2s256, Digest};
+        let mut hasher = Blake2s256::new();
+        hasher.update(content.as_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// Bind this receipt to the exact content, memory id, and revision it
+    /// was persisted against, returning a new receipt. `content_hash` is
+    /// always derived from `content` by this method -- never accepted as a
+    /// raw value -- so a caller can supply what it is binding to, but cannot
+    /// forge a hash unrelated to that content. Call this once, immediately
+    /// before the durable write the receipt describes; a receipt carried
+    /// forward unbound (or bound to an earlier write) is intentionally left
+    /// alone by this method, not silently rebound, so [`binding_matches`]
+    /// can still detect that drift later.
+    ///
+    /// [`binding_matches`]: Self::binding_matches
+    #[must_use]
+    pub fn bound_to_content(
+        &self,
+        content: &str,
+        memory_id: impl Into<String>,
+        revision: i64,
+    ) -> Self {
+        let mut bound = self.clone();
+        bound.content_hash = Some(Self::content_hash_for(content));
+        bound.memory_id = Some(memory_id.into());
+        bound.revision = Some(revision);
+        bound
+    }
+
+    /// True only when this receipt carries a binding and that binding
+    /// matches the given content, memory id, and revision exactly. An
+    /// unbound receipt (legacy, or never bound) always returns `false`:
+    /// absence of a binding is not treated as a vacuous match, so callers
+    /// cannot mistake "never checked" for "verified".
+    pub fn binding_matches(&self, content: &str, memory_id: &str, revision: i64) -> bool {
+        self.content_hash.as_deref() == Some(Self::content_hash_for(content).as_str())
+            && self.memory_id.as_deref() == Some(memory_id)
+            && self.revision == Some(revision)
     }
 }
 
@@ -635,6 +722,109 @@ mod tests {
         assert_eq!(cli.completion_status(), CompletionStatusV1::Unknown);
         assert!(cli.effective_model().is_none());
         assert!(cli.completion_tokens().is_none());
+    }
+
+    fn fixture_receipt() -> PersistedModelInvocationReceiptV1 {
+        PersistedModelInvocationReceiptV1::claude_cli_reasoning(9)
+    }
+
+    /// #1558: an unbound receipt's wire shape must stay byte-identical to
+    /// the pre-#1558 allowlist -- this is the actual back-compat guarantee
+    /// the migration promises (existing persisted receipts, and any
+    /// producer that has not yet wired binding, keep deserializing/matching
+    /// exactly as before).
+    #[test]
+    fn unbound_receipt_serializes_with_no_binding_keys() {
+        let receipt = fixture_receipt();
+        assert!(receipt.content_hash().is_none());
+        assert!(receipt.memory_id().is_none());
+        assert!(receipt.revision().is_none());
+
+        let value = serde_json::to_value(&receipt).expect("receipt must serialize");
+        let object = value.as_object().expect("receipt serializes as object");
+        for key in ["content_hash", "memory_id", "revision"] {
+            assert!(
+                !object.contains_key(key),
+                "unbound receipt must omit binding key {key}, not serialize it as null"
+            );
+        }
+    }
+
+    /// #1558 discriminating test: a receipt's binding fields round-trip
+    /// through the exact content/memory_id/revision it was bound to.
+    #[test]
+    fn bound_receipt_binding_fields_round_trip() {
+        let receipt = fixture_receipt().bound_to_content("row bytes as persisted", "mem-1", 3);
+
+        assert_eq!(
+            receipt.content_hash(),
+            Some(
+                PersistedModelInvocationReceiptV1::content_hash_for("row bytes as persisted")
+                    .as_str()
+            )
+        );
+        assert_eq!(receipt.memory_id(), Some("mem-1"));
+        assert_eq!(receipt.revision(), Some(3));
+        assert!(receipt.binding_matches("row bytes as persisted", "mem-1", 3));
+
+        let value = serde_json::to_value(&receipt).expect("bound receipt must serialize");
+        let object = value.as_object().expect("receipt serializes as object");
+        assert_eq!(
+            object
+                .get("content_hash")
+                .and_then(serde_json::Value::as_str),
+            Some(
+                PersistedModelInvocationReceiptV1::content_hash_for("row bytes as persisted")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            object.get("memory_id").and_then(serde_json::Value::as_str),
+            Some("mem-1")
+        );
+        assert_eq!(
+            object.get("revision").and_then(serde_json::Value::as_i64),
+            Some(3)
+        );
+    }
+
+    /// #1558 discriminating test: a receipt that mismatches its row's
+    /// content/memory_id/revision is detectable, not silently reported as
+    /// still valid.
+    #[test]
+    fn binding_mismatch_is_detectable() {
+        let receipt = fixture_receipt().bound_to_content("original content", "mem-1", 1);
+
+        assert!(receipt.binding_matches("original content", "mem-1", 1));
+        assert!(
+            !receipt.binding_matches("edited content", "mem-1", 1),
+            "content drift must be detectable"
+        );
+        assert!(
+            !receipt.binding_matches("original content", "mem-2", 1),
+            "memory_id drift must be detectable"
+        );
+        assert!(
+            !receipt.binding_matches("original content", "mem-1", 2),
+            "revision drift must be detectable"
+        );
+        assert!(
+            !fixture_receipt().binding_matches("original content", "mem-1", 1),
+            "an unbound receipt must never report a vacuous match"
+        );
+    }
+
+    /// The hash is derived from content the method itself hashes, not
+    /// accepted as a raw claim -- content_hash_for is deterministic and
+    /// content-sensitive (the property `bound_to_content`'s forgery-
+    /// resistance depends on).
+    #[test]
+    fn content_hash_for_is_stable_and_content_sensitive() {
+        let a = PersistedModelInvocationReceiptV1::content_hash_for("hello world");
+        let b = PersistedModelInvocationReceiptV1::content_hash_for("hello world");
+        let c = PersistedModelInvocationReceiptV1::content_hash_for("hello world!");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 }
 
