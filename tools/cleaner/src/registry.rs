@@ -132,9 +132,9 @@ pub fn list_registered_worktrees() -> Result<Vec<ListedWorktree>, String> {
 /// Look one registered worktree up **without touching the filesystem for the
 /// worktree path itself** (kckylechen1/tachi#1605).
 ///
-/// [`remove_registry_entry`]'s `paths_equal` canonicalizes both sides, which is
-/// right while the directory still exists and useless once it does not: a stale
-/// row is exactly the case where `canonicalize` fails. This matches the stored
+/// A canonicalizing `paths_equal` comparison alone is right while the
+/// directory still exists and useless once it does not: a stale row is
+/// exactly the case where `canonicalize` fails. This matches the stored
 /// path string literally first — the form the doctor's
 /// `registered_worktree_missing` remediation prints, so the remediation it
 /// tells an operator to run is actually executable — and falls back to the
@@ -160,28 +160,11 @@ pub fn registry_contains(worktree_root: &Path) -> bool {
     value_contains_path(&value, &needle)
 }
 
-pub fn remove_registry_entry(worktree_root: &Path) -> Result<bool, String> {
-    let registry_path = registry_path()?;
-    if !registry_path.exists() {
-        return Ok(false);
-    }
-    let _lock = acquire_registry_lock(&registry_path)?;
-    let mut registry = read_registry(&registry_path)?;
-    let before = registry.worktrees.len();
-    registry
-        .worktrees
-        .retain(|record| !paths_equal(Path::new(&record.path), worktree_root));
-    if registry.worktrees.len() == before {
-        return Ok(false);
-    }
-    write_registry(&registry_path, &registry)?;
-    Ok(true)
-}
-
-/// Exact-row removal for the registry-only stale-close execute path
-/// (kckylechen1/tachi#1605 fix round, codex review). Unlike
-/// [`remove_registry_entry`], this does **not** canonicalize either side.
-/// Canonicalizing here is exactly the TOCTOU the review flagged: a stale
+/// Exact-row removal for both the ordinary close path and the
+/// registry-only stale-close execute path (kckylechen1/tachi#1605 fix
+/// round, codex review; round-2 review, FIX 2). This does **not**
+/// canonicalize either side — canonicalizing here is exactly the TOCTOU
+/// the review flagged: a stale
 /// path can be recreated as a symlink to a DIFFERENT, LIVE registered
 /// worktree between plan and execute, and `paths_equal`'s canonicalizing
 /// comparison would then resolve the stale spelling to the live target's
@@ -430,7 +413,11 @@ mod tests {
 
         assert!(registry_contains(&worktree));
         assert!(worktree.join(".tachi-worktree.json").exists());
-        assert!(remove_registry_entry(&worktree).unwrap());
+        let stored_path = find_registry_entry(&worktree)
+            .unwrap()
+            .expect("worktree is registered")
+            .path;
+        assert!(remove_registry_entry_exact(&stored_path).unwrap());
         assert!(!registry_contains(&worktree));
 
         match old_home {
