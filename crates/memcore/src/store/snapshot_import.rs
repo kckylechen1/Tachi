@@ -276,14 +276,24 @@ impl MemoryStore {
             return PortableImportReceipt::empty();
         }
 
+        let vec_available = self.vec_available;
         // Pre-walk: every entry's policy-driven path check runs before any
         // write, so an invalid entry anywhere in the batch means no
         // transaction is ever opened — the same ordering `upsert_batch` uses.
+        // The vector-availability refusal is here for the same reason: a
+        // corpus with embeddings must fail loudly against a store that cannot
+        // hold them, not quietly import 6,648 vectors as zero.
         for import in entries {
             self.validate_write_path(&import.entry)?;
+            if import.entry.vector.is_some() && !vec_available {
+                return Err(MemoryError::InvalidArg(format!(
+                    "snapshot import of id '{}' carries a vector but this store has no vector \
+                     projection table; importing it would silently drop the embedding",
+                    import.entry.id
+                )));
+            }
         }
 
-        let vec_available = self.vec_available;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let tx = self

@@ -81,6 +81,14 @@ pub(crate) fn import_snapshot_row_within_tx(
     let path = crate::path_router::normalize_path(&entry.path);
     refuse_reserved_write_identity(&entry.id, &path, &entry.topic, false, false)?;
 
+    if entry.vector.is_some() && !vec_available {
+        return Err(MemoryError::InvalidArg(format!(
+            "snapshot import of id '{}' carries a vector but this store has no vector \
+             projection table; importing it would silently drop the embedding",
+            entry.id
+        )));
+    }
+
     if memory_row_exists_within_tx(tx, &entry.id)? {
         return Err(MemoryError::Duplicate(format!(
             "snapshot import target already contains id '{}'; import requires a destination \
@@ -155,13 +163,6 @@ pub(crate) fn import_snapshot_row_within_tx(
     )?;
 
     if let Some(vector) = &entry.vector {
-        if !vec_available {
-            return Err(MemoryError::InvalidArg(format!(
-                "snapshot import of id '{}' carries a vector but this store has no vector \
-                 projection table; importing it would silently drop the embedding",
-                entry.id
-            )));
-        }
         let blob = serialize_f32(vector);
         // vec0 virtual tables do NOT support ON CONFLICT / UPSERT; the id is
         // known-absent above, so a bare INSERT is enough.

@@ -153,11 +153,13 @@ fn portable_build_import_snapshot_batch_preserves_lifecycle() {
         "the destination's stored vectors must reconcile with the source side"
     );
 
-    // Portable readback of the fields `MemoryEntry` does carry.
+    // Portable readback of the fields `MemoryEntry` does carry. Archive
+    // visibility must be on: `get` alone hides the archived row, and hiding it
+    // is exactly the state this import has to have preserved.
     for import in &batch {
         let stored = store
-            .get(&import.entry.id)
-            .expect("get")
+            .get_with_options(&import.entry.id, true)
+            .expect("get_with_options")
             .unwrap_or_else(|| panic!("row {} must exist", import.entry.id));
         assert_eq!(stored.archived, import.entry.archived);
         assert_eq!(stored.revision, import.entry.revision);
