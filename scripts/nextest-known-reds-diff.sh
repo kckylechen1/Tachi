@@ -105,8 +105,17 @@ else
 fi
 
 if [[ ! -s "${KNOWN_FILE}" ]]; then
-  echo "nextest-known-reds-diff: group(known-deterministic-reds) resolved to zero tests — is .config/nextest.toml present?" >&2
-  exit 2
+  # Zero members is ambiguous: an intentionally-empty roster (every known red
+  # fixed and removed) is a legitimate end-state, but zero can also mean the
+  # config never loaded (drift → every red would silently pass as "outsider
+  # handling" never engages the roster). Disambiguate against the group
+  # DEFINITION, which must exist either way.
+  if grep -q '^known-deterministic-reds[[:space:]]*=' "${ROOT}/.config/nextest.toml" 2>/dev/null; then
+    echo "nextest-known-reds-diff: roster is intentionally empty (group defined, no member overrides) — any failure in the report is an outsider" >&2
+  else
+    echo "nextest-known-reds-diff: group(known-deterministic-reds) has no DEFINITION in .config/nextest.toml — config drift, refusing" >&2
+    exit 2
+  fi
 fi
 
 # Resolve the FULL expected test set for the completeness gate (#1413 concern 5).
