@@ -42,16 +42,6 @@ impl super::super::LlmClient {
         true
     }
 
-    pub fn set_provider_secret_pools<I>(&self, pools: I) -> usize
-    where
-        I: IntoIterator<Item = (String, Vec<ProviderSecret>)>,
-    {
-        pools
-            .into_iter()
-            .filter(|(name, entries)| self.set_provider_secret_pool(name, entries.clone()))
-            .count()
-    }
-
     /// Clone one logical provider pool under a read lock. Missing-alias recovery
     /// calls this only for the affected key, avoiding a second full secret map.
     pub(crate) fn provider_secret_pool_snapshot(
