@@ -9,6 +9,7 @@ mod scoring;
 
 fn params() -> TachiDispatchParams {
     TachiDispatchParams {
+        staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
         agent: None,
         profile: Some("claude_plan".to_string()),
         task: "Plan issue #194".to_string(),

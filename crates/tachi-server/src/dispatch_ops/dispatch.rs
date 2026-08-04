@@ -157,6 +157,7 @@ use self::workspace_setup::prepare_workspace_and_mcp;
 
 #[cfg(test)]
 pub(crate) use self::credentials::apply_unlocked_vault_env;
+pub(crate) use self::dedupe::dispatch_runs_root;
 pub(crate) use self::dedupe::new_dispatch_id;
 pub(crate) use self::dedupe::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
 pub(crate) use self::recovery::recover_orphaned_dispatch_runs;
@@ -333,6 +334,35 @@ pub(crate) async fn handle_tachi_dispatch(
     )?;
     let authority_receipt = contract_receipt(&effective_contract);
 
+    // #1319-E1 defense-in-depth staffing-reason gate. `staffing_reason` is
+    // non-optional on `TachiDispatchParams`, so every well-typed caller carries
+    // a typed reason. This is a RELEASE-ACTIVE check (not debug_assert, which
+    // vanishes in release builds) so the kernel-side backstop claim holds in
+    // production: a caller that somehow reached here with an out-of-variant
+    // reason (e.g. an `unsafe`/transmute path, or a future struct change that
+    // widens the field) fails closed with ZERO run-directory / status.json /
+    // trajectory artifacts created. It runs BEFORE step 1 (workspace creation)
+    // and BEFORE the receipt-first `write_status_json` seed below. The
+    // facade-level gate (`staff_start` + serde rejecting a missing required
+    // field) is the primary check; this is the kernel-side backstop, same
+    // layering as the #894 authority gate above. (TachiDispatchReason is a
+    // closed enum so a well-typed value is always one of these four — this
+    // check can only trip a memory-safety violation or an ABI-break, both of
+    // which must fail closed rather than stamp a bogus receipt.)
+    if !matches!(
+        params.staffing_reason,
+        tachi_params::TachiDispatchReason::ExplicitUserRequest
+            | tachi_params::TachiDispatchReason::DurableCrossSession
+            | tachi_params::TachiDispatchReason::CrossDeviceRemote
+            | tachi_params::TachiDispatchReason::NativeSubagentUnavailable
+    ) {
+        return Err(
+            "handle_tachi_dispatch: staffing_reason failed the kernel admission check; \
+             zero run-directory / status.json / trajectory artifacts were created"
+                .to_string(),
+        );
+    }
+
     // 1. Create isolated workspace directory + MCP config
     //
     // `agent_seat` (round-3 fix, codex final review of #964/PR #1003, BUG
@@ -422,6 +452,11 @@ pub(crate) async fn handle_tachi_dispatch(
             // bypass), and which skills were excluded for asking for more than
             // the contract grants.
             "authority": authority_receipt.clone(),
+            // #1319-E1: stamp the typed staffing reason into the canonical
+            // receipt so external staffing is auditable — the reason admission
+            // happened on (not just that it was non-None).
+            "staffing_reason": serde_json::to_value(&params.staffing_reason)
+                .unwrap_or(Value::Null),
             "identity_receipt": resolved_profile.identity_receipt,
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
@@ -514,6 +549,11 @@ pub(crate) async fn handle_tachi_dispatch(
             // #894 S2d: same authority receipt as the receipt-first seed above
             // (this write's `extra` is a fresh object, not a merge).
             "authority": authority_receipt.clone(),
+            // #1319-E1: stamp the typed staffing reason into the canonical
+            // receipt so external staffing is auditable — the reason admission
+            // happened on (not just that it was non-None).
+            "staffing_reason": serde_json::to_value(&params.staffing_reason)
+                .unwrap_or(Value::Null),
             "identity_receipt": resolved_profile.identity_receipt,
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can

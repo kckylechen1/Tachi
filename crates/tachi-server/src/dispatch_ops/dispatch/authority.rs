@@ -188,6 +188,7 @@ mod tests {
     fn omitted_sandbox_on_review_profile_reaches_codex_as_read_only() {
         let (mut params, resolved) = resolve(json!({
             "task": "review the diff",
+            "staffing_reason": "explicit_user_request",
             "profile": "codex_55_review",
         }));
         assert_eq!(params.sandbox, None, "the caller omitted sandbox");
@@ -262,6 +263,7 @@ mod tests {
     fn read_only_profile_plus_explicit_workspace_write_is_refused() {
         let (mut params, resolved) = resolve(json!({
             "task": "review the diff",
+            "staffing_reason": "explicit_user_request",
             "profile": "codex_55_review",
             "sandbox": "workspace-write",
         }));
@@ -295,6 +297,7 @@ mod tests {
 
         let (mut params, resolved) = resolve(json!({
             "task": "review the diff",
+            "staffing_reason": "explicit_user_request",
             "profile": "codex_55_review",
             "sandbox": "read-only",
             "permission_profile": "full",
@@ -336,6 +339,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (mut params, resolved) = resolve(json!({
             "task": "review the diff",
+            "staffing_reason": "explicit_user_request",
             "profile": "codex_55_review",
             "skills": [
                 "skill:waza-check",
@@ -376,6 +380,7 @@ mod tests {
         // nothing is excluded — the exclusion tracks the contract, not the skill.
         let (mut exec_params, exec_resolved) = resolve(json!({
             "task": "land the patch",
+            "staffing_reason": "explicit_user_request",
             "profile": "glm_impl",
             "skills": [
                 "skill:waza-check",
@@ -413,6 +418,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (mut params, resolved) = resolve(json!({
             "task": "map the repo",
+            "staffing_reason": "explicit_user_request",
             "profile": "deepseek_explore",
         }));
         let err = compile_dispatch_contract(
@@ -455,6 +461,7 @@ mod tests {
         ] {
             let (mut params, resolved) = resolve(json!({
                 "task": "review the diff",
+                "staffing_reason": "explicit_user_request",
                 "profile": "codex_55_review",
             }));
             let err = compile_dispatch_contract(
@@ -487,6 +494,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (mut params, resolved) = resolve(json!({
             "task": "land the patch",
+            "staffing_reason": "explicit_user_request",
             "profile": "opencode_builder",
         }));
         let contract = compile_dispatch_contract(

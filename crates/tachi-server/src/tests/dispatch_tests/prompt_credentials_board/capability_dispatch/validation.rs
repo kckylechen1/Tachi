@@ -26,6 +26,7 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
     let err = crate::dispatch_ops::handle_tachi_dispatch(
         &server,
         TachiDispatchParams {
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
             agent: Some("gemini".to_string()),
             profile: None,
             task: "noop".to_string(),

@@ -58,6 +58,17 @@ pub(super) async fn handle_dispatch_action(
             task = task,
         );
         let dp = TachiDispatchParams {
+            // Shell dispatch carries the facade's OWN dispatch_reason into the
+            // canonical kernel — never a fabricated default. This block only
+            // runs under `params.async_dispatch`, and line 11 above already
+            // rejected `async_dispatch && dispatch_reason.is_none()`, so
+            // dispatch_reason is guaranteed Some here. Use expect (not
+            // unwrap_or) so a future gate regression fails loudly instead of
+            // silently stamping a false reason into the receipt. (Shell is
+            // retired in [1319-B7]; this mapping is main-branch-only.)
+            staffing_reason: params
+                .dispatch_reason
+                .expect("async_dispatch gate at line 11 verified dispatch_reason is Some"),
             agent,
             profile: params.profile.clone(),
             task: prompt,

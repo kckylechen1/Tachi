@@ -44,6 +44,10 @@ pub(super) async fn handle_tachi_task_facade(
                 .clone()
                 .ok_or_else(|| "task is required when action='dispatch'".to_string())?;
             let dispatch_params = TachiDispatchParams {
+                // require_tachi_dispatch_reason (line 37) already verified this
+                // is Some; carry the typed reason into the canonical kernel
+                // request so it reaches the receipt stamp.
+                staffing_reason: params.dispatch_reason.expect("verified non-None above"),
                 agent: params.agent.clone(),
                 profile: params.profile.clone(),
                 task,
