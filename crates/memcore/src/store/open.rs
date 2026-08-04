@@ -2179,7 +2179,7 @@ mod exact_dedupe_open_tests {
 
         let mut target = MemoryStore::open_in_memory().expect("open_in_memory");
         let refusal = target
-            .upsert_batch_with_precommit(&[anchor_entry.clone()], |_tx| Ok(()))
+            .upsert_batch_with_precommit(std::slice::from_ref(&anchor_entry), |_tx| Ok(()))
             .expect_err("the ordinary precommit entry point must still refuse anchor: ids");
         assert!(
             matches!(refusal, MemoryError::InvalidArg(_)),
