@@ -14,6 +14,10 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
     let raw = crate::dispatch_ops::handle_tachi_dispatch(
         server,
         TachiDispatchParams {
+            // Operator poke probe — an explicit operator-initiated smoke
+            // probe, not model delegation. ExplicitUserRequest records why a
+            // non-native path is used here.
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
             agent: Some("custom".to_string()),
             profile: None,
             task: "Poke no-op mock dispatch".to_string(),

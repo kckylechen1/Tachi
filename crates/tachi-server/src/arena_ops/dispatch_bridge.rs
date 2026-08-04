@@ -58,6 +58,21 @@ pub(super) fn dispatch_params_for_mission(
     }
 
     Some(TachiDispatchParams {
+        // #1319: carry the caller's ACTUAL verified dispatch_reason into the
+        // canonical kernel — never normalize or hardcode it. `handle_spawn`
+        // already validated that `params.dispatch_reason` is `Some` for every
+        // launch-capable lane that reaches this bridge (the gate at
+        // spawn.rs rejects `launch && launchable-lane && dispatch_reason.is_none()`
+        // before any mission artifact is created, and this fn only runs inside
+        // `if params.launch {}` for the opencode/claude lanes). So the expect
+        // is provably non-panicking for the live path; the receipt must record
+        // the real reason the caller admitted (explicit_user_request,
+        // cross_device_remote, native_subagent_unavailable, or
+        // durable_cross_session) — not a fabricated one. (Arena is retired in
+        // [1319-D2]; this mapping is main-branch-only.)
+        staffing_reason: params
+            .dispatch_reason
+            .expect("handle_spawn validated dispatch_reason for launch-capable lanes"),
         agent: Some(agent.to_string()),
         profile: params.profile.clone(),
         credential_profiles: params.credential_profiles.clone(),
@@ -170,5 +185,73 @@ pub(super) fn infer_completion_outcome(result: &str) -> Option<&'static str> {
         Some("partial")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod reason_preservation_tests {
+    use super::dispatch_params_for_mission;
+    use crate::arena_ops::lane::harness_lane;
+    use crate::{TachiArenaParams, TachiDispatchReason};
+
+    /// Build a minimal launch-shaped `TachiArenaParams` carrying the given
+    /// verified dispatch_reason. Only the fields `dispatch_params_for_mission`
+    /// reads are populated.
+    fn arena_params_with_reason(reason: TachiDispatchReason) -> TachiArenaParams {
+        let defaults: serde_json::Value = serde_json::json!({ "action": "spawn" });
+        let mut params: TachiArenaParams =
+            serde_json::from_value(defaults).expect("minimal spawn params parse");
+        params.launch = true;
+        params.harness = Some("claude".to_string());
+        params.dispatch_reason = Some(reason);
+        params
+    }
+
+    /// #1319 regression: the bridge must carry the caller's ACTUAL verified
+    /// dispatch_reason into `TachiDispatchParams.staffing_reason` — it must
+    /// NOT normalize, default, or hardcode a different reason. The pre-fix
+    /// bridge hardcoded `DurableCrossSession`, so a caller who admitted
+    /// `explicit_user_request` / `cross_device_remote` /
+    /// `native_subagent_unavailable` got a receipt that lied. This test pins
+    /// all four valid Arena reasons against rewrite.
+    #[test]
+    fn dispatch_bridge_preserves_each_valid_arena_reason() {
+        let lane = harness_lane(Some("claude"));
+        assert_eq!(
+            lane.id, "claude",
+            "test setup: claude is a launch-capable lane"
+        );
+
+        for reason in [
+            TachiDispatchReason::ExplicitUserRequest,
+            TachiDispatchReason::DurableCrossSession,
+            TachiDispatchReason::CrossDeviceRemote,
+            TachiDispatchReason::NativeSubagentUnavailable,
+        ] {
+            let params = arena_params_with_reason(reason);
+            let bridged = dispatch_params_for_mission(&params, &lane, "tracked prompt")
+                .expect("claude launch lane produces dispatch params");
+            assert_eq!(
+                bridged.staffing_reason, reason,
+                "bridge must carry the caller's actual verified reason unchanged \
+                 into the canonical receipt; it must not normalize or hardcode a \
+                 different reason (pre-fix this hardcoded DurableCrossSession)"
+            );
+        }
+    }
+
+    /// The non-launch lanes (manual/document) do not produce dispatch params
+    /// (the bridge returns None for them), so no reason flows and nothing is
+    /// fabricated. This pins that the bridge only runs for launch-capable
+    /// lanes — the lane whose gate `handle_spawn` enforces.
+    #[test]
+    fn dispatch_bridge_returns_none_for_non_launch_lane() {
+        let manual_lane = harness_lane(Some("manual"));
+        assert_eq!(manual_lane.id, "manual");
+        let params = arena_params_with_reason(TachiDispatchReason::DurableCrossSession);
+        assert!(
+            dispatch_params_for_mission(&params, &manual_lane, "tracked prompt").is_none(),
+            "non-launch lanes must not produce canonical dispatch params"
+        );
     }
 }

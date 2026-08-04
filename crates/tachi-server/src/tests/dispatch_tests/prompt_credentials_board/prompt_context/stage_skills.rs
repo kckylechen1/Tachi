@@ -6,6 +6,7 @@ async fn dispatch_prompt_invokes_stage_and_waza_skills_for_execute_slice() {
     let prompt = crate::dispatch_ops::assemble_prompt(
         &server,
         &TachiDispatchParams {
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
             agent: Some("claude".to_string()),
             profile: None,
             task: "修好 tachi-server 报错，先找根因再改".to_string(),
@@ -68,6 +69,7 @@ async fn dispatch_prompt_invokes_native_subagent_factory_for_dispatch_stage() {
     let prompt = crate::dispatch_ops::assemble_prompt(
         &server,
         &TachiDispatchParams {
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
             agent: Some("codex".to_string()),
             profile: None,
             task: "Split this implementation plan into worker slices and run review gates"

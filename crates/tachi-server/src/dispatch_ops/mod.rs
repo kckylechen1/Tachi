@@ -21,6 +21,7 @@ pub(crate) use board::{
 };
 #[cfg(test)]
 pub(crate) use dispatch::apply_unlocked_vault_env;
+pub(crate) use dispatch::dispatch_runs_root;
 pub(crate) use dispatch::handle_tachi_dispatch;
 #[cfg(test)]
 pub(crate) use dispatch::new_dispatch_id;

@@ -1,3 +1,4 @@
+use super::task::TachiDispatchReason;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
@@ -97,6 +98,21 @@ impl ExecutionLevel {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiDispatchParams {
+    /// #1319 admission contract: the typed reason execution is leaving the
+    /// host harness instead of using its native subagent. REQUIRED (non-
+    /// optional) — the canonical kernel fails closed without it, and
+    /// `tachi_staff(start)` rejects a missing reason at deserialization.
+    /// Reuses [`TachiDispatchReason`] so the vocabulary cannot drift from the
+    /// retired `tachi_task(dispatch)` `require_tachi_dispatch_reason` gate.
+    /// Stamped into the canonical receipt (status.json) so staffing is
+    /// auditable.
+    ///
+    /// Note: `ExplicitUserRequest` is a *recorded override* naming why a user
+    /// asked for external staffing — it is NOT a self-granted authority
+    /// elevation. The #894 authority gate (`compile_dispatch_contract`) is
+    /// independent and still applies; this reason is evidence, not a bypass.
+    pub staffing_reason: TachiDispatchReason,
+
     /// Agent backend: "claude" | "codex" | "grok" | "kimi" | "custom" (aliases accepted)
     #[serde(default)]
     pub agent: Option<String>,

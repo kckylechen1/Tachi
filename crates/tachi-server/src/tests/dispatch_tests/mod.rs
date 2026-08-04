@@ -14,6 +14,7 @@ mod workflow_artifacts;
 
 fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
     TachiDispatchParams {
+        staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
         agent: agent.map(str::to_string),
         profile: None,
         task: task.to_string(),

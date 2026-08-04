@@ -214,6 +214,7 @@ mod tests {
 
     fn params() -> TachiDispatchParams {
         TachiDispatchParams {
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
             agent: Some("custom".to_string()),
             profile: None,
             task: "noop".to_string(),

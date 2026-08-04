@@ -7,7 +7,7 @@ pub(crate) fn new_dispatch_id(now: chrono::DateTime<Utc>, agent: &str) -> String
     format!("{}-{}-{}", timestamp, sanitized, suffix)
 }
 
-pub(super) fn dispatch_runs_root() -> PathBuf {
+pub(crate) fn dispatch_runs_root() -> PathBuf {
     crate::path_utils::tachi_home().join("runs")
 }
 

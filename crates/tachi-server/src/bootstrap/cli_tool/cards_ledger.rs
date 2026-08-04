@@ -1583,6 +1583,7 @@ aliases: [codex-cli, codex-app-server]
             "agent": "codex",
             "profile": "reviewed-seat",
             "task": "review the bounded change",
+            "staffing_reason": "explicit_user_request",
             "auto_capability_bundle": false
         }))
         .unwrap();

@@ -23,8 +23,8 @@
             },
             "coordinate": {
                 "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 133575,
-                "max_total_tool_definition_bytes": 152754,
+                "max_total_input_schema_bytes": 133605,
+                "max_total_tool_definition_bytes": 152784,
                 "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
             },
             "operate": {
@@ -35,8 +35,8 @@
             },
             "admin": {
                 "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 198146,
-                "max_total_tool_definition_bytes": 236637,
+                "max_total_input_schema_bytes": 198191,
+                "max_total_tool_definition_bytes": 236682,
                 "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification."
             }
         },
@@ -58,7 +58,7 @@
             },
             "admin.tachi_task": {
                 "max_top_level_properties": 106,
-                "max_input_schema_bytes": 37912,
+                "max_input_schema_bytes": 37927,
                 "rationale": "Typed operator compatibility exception baseline."
             }
         }
@@ -235,8 +235,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 198146,
-                "total_tool_definition_bytes": 236637,
+                "total_input_schema_bytes": 198191,
+                "total_tool_definition_bytes": 236682,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -345,8 +345,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 133575,
-                "total_tool_definition_bytes": 152754,
+                "total_input_schema_bytes": 133605,
+                "total_tool_definition_bytes": 152784,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -615,7 +615,7 @@
                         ]
                     },
                     "tachi_arena": {
-                        "input_schema_bytes": 5494,
+                        "input_schema_bytes": 5509,
                         "property_count": 31,
                         "property_names": [
                             "action",
@@ -679,7 +679,7 @@
                         ]
                     },
                     "tachi_shell": {
-                        "input_schema_bytes": 4953,
+                        "input_schema_bytes": 4968,
                         "property_count": 18,
                         "property_names": [
                             "action",
@@ -703,7 +703,7 @@
                         ]
                     },
                     "tachi_task": {
-                        "input_schema_bytes": 37912,
+                        "input_schema_bytes": 37927,
                         "property_count": 106,
                         "property_names": [
                             "action",
@@ -830,7 +830,7 @@
                         ]
                     },
                     "tachi_arena": {
-                        "input_schema_bytes": 5494,
+                        "input_schema_bytes": 5509,
                         "property_count": 31,
                         "property_names": [
                             "action",
@@ -894,7 +894,7 @@
                         ]
                     },
                     "tachi_shell": {
-                        "input_schema_bytes": 4953,
+                        "input_schema_bytes": 4968,
                         "property_count": 18,
                         "property_names": [
                             "action",

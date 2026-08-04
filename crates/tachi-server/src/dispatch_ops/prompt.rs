@@ -554,6 +554,7 @@ mod tests {
 
     fn params_with_skills(skills: Vec<&str>) -> TachiDispatchParams {
         TachiDispatchParams {
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
             agent: Some("codex".to_string()),
             profile: None,
             task: "review the bounded prompt".to_string(),
@@ -697,6 +698,7 @@ mod tests {
 
     fn seat_card_dispatch_params(profile: &str, inject_card: Option<bool>) -> TachiDispatchParams {
         TachiDispatchParams {
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
             agent: Some("codex".to_string()),
             profile: Some(profile.to_string()),
             task: "implement the bounded slice".to_string(),

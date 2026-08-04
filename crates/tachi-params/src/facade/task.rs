@@ -3,12 +3,12 @@ use super::{
     RulingRecordParams, SignatureRecordParams, TachiSubagentEvalParams, TachiTaskAction,
 };
 use rmcp::schemars::{self, JsonSchema};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Why execution is leaving the host harness instead of using its native
 /// subagent. Tachi is memory/ledger by default; these are the only admitted
 /// exceptions for its legacy durable dispatch backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TachiDispatchReason {
     ExplicitUserRequest,
