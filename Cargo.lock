@@ -2337,6 +2337,7 @@ name = "tachi-llm"
 version = "1.9.0"
 dependencies = [
  "axum",
+ "blake2",
  "chrono",
  "dirs",
  "memcore",
