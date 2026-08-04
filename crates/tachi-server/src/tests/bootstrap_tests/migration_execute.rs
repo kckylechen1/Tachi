@@ -833,3 +833,83 @@ fn tidy_execute_migrates_cross_scope_source_while_outer_target_lock_is_held() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// tachi#1602: the reserved-`anchor:` refusal moved into memcore's shared
+/// transactional upsert seam, which tidy migration's batch writer runs per
+/// row. A source database that legitimately contains an `anchor:` row (created
+/// by `ensure_anchor`) must still migrate — the migration copies existing rows
+/// through the named trusted variant
+/// (`upsert_batch_with_precommit_preserving_anchor_rows`), it does not mint new
+/// anchors behind `ensure_anchor`'s back.
+#[test]
+fn tidy_execute_migrates_a_source_containing_an_anchor_row() {
+    let root =
+        crate::utils::test_fixture_path(format!("tachi-tidy-anchor-{}", uuid::Uuid::new_v4()));
+    let home = root.clone();
+    let app_home = home.join(".tachi");
+    std::fs::create_dir_all(&app_home).expect("create app_home");
+    let target_db = app_home.join("global").join("memory.db");
+    let archive_root = app_home.join("archive").join("ts-anchor");
+
+    std::fs::create_dir_all(target_db.parent().unwrap()).expect("create target parent");
+    let mut tgt = MemoryStore::open(target_db.to_str().unwrap()).expect("open target");
+    tgt.upsert(&make_entry("preexisting-target"))
+        .expect("seed target");
+    drop(tgt);
+
+    let (legacy_a, legacy_b) = build_legacy_openclaw_fixture(&home, 1);
+
+    // Put a real anchor row in one source, through its only legitimate
+    // creation path.
+    let anchor_id = {
+        let source = MemoryStore::open(legacy_a.to_str().unwrap()).expect("open legacy source");
+        source
+            .ensure_anchor(memcore::AnchorKind::Issue, "kckylechen1/tachi:1602")
+            .expect("seed source anchor row")
+    };
+    assert!(
+        anchor_id.starts_with("anchor:"),
+        "fixture must actually be in the reserved namespace, got {anchor_id}"
+    );
+
+    let report = crate::bootstrap::build_tidy_report(&[home.clone()], None).expect("report");
+    let plan = crate::bootstrap::build_migration_plan(&report, &target_db, &archive_root, &home);
+    assert_eq!(plan.len(), 2, "expected 2 legacy DBs in the plan");
+
+    let cfg = crate::bootstrap::MigrationConfig {
+        target_db: target_db.clone(),
+        manifest_path: app_home.join("manifest.json"),
+        dry_run: false,
+        interactive: false,
+        app_home: app_home.clone(),
+    };
+    let authorized_sources = authorized_plan_sources(&plan);
+    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorized_sources)
+        .expect("execute summary");
+    let messages: Vec<&str> = summary
+        .outcomes
+        .iter()
+        .map(|o| o.message.as_str())
+        .collect();
+    assert_eq!(
+        summary.failed_count, 0,
+        "a source holding an anchor row must not fail migration; messages={messages:?}"
+    );
+    assert_eq!(summary.migrated_count, 2, "messages={messages:?}");
+    assert!(!legacy_a.exists() && !legacy_b.exists());
+
+    let tgt_after =
+        MemoryStore::open_read_only(target_db.to_str().unwrap()).expect("open target after");
+    assert!(
+        tgt_after.get(&anchor_id).expect("get").is_some(),
+        "the source's anchor row must have been carried into the target"
+    );
+    assert_eq!(
+        tgt_after.stats(true).unwrap().total,
+        4,
+        "target must hold preexisting (1) + 2 legacy rows + the carried anchor row"
+    );
+    drop(tgt_after);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
