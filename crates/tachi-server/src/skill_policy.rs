@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 
 pub(crate) const SUPERPOWER_BRAINSTORMING: &str = tachi_dispatch::SUPERPOWER_BRAINSTORMING;
 pub(crate) const SUPERPOWER_WRITING_PLANS: &str = tachi_dispatch::SUPERPOWER_WRITING_PLANS;
@@ -72,13 +72,6 @@ pub(crate) fn dispatch_stage_skills(stage_key: &str) -> Vec<String> {
     }
 }
 
-pub(crate) fn shell_stage_skills(stage: &str) -> Vec<String> {
-    match stage {
-        "auto" | "execute" => Vec::new(),
-        other => dispatch_stage_skills(other),
-    }
-}
-
 pub(crate) fn is_native_skill(id: &str) -> bool {
     matches!(
         id,
@@ -102,16 +95,6 @@ pub(crate) fn is_native_skill(id: &str) -> bool {
             | CODING_TEST_STRATEGY
             | CODING_ARCHITECTURE_DECISION
     )
-}
-
-pub(crate) fn native_policy_summary(stage: &str, required_skills: &[String]) -> Value {
-    json!({
-        "stage": stage,
-        "required_skills": required_skills,
-        "policy": "native",
-        "leader_rule": "apply lifecycle skills before dispatching or shipping",
-        "worker_rule": "apply role/task skills before substantive work and report skills used",
-    })
 }
 
 pub(crate) fn dedupe_preserve_order(items: &mut Vec<String>) {
@@ -147,18 +130,5 @@ mod tests {
         let execute = dispatch_stage_skills("execute");
         assert!(!execute.contains(&SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT.to_string()));
         assert!(execute.contains(&SUPERPOWER_EXECUTING_PLANS.to_string()));
-    }
-
-    #[test]
-    fn shell_ship_policy_requires_verification_gate() {
-        let skills = shell_stage_skills("ship");
-        assert!(skills.contains(&SUPERPOWER_VERIFICATION_BEFORE_COMPLETION.to_string()));
-        assert!(skills.contains(&SUPERPOWER_FINISHING_BRANCH.to_string()));
-    }
-
-    #[test]
-    fn shell_policy_rejects_dispatch_only_stages() {
-        assert!(shell_stage_skills("auto").is_empty());
-        assert!(shell_stage_skills("execute").is_empty());
     }
 }

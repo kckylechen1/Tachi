@@ -185,7 +185,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             // (not action-aware) precedent applies here.
             | "tachi_memory"
             | "tachi_task"
-            | "tachi_shell"
+            | "tachi_staff"
             | "tachi_orchestrator"
             | "tachi_arena"
             | "tachi_verify"

@@ -240,7 +240,7 @@ async fn ship_gb4_main_branch_is_protected_even_when_confirmed() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn ship_gb5_flow_id_appends_github_event_with_step_statuses() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     let run_root = tempfile::tempdir().expect("run root");
@@ -401,7 +401,7 @@ async fn ship_gb9_chinese_filename_ships_with_unquoted_staged_compare() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn ship_gb10_push_failure_after_commit_returns_partial_and_records_flow_event() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     let run_root = tempfile::tempdir().expect("run root");

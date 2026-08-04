@@ -42,7 +42,7 @@ async fn dispatch_prompt_does_not_require_self_complete_without_tachi_mcp() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn dispatch_rejects_unsupported_mcp_injection_before_run_dir() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp tachi home");

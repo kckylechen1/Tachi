@@ -3,7 +3,7 @@ use super::*;
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_memory_briefing_includes_recent_verification_gates() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();

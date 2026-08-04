@@ -105,7 +105,7 @@ async fn safe_merge_head_consistency_required_blocks_merge() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_with_flow_id_missing_verification_waits() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -149,7 +149,7 @@ async fn safe_merge_with_flow_id_missing_verification_waits() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_failed_verification_blocks_even_permissive() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -194,7 +194,7 @@ async fn safe_merge_failed_verification_blocks_even_permissive() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_stale_verification_waits_on_head_mismatch() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -239,7 +239,7 @@ async fn safe_merge_stale_verification_waits_on_head_mismatch() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_strict_uses_passed_verification_for_head_consistency() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -287,7 +287,7 @@ async fn safe_merge_strict_uses_passed_verification_for_head_consistency() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proof() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -349,7 +349,7 @@ async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proo
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_records_missing_verification_from_tests_run() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();

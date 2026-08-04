@@ -140,7 +140,7 @@ fn lock_run_root(
     std::sync::MutexGuard<'static, ()>,
     Option<std::ffi::OsString>,
 ) {
-    let guard = crate::shell_ops::tachi_run_root_env_lock()
+    let guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let original = std::env::var_os("TACHI_RUN_ROOT");
@@ -597,7 +597,7 @@ async fn ci_watch_blanket_reader_populates_observed_head_sha_from_pr_view() {
 /// None), and a value below the min is clamped up.
 #[test]
 fn ci_watch_interval_resolves_with_min_clamp_and_disable() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -630,7 +630,7 @@ fn ci_watch_interval_resolves_with_min_clamp_and_disable() {
 /// but `TACHI_CI_WATCH=on` forces it on regardless.
 #[test]
 fn ci_watch_enabled_gating() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let saved_watch = std::env::var("TACHI_CI_WATCH").ok();

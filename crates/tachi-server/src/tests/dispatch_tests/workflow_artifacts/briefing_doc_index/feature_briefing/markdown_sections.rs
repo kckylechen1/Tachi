@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn tachi_task_briefing_supports_markdown_layered_sections() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp tachi home");
@@ -55,7 +55,7 @@ async fn tachi_task_briefing_supports_markdown_layered_sections() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn tachi_task_briefing_markdown_renders_presence_section() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp tachi home");

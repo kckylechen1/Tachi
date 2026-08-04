@@ -9,7 +9,7 @@ const COMPARISON_SURFACES: &[&str] = &[
     "tachi_agent_eval",
     "tachi_arena",
     "tachi_orchestrator",
-    "tachi_shell",
+    "tachi_staff",
     "tachi_task",
 ];
 

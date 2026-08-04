@@ -173,7 +173,7 @@ fn dedupe_strings_keeps_first_occurrence() {
 //
 // GitHub flow-state tests (and future flow-artifact tests) need an isolated
 // `TACHI_RUN_ROOT` so they never collide with a developer's real `.tachi/runs`
-// or with each other. `tachi_run_root_env_lock` is the shared cfg-test mutex
+// or with each other. `global_test_lock` is the shared cfg-test mutex
 // that already serializes every run-root test across the crate; we reuse it
 // (rather than inventing a second lock) so all run-root tests stay mutually
 // exclusive. This mirrors the `shell_ops/tests` harness convention: the mutex
@@ -182,7 +182,7 @@ fn dedupe_strings_keeps_first_occurrence() {
 // other's run directory even though `TACHI_RUN_ROOT` is not restored on drop.
 
 fn runs_env_lock() -> &'static std::sync::Mutex<()> {
-    crate::shell_ops::tachi_run_root_env_lock()
+    crate::utils::global_test_lock()
 }
 
 struct RunsRootGuard {
@@ -206,7 +206,7 @@ fn temp_runs_root() -> RunsRootGuard {
     std::fs::create_dir_all(&d).unwrap();
     // SAFETY: `set_var` is unsafe on edition 2021 because it can race with
     // other threads reading the same env key. This call is safe because:
-    //   1. The shared `tachi_run_root_env_lock` mutex is held for the entire
+    //   1. The shared `global_test_lock` mutex is held for the entire
     //      lifetime of `RunsRootGuard`, serialising all `temp_runs_root()`
     //      callers across the crate.
     //   2. Each test resolves a unique fixture path from the current

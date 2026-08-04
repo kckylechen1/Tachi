@@ -1,4 +1,4 @@
-use super::{action_inventory, string_enum_schema, DispatchMcpAccessParams, TachiDispatchReason};
+use super::{action_inventory, string_enum_schema, TachiDispatchReason};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
@@ -22,12 +22,12 @@ fn tachi_verify_action_schema(
     )
 }
 
-fn tachi_shell_action_schema(
+fn tachi_staff_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        action_inventory::TACHI_SHELL_ACTIONS,
-        "Required Tachi shell workflow stage.",
+        action_inventory::TACHI_STAFF_ACTIONS,
+        "Required Tachi staffing action.",
         generator,
     )
 }
@@ -293,85 +293,84 @@ pub struct TachiVerifyParams {
     pub checks: Vec<TachiVerifyCheckItem>,
 }
 
-// ─── Facade: tachi_shell (dispatch packet and flow status) ──────────────────
+// ─── Facade: tachi_staff (external staffing via canonical dispatch kernel) ────
 
+/// Parameters for the `tachi_staff` facade — external staffing via the
+/// canonical dispatch kernel.
+///
+/// This is a flat, MCP-compatible struct (not a `#[serde(tag)]` enum, which
+/// produces a schema without the root `type: object` the MCP spec requires).
+/// `action` selects the path; the facade handler enforces per-action
+/// admission:
+/// - `action='start'`: the handler REQUIRES a typed `staffing_reason`
+///   (native-first exception gate) — a `start` request with `staffing_reason =
+///   None` is rejected with zero artifacts, same fail-closed shape as the
+///   retired `require_tachi_dispatch_reason`.
+/// - `action='status'`: only `dispatch_id` is required; `staffing_reason` is
+///   ignored and MUST NOT be required, so a read-only probe is never forced to
+///   fabricate an admission reason.
+///
+/// `staffing_reason` is therefore `Option<TachiDispatchReason>` at the schema
+/// level (so `status` can omit it) but REQUIRED semantically for `start` —
+/// enforced by the handler, not by a cross-action struct field.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct TachiShellParams {
-    /// Action: "dispatch" | "status"
-    #[schemars(schema_with = "tachi_shell_action_schema")]
+pub struct TachiStaffParams {
+    /// Action: "start" | "status"
+    #[schemars(schema_with = "tachi_staff_action_schema")]
     pub action: String,
 
     /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
 
-    /// Existing flow id to continue (optional). When omitted, dispatch generates a new flow_id.
+    /// Existing canonical dispatch_id for `action='status'`. Required for
+    /// status; ignored for start.
     #[serde(default)]
-    pub flow_id: Option<String>,
+    pub dispatch_id: Option<String>,
 
-    /// Free-form task / goal description. Required for dispatch.
+    /// Task description / prompt for the worker. Required for `start`
+    /// (the route validates non-empty); ignored for `status`.
     #[serde(default)]
     pub task: Option<String>,
 
-    /// Short title used to slug the flow_id when creating a new flow.
+    /// Typed reason execution is leaving the host harness. REQUIRED for
+    /// `action='start'` (the handler rejects `None` with zero artifacts — the
+    /// admission gate); IGNORED for `action='status'` (a read-only probe never
+    /// needs a reason, and MUST NOT be pressured to fabricate one). Optional
+    /// at the schema level precisely so `status` can omit it; the `start`
+    /// handler enforces presence. Reuses [`TachiDispatchReason`] so the
+    /// vocabulary cannot drift.
     #[serde(default)]
-    pub title: Option<String>,
+    pub staffing_reason: Option<TachiDispatchReason>,
 
-    /// Optional clanker backend hint for dispatch (e.g. "claude" | "codex" | "custom").
-    /// Forwarded to the underlying tachi_dispatch when async hook fires.
+    /// Semantic dispatch profile hint — resolved through the existing profile
+    /// pipeline, not a raw agent/transport override. Start-only.
     #[serde(default)]
-    pub agent: Option<String>,
-
-    /// Optional dispatch profile forwarded to the underlying tachi_dispatch.
-    #[serde(default, alias = "dispatch_profile")]
     pub profile: Option<String>,
 
-    /// Optional cwd override for downstream dispatch.
+    /// Worker/agent backend hint (e.g. "claude", "codex", "custom"). Start-only.
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub worker: Option<String>,
 
-    /// Tachi MCP ToolProfile for async-dispatched workers.
-    #[serde(default)]
-    pub tool_profile: Option<String>,
-
-    /// Optional explicit MCP/tool access contract for async-dispatched workers.
-    #[serde(default)]
-    pub mcp_access: Option<DispatchMcpAccessParams>,
-
-    /// Hub MCP allowlist for async-dispatched workers.
-    #[serde(default)]
-    pub allowed_mcp_servers: Vec<String>,
-
-    /// When true, attempt to spawn the underlying async dispatch immediately
-    /// (Phase 4). When false (MVP default), only the instruction.md artifact is
-    /// produced and the caller is expected to dispatch separately.
-    #[serde(default)]
-    pub async_dispatch: bool,
-
-    /// Required when `async_dispatch=true`; ordinary shell packets are handed
-    /// to harness-native subagents and need no Tachi dispatch reason.
-    #[serde(default)]
-    pub dispatch_reason: Option<TachiDispatchReason>,
-
-    /// Project DB hint passed through to underlying handlers.
+    /// Optional named project DB for context search. Start-only.
     #[serde(default)]
     pub project: Option<String>,
 
-    /// Limit for status list views.
+    /// Dispatch stage: "plan" | "execute" | "auto". Start-only.
     #[serde(default)]
-    pub limit: Option<usize>,
+    pub stage: Option<String>,
 
-    /// Free-form notes appended to the generated instruction.md (e.g. acceptance criteria).
+    /// GitHub issue reference bound to this dispatch. Start-only.
     #[serde(default)]
-    pub notes: Option<String>,
+    pub issue_ref: Option<String>,
 
-    /// Validation commands to embed in the instruction packet.
+    /// GitHub PR reference bound to this dispatch. Start-only.
     #[serde(default)]
-    pub validation: Vec<String>,
+    pub pr_ref: Option<String>,
 
-    /// Allowed scope (file globs / module names) to embed in the instruction packet.
+    /// Tachi flow id for feature-scoped briefing/dispatch/eval linkage. Start-only.
     #[serde(default)]
-    pub allowed_scope: Vec<String>,
+    pub flow_id: Option<String>,
 }
 
 // ─── Facade: orchestrator (persistent TODO / handoff) ────────────────────────

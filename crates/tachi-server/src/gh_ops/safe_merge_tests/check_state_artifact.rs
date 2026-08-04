@@ -29,7 +29,7 @@ fn check(name: &str, status: &str, conclusion: Option<&str>) -> CheckRun {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn check_state_artifact_writes_machine_readable_flow_snapshot() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -118,7 +118,7 @@ async fn check_state_artifact_writes_machine_readable_flow_snapshot() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn check_state_artifact_records_red_checks_without_merge_or_repair_side_effects() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -209,7 +209,7 @@ async fn check_state_artifact_without_flow_id_is_explicitly_non_auditable() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_repair() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -292,7 +292,7 @@ async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_re
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_already_merged_dry_run_still_records_check_state_artifact() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -410,7 +410,7 @@ async fn safe_merge_dry_run_without_flow_id_reports_non_auditable_check_state() 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn check_state_ingest_reader_records_pending_to_failed_transition() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -481,7 +481,7 @@ async fn check_state_ingest_reader_records_pending_to_failed_transition() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn check_state_ingest_distinguishes_no_checks_stale_and_reader_error() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -600,7 +600,7 @@ async fn check_state_ingest_distinguishes_no_checks_stale_and_reader_error() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn safe_merge_dry_run_returns_ok_with_reader_error_marker_when_checks_list_fails() {
-    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+    let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();

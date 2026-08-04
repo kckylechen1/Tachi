@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn dispatch_legacy_vault_env_binding_still_injects_without_credential_profile() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+    let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();

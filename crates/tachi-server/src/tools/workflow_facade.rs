@@ -72,20 +72,75 @@ impl MemoryServer {
         handle_tachi_verify(self, params).await
     }
 
-    // ─── Tachi Shell: dispatch packet and flow-status facade ────────────────
+    // ─── Tachi Staff: external staffing facade ──────────────────────────────
 
     #[tool(
-        description = "Dispatch packet and flow-status facade. This does not replace the host harness's native subagents. action='dispatch': prepare bounded handoff packets and inject the dispatch SOP, using native workers by default (legacy async Tachi execution is only for an explicit durable/remote exception); action='status': read flow progress without creating or mutating artifacts."
+        description = "External staffing: start a worker via the canonical dispatch kernel, or read a worker's canonical status receipt. start requires a typed staffing_reason (native-first exception); execution detail is resolved by profile/policy, not the caller."
     )]
-    pub(crate) async fn tachi_shell(
+    pub(crate) async fn tachi_staff(
         &self,
-        Parameters(params): Parameters<TachiShellParams>,
+        Parameters(params): Parameters<TachiStaffParams>,
     ) -> Result<String, String> {
-        let action = params.action.to_ascii_lowercase();
+        // `TachiStaffParams` is a flat, MCP-compatible struct (a `#[serde(tag)]`
+        // enum would emit a schema without the root `type: object` the MCP spec
+        // requires). Per-action admission is enforced HERE, before any run
+        // artifact, so each action requires only its own fields:
+        //   - start: REQUIRES a typed staffing_reason (native-first gate) +
+        //     non-empty task; rejected with zero artifacts if missing.
+        //   - status: REQUIRES dispatch_id; staffing_reason is IGNORED and
+        //     MUST NOT be required (a read-only probe is never forced to
+        //     fabricate a reason).
+        let action = params.action.trim().to_ascii_lowercase();
         let format = params.format.clone();
-        let raw = crate::shell_ops::handle_tachi_shell(self, params).await?;
+        let raw = match action.as_str() {
+            "start" => {
+                let task = params.task.unwrap_or_default();
+                if task.trim().is_empty() {
+                    return Err(
+                        "tachi_staff: action='start' requires a non-empty `task`".to_string()
+                    );
+                }
+                // #1319 admission gate: a start request MUST carry a typed
+                // staffing_reason. None is rejected with zero artifacts (no
+                // run dir, no status.json) — same fail-closed shape as the
+                // retired require_tachi_dispatch_reason. This runs before
+                // staff_start → handle_tachi_dispatch, so no receipt is seeded.
+                let staffing_reason = params.staffing_reason.ok_or_else(|| {
+                    "tachi_staff: action='start' requires a typed staffing_reason (the native-first exception); use the host harness's native subagent for ordinary delegation, or set staffing_reason to explicit_user_request / durable_cross_session / cross_device_remote / native_subagent_unavailable for an admitted exception; zero staffing or dispatch artifacts were created.".to_string()
+                })?;
+                let request = crate::staffing_ops::StaffStartRequest {
+                    task,
+                    staffing_reason,
+                    profile: params.profile,
+                    worker: params.worker,
+                    project: params.project,
+                    stage: params.stage,
+                    issue_ref: params.issue_ref,
+                    pr_ref: params.pr_ref,
+                    flow_id: params.flow_id,
+                };
+                crate::staffing_ops::staff_start(self, request).await?
+            }
+            "status" => {
+                // status ignores staffing_reason entirely — a read-only probe
+                // never needs a reason and is not pressured to fabricate one.
+                let dispatch_id = params.dispatch_id.ok_or_else(|| {
+                    "tachi_staff: action='status' requires a `dispatch_id`".to_string()
+                })?;
+                crate::staffing_ops::staff_status(
+                    self,
+                    crate::staffing_ops::StaffStatusRequest { dispatch_id },
+                )
+                .await?
+            }
+            other => {
+                return Err(format!(
+                    "tachi_staff: unknown action '{other}' (start|status)"
+                ))
+            }
+        };
         format_facade_response(
-            &format!("Tachi shell {}", action),
+            &format!("Tachi staff {}", action),
             &action,
             &raw,
             format.as_deref(),

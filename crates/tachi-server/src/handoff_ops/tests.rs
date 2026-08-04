@@ -1,7 +1,7 @@
 use super::*;
 
 fn env_lock() -> &'static std::sync::Mutex<()> {
-    crate::shell_ops::tachi_run_root_env_lock()
+    crate::utils::global_test_lock()
 }
 
 fn test_server(db_path: std::path::PathBuf) -> MemoryServer {
