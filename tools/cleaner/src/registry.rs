@@ -192,6 +192,13 @@ pub fn remove_registry_entry(worktree_root: &Path) -> Result<bool, String> {
 /// [`find_registry_entry`]/[`list_registered_worktrees`]) removes at most
 /// the one row that was actually planned, and never touches any other row
 /// no matter what now lives on disk at that path.
+///
+/// If more than one row shares the identical stored `path` string, this
+/// refuses to delete anything rather than guess (round-2 cross-vendor
+/// review, FIX 1): a duplicate-path registry is itself corrupt state, and
+/// picking the "first" match by iteration order is a guess dressed up as a
+/// decision — nothing about iteration order says which duplicate row was
+/// actually the one planned for removal.
 pub fn remove_registry_entry_exact(stored_path: &str) -> Result<bool, String> {
     let registry_path = registry_path()?;
     if !registry_path.exists() {
@@ -199,19 +206,36 @@ pub fn remove_registry_entry_exact(stored_path: &str) -> Result<bool, String> {
     }
     let _lock = acquire_registry_lock(&registry_path)?;
     let mut registry = read_registry(&registry_path)?;
-    let mut removed_one = false;
-    registry.worktrees.retain(|record| {
-        if !removed_one && record.path == stored_path {
-            removed_one = true;
-            false
-        } else {
-            true
-        }
-    });
-    if !removed_one {
+    if !remove_matching_row_exact(&mut registry, stored_path)? {
         return Ok(false);
     }
     write_registry(&registry_path, &registry)?;
+    Ok(true)
+}
+
+/// Shared count-then-remove logic behind [`remove_registry_entry_exact`].
+/// Mutates `registry` in place; callers persist it. `Ok(true)` = one row
+/// removed, `Ok(false)` = zero rows matched, `Err` (naming the path and the
+/// count) = more than one row matched — refusing to guess which to drop.
+fn remove_matching_row_exact(
+    registry: &mut WorktreeRegistry,
+    stored_path: &str,
+) -> Result<bool, String> {
+    let count = registry
+        .worktrees
+        .iter()
+        .filter(|record| record.path == stored_path)
+        .count();
+    if count == 0 {
+        return Ok(false);
+    }
+    if count > 1 {
+        return Err(format!(
+            "registry holds {count} rows with identical path {stored_path}; refusing to guess \
+             which to drop; repair the registry first"
+        ));
+    }
+    registry.worktrees.retain(|record| record.path != stored_path);
     Ok(true)
 }
 
@@ -490,6 +514,85 @@ mod tests {
         assert_eq!(
             remaining[0].branch, "feature/link",
             "the OTHER row (different stored string) must survive untouched"
+        );
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Round-2 cross-vendor review, FIX 1: `remove_registry_entry_exact` must
+    /// refuse — not silently pick the first match — when two rows share the
+    /// IDENTICAL stored `path` string. Before this fix the old code walked
+    /// `retain` and dropped only the first hit it encountered, which is a
+    /// guess dressed up as a decision: nothing about iteration order tells
+    /// you which of two identically-spelled rows was actually the one
+    /// planned for removal. This pins that a duplicate-path registry is
+    /// refused outright, typed, naming the path and the count, and that
+    /// BOTH rows survive the refusal untouched.
+    #[test]
+    fn remove_registry_entry_exact_refuses_on_duplicate_stored_path_rows() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let root = std::env::temp_dir().join(format!(
+            "tachi-clean-duplicate-rows-test-{}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let dup_path = root.join("dup-wt").display().to_string();
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let registry_path = registry_path().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let registry = WorktreeRegistry {
+            version: 1,
+            worktrees: vec![
+                WorktreeRecord {
+                    path: dup_path.clone(),
+                    repo_root: root.display().to_string(),
+                    branch: "feature/dup-a".to_string(),
+                    dispatch_id: None,
+                    pr: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                },
+                WorktreeRecord {
+                    path: dup_path.clone(),
+                    repo_root: root.display().to_string(),
+                    branch: "feature/dup-b".to_string(),
+                    dispatch_id: None,
+                    pr: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                },
+            ],
+        };
+        write_registry(&registry_path, &registry).unwrap();
+
+        let err = remove_registry_entry_exact(&dup_path)
+            .expect_err("must refuse rather than guess which duplicate row to drop");
+        assert!(
+            err.contains(&dup_path),
+            "refusal must name the path: {err}"
+        );
+        assert!(
+            err.contains('2'),
+            "refusal must name the count of matching rows: {err}"
+        );
+        assert!(
+            err.contains("refusing"),
+            "refusal must be explicit about refusing, not just describing state: {err}"
+        );
+
+        let remaining = read_registry(&registry_path).unwrap().worktrees;
+        assert_eq!(
+            remaining.len(),
+            2,
+            "BOTH duplicate rows must survive a refused exact-remove: {remaining:?}"
         );
 
         match old_home {
