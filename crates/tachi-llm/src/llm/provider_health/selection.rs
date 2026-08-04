@@ -485,4 +485,21 @@ impl super::super::LlmClient {
     pub fn provider_secret_for_tests(&self, keys: &[&str]) -> Option<String> {
         self.first_secret(keys)
     }
+
+    /// The distill lane's resolved api-key chain — primary tier followed by
+    /// the cross-provider fallback tier when one is configured.
+    ///
+    /// Exposed for consumer-crate tests (kckylechen1/tachi#1605) so a test can
+    /// assert that a materialized Vault secret is reachable through the chain
+    /// the distill lane actually consults, instead of hardcoding that chain a
+    /// second time where it would silently drift from `config.rs`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn distill_api_key_envs_for_tests(&self) -> Vec<&'static str> {
+        let mut envs = self.distill.api_key_envs.clone();
+        if let Some(fallback) = self.distill_fallback.as_ref() {
+            envs.extend(fallback.api_key_envs.iter().copied());
+        }
+        envs
+    }
 }
