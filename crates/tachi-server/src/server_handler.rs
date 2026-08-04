@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_schema_hides_operator_dispatch_while_admin_keeps_it() {
+    fn standard_schema_hides_dispatch_only_execution_knobs() {
         fn task_tool() -> rmcp::model::Tool {
             MemoryServer::workflow_tool_router()
                 .list_all()
@@ -1162,20 +1162,42 @@ mod tests {
         let standard_properties = standard[0].input_schema["properties"]
             .as_object()
             .expect("standard properties");
+        // #1319-C2: dispatch-only execution knobs are hidden at the struct
+        // level (#[schemars(skip)]), so no profile — standard or admin —
+        // exposes them anymore. The projection list below is the surviving
+        // verification surface for the struct-level hide.
         for hidden in [
             "dispatch_reason",
             "env_id",
+            "unmanaged_cwd",
+            "skills",
+            "context_query",
+            "model",
+            "timeout_secs",
+            "permission_profile",
+            "allowed_tools",
+            "completion_predicate",
+            "max_turns",
+            "sandbox",
+            "inject_tachi_mcp",
+            "inject_hub_mcps",
             "command",
+            "harness_transport",
+            "harness_server_url",
             "credential_profiles",
+            "tool_profile",
             "mcp_access",
+            "allowed_mcp_servers",
         ] {
             assert!(!standard_properties.contains_key(hidden), "{hidden}");
         }
+        // #1319-C2: `cwd` survives as a briefing/doc_index field (relative
+        // doc path resolution) — it must stay visible on the standard tool.
         assert!(standard_properties.contains_key("cwd"));
-        assert_eq!(
-            standard_properties["cwd"]["description"],
-            json!("[action=briefing|doc_index] Workspace root used to resolve relative canonical document paths.")
-        );
+        assert!(standard_properties["cwd"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("action=briefing"));
         assert!(!standard[0]
             .description
             .as_deref()

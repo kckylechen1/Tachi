@@ -369,3 +369,44 @@ fn task_field_disposition_census_matches_live_struct() {
         );
     }
 }
+
+/// #1319-C2 discriminator: every action named in any field's `used_by_actions`
+/// must be a LIVE action in the current `TachiTaskAction` inventory. After
+/// [1319-C2] removed Dispatch/Wait/Cancel, the census must not keep naming
+/// them — a field whose only readers were removed must be re-dispositioned.
+/// This is the semantic check the field-count checks cannot catch.
+#[test]
+fn census_used_by_actions_are_live_primary_actions() {
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("census fixture parses");
+    let live: BTreeSet<&str> = tachi_params::TachiTaskAction::PRIMARY
+        .iter()
+        .map(|action| action.as_str())
+        .collect();
+    let removed: BTreeSet<&str> = ["Dispatch", "Wait", "Cancel"].into_iter().collect();
+
+    let fields = fixture["fields"].as_object().expect("census fields");
+    let mut stale = Vec::new();
+    for (field, entry) in fields {
+        let Some(actions) = entry["used_by_actions"].as_array() else {
+            continue;
+        };
+        for action in actions {
+            let name = action.as_str().unwrap_or_default();
+            if !live.contains(name) {
+                stale.push(format!(
+                    "{field}: used_by_actions contains '{name}' (not a live PRIMARY action)"
+                ));
+            }
+            if removed.contains(name) {
+                stale.push(format!(
+                    "{field}: used_by_actions contains REMOVED action '{name}' (#1319-C2)"
+                ));
+            }
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "census used_by_actions references stale/removed actions:\n{}",
+        stale.join("\n")
+    );
+}

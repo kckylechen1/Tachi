@@ -5,475 +5,700 @@
   "total_fields": 105,
   "fields": {
     "action": {
-      "used_by_actions": ["Plan", "Briefing", "DocIndex", "Recommend", "Complete", "Profiles", "Profile", "Card", "RouteSimulate", "Proposals", "ReviewProposal", "ApplyProposals", "Status", "Board", "Merge", "Intake", "CycleStatus", "CyclePlan", "UxMatrix", "BuildReferences", "CloseLoop", "RefineIssues", "Adjudicate", "Claim", "Release", "Heartbeat", "Handoff"],
+      "used_by_actions": [
+        "plan",
+        "briefing",
+        "doc_index",
+        "recommend",
+        "complete",
+        "profiles",
+        "profile",
+        "card",
+        "route_simulate",
+        "proposals",
+        "review_proposal",
+        "apply_proposals",
+        "status",
+        "board",
+        "merge",
+        "intake",
+        "cycle_status",
+        "cycle_plan",
+        "ux_matrix",
+        "build_references",
+        "close_loop",
+        "refine_issues",
+        "adjudicate",
+        "claim",
+        "release",
+        "heartbeat",
+        "handoff"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
       "rationale": "Discriminator for every arm of the exhaustive match in task_router.rs; load-bearing for the whole facade."
     },
     "format": {
-      "used_by_actions": ["Plan", "Briefing", "DocIndex", "Recommend", "Complete", "Board", "Intake"],
+      "used_by_actions": [
+        "plan",
+        "briefing",
+        "doc_index",
+        "recommend",
+        "complete",
+        "board",
+        "intake"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
       "rationale": "Cross-cutting response-shape selector (json/markdown/full) read by format_facade_response and wants_full_format across many arms."
     },
     "verbose": {
-      "used_by_actions": ["Dispatch", "Complete", "Board", "Profiles", "Profile", "Card"],
+      "used_by_actions": [
+        "complete",
+        "board",
+        "profiles",
+        "profile",
+        "card"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Drives the slim-vs-full payload shape on multiple surviving actions (board/profiles); spec names it shared."
     },
     "include_card": {
-      "used_by_actions": ["Complete", "Recommend"],
+      "used_by_actions": [
+        "complete",
+        "recommend"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Recommend/card top-level mbit_card toggle (#1201) — tuning/profile/card surface, defer to #1467."
     },
     "task": {
-      "used_by_actions": ["Plan", "Recommend", "Dispatch", "Complete", "Briefing", "Intake"],
+      "used_by_actions": [
+        "plan",
+        "recommend",
+        "complete",
+        "briefing",
+        "intake"
+      ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
       "rationale": "Prompt text; duplicates StaffStartFields.task semantically."
     },
     "execution_level": {
-      "used_by_actions": ["Dispatch", "Recommend", "RouteSimulate"],
-      "canonical_future_owner": "CLI/internal",
-      "disposition": "operator_only_internal",
-      "rationale": "Declared side-effect level L0-L3 admission knob; execution-bottom, not in the public Task ledger surface."
+      "used_by_actions": [
+        "recommend",
+        "route_simulate"
+      ],
+      "canonical_future_owner": "Task",
+      "disposition": "keep_task_shared",
+      "rationale": "Read by Recommend and RouteSimulate arms for host admission (task_router.rs); stays in the public schema after [1319-C2]."
     },
     "agent_id": {
-      "used_by_actions": ["Plan", "Briefing"],
+      "used_by_actions": [
+        "plan",
+        "briefing"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
       "rationale": "Ledger identity of the requesting agent; threaded into TaskBriefParams and briefing."
     },
     "domain": {
-      "used_by_actions": ["Plan", "Briefing"],
+      "used_by_actions": [
+        "plan",
+        "briefing"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Area tag for plan/briefing context scoping; survives Dispatch removal."
     },
     "path_prefix": {
-      "used_by_actions": ["Plan", "Briefing"],
+      "used_by_actions": [
+        "plan",
+        "briefing"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Recall path-prefix filter for context recall; tuning-knob surface aligned with #1467."
     },
     "top_k": {
-      "used_by_actions": ["Plan", "Briefing"],
+      "used_by_actions": [
+        "plan",
+        "briefing"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Max context fragments to recall; tuning knob, defer to #1467."
     },
     "doc_paths": {
-      "used_by_actions": ["Briefing", "Recommend", "RouteSimulate", "CycleStatus", "UxMatrix", "BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "briefing",
+        "recommend",
+        "route_simulate",
+        "cycle_status",
+        "ux_matrix",
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Canonical docs prioritization; tuning/context surface, defer to #1467."
     },
     "related_issues": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Related issues for close_loop/build_references; advisory context surface."
     },
     "spec_paths": {
-      "used_by_actions": ["Briefing", "Recommend", "RouteSimulate", "CycleStatus", "UxMatrix", "BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "briefing",
+        "recommend",
+        "route_simulate",
+        "cycle_status",
+        "ux_matrix",
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Canonical spec docs prioritization; tuning/context surface, defer to #1467."
     },
     "include_global": {
-      "used_by_actions": ["Briefing"],
+      "used_by_actions": [
+        "briefing"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Briefing scope-expansion toggle; tuning knob, defer to #1467."
     },
     "compact": {
-      "used_by_actions": ["Briefing"],
+      "used_by_actions": [
+        "briefing"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Agent-facing tight packet toggle; tuning knob, defer to #1467."
     },
     "agent": {
-      "used_by_actions": ["Dispatch", "Complete"],
-      "canonical_future_owner": "Staff",
-      "disposition": "move_to_staff",
-      "rationale": "Agent backend id; maps to StaffStartFields.worker (the executor identity)."
+      "used_by_actions": [
+        "complete"
+      ],
+      "canonical_future_owner": "Task",
+      "disposition": "keep_task_shared",
+      "rationale": "Agent backend required by the Complete arm (task_router.rs complete arm reads params.agent with dispatch-defaults fallback); stays in the public schema after [1319-C2]."
     },
     "outcome": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Terminal outcome (success/failure/partial/aborted) recorded by Complete; spec-named shared."
     },
     "task_id": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Optional task id recorded by Complete; survives as a complete/submit shared field."
     },
     "task_type": {
-      "used_by_actions": ["Complete", "Briefing"],
+      "used_by_actions": [
+        "complete",
+        "briefing"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Standard task type stamp (fix_request/plan_request); recorded by Complete, read by Briefing."
     },
     "duration_ms": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Execution duration recorded by Complete; complete/submit shared evidence."
     },
     "skills_used": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Skills actually used; recorded by Complete, distinct from dispatch prompt skills."
     },
     "cost_tokens": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Token cost recorded by Complete; complete/submit shared evidence."
     },
     "cost_usd": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "USD cost recorded by Complete; complete/submit shared evidence."
     },
     "quality_score": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Quality score recorded by Complete; complete/submit shared evidence."
     },
     "notes": {
-      "used_by_actions": ["Complete", "ReviewProposal", "BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "complete",
+        "review_proposal",
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Free-text completion/review/workflow notes; spec-named shared."
     },
     "trajectory": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Execution trajectory recorded by Complete; complete/submit shared evidence."
     },
     "diff": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Unified diff evidence recorded by Complete; spec-named shared."
     },
     "subagents": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Structured subagent eval records recorded by Complete; complete/submit shared."
     },
     "eval_run_ids": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "#1066 eval-run projections recorded by Complete; complete/submit shared."
     },
     "feedback_rules_applied": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Prompt-quality rule ids recorded by Complete; complete/submit shared."
     },
     "signatures": {
-      "used_by_actions": ["Complete", "Adjudicate"],
+      "used_by_actions": [
+        "complete",
+        "adjudicate"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Vendor-keyed error signatures (#735); spec-named shared, used by surviving Complete/Adjudicate."
     },
     "rulings": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Leader adjudication rulings (#950); spec-named shared, recorded by Complete."
     },
     "adjudication": {
-      "used_by_actions": ["Complete", "Adjudicate"],
+      "used_by_actions": [
+        "complete",
+        "adjudicate"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Terminal adjudication block (#1035); spec-named shared, used by surviving Complete/Adjudicate."
     },
     "evidence_refs": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Verification evidence references recorded by Complete; spec-named shared."
     },
     "tests_run": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Verification commands recorded by Complete; spec-named shared."
     },
     "diff_present": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Diff-presence flag recorded by Complete; complete/submit shared."
     },
     "scope": {
-      "used_by_actions": ["Complete", "Adjudicate"],
+      "used_by_actions": [
+        "complete",
+        "adjudicate"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Target DB scope (global/project); used by surviving Complete/Adjudicate."
     },
     "cwd": {
-      "used_by_actions": ["Dispatch", "Briefing"],
-      "canonical_future_owner": "CLI/internal",
-      "disposition": "operator_only_internal",
-      "rationale": "Working-directory execution knob; spec lists cwd as operator-only execution-bottom."
+      "used_by_actions": [
+        "briefing",
+        "doc_index"
+      ],
+      "canonical_future_owner": "Task",
+      "disposition": "keep_task_shared",
+      "rationale": "Read by briefing/doc_index to resolve relative doc_paths/spec_paths (feature_briefing/docs.rs) and echoed into the brief packet; stays in the public schema after [1319-C2]."
     },
     "env_id": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Execution-environment lease id (#894 S1); execution-bottom, Dispatch-only build of TachiDispatchParams."
+      "rationale": "Dispatch-only execution knob (#894 S1 lease); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
     },
     "unmanaged_cwd": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Bare-cwd opt-in execution knob; Dispatch-only, operator-internal."
+      "rationale": "Dispatch-only execution knob (bare-cwd opt-in); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
     },
     "skills": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Skill ids injected into the dispatch prompt; execution-bottom, Dispatch-only."
+      "rationale": "Dispatch-only execution knob (prompt skill injection); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
     },
     "context_query": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Extra recall query injected into the dispatch prompt; execution-bottom, Dispatch-only."
+      "rationale": "Dispatch-only execution knob (recall injection); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
     },
     "model": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Model override for the spawned agent; spec lists model as operator-only execution-bottom."
+      "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists model as operator-only execution-bottom."
     },
     "timeout_secs": {
-      "used_by_actions": ["Dispatch", "Wait", "Status", "Cancel"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Execution/poll timeout knob consumed by dispatch + control loops; spec lists timeout_secs as operator-only."
+      "rationale": "Dispatch-only execution knob (worker timeout); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
     },
     "permission_profile": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Permission profile execution knob; spec lists permission_profile as operator-only."
+      "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists permission_profile as operator-only."
     },
     "allowed_tools": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Tool allowlist execution knob; spec lists allowed_tools as operator-only."
+      "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists allowed_tools as operator-only."
     },
     "completion_predicate": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Machine-checkable completion gate (#878-A); spec lists completion_predicate as operator-only."
+      "rationale": "Dispatch-only execution knob (#878-A gate); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
     },
     "max_turns": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Maximum conversation turns execution knob; spec lists max_turns as operator-only."
+      "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists max_turns as operator-only."
     },
     "sandbox": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Codex sandbox mode execution knob; spec lists sandbox as operator-only."
+      "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists sandbox as operator-only."
     },
     "inject_tachi_mcp": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Tachi MCP injection toggle; spec lists inject_tachi_mcp as operator-only."
+      "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists inject_tachi_mcp as operator-only."
     },
     "inject_hub_mcps": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Hub MCP injection toggle; spec lists inject_hub_mcps as operator-only."
+      "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists inject_hub_mcps as operator-only."
     },
     "command": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Explicit command argv override; spec lists command as operator-only execution-bottom."
+      "rationale": "Dispatch-only execution knob (argv override); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
     },
     "harness_transport": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Harness transport override; spec lists harness_transport as operator-only."
+      "rationale": "Dispatch-only execution knob (transport override); hidden from the census reader set after [1319-C2]. Kept schema-public per [1319-C2] hide list scope."
     },
     "harness_server_url": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Harness server URL for attach transports; spec lists harness_server_url as operator-only."
+      "rationale": "Dispatch-only execution knob (attach transport URL); hidden from the census reader set after [1319-C2]. Kept schema-public per [1319-C2] hide list scope."
     },
     "project": {
-      "used_by_actions": ["Plan", "Briefing", "DocIndex", "Dispatch", "Complete", "Board", "BuildReferences", "CloseLoop", "Adjudicate"],
+      "used_by_actions": [
+        "plan",
+        "briefing",
+        "doc_index",
+        "complete",
+        "board",
+        "build_references",
+        "close_loop",
+        "adjudicate"
+      ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
       "rationale": "Named project DB; duplicates StaffStartFields.project. Survives, but its canonical home is Staff."
     },
     "project_explicit": {
-      "used_by_actions": ["Complete"],
+      "used_by_actions": [
+        "complete"
+      ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
       "rationale": "#1041 B7 wire-explicitness signal for transport-injected project default; travels with project ownership into Staff."
     },
     "stage": {
-      "used_by_actions": ["Dispatch", "Recommend"],
+      "used_by_actions": [
+        "briefing"
+      ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
-      "rationale": "Workflow stage hint; duplicates StaffStartFields.stage."
+      "rationale": "Workflow stage hint; read by copilot_ops feature-briefing (Briefing arm) feedback path; duplicates StaffStartFields.stage."
     },
     "profile": {
-      "used_by_actions": ["Dispatch", "Complete", "Briefing", "Recommend"],
+      "used_by_actions": [
+        "complete",
+        "briefing",
+        "recommend"
+      ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
-      "rationale": "Dispatch profile id; duplicates StaffStartFields.profile (the executor profile)."
+      "rationale": "Worker profile id; duplicates StaffStartFields.profile (the executor profile)."
     },
     "credential_profiles": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Credential profile ids materialized before spawn; spec lists credential_profiles as operator-only."
+      "rationale": "Dispatch-only execution knob (credential materialization); hidden from the census reader set after [1319-C2]. Kept schema-public per [1319-C2] hide list scope."
     },
     "repo": {
-      "used_by_actions": ["Intake", "RefineIssues"],
+      "used_by_actions": [
+        "intake",
+        "refine_issues"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "owner/repo target for intake/refine; survives as a workflow-shared field."
     },
     "number": {
-      "used_by_actions": ["Intake", "RefineIssues"],
+      "used_by_actions": [
+        "intake",
+        "refine_issues"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Issue number target for intake/refine; survives as a workflow-shared field."
     },
     "issue_ref": {
-      "used_by_actions": ["Dispatch", "Complete", "Briefing", "Intake", "CycleStatus", "BuildReferences", "CloseLoop", "RefineIssues", "Claim"],
+      "used_by_actions": [
+        "complete",
+        "briefing",
+        "intake",
+        "cycle_status",
+        "build_references",
+        "close_loop",
+        "refine_issues",
+        "claim"
+      ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
       "rationale": "GitHub issue ref; duplicates StaffStartFields.issue_ref. Many arms read it, so its canonical home is Staff."
     },
     "pr_ref": {
-      "used_by_actions": ["Dispatch", "Complete", "Briefing", "CycleStatus", "BuildReferences", "CloseLoop", "Merge"],
+      "used_by_actions": [
+        "complete",
+        "briefing",
+        "cycle_status",
+        "build_references",
+        "close_loop",
+        "merge"
+      ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
       "rationale": "GitHub PR ref; duplicates StaffStartFields.pr_ref. Many arms read it, so its canonical home is Staff."
     },
     "flow_id": {
-      "used_by_actions": ["Dispatch", "Complete", "Board", "Intake", "BuildReferences", "CloseLoop", "Claim"],
+      "used_by_actions": [
+        "complete",
+        "board",
+        "intake",
+        "build_references",
+        "close_loop",
+        "claim"
+      ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
       "rationale": "Tachi flow id linking artifacts back to a flow; duplicates StaffStartFields.flow_id."
     },
     "dispatch_id": {
-      "used_by_actions": ["Complete", "Status", "Cancel", "Wait", "Adjudicate", "Claim"],
+      "used_by_actions": [
+        "complete",
+        "status",
+        "adjudicate",
+        "claim"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Dispatch ledger linkage for lifecycle events; survives across status/cancel/wait/complete."
+      "rationale": "Dispatch ledger linkage for lifecycle events; survives across complete/status/adjudicate/claim."
     },
     "outcome_id": {
-      "used_by_actions": ["Adjudicate"],
+      "used_by_actions": [
+        "adjudicate"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Direct outcome id for Adjudicate; survives as an adjudicate-shared field."
     },
     "include_result": {
-      "used_by_actions": ["Status"],
+      "used_by_actions": [
+        "status"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Status response shape toggle (#878-C); survives as a status-shared field."
     },
     "risk": {
-      "used_by_actions": ["Recommend", "RouteSimulate", "Intake"],
+      "used_by_actions": [
+        "recommend",
+        "route_simulate",
+        "intake"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Risk override for recommendation/routing/intake automation plan; tuning/profile surface, defer to #1467."
     },
     "tool_profile": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Expected child-agent tool surface; execution-bottom, Dispatch-only build of TachiDispatchParams."
+      "rationale": "Dispatch-only execution knob (child-agent tool surface); hidden from the census reader set after [1319-C2]. Kept schema-public per [1319-C2] hide list scope."
     },
     "auto_capability_bundle": {
-      "used_by_actions": ["Dispatch", "Recommend"],
-      "canonical_future_owner": "CLI/internal",
-      "disposition": "operator_only_internal",
-      "rationale": "Capability-bundle injection toggle; execution-bottom, forwarded into TachiDispatchParams."
+      "used_by_actions": [
+        "briefing"
+      ],
+      "canonical_future_owner": "Task",
+      "disposition": "keep_task_shared",
+      "rationale": "Read by briefing to inject the capability bundle into the briefing context (feature_briefing/dispatch.rs); stays in the public schema after [1319-C2]."
     },
     "mcp_access": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "MCP/GitHub access contract for the spawned agent; spec lists mcp_access as operator-only."
+      "rationale": "Dispatch-only execution knob (MCP/GitHub access contract); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
     },
     "allowed_mcp_servers": {
-      "used_by_actions": ["Dispatch"],
+      "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
-      "rationale": "Hub MCP server ids the dispatch may inject; spec lists allowed_mcp_servers as operator-only."
+      "rationale": "Dispatch-only execution knob (Hub MCP server filter); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
     },
     "state_filter": {
-      "used_by_actions": ["Board", "Proposals"],
+      "used_by_actions": [
+        "board",
+        "proposals"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Board/proposals ledger row filter; survives on board surface."
     },
     "limit": {
-      "used_by_actions": ["Board", "Recommend", "RouteSimulate", "Proposals"],
+      "used_by_actions": [
+        "board",
+        "recommend",
+        "route_simulate",
+        "proposals"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Maximum ledger/proposal rows to return; survives on board/recommend surfaces."
     },
     "proposal_id": {
-      "used_by_actions": ["ReviewProposal", "ApplyProposals"],
+      "used_by_actions": [
+        "review_proposal",
+        "apply_proposals"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Route-policy proposal id; routing/profile/recommendation surface, defer to #1467."
     },
     "review_status": {
-      "used_by_actions": ["ReviewProposal"],
+      "used_by_actions": [
+        "review_proposal"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Review status for route-policy proposal review; routing/profile surface, defer to #1467."
     },
     "worktree": {
-      "used_by_actions": ["Complete", "Merge"],
+      "used_by_actions": [
+        "complete",
+        "merge"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Local dispatched worktree path used by Merge and recorded by Complete; survives."
     },
     "branch": {
-      "used_by_actions": ["Merge", "Claim"],
+      "used_by_actions": [
+        "merge",
+        "claim"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Local worktree merge branch / claim branch hint; survives."
     },
     "strategy": {
-      "used_by_actions": ["Merge"],
+      "used_by_actions": [
+        "merge"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Local worktree merge strategy; survives on merge surface."
@@ -491,156 +716,231 @@
       "rationale": "Umbrella/no-close override for tachi_gh helpers, not read by any tachi_task arm; conservative keep."
     },
     "delete_worktree": {
-      "used_by_actions": ["Merge"],
+      "used_by_actions": [
+        "merge"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Remove-worktree-after-merge toggle; survives on merge surface."
     },
     "confirm": {
-      "used_by_actions": ["Merge", "Dispatch", "ApplyProposals"],
+      "used_by_actions": [
+        "merge",
+        "apply_proposals"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Leader confirmation gate for merge/apply_proposals and dispatch issue-flow bypass; survives."
+      "rationale": "Leader confirmation gate for merge/apply_proposals; survives."
     },
     "wiki_title": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure entry title; survives on close_loop surface."
     },
     "wiki_text": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure entry body; survives on close_loop surface."
     },
     "wiki_path": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure path; survives on close_loop surface."
     },
     "wiki_topic": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure topic label; survives on close_loop surface."
     },
     "wiki_summary": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure short summary; survives on close_loop surface."
     },
     "wiki_category": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure category; survives on close_loop surface."
     },
     "wiki_keywords": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure keywords/tags; survives on close_loop surface."
     },
     "wiki_entities": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure named entities; survives on close_loop surface."
     },
     "wiki_importance": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure importance; survives on close_loop surface."
     },
     "wiki_scope": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure scope; survives on close_loop surface."
     },
     "wiki_domain": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Wiki closure area/domain tag; survives on close_loop surface."
     },
     "force": {
-      "used_by_actions": ["BuildReferences", "CloseLoop"],
+      "used_by_actions": [
+        "build_references",
+        "close_loop"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Bypass wiki noise filtering on close_loop; survives on close_loop surface."
     },
     "agent_identity_id": {
-      "used_by_actions": ["Claim", "Release", "Heartbeat", "Handoff"],
+      "used_by_actions": [
+        "claim",
+        "release",
+        "heartbeat",
+        "handoff"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Stable AgentIdentity id for WorkClaim lifecycle; survives across claim/release/heartbeat/handoff."
     },
     "claim_role": {
-      "used_by_actions": ["Claim", "Handoff"],
+      "used_by_actions": [
+        "claim",
+        "handoff"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Per-work claimant role; survives on claim surface."
     },
     "claim_mode": {
-      "used_by_actions": ["Claim", "Handoff"],
+      "used_by_actions": [
+        "claim",
+        "handoff"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "WorkClaim mode (read_only/writable); survives on claim surface."
     },
     "worktree_path": {
-      "used_by_actions": ["Claim", "Handoff"],
+      "used_by_actions": [
+        "claim",
+        "handoff"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Canonical writable worktree path for WorkClaim; survives on claim surface."
     },
     "claim_scope": {
-      "used_by_actions": ["Claim", "Handoff"],
+      "used_by_actions": [
+        "claim",
+        "handoff"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Declared file scope for collision checks; survives on claim surface."
     },
     "expected_head": {
-      "used_by_actions": ["Claim", "Handoff"],
+      "used_by_actions": [
+        "claim",
+        "handoff"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Expected Git head for compare-and-swap; survives on claim surface."
     },
     "lease_expires_at": {
-      "used_by_actions": ["Claim", "Heartbeat", "Handoff", "Release"],
+      "used_by_actions": [
+        "claim",
+        "heartbeat",
+        "handoff",
+        "release"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Lease expiry timestamp for WorkClaim; survives across claim lifecycle."
     },
     "transition_version": {
-      "used_by_actions": ["Heartbeat", "Handoff", "Release"],
+      "used_by_actions": [
+        "heartbeat",
+        "handoff",
+        "release"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Required WorkClaim transition version for CAS; survives across claim lifecycle."
     },
     "claim_id": {
-      "used_by_actions": ["Heartbeat", "Handoff", "Release"],
+      "used_by_actions": [
+        "heartbeat",
+        "handoff",
+        "release"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "WorkClaim id; survives across claim lifecycle."
     },
     "release_reason": {
-      "used_by_actions": ["Release"],
+      "used_by_actions": [
+        "release"
+      ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Explicit release reason; survives on release surface."
     }
   },
   "disposition_summary": {
-    "delete": 0,
-    "move_to_staff": 9,
-    "operator_only_internal": 23,
-    "keep_task_shared": 59,
     "keep_task_ledger": 3,
-    "defer_1467": 11
+    "keep_task_shared": 63,
+    "defer_1467": 11,
+    "move_to_staff": 8,
+    "operator_only_internal": 20
   }
 }

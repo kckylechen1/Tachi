@@ -11,40 +11,40 @@
         "profiles": {
             "standard": {
                 "max_visible_tools": 16,
-                "max_total_input_schema_bytes": 64506,
-                "max_total_tool_definition_bytes": 73793,
+                "max_total_input_schema_bytes": 67440,
+                "max_total_tool_definition_bytes": 76727,
                 "rationale": "Post-#1540 daily-agent ceiling; any regrowth requires explicit adjudication."
             },
             "delegate": {
                 "max_visible_tools": 11,
-                "max_total_input_schema_bytes": 68453,
-                "max_total_tool_definition_bytes": 73929,
+                "max_total_input_schema_bytes": 71387,
+                "max_total_tool_definition_bytes": 76863,
                 "rationale": "Post-#1540 managed-worker compatibility ceiling."
             },
             "coordinate": {
                 "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 131526,
-                "max_total_tool_definition_bytes": 150580,
+                "max_total_input_schema_bytes": 134460,
+                "max_total_tool_definition_bytes": 153514,
                 "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
             },
             "operate": {
                 "max_visible_tools": 50,
-                "max_total_input_schema_bytes": 122211,
-                "max_total_tool_definition_bytes": 141308,
+                "max_total_input_schema_bytes": 125145,
+                "max_total_tool_definition_bytes": 144242,
                 "rationale": "Post-#1540 runtime-adapter surface ceiling pending #1315 re-slice."
             },
             "admin": {
                 "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 194964,
-                "max_total_tool_definition_bytes": 233128,
+                "max_total_input_schema_bytes": 189249,
+                "max_total_tool_definition_bytes": 227413,
                 "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification."
             }
         },
         "surfaces": {
             "standard.tachi_task": {
-                "max_top_level_properties": 86,
-                "max_input_schema_bytes": 26063,
-                "rationale": "Native-first task facade baseline; launch-only schema must not regrow."
+                "max_top_level_properties": 85,
+                "max_input_schema_bytes": 28997,
+                "rationale": "Native-first task facade baseline after [1319-C2] dispatch-only knob hiding; clean descriptions now survive the non-admin projection, property set is fixed."
             },
             "standard.tachi_memory": {
                 "max_top_level_properties": 68,
@@ -57,9 +57,9 @@
                 "rationale": "Daily GitHub/evidence facade baseline under the facade-width review."
             },
             "admin.tachi_task": {
-                "max_top_level_properties": 104,
-                "max_input_schema_bytes": 36763,
-                "rationale": "Typed operator compatibility exception baseline."
+                "max_top_level_properties": 85,
+                "max_input_schema_bytes": 31048,
+                "rationale": "Typed operator compatibility exception baseline after [1319-C2] dispatch-only knob hiding."
             }
         }
     },
@@ -232,8 +232,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 194964,
-                "total_tool_definition_bytes": 233128,
+                "total_input_schema_bytes": 189249,
+                "total_tool_definition_bytes": 227413,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -342,8 +342,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 131526,
-                "total_tool_definition_bytes": 150580,
+                "total_input_schema_bytes": 134460,
+                "total_tool_definition_bytes": 153514,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -389,8 +389,8 @@
                 ]
             },
             "delegate": {
-                "total_input_schema_bytes": 68453,
-                "total_tool_definition_bytes": 73929,
+                "total_input_schema_bytes": 71387,
+                "total_tool_definition_bytes": 76863,
                 "visible_tool_count": 11,
                 "visible_tools": [
                     "peer_query",
@@ -407,8 +407,8 @@
                 ]
             },
             "operate": {
-                "total_input_schema_bytes": 122211,
-                "total_tool_definition_bytes": 141308,
+                "total_input_schema_bytes": 125145,
+                "total_tool_definition_bytes": 144242,
                 "visible_tool_count": 50,
                 "visible_tools": [
                     "archive_memory",
@@ -464,8 +464,8 @@
                 ]
             },
             "standard": {
-                "total_input_schema_bytes": 64506,
-                "total_tool_definition_bytes": 73793,
+                "total_input_schema_bytes": 67440,
+                "total_tool_definition_bytes": 76727,
                 "visible_tool_count": 16,
                 "visible_tools": [
                     "peer_query",
@@ -694,31 +694,26 @@
                         ]
                     },
                     "tachi_task": {
-                        "input_schema_bytes": 36763,
-                        "property_count": 104,
+                        "input_schema_bytes": 31048,
+                        "property_count": 85,
                         "property_names": [
+                            "__tachi_project_explicit",
                             "action",
                             "adjudication",
                             "agent",
                             "agent_id",
                             "agent_identity_id",
                             "allow_umbrella_close",
-                            "allowed_mcp_servers",
-                            "allowed_tools",
                             "auto_capability_bundle",
                             "branch",
                             "claim_id",
                             "claim_mode",
                             "claim_role",
                             "claim_scope",
-                            "command",
                             "compact",
-                            "completion_predicate",
                             "confirm",
-                            "context_query",
                             "cost_tokens",
                             "cost_usd",
-                            "credential_profiles",
                             "cwd",
                             "delete_worktree",
                             "diff",
@@ -727,7 +722,6 @@
                             "doc_paths",
                             "domain",
                             "duration_ms",
-                            "env_id",
                             "eval_run_ids",
                             "evidence_refs",
                             "execution_level",
@@ -736,26 +730,18 @@
                             "flow_id",
                             "force",
                             "format",
-                            "harness_server_url",
-                            "harness_transport",
                             "include_card",
                             "include_global",
                             "include_result",
-                            "inject_hub_mcps",
-                            "inject_tachi_mcp",
                             "issue_ref",
                             "lease_expires_at",
                             "limit",
-                            "max_turns",
-                            "mcp_access",
                             "merge_policy",
-                            "model",
                             "notes",
                             "number",
                             "outcome",
                             "outcome_id",
                             "path_prefix",
-                            "permission_profile",
                             "pr_ref",
                             "profile",
                             "project",
@@ -767,10 +753,8 @@
                             "review_status",
                             "risk",
                             "rulings",
-                            "sandbox",
                             "scope",
                             "signatures",
-                            "skills",
                             "skills_used",
                             "spec_paths",
                             "stage",
@@ -781,12 +765,9 @@
                             "task_id",
                             "task_type",
                             "tests_run",
-                            "timeout_secs",
-                            "tool_profile",
                             "top_k",
                             "trajectory",
                             "transition_version",
-                            "unmanaged_cwd",
                             "verbose",
                             "wiki_category",
                             "wiki_domain",
@@ -901,9 +882,10 @@
                         ]
                     },
                     "tachi_task": {
-                        "input_schema_bytes": 25998,
-                        "property_count": 86,
+                        "input_schema_bytes": 28932,
+                        "property_count": 85,
                         "property_names": [
+                            "__tachi_project_explicit",
                             "action",
                             "adjudication",
                             "agent",
@@ -971,8 +953,6 @@
                             "task_id",
                             "task_type",
                             "tests_run",
-                            "timeout_secs",
-                            "tool_profile",
                             "top_k",
                             "trajectory",
                             "transition_version",
@@ -1178,9 +1158,10 @@
                     ]
                 },
                 "tachi_task": {
-                    "input_schema_bytes": 26063,
-                    "property_count": 86,
+                    "input_schema_bytes": 28997,
+                    "property_count": 85,
                     "property_names": [
+                        "__tachi_project_explicit",
                         "action",
                         "adjudication",
                         "agent",
@@ -1248,8 +1229,6 @@
                         "task_id",
                         "task_type",
                         "tests_run",
-                        "timeout_secs",
-                        "tool_profile",
                         "top_k",
                         "trajectory",
                         "transition_version",
