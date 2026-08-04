@@ -30,6 +30,11 @@ struct WtRemoveReport {
     dry_run: bool,
     removed: bool,
     allowed: bool,
+    /// #1605: this close has no directory left to remove and only reconciles a
+    /// stale registry row. Nothing destructive runs — no `git worktree
+    /// remove`, no scrap-ledger record — so the field is load-bearing for the
+    /// execute step, not just for the report reader.
+    registry_only: bool,
     warnings: Vec<String>,
     errors: Vec<String>,
 }
@@ -76,6 +81,7 @@ fn plan_wt_remove(
         dry_run,
         removed: false,
         allowed: false,
+        registry_only: false,
         warnings: Vec::new(),
         errors: Vec::new(),
     };
@@ -83,10 +89,14 @@ fn plan_wt_remove(
     let canonical = match std::fs::canonicalize(path) {
         Ok(path) => path,
         Err(err) => {
-            report
-                .errors
-                .push(format!("path does not exist or cannot be resolved: {err}"));
-            return report;
+            // #1605: a registration whose directory is already gone was
+            // unclosable — canonicalization ran before any registry lookup, so
+            // the only documented remediation for the doctor's
+            // `registered_worktree_missing` warning was to hand-edit
+            // ~/.tachi/worktrees.json. A stale row is precisely the case where
+            // the path cannot canonicalize, so the row is matched on its
+            // stored string instead.
+            return plan_stale_registry_row_close(report, path, &err.to_string());
         }
     };
     report.canonical_path = Some(canonical.display().to_string());
@@ -199,6 +209,54 @@ fn plan_wt_remove(
     report
 }
 
+/// Close plan for a path that cannot be canonicalized (kckylechen1/tachi#1605).
+///
+/// If the registry has no row for it, the pre-existing "path does not exist"
+/// error stands: there is nothing to remove and nothing to reconcile. If a row
+/// IS present, the tree was removed outside this tool and only bookkeeping is
+/// left, so the close is allowed and marked `registry_only` — the execute step
+/// then drops the row and runs nothing destructive.
+///
+/// Deliberately does NOT write the scrap ledger: that record exists to gate
+/// re-entry to a tree *this tool* scrapped (tachi#1118 freeze boundary 3).
+/// Nothing was removed here, so inventing a scrap would newly refuse an
+/// operator's reopen of a path/branch on the strength of an event this command
+/// never performed.
+fn plan_stale_registry_row_close(
+    mut report: WtRemoveReport,
+    path: &Path,
+    canonicalize_error: &str,
+) -> WtRemoveReport {
+    let listed = match registry::find_registry_entry(path) {
+        Ok(listed) => listed,
+        Err(err) => {
+            report.errors.push(format!(
+                "path does not exist or cannot be resolved: {canonicalize_error}; \
+                 the worktree registry could not be read either: {err}"
+            ));
+            return report;
+        }
+    };
+    let Some(listed) = listed else {
+        report.errors.push(format!(
+            "path does not exist or cannot be resolved: {canonicalize_error}"
+        ));
+        return report;
+    };
+
+    report.canonical_path = Some(listed.path.clone());
+    report.repo_root = Some(listed.repo_root.clone());
+    report.branch = Some(listed.branch.clone());
+    report.registry_only = true;
+    report.allowed = true;
+    report.warnings.push(format!(
+        "directory is already gone ({canonicalize_error}); this close only drops the stale \
+         registry row for branch '{}' — no git worktree remove, no scrap ledger record",
+        listed.branch
+    ));
+    report
+}
+
 /// Current branch of a worktree (`git rev-parse --abbrev-ref HEAD`), used
 /// only to populate the scrap-ledger record on a successful removal — a
 /// failure to resolve it never blocks the removal itself.
@@ -218,6 +276,27 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
         report.errors.push("missing canonical path".to_string());
         return report;
     };
+    if report.registry_only {
+        // #1605: the directory is gone; the only remaining state is the row.
+        match registry::remove_registry_entry(Path::new(&path)) {
+            Ok(true) => {
+                report.removed = true;
+                report.dry_run = false;
+                if let Err(err) = append_log(&report) {
+                    report
+                        .warnings
+                        .push(format!("cleanup log write failed: {err}"));
+                }
+            }
+            Ok(false) => report.errors.push(format!(
+                "stale registry row for {path} disappeared before it could be dropped"
+            )),
+            Err(err) => report
+                .errors
+                .push(format!("registry cleanup failed: {err}")),
+        }
+        return report;
+    }
     let Some(repo_root) = report.repo_root.clone() else {
         report.errors.push("missing repo root".to_string());
         return report;
@@ -658,6 +737,98 @@ mod tests {
                 "{evidence:?} may proceed to the OS/dirty guards"
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The registered path as the registry stores it — the form the doctor's
+    /// `registered_worktree_missing` remediation prints, and the only form that
+    /// can still be matched once the directory is gone (`canonicalize` fails,
+    /// so a differently-spelled but equivalent path can no longer be resolved
+    /// to it).
+    fn registered_path_string(worktree: &Path) -> String {
+        registry::find_registry_entry(worktree)
+            .expect("read registry")
+            .expect("worktree is registered")
+            .path
+    }
+
+    /// #1605: a registration whose directory was removed by hand could not be
+    /// closed at all — `plan_wt_remove` canonicalized before it ever looked at
+    /// the registry, so the stale row survived every documented remediation.
+    #[test]
+    fn close_drops_a_stale_registry_row_when_the_directory_is_gone() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-stale-row");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let stored_path = registered_path_string(&worktree);
+
+        // Hand-removal: the directory disappears, the registry row does not.
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let report = plan_wt_remove(
+            Path::new(&stored_path),
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(
+            report.allowed,
+            "a stale row must be closable: {:?}",
+            report.errors
+        );
+        assert!(
+            report.registry_only,
+            "nothing destructive is left to do; only the row"
+        );
+        assert_eq!(report.branch.as_deref(), Some("feature/holder-test"));
+        assert!(
+            report.warnings.join(" | ").contains("already gone"),
+            "the close must say why it is registry-only: {:?}",
+            report.warnings
+        );
+
+        let report = execute_wt_remove(report);
+        assert!(
+            report.errors.is_empty(),
+            "registry-only close must not error: {:?}",
+            report.errors
+        );
+        assert!(report.removed, "the stale row must actually be dropped");
+        assert!(
+            registry::find_registry_entry(Path::new(&stored_path))
+                .expect("read registry")
+                .is_none(),
+            "the registry row must be gone after the close"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The fallback is a registry reconciliation, not a blanket relaxation: a
+    /// path that neither exists nor is registered still refuses.
+    #[test]
+    fn close_still_refuses_a_missing_path_with_no_registry_row() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-unknown-missing");
+        let (_home_guard, _worktree) = setup_registered_worktree(&root);
+
+        let report = plan_wt_remove(
+            &root.join("never-registered"),
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(!report.allowed);
+        assert!(!report.registry_only);
+        assert!(
+            report
+                .errors
+                .join(" | ")
+                .contains("path does not exist or cannot be resolved"),
+            "unchanged refusal expected, got: {:?}",
+            report.errors
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

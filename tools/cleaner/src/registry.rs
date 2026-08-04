@@ -129,6 +129,23 @@ pub fn list_registered_worktrees() -> Result<Vec<ListedWorktree>, String> {
         .collect())
 }
 
+/// Look one registered worktree up **without touching the filesystem for the
+/// worktree path itself** (kckylechen1/tachi#1605).
+///
+/// [`remove_registry_entry`]'s `paths_equal` canonicalizes both sides, which is
+/// right while the directory still exists and useless once it does not: a stale
+/// row is exactly the case where `canonicalize` fails. This matches the stored
+/// path string literally first — the form the doctor's
+/// `registered_worktree_missing` remediation prints, so the remediation it
+/// tells an operator to run is actually executable — and falls back to the
+/// canonicalizing comparison for a live path given in another spelling.
+pub fn find_registry_entry(worktree_path: &Path) -> Result<Option<ListedWorktree>, String> {
+    let needle = canonical_string(worktree_path);
+    Ok(list_registered_worktrees()?.into_iter().find(|listed| {
+        listed.path == needle || paths_equal(Path::new(&listed.path), worktree_path)
+    }))
+}
+
 pub fn registry_contains(worktree_root: &Path) -> bool {
     let Ok(registry_path) = registry_path() else {
         return false;

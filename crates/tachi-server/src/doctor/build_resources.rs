@@ -383,10 +383,16 @@ fn worktree_inspection_warning(
                  registry entry",
                 wt.path, wt.branch
             ),
+            // #1605: the remediation must name a subcommand that exists.
+            // `tachi worktree remove --path <p>` never did — the verb is
+            // `close` and the path is positional
+            // (tachi-bootstrap/src/cli/maintenance_actions.rs:178-191). The
+            // hand-edit escape hatch is gone too: `worktree close --force`
+            // now falls back to a registry-row match when the directory is
+            // already gone (tools/cleaner/src/wt_clean.rs).
             remediation: format!(
                 "if this worktree was already removed by hand, drop the stale row: \
-                 `tachi worktree remove --path {}` (or edit ~/.tachi/worktrees.json if the \
-                 path is already gone and the CLI has nothing left to canonicalize)",
+                 `tachi worktree close {} --force`",
                 wt.path
             ),
         });
@@ -411,7 +417,7 @@ fn worktree_inspection_warning(
         ),
         remediation: format!(
             "`git -C {0} status --short` and `git -C {0} log -1 --format=%cr` to judge, then \
-             `tachi worktree remove --path {0}` once a human/Oz confirms it is done",
+             `tachi worktree close {0} --force` once a human/Oz confirms it is done",
             wt.path
         ),
     })
@@ -814,6 +820,55 @@ mod tests {
         let warnings = worktree_inspection_warnings(&worktrees, now, 14);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code, "registered_worktree_missing");
+    }
+
+    /// #1605: the remediation used to name `tachi worktree remove --path <p>`,
+    /// which is not a subcommand — the verb is `close` and the path is
+    /// positional. An unrunnable remediation is worse than none: it reads as
+    /// tried-and-failed when an operator's shell rejects it.
+    #[test]
+    fn worktree_remediations_name_a_real_subcommand() {
+        let now = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let worktrees = vec![
+            listed(
+                "/private/tmp/wz-gone",
+                "feat/gone",
+                None,
+                "2026-07-17T00:00:00Z",
+                false,
+            ),
+            listed(
+                "/private/tmp/wz-stale",
+                "feat/stale",
+                None,
+                "2026-06-01T00:00:00Z",
+                true,
+            ),
+        ];
+        let warnings = worktree_inspection_warnings(&worktrees, now, 14);
+        assert_eq!(
+            warnings.len(),
+            2,
+            "expected both warning kinds: {warnings:?}"
+        );
+        for warning in &warnings {
+            assert!(
+                !warning.remediation.contains("worktree remove --path"),
+                "{}: remediation names a subcommand that does not exist: {}",
+                warning.code,
+                warning.remediation
+            );
+            assert!(
+                warning
+                    .remediation
+                    .contains(&format!("tachi worktree close {} --force", warning.path)),
+                "{}: remediation must be the runnable close command: {}",
+                warning.code,
+                warning.remediation
+            );
+        }
     }
 
     #[test]
