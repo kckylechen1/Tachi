@@ -130,14 +130,6 @@ impl DbOpenContext {
         }
     }
 
-    /// Builder: declare the schema shape this caller needs (#1585 D2). The
-    /// only callers that lower it below [`StoreProfile::TachiFull`] are
-    /// portable-kernel embedders that touch no product table.
-    pub fn with_profile(mut self, required_profile: StoreProfile) -> Self {
-        self.required_profile = required_profile;
-        self
-    }
-
     /// True iff this context authorizes migrating an existing older-schema DB.
     pub fn migration_allowed(&self) -> bool {
         matches!(self.migration, MigrationAuthority::Allow { .. })
