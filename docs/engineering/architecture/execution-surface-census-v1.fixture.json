@@ -11,39 +11,39 @@
         "profiles": {
             "standard": {
                 "max_visible_tools": 16,
-                "max_total_input_schema_bytes": 67440,
-                "max_total_tool_definition_bytes": 76727,
+                "max_total_input_schema_bytes": 67660,
+                "max_total_tool_definition_bytes": 76947,
                 "rationale": "Post-#1540 daily-agent ceiling; any regrowth requires explicit adjudication."
             },
             "delegate": {
                 "max_visible_tools": 11,
-                "max_total_input_schema_bytes": 71387,
-                "max_total_tool_definition_bytes": 76863,
+                "max_total_input_schema_bytes": 71607,
+                "max_total_tool_definition_bytes": 77083,
                 "rationale": "Post-#1540 managed-worker compatibility ceiling."
             },
             "coordinate": {
                 "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 134460,
-                "max_total_tool_definition_bytes": 153514,
+                "max_total_input_schema_bytes": 134680,
+                "max_total_tool_definition_bytes": 153734,
                 "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
             },
             "operate": {
                 "max_visible_tools": 50,
-                "max_total_input_schema_bytes": 125145,
-                "max_total_tool_definition_bytes": 144242,
+                "max_total_input_schema_bytes": 125365,
+                "max_total_tool_definition_bytes": 144462,
                 "rationale": "Post-#1540 runtime-adapter surface ceiling pending #1315 re-slice."
             },
             "admin": {
                 "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 189249,
-                "max_total_tool_definition_bytes": 227413,
+                "max_total_input_schema_bytes": 189469,
+                "max_total_tool_definition_bytes": 227633,
                 "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification."
             }
         },
         "surfaces": {
             "standard.tachi_task": {
-                "max_top_level_properties": 85,
-                "max_input_schema_bytes": 28997,
+                "max_top_level_properties": 86,
+                "max_input_schema_bytes": 29217,
                 "rationale": "Native-first task facade baseline after [1319-C2] dispatch-only knob hiding; clean descriptions now survive the non-admin projection, property set is fixed."
             },
             "standard.tachi_memory": {
@@ -57,8 +57,8 @@
                 "rationale": "Daily GitHub/evidence facade baseline under the facade-width review."
             },
             "admin.tachi_task": {
-                "max_top_level_properties": 85,
-                "max_input_schema_bytes": 31048,
+                "max_top_level_properties": 86,
+                "max_input_schema_bytes": 31268,
                 "rationale": "Typed operator compatibility exception baseline after [1319-C2] dispatch-only knob hiding."
             }
         }
@@ -232,8 +232,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 189249,
-                "total_tool_definition_bytes": 227413,
+                "total_input_schema_bytes": 189469,
+                "total_tool_definition_bytes": 227633,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -342,8 +342,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 134460,
-                "total_tool_definition_bytes": 153514,
+                "total_input_schema_bytes": 134680,
+                "total_tool_definition_bytes": 153734,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -389,8 +389,8 @@
                 ]
             },
             "delegate": {
-                "total_input_schema_bytes": 71387,
-                "total_tool_definition_bytes": 76863,
+                "total_input_schema_bytes": 71607,
+                "total_tool_definition_bytes": 77083,
                 "visible_tool_count": 11,
                 "visible_tools": [
                     "peer_query",
@@ -407,8 +407,8 @@
                 ]
             },
             "operate": {
-                "total_input_schema_bytes": 125145,
-                "total_tool_definition_bytes": 144242,
+                "total_input_schema_bytes": 125365,
+                "total_tool_definition_bytes": 144462,
                 "visible_tool_count": 50,
                 "visible_tools": [
                     "archive_memory",
@@ -464,8 +464,8 @@
                 ]
             },
             "standard": {
-                "total_input_schema_bytes": 67440,
-                "total_tool_definition_bytes": 76727,
+                "total_input_schema_bytes": 67660,
+                "total_tool_definition_bytes": 76947,
                 "visible_tool_count": 16,
                 "visible_tools": [
                     "peer_query",
@@ -694,8 +694,8 @@
                         ]
                     },
                     "tachi_task": {
-                        "input_schema_bytes": 31048,
-                        "property_count": 85,
+                        "input_schema_bytes": 31268,
+                        "property_count": 86,
                         "property_names": [
                             "__tachi_project_explicit",
                             "action",
@@ -765,6 +765,7 @@
                             "task_id",
                             "task_type",
                             "tests_run",
+                            "timeout_secs",
                             "top_k",
                             "trajectory",
                             "transition_version",
@@ -882,8 +883,8 @@
                         ]
                     },
                     "tachi_task": {
-                        "input_schema_bytes": 28932,
-                        "property_count": 85,
+                        "input_schema_bytes": 29152,
+                        "property_count": 86,
                         "property_names": [
                             "__tachi_project_explicit",
                             "action",
@@ -953,6 +954,7 @@
                             "task_id",
                             "task_type",
                             "tests_run",
+                            "timeout_secs",
                             "top_k",
                             "trajectory",
                             "transition_version",
@@ -1158,8 +1160,8 @@
                     ]
                 },
                 "tachi_task": {
-                    "input_schema_bytes": 28997,
-                    "property_count": 85,
+                    "input_schema_bytes": 29217,
+                    "property_count": 86,
                     "property_names": [
                         "__tachi_project_explicit",
                         "action",
@@ -1229,6 +1231,7 @@
                         "task_id",
                         "task_type",
                         "tests_run",
+                        "timeout_secs",
                         "top_k",
                         "trajectory",
                         "transition_version",

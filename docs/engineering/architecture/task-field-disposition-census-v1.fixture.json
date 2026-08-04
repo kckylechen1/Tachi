@@ -406,10 +406,12 @@
       "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists model as operator-only execution-bottom."
     },
     "timeout_secs": {
-      "used_by_actions": [],
-      "canonical_future_owner": "CLI/internal",
-      "disposition": "operator_only_internal",
-      "rationale": "Dispatch-only execution knob (worker timeout); hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat)."
+      "used_by_actions": [
+        "status"
+      ],
+      "canonical_future_owner": "Task",
+      "disposition": "keep_task_shared",
+      "rationale": "Read by the Status arm as the acpx control command timeout (task_facade.rs handle_tachi_task_status, default 30s cap 300s); stays in the public schema after [1319-C2]."
     },
     "permission_profile": {
       "used_by_actions": [],
@@ -938,9 +940,9 @@
   },
   "disposition_summary": {
     "keep_task_ledger": 3,
-    "keep_task_shared": 63,
+    "keep_task_shared": 64,
     "defer_1467": 11,
     "move_to_staff": 8,
-    "operator_only_internal": 20
+    "operator_only_internal": 19
   }
 }

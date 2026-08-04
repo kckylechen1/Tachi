@@ -393,10 +393,11 @@ fn assert_field_accepts_string_and_number(value: &Value, field: &str, numeric_ty
 fn tachi_task_numeric_params_schema_accepts_string_or_number() {
     let value = serde_json::to_value(rmcp::schemars::schema_for!(TachiTaskParams))
         .expect("schema serializes");
-    // #1319-C2: timeout_secs/max_turns were dispatch-only execution knobs and
-    // are hidden from the public schema (#[schemars(skip)]); the string-or-
-    // number admission contract now covers only the surviving ledger fields.
-    for field in ["duration_ms", "number", "cost_tokens"] {
+    // #1319-C2: the dispatch-only execution knobs other than timeout_secs are
+    // hidden from the public schema (#[schemars(skip)]); timeout_secs survives
+    // as the Status arm's acpx control timeout and keeps its string-or-number
+    // admission contract. The list below covers the surviving ledger fields.
+    for field in ["duration_ms", "number", "cost_tokens", "timeout_secs"] {
         assert_field_accepts_string_and_number(&value, field, "integer");
     }
     for field in ["cost_usd", "quality_score"] {
@@ -566,7 +567,6 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
         "skills",
         "context_query",
         "model",
-        "timeout_secs",
         "permission_profile",
         "allowed_tools",
         "completion_predicate",
@@ -603,7 +603,9 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
 ///   name is the serde rename `__tachi_project_explicit`, which IS the wire
 ///   name clients send;
 /// - `execution_level` is read by the Recommend and RouteSimulate arms for
-///   host admission (task_router.rs).
+///   host admission (task_router.rs);
+/// - `timeout_secs` is read by the Status arm for the acpx control command
+///   timeout (task_facade.rs handle_tachi_task_status).
 #[test]
 fn tachi_task_schema_keeps_fields_read_by_surviving_actions() {
     let schema = rmcp::schemars::schema_for!(TachiTaskParams);
@@ -615,6 +617,7 @@ fn tachi_task_schema_keeps_fields_read_by_surviving_actions() {
         ("auto_capability_bundle", "action=briefing"),
         ("__tachi_project_explicit", "action=complete"),
         ("execution_level", "action=recommend"),
+        ("timeout_secs", "action=status"),
     ] {
         let property = properties.get(field).unwrap_or_else(|| {
             panic!("{field} must stay visible in the public tachi_task schema after [1319-C2]")

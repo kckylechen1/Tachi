@@ -1173,7 +1173,6 @@ mod tests {
             "skills",
             "context_query",
             "model",
-            "timeout_secs",
             "permission_profile",
             "allowed_tools",
             "completion_predicate",

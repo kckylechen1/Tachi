@@ -269,7 +269,10 @@ pub struct TachiTaskParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
-    #[schemars(skip)]
+    #[schemars(
+        schema_with = "crate::coerce::opt_integer_from_string_or_number_schema",
+        description = "[action=status] Timeout in seconds for the acpx control command issued by status; default 30, capped at 300."
+    )]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     #[schemars(skip)]
