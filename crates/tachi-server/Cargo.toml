@@ -83,7 +83,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 aes-gcm = { workspace = true }
-argon2 = { workspace = true }
 # Cryptographic digest for the #894 S2e postflight workspace manifest
 # (`exec_env_postflight`). The worker this gate is aimed at can run arbitrary
 # code, so the fingerprint must not be forgeable — a non-cryptographic hash
