@@ -887,7 +887,11 @@ impl MemoryStore {
         Ok(())
     }
 
-    fn validate_write_path(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+    /// `pub(crate)` since tachi#1607 so the snapshot-import path in
+    /// `store::snapshot_import` runs *this* check rather than carrying a copy
+    /// of it — a second copy is how the escape hatch and the `db_label`
+    /// routing rule drift apart.
+    pub(crate) fn validate_write_path(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
         // tachi#1585 D5: this store's `KernelPolicy::path_validation_escape_hatch`,
         // not a `TACHI_DISABLE_PATH_VALIDATION` env read.
         if self.path_validation && !self.policy.path_validation_escape_hatch {

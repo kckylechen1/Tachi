@@ -192,6 +192,12 @@ pub use search::{
     SearchReceiptDatabaseScope, SearchReceiptOperation, TypoFallbackPhaseReceipt,
     HYBRID_HEAD_FRACTION,
 };
+/// tachi#1607 portable snapshot-import contract. Re-exported at the root so
+/// an external portable consumer reaches it exactly like [`MemoryEntry`],
+/// without importing the internal `store::` module layout.
+pub use store::snapshot_import::{
+    DanglingSupersession, PortableImportEntry, PortableImportReceipt,
+};
 pub use types::{
     AuthorityLevel, ContinuityCandidate, ContinuityCandidateBatch, ContinuityMetrics,
     ContinuityOutcomeLabel, EffectScope, ExpectedMemoryState, GcConfig, GraphExpandResult,
