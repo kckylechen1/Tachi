@@ -780,6 +780,19 @@ fn portable_store_survives_crud_gc_and_maintenance() {
     store
         .upsert(&entry("smoke-2", "/scratch/smoke"))
         .expect("upsert 2");
+    // #1599: the atomic batch upsert is ungated, so it must be callable here
+    // too — this is the assertion that it introduces no admin dependency.
+    store
+        .upsert_batch(&[
+            entry("smoke-3", "/scratch/smoke"),
+            entry("smoke-4", "/scratch/smoke"),
+        ])
+        .expect("upsert_batch on a PortableKernel store");
+    assert!(store.get("smoke-3").expect("get").is_some());
+    assert!(store.get("smoke-4").expect("get").is_some());
+    store
+        .upsert_batch(&[])
+        .expect("empty upsert_batch is a successful no-op");
     assert!(store.get("smoke-1").expect("get").is_some());
     // Search is exercised for its table reach (FTS + symbolic FTS + recall
     // cache + access_history), not for relevance — asserting a hit here would
