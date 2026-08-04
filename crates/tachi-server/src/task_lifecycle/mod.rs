@@ -182,7 +182,7 @@ pub(crate) use self::flow_artifacts::{
 #[cfg(test)]
 pub(crate) use self::issue_flow::build_issue_automation_plan;
 pub(crate) use self::issue_flow::{
-    guard_issue_flow_dispatch, handle_task_intake, handle_task_link_pr, handle_task_pr_handoff,
+    handle_task_intake, handle_task_link_pr, handle_task_pr_handoff,
 };
 pub(crate) use self::release_ux::{handle_task_release_note, handle_task_ux_matrix};
 pub(crate) use self::utils::read_json_file;

@@ -147,8 +147,10 @@ mod tests {
         // #1002 Issue Refinery plus append-only adjudication bumped this from
         // 24 -> 26. #1253 WorkClaim lifecycle then intentionally adds four
         // canonical task actions: claim, release, heartbeat, and handoff.
+        // #1319-C2 removes three (dispatch/wait/cancel) as worker launch
+        // moves to tachi_staff: 30 -> 27.
         // Keep this exact so the next inventory addition gets explicit review.
-        assert_eq!(primary.len(), 30);
+        assert_eq!(primary.len(), 27);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 

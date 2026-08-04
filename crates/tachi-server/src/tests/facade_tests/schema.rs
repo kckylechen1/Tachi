@@ -168,10 +168,7 @@ fn tachi_staff_schema_exposes_only_start_and_status() {
         properties.contains_key("staffing_reason"),
         "staff schema must surface staffing_reason"
     );
-    let required = value["required"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let required = value["required"].as_array().cloned().unwrap_or_default();
     assert!(
         !required.iter().any(|r| r == "staffing_reason"),
         "staffing_reason must NOT be schema-level required (status must be able to omit it); required={required:?}"
@@ -285,7 +282,20 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("briefing")));
     assert!(values.contains(&json!("doc_index")));
     assert!(values.contains(&json!("plan")));
-    assert!(values.contains(&json!("dispatch")));
+    // #1319-C2: dispatch/cancel/wait were removed from tachi_task (external
+    // staffing now flows through tachi_staff). The schema must NOT list them.
+    assert!(
+        !values.contains(&json!("dispatch")),
+        "tachi_task must not advertise dispatch after [1319-C2]"
+    );
+    assert!(
+        !values.contains(&json!("cancel")),
+        "tachi_task must not advertise cancel after [1319-C2]"
+    );
+    assert!(
+        !values.contains(&json!("wait")),
+        "tachi_task must not advertise wait after [1319-C2]"
+    );
     assert!(values.contains(&json!("complete")));
     assert!(values.contains(&json!("recommend")));
     assert!(values.contains(&json!("route_simulate")));
@@ -293,7 +303,6 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("review_proposal")));
     assert!(values.contains(&json!("apply_proposals")));
     assert!(values.contains(&json!("status")));
-    assert!(values.contains(&json!("cancel")));
     assert!(values.contains(&json!("intake")));
     assert!(values.contains(&json!("cycle_plan")));
     assert!(values.contains(&json!("ux_matrix")));

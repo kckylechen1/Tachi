@@ -11,39 +11,39 @@
         "profiles": {
             "standard": {
                 "max_visible_tools": 16,
-                "max_total_input_schema_bytes": 64522,
-                "max_total_tool_definition_bytes": 73809,
+                "max_total_input_schema_bytes": 64506,
+                "max_total_tool_definition_bytes": 73793,
                 "rationale": "Post-#1540 daily-agent ceiling; any regrowth requires explicit adjudication."
             },
             "delegate": {
                 "max_visible_tools": 11,
-                "max_total_input_schema_bytes": 68460,
-                "max_total_tool_definition_bytes": 73936,
+                "max_total_input_schema_bytes": 68453,
+                "max_total_tool_definition_bytes": 73929,
                 "rationale": "Post-#1540 managed-worker compatibility ceiling."
             },
             "coordinate": {
                 "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 133605,
-                "max_total_tool_definition_bytes": 152784,
+                "max_total_input_schema_bytes": 131526,
+                "max_total_tool_definition_bytes": 150580,
                 "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
             },
             "operate": {
                 "max_visible_tools": 50,
-                "max_total_input_schema_bytes": 122218,
-                "max_total_tool_definition_bytes": 141315,
+                "max_total_input_schema_bytes": 122211,
+                "max_total_tool_definition_bytes": 141308,
                 "rationale": "Post-#1540 runtime-adapter surface ceiling pending #1315 re-slice."
             },
             "admin": {
                 "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 198191,
-                "max_total_tool_definition_bytes": 236682,
+                "max_total_input_schema_bytes": 194964,
+                "max_total_tool_definition_bytes": 233128,
                 "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification."
             }
         },
         "surfaces": {
             "standard.tachi_task": {
                 "max_top_level_properties": 86,
-                "max_input_schema_bytes": 26079,
+                "max_input_schema_bytes": 26063,
                 "rationale": "Native-first task facade baseline; launch-only schema must not regrow."
             },
             "standard.tachi_memory": {
@@ -57,8 +57,8 @@
                 "rationale": "Daily GitHub/evidence facade baseline under the facade-width review."
             },
             "admin.tachi_task": {
-                "max_top_level_properties": 106,
-                "max_input_schema_bytes": 37927,
+                "max_top_level_properties": 104,
+                "max_input_schema_bytes": 36763,
                 "rationale": "Typed operator compatibility exception baseline."
             }
         }
@@ -180,21 +180,19 @@
                 ]
             },
             "tachi_task": {
-                "action_count": 30,
+                "action_count": 27,
                 "actions": [
                     "adjudicate",
                     "apply_proposals",
                     "board",
                     "briefing",
                     "build_references",
-                    "cancel",
                     "card",
                     "claim",
                     "close_loop",
                     "complete",
                     "cycle_plan",
                     "cycle_status",
-                    "dispatch",
                     "doc_index",
                     "handoff",
                     "heartbeat",
@@ -210,8 +208,7 @@
                     "review_proposal",
                     "route_simulate",
                     "status",
-                    "ux_matrix",
-                    "wait"
+                    "ux_matrix"
                 ]
             },
             "tachi_verify": {
@@ -235,8 +232,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 196128,
-                "total_tool_definition_bytes": 234494,
+                "total_input_schema_bytes": 194964,
+                "total_tool_definition_bytes": 233128,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -345,8 +342,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 131542,
-                "total_tool_definition_bytes": 150596,
+                "total_input_schema_bytes": 131526,
+                "total_tool_definition_bytes": 150580,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -392,8 +389,8 @@
                 ]
             },
             "delegate": {
-                "total_input_schema_bytes": 68460,
-                "total_tool_definition_bytes": 73936,
+                "total_input_schema_bytes": 68453,
+                "total_tool_definition_bytes": 73929,
                 "visible_tool_count": 11,
                 "visible_tools": [
                     "peer_query",
@@ -410,8 +407,8 @@
                 ]
             },
             "operate": {
-                "total_input_schema_bytes": 122218,
-                "total_tool_definition_bytes": 141315,
+                "total_input_schema_bytes": 122211,
+                "total_tool_definition_bytes": 141308,
                 "visible_tool_count": 50,
                 "visible_tools": [
                     "archive_memory",
@@ -467,8 +464,8 @@
                 ]
             },
             "standard": {
-                "total_input_schema_bytes": 64522,
-                "total_tool_definition_bytes": 73809,
+                "total_input_schema_bytes": 64506,
+                "total_tool_definition_bytes": 73793,
                 "visible_tool_count": 16,
                 "visible_tools": [
                     "peer_query",
@@ -697,8 +694,8 @@
                         ]
                     },
                     "tachi_task": {
-                        "input_schema_bytes": 37927,
-                        "property_count": 106,
+                        "input_schema_bytes": 36763,
+                        "property_count": 104,
                         "property_names": [
                             "action",
                             "adjudication",
@@ -727,7 +724,6 @@
                             "diff",
                             "diff_present",
                             "dispatch_id",
-                            "dispatch_reason",
                             "doc_paths",
                             "domain",
                             "duration_ms",
@@ -745,7 +741,6 @@
                             "include_card",
                             "include_global",
                             "include_result",
-                            "inject_card",
                             "inject_hub_mcps",
                             "inject_tachi_mcp",
                             "issue_ref",
@@ -906,7 +901,7 @@
                         ]
                     },
                     "tachi_task": {
-                        "input_schema_bytes": 26014,
+                        "input_schema_bytes": 25998,
                         "property_count": 86,
                         "property_names": [
                             "action",
@@ -1183,7 +1178,7 @@
                     ]
                 },
                 "tachi_task": {
-                    "input_schema_bytes": 26079,
+                    "input_schema_bytes": 26063,
                     "property_count": 86,
                     "property_names": [
                         "action",

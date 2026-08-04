@@ -5,12 +5,13 @@
 //! Every method in this file is a thin shim that delegates to a `handle_*`
 //! function in one of the `*_ops` siblings — no business logic lives here.
 
+#[cfg(test)]
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::time::{Duration as StdDuration, Instant};
+use std::time::Duration as StdDuration;
 
 use crate::arena_ops::handle_tachi_arena;
 use crate::capability_ops::handle_prepare_capability_bundle;
@@ -33,21 +34,13 @@ use crate::wiki_ops::{
 };
 use crate::MemoryServer;
 
-const TASK_WAIT_INITIAL_POLL_DELAY: StdDuration = StdDuration::from_millis(250);
-const TASK_WAIT_MAX_POLL_DELAY: StdDuration = StdDuration::from_secs(2);
-
-/// `tachi_task(action='wait')` timeout_secs default/cap (see
-/// `task_facade::handle_tachi_task_wait`). `pub(crate)` so
-/// `cli_client::transport::daemon_call_timeout` can derive the outer RPC
-/// timeout from the *same* numbers instead of a hand-mirrored copy that can
-/// drift out of sync (see #970, #1028).
-pub(crate) const TASK_WAIT_TIMEOUT_DEFAULT_SECS: u64 = 600;
-pub(crate) const TASK_WAIT_TIMEOUT_CAP_SECS: u64 = 86_400;
-
-/// `tachi_task(action='status'|'cancel')` timeout_secs default/cap for the
-/// acpx control-plane call (see `task_facade::handle_tachi_task_status` and
-/// `handle_tachi_task_cancel`). Same cross-module sharing rationale as
-/// `TASK_WAIT_TIMEOUT_DEFAULT_SECS` above.
+/// `tachi_task(action='status')` timeout_secs default/cap for the acpx
+/// control-plane call (see `task_facade::handle_tachi_task_status`).
+/// `pub(crate)` so `cli_client::transport::daemon_call_timeout` can derive
+/// the outer RPC timeout from the *same* numbers instead of a hand-mirrored
+/// copy that can drift out of sync (see #970, #1028). The `wait`/`cancel`
+/// long-poll/control actions left `tachi_task` in #1319-C2; their timeout
+/// consts were removed with them.
 pub(crate) const TASK_CONTROL_TIMEOUT_DEFAULT_SECS: u64 = 30;
 pub(crate) const TASK_CONTROL_TIMEOUT_CAP_SECS: u64 = 300;
 

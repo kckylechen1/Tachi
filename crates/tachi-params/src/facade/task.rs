@@ -21,9 +21,10 @@ fn tachi_task_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
+    // #1319-C2: worker launch/wait/cancel left Task; use tachi_staff instead.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation. action='dispatch' is only an explicit durable/remote/native-unavailable exception and requires dispatch_reason; action='recommend' is advisory and does not authorize dispatch. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage existing explicit dispatches; action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. action='recommend' is advisory and does not authorize launch. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'board' read existing worker state (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
         generator,
     )
 }
@@ -33,10 +34,12 @@ fn tachi_task_action_schema(
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
     /// Primary actions (F4 enum): plan, briefing,
-    /// doc_index, recommend, dispatch, complete, adjudicate, profiles, profile, card,
+    /// doc_index, recommend, complete, adjudicate, profiles, profile, card,
     /// route_simulate, proposals, review_proposal, apply_proposals, status,
-    /// cancel, board, wait, merge, intake, cycle_status, cycle_plan, ux_matrix,
+    /// board, merge, intake, cycle_status, cycle_plan, ux_matrix,
     /// build_references, close_loop, claim, release, heartbeat, handoff.
+    /// Worker launch/wait/cancel left Task in #1319-C2 — use
+    /// tachi_staff(action='start'|'status') for worker lifecycle.
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') for GitHub PR merges.
     /// action="intake" binds a GitHub issue to a flow.
@@ -96,14 +99,6 @@ pub struct TachiTaskParams {
         description = "[action=dispatch|recommend|route_simulate] Declared side-effect level L0–L3. Omitted → L1 for host admission."
     )]
     pub execution_level: Option<super::ExecutionLevel>,
-    /// [action=dispatch] Required exception to the native-subagent-first law.
-    /// Installing Tachi, wanting parallelism, ordinary tracking, or choosing
-    /// a model/vendor is not sufficient. Omit for every non-dispatch action.
-    #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Required native-first exception: explicit_user_request, durable_cross_session, cross_device_remote, or native_subagent_unavailable. Ordinary local delegation must use the host harness's native subagent."
-    )]
-    pub dispatch_reason: Option<TachiDispatchReason>,
     #[serde(default)]
     #[schemars(description = "[action=plan|recommend|dispatch] Requesting agent id.")]
     pub agent_id: Option<String>,
@@ -532,15 +527,6 @@ pub struct TachiTaskParams {
         description = "Bypass wiki noise filtering for action='close_loop'. Does not force dispatch or merge behavior."
     )]
     pub force: bool,
-    /// [action=dispatch] tachi#1202/#993: suppress the `/cards/<seat>`
-    /// lane-card countermeasures overlay for this dispatch. Forwarded
-    /// verbatim to `TachiDispatchParams::inject_card`. Placed as a trailing
-    /// field (rather than next to `verbose`, its semantic sibling) to keep
-    /// this additive slice out of the high-churn action=recommend/profiles
-    /// region other in-flight tachi#1201 work also edits — same trailing
-    /// pattern as `eval_run_ids`/`project_explicit` above.
-    #[serde(default)]
-    pub inject_card: Option<bool>,
     // --- canonical WorkClaim fields (#1253) ---
     #[serde(default)]
     #[schemars(
@@ -584,25 +570,55 @@ pub struct TachiTaskParams {
 
 #[cfg(test)]
 mod tests {
-    use super::{TachiDispatchReason, TachiTaskParams};
+    use super::TachiTaskParams;
 
+    /// #1319-C2: worker launch/wait/cancel left Task. `dispatch_reason` and
+    /// `inject_card` were strictly dispatch-only fields and are removed from
+    /// `TachiTaskParams` together with the Dispatch arm. The `dispatch_reason`
+    /// allowlist vocabulary still lives on `TachiArenaParams` /
+    /// `TachiStaffParams` / `TachiDispatchParams`. Pin that `tachi_task` no
+    /// longer accepts `dispatch`/`wait`/`cancel` and points callers at
+    /// `tachi_staff`.
     #[test]
-    fn dispatch_reason_is_allowlisted_not_free_form() {
-        let params: TachiTaskParams = serde_json::from_value(serde_json::json!({
-            "action": "dispatch",
-            "dispatch_reason": "durable_cross_session"
-        }))
-        .expect("allowlisted reason deserializes");
-        assert_eq!(
-            params.dispatch_reason,
-            Some(TachiDispatchReason::DurableCrossSession)
-        );
+    fn dispatch_wait_cancel_actions_left_task() {
+        use std::str::FromStr;
 
-        let error = serde_json::from_value::<TachiTaskParams>(serde_json::json!({
-            "action": "dispatch",
-            "dispatch_reason": "want_parallelism"
-        }))
-        .expect_err("free-form reasons must fail schema deserialization");
-        assert!(error.to_string().contains("unknown variant"));
+        use super::super::action_enums::TachiTaskAction;
+
+        // Serde path (the wire/MCP path): the #[serde(rename_all)] derive
+        // rejects retired variants with a standard "unknown variant" error
+        // listing the surviving actions. The accepted-variants list (after
+        // "expected one of") must NOT contain dispatch/wait/cancel anymore.
+        for retired in ["dispatch", "wait", "cancel"] {
+            let err =
+                serde_json::from_str::<TachiTaskParams>(&format!("{{\"action\":\"{retired}\"}}"))
+                    .expect_err("retired action must not deserialize as tachi_task action");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unknown variant"),
+                "retired action {retired} should be an unknown variant, got: {msg}"
+            );
+            // The "expected one of `<...>`" list is the accepted surface;
+            // the retired action must not be admitted there. (The message
+            // does echo the rejected value back, so check the accepted list
+            // fragment specifically.)
+            let accepted = msg.split("expected one of ").nth(1).unwrap_or_default();
+            assert!(
+                !accepted.contains(&format!("`{retired}`")),
+                "retired action {retired} must not appear in the accepted-variants list, got: {msg}"
+            );
+        }
+
+        // FromStr path (the typed-action parse used by router-side matching):
+        // #1319-C2 points callers at tachi_staff for the retired worker
+        // lifecycle actions.
+        for retired in ["dispatch", "wait", "cancel"] {
+            let err = TachiTaskAction::from_str(retired)
+                .expect_err("retired action must not parse as tachi_task action");
+            assert!(
+                err.contains("tachi_staff"),
+                "retired action {retired} error should point at tachi_staff, got: {err}"
+            );
+        }
     }
 }

@@ -2,10 +2,10 @@
   "schema_version": "task_field_disposition.v1",
   "issue": 1319,
   "generated_from": "crates/tachi-params/src/facade/task.rs::TachiTaskParams + crates/tachi-server/src/tools/task_router.rs",
-  "total_fields": 107,
+  "total_fields": 105,
   "fields": {
     "action": {
-      "used_by_actions": ["Plan", "Briefing", "DocIndex", "Recommend", "Dispatch", "Complete", "Profiles", "Profile", "Card", "RouteSimulate", "Proposals", "ReviewProposal", "ApplyProposals", "Status", "Cancel", "Board", "Wait", "Merge", "Intake", "CycleStatus", "CyclePlan", "UxMatrix", "BuildReferences", "CloseLoop", "RefineIssues", "Adjudicate", "Claim", "Release", "Heartbeat", "Handoff"],
+      "used_by_actions": ["Plan", "Briefing", "DocIndex", "Recommend", "Complete", "Profiles", "Profile", "Card", "RouteSimulate", "Proposals", "ReviewProposal", "ApplyProposals", "Status", "Board", "Merge", "Intake", "CycleStatus", "CyclePlan", "UxMatrix", "BuildReferences", "CloseLoop", "RefineIssues", "Adjudicate", "Claim", "Release", "Heartbeat", "Handoff"],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
       "rationale": "Discriminator for every arm of the exhaustive match in task_router.rs; load-bearing for the whole facade."
@@ -39,12 +39,6 @@
       "canonical_future_owner": "CLI/internal",
       "disposition": "operator_only_internal",
       "rationale": "Declared side-effect level L0-L3 admission knob; execution-bottom, not in the public Task ledger surface."
-    },
-    "dispatch_reason": {
-      "used_by_actions": ["Dispatch"],
-      "canonical_future_owner": "deleted",
-      "disposition": "delete",
-      "rationale": "Required-only-by-Dispatch native-first exception gate; Dispatch arm is removed in [1319-C2]."
     },
     "agent_id": {
       "used_by_actions": ["Plan", "Briefing"],
@@ -580,12 +574,6 @@
       "disposition": "keep_task_shared",
       "rationale": "Bypass wiki noise filtering on close_loop; survives on close_loop surface."
     },
-    "inject_card": {
-      "used_by_actions": ["Dispatch"],
-      "canonical_future_owner": "deleted",
-      "disposition": "delete",
-      "rationale": "tachi#1202/#993 lane-card countermeasures overlay toggle forwarded only to TachiDispatchParams::inject_card; Dispatch-only."
-    },
     "agent_identity_id": {
       "used_by_actions": ["Claim", "Release", "Heartbeat", "Handoff"],
       "canonical_future_owner": "Task",
@@ -648,7 +636,7 @@
     }
   },
   "disposition_summary": {
-    "delete": 2,
+    "delete": 0,
     "move_to_staff": 9,
     "operator_only_internal": 23,
     "keep_task_shared": 59,

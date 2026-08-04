@@ -1239,16 +1239,37 @@ mod tests {
         let admin_actions = admin[0].input_schema["properties"]["action"]["enum"]
             .as_array()
             .expect("admin action enum");
-        assert!(admin_actions.contains(&json!("dispatch")));
-        assert!(admin[0].input_schema["properties"]
-            .as_object()
-            .expect("admin properties")
-            .contains_key("dispatch_reason"));
-        assert!(admin[0]
-            .description
-            .as_deref()
-            .unwrap_or_default()
-            .contains("dispatch"));
+        // #1319-C2: dispatch/cancel/wait were removed from tachi_task (external
+        // staffing now flows through tachi_staff). The schema must NOT
+        // advertise them, and the dispatch_reason field is gone.
+        assert!(
+            !admin_actions.contains(&json!("dispatch")),
+            "tachi_task must not advertise dispatch after [1319-C2]"
+        );
+        assert!(
+            !admin_actions.contains(&json!("cancel")),
+            "tachi_task must not advertise cancel after [1319-C2]"
+        );
+        assert!(
+            !admin_actions.contains(&json!("wait")),
+            "tachi_task must not advertise wait after [1319-C2]"
+        );
+        assert!(
+            !admin[0].input_schema["properties"]
+                .as_object()
+                .expect("admin properties")
+                .contains_key("dispatch_reason"),
+            "dispatch_reason field must be gone after [1319-C2]"
+        );
+        // The description no longer advertises dispatch as a tachi_task action.
+        assert!(
+            !admin[0]
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("action='dispatch'"),
+            "tachi_task description must not advertise action='dispatch' after [1319-C2]"
+        );
     }
 
     #[test]
