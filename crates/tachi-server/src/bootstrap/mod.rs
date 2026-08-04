@@ -22,7 +22,7 @@ mod recall_coverage_cli;
 mod rescue_cli;
 mod serve;
 mod setup;
-mod setup_wizard;
+pub(crate) mod setup_wizard;
 mod skill_surface_cli;
 mod tidy;
 mod vault_sync;

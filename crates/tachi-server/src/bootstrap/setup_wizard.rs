@@ -1,4 +1,4 @@
-mod agent_rules;
+pub(crate) mod agent_rules;
 mod env;
 #[cfg(test)]
 mod tests;

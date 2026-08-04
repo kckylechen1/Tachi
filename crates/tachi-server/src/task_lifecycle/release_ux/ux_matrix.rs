@@ -159,7 +159,7 @@ pub(crate) fn handle_task_ux_matrix(params: &TachiTaskParams) -> Result<String, 
     matrix.push(ux_step(
         "dispatch",
         "Explicit durable/remote worker dispatch",
-        "tachi_staff(action='start') — otherwise use a native subagent",
+        "tachi_staff(action='start', task=..., staffing_reason=...) — otherwise use a native subagent",
         if !dispatch_ids.is_empty() {
             "passed"
         } else if flow_id.is_some() {
