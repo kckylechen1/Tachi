@@ -723,17 +723,43 @@ async fn ordinary_public_wiki_update_preserves_trusted_existing_model_receipt() 
     .expect("first model-derived wiki write");
     let first_json: Value = serde_json::from_str(&first).expect("first public response");
     let first_id = first_json["id"].as_str().expect("first public id");
-    let receipt_a = server
+    let first_entry = server
         .with_named_project_store_read("wiki", |store| {
             store.get(first_id).map_err(|error| error.to_string())
         })
         .expect("read first public row")
-        .expect("first public row exists")
+        .expect("first public row exists");
+    let receipt_a = first_entry
         .metadata
         .pointer("/provenance/model_invocation")
         .cloned()
         .expect("first public typed receipt");
     assert_eq!(receipt_a["effective_model"], "wiki-public-a");
+    // #1558: the receipt minted on the artifact's first durable write must
+    // bind to the exact row it landed on -- not merely record that a call
+    // happened. `first_entry.text` is what the seam actually hashed
+    // (post-`scrub_think_tags`, matching what memcore's upsert persists to
+    // the `text` column); recomputing the same public, pure hash function
+    // over that stored text and comparing it to the stored `content_hash`
+    // is round-trip proof, not an assumption about the hashing algorithm.
+    assert_eq!(
+        receipt_a["content_hash"].as_str(),
+        Some(
+            tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&first_entry.text)
+                .as_str()
+        ),
+        "receipt A must bind to the exact text of the row it was attached to"
+    );
+    assert_eq!(
+        receipt_a["memory_id"].as_str(),
+        Some(first_id),
+        "receipt A must bind to the row it was attached to"
+    );
+    assert_eq!(
+        receipt_a["revision"].as_i64(),
+        Some(first_entry.revision),
+        "receipt A must bind to the revision it was attached to"
+    );
 
     let second = crate::copilot_ops::handle_tachi_wiki_write(
         &server,
@@ -794,6 +820,41 @@ async fn ordinary_public_wiki_update_preserves_trusted_existing_model_receipt() 
         updated.metadata["provenance"]["model_invocation"]["effective_model"],
         "hostile-new-receipt",
         "public metadata must not forge or select the receipt slot"
+    );
+    // #1558 re-adjudication: preserving receipt A's bytes verbatim across an
+    // ordinary (non-model) text edit is the correct behavior -- the receipt
+    // must keep describing generation A, not silently become a fabricated
+    // claim about the ordinary edit. But before #1558 that preserved
+    // receipt carried no way to tell "still describes this row's current
+    // content" from "describes a generation this row no longer contains" --
+    // this is the defect named in kckylechen1/tachi#1558. The binding
+    // fields now make that distinction detectable without weakening the
+    // preserve-on-ordinary-update behavior itself:
+    assert_ne!(
+        updated.text, first_entry.text,
+        "the ordinary update must actually have changed the row's content \
+         (otherwise the mismatch assertions below would pass vacuously)"
+    );
+    assert_ne!(
+        receipt_a["content_hash"].as_str(),
+        Some(
+            tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&updated.text).as_str()
+        ),
+        "preserved receipt A's content_hash must now mismatch the row's current text -- \
+         the receipt still (correctly) describes generation A's original content, and that \
+         staleness relative to the row's current bytes must be detectable, not silent"
+    );
+    assert_eq!(
+        receipt_a["memory_id"].as_str(),
+        Some(second_id),
+        "receipt A's memory_id binding still correctly identifies this row -- only its \
+         content/revision binding go stale across the ordinary edit, not its row identity"
+    );
+    assert_ne!(
+        receipt_a["revision"].as_i64(),
+        Some(updated.revision),
+        "preserved receipt A's revision binding must now mismatch the row's current \
+         revision -- the row advanced past the revision receipt A was attached to"
     );
 }
 

@@ -734,6 +734,7 @@ async fn handle_save_memory_impl(
         target_db,
         existing_entry.as_ref(),
         model_invocation.as_ref(),
+        enrichment_revision,
     )?;
 
     // #1041 F3/C5: `build_save_entry` -> `inject_provenance` resolves
