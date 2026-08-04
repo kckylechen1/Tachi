@@ -677,6 +677,30 @@ mod tests {
         assert_eq!(rows, 0);
     }
 
+    /// The same refusal has to cover a duplicate *inside* one batch, not just
+    /// a collision with an earlier call: the first copy is already written
+    /// when the second is checked, so a caller cannot smuggle an in-place
+    /// overwrite past the guard by putting both rows in one import.
+    #[test]
+    fn two_entries_sharing_an_id_within_one_batch_are_refused() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let error = store
+            .import_snapshot_batch(&[
+                snapshot_entry("snap-twin", "first copy"),
+                snapshot_entry("snap-twin", "second copy"),
+            ])
+            .expect_err("a duplicate id inside one batch must be refused");
+        assert!(
+            matches!(error, MemoryError::Duplicate(_)),
+            "unexpected error variant: {error:?}"
+        );
+        let rows: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+            .expect("count memories");
+        assert_eq!(rows, 0, "the refused batch must leave nothing behind");
+    }
+
     #[test]
     fn an_id_already_present_in_the_destination_is_refused_and_rolls_the_batch_back() {
         let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
