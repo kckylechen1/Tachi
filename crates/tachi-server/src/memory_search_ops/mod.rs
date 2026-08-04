@@ -34,7 +34,6 @@ pub(crate) use save_memory::save_eval_memory;
 #[allow(unused_imports)] // stable internal receipt siblings; producers may be feature-gated
 pub(crate) use save_memory::{
     handle_save_memory_with_authorized_reference_mutations,
-    handle_save_memory_with_authorized_reference_mutations_and_invocation,
     handle_save_memory_with_wiki_projection, save_eval_memory_with_authorized_reference_mutations,
 };
 pub(crate) use search_helpers::client_project_precedence;
