@@ -151,7 +151,7 @@ pub(crate) use memory_crud::{
 /// `BEGIN IMMEDIATE` transaction. See `memory_crud::upsert_within_tx`.
 pub(crate) use memory_crud::{
     insert_if_absent, insert_if_absent_within_tx, insert_rem_operation_if_absent_within_tx, upsert,
-    upsert_idless, upsert_within_tx,
+    upsert_idless, upsert_within_tx, upsert_within_tx_allowing_reserved_anchor_ids,
 };
 /// Public: see `open::ensure_reserved_reference_write_guard`'s doc comment.
 pub use open::ensure_reserved_reference_write_guard;

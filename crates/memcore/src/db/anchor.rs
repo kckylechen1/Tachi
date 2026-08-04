@@ -20,6 +20,15 @@
 //!     `memory_crud::upsert` (ordinary upserts to `anchor:`-prefixed ids are
 //!     rejected) — `ensure_anchor` is the only creation path, using its own
 //!     `INSERT ... OR IGNORE`, not `upsert`'s `ON CONFLICT DO UPDATE`.
+//!     Since tachi#1602 the refusal lives at the shared transactional seam
+//!     (`memory_crud::upsert_prepared_within_tx`) rather than only at the
+//!     single-row entry point, so batch writers
+//!     (`MemoryStore::upsert_batch`, `upsert_batch_with_precommit`) and
+//!     lifecycle-apply refuse identically. The one opt-out is
+//!     `memory_crud::upsert_within_tx_allowing_reserved_anchor_ids`, used by
+//!     tidy migration to copy *existing* anchor rows from a source database
+//!     into the target — a whole-store copy, not a new anchor minted outside
+//!     `ensure_anchor`.
 //! (d) both edge endpoints must exist in the same physical DB: this module
 //!     only creates the anchor row itself; callers that immediately follow
 //!     with an edge write get that guarantee for free because

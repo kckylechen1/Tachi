@@ -932,9 +932,16 @@ impl MemoryStore {
     /// method's signature, which is the entire reason `upsert_batch` can be
     /// ungated while `upsert_batch_with_precommit`'s closure-carrying public
     /// signature stays admin/test-gated (see that method's doc comment).
+    ///
+    /// `allow_reserved_anchor_ids` selects which `db` seam the per-row loop
+    /// uses: `false` (every ordinary caller) refuses reserved `anchor:` ids
+    /// inside the shared upsert body, `true` is the trusted whole-store-copy
+    /// channel described on
+    /// [`Self::upsert_batch_with_precommit_preserving_anchor_rows`].
     fn upsert_batch_in_tx<T, F>(
         &mut self,
         entries: &[MemoryEntry],
+        allow_reserved_anchor_ids: bool,
         postcommit: F,
     ) -> Result<T, MemoryError>
     where
@@ -949,7 +956,16 @@ impl MemoryStore {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for entry in entries {
-            db::upsert_within_tx(&tx, entry, self.vec_available, None)?;
+            if allow_reserved_anchor_ids {
+                db::upsert_within_tx_allowing_reserved_anchor_ids(
+                    &tx,
+                    entry,
+                    self.vec_available,
+                    None,
+                )?;
+            } else {
+                db::upsert_within_tx(&tx, entry, self.vec_available, None)?;
+            }
         }
         let output = postcommit(&tx)?;
         tx.commit()?;
@@ -968,7 +984,14 @@ impl MemoryStore {
     /// closure's `&Transaction` derefs to `&Connection`, which would hand the
     /// portable surface the same raw-SQL bypass of the `store_identity`
     /// write-once guards. Its only production caller is tachi-server's tidy
-    /// migration (admin build).
+    /// migration (admin build), through the
+    /// [`Self::upsert_batch_with_precommit_preserving_anchor_rows`] variant.
+    ///
+    /// Reserved-id refusals are not weakened by batching: since tachi#1602 a
+    /// blank `id` and an `id` in the reserved `anchor:` namespace are refused
+    /// inside the shared [`db::upsert_within_tx`] body this method runs per
+    /// row, so a bad entry anywhere in the batch rolls the whole batch back
+    /// exactly as single-row `upsert` refuses.
     #[cfg(any(feature = "admin", test))]
     pub fn upsert_batch_with_precommit<T, F>(
         &mut self,
@@ -978,7 +1001,33 @@ impl MemoryStore {
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
     {
-        self.upsert_batch_in_tx(entries, precommit)
+        self.upsert_batch_in_tx(entries, false, precommit)
+    }
+
+    /// Trusted whole-store-copy variant of
+    /// [`Self::upsert_batch_with_precommit`]: identical behavior, except rows
+    /// whose `id` is already in the reserved `anchor:` namespace are copied
+    /// verbatim instead of refused (tachi#1602).
+    ///
+    /// This is the batch analogue of [`Self::upsert_wiki_operation_log`]: the
+    /// reserved-namespace refusal is enforced at the shared seam for every
+    /// ordinary caller, and exactly one named internal writer opts out. That
+    /// writer is tachi-server's tidy migration, which copies *every* row of a
+    /// source database into the target — its row selection is an unfiltered
+    /// `SELECT ... FROM memories`, so an `anchor:` row in the source is an
+    /// existing row being carried across, not a new anchor being minted
+    /// behind `ensure_anchor`'s back. Every other reserved-namespace guard
+    /// (`wiki-rem:`, the Wiki operation log) still applies to this variant.
+    #[cfg(any(feature = "admin", test))]
+    pub fn upsert_batch_with_precommit_preserving_anchor_rows<T, F>(
+        &mut self,
+        entries: &[MemoryEntry],
+        precommit: F,
+    ) -> Result<T, MemoryError>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
+    {
+        self.upsert_batch_in_tx(entries, true, precommit)
     }
 
     /// Upsert a bounded batch atomically, with **no handle exposure**: unlike
@@ -990,28 +1039,24 @@ impl MemoryStore {
     /// ([`Self::validate_write_path`] — the same per-row check ordinary
     /// [`Self::upsert`] runs) and the reserved-reference write authorization
     /// are done before any row is written — an invalid entry anywhere in the
-    /// batch means zero writes happen, not a partial batch. Because this
-    /// method is the ungated public entry point (unlike the admin/test-gated
-    /// [`Self::upsert_batch_with_precommit`]), it also mirrors, in this same
-    /// pre-walk, the two top-level guards single-row [`Self::upsert`] enforces
-    /// via `db::upsert_with_idless_identity`
-    /// (`crates/memcore/src/db/memory_crud.rs:2550-2566`) but
-    /// [`db::upsert_within_tx`] does not repeat: a blank/empty `id`, and an
-    /// `id` in the reserved `anchor:` namespace (reserved for
-    /// `memcore::db::anchor::ensure_anchor`). Without this pre-walk, batching
-    /// through the shared `upsert_within_tx` seam would let the ungated
-    /// portable surface bypass a guard the single-row entry point enforces —
-    /// tachi#1602 tracks folding this parity into the shared
-    /// `upsert_with_idless_identity`/`upsert_within_tx` seam itself so
-    /// `upsert_batch_with_precommit` (still gap-having pending that work)
-    /// stops needing its own copy too. All main rows, FTS rows, and vector
+    /// batch means zero writes happen, not a partial batch. The pre-walk
+    /// below also refuses, before any transaction opens, a blank/empty `id`
+    /// and an `id` in the reserved `anchor:` namespace (reserved for
+    /// `memcore::db::anchor::ensure_anchor`). Since tachi#1602 that pair is
+    /// belt-and-braces rather than the only enforcement: the same two
+    /// refusals, with byte-identical error text, now live inside the shared
+    /// [`db::upsert_within_tx`] body, so every batch path —
+    /// [`Self::upsert_batch_with_precommit`] included — refuses them too, and
+    /// the pre-walk's remaining value is failing without opening a writer
+    /// transaction. All main rows, FTS rows, and vector
     /// projections for the whole batch are then written inside a single
     /// `BEGIN IMMEDIATE` transaction via the same [`db::upsert_within_tx`]
     /// seam `upsert_batch_with_precommit` and (indirectly, through
     /// `db::upsert`) ordinary `upsert` both use — same main-row/FTS/vector
-    /// write body, same reserved-metadata merge, same `wiki-rem:`/wiki-log id
-    /// guards (enforced inside `upsert_within_tx`/`upsert_prepared_within_tx`,
-    /// not this pre-walk); only the outer entry point differs. Any row or
+    /// write body, same reserved-metadata merge, same blank-id/`anchor:`/
+    /// `wiki-rem:`/wiki-log id guards (enforced inside
+    /// `upsert_within_tx`/`upsert_prepared_within_tx`, not this pre-walk);
+    /// only the outer entry point differs. Any row or
     /// projection failure rolls back the entire batch. An empty slice is a
     /// successful no-op: no transaction is opened.
     ///
@@ -1025,12 +1070,11 @@ impl MemoryStore {
         if entries.is_empty() {
             return Ok(());
         }
-        // Mirror memory_crud.rs:2550-2566's two single-row top-level guards
-        // (blank id, reserved `anchor:` namespace) before any transaction
-        // opens, since `upsert_within_tx` — what the loop below shares with
-        // `upsert_batch_with_precommit` — does not repeat them. See the doc
-        // comment above and tachi#1602 for why this lives here rather than
-        // in the shared `upsert_batch_in_tx`/`upsert_within_tx` seam.
+        // Refuse a blank id and the reserved `anchor:` namespace before any
+        // transaction opens. Since tachi#1602 the shared
+        // `upsert_within_tx`/`upsert_prepared_within_tx` seam enforces both
+        // with the same error text for every batch path, so this pre-walk is
+        // a redundant early exit, not the guard of record.
         for entry in entries {
             if entry.id.trim().is_empty() {
                 return Err(MemoryError::InvalidArg(
@@ -1044,7 +1088,7 @@ impl MemoryStore {
                 )));
             }
         }
-        self.upsert_batch_in_tx(entries, |_tx| Ok(()))
+        self.upsert_batch_in_tx(entries, false, |_tx| Ok(()))
     }
 
     /// Atomically insert a memory and all of its search projections, without
@@ -2027,5 +2071,185 @@ mod exact_dedupe_open_tests {
             "a batch refused for a blank id must leave zero rows behind, and no \
              transaction should even have opened"
         );
+    }
+
+    // ── #1602: the refusals live at the shared transactional seam ───────────
+    //
+    // `upsert_batch_with_precommit` has no pre-walk of its own — it goes
+    // straight to `upsert_batch_in_tx`. So every assertion below is a direct
+    // test of the guard inside
+    // `db::upsert_within_tx`/`memory_crud::upsert_prepared_within_tx`: if the
+    // refusal were only at `upsert_with_idless_identity` (single-row) or in
+    // `upsert_batch`'s pre-walk, these batches would commit.
+
+    #[test]
+    fn upsert_batch_with_precommit_refuses_an_anchor_namespace_id_at_the_seam() {
+        let mut reference_store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let reference_error = reference_store
+            .upsert(&test_memory_entry("anchor:precommit-guard-bad"))
+            .expect_err("single-row upsert must refuse an anchor: id");
+
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let ok_entry = test_memory_entry("precommit-anchor-guard-ok");
+        let anchor_entry = test_memory_entry("anchor:precommit-guard-bad");
+
+        let precommit_ran = std::cell::Cell::new(false);
+        let error = store
+            .upsert_batch_with_precommit(&[ok_entry, anchor_entry], |_tx| {
+                precommit_ran.set(true);
+                Ok(())
+            })
+            .expect_err("a precommit batch containing an anchor: id must be refused");
+        assert!(
+            matches!(error, MemoryError::InvalidArg(_)),
+            "unexpected error variant: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            reference_error.to_string(),
+            "the seam's refusal must be byte-identical to the single-row refusal"
+        );
+        assert!(
+            !precommit_ran.get(),
+            "the row loop must fail before the pre-commit closure runs"
+        );
+
+        assert!(
+            store
+                .get("precommit-anchor-guard-ok")
+                .expect("get")
+                .is_none(),
+            "the earlier, individually-valid entry must roll back with the batch"
+        );
+        let stats = store.stats(true).expect("stats");
+        assert_eq!(
+            stats.total, 0,
+            "a batch refused mid-loop must leave zero rows behind"
+        );
+    }
+
+    #[test]
+    fn upsert_batch_with_precommit_refuses_a_blank_id_at_the_seam() {
+        let mut reference_store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let reference_error = reference_store
+            .upsert(&test_memory_entry("   "))
+            .expect_err("single-row upsert must refuse a blank id");
+
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let ok_entry = test_memory_entry("precommit-blank-guard-ok");
+        let blank_entry = test_memory_entry("   ");
+
+        let error = store
+            .upsert_batch_with_precommit(&[ok_entry, blank_entry], |_tx| Ok(()))
+            .expect_err("a precommit batch containing a blank id must be refused");
+        assert_eq!(
+            error.to_string(),
+            reference_error.to_string(),
+            "the seam's refusal must be byte-identical to the single-row refusal"
+        );
+
+        assert!(
+            store
+                .get("precommit-blank-guard-ok")
+                .expect("get")
+                .is_none(),
+            "the earlier, individually-valid entry must roll back with the batch"
+        );
+        let stats = store.stats(true).expect("stats");
+        assert_eq!(
+            stats.total, 0,
+            "a batch refused mid-loop must leave zero rows behind"
+        );
+    }
+
+    #[test]
+    fn preserving_anchor_rows_variant_carries_an_existing_anchor_row_verbatim() {
+        // The tidy-migration exemption: a whole-store copy must be able to
+        // carry an `anchor:` row that `ensure_anchor` legitimately created in
+        // the source database, while the ordinary batch entry point still
+        // refuses the very same entry.
+        let source = MemoryStore::open_in_memory().expect("open_in_memory");
+        let anchor_id = source
+            .ensure_anchor(crate::db::AnchorKind::Issue, "kckylechen1/tachi:1602")
+            .expect("ensure_anchor creates the source anchor row");
+        let anchor_entry = source
+            .get(&anchor_id)
+            .expect("get")
+            .expect("the source anchor row must be readable");
+
+        let mut target = MemoryStore::open_in_memory().expect("open_in_memory");
+        let refusal = target
+            .upsert_batch_with_precommit(&[anchor_entry.clone()], |_tx| Ok(()))
+            .expect_err("the ordinary precommit entry point must still refuse anchor: ids");
+        assert!(
+            matches!(refusal, MemoryError::InvalidArg(_)),
+            "unexpected error variant: {refusal:?}"
+        );
+
+        let rows_after: usize = target
+            .upsert_batch_with_precommit_preserving_anchor_rows(
+                &[
+                    test_memory_entry("migration-carried-ordinary"),
+                    anchor_entry,
+                ],
+                |tx| {
+                    tx.query_row("SELECT COUNT(*) FROM memories", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map(|count| count as usize)
+                    .map_err(MemoryError::from)
+                },
+            )
+            .expect("the trusted whole-store-copy variant must carry the anchor row");
+        assert_eq!(rows_after, 2, "both copied rows must be visible in-tx");
+
+        assert!(
+            target.get(&anchor_id).expect("get").is_some(),
+            "the carried anchor row must be durable in the target"
+        );
+        // The carried row is still a valid anchor: `ensure_anchor`'s
+        // read-verify guard (a) accepts it as the existing row for the same
+        // (kind, key) instead of failing closed on a mismatch.
+        assert_eq!(
+            target
+                .ensure_anchor(crate::db::AnchorKind::Issue, "kckylechen1/tachi:1602")
+                .expect("ensure_anchor must accept the carried row"),
+            anchor_id
+        );
+    }
+
+    #[test]
+    fn preserving_anchor_rows_variant_still_refuses_other_reserved_namespaces() {
+        // The exemption is anchor-only: `wiki-rem:` and the blank id stay
+        // refused even for the trusted whole-store-copy writer.
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let wiki_rem_error = store
+            .upsert_batch_with_precommit_preserving_anchor_rows(
+                &[test_memory_entry("wiki-rem:1602-narrowness")],
+                |_tx| Ok(()),
+            )
+            .expect_err("wiki-rem: ids must stay refused");
+        assert!(
+            wiki_rem_error
+                .to_string()
+                .contains("reserved 'wiki-rem:' namespace"),
+            "unexpected error: {wiki_rem_error}"
+        );
+
+        let blank_error = store
+            .upsert_batch_with_precommit_preserving_anchor_rows(
+                &[test_memory_entry("   ")],
+                |_tx| Ok(()),
+            )
+            .expect_err("a blank id must stay refused");
+        assert!(
+            blank_error
+                .to_string()
+                .contains("entry.id must be provided by caller"),
+            "unexpected error: {blank_error}"
+        );
+
+        let stats = store.stats(true).expect("stats");
+        assert_eq!(stats.total, 0, "no refused batch may leave a row behind");
     }
 }

@@ -406,28 +406,37 @@ fn migrate_single_db(
     // source at its archive path. Only a successful commit permits removal of
     // the live source alias/file below.
     let copied = source_entries.len();
-    let rows_after = match target_store.upsert_batch_with_precommit(&source_entries, |tx| {
-        // This is the last authority check before the non-atomic
-        // main/WAL/SHM archive move, while target writes remain uncommitted.
-        authority
-            .revalidate_for_mutation(Some(&target_path))
-            .map_err(memcore::MemoryError::InvalidArg)?;
-        stage_archive_copy(&source_path, &archive_path)?;
-        #[cfg(test)]
-        FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE.with(|flag| {
-            if flag.get() {
-                return Err(memcore::MemoryError::InvalidArg(
-                    "injected boundary failure after archive staging".to_string(),
-                ));
-            }
-            Ok::<(), memcore::MemoryError>(())
-        })?;
-        tx.query_row("SELECT COUNT(*) FROM memories", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map(|count| count as usize)
-        .map_err(memcore::MemoryError::from)
-    }) {
+    // `read_source_entries` copies every row of the source, including rows in
+    // the reserved `anchor:` id namespace. Since tachi#1602 the shared upsert
+    // seam refuses that namespace for ordinary writers, so this whole-store
+    // copy uses memcore's named trusted variant: it carries pre-existing
+    // anchor rows across instead of failing the migration, while every other
+    // reserved-namespace guard still applies.
+    let rows_after = match target_store.upsert_batch_with_precommit_preserving_anchor_rows(
+        &source_entries,
+        |tx| {
+            // This is the last authority check before the non-atomic
+            // main/WAL/SHM archive move, while target writes remain uncommitted.
+            authority
+                .revalidate_for_mutation(Some(&target_path))
+                .map_err(memcore::MemoryError::InvalidArg)?;
+            stage_archive_copy(&source_path, &archive_path)?;
+            #[cfg(test)]
+            FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE.with(|flag| {
+                if flag.get() {
+                    return Err(memcore::MemoryError::InvalidArg(
+                        "injected boundary failure after archive staging".to_string(),
+                    ));
+                }
+                Ok::<(), memcore::MemoryError>(())
+            })?;
+            tx.query_row("SELECT COUNT(*) FROM memories", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+            .map_err(memcore::MemoryError::from)
+        },
+    ) {
         Ok(rows_after) => rows_after,
         Err(memcore::MemoryError::InvalidArg(reason))
             if reason.starts_with("invariant: mutation authority") =>
