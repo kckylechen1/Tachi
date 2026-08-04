@@ -26,7 +26,7 @@ impl LaneAuthority {
         match self {
             Self::LaneOperationalEvidence => None,
             Self::EngineeringPrecedent => Some("#950"),
-            Self::UniversalLaw => Some("#868/#871"),
+            Self::UniversalLaw => Some("#871/#1467"),
             Self::UserModel => Some("#953"),
             Self::Soul => Some("#858"),
             Self::Unknown => Some("refused: authority is unknown"),
@@ -490,7 +490,7 @@ mod tests {
     fn authority_reroutes_never_render_markdown() {
         for (a, r) in [
             (LaneAuthority::EngineeringPrecedent, "#950"),
-            (LaneAuthority::UniversalLaw, "#868/#871"),
+            (LaneAuthority::UniversalLaw, "#871/#1467"),
             (LaneAuthority::UserModel, "#953"),
             (LaneAuthority::Soul, "#858"),
             (LaneAuthority::Unknown, "unknown"),
