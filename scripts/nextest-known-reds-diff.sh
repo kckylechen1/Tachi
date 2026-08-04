@@ -46,6 +46,14 @@
 
 set -euo pipefail
 
+# Pin collation: `comm` requires both inputs in identical order, and this
+# script mixes shell `sort -u` (locale collation) with Python `sorted()`
+# (codepoint order). Under a non-C locale (e.g. en_SG.UTF-8) the orderings
+# diverge and `comm -23 expected present` fabricates "missing" tests —
+# observed as a false INCOMPLETE_JUNIT (96 phantom absences) on a complete
+# report. CI runs C locale, so this only ever fired on developer machines.
+export LC_ALL=C
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JUNIT="${1:-}"
 
