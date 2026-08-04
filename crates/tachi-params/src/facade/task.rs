@@ -21,9 +21,10 @@ fn tachi_task_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
+    // #1319-C2: worker launch/wait/cancel left Task; use tachi_staff instead.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation. action='dispatch' is only an explicit durable/remote/native-unavailable exception and requires dispatch_reason; action='recommend' is advisory and does not authorize dispatch. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage existing explicit dispatches; action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. action='recommend' is advisory and does not authorize launch. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'board' read existing worker state (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
         generator,
     )
 }
@@ -33,10 +34,12 @@ fn tachi_task_action_schema(
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
     /// Primary actions (F4 enum): plan, briefing,
-    /// doc_index, recommend, dispatch, complete, adjudicate, profiles, profile, card,
+    /// doc_index, recommend, complete, adjudicate, profiles, profile, card,
     /// route_simulate, proposals, review_proposal, apply_proposals, status,
-    /// cancel, board, wait, merge, intake, cycle_status, cycle_plan, ux_matrix,
+    /// board, merge, intake, cycle_status, cycle_plan, ux_matrix,
     /// build_references, close_loop, claim, release, heartbeat, handoff.
+    /// Worker launch/wait/cancel left Task in #1319-C2 — use
+    /// tachi_staff(action='start'|'status') for worker lifecycle.
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') for GitHub PR merges.
     /// action="intake" binds a GitHub issue to a flow.
@@ -58,10 +61,8 @@ pub struct TachiTaskParams {
     #[serde(default)]
     pub format: Option<String>,
     /// tachi#1173 items 1+2+3: request the full payload instead of the
-    /// default slim shape. [action=dispatch]: the dispatch response includes
-    /// the full routing card (`profile`, `identity_receipt`,
-    /// `dispatch_profile`) rather than just
-    /// dispatch_id/state/run_dir/suggested_complete_command.
+    /// default slim shape. Response verbosity for board/profile/status
+    /// payloads.
     /// [action=profiles|profile|card]: each row includes the full mbit_card
     /// (stats/guidance/moves/personality/skill_loadout/evidence_contract)
     /// rather than just name/backend/model/role.
@@ -84,28 +85,20 @@ pub struct TachiTaskParams {
     // plan fields
     #[serde(default)]
     #[schemars(
-        description = "[action=plan|recommend|dispatch|route_simulate|complete|intake|ux_matrix] Task description / prompt text."
+        description = "[action=plan|recommend|route_simulate|complete|intake|ux_matrix] Task description / prompt text."
     )]
     pub task: Option<String>,
-    /// [action=dispatch|recommend|route_simulate] Declared side-effect level:
+    /// [action=recommend|route_simulate] Declared side-effect level:
     /// L0 source/metadata read, L1 temporary local state, L2 product-data
     /// diagnostics, or L3 product data/resident runtime side effects. Omitted
     /// values resolve to L1 for host-profile admission without task-text inference.
     #[serde(default)]
     #[schemars(
-        description = "[action=dispatch|recommend|route_simulate] Declared side-effect level L0–L3. Omitted → L1 for host admission."
+        description = "[action=recommend|route_simulate] Declared side-effect level L0–L3. Omitted → L1 for host admission."
     )]
     pub execution_level: Option<super::ExecutionLevel>,
-    /// [action=dispatch] Required exception to the native-subagent-first law.
-    /// Installing Tachi, wanting parallelism, ordinary tracking, or choosing
-    /// a model/vendor is not sufficient. Omit for every non-dispatch action.
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Required native-first exception: explicit_user_request, durable_cross_session, cross_device_remote, or native_subagent_unavailable. Ordinary local delegation must use the host harness's native subagent."
-    )]
-    pub dispatch_reason: Option<TachiDispatchReason>,
-    #[serde(default)]
-    #[schemars(description = "[action=plan|recommend|dispatch] Requesting agent id.")]
+    #[schemars(description = "[action=plan|briefing] Requesting agent id.")]
     pub agent_id: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -149,10 +142,10 @@ pub struct TachiTaskParams {
         description = "[action=briefing|doc_index] When true or omitted, use the tight agent packet (smaller top_k). Set false for the full feature board."
     )]
     pub compact: Option<bool>,
-    // dispatch / complete fields
+    // complete fields
     #[serde(default)]
     #[schemars(
-        description = "[action=dispatch|recommend|complete] Agent backend, e.g. claude, codex, grok, kimi."
+        description = "[action=complete] Agent backend that ran the completed task, e.g. claude, codex, grok, kimi. When omitted, the dispatched run's agent is used (requires a readable dispatch_id)."
     )]
     pub agent: Option<String>,
     /// [action=complete] Outcome: success | failure | partial | aborted.
@@ -171,7 +164,7 @@ pub struct TachiTaskParams {
     )]
     #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub duration_ms: Option<u64>,
-    /// [action=complete] Skills actually used. Distinct from dispatch prompt skills.
+    /// [action=complete] Skills actually used.
     #[serde(default)]
     pub skills_used: Vec<String>,
     /// [action=complete] Cost in tokens.
@@ -224,7 +217,7 @@ pub struct TachiTaskParams {
     #[serde(default)]
     pub feedback_rules_applied: Vec<String>,
     /// [action=complete] Adjudicated vendor-keyed error signatures to record for
-    /// this dispatch's lane (#735). Additive/optional — omitting it is
+    /// this task's lane (#735). Additive/optional — omitting it is
     /// byte-compatible with existing callers.
     #[serde(default)]
     pub signatures: Vec<SignatureRecordParams>,
@@ -234,7 +227,7 @@ pub struct TachiTaskParams {
     /// with existing callers.
     #[serde(default)]
     pub rulings: Vec<RulingRecordParams>,
-    /// [action=complete|adjudicate] Leader terminal adjudication for a dispatch
+    /// [action=complete|adjudicate] Leader terminal adjudication for a task
     /// outcome (#1035). On `complete` it writes an append-only row linked to
     /// the freshly-recorded outcome; on `adjudicate` it writes a post-hoc
     /// event linked to an already-existing outcome.
@@ -253,28 +246,24 @@ pub struct TachiTaskParams {
     #[serde(default)]
     pub scope: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=dispatch] Working directory for the spawned agent.")]
+    #[schemars(
+        description = "[action=briefing|doc_index] Working directory used to resolve relative doc_paths/spec_paths; also echoed into the brief packet."
+    )]
     pub cwd: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Execution-environment lease id (#894 S1); resolves the agent cwd from the daemon-owned lease (managed env)."
-    )]
+    #[schemars(skip)]
     pub env_id: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Explicit opt-in to dispatch into a bare cwd not backed by a lease; stamped env: unmanaged. Fail-safe default is managed."
-    )]
+    #[schemars(skip)]
     pub unmanaged_cwd: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "[action=dispatch] Skill ids to inject into the agent prompt.")]
+    #[schemars(skip)]
     pub skills: Vec<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Extra recall query; top hits are injected into the prompt."
-    )]
+    #[schemars(skip)]
     pub context_query: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=dispatch] Model override for the spawned agent.")]
+    #[schemars(skip)]
     pub model: Option<String>,
     #[serde(
         default,
@@ -282,92 +271,67 @@ pub struct TachiTaskParams {
     )]
     #[schemars(
         schema_with = "crate::coerce::opt_integer_from_string_or_number_schema",
-        description = "[action=dispatch|wait] Timeout in seconds for the spawned agent (dispatch) or terminal poll loop (wait)."
+        description = "[action=status] Timeout in seconds for the acpx control command issued by status; default 30, capped at 300."
     )]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Permission profile, e.g. full, allowlist, default."
-    )]
+    #[schemars(skip)]
     pub permission_profile: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Tool allowlist when permission_profile=allowlist."
-    )]
+    #[schemars(skip)]
     pub allowed_tools: Vec<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Machine-checkable completion predicate. When set, self-reported success must satisfy it to land a reviewed TASK_STATE_COMPLETED; otherwise the run is intercepted as a false success and routed to TASK_STATE_FAILED (#878-A)."
-    )]
+    #[schemars(skip)]
     pub completion_predicate: Option<CompletionPredicate>,
     #[serde(
         default,
         deserialize_with = "crate::coerce::opt_u32_from_string_or_number"
     )]
-    #[schemars(
-        schema_with = "crate::coerce::opt_integer_from_string_or_number_schema",
-        description = "[action=dispatch] Maximum conversation turns for the spawned agent."
-    )]
+    #[schemars(skip)]
     pub max_turns: Option<u32>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Codex sandbox: workspace-write | danger-full-access | read-only."
-    )]
+    #[schemars(skip)]
     pub sandbox: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=dispatch] Inject Tachi MCP when the backend supports it.")]
+    #[schemars(skip)]
     pub inject_tachi_mcp: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "[action=dispatch] Inject Hub MCPs when the backend supports it.")]
+    #[schemars(skip)]
     pub inject_hub_mcps: Option<bool>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] Explicit command argv override for custom backends."
-    )]
+    #[schemars(skip)]
     pub command: Vec<String>,
     #[serde(default)]
-    #[schemars(
-        description = "Harness transport override, e.g. opencode_serve to dispatch through an existing local OpenCode server via opencode run --attach."
-    )]
+    #[schemars(skip)]
     pub harness_transport: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "Harness server URL for attach transports, e.g. http://127.0.0.1:4321 for OpenCode serve."
-    )]
+    #[schemars(skip)]
     pub harness_server_url: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Named project DB for context/dispatch. Shared across actions; omit for the daemon-bound workspace DB."
+        description = "Named project DB. Shared across actions; omit for the daemon-bound workspace DB."
     )]
     pub project: Option<String>,
-    /// #1041 B7: see `crate::memory::SaveMemoryParams::project_explicit` —
-    /// same wire signal, same purpose. `tachi_task` is one of the tools
-    /// `session_identity::enforce_session_project` auto-defaults `project`
-    /// onto when the caller omits it (a bound-session convenience) — WITHOUT
-    /// this field, `action='complete'`'s downstream eval/lesson/precedent
-    /// writes (`build_complete_eval_record`/`run_lesson_post_complete_hook`/
-    /// `record_complete_rulings`) had no way to tell that transport-injected
-    /// default apart from a caller's own deliberate `project=`, and treated
-    /// `project.is_some()` alone as proof of deliberate intent — exactly the
-    /// inverted-polarity bug `SaveMemoryParams::project_explicit` was
-    /// introduced to fix for `save_memory` itself.
+    /// #1041 B7: wire explicitness signal. When `action='complete'`, tells
+    /// the downstream eval/lesson/precedent writes whether `project` came
+    /// from the caller's own wire input or was transport-injected by
+    /// `session_identity::enforce_session_project` — `project.is_some()`
+    /// alone cannot distinguish deliberate intent (#1041 B7).
     #[serde(default, rename = "__tachi_project_explicit")]
-    #[schemars(skip)]
+    #[schemars(
+        description = "[action=complete] True when the caller explicitly set project on the wire; distinguishes deliberate intent from a transport-injected bound-project default (#1041 B7)."
+    )]
     pub project_explicit: bool,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch|recommend] Workflow stage hint, e.g. plan, build, review."
-    )]
+    #[schemars(description = "[action=briefing] Workflow stage hint, e.g. plan, build, review.")]
     pub stage: Option<String>,
     #[serde(default, alias = "dispatch_profile")]
     #[schemars(
-        description = "Dispatch profile id, e.g. claude_plan, glm_51_impl, opencode_builder, codex_55_review, codex_53_fast, kimi_arch, deepseek_explore, or kimi_ux. Distinct from the server ToolProfile."
+        description = "Worker profile id, e.g. claude_plan, glm_51_impl, opencode_builder, codex_55_review, codex_53_fast, kimi_arch, deepseek_explore, or kimi_ux. Distinct from the server ToolProfile."
     )]
     pub profile: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "Credential profile ids to materialize before spawning the worker, e.g. codex_shared. Values resolve from .tachi/credentials/*.json."
-    )]
+    #[schemars(skip)]
     pub credential_profiles: Vec<String>,
     #[serde(default)]
     #[schemars(
@@ -385,20 +349,20 @@ pub struct TachiTaskParams {
     pub number: Option<u64>,
     #[serde(default)]
     #[schemars(
-        description = "[action=intake|dispatch|complete] GitHub issue ref, e.g. owner/repo#123 or URL."
+        description = "[action=intake|complete] GitHub issue ref, e.g. owner/repo#123 or URL."
     )]
     pub issue_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=dispatch|complete] GitHub PR ref, e.g. owner/repo#123 or URL. PR lifecycle (link/status/handoff/release) is tachi_gh only."
+        description = "[action=complete] GitHub PR ref, e.g. owner/repo#123 or URL. PR lifecycle (link/status/handoff/release) is tachi_gh only."
     )]
     pub pr_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Tachi flow id for feature-scoped artifacts, also linking a dispatch/complete back to its flow (briefing/intake/ux_matrix/close_loop/status/wait/dispatch/complete)."
+        description = "Tachi flow id for feature-scoped artifacts, also linking a completion back to its flow (briefing/intake/ux_matrix/close_loop/status/complete)."
     )]
     pub flow_id: Option<String>,
-    /// [action=complete|wait|status|cancel] Dispatch id linked to this task lifecycle event.
+    /// [action=complete|status] Dispatch id linked to this task lifecycle event.
     #[serde(default)]
     pub dispatch_id: Option<String>,
     /// [action=adjudicate] Direct outcome id to adjudicate. When omitted,
@@ -418,22 +382,18 @@ pub struct TachiTaskParams {
     )]
     pub risk: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "Expected child-agent tool surface, e.g. readonly, delegate, reviewer."
-    )]
+    #[schemars(skip)]
     pub tool_profile: Option<String>,
     #[serde(default, alias = "include_capability_bundle")]
     #[schemars(
-        description = "[action=dispatch|recommend] Include a capability bundle in the dispatch prompt when supported."
+        description = "[action=briefing] When true, includes the capability bundle in the briefing context when supported."
     )]
     pub auto_capability_bundle: Option<bool>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=dispatch] MCP/GitHub access contract for the spawned agent."
-    )]
+    #[schemars(skip)]
     pub mcp_access: Option<DispatchMcpAccessParams>,
     #[serde(default)]
-    #[schemars(description = "[action=dispatch] Hub MCP server ids the dispatch may inject.")]
+    #[schemars(skip)]
     pub allowed_mcp_servers: Vec<String>,
     // board fields
     #[serde(default)]
@@ -484,7 +444,7 @@ pub struct TachiTaskParams {
     pub delete_worktree: bool,
     #[serde(default)]
     #[schemars(
-        description = "[action=merge|dispatch] Confirm the local worktree merge (merge), or bypass the leader confirmation gate when dispatching an issue flow (dispatch)."
+        description = "[action=merge|apply_proposals] Leader confirmation gate for the local worktree merge or for route-policy proposal application."
     )]
     pub confirm: bool,
     // close_loop fields
@@ -529,18 +489,9 @@ pub struct TachiTaskParams {
     pub wiki_domain: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Bypass wiki noise filtering for action='close_loop'. Does not force dispatch or merge behavior."
+        description = "Bypass wiki noise filtering for action='close_loop'. Does not force merge behavior."
     )]
     pub force: bool,
-    /// [action=dispatch] tachi#1202/#993: suppress the `/cards/<seat>`
-    /// lane-card countermeasures overlay for this dispatch. Forwarded
-    /// verbatim to `TachiDispatchParams::inject_card`. Placed as a trailing
-    /// field (rather than next to `verbose`, its semantic sibling) to keep
-    /// this additive slice out of the high-churn action=recommend/profiles
-    /// region other in-flight tachi#1201 work also edits — same trailing
-    /// pattern as `eval_run_ids`/`project_explicit` above.
-    #[serde(default)]
-    pub inject_card: Option<bool>,
     // --- canonical WorkClaim fields (#1253) ---
     #[serde(default)]
     #[schemars(
@@ -584,25 +535,55 @@ pub struct TachiTaskParams {
 
 #[cfg(test)]
 mod tests {
-    use super::{TachiDispatchReason, TachiTaskParams};
+    use super::TachiTaskParams;
 
+    /// #1319-C2: worker launch/wait/cancel left Task. `dispatch_reason` and
+    /// `inject_card` were strictly dispatch-only fields and are removed from
+    /// `TachiTaskParams` together with the Dispatch arm. The `dispatch_reason`
+    /// allowlist vocabulary still lives on `TachiArenaParams` /
+    /// `TachiStaffParams` / `TachiDispatchParams`. Pin that `tachi_task` no
+    /// longer accepts `dispatch`/`wait`/`cancel` and points callers at
+    /// `tachi_staff`.
     #[test]
-    fn dispatch_reason_is_allowlisted_not_free_form() {
-        let params: TachiTaskParams = serde_json::from_value(serde_json::json!({
-            "action": "dispatch",
-            "dispatch_reason": "durable_cross_session"
-        }))
-        .expect("allowlisted reason deserializes");
-        assert_eq!(
-            params.dispatch_reason,
-            Some(TachiDispatchReason::DurableCrossSession)
-        );
+    fn dispatch_wait_cancel_actions_left_task() {
+        use std::str::FromStr;
 
-        let error = serde_json::from_value::<TachiTaskParams>(serde_json::json!({
-            "action": "dispatch",
-            "dispatch_reason": "want_parallelism"
-        }))
-        .expect_err("free-form reasons must fail schema deserialization");
-        assert!(error.to_string().contains("unknown variant"));
+        use super::super::action_enums::TachiTaskAction;
+
+        // Serde path (the wire/MCP path): the #[serde(rename_all)] derive
+        // rejects retired variants with a standard "unknown variant" error
+        // listing the surviving actions. The accepted-variants list (after
+        // "expected one of") must NOT contain dispatch/wait/cancel anymore.
+        for retired in ["dispatch", "wait", "cancel"] {
+            let err =
+                serde_json::from_str::<TachiTaskParams>(&format!("{{\"action\":\"{retired}\"}}"))
+                    .expect_err("retired action must not deserialize as tachi_task action");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unknown variant"),
+                "retired action {retired} should be an unknown variant, got: {msg}"
+            );
+            // The "expected one of `<...>`" list is the accepted surface;
+            // the retired action must not be admitted there. (The message
+            // does echo the rejected value back, so check the accepted list
+            // fragment specifically.)
+            let accepted = msg.split("expected one of ").nth(1).unwrap_or_default();
+            assert!(
+                !accepted.contains(&format!("`{retired}`")),
+                "retired action {retired} must not appear in the accepted-variants list, got: {msg}"
+            );
+        }
+
+        // FromStr path (the typed-action parse used by router-side matching):
+        // #1319-C2 points callers at tachi_staff for the retired worker
+        // lifecycle actions.
+        for retired in ["dispatch", "wait", "cancel"] {
+            let err = TachiTaskAction::from_str(retired)
+                .expect_err("retired action must not parse as tachi_task action");
+            assert!(
+                err.contains("tachi_staff"),
+                "retired action {retired} error should point at tachi_staff, got: {err}"
+            );
+        }
     }
 }

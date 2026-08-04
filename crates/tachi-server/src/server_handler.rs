@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_schema_hides_operator_dispatch_while_admin_keeps_it() {
+    fn standard_schema_hides_dispatch_only_execution_knobs() {
         fn task_tool() -> rmcp::model::Tool {
             MemoryServer::workflow_tool_router()
                 .list_all()
@@ -1162,20 +1162,41 @@ mod tests {
         let standard_properties = standard[0].input_schema["properties"]
             .as_object()
             .expect("standard properties");
+        // #1319-C2: dispatch-only execution knobs are hidden at the struct
+        // level (#[schemars(skip)]), so no profile — standard or admin —
+        // exposes them anymore. The projection list below is the surviving
+        // verification surface for the struct-level hide.
         for hidden in [
             "dispatch_reason",
             "env_id",
+            "unmanaged_cwd",
+            "skills",
+            "context_query",
+            "model",
+            "permission_profile",
+            "allowed_tools",
+            "completion_predicate",
+            "max_turns",
+            "sandbox",
+            "inject_tachi_mcp",
+            "inject_hub_mcps",
             "command",
+            "harness_transport",
+            "harness_server_url",
             "credential_profiles",
+            "tool_profile",
             "mcp_access",
+            "allowed_mcp_servers",
         ] {
             assert!(!standard_properties.contains_key(hidden), "{hidden}");
         }
+        // #1319-C2: `cwd` survives as a briefing/doc_index field (relative
+        // doc path resolution) — it must stay visible on the standard tool.
         assert!(standard_properties.contains_key("cwd"));
-        assert_eq!(
-            standard_properties["cwd"]["description"],
-            json!("[action=briefing|doc_index] Workspace root used to resolve relative canonical document paths.")
-        );
+        assert!(standard_properties["cwd"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("action=briefing"));
         assert!(!standard[0]
             .description
             .as_deref()
@@ -1239,16 +1260,37 @@ mod tests {
         let admin_actions = admin[0].input_schema["properties"]["action"]["enum"]
             .as_array()
             .expect("admin action enum");
-        assert!(admin_actions.contains(&json!("dispatch")));
-        assert!(admin[0].input_schema["properties"]
-            .as_object()
-            .expect("admin properties")
-            .contains_key("dispatch_reason"));
-        assert!(admin[0]
-            .description
-            .as_deref()
-            .unwrap_or_default()
-            .contains("dispatch"));
+        // #1319-C2: dispatch/cancel/wait were removed from tachi_task (external
+        // staffing now flows through tachi_staff). The schema must NOT
+        // advertise them, and the dispatch_reason field is gone.
+        assert!(
+            !admin_actions.contains(&json!("dispatch")),
+            "tachi_task must not advertise dispatch after [1319-C2]"
+        );
+        assert!(
+            !admin_actions.contains(&json!("cancel")),
+            "tachi_task must not advertise cancel after [1319-C2]"
+        );
+        assert!(
+            !admin_actions.contains(&json!("wait")),
+            "tachi_task must not advertise wait after [1319-C2]"
+        );
+        assert!(
+            !admin[0].input_schema["properties"]
+                .as_object()
+                .expect("admin properties")
+                .contains_key("dispatch_reason"),
+            "dispatch_reason field must be gone after [1319-C2]"
+        );
+        // The description no longer advertises dispatch as a tachi_task action.
+        assert!(
+            !admin[0]
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("action='dispatch'"),
+            "tachi_task description must not advertise action='dispatch' after [1319-C2]"
+        );
     }
 
     #[test]

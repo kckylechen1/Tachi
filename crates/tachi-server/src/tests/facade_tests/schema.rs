@@ -282,7 +282,20 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("briefing")));
     assert!(values.contains(&json!("doc_index")));
     assert!(values.contains(&json!("plan")));
-    assert!(values.contains(&json!("dispatch")));
+    // #1319-C2: dispatch/cancel/wait were removed from tachi_task (external
+    // staffing now flows through tachi_staff). The schema must NOT list them.
+    assert!(
+        !values.contains(&json!("dispatch")),
+        "tachi_task must not advertise dispatch after [1319-C2]"
+    );
+    assert!(
+        !values.contains(&json!("cancel")),
+        "tachi_task must not advertise cancel after [1319-C2]"
+    );
+    assert!(
+        !values.contains(&json!("wait")),
+        "tachi_task must not advertise wait after [1319-C2]"
+    );
     assert!(values.contains(&json!("complete")));
     assert!(values.contains(&json!("recommend")));
     assert!(values.contains(&json!("route_simulate")));
@@ -290,7 +303,6 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("review_proposal")));
     assert!(values.contains(&json!("apply_proposals")));
     assert!(values.contains(&json!("status")));
-    assert!(values.contains(&json!("cancel")));
     assert!(values.contains(&json!("intake")));
     assert!(values.contains(&json!("cycle_plan")));
     assert!(values.contains(&json!("ux_matrix")));
@@ -381,13 +393,11 @@ fn assert_field_accepts_string_and_number(value: &Value, field: &str, numeric_ty
 fn tachi_task_numeric_params_schema_accepts_string_or_number() {
     let value = serde_json::to_value(rmcp::schemars::schema_for!(TachiTaskParams))
         .expect("schema serializes");
-    for field in [
-        "duration_ms",
-        "timeout_secs",
-        "max_turns",
-        "number",
-        "cost_tokens",
-    ] {
+    // #1319-C2: the dispatch-only execution knobs other than timeout_secs are
+    // hidden from the public schema (#[schemars(skip)]); timeout_secs survives
+    // as the Status arm's acpx control timeout and keeps its string-or-number
+    // admission contract. The list below covers the surviving ledger fields.
+    for field in ["duration_ms", "number", "cost_tokens", "timeout_secs"] {
         assert_field_accepts_string_and_number(&value, field, "integer");
     }
     for field in ["cost_usd", "quality_score"] {
@@ -509,4 +519,113 @@ fn tachi_verify_runtime_accepts_numeric_strings() {
     .expect("runtime accepts numeric strings");
     assert_eq!(params.exit_code, Some(0));
     assert_eq!(params.limit, Some(3));
+}
+
+/// #1319-C2 discriminator: the generated `tachi_task` MCP schema's property
+/// descriptions must not reference the removed Dispatch/Wait/Cancel actions.
+/// After the enum dropped those variants, any description still guiding the
+/// model to "provide this for action=dispatch" is a schema lie.
+#[test]
+fn tachi_task_schema_descriptions_do_not_reference_removed_actions() {
+    let schema = rmcp::schemars::schema_for!(TachiTaskParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let serialized = value.to_string().to_ascii_lowercase();
+    for stale in [
+        "[action=dispatch",
+        "action='dispatch'",
+        "action=dispatch|",
+        "dispatch response",
+        "dispatch prompt",
+        "spawned agent",
+        "[action=wait",
+        "action=wait",
+        "[action=cancel",
+        "action=cancel",
+    ] {
+        assert!(
+            !serialized.contains(stale),
+            "tachi_task schema must not reference removed action text '{stale}' after [1319-C2]"
+        );
+    }
+}
+
+/// #1319-C2 discriminator: dispatch-only execution knobs (fields with no live
+/// reader on any surviving Task action) must NOT appear in the public
+/// `tachi_task` schema. They were exposed only for the removed Dispatch arm;
+/// leaving them public is an unactionable no-op surface.
+#[test]
+fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
+    let schema = rmcp::schemars::schema_for!(TachiTaskParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let properties = value["properties"].as_object().expect("task properties");
+    // Fields whose ONLY reader was the removed Dispatch arm (verified by
+    // grep: zero `params.<field>` reads in surviving task_router/task_facade
+    // arms). These must be hidden via #[schemars(skip)].
+    for knob in [
+        "env_id",
+        "unmanaged_cwd",
+        "skills",
+        "context_query",
+        "model",
+        "permission_profile",
+        "allowed_tools",
+        "completion_predicate",
+        "max_turns",
+        "sandbox",
+        "inject_tachi_mcp",
+        "inject_hub_mcps",
+        "command",
+        "harness_transport",
+        "harness_server_url",
+        "credential_profiles",
+        "tool_profile",
+        "mcp_access",
+        "allowed_mcp_servers",
+    ] {
+        assert!(
+            !properties.contains_key(knob),
+            "dispatch-only execution knob '{knob}' must be hidden from the public tachi_task schema after [1319-C2]"
+        );
+    }
+}
+
+/// #1319-C2 discriminator (positive): fields still READ by surviving public
+/// Task actions must remain visible in the public `tachi_task` schema —
+/// hiding them would make their live readers unactionable no-ops.
+/// - `agent` is read by the Complete arm (task_router.rs, with
+///   dispatch-defaults fallback);
+/// - `cwd` is read by briefing/doc_index for relative doc path resolution
+///   (feature_briefing/docs.rs);
+/// - `auto_capability_bundle` is read by briefing for context injection
+///   (feature_briefing/dispatch.rs);
+/// - `project_explicit` is read by the Complete arm for the #1041 B7 wire
+///   explicitness signal (task_router.rs complete arm); its schema property
+///   name is the serde rename `__tachi_project_explicit`, which IS the wire
+///   name clients send;
+/// - `execution_level` is read by the Recommend and RouteSimulate arms for
+///   host admission (task_router.rs);
+/// - `timeout_secs` is read by the Status arm for the acpx control command
+///   timeout (task_facade.rs handle_tachi_task_status).
+#[test]
+fn tachi_task_schema_keeps_fields_read_by_surviving_actions() {
+    let schema = rmcp::schemars::schema_for!(TachiTaskParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let properties = value["properties"].as_object().expect("task properties");
+    for (field, reader_hint) in [
+        ("agent", "action=complete"),
+        ("cwd", "action=briefing"),
+        ("auto_capability_bundle", "action=briefing"),
+        ("__tachi_project_explicit", "action=complete"),
+        ("execution_level", "action=recommend"),
+        ("timeout_secs", "action=status"),
+    ] {
+        let property = properties.get(field).unwrap_or_else(|| {
+            panic!("{field} must stay visible in the public tachi_task schema after [1319-C2]")
+        });
+        let description = property["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains(reader_hint),
+            "{field} description must name its surviving reader action ({reader_hint})"
+        );
+    }
 }

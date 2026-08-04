@@ -13,10 +13,7 @@ use serde_json::Value;
 
 use super::detect::DaemonInfo;
 use super::tool_map::remap_daemon_tool;
-use crate::tools::{
-    TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS, TASK_WAIT_TIMEOUT_CAP_SECS,
-    TASK_WAIT_TIMEOUT_DEFAULT_SECS,
-};
+use crate::tools::{TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS};
 
 const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -29,27 +26,22 @@ const LONG_POLL_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
 /// Derive the outer RPC timeout to use for `peer.call_tool(params)`.
 ///
-/// Most tools get the fixed `DAEMON_CALL_TIMEOUT` (60s) baseline. A small
-/// whitelist of `tachi_task` long-poll/control actions carry their own
+/// Most tools get the fixed `DAEMON_CALL_TIMEOUT` (60s) baseline. The
+/// `tachi_task(action='status')` control action carries its own
 /// caller-supplied timeout in `arguments.timeout_secs` and can legitimately
-/// run longer than 60s by design:
+/// run longer than 60s by design — it drives the acpx control-plane call,
+/// default [`TASK_CONTROL_TIMEOUT_DEFAULT_SECS`] (30s), capped at
+/// [`TASK_CONTROL_TIMEOUT_CAP_SECS`] (300s) —
+/// `handle_tachi_task_status`. (The `wait`/`cancel` long-poll/control
+/// actions left `tachi_task` in #1319-C2; worker launch is now
+/// `tachi_staff(action='start')`.)
 ///
-/// - `action == "wait"` polls up to `timeout_secs`, default
-///   [`TASK_WAIT_TIMEOUT_DEFAULT_SECS`] (600s), capped at
-///   [`TASK_WAIT_TIMEOUT_CAP_SECS`] (86_400s / 24h) —
-///   `tools/task_facade.rs::handle_tachi_task_wait`.
-/// - `action == "status"` / `action == "cancel"` drive the acpx
-///   control-plane call with the same shape, default
-///   [`TASK_CONTROL_TIMEOUT_DEFAULT_SECS`] (30s), capped at
-///   [`TASK_CONTROL_TIMEOUT_CAP_SECS`] (300s) —
-///   `handle_tachi_task_status` / `handle_tachi_task_cancel`.
-///
-/// These four constants are shared (`crate::tools::TASK_*`) with the
-/// daemon-side handlers rather than mirrored, so the RPC-layer default/cap
+/// These constants are shared (`crate::tools::TASK_CONTROL_*`) with the
+/// daemon-side handler rather than mirrored, so the RPC-layer default/cap
 /// can't drift out of sync with what the daemon actually applies (see #970,
 /// #991, #1028).
 ///
-/// The **invariant**: for every whitelisted action, the derived RPC timeout
+/// The **invariant**: for the whitelisted action, the derived RPC timeout
 /// is `min(requested_or_default, daemon_cap) + LONG_POLL_TIMEOUT_MARGIN` —
 /// the daemon-side cap is applied *first*, then the margin is added on top.
 /// That ordering means the margin is never eaten by capping (the #970/#1028
@@ -71,7 +63,7 @@ const LONG_POLL_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 /// A non-numeric garbage string (e.g. `"abc"`) or a negative number also
 /// maps to `None` → the action's default here, even though daemon-side
 /// `TachiTaskParams` deserialization would *reject* that value outright (a
-/// hard parse error before the wait/control loop ever starts). That's
+/// hard parse error before the control loop ever starts). That's
 /// intentionally harmless: the whole `tachi_task` call fails fast on the
 /// daemon's strict param parse, so no real long-running call is ever
 /// entered under that value — the derived RPC timeout here only needs to
@@ -88,8 +80,7 @@ pub(super) fn daemon_call_timeout(params: &CallToolRequestParams) -> Duration {
         .and_then(Value::as_str)
         .unwrap_or("");
     let (default_secs, cap_secs) = match action {
-        "wait" => (TASK_WAIT_TIMEOUT_DEFAULT_SECS, TASK_WAIT_TIMEOUT_CAP_SECS),
-        "status" | "cancel" => (
+        "status" => (
             TASK_CONTROL_TIMEOUT_DEFAULT_SECS,
             TASK_CONTROL_TIMEOUT_CAP_SECS,
         ),
@@ -452,10 +443,6 @@ mod tests {
         params
     }
 
-    fn wait_params(timeout_secs: Option<Value>) -> CallToolRequestParams {
-        action_params("wait", timeout_secs)
-    }
-
     fn action_params(action: &str, timeout_secs: Option<Value>) -> CallToolRequestParams {
         let mut args = serde_json::Map::new();
         args.insert("action".into(), Value::String(action.into()));
@@ -484,59 +471,6 @@ mod tests {
     }
 
     #[test]
-    fn wait_with_explicit_timeout_gets_timeout_plus_margin() {
-        let params = wait_params(Some(json!(600)));
-        assert_eq!(
-            daemon_call_timeout(&params),
-            Duration::from_secs(600) + LONG_POLL_TIMEOUT_MARGIN
-        );
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
-    }
-
-    #[test]
-    fn wait_with_absent_timeout_mirrors_task_facade_default() {
-        // handle_tachi_task_wait's own unwrap_or(600) is the daemon-side
-        // source of truth for "no timeout_secs supplied" — the RPC layer
-        // must not undercut that with a generic 60s fallback, or #970
-        // recurs for the common no-argument wait call.
-        let params = wait_params(None);
-        assert_eq!(
-            daemon_call_timeout(&params),
-            Duration::from_secs(600) + LONG_POLL_TIMEOUT_MARGIN
-        );
-    }
-
-    // #1028: this replaces the old `wait_above_ceiling_is_capped` assertion
-    // (`daemon_call_timeout == DAEMON_CALL_TIMEOUT_CEILING`, i.e. exactly
-    // 86_400s with the margin fully eaten). That was the bug: capping
-    // `requested + margin` at a ceiling equal to the daemon's own cap
-    // squeezes the margin to zero right at the boundary the daemon itself
-    // uses, racing its clean `"status":"timeout"` response instead of
-    // comfortably outliving it. The fix caps `requested` at the daemon's
-    // cap *first*, then always adds the full margin on top — so a
-    // wildly-over-cap request and a request sitting exactly on the cap
-    // boundary both land at `cap + margin`, never `cap`.
-    #[test]
-    fn wait_above_cap_gets_cap_plus_margin_not_truncated() {
-        let params = wait_params(Some(json!(999_999)));
-        assert_eq!(
-            daemon_call_timeout(&params),
-            Duration::from_secs(TASK_WAIT_TIMEOUT_CAP_SECS) + LONG_POLL_TIMEOUT_MARGIN
-        );
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(86_430));
-    }
-
-    #[test]
-    fn wait_at_cap_boundary_still_gets_full_margin() {
-        // requested == the daemon's own cap exactly (86_400s) is the
-        // precise boundary #1028 called out: the old ceiling-after-margin
-        // code shaved the margin to 0 here. min(86_400, 86_400) + 30 must
-        // be 86_430, not 86_400.
-        let params = wait_params(Some(json!(TASK_WAIT_TIMEOUT_CAP_SECS)));
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(86_430));
-    }
-
-    #[test]
     fn status_with_explicit_timeout_gets_timeout_plus_margin() {
         let params = action_params("status", Some(json!(300)));
         assert_eq!(daemon_call_timeout(&params), Duration::from_secs(330));
@@ -544,12 +478,12 @@ mod tests {
 
     #[test]
     fn status_above_cap_is_capped_before_margin() {
-        // requested (301) > daemon cap (300) for status/cancel: the daemon
-        // itself clamps to 300 (`unwrap_or(30).min(300)` in
-        // `handle_tachi_task_status`), so the RPC layer must derive from
-        // the *clamped* 300, not the raw 301 — otherwise it'd still be
-        // correct by accident here, but the point is the cap, not the
-        // requested value, drives the derived timeout once over cap.
+        // requested (301) > daemon cap (300) for status: the daemon itself
+        // clamps to 300 (`unwrap_or(30).min(300)` in
+        // `handle_tachi_task_status`), so the RPC layer must derive from the
+        // *clamped* 300, not the raw 301 — otherwise it'd still be correct
+        // by accident here, but the point is the cap, not the requested
+        // value, drives the derived timeout once over cap.
         let params = action_params("status", Some(json!(301)));
         assert_eq!(daemon_call_timeout(&params), Duration::from_secs(330));
     }
@@ -561,25 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_with_explicit_timeout_gets_timeout_plus_margin() {
-        let params = action_params("cancel", Some(json!(300)));
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(330));
-    }
-
-    #[test]
-    fn cancel_above_cap_is_capped_before_margin() {
-        let params = action_params("cancel", Some(json!(999_999)));
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(330));
-    }
-
-    #[test]
-    fn cancel_with_absent_timeout_mirrors_task_facade_default() {
-        let params = action_params("cancel", None);
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn tachi_task_non_wait_action_gets_default_timeout() {
+    fn tachi_task_non_status_action_gets_default_timeout() {
         let mut args = serde_json::Map::new();
         args.insert("action".into(), Value::String("board".into()));
         let params = params_with_args("tachi_task", args);
@@ -587,70 +503,69 @@ mod tests {
     }
 
     // --- Review-fix (#970 follow-up): string/null timeout_secs must not
-    // truncate the wait. `opt_u64_from_value` is the same lenient
-    // Null/Number/String-or-number coercion the daemon-side
+    // truncate the status control call. `opt_u64_from_value` is the same
+    // lenient Null/Number/String-or-number coercion the daemon-side
     // `TachiTaskParams::timeout_secs` field uses, so a numeric string, an
     // explicit null, an absent key, and an empty string must all derive
-    // the *same* timeout the daemon will actually apply — the wait
-    // default (600s) + margin (30s) = 630s — not the generic 60s
-    // baseline. This replaces the old (wrong) assertion that null → 60s,
-    // which locked in the truncation bug this test module now guards
-    // against.
+    // the *same* timeout the daemon will actually apply — the status
+    // default (30s) + margin (30s) = 60s — not the generic 60s baseline
+    // by accident. (The wait long-poll action left tachi_task in #1319-C2;
+    // status is the surviving control action that carries timeout_secs.)
 
     #[test]
-    fn wait_with_numeric_string_timeout_gets_timeout_plus_margin() {
-        let params = wait_params(Some(json!("600")));
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
+    fn status_with_numeric_string_timeout_mirrors_status_default() {
+        let params = action_params("status", Some(json!("30")));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(60));
     }
 
     #[test]
-    fn wait_with_null_timeout_mirrors_wait_default() {
-        let params = wait_params(Some(json!(null)));
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
+    fn status_with_null_timeout_mirrors_status_default() {
+        let params = action_params("status", Some(json!(null)));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(60));
     }
 
     #[test]
-    fn wait_with_empty_string_timeout_mirrors_wait_default() {
-        let params = wait_params(Some(json!("")));
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
+    fn status_with_empty_string_timeout_mirrors_status_default() {
+        let params = action_params("status", Some(json!("")));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(60));
     }
 
     #[test]
-    fn wait_with_garbage_string_timeout_falls_back_to_wait_default_not_60s() {
+    fn status_with_garbage_string_timeout_falls_back_to_status_default_not_60s_baseline() {
         // A non-numeric string ("abc") coerces to `None` here, same as
-        // null/absent, and derives the wait default (630s) rather than the
-        // generic 60s baseline. This is deliberately harmless even though
-        // it looks generous: daemon-side `TachiTaskParams` deserialization
+        // null/absent, and derives the status default (30s) + margin (30s) =
+        // 60s. This is deliberately harmless even though it looks like the
+        // generic baseline: daemon-side `TachiTaskParams` deserialization
         // uses the *strict* `opt_u64_from_string_or_number` deserializer,
         // which hard-errors on a non-numeric string — the whole
         // `tachi_task` call fails fast on the daemon's param parse before
-        // any wait loop starts, so a real 600s+ wait is never actually
-        // entered under this value. Garbage->None->default is chosen for
-        // consistency with null/absent/empty-string rather than adding a
-        // separate garbage->60s special case that would just be a second
-        // codepath to keep in sync for no behavioral benefit (the call
-        // errors out well within either 60s or 630s regardless).
-        let params = wait_params(Some(json!("not-a-number")));
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
+        // any control loop starts, so a real 30s+ status call is never
+        // actually entered under this value. Garbage->None->default is
+        // chosen for consistency with null/absent/empty-string rather than
+        // adding a separate garbage->60s special case that would just be a
+        // second codepath to keep in sync for no behavioral benefit (the
+        // call errors out well within either 60s or 90s regardless).
+        let params = action_params("status", Some(json!("not-a-number")));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(60));
     }
 
     #[test]
-    fn wait_with_negative_number_timeout_falls_back_to_wait_default() {
-        // Same reasoning as the garbage-string case: a negative JSON
-        // number isn't representable as u64, coerces to `None`, and the
+    fn status_with_negative_number_timeout_falls_back_to_status_default() {
+        // Same reasoning as the garbage-string case: a negative JSON number
+        // isn't representable as u64, coerces to `None`, and the
         // daemon-side strict deserializer would hard-error on it too (the
-        // call fails fast, no real long wait is ever entered).
-        let params = wait_params(Some(json!(-5)));
-        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
+        // call fails fast, no real long control call is ever entered).
+        let params = action_params("status", Some(json!(-5)));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(60));
     }
 
     #[test]
     fn missing_arguments_map_entirely_gets_default_timeout() {
-        // tachi_task with action=wait but no arguments map at all (not just
-        // a missing key) must still fail safe to the 60s default — there is
-        // no `arguments` map to read `timeout_secs` from at all, which is a
+        // tachi_task with no arguments map at all (not just a missing key)
+        // must still fail safe to the 60s default — there is no `arguments`
+        // map to read `action`/`timeout_secs` from at all, which is a
         // distinct case from a present-but-absent/null `timeout_secs` key
-        // (those go through the wait-default path above).
+        // (those go through the status-default path above).
         let params = CallToolRequestParams::new("tachi_task".to_string());
         assert_eq!(daemon_call_timeout(&params), DAEMON_CALL_TIMEOUT);
     }

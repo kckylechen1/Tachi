@@ -69,7 +69,8 @@ impl FromStr for TachiVerifyAction {
 /// Actions accepted by `tachi_task`.
 ///
 /// GitHub PR lifecycle (`link_pr` / `pr_status` / `pr_handoff` / `release_note`)
-/// is **not** accepted here — use `tachi_gh` (#757).
+/// is **not** accepted here — use `tachi_gh` (#757). Worker launch/wait/cancel
+/// left Task in #1319-C2; use `tachi_staff(action='start'|'status')` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TachiTaskAction {
@@ -77,7 +78,6 @@ pub enum TachiTaskAction {
     Briefing,
     DocIndex,
     Recommend,
-    Dispatch,
     Complete,
     Profiles,
     Profile,
@@ -87,9 +87,7 @@ pub enum TachiTaskAction {
     ReviewProposal,
     ApplyProposals,
     Status,
-    Cancel,
     Board,
-    Wait,
     Merge,
     Intake,
     CycleStatus,
@@ -112,7 +110,6 @@ impl TachiTaskAction {
         Self::Briefing,
         Self::DocIndex,
         Self::Recommend,
-        Self::Dispatch,
         Self::Complete,
         Self::Profiles,
         Self::Profile,
@@ -122,9 +119,7 @@ impl TachiTaskAction {
         Self::ReviewProposal,
         Self::ApplyProposals,
         Self::Status,
-        Self::Cancel,
         Self::Board,
-        Self::Wait,
         Self::Merge,
         Self::Intake,
         Self::CycleStatus,
@@ -146,7 +141,6 @@ impl TachiTaskAction {
             Self::Briefing => "briefing",
             Self::DocIndex => "doc_index",
             Self::Recommend => "recommend",
-            Self::Dispatch => "dispatch",
             Self::Complete => "complete",
             Self::Profiles => "profiles",
             Self::Profile => "profile",
@@ -156,9 +150,7 @@ impl TachiTaskAction {
             Self::ReviewProposal => "review_proposal",
             Self::ApplyProposals => "apply_proposals",
             Self::Status => "status",
-            Self::Cancel => "cancel",
             Self::Board => "board",
-            Self::Wait => "wait",
             Self::Merge => "merge",
             Self::Intake => "intake",
             Self::CycleStatus => "cycle_status",
@@ -197,7 +189,6 @@ impl FromStr for TachiTaskAction {
             "briefing" => Ok(Self::Briefing),
             "doc_index" => Ok(Self::DocIndex),
             "recommend" => Ok(Self::Recommend),
-            "dispatch" => Ok(Self::Dispatch),
             "complete" => Ok(Self::Complete),
             "profiles" => Ok(Self::Profiles),
             "profile" => Ok(Self::Profile),
@@ -207,9 +198,7 @@ impl FromStr for TachiTaskAction {
             "review_proposal" => Ok(Self::ReviewProposal),
             "apply_proposals" => Ok(Self::ApplyProposals),
             "status" => Ok(Self::Status),
-            "cancel" => Ok(Self::Cancel),
             "board" => Ok(Self::Board),
-            "wait" => Ok(Self::Wait),
             "merge" => Ok(Self::Merge),
             "intake" => Ok(Self::Intake),
             "cycle_status" => Ok(Self::CycleStatus),
@@ -223,6 +212,11 @@ impl FromStr for TachiTaskAction {
             "release" => Ok(Self::Release),
             "heartbeat" => Ok(Self::Heartbeat),
             "handoff" => Ok(Self::Handoff),
+            // #1319-C2: dispatch/wait/cancel left Task (worker launch moved to
+            // tachi_staff). Point callers at the canonical worker surface.
+            "dispatch" | "wait" | "cancel" => Err(format!(
+                "Invalid tachi_task action '{s}'. Worker launch/wait/cancel left Task in #1319-C2; use tachi_staff(action='start') to launch a worker and tachi_task(action='status') to read its state."
+            )),
             // #757: these were removed from tachi_task; point callers at tachi_gh.
             "link_pr" | "pr_status" | "pr_handoff" | "release_note" => Err(format!(
                 "Invalid tachi_task action '{s}'. GitHub PR lifecycle actions live on tachi_gh(action='{s}')."
