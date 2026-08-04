@@ -320,6 +320,11 @@ jobs:
         # installed. Personal-account repos need no GITLEAKS_LICENSE (only
         # GitHub Organization accounts do); this repo is under the
         # kckylechen1 personal account, not an org.
+        # Licensing note (2026-08-05): gitleaks-action v2+ is NOT MIT — its
+        # action.yml carries the GITLEAKS-ACTION EULA. Free for personal-account
+        # repos (this one); an org would need GITLEAKS_LICENSE. The gitleaks CLI
+        # the local pre-push hook runs directly remains MIT. Re-read the EULA
+        # before this job runs in any org context.
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
