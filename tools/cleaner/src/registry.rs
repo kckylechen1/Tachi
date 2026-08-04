@@ -160,9 +160,10 @@ pub fn registry_contains(worktree_root: &Path) -> bool {
     value_contains_path(&value, &needle)
 }
 
-/// Exact-row removal for both the ordinary close path and the
-/// registry-only stale-close execute path (kckylechen1/tachi#1605 fix
-/// round, codex review; round-2 review, FIX 2). This does **not**
+/// Exact-row removal, used directly by the ordinary close path and as the
+/// building block behind [`remove_registry_entry_exact_if_still_gone`],
+/// which the registry-only stale-close execute path calls (kckylechen1/tachi#1605
+/// fix round, codex review; round-2 review, FIX 2/FIX 3). This does **not**
 /// canonicalize either side — canonicalizing here is exactly the TOCTOU
 /// the review flagged: a stale
 /// path can be recreated as a symlink to a DIFFERENT, LIVE registered
@@ -219,6 +220,44 @@ fn remove_matching_row_exact(
         ));
     }
     registry.worktrees.retain(|record| record.path != stored_path);
+    Ok(true)
+}
+
+/// Locked precondition-then-remove for the registry-only stale-close
+/// execute path (round-2 cross-vendor review, FIX 3). The plan-time and
+/// pre-execute "does this still fail to resolve?" checks in `wt_clean.rs`
+/// run OUTSIDE the registry file lock, so a concurrent registration
+/// landing at the identical path between that pre-execute re-check and the
+/// eventual exact-delete could still be deleted without refusal — a
+/// re-check/use race. This folds the precondition into the SAME critical
+/// section as the mutation: nothing can register at `stored_path` between
+/// the check and the removal, because both run while this function alone
+/// holds the registry lock (`acquire_registry_lock`, the same lock
+/// `register_worktree` takes).
+///
+/// Uses `symlink_metadata` rather than `exists()`/`canonicalize()`: a
+/// dangling symlink left at the path is still "something present" for the
+/// purposes of this refusal — it is not the verifiably, truly-gone state
+/// the stale-row close was planned against — so it must refuse too; only
+/// an outright missing directory entry counts as still-gone.
+pub fn remove_registry_entry_exact_if_still_gone(stored_path: &str) -> Result<bool, String> {
+    let registry_path = registry_path()?;
+    if !registry_path.exists() {
+        return Ok(false);
+    }
+    let _lock = acquire_registry_lock(&registry_path)?;
+    if Path::new(stored_path).symlink_metadata().is_ok() {
+        return Err(format!(
+            "refusing registry-only close: {stored_path} now resolves to something on disk \
+             (it did not at plan time) — this row may no longer be stale; re-run `wt-remove` \
+             to re-plan against current state before dropping it"
+        ));
+    }
+    let mut registry = read_registry(&registry_path)?;
+    if !remove_matching_row_exact(&mut registry, stored_path)? {
+        return Ok(false);
+    }
+    write_registry(&registry_path, &registry)?;
     Ok(true)
 }
 
@@ -580,6 +619,72 @@ mod tests {
             remaining.len(),
             2,
             "BOTH duplicate rows must survive a refused exact-remove: {remaining:?}"
+        );
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Round-2 cross-vendor review, FIX 3: pins that the "path must not
+    /// resolve" precondition is authoritative when checked directly through
+    /// `remove_registry_entry_exact_if_still_gone`, independent of any
+    /// unlocked pre-check a caller might have already run. This does not
+    /// simulate real thread interleaving — it calls the locked variant
+    /// directly with the path already present, which is exactly the state
+    /// a race would produce between an earlier unlocked "still gone?"
+    /// check and this call. If this function's own internal check did not
+    /// hold, nothing about calling it later under a lock would save it.
+    #[test]
+    fn remove_registry_entry_exact_if_still_gone_refuses_when_path_resolves() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let root = std::env::temp_dir().join(format!(
+            "tachi-clean-locked-precondition-test-{}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let present_path = root.join("recreated-wt");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let registry_path = registry_path().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let stored_path = present_path.display().to_string();
+        let registry = WorktreeRegistry {
+            version: 1,
+            worktrees: vec![WorktreeRecord {
+                path: stored_path.clone(),
+                repo_root: root.display().to_string(),
+                branch: "feature/locked-precondition".to_string(),
+                dispatch_id: None,
+                pr: None,
+                created_at: now.clone(),
+                updated_at: now,
+            }],
+        };
+        write_registry(&registry_path, &registry).unwrap();
+
+        // The precondition: this path exists on disk (recreated between an
+        // earlier unlocked staleness check and this call), so the row it
+        // maps to is no longer verifiably stale.
+        std::fs::create_dir_all(&present_path).unwrap();
+
+        let err = remove_registry_entry_exact_if_still_gone(&stored_path)
+            .expect_err("must refuse once the planned path resolves again, even called directly");
+        assert!(
+            err.contains("resolves") && err.contains("re-run"),
+            "refusal must be typed and point the operator at re-planning: {err}"
+        );
+
+        let remaining = read_registry(&registry_path).unwrap().worktrees;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the row must survive the refusal, not be dropped: {remaining:?}"
         );
 
         match old_home {

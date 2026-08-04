@@ -285,6 +285,16 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
         // this row is no longer verifiably stale — refuse rather than let a
         // canonicalizing matcher merge this row into (and delete) a live
         // one. The operator re-runs planning to see current reality.
+        //
+        // Round-2 cross-vendor review (FIX 3): this check is a fast,
+        // UNLOCKED fail-fast courtesy only — a cheap way to bail before
+        // ever taking the registry lock, in the common case. It is
+        // deliberately NOT the authoritative check: a concurrent
+        // registration landing at this exact path between this call and
+        // the lock acquisition below would slip past it unrefused. The
+        // authoritative precondition runs INSIDE the registry lock, in
+        // `remove_registry_entry_exact_if_still_gone` below, so nothing
+        // can register at `path` between the check and the delete.
         if std::fs::canonicalize(&path).is_ok() {
             report.errors.push(format!(
                 "refusing registry-only close: {path} now resolves to something on disk \
@@ -293,13 +303,13 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             ));
             return report;
         }
-        // Exact-row deletion: match the literal stored path string of the
-        // planned row only, no canonicalization, no `paths_equal`. This is
-        // the other half of the TOCTOU fix — even if the path above still
-        // fails to canonicalize, byte-matching only the planned row's own
-        // stored string guarantees at most one row is ever removed, and
-        // never one that merely canonicalizes equal to it.
-        match registry::remove_registry_entry_exact(&path) {
+        // Locked precondition + exact-row deletion in one critical section:
+        // the other half of the TOCTOU fix. Re-checks "does this path
+        // truly not exist" a second time — under the SAME registry file
+        // lock that serializes the mutation — and byte-matches only the
+        // planned row's own stored string (never `paths_equal`), closing
+        // the re-check/delete race window the fast pre-check above cannot.
+        match registry::remove_registry_entry_exact_if_still_gone(&path) {
             Ok(true) => {
                 report.removed = true;
                 report.dry_run = false;
@@ -312,9 +322,7 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             Ok(false) => report.errors.push(format!(
                 "stale registry row for {path} disappeared before it could be dropped"
             )),
-            Err(err) => report
-                .errors
-                .push(format!("registry cleanup failed: {err}")),
+            Err(err) => report.errors.push(err),
         }
         return report;
     }
