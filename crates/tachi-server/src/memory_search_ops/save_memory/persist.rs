@@ -200,6 +200,23 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
 /// and every corresponding graph edge under one `BEGIN IMMEDIATE` writer
 /// snapshot. A failed scan, claim, or edge write rolls the canonical upsert
 /// back with the rest of the projection.
+///
+/// `receipt_attach_expected_revision`: #1558 fix round. `Some(revision)` only
+/// when this write is about to attach a *new* model-derived receipt (see
+/// `entry.rs`'s `build_save_entry` -- the trusted-existing-receipt branch
+/// never reaches here with `Some`) to a row the caller read at `revision`.
+/// Two concurrent model-derived writers can both read the same receipt-less
+/// row at revision 1, both bind a receipt to revision 2, and both reach this
+/// transaction; the row-identity check right below only proves the row was
+/// not replaced by a *different* winner -- it says nothing about whether a
+/// concurrent writer already advanced *this* row's revision between this
+/// writer's pre-read and this transaction's snapshot. Left unguarded, the
+/// second writer's transaction would silently overwrite the first writer's
+/// fresher receipt with provenance describing stale content. Mirrors the
+/// CAS-loser shape `memcore::db::memory_crud::update::update_enrichment_fields`
+/// already established for background enrichment: a stale expectation aborts
+/// the write rather than landing content computed against data that is no
+/// longer current.
 pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
     server: &MemoryServer,
     entry: &mut MemoryEntry,
@@ -207,6 +224,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
     target_db: DbScope,
     named_project: Option<&str>,
     evidence_write: &AtomicReferenceWrite,
+    receipt_attach_expected_revision: Option<i64>,
 ) -> Result<WikiProjectionWriteResult, String> {
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
         let (result, metadata, duplicates_superseded, previous_revision) = store
@@ -218,6 +236,15 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                             "wiki projection canonical changed before commit: expected {}",
                             entry.id
                         )));
+                    }
+                    if let Some(expected_revision) = receipt_attach_expected_revision {
+                        let current_revision = active.as_ref().map(|winner| winner.revision);
+                        if current_revision != Some(expected_revision) {
+                            return Err(memcore::MemoryError::InvalidArg(format!(
+                                "wiki projection receipt attach stale: expected revision {expected_revision} for {}, found {current_revision:?}",
+                                entry.id
+                            )));
+                        }
                     }
                 }
                 // Update lineage belongs to the same writer snapshot as the

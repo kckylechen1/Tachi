@@ -858,6 +858,165 @@ async fn ordinary_public_wiki_update_preserves_trusted_existing_model_receipt() 
     );
 }
 
+/// #1558 fix round (codex terra review): two concurrent model-derived
+/// writers both read the same receipt-less row at revision 1, both bind a
+/// receipt to revision 2, and race to commit. Mirrors the concurrency
+/// harness style in `wiki_tests::write::updates`
+/// (`concurrent_exact_path_updates_stamp_the_immediate_predecessor_revision`,
+/// `stale_wiki_canonical_cannot_supersede_the_new_active_winner`) -- separate
+/// `MemoryServer` connections, `install_pre_upsert_path_barrier` to force the
+/// race at the actual write transaction -- but exercises the receipt-attach
+/// CAS instead of the row-identity CAS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_model_derived_wiki_writers_receipt_attach_is_revision_guarded() {
+    let provider_a = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-race-a").await;
+    let provider_b = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-race-b").await;
+
+    let mut canonical = make_entry("wiki-receipt-race-canonical");
+    canonical.path = "/wiki/agent/tachi/receipt-race".to_string();
+    canonical.topic = "receipt race".to_string();
+    canonical.text =
+        "Receipt-less canonical row both writers race to attach a receipt to.".to_string();
+    canonical.metadata = json!({"wiki": true});
+    canonical.domain = Some("wiki".to_string());
+    let (server, _home) = seed_wiki_project_entries(vec![canonical.clone()]);
+
+    let writer_one = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+        .expect("open first receipt writer");
+    let writer_two = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+        .expect("open second receipt writer");
+
+    let invocation_a = provider_a
+        .llm
+        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
+        .await
+        .expect("receipt A")
+        .invocation;
+    let invocation_b = provider_b
+        .llm
+        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
+        .await
+        .expect("receipt B")
+        .invocation;
+
+    let _barrier = crate::memory_search_ops::save_memory::install_pre_upsert_path_barrier(
+        &canonical.path,
+        std::sync::Arc::new(std::sync::Barrier::new(2)),
+    );
+
+    let write = |writer: MemoryServer,
+                 title: &'static str,
+                 text: &'static str,
+                 invocation: tachi_llm::PersistedModelInvocationReceiptV1| {
+        let path = canonical.path.clone();
+        tokio::spawn(async move {
+            crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
+                &writer,
+                WikiWriteParams {
+                    title: title.to_string(),
+                    text: text.to_string(),
+                    path: Some(path),
+                    topic: Some("receipt race".to_string()),
+                    summary: None,
+                    category: "experience".to_string(),
+                    keywords: vec![],
+                    entities: vec![],
+                    importance: 0.9,
+                    scope: "global".to_string(),
+                    retention_policy: "permanent".to_string(),
+                    domain: None,
+                    project: None,
+                    metadata: None,
+                    force: true,
+                    references: vec![],
+                    include_patterns: false,
+                    pattern_query: None,
+                    pattern_top_k: None,
+                },
+                invocation,
+            )
+            .await
+        })
+    };
+    let first = write(
+        writer_one,
+        "Receipt race A",
+        "First concurrent model-derived writer.",
+        invocation_a,
+    );
+    let second = write(
+        writer_two,
+        "Receipt race B",
+        "Second concurrent model-derived writer.",
+        invocation_b,
+    );
+    let first = first.await.expect("first writer task");
+    let second = second.await.expect("second writer task");
+    let results = [first, second];
+
+    let winners: Vec<&Result<String, String>> =
+        results.iter().filter(|result| result.is_ok()).collect();
+    let losers: Vec<&Result<String, String>> =
+        results.iter().filter(|result| result.is_err()).collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one racing receipt attach must survive: {results:?}"
+    );
+    assert_eq!(
+        losers.len(),
+        1,
+        "exactly one racing receipt attach must lose: {results:?}"
+    );
+
+    let loser_error = losers[0].as_ref().unwrap_err();
+    assert!(
+        loser_error.contains("wiki projection receipt attach stale"),
+        "the loser must surface the same typed CAS-loser signal the row-level \
+         identity check gives, not a silent overwrite: {loser_error}"
+    );
+
+    let winner_json: Value =
+        serde_json::from_str(winners[0].as_ref().unwrap()).expect("winner response json");
+    let winner_id = winner_json["id"].as_str().expect("winner id").to_string();
+    assert_eq!(
+        winner_id, canonical.id,
+        "the raced update must stay on the canonical row"
+    );
+
+    let stored = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get(&winner_id).map_err(|error| error.to_string())
+        })
+        .expect("read raced canonical row")
+        .expect("raced canonical row exists");
+    let receipt = stored
+        .metadata
+        .pointer("/provenance/model_invocation")
+        .cloned()
+        .expect("surviving receipt");
+    assert!(
+        receipt["effective_model"] == json!("wiki-race-a")
+            || receipt["effective_model"] == json!("wiki-race-b"),
+        "surviving receipt must belong to whichever writer actually committed: {receipt}"
+    );
+    assert_eq!(
+        receipt["content_hash"].as_str(),
+        Some(tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&stored.text).as_str()),
+        "surviving receipt's binding must match the surviving row's content"
+    );
+    assert_eq!(
+        receipt["memory_id"].as_str(),
+        Some(winner_id.as_str()),
+        "surviving receipt's binding must match the surviving row's id"
+    );
+    assert_eq!(
+        receipt["revision"].as_i64(),
+        Some(stored.revision),
+        "surviving receipt's binding must match the surviving row's revision"
+    );
+}
+
 #[tokio::test]
 async fn tachi_wiki_ingest_truncated_metadata_writes_nothing() {
     let provider = MockWikiIngestProvider::start(
