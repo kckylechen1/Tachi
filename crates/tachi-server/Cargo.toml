@@ -181,10 +181,12 @@ path = "src/bin/github_corpus_pilot.rs"
 #     and `cargo build --release` still produce the bin ARTIFACT, so release
 #     packaging (scripts/package_release_binary.sh -> the `tachi` binary) and
 #     the install/PATH surface are unchanged.
-#   * No `CARGO_BIN_EXE_*` reference exists anywhere in the repo (verified by
-#     grep, zero hits), so no integration test depends on this bin's test
-#     target; and there is no `[[bench]]` / `#[bench]` in this crate, so
-#     `bench = false` removes nothing.
+#   * The repo's one `CARGO_BIN_EXE_*` reference
+#     (tests/doctor_run_daily_process.rs -> CARGO_BIN_EXE_tachi-server) names
+#     the `tachi-server` bin, not this alias, and reads the bin TARGET rather
+#     than its test target -- so no integration test depends on this bin's
+#     test target either way; and there is no `[[bench]]` / `#[bench]` in this
+#     crate, so `bench = false` removes nothing.
 #
 # The `memory-server` [[bin]] alias that used to live here (the #890/#912
 # brand-rename PATH-compat shim) is retired (tachi#1132, owner-ratified
