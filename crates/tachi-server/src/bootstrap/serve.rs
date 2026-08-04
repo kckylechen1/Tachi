@@ -2258,6 +2258,26 @@ mod tests {
         assert_eq!(mode, 0o600, "expected 0o600, got {mode:o}");
     }
 
+    /// Hermetic global-only server bound to `home` as its Tachi home, so the
+    /// distill gate's named-project scan sees only what the test created.
+    fn server_with_home(
+        home: &std::path::Path,
+        project_db: Option<PathBuf>,
+    ) -> crate::MemoryServer {
+        crate::MemoryServer::new_with_home_for_test(
+            home.join("global.db"),
+            project_db,
+            home.to_path_buf(),
+        )
+        .expect("server")
+    }
+
+    fn write_named_project_db(home: &std::path::Path, name: &str) {
+        let dir = home.join("projects").join(name);
+        std::fs::create_dir_all(&dir).expect("named project dir");
+        std::fs::write(dir.join(memcore::MEMORY_DB_FILENAME), b"").expect("named project db file");
+    }
+
     #[test]
     fn daily_distill_scheduler_stays_enabled_when_pipeline_is_disabled() {
         let _guard = crate::utils::global_test_lock()
@@ -2267,18 +2287,22 @@ mod tests {
         std::env::remove_var("ENABLE_PIPELINE");
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let global_db = temp.path().join("global.db");
         let project_db = temp.path().join("project").join("memory.db");
         std::fs::create_dir_all(project_db.parent().expect("project parent"))
             .expect("create project db parent");
 
-        let server =
-            crate::MemoryServer::new(global_db, Some(project_db)).expect("server with project db");
+        let server = server_with_home(temp.path(), Some(project_db));
         assert!(
             !server.pipeline_enabled,
             "test precondition: pipeline should default to disabled"
         );
-        assert!(daily_distill_scheduler_enabled(&server));
+        assert!(matches!(
+            daily_distill_scheduler_gate(&server),
+            DailyDistillGate::Enabled {
+                bound_project: true,
+                ..
+            }
+        ));
 
         match previous {
             Some(value) => std::env::set_var("ENABLE_PIPELINE", value),
@@ -2286,26 +2310,61 @@ mod tests {
         }
     }
 
+    /// #1605 headline: the global-only owner daemon has real distill work —
+    /// `run_daily_batch_distill` scans every manifest-attached named-project DB
+    /// with no bound project involved — so the gate must spawn, not refuse.
     #[test]
-    fn daily_distill_scheduler_requires_project_db() {
+    fn daily_distill_scheduler_enabled_for_global_only_daemon_with_named_projects() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var("ENABLE_PIPELINE").ok();
-        std::env::set_var("ENABLE_PIPELINE", "true");
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let server = crate::MemoryServer::new(temp.path().join("global.db"), None).expect("server");
+        write_named_project_db(temp.path(), "Sigil");
+        let server = server_with_home(temp.path(), None);
 
         assert!(
-            server.pipeline_enabled,
-            "test precondition: pipeline enabled"
+            !server.has_project_db(),
+            "test precondition: no bound project DB"
         );
-        assert!(!daily_distill_scheduler_enabled(&server));
+        assert_eq!(
+            daily_distill_scheduler_gate(&server),
+            DailyDistillGate::Enabled {
+                bound_project: false,
+                named_projects: 1,
+            }
+        );
+    }
 
-        match previous {
-            Some(value) => std::env::set_var("ENABLE_PIPELINE", value),
-            None => std::env::remove_var("ENABLE_PIPELINE"),
+    /// The runner skips `wiki` (it has its own curation path), so a home whose
+    /// only named project is `wiki` genuinely has nothing to distill — and the
+    /// refusal must name the gate and the remedy rather than go silent.
+    #[test]
+    fn daily_distill_scheduler_disabled_refusal_names_gate_and_remedy() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_named_project_db(temp.path(), "wiki");
+        let server = server_with_home(temp.path(), None);
+
+        match daily_distill_scheduler_gate(&server) {
+            DailyDistillGate::Disabled { reason, remedy } => {
+                assert!(
+                    reason.contains("daily_distill_scheduler_gate"),
+                    "refusal must name the gate, got: {reason}"
+                );
+                assert!(
+                    reason.contains("no bound project DB"),
+                    "refusal must state the condition, got: {reason}"
+                );
+                assert!(
+                    remedy.contains("--project-db") && remedy.contains("projects"),
+                    "refusal must state the remedy, got: {remedy}"
+                );
+            }
+            other => panic!("expected DISABLED for a wiki-only home, got {other:?}"),
         }
     }
 

@@ -476,7 +476,27 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
         eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
     }
 
-    if daily_distill_scheduler_enabled(server) {
+    // #1605: refuse loudly or not at all. The gate carries its own reason, and
+    // both branches log through the tracing sink so `tachi.log` records the
+    // decision deterministically — the old silent no-spawn cost six days of
+    // zero distillation on the global-only owner daemon.
+    let (bound_project, named_projects) = match daily_distill_scheduler_gate(server) {
+        DailyDistillGate::Enabled {
+            bound_project,
+            named_projects,
+        } => (bound_project, named_projects),
+        DailyDistillGate::Disabled { reason, remedy } => {
+            tracing::warn!(
+                target: "tachi::distill",
+                reason = %reason,
+                remedy = %remedy,
+                "Distill scheduler: DISABLED"
+            );
+            return tokio::spawn(async {});
+        }
+    };
+
+    {
         // Phase 1 daily batch distill. Default cadence is 24h; the legacy
         // per-capture `MemoryDistill` enqueue is gone, so this scheduler must
         // remain active even when external pipeline workers are disabled.
@@ -485,6 +505,16 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
             .and_then(|value| value.parse().ok())
             .unwrap_or(86_400);
 
+        // Logged at decision time, not after the 60s warmup: a daemon that
+        // dies inside the warmup must still have said what it decided.
+        tracing::info!(
+            target: "tachi::distill",
+            interval_secs = distill_interval_secs,
+            bound_project,
+            named_projects,
+            "Distill scheduler: ENABLED (daily batch)"
+        );
+
         let distill_server = server.clone();
         let marker_path = daily_distill_marker_path(app_home);
         tokio::spawn(async move {
@@ -492,9 +522,10 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
                 _ = shutdown.cancelled() => return,
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {}
             }
-            eprintln!(
-                "Distill scheduler: ENABLED (daily batch, interval={}s)",
-                distill_interval_secs
+            tracing::debug!(
+                target: "tachi::distill",
+                interval_secs = distill_interval_secs,
+                "Distill scheduler: warmup complete, entering run loop"
             );
 
             let run_once = |server: &crate::MemoryServer, marker: &std::path::Path| {
@@ -604,9 +635,6 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
                 }
             }
         })
-    } else {
-        eprintln!("Distill scheduler: DISABLED (no project DB available)");
-        tokio::spawn(async {})
     }
 }
 
@@ -975,6 +1003,65 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
             .expect("disabled gc handle should complete immediately")
+            .expect("task panicked");
+    }
+
+    /// Hermetic server whose Tachi home is `home`, so the #1605 distill gate's
+    /// named-project scan sees only what the test put there.
+    fn server_with_home(home: &std::path::Path) -> MemoryServer {
+        MemoryServer::new_with_home_for_test(home.join("global.db"), None, home.to_path_buf())
+            .expect("server")
+    }
+
+    /// #1605 discriminating test: a global-store-only daemon that still has a
+    /// manifest-attached named project MUST spawn the scheduler. The enabled
+    /// task parks in its 60s warmup, so "still running after 250ms" separates
+    /// it from the disabled branch's immediately-completing no-op handle.
+    #[tokio::test]
+    async fn daily_distill_spawns_for_global_only_daemon_with_named_project() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let project_dir = home.join("projects").join("Sigil");
+        std::fs::create_dir_all(&project_dir).expect("named project dir");
+        std::fs::write(project_dir.join(memcore::MEMORY_DB_FILENAME), b"")
+            .expect("named project db file");
+
+        let server = server_with_home(home);
+        assert!(
+            !server.has_project_db(),
+            "test precondition: global-store-only daemon"
+        );
+
+        let shutdown = CancellationToken::new();
+        let mut handle = report_pipeline_and_spawn_daily_distill(&server, home, shutdown.clone());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut handle)
+                .await
+                .is_err(),
+            "scheduler must be live (parked in warmup), not a silent no-op handle"
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("distill scheduler did not exit within 2s after shutdown")
+            .expect("task panicked");
+    }
+
+    /// The genuinely-nothing-to-distill home still returns the no-op handle —
+    /// paired with `serve.rs`'s gate test, which pins the `DISABLED` reason and
+    /// remedy text that this branch hands to `tracing::warn!`.
+    #[tokio::test]
+    async fn daily_distill_returns_noop_handle_when_no_store_is_distillable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let server = server_with_home(home);
+
+        let shutdown = CancellationToken::new();
+        let handle = report_pipeline_and_spawn_daily_distill(&server, home, shutdown);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("disabled distill handle should complete immediately")
             .expect("task panicked");
     }
 }

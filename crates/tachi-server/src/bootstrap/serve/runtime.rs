@@ -46,8 +46,63 @@ pub(super) fn embedded_mcp_facade() -> bool {
     embedded && !crate::cli_client::is_daemon_process()
 }
 
-pub(super) fn daily_distill_scheduler_enabled(server: &crate::MemoryServer) -> bool {
-    server.has_project_db()
+/// Decision (with the reason attached) for whether the daily distill scheduler
+/// spawns in this process — kckylechen1/tachi#1605.
+///
+/// The gate used to be a bare `has_project_db()`, which silently disabled the
+/// scheduler on the global-only owner daemon. That was wrong on the facts:
+/// `run_daily_batch_distill` already distills **every** manifest-attached
+/// named-project DB under `<tachi_home>/projects/*` and only treats the bound
+/// project as an extra target
+/// (`foundry_runtime_ops/daily_distill/runner.rs:47-79`), so a daemon with no
+/// bound project still has real work. The reason travels with the decision so
+/// the caller can log a `DISABLED(reason)` line that names the gate and the
+/// remedy instead of refusing in silence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DailyDistillGate {
+    Enabled {
+        /// The daemon has a bound project DB (distilled as target #1).
+        bound_project: bool,
+        /// Distillable named-project DBs found in the manifest home
+        /// (`wiki` excluded — it has its own curation path).
+        named_projects: usize,
+    },
+    Disabled {
+        reason: String,
+        remedy: String,
+    },
+}
+
+/// Named-project DBs the distill batch would actually scan, mirroring the
+/// runner's own `wiki` skip (`daily_distill/runner.rs:63`).
+fn distillable_named_projects(server: &crate::MemoryServer) -> Vec<String> {
+    crate::path_utils::list_named_projects_in_home(&server.tachi_home_dir())
+        .into_iter()
+        .filter(|name| !name.eq_ignore_ascii_case("wiki"))
+        .collect()
+}
+
+pub(super) fn daily_distill_scheduler_gate(server: &crate::MemoryServer) -> DailyDistillGate {
+    let bound_project = server.has_project_db();
+    let named_projects = distillable_named_projects(server).len();
+    if bound_project || named_projects > 0 {
+        return DailyDistillGate::Enabled {
+            bound_project,
+            named_projects,
+        };
+    }
+    let projects_dir = server.tachi_home_dir().join("projects");
+    DailyDistillGate::Disabled {
+        reason: format!(
+            "gate daily_distill_scheduler_gate: no distillable store — no bound project DB and no named-project DB under {}",
+            projects_dir.display()
+        ),
+        remedy: format!(
+            "bind a project DB (serve with --project-db <PATH>, or without --no-project-db from inside a repo) or create a named project store at {}/<name>/{}",
+            projects_dir.display(),
+            memcore::MEMORY_DB_FILENAME
+        ),
+    }
 }
 
 pub(super) fn daily_distill_marker_path(app_home: &std::path::Path) -> std::path::PathBuf {
