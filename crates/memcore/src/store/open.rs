@@ -1801,9 +1801,25 @@ mod exact_dedupe_open_tests {
     #[test]
     fn upsert_batch_atomically_writes_main_rows_fts_and_vector_projections() {
         let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        // Each row needs a distinct body. memcore's write path runs
+        // write-time near-duplicate consolidation
+        // (`memcore::db::memory_crud::merge_into_jaccard_candidate`,
+        // crates/memcore/src/db/memory_crud.rs:284; token-Jaccard > 0.9 at
+        // :324) on every net-new id within the same transaction. Giving both
+        // rows of a batch the shared `test_memory_entry` body ("read-only
+        // compatibility fixture", token-Jaccard 1.0) merges the second row
+        // into the first at write time and stamps it `superseded_by` before
+        // this test's assertions ever run (tachi#1571/#1572's exact
+        // pattern) — `store.get` still returns the superseded row, but
+        // ordinary `search` correctly excludes it, which is what made
+        // `hit_ids.contains("batch-ok-2")` fail. Distinct bodies keep both
+        // rows live while the shared prefix keeps them both matching the FTS
+        // query below.
         let mut e1 = test_memory_entry("batch-ok-1");
+        e1.text = "read-only compatibility fixture batch entry one".to_string();
         e1.vector = Some(vec![0.25_f32; 1024]);
         let mut e2 = test_memory_entry("batch-ok-2");
+        e2.text = "read-only compatibility fixture batch entry two".to_string();
         e2.vector = Some(vec![0.75_f32; 1024]);
 
         store
@@ -1813,7 +1829,28 @@ mod exact_dedupe_open_tests {
         assert!(store.get("batch-ok-1").expect("get").is_some());
         assert!(store.get("batch-ok-2").expect("get").is_some());
 
-        // FTS projection: the fixture's shared text/keywords are queryable.
+        // Both rows must still be live, not silently folded into each other
+        // by write-time near-duplicate merge: `MemoryStore::get` returns
+        // superseded rows too, so this is the assertion that would actually
+        // catch a regression back to a shared body.
+        for id in ["batch-ok-1", "batch-ok-2"] {
+            let superseded_by: Option<String> = store
+                .connection()
+                .query_row(
+                    "SELECT superseded_by FROM memories WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|error| panic!("row {id} must exist: {error}"));
+            assert!(
+                superseded_by.is_none(),
+                "row {id} was superseded by {superseded_by:?}; the batch's rows merged into \
+                 one another instead of staying independent"
+            );
+        }
+
+        // FTS projection: the fixture's shared text prefix is queryable, and
+        // both distinct-bodied rows are live hits.
         let hits = store
             .search("read-only compatibility fixture", None)
             .expect("fts search");
@@ -1821,6 +1858,11 @@ mod exact_dedupe_open_tests {
             hits.into_iter().map(|r| r.entry.id).collect();
         assert!(hit_ids.contains("batch-ok-1"));
         assert!(hit_ids.contains("batch-ok-2"));
+        assert_eq!(
+            hit_ids.len(),
+            2,
+            "expected exactly the batch's two rows as FTS hits, got {hit_ids:?}"
+        );
 
         // Vector projection: both rows landed in memories_vec, not just `memories`.
         let vec_ids: std::collections::BTreeSet<String> = store
@@ -1833,6 +1875,11 @@ mod exact_dedupe_open_tests {
             .expect("read memories_vec ids");
         assert!(vec_ids.contains("batch-ok-1"));
         assert!(vec_ids.contains("batch-ok-2"));
+        assert_eq!(
+            vec_ids.len(),
+            2,
+            "expected exactly the batch's two rows in memories_vec, got {vec_ids:?}"
+        );
     }
 
     #[test]

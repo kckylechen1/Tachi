@@ -168,10 +168,7 @@ fn tachi_staff_schema_exposes_only_start_and_status() {
         properties.contains_key("staffing_reason"),
         "staff schema must surface staffing_reason"
     );
-    let required = value["required"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let required = value["required"].as_array().cloned().unwrap_or_default();
     assert!(
         !required.iter().any(|r| r == "staffing_reason"),
         "staffing_reason must NOT be schema-level required (status must be able to omit it); required={required:?}"
