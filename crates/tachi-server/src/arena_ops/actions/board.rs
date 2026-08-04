@@ -8,7 +8,7 @@ fn mission_state_count(missions: &[Value], state: &str) -> usize {
 }
 
 fn arena_board_summary(arena_id: &str, mut manifest: Value) -> Value {
-    let board = refresh_board(arena_id).ok();
+    let board = canonical_board(arena_id).ok();
     let missions = board
         .as_ref()
         .and_then(|board| board.get("missions"))
@@ -61,13 +61,21 @@ fn arena_board_summary(arena_id: &str, mut manifest: Value) -> Value {
     manifest
 }
 
+/// Compute the canonical board view from mission status.json state. PR7 [D1]
+/// stops writing the standalone `board.json` ledger: board now READS canonical
+/// mission status rather than maintaining a parallel board store. Full board
+/// migration to the Task unified board is deferred to [D2].
 pub(super) fn refresh_board(arena_id: &str) -> Result<Value, String> {
+    canonical_board(arena_id)
+}
+
+fn canonical_board(arena_id: &str) -> Result<Value, String> {
     let dir = arena_dir(arena_id)?;
     let missions = mission_statuses(arena_id)?
         .into_iter()
         .map(|status| compact_mission_status(&status))
         .collect::<Vec<_>>();
-    let board = json!({
+    Ok(json!({
         "arena_id": arena_id,
         "state": read_json_file(&dir.join("manifest.json"))
             .ok()
@@ -75,9 +83,7 @@ pub(super) fn refresh_board(arena_id: &str) -> Result<Value, String> {
             .unwrap_or_else(|| json!("unknown")),
         "missions": missions,
         "updated_at": Utc::now().to_rfc3339(),
-    });
-    crate::utils::write_json_file_owner_only(&dir.join("board.json"), &board)?;
-    Ok(board)
+    }))
 }
 
 pub(super) fn handle_board(params: TachiArenaParams) -> Result<String, String> {
@@ -99,17 +105,26 @@ pub(super) fn handle_board(params: TachiArenaParams) -> Result<String, String> {
             .map_err(|e| format!("read arena root {}: {e}", root.display()))?
         {
             let entry = entry.map_err(|e| format!("read arena entry: {e}"))?;
-            let manifest_path = entry.path().join("manifest.json");
-            if manifest_path.exists() {
-                let arena_id = entry.file_name().to_string_lossy().to_string();
-                if validate_arena_id(&arena_id).is_err() {
-                    continue;
-                }
-                arenas.push(arena_board_summary(
-                    &arena_id,
-                    read_json_file(&manifest_path)?,
-                ));
+            let arena_id = entry.file_name().to_string_lossy().to_string();
+            if validate_arena_id(&arena_id).is_err() {
+                continue;
             }
+            let manifest_path = entry.path().join("manifest.json");
+            // [1319-D1] open (which wrote manifest.json) was removed; spawn now
+            // auto-provisions the arena dir. Discover arenas that either have a
+            // legacy manifest OR a missions/ subdir, and synthesize a minimal
+            // manifest view when one is absent so board-all still surfaces them.
+            let has_manifest = manifest_path.exists();
+            let has_missions = entry.path().join("missions").exists();
+            if !has_manifest && !has_missions {
+                continue;
+            }
+            let manifest = if has_manifest {
+                read_json_file(&manifest_path)?
+            } else {
+                json!({"arena_id": arena_id, "state": "open"})
+            };
+            arenas.push(arena_board_summary(&arena_id, manifest));
         }
     }
     arenas.sort_by(|a, b| {

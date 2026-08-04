@@ -46,7 +46,7 @@ fn tachi_orchestrator_action_schema(
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiArenaParams {
-    /// Action: "open", "spawn", "board", "collect", "abort", "reap", or "close"
+    /// Action: "spawn", "board", or "collect"
     #[schemars(schema_with = "tachi_arena_action_schema")]
     pub action: String,
 
@@ -54,23 +54,23 @@ pub struct TachiArenaParams {
     #[serde(default)]
     pub format: Option<String>,
 
-    /// Existing arena id for spawn/board/collect/abort/reap/close.
+    /// Existing arena id for spawn/board/collect.
     #[serde(default)]
     pub arena_id: Option<String>,
 
-    /// Existing or requested mission id for spawn/collect/abort.
+    /// Existing or requested mission id for spawn/collect.
     #[serde(default)]
     pub mission_id: Option<String>,
 
-    /// Human-readable arena title for open.
+    /// Human-readable arena title (legacy open field; retained for spawn metadata only).
     #[serde(default)]
     pub title: Option<String>,
 
-    /// Arena objective for open.
+    /// Arena objective (legacy open field; retained for spawn metadata only).
     #[serde(default)]
     pub objective: Option<String>,
 
-    /// Mission prompt for spawn, or objective fallback for open.
+    /// Mission prompt for spawn.
     #[serde(default)]
     pub prompt: Option<String>,
 
@@ -99,8 +99,8 @@ pub struct TachiArenaParams {
     #[serde(default)]
     pub permissions: Vec<String>,
 
-    /// Mission timeout in seconds. For launch=true this is the dispatch timeout;
-    /// for active arena missions it is also the reap threshold when supplied.
+    /// Mission timeout in seconds. For launch=true this is the dispatch timeout.
+    /// (The reap threshold use was removed with the reap action in [1319-D1].)
     #[serde(
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
@@ -166,22 +166,8 @@ pub struct TachiArenaParams {
     /// Include a capability bundle in the launched dispatch prompt when supported.
     #[serde(default, alias = "include_capability_bundle")]
     pub auto_capability_bundle: Option<bool>,
-
-    /// Reason for abort/reap.
-    #[serde(default)]
-    pub reason: Option<String>,
-
-    /// For reap, defaults to true.
-    #[serde(default)]
-    pub dry_run: Option<bool>,
-
-    /// Close even when active/uncollected missions remain.
-    #[serde(default)]
-    pub force: bool,
-
-    /// Close requires written results to have been collected. Defaults to true.
-    #[serde(default)]
-    pub require_collected: Option<bool>,
+    // [1319-D1] removed the abort/reap/close-only fields (reason, dry_run, force,
+    // require_collected) alongside those no-real-authority actions.
 }
 
 // ─── Facade: tachi_verify (background verification ledger) ──────────────────

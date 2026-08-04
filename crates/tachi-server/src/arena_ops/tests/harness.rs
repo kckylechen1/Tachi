@@ -45,14 +45,13 @@ async fn wait_for_terminal_dispatch_status(run_dir: &Path) -> Value {
 async fn arena_spawn_normalizes_golden_harness_lanes() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("golden lanes".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+    // [1319-D1] open was removed; spawn auto-provisions the arena directory.
+    let arena_id = "arena_20260606T000000Z_golden_lanes".to_string();
+    let objective = Some("golden lanes".into());
 
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id.clone());
+    spawn.objective = objective;
     spawn.prompt = Some("brainstorm the design".into());
     spawn.harness = Some("gemini".into());
     let spawned: Value =
@@ -118,14 +117,12 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         EnvRestore::set("TACHI_DISPATCH_WATCHDOG_POLL_MS", TEST_WATCHDOG_POLL_MILLIS);
 
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("launch worker".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+    // [1319-D1] open was removed; spawn auto-provisions the arena directory.
+    let arena_id = "arena_20260606T000000Z_launch_worker".to_string();
 
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id.clone());
+    spawn.objective = Some("launch worker".into());
     spawn.prompt = Some("run a fake worker".into());
     spawn.harness = Some("opencode".into());
     spawn.role = Some("explore".into());
@@ -251,6 +248,19 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         collected["missions"][0]["completion_draft"]["arguments"]["agent"],
         json!("opencode")
     );
+    // [1319-D1] discriminator: collect surfaces the canonical linked dispatch
+    // result WITHOUT copying it into the mission dir — the canonical dispatch
+    // run_dir/result.md stays the single source of truth (the pre-D1 code
+    // wrote a copy into the mission result.md here).
+    let mission_result_path = PathBuf::from(
+        collected["missions"][0]["result_path"]
+            .as_str()
+            .expect("mission result path"),
+    );
+    assert!(
+        !mission_result_path.exists(),
+        "collect must not copy the linked dispatch result into the mission dir ([1319-D1] linked_result_copies floor)"
+    );
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -294,14 +304,12 @@ async fn arena_opencode_executor_fallback_uses_glm_registry_model() {
     let _model = EnvRestore::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2-arena");
 
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("launch registry worker".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+    // [1319-D1] open was removed; spawn auto-provisions the arena directory.
+    let arena_id = "arena_20260606T000000Z_registry_worker".to_string();
 
     let mut spawn = params("spawn");
-    spawn.arena_id = Some(arena_id);
+    spawn.arena_id = Some(arena_id.clone());
+    spawn.objective = Some("launch registry worker".into());
     spawn.prompt = Some("run a fake worker".into());
     spawn.harness = Some("opencode".into());
     spawn.role = Some("execute".into());

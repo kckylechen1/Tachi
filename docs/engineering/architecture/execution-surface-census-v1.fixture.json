@@ -23,8 +23,8 @@
             },
             "coordinate": {
                 "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 134680,
-                "max_total_tool_definition_bytes": 153734,
+                "max_total_input_schema_bytes": 134194,
+                "max_total_tool_definition_bytes": 153230,
                 "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
             },
             "operate": {
@@ -35,8 +35,8 @@
             },
             "admin": {
                 "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 189469,
-                "max_total_tool_definition_bytes": 227633,
+                "max_total_input_schema_bytes": 188983,
+                "max_total_tool_definition_bytes": 227129,
                 "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification."
             }
         },
@@ -66,14 +66,10 @@
     "observed": {
         "canonical_action_inventories": {
             "tachi_arena": {
-                "action_count": 7,
+                "action_count": 3,
                 "actions": [
-                    "abort",
                     "board",
-                    "close",
                     "collect",
-                    "open",
-                    "reap",
                     "spawn"
                 ]
             },
@@ -232,8 +228,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 189469,
-                "total_tool_definition_bytes": 227633,
+                "total_input_schema_bytes": 188983,
+                "total_tool_definition_bytes": 227129,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -342,8 +338,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 134680,
-                "total_tool_definition_bytes": 153734,
+                "total_input_schema_bytes": 134194,
+                "total_tool_definition_bytes": 153230,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -612,8 +608,8 @@
                         ]
                     },
                     "tachi_arena": {
-                        "input_schema_bytes": 5509,
-                        "property_count": 31,
+                        "input_schema_bytes": 5023,
+                        "property_count": 27,
                         "property_names": [
                             "action",
                             "arena_id",
@@ -621,9 +617,7 @@
                             "credential_profiles",
                             "cwd",
                             "dispatch_reason",
-                            "dry_run",
                             "flow_id",
-                            "force",
                             "format",
                             "harness",
                             "issue_ref",
@@ -637,8 +631,6 @@
                             "profile",
                             "project",
                             "prompt",
-                            "reason",
-                            "require_collected",
                             "role",
                             "sandbox",
                             "scope",
@@ -801,8 +793,8 @@
                         ]
                     },
                     "tachi_arena": {
-                        "input_schema_bytes": 5509,
-                        "property_count": 31,
+                        "input_schema_bytes": 5023,
+                        "property_count": 27,
                         "property_names": [
                             "action",
                             "arena_id",
@@ -810,9 +802,7 @@
                             "credential_profiles",
                             "cwd",
                             "dispatch_reason",
-                            "dry_run",
                             "flow_id",
-                            "force",
                             "format",
                             "harness",
                             "issue_ref",
@@ -826,8 +816,6 @@
                             "profile",
                             "project",
                             "prompt",
-                            "reason",
-                            "require_collected",
                             "role",
                             "sandbox",
                             "scope",

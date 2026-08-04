@@ -1,28 +1,51 @@
 use super::*;
-use crate::arena_ops::state::mission_dir;
 
+/// #1319-D1 discriminator: board must NOT write the standalone board.json
+/// ledger — board is a projection over canonical mission status, not a
+/// parallel store. RED pre-D1 (refresh_board wrote board.json), GREEN post.
 #[tokio::test]
-async fn arena_open_spawn_collect_close_writes_tracked_documents() {
+async fn arena_board_does_not_write_board_json() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.title = Some("Arena Test".into());
-    open.objective = Some("coordinate tracked workers".into());
-    let raw = handle_tachi_arena(&server, open).await.unwrap();
-    let opened: Value = serde_json::from_str(&raw).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-    let arena_dir = PathBuf::from(opened["arena_dir"].as_str().unwrap());
-    assert!(arena_dir.join("arena.md").exists());
-    assert!(arena_dir.join("manifest.json").exists());
-
+    let arena_id = "arena_20260606T000000Z_no_board_json".to_string();
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id.clone());
+    spawn.prompt = Some("write a result".into());
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+    let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
+    let arena_dir = mission_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("mission dir lives under <arena>/missions/<mission>");
+    std::fs::write(mission_dir.join("result.md"), "Summary: external result\n").unwrap();
+
+    handle_tachi_arena(&server, params("board")).await.unwrap();
+    let mut collect = params("collect");
+    collect.arena_id = Some(arena_id.clone());
+    handle_tachi_arena(&server, collect).await.unwrap();
+    assert!(
+        !arena_dir.join("board.json").exists(),
+        "board/collect must not write the standalone board.json ledger after [1319-D1]"
+    );
+}
+
+#[tokio::test]
+async fn arena_spawn_collect_reads_tracked_documents() {
+    let _root = temp_arena_root();
+    let server = server();
+    // [1319-D1] open/close were removed; spawn auto-provisions the arena dir.
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some("arena_20260606T000000Z_test_collect".to_string());
+    spawn.title = Some("Arena Test".into());
+    spawn.objective = Some("coordinate tracked workers".into());
     spawn.prompt = Some("inspect the code".into());
     spawn.harness = Some("codex".into());
     spawn.role = Some("explore".into());
     spawn.skills = vec!["skill:waza-check".into()];
     let raw = handle_tachi_arena(&server, spawn).await.unwrap();
     let spawned: Value = serde_json::from_str(&raw).unwrap();
+    let arena_id = spawned["arena_id"].as_str().unwrap().to_string();
     let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
     let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
     assert!(mission_dir.join("prompt.md").exists());
@@ -53,30 +76,23 @@ async fn arena_open_spawn_collect_close_writes_tracked_documents() {
         collected["missions"][0]["status"]["result_source"],
         "mission_result"
     );
-
-    let mut close = params("close");
-    close.arena_id = Some(arena_id);
-    let raw = handle_tachi_arena(&server, close).await.unwrap();
-    let closed: Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(closed["state"], "closed");
-    assert!(arena_dir.join("summary.md").exists());
-    let summary = std::fs::read_to_string(arena_dir.join("summary.md")).unwrap();
-    assert!(summary.contains(&mission_id));
-    assert!(summary.contains("Summary: done"));
+    // [1319-D1] collect no longer copies a linked dispatch result; the canonical
+    // result.md stays the single source of truth. canonical_result_ref is null
+    // when a real mission result is present.
+    assert_eq!(
+        collected["missions"][0]["canonical_result_ref"],
+        Value::Null
+    );
 }
 
 #[tokio::test]
-async fn arena_board_refreshes_external_plan_and_result_writes() {
+async fn arena_board_reads_external_plan_and_result_writes() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("refresh board".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-
     let mut spawn = params("spawn");
+    let arena_id = "arena_20260606T000000Z_test_board".to_string();
     spawn.arena_id = Some(arena_id.clone());
+    spawn.objective = Some("refresh board".into());
     spawn.prompt = Some("write files externally".into());
     let spawned: Value =
         serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
@@ -85,19 +101,23 @@ async fn arena_board_refreshes_external_plan_and_result_writes() {
     std::fs::write(mission_dir.join("result.md"), "Summary: external result\n").unwrap();
 
     let mut board = params("board");
-    board.arena_id = Some(arena_id);
+    board.arena_id = Some(arena_id.clone());
     let board: Value =
         serde_json::from_str(&handle_tachi_arena(&server, board).await.unwrap()).unwrap();
     let mission = &board["result"]["missions"][0];
     assert_eq!(mission["plan_written"], true);
     assert_eq!(mission["result_written"], true);
 
+    let mut board_all = params("board");
+    board_all.arena_id = None;
     let board: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, params("board")).await.unwrap()).unwrap();
+        serde_json::from_str(&handle_tachi_arena(&server, board_all).await.unwrap()).unwrap();
     let arena = &board["arenas"][0];
     assert_eq!(arena["mission_count"], json!(1));
     assert_eq!(arena["active_missions"], json!(1));
     assert_eq!(arena["pending_collect"], json!(1));
+    // [1319-D1] board.json is no longer written by refresh_board; the board path
+    // is still surfaced as a legacy pointer but the file need not exist.
     assert!(arena["board_path"]
         .as_str()
         .unwrap()
@@ -108,12 +128,7 @@ async fn arena_board_refreshes_external_plan_and_result_writes() {
 async fn arena_collect_marks_corrupt_result_as_read_error_instead_of_pending() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("collect corrupt result".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-
+    let arena_id = "arena_20260606T000000Z_test_corrupt".to_string();
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id.clone());
     spawn.prompt = Some("write corrupt result".into());
@@ -160,12 +175,7 @@ async fn arena_collect_marks_corrupt_result_as_read_error_instead_of_pending() {
 async fn arena_collect_refuses_mission_result_leaf_symlink() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("refuse a mission result leaf link".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-
+    let arena_id = "arena_20260606T000000Z_test_leaf_link".to_string();
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id.clone());
     spawn.prompt = Some("write a result".into());
@@ -192,12 +202,7 @@ async fn arena_collect_refuses_mission_result_leaf_symlink() {
 async fn arena_board_refuses_mission_parent_symlink() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("refuse a mission parent link".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-
+    let arena_id = "arena_20260606T000000Z_test_parent_link".to_string();
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id.clone());
     spawn.prompt = Some("write a result".into());
@@ -225,12 +230,7 @@ async fn arena_board_refuses_mission_parent_symlink() {
 async fn arena_mission_result_read_keeps_opened_file_across_replacement_race() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("keep the opened result descriptor".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-
+    let arena_id = "arena_20260606T000000Z_test_race".to_string();
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id.clone());
     spawn.prompt = Some("write a result".into());
@@ -265,12 +265,7 @@ async fn arena_mission_result_read_keeps_opened_file_across_replacement_race() {
 async fn arena_collect_enforces_mission_result_named_byte_limit() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("bound mission result bytes".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-
+    let arena_id = "arena_20260606T000000Z_test_limit".to_string();
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id.clone());
     spawn.prompt = Some("write a bounded result".into());
@@ -345,12 +340,7 @@ fn arena_collect_refuses_linked_run_dir_symlink_escape() {
         .expect("build current-thread test runtime");
 
     runtime.block_on(async {
-        let mut open = params("open");
-        open.objective = Some("surface linked result refusal".into());
-        let opened: Value =
-            serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-        let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-
+        let arena_id = "arena_20260606T000000Z_test_linked_escape".to_string();
         let mut spawn = params("spawn");
         spawn.arena_id = Some(arena_id.clone());
         spawn.prompt = Some("collect linked result".into());
@@ -404,9 +394,11 @@ fn arena_collect_refuses_linked_run_dir_symlink_escape() {
                 .display(),
         );
         assert_eq!(error, expected_refusal);
+        // [1319-D1] collect never copies the linked result into the mission;
+        // the canonical run_dir/result.md is the single source of truth.
         assert!(
             !mission_dir.join("result.md").exists(),
-            "refusing an escaped linked run must not write its result into the mission"
+            "collect must not write a result.md for an escaped linked run"
         );
 
         std::fs::remove_file(&run_dir).unwrap();
@@ -435,7 +427,13 @@ fn arena_collect_refuses_linked_run_dir_symlink_escape() {
             Some(crate::arena_ops::state::ARENA_LINKED_RESULT_MAX_BYTES)
         );
 
-        std::fs::remove_file(mission_dir.join("result.md")).unwrap();
+        // [1319-D1] linked_result_copies ratchet: the canonical dispatch result
+        // is surfaced without writing it into mission result.md.
+        assert!(
+            !mission_dir.join("result.md").exists(),
+            "linked result must not be copied into mission result.md"
+        );
+
         std::fs::write(
             run_dir.join("result.md"),
             vec![b'x'; crate::arena_ops::state::ARENA_LINKED_RESULT_MAX_BYTES + 1],
@@ -460,65 +458,10 @@ fn arena_collect_refuses_linked_run_dir_symlink_escape() {
 }
 
 #[tokio::test]
-async fn arena_close_blocks_active_missions_until_reaped_or_aborted() {
-    let _root = temp_arena_root();
-    let server = server();
-    let mut open = params("open");
-    open.objective = Some("block close".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-    let mut spawn = params("spawn");
-    spawn.arena_id = Some(arena_id.clone());
-    spawn.prompt = Some("stay active".into());
-    let spawned: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
-    let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
-
-    let mut close = params("close");
-    close.arena_id = Some(arena_id.clone());
-    let blocked: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, close).await.unwrap()).unwrap();
-    assert_eq!(blocked["state"], "blocked");
-
-    let mut reap = params("reap");
-    reap.arena_id = Some(arena_id.clone());
-    reap.dry_run = Some(false);
-    let reaped: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, reap).await.unwrap()).unwrap();
-    assert_eq!(reaped["stale_missions"].as_array().unwrap().len(), 0);
-
-    let mission_dir = mission_dir(&arena_id, &mission_id).unwrap();
-    let status_path = mission_dir.join("status.json");
-    let mut status: Value =
-        serde_json::from_str(&std::fs::read_to_string(&status_path).unwrap()).unwrap();
-    status["created_at"] = json!((chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339());
-    crate::utils::write_json_file_owner_only(&status_path, &status).unwrap();
-
-    let mut reap = params("reap");
-    reap.arena_id = Some(arena_id.clone());
-    reap.dry_run = Some(false);
-    let reaped: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, reap).await.unwrap()).unwrap();
-    assert_eq!(reaped["stale_missions"].as_array().unwrap().len(), 1);
-
-    let mut close = params("close");
-    close.arena_id = Some(arena_id);
-    let closed: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, close).await.unwrap()).unwrap();
-    assert_eq!(closed["state"], "closed");
-}
-
-#[tokio::test]
 async fn arena_spawn_launch_failure_returns_recoverable_mission_status() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("recover failed launch".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-
+    let arena_id = "arena_20260606T000000Z_test_launch_fail".to_string();
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id);
     spawn.prompt = Some("launch with bad profile".into());
@@ -545,12 +488,8 @@ async fn arena_spawn_launch_failure_returns_recoverable_mission_status() {
 async fn arena_worker_launch_requires_native_first_exception_before_mission_artifacts() {
     let _root = temp_arena_root();
     let server = server();
-    let mut open = params("open");
-    open.objective = Some("reject an unadmitted worker launch".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-    let arena_dir = PathBuf::from(opened["arena_dir"].as_str().unwrap());
+    let arena_id = "arena_20260606T000000Z_test_native_first".to_string();
+    let arena_dir = crate::arena_ops::state::arena_dir(&arena_id).unwrap();
 
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id);
@@ -568,4 +507,21 @@ async fn arena_worker_launch_requires_native_first_exception_before_mission_arti
         "{error}"
     );
     assert!(!arena_dir.join("missions/must-not-exist").exists());
+}
+
+#[tokio::test]
+async fn arena_removed_actions_are_rejected() {
+    let _root = temp_arena_root();
+    let server = server();
+    for removed in ["open", "abort", "close", "reap"] {
+        let mut p = params(removed);
+        p.arena_id = Some("arena_20260606T000000Z_test_reject".to_string());
+        let error = handle_tachi_arena(&server, p)
+            .await
+            .expect_err("removed action must be rejected");
+        assert!(
+            error.contains("Invalid action"),
+            "removed action {removed} should be rejected: {error}"
+        );
+    }
 }

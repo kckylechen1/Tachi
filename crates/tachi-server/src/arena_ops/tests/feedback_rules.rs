@@ -62,15 +62,12 @@ async fn arena_spawn_injects_applicable_feedback_rules_into_mission_prompt() {
     let server = server();
     let rule_id = save_arena_feedback_rule(&server).await;
 
-    let mut open = params("open");
-    open.title = Some("Feedback Arena".into());
-    open.objective = Some("coordinate code-audit workers".into());
-    let opened: Value =
-        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
-    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
-
+    // [1319-D1] open was removed; spawn auto-provisions the arena directory.
     let mut spawn = params("spawn");
-    spawn.arena_id = Some(arena_id);
+    let arena_id = "arena_20260606T000000Z_feedback".to_string();
+    spawn.arena_id = Some(arena_id.clone());
+    spawn.title = Some("Feedback Arena".into());
+    spawn.objective = Some("coordinate code-audit workers".into());
     spawn.prompt = Some("Explore unused functions and dead code with grep evidence.".into());
     spawn.harness = Some("codex".into());
     spawn.role = Some("explore".into());

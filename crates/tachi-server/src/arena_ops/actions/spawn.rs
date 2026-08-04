@@ -13,9 +13,10 @@ pub(super) async fn handle_spawn(
         .as_deref()
         .ok_or_else(|| "prompt is required for action='spawn'".to_string())?;
     let arena = arena_dir(arena_id)?;
-    if !arena.join("manifest.json").exists() {
-        return Err(format!("arena not found: {arena_id}"));
-    }
+    // [1319-D1] the open action (which created arena manifests) was removed;
+    // spawn now auto-provisions the arena directory. The legacy manifest.json
+    // is no longer a precondition — arena grouping is retained only as
+    // mission metadata (batch_id/flow_id) until full deletion in [D2].
     let lane = harness_lane(params.harness.as_deref());
     if params.launch && matches!(lane.id, "opencode" | "claude") && params.dispatch_reason.is_none()
     {

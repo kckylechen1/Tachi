@@ -1,19 +1,6 @@
 use crate::TachiArenaParams;
-use serde_json::Value;
 
 use super::lane::harness_lane;
-use super::state::{read_mission_result, ArenaArtifactRead};
-
-pub(super) fn render_arena_md(arena_id: &str, title: &str, objective: &str) -> String {
-    format!(
-        "# {title}\n\n\
-         Arena: `{arena_id}`\n\n\
-         ## Objective\n\n{objective}\n\n\
-         ## Contract\n\n\
-         Arena owns run documents. Memory owns distilled knowledge.\n\n\
-         Workers must write `plan.md` before substantive work and `result.md` before completion.\n"
-    )
-}
 
 pub(super) fn render_prompt_md(
     params: &TachiArenaParams,
@@ -75,58 +62,4 @@ fn list_lines(items: &[String]) -> String {
             .map(|item| format!("- {item}\n"))
             .collect::<String>()
     }
-}
-
-fn mission_result_preview(arena_id: &str, mission_id: &str) -> String {
-    let raw = match read_mission_result(arena_id, mission_id) {
-        ArenaArtifactRead::Present(raw) => raw,
-        ArenaArtifactRead::Missing => String::new(),
-        ArenaArtifactRead::Error(_) => return "result unreadable".to_string(),
-    };
-    raw.lines()
-        .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(180)
-        .collect()
-}
-
-pub(super) fn render_summary_md(arena_id: &str, missions: &[Value]) -> String {
-    let mut out = format!(
-        "# Arena Summary\n\nArena: `{arena_id}`\n\nMissions: {}\n\nState: closed\n\n## Mission Results\n\n",
-        missions.len()
-    );
-    if missions.is_empty() {
-        out.push_str("- none\n");
-        return out;
-    }
-    for mission in missions {
-        let mission_id = mission
-            .get("mission_id")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let harness = mission
-            .get("harness")
-            .and_then(Value::as_str)
-            .unwrap_or("manual");
-        let role = mission
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("worker");
-        let state = mission
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let preview = mission_result_preview(arena_id, mission_id);
-        out.push_str(&format!(
-            "- `{mission_id}` [{harness}/{role}] {state}: {}\n",
-            if preview.is_empty() {
-                "no result preview"
-            } else {
-                preview.as_str()
-            }
-        ));
-    }
-    out
 }

@@ -356,13 +356,7 @@ pub(crate) fn facade_action_effect(
                 "recovery_briefing",
             ],
         ),
-        "tachi_arena" => (
-            &[],
-            &[],
-            &[
-                "open", "spawn", "board", "collect", "abort", "reap", "close",
-            ],
-        ),
+        "tachi_arena" => (&["board"], &[], &["spawn", "collect"]),
         _ => return None,
     };
 
