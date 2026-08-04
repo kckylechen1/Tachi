@@ -293,7 +293,7 @@ pub(crate) async fn handle_tachi_dispatch(
 
     // 0b. Compile the effective-authority contract before ANY stage/preflight/
     // spawn work (#894 S2d). This is the single choke-point every dispatch
-    // caller (`tachi_task`, arena spawn, shell dispatch, convoy, poke probes)
+    // caller (`tachi_staff(start)`, task lifecycle callers, poke probes)
     // funnels through, so it runs before step 1 (workspace creation), before
     // prompt assembly, before the V2 plan stage's `ClaudePool` spawn, before
     // credential materialization, and before any builder's own preflight

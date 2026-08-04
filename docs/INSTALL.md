@@ -578,7 +578,7 @@ LONGPORT_APP_SECRET=vault:longbridge.1.secret
 GOOGLE_API_KEY=vault:google.1.api_key
 ```
 
-When dispatch runs through `tachi_task(action='dispatch')` with `cwd` inside that project, the child agent process receives the resolved env values from the unlocked Tachi Vault.
+When dispatch runs through the staffing kernel (`tachi_staff(action='start')`) inside that project, the child agent process receives the resolved env values from the unlocked Tachi Vault.
 
 #### Project env CLI (`tachi env`)
 
@@ -646,7 +646,7 @@ such a failure.
 #### DLQ and dispatch safety
 
 - **`dlq_list` / `dlq_retry`**: DLQ replay skips mutating tools by default. Only idempotent read/search-style failures are safe to retry automatically.
-- **Bare dispatch dedupe**: repeated identical `tachi_task(action='dispatch')` tasks without a `flow_id` coalesce via fingerprint locks under `~/.tachi/runs/.dispatch-dedupe/`.
+- **Bare dispatch dedupe**: repeated identical `tachi_staff(action='start')` requests without a `flow_id` coalesce via fingerprint locks under `~/.tachi/runs/.dispatch-dedupe/`.
 - **Crash recovery**: restarting the daemon reconciles orphaned dispatch runs left by abrupt process exit.
 
 See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineering/architecture/safety-hardening-2026-06.md).
@@ -661,7 +661,7 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Facade & Delegation
 
-`tachi_memory`, `tachi_web_search`, `tachi_save`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_arena`, `tachi_verify`, `tachi_complete`
+`tachi_memory`, `tachi_web_search`, `tachi_save`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_verify`, `tachi_complete`
 
 *(Compatibility/read-only helpers are kept behind the admin profile; daily agent surfaces should use the facade tools above.)*
 
@@ -684,9 +684,9 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 | Profile | Exposed surface | Best for |
 |---|---|---|
 | `standard` | Daily agent-intent surface: `tachi_save`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. Arena and manual native-eval intake are hidden. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). Ordinary delegation uses the host's native subagent. |
-| `coordinate` | `remember` + `coordinate` bundles: adds advanced handoff/workflow/shell/arena tools. Tachi-owned `tachi_task(action='dispatch')` remains operator-only. | Advanced coordination and adapter workflows. |
+| `coordinate` | `remember` + `coordinate` bundles: adds advanced handoff/workflow/shell/arena tools. Tachi-owned staffing (`tachi_staff(action='start')`) remains operator-only. | Advanced coordination and adapter workflows. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
-| `delegate` | Curated 11-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`, and read-only `peer_query`. Standalone `run_skill` is a legacy compatibility route outside the default delegate profile. | Worker subagents spawned by `tachi_task(action='dispatch')`. |
+| `delegate` | Curated 11-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`, and read-only `peer_query`. Standalone `run_skill` is a legacy compatibility route outside the default delegate profile. | Worker subagents spawned via `tachi_staff(action='start')`. |
 | `admin` | Full catalog, including explicitly justified durable/remote Tachi dispatch. | Maintenance, development, and operator-approved execution exceptions. |
 
 Host aliases:

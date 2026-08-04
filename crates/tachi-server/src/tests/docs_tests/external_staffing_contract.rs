@@ -251,14 +251,16 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
     let mut ledger_writers = Vec::new();
     let mut linked_result_copies = Vec::new();
     for function in functions {
-        // Runs-root ownership relocated from shell_ops → task_lifecycle
-        // (PR #1339 / #1337). Keep counting the live secondary ledger root
-        // after the move — budget may only drop on deletion, not relocation.
-        let is_legacy_owner = function.symbol.contains("/arena_ops/")
-            || function.symbol.contains("/shell_ops/")
-            || function
-                .symbol
-                .contains("/task_lifecycle/flow_artifacts.rs");
+        // Legacy secondary-ledger ownership is bounded to the retired Shell and
+        // Arena run-time modules (both deleted: Shell in [1319-B7], Arena in
+        // [1319-D2]). The canonical runs root — `flow_runs_root` in
+        // `task_lifecycle/flow_artifacts.rs` — is NOT a legacy owner: it was
+        // renamed from `shell_runs_root` in [1319-E2] precisely to stop being
+        // miscounted as Shell-owned. The `/shell_ops/` and `/arena_ops/` rules
+        // are kept so the synthetic discrimination test still exercises the
+        // path-based owner rule against retired module shapes.
+        let is_legacy_owner =
+            function.symbol.contains("/arena_ops/") || function.symbol.contains("/shell_ops/");
         let is_staffing_flow_projection = function
             .symbol
             .contains("/task_lifecycle/flow_artifacts/dispatch_markers.rs::")

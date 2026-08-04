@@ -52,7 +52,7 @@ invent calls that are not exposed yet.
 | route recommendation | `tachi_task(action="recommend")` | implemented |
 | route policy replay | `tachi_task(action="route_simulate")` | implemented |
 | route policy proposals | `tachi_task(action="proposals"|"review_proposal"|"apply_proposals")` | implemented |
-| external staffing exception | admin/operator `tachi_task(action="dispatch", dispatch_reason=..., profile=...)` | implemented compatibility path; not ordinary delegation |
+| external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (the retired `tachi_task(action="dispatch")` was deleted in #1319-C2) | implemented; not ordinary delegation |
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` / `tachi_complete` | implemented |
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |

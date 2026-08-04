@@ -8,7 +8,7 @@ async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let original = std::env::var_os("TACHI_RUN_ROOT");
-    // Force shell_runs_root() to the tempdir via env override.
+    // Force flow_runs_root() to the tempdir via env override.
     std::env::set_var("TACHI_RUN_ROOT", tmp.path());
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())

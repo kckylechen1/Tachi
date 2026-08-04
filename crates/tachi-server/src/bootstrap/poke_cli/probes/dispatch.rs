@@ -103,7 +103,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
             "artifacts": required,
         },
         "repro_steps": [
-            "tachi_task(action='dispatch', agent='custom', command=['python3','-c',...])",
+            "tachi_staff(action='start', task=..., profile=...) or invoke the dispatch kernel directly with a mock worker",
             "wait for result.md",
             "verify prompt/context/capability_bundle/trajectory/status artifacts"
         ],

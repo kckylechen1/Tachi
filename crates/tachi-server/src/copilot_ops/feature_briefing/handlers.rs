@@ -417,7 +417,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
             "guide": "global workflow/SOP and skill loadout guidance; playbook authority",
             "feedback_rules": "behavior patches that shape future agent prompts",
             "eval": "verification and reviewer usefulness evidence",
-            "runtime_artifacts": "arena/dispatch/run files; runtime state, not canonical product truth",
+            "runtime_artifacts": "dispatch/run files; runtime state, not canonical product truth",
             "principle": "Project facts first. Global playbook second. Feedback rules and eval pitfalls as behavior patches."
         },
     });

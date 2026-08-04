@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 #[tokio::test]
 async fn scan_open_loops_flags_unclosed_and_spec_drift() {
     let (_server, _home) = make_server_with_temp_home();
-    let runs_root = crate::task_lifecycle::shell_runs_root();
+    let runs_root = crate::task_lifecycle::flow_runs_root();
     std::fs::create_dir_all(&runs_root).expect("create runs root");
 
     let unclosed = runs_root.join("flow_20260101T000000Z_unclosed_aaaa1111");

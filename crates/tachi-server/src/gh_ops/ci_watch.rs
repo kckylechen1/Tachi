@@ -22,7 +22,7 @@
 //! second GitHub checks reader or a second recorder.
 
 use super::*;
-use crate::task_lifecycle::{shell_runs_root, validate_flow_id};
+use crate::task_lifecycle::{flow_runs_root, validate_flow_id};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -444,7 +444,7 @@ pub(crate) fn spawn_ci_watch(
             _ = tokio::time::sleep(base_interval) => {}
         }
         loop {
-            let runs_root = shell_runs_root();
+            let runs_root = flow_runs_root();
             let summary =
                 run_poll_cycle(reader.as_ref(), || discover_watch_targets(&runs_root)).await;
             eprintln!(

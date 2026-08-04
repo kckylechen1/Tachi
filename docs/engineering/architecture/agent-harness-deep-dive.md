@@ -439,7 +439,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 
 **对策：**
 - Issue 创建时强制写 `## Spec` section（明确 scope）
-- 计划与验收标准由 planning owner surface 产出；`tachi_shell` 不再提供 `plan`
+- 计划与验收标准由 planning owner surface 产出；`tachi_task(action='plan')` 提供计划（Shell 已删除）
 - Agent 输出超过 N turns 无进展 → 自动暂停，要求用户确认
 
 #### 陷阱 2：环境泥潭
@@ -452,7 +452,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 #### 陷阱 3：方向摇摆
 
 **对策：**
-- 进入 `tachi_shell(action="dispatch")` 前，调用方必须已完成所需的计划与用户确认；Shell 只生成执行包
+- 进入 `tachi_staff(action='start')` 前，调用方必须已完成所需的计划与用户确认；staffing 只生成执行包
 - Kanban card 的 `title` 变更需要显式用户确认
 - Agent 检测到需求变更时："检测到需求变更，是否创建新 issue？"
 

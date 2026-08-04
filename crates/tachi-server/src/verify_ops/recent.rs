@@ -10,7 +10,7 @@ fn parse_updated_at(value: &Value) -> Option<DateTime<Utc>> {
 }
 
 pub(crate) fn recent_verification_summaries(limit: usize) -> Value {
-    let root = shell_runs_root();
+    let root = flow_runs_root();
     let Ok(read_dir) = std::fs::read_dir(root) else {
         return json!([]);
     };
