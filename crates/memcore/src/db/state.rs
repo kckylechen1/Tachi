@@ -15,6 +15,35 @@ pub struct StateRow {
 
 // ─── Hard State Operations ─────────────────────────────────────────────────────
 
+/// Write-once guard for the `store_identity` namespace (#1579).
+///
+/// The store's role and profile stamps are the *authority* every identity
+/// decision downstream reads (`is_wiki_corpus_store`, path routing, product
+/// admission). They are written exactly once, by the schema-init transaction,
+/// through [`insert_state_if_absent`]. Making the general-purpose
+/// `set_state`/`delete_state` API refuse the namespace turns "write-once" from
+/// a convention every future caller has to remember into something the API
+/// will not let them break — the identity is not re-negotiable by whoever
+/// happens to hold a `&Connection`.
+///
+/// Deliberately at this layer rather than a SQLite trigger: `hard_state` is
+/// also written by migrations and fixtures that must remain able to build the
+/// table itself, and a trigger would have to be installed before the first
+/// stamp and validated forever after by the trigger-inventory gate.
+pub(crate) fn refuse_store_identity_namespace(
+    namespace: &str,
+    operation: &str,
+) -> Result<(), MemoryError> {
+    if namespace == crate::db::store_profile::STORE_IDENTITY_NAMESPACE {
+        return Err(MemoryError::InvalidArg(format!(
+            "hard_state namespace '{namespace}' is write-once store identity and cannot be \
+             {operation} (kckylechen1/Sigil#1579); it is stamped once by schema init via \
+             insert_state_if_absent"
+        )));
+    }
+    Ok(())
+}
+
 /// Set a key-value pair in the hard_state table. INSERT OR UPDATE with version bump.
 pub fn set_state(
     conn: &Connection,
@@ -22,6 +51,7 @@ pub fn set_state(
     key: &str,
     value_json: &str,
 ) -> Result<u32, MemoryError> {
+    refuse_store_identity_namespace(namespace, "overwritten")?;
     let now = now_utc_iso();
     conn.execute(
         "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
@@ -41,6 +71,17 @@ pub fn set_state(
 }
 
 /// Insert a state row only when the key is currently absent.
+///
+/// Deliberately **not** guarded by [`refuse_store_identity_namespace`] here:
+/// this is the exact primitive [`crate::db::store_identity::write_stamp_if_absent`]
+/// calls to write the store's write-once identity stamps in the first place
+/// (kckylechen1/Sigil#1579) — guarding it at this layer would make the
+/// legitimate stamp writer refuse itself. The forgery guard for this
+/// namespace instead lives one layer up, on the public
+/// `MemoryStore::insert_state_if_absent` wrapper
+/// (`crates/memcore/src/store/state.rs`), which is the only other caller of
+/// this function and the one a hostile/careless caller with a bare
+/// `&MemoryStore` can actually reach.
 pub fn insert_state_if_absent(
     conn: &Connection,
     namespace: &str,
@@ -65,6 +106,7 @@ pub fn set_state_if_version(
     value_json: &str,
     expected_version: u32,
 ) -> Result<bool, MemoryError> {
+    refuse_store_identity_namespace(namespace, "overwritten")?;
     let now = now_utc_iso();
     let changed = conn.execute(
         "UPDATE hard_state
@@ -99,6 +141,7 @@ pub fn get_state(
 
 /// Delete a single state row. Returns whether a row was actually removed.
 pub fn delete_state(conn: &Connection, namespace: &str, key: &str) -> Result<bool, MemoryError> {
+    refuse_store_identity_namespace(namespace, "deleted")?;
     let changed = conn.execute(
         "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
         params![namespace, key],
@@ -149,14 +192,29 @@ pub fn delete_state(conn: &Connection, namespace: &str, key: &str) -> Result<boo
 ///   an unpredictable comparison result.
 /// - `datetime(...) < datetime(?1)` false — an unexpired (or exactly-now)
 ///   timestamp is retained.
+///
+/// Belt-and-braces fifth exclusion (kckylechen1/Sigil#1579/#1585 review
+/// round 2): `namespace != STORE_IDENTITY_NAMESPACE`. The write-once store
+/// identity stamps are never written with an `expires_at` field in the first
+/// place ([`crate::db::store_identity`]'s own header), so this should never
+/// fire in practice — but this DELETE is generic over every namespace and a
+/// future bug (or a hand-crafted row surviving a weaker guard elsewhere)
+/// putting an `expires_at` on a `store_identity` row must not make it
+/// reapable. The namespace exclusion is enforced structurally here rather
+/// than trusted to stay true only because nothing currently writes that
+/// combination.
 pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize, MemoryError> {
     let removed = conn.execute(
         "DELETE FROM hard_state
-         WHERE json_valid(value_json)
+         WHERE namespace != ?2
+           AND json_valid(value_json)
            AND json_type(value_json, '$.expires_at') = 'text'
            AND datetime(json_extract(value_json, '$.expires_at')) IS NOT NULL
            AND datetime(json_extract(value_json, '$.expires_at')) < datetime(?1)",
-        params![now_rfc3339],
+        params![
+            now_rfc3339,
+            crate::db::store_profile::STORE_IDENTITY_NAMESPACE
+        ],
     )?;
     Ok(removed)
 }
@@ -213,6 +271,14 @@ pub fn backfill_missing_expires_at(
     ttl_rfc3339: &str,
     terminal_status: Option<(&str, &[&str])>,
 ) -> Result<usize, MemoryError> {
+    // The `store_identity` namespace (#1579) must never acquire an
+    // `expires_at` field: doing so would make `reap_expired_state`'s generic
+    // TTL sweep (which runs against every namespace) an unstamp path for the
+    // write-once store identity. Skip it unconditionally rather than trust
+    // every future call site to avoid passing this namespace in.
+    if namespace == crate::db::store_profile::STORE_IDENTITY_NAMESPACE {
+        return Ok(0);
+    }
     match terminal_status {
         None => {
             let updated = conn.execute(

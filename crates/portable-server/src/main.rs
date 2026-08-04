@@ -27,7 +27,7 @@ mod malformed_json_middleware;
 mod service;
 
 use config::{Config, IN_MEMORY};
-use portable_kernel::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent};
+use portable_kernel::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, StoreProfile};
 use service::PortableServer;
 
 fn build_server(config: Config) -> Result<PortableServer, String> {
@@ -54,6 +54,14 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
             let ctx = DbOpenContext {
                 intent: OpenIntent::OpenExisting,
                 migration: migration.clone(),
+                // #1585 D2: this binary IS the portable kernel — save/search/
+                // get/status and nothing else — so it requires only the
+                // portable profile. It therefore also refuses an *unstamped*
+                // pre-#1585 database rather than adopting one: adopting would
+                // mean a portable binary silently claiming authority over a
+                // full Tachi store. See `StoreProfileUnstamped`'s remediation
+                // text for the operator route.
+                required_profile: StoreProfile::PortableKernel,
             };
             MemoryStore::open_with_context(path, &ctx)
                 .map_err(|e| format!("open store at {path}: {e}"))
@@ -178,6 +186,56 @@ mod tests {
         path
     }
 
+    /// The same stamped-older file, plus the one thing #1585 requires before a
+    /// portable binary may touch an existing database: a
+    /// `store_identity/profile` stamp reading `portable_kernel`.
+    ///
+    /// The stamp lives in `hard_state`, which a raw pre-schema file does not
+    /// have yet, so the fixture creates that one table verbatim from the
+    /// kernel's own portable DDL chunk and inserts the row in the same shape
+    /// `db::store_identity::write_stamp_if_absent` writes (a JSON object whose
+    /// `value` field carries the token). Everything else — every other table,
+    /// every migration — is still built by the authorized migration run under
+    /// test, exactly as for a real legacy portable file.
+    fn fabricate_stamped_older_portable_db() -> std::path::PathBuf {
+        use portable_kernel::db::store_profile::{STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY};
+
+        let path = fabricate_stamped_older_db();
+        let conn = rusqlite::Connection::open(&path).expect("reopen raw sqlite file");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS hard_state (
+                 namespace        TEXT NOT NULL,
+                 key              TEXT NOT NULL,
+                 value_json       TEXT NOT NULL DEFAULT '{}',
+                 version          INTEGER NOT NULL DEFAULT 1,
+                 created_at       TEXT NOT NULL DEFAULT '',
+                 updated_at       TEXT NOT NULL DEFAULT '',
+                 PRIMARY KEY (namespace, key)
+             );",
+        )
+        .expect("create hard_state to hold the profile stamp");
+        let stamped_at = "2026-01-01T00:00:00Z";
+        let value_json = serde_json::json!({
+            "value": StoreProfile::PortableKernel.as_str(),
+            "conferred_by": "test:portable-server-1585-fixture",
+            "stamped_at": stamped_at,
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 1, ?4, ?4)",
+            rusqlite::params![
+                STORE_IDENTITY_NAMESPACE,
+                STORE_PROFILE_KEY,
+                value_json,
+                stamped_at
+            ],
+        )
+        .expect("stamp the portable_kernel profile");
+        drop(conn);
+        path
+    }
+
     fn config_for_persistent_db(db_path: &std::path::Path, allow: bool) -> Config {
         Config {
             db_path: db_path.to_string_lossy().to_string(),
@@ -192,9 +250,19 @@ mod tests {
 
     /// Discriminating test 2: `--allow-schema-migration` (config field `true`)
     /// migrates a stamped-older persistent DB forward instead of refusing.
+    ///
+    /// The fixture carries a `portable_kernel` profile stamp because #1585's
+    /// adoption asymmetry now decides admission *before* this binary is
+    /// allowed to migrate anything: an UNSTAMPED existing DB is refused
+    /// outright (pinned by
+    /// `allow_schema_migration_true_still_refuses_an_unstamped_persistent_db`
+    /// below), so it can no longer serve as the input that isolates the
+    /// migration-authority variable. Holding the profile fixed at
+    /// `portable_kernel` is what keeps this pair discriminating: it and its
+    /// `false` twin below differ in exactly one thing, the flag.
     #[test]
     fn allow_schema_migration_true_migrates_stamped_older_persistent_db() {
-        let path = fabricate_stamped_older_db();
+        let path = fabricate_stamped_older_portable_db();
         let config = config_for_persistent_db(&path, true);
 
         let result = build_server(config);
@@ -216,6 +284,70 @@ mod tests {
             "authorized migration must advance the stamp to the current version"
         );
 
+        // #1585 D2's load-bearing rule: the migration walked the STORED
+        // profile, so the store is still portable afterwards. A migration that
+        // silently promoted it to `tachi_full` would be the reverse of the
+        // damaging failure mode the profile stamp exists to prevent.
+        let profile: String = conn
+            .query_row(
+                "SELECT value_json FROM hard_state WHERE namespace = ?1 AND key = ?2",
+                rusqlite::params![
+                    portable_kernel::db::store_profile::STORE_IDENTITY_NAMESPACE,
+                    portable_kernel::db::store_profile::STORE_PROFILE_KEY
+                ],
+                |row| row.get(0),
+            )
+            .expect("profile stamp survives the migration");
+        assert!(
+            profile.contains(StoreProfile::PortableKernel.as_str()),
+            "migrating must not re-shape the store's profile; stamp reads: {profile}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #1585 D2's adoption asymmetry, from the portable side: migration
+    /// authority is NOT profile authority. Even holding `Allow`, this binary
+    /// refuses an existing database that carries no profile stamp — such a
+    /// file predates #1585 and is therefore a full Tachi store, and adopting
+    /// it would let a portable build claim authority over product data and
+    /// then walk its migrations as if the product tables were absent.
+    ///
+    /// The refusal is typed (`StoreProfileUnstamped`) and arrives *before* any
+    /// DDL runs, so the fixture's schema stamp must be untouched afterwards.
+    #[test]
+    fn allow_schema_migration_true_still_refuses_an_unstamped_persistent_db() {
+        let path = fabricate_stamped_older_db();
+        let older = portable_kernel::db::migrations::EXPECTED_SCHEMA_VERSION - 1;
+        let config = config_for_persistent_db(&path, true);
+
+        // Not `expect_err`: `PortableServer` is deliberately not `Debug` (same
+        // reason as `allow_schema_migration_false_refuses_stamped_older_persistent_db`).
+        let err = match build_server(config) {
+            Ok(_) => panic!(
+                "a portable-profile opener must refuse an unstamped existing DB even with \
+                 --allow-schema-migration (tachi#1585 D2 adoption asymmetry)"
+            ),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("store profile unstamped"),
+            "expected the typed StoreProfileUnstamped refusal, got: {err}"
+        );
+        assert!(
+            err.contains("portable-kernel build"),
+            "the refusal must carry its operator remediation route, got: {err}"
+        );
+
+        let conn = rusqlite::Connection::open(&path).expect("reopen db");
+        let stored: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("read user_version");
+        assert_eq!(
+            stored as u32, older,
+            "a refused open must leave the schema stamp exactly as it found it"
+        );
+
         let _ = std::fs::remove_file(&path);
     }
 
@@ -224,7 +356,7 @@ mod tests {
     /// `SchemaMigrationOptInRequired` error, not silently migrated.
     #[test]
     fn allow_schema_migration_false_refuses_stamped_older_persistent_db() {
-        let path = fabricate_stamped_older_db();
+        let path = fabricate_stamped_older_portable_db();
         let config = config_for_persistent_db(&path, false);
 
         // Not `expect_err`: that would require `PortableServer: Debug`, and the

@@ -1,5 +1,6 @@
 //! Core CRUD, search, and diagnostics methods on [`MemoryStore`].
 
+#[cfg(any(feature = "admin", test))]
 use rusqlite::Connection;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,22 @@ use crate::{
 };
 
 impl MemoryStore {
+    /// Fill `options.recall_config`/`decay_policy` from this store's
+    /// host-injected [`crate::KernelPolicy`] when the caller left them
+    /// unset. A caller-supplied per-call override always wins (tachi#1585
+    /// D5 point 6) — this only supplies the store-level default that the
+    /// `SearchOptions` seam falls back to, in place of the process-wide
+    /// `RecallConfig::get()`/`DEFAULT_DECAY_POLICY` fallbacks those seams
+    /// used before a store existed to ask.
+    fn apply_kernel_policy_defaults(&self, options: &mut SearchOptions) {
+        if options.recall_config.is_none() {
+            options.recall_config = Some(self.policy.recall.clone());
+        }
+        if options.decay_policy.is_none() {
+            options.decay_policy = Some(self.policy.decay.clone());
+        }
+    }
+
     /// Hybrid search: Text + FTS5 + optional vector channel.
     pub fn search(
         &self,
@@ -28,6 +45,7 @@ impl MemoryStore {
         // caller-supplied value is overwritten on purpose — the store, not the
         // request, is the authority on which database this is.
         options.wiki_corpus_store = self.is_wiki_corpus_store();
+        self.apply_kernel_policy_defaults(&mut options);
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         retry_search_locked(&self.db_label, || {
@@ -48,6 +66,7 @@ impl MemoryStore {
         // Same store-identity injection as `search` (tachi#1569); the
         // instrumented path must not measure a differently-gated query.
         options.wiki_corpus_store = self.is_wiki_corpus_store();
+        self.apply_kernel_policy_defaults(&mut options);
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let (results, mut receipt) = retry_search_locked(&self.db_label, || {
@@ -153,6 +172,11 @@ impl MemoryStore {
     /// no-DDL failure (a missing row, a violated constraint): see
     /// `store/vault.rs`'s
     /// `vault_touch_entries_atomic_rolls_back_every_touch_when_one_name_is_missing`.
+    /// Absent from non-test portable builds (#1585 review round 2): a bare
+    /// `&Connection` is a raw-SQL bypass of the `store_identity` write-once
+    /// guards, so external portable consumers do not get it. Admin builds
+    /// (tachi-server and friends) and in-crate tests keep it.
+    #[cfg(any(feature = "admin", test))]
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -164,6 +188,10 @@ impl MemoryStore {
     /// the blanket DDL denial and the fault-injection guidance documented
     /// there, which is what a test wanting to break one of these transactions
     /// needs to read first.
+    /// Gated identically to [`Self::connection`] and for the same reason
+    /// (#1585 review round 2): a `&mut Connection` is the same raw-SQL bypass
+    /// with strictly more power.
+    #[cfg(any(feature = "admin", test))]
     pub fn connection_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }
@@ -290,8 +318,9 @@ impl MemoryStore {
     /// Delete a memory entry by ID. Returns true if found and deleted.
     pub fn delete(&mut self, id: &str) -> Result<bool, MemoryError> {
         let db_label = self.db_label.clone();
+        let profile = self.profile;
         db::retry_memory_locked("delete", &db_label, || {
-            db::delete(&mut self.conn, id, self.vec_available)
+            db::delete(&mut self.conn, id, self.vec_available, profile)
         })
     }
 

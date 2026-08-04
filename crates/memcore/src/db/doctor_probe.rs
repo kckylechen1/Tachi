@@ -9,14 +9,19 @@
 //! and connection-opening mechanics are centralized here; classification
 //! decisions stay in tachi-server.
 
+#[cfg(any(feature = "admin", test))]
 use std::path::Path;
+#[cfg(any(feature = "admin", test))]
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
+#[cfg(any(feature = "admin", test))]
+use rusqlite::OpenFlags;
 
 /// Open a database read-only, disabling WAL writes, via the `immutable=1` URI
 /// flag. `uri` must already be the fully-formed `file:...?mode=ro&immutable=1`
 /// string — percent-encoding the path is the caller's concern.
+#[cfg(any(feature = "admin", test))]
 pub fn open_immutable_readonly(uri: &str) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(
         uri,
@@ -225,6 +230,7 @@ pub fn foundry_job_status_counts(conn: &Connection) -> FoundryJobStatusCounts {
 /// [`checkpoint_wal_truncate`]. Schema mutation and protected memory writes
 /// remain denied even though SQLite requires a read-write handle for the WAL
 /// checkpoint itself.
+#[cfg(any(feature = "admin", test))]
 pub fn open_for_wal_checkpoint(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let _ = conn.busy_timeout(Duration::from_millis(5_000));
@@ -247,6 +253,7 @@ pub fn checkpoint_wal_truncate(conn: &Connection) -> rusqlite::Result<()> {
 /// memory inserts and authority-bearing classifier/lifecycle writes fail
 /// closed; production code must use `MemoryStore` typed operations instead.
 /// Non-memory fixture schemas stay writable for doctor probes.
+#[cfg(any(feature = "admin", test))]
 pub fn open_raw(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;

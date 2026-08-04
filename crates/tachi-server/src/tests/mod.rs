@@ -202,6 +202,7 @@ fn template_db_path() -> &'static std::path::PathBuf {
                 .checkpoint_wal_truncate()
                 .expect("checkpoint template test db fixture");
         } // `server` (and its connections) drop here before the rename.
+        clear_template_store_role_stamp(&build);
         for suffix in ["-wal", "-shm"] {
             let mut sidecar = build.clone().into_os_string();
             sidecar.push(suffix);
@@ -212,10 +213,49 @@ fn template_db_path() -> &'static std::path::PathBuf {
     })
 }
 
+/// Strip the template's `store_identity/role` stamp before it is published.
+///
+/// The template is a schema **shape**, but it is produced by a real
+/// `MemoryServer::new`, and that constructor legitimately confers the role
+/// `"global"` on its own global store (`server_state/init.rs`). Since
+/// tachi#1579 that conferral is a write-once row *inside the file*, so
+/// [`copy_template_db`]'s `fs::copy` would clone one server's identity into
+/// every fixture database below — including project and named-project stores.
+/// A later open that declares those stores' real roles then fails the open
+/// with `StoreRoleConflict` against a role no fixture ever meant to confer.
+/// That is the stamp working as designed: cloning a store's bytes into a new
+/// role IS the forgery #1579 refuses to resolve silently.
+///
+/// So the clone source carries no role, exactly like the documented operator
+/// unstamp procedure (#1585 D6), and each copy takes its identity from its
+/// own FIRST declared open — the global fixture from `MemoryServer::new`, a
+/// named-project fixture from the manifest-resolved project name — which is
+/// what a real database does. The `store_identity/profile` row deliberately
+/// stays: every copy really is the `tachi_full` shape the template was built
+/// with, and profile is not a per-copy fact.
+fn clear_template_store_role_stamp(build: &std::path::Path) {
+    let conn =
+        rusqlite::Connection::open(build).expect("open template test db fixture for unstamping");
+    conn.execute(
+        "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+        params![
+            memcore::db::store_profile::STORE_IDENTITY_NAMESPACE,
+            memcore::db::store_profile::STORE_ROLE_KEY
+        ],
+    )
+    .expect("clear template store-identity role stamp");
+    // Fold this write into the base file too: the caller removes the `-wal`
+    // sidecar next, so an unflushed delete would be silently discarded and the
+    // published template would still carry the role.
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .expect("checkpoint template test db fixture after unstamping");
+}
+
 /// Copy the schema-initialized template into `dest` so the caller's
 /// subsequent `MemoryServer::new` finds an already-migrated file. The
 /// template is checkpointed with `wal_checkpoint(TRUNCATE)` before publish,
-/// so the base file alone is a complete snapshot (no sidecars to copy).
+/// so the base file alone is a complete snapshot (no sidecars to copy), and
+/// carries no `store_identity` role (see [`clear_template_store_role_stamp`]).
 fn copy_template_db(dest: &std::path::Path) {
     std::fs::copy(template_db_path(), dest).expect("seed test db from template fixture");
 }

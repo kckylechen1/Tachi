@@ -48,6 +48,7 @@
 
 use rusqlite::{params, Connection};
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
 /// Idempotent: dedupes any pre-existing duplicate active claims for the same
@@ -56,7 +57,18 @@ use crate::error::MemoryError;
 /// Returns the number of duplicate rows released.
 pub(super) fn migrate_v12_session_claims_unique_identity(
     conn: &Connection,
+    profile: StoreProfile,
 ) -> Result<usize, MemoryError> {
+    // #1585 D3: product-scoped migration. A PortableKernel store never
+    // created the table(s) this touches, so the work is vacuously done.
+    // Returning Ok here (rather than skipping the call) is deliberate:
+    // `apply_versioned_migration` still marks the sentinel, so a portable
+    // database is a COMPLETE stamped-28 database by every existing gate's
+    // definition (`validate_current_schema_integrity`,
+    // `MIGRATION_SENTINEL_KEYS`) — the sentinel set is profile-invariant.
+    if !profile.includes_product() {
+        return Ok(0);
+    }
     if !table_exists(conn, "session_claims")? {
         // Nothing to migrate — a DB that has never run the #1001 schema yet
         // will get the index for free when `session_claims` is first created
@@ -287,7 +299,8 @@ mod tests {
     #[test]
     fn creates_unique_index_on_fresh_schema_noop_dedupe() {
         let conn = open_test_db();
-        let released = migrate_v12_session_claims_unique_identity(&conn).unwrap();
+        let released =
+            migrate_v12_session_claims_unique_identity(&conn, StoreProfile::TachiFull).unwrap();
         assert_eq!(released, 0, "fresh schema has no duplicates to dedupe");
 
         // Index must now reject a duplicate active insert for the same
@@ -316,7 +329,7 @@ mod tests {
     #[test]
     fn null_flow_id_collides_same_as_a_concrete_value() {
         let conn = open_test_db();
-        migrate_v12_session_claims_unique_identity(&conn).unwrap();
+        migrate_v12_session_claims_unique_identity(&conn, StoreProfile::TachiFull).unwrap();
 
         insert_claim(
             &conn,
@@ -351,7 +364,7 @@ mod tests {
             "released",
             "2026-07-11T00:00:00Z",
         );
-        migrate_v12_session_claims_unique_identity(&conn).unwrap();
+        migrate_v12_session_claims_unique_identity(&conn, StoreProfile::TachiFull).unwrap();
 
         conn.execute(
             "INSERT INTO session_claims
@@ -384,7 +397,8 @@ mod tests {
             "2026-07-11T00:10:00Z",
         );
 
-        let released = migrate_v12_session_claims_unique_identity(&conn).unwrap();
+        let released =
+            migrate_v12_session_claims_unique_identity(&conn, StoreProfile::TachiFull).unwrap();
         assert_eq!(released, 1, "exactly the older duplicate must be released");
 
         let old_state: String = conn
@@ -436,7 +450,8 @@ mod tests {
             "2026-07-11T00:00:00Z",
         );
 
-        let released = migrate_v12_session_claims_unique_identity(&conn).unwrap();
+        let released =
+            migrate_v12_session_claims_unique_identity(&conn, StoreProfile::TachiFull).unwrap();
         assert_eq!(
             released, 0,
             "different session_client is a different identity"
@@ -483,7 +498,7 @@ mod tests {
             "2026-07-11T00:10:00Z",
         );
 
-        let released = migrate_v12_session_claims_unique_identity(&conn)
+        let released = migrate_v12_session_claims_unique_identity(&conn, StoreProfile::TachiFull)
             .expect("v12 must not crash on a pre-v21 DB missing the mode column (#1289 Claim5)");
         assert_eq!(released, 1, "the older modeless duplicate must be released");
 
@@ -540,9 +555,11 @@ mod tests {
             "2026-07-11T00:10:00Z",
         );
 
-        let first = migrate_v12_session_claims_unique_identity(&conn).unwrap();
+        let first =
+            migrate_v12_session_claims_unique_identity(&conn, StoreProfile::TachiFull).unwrap();
         assert_eq!(first, 1);
-        let second = migrate_v12_session_claims_unique_identity(&conn).unwrap();
+        let second =
+            migrate_v12_session_claims_unique_identity(&conn, StoreProfile::TachiFull).unwrap();
         assert_eq!(
             second, 0,
             "nothing left to dedupe; index already exists (IF NOT EXISTS)"

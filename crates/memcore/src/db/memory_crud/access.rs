@@ -175,6 +175,13 @@ fn unique_id_order(ids: &[String]) -> Vec<&str> {
 /// Test-only thin wrapper over [`record_access_with_updates`] that drops the
 /// returned map. Read that function's doc for what the counters mean and, in
 /// particular, for what they do not observe.
+///
+/// tachi#1585 D5: defaults to the pure `RecallConfig::default()`, not the
+/// process-wide `RecallConfig::get()` — this wrapper has no `MemoryStore` to
+/// draw a host-injected policy from (it takes a bare `Connection`), and the
+/// crate's only production caller of `record_access_with_updates`
+/// (`search.rs`'s `hybrid_search_inner`) already passes an explicit config,
+/// so this default is test-only regardless.
 #[cfg(test)]
 pub(crate) fn record_access(
     conn: &Connection,
@@ -188,7 +195,7 @@ pub(crate) fn record_access(
         ids,
         fts_hits,
         query,
-        crate::RecallConfig::get(),
+        &crate::RecallConfig::default(),
         None,
     )
     .map(|_| ())

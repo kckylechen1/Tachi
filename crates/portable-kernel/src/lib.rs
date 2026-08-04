@@ -21,9 +21,18 @@
 //! No direct ZeroClaw Cargo integration has landed. ZeroClaw does not
 //! currently depend on this crate.
 //!
-//! Historical provenance: this facade was cut for downstream HyperTachi and
-//! HyperMemory convergence. That fork separated on 2026-07-14
-//! (Hyperion-HyperTachi `9da2015`), so it is no longer the target consumer.
+//! Owner ruling 2026-08-03 (#1585): Hypermem is the supported external
+//! consumer of this boundary. Tachi owns the reusable memory kernel; Hypermem
+//! is an independent component (standalone or embedded in Hyperion) that
+//! depends on this crate only, opening explicitly supplied Hyperion-owned
+//! databases under the `PortableKernel` schema profile, with policy injected
+//! via `KernelPolicy` rather than any `TACHI_*` environment. Product adapters
+//! remain downstream.
+//!
+//! Historical provenance: this facade was originally cut for downstream
+//! HyperTachi and HyperMemory convergence; that fork separated on 2026-07-14
+//! (Hyperion-HyperTachi `9da2015`), and the #1585 ruling above is the current
+//! consumer contract.
 //!
 //! See `docs/engineering/architecture/portable-kernel-split.md` and
 //! `docs/engineering/architecture/downstream-sync-surface.md`.

@@ -16,8 +16,10 @@ publish = false
 # for a future ZeroClaw-native module. No direct ZeroClaw Cargo integration is
 # present today.
 #
-# Schema DDL still creates admin tables so a portable consumer can open
-# DBs written by full Tachi; those tables simply stay unused.
+# Since #1585 a database this crate CREATES carries only the portable kernel
+# schema (no product tables). It can still open a full Tachi database — the
+# profile lattice makes TachiFull satisfy a PortableKernel requirement — and
+# such a store keeps being migrated as TachiFull, never re-shaped.
 [dependencies]
 memcore = { path = "../memcore", default-features = false }
 

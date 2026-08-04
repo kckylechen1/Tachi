@@ -3,6 +3,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::types::{MemoryEntry, SearchResult};
 
+/// `admin`-gated (kckylechen1/Sigil#1585 review): this crate's sole caller
+/// (`search::include_superseded_env_override_active`'s admin arm) is itself
+/// admin-only, so under `not(admin)` this would otherwise be dead code.
+#[cfg(feature = "admin")]
 pub(super) fn env_truthy(key: &str) -> bool {
     matches!(
         std::env::var(key).ok().as_deref(),

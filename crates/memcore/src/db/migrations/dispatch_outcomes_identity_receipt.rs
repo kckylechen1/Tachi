@@ -2,6 +2,7 @@
 
 use rusqlite::Connection;
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
 use super::dispatch_outcomes_reported::table_exists;
@@ -9,7 +10,18 @@ use super::legacy_columns::table_has_column;
 
 pub(super) fn migrate_v16_dispatch_outcomes_identity_receipt(
     conn: &Connection,
+    profile: StoreProfile,
 ) -> Result<usize, MemoryError> {
+    // #1585 D3: product-scoped migration. A PortableKernel store never
+    // created the table(s) this touches, so the work is vacuously done.
+    // Returning Ok here (rather than skipping the call) is deliberate:
+    // `apply_versioned_migration` still marks the sentinel, so a portable
+    // database is a COMPLETE stamped-28 database by every existing gate's
+    // definition (`validate_current_schema_integrity`,
+    // `MIGRATION_SENTINEL_KEYS`) — the sentinel set is profile-invariant.
+    if !profile.includes_product() {
+        return Ok(0);
+    }
     if !table_exists(conn, "dispatch_outcomes")?
         || table_has_column(conn, "dispatch_outcomes", "identity_receipt")?
     {
@@ -43,7 +55,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            migrate_v16_dispatch_outcomes_identity_receipt(&conn).unwrap(),
+            migrate_v16_dispatch_outcomes_identity_receipt(&conn, StoreProfile::TachiFull).unwrap(),
             1
         );
         assert!(table_has_column(&conn, "dispatch_outcomes", "identity_receipt").unwrap());
@@ -56,7 +68,7 @@ mod tests {
             .unwrap();
         assert_eq!(legacy_receipt, None);
         assert_eq!(
-            migrate_v16_dispatch_outcomes_identity_receipt(&conn).unwrap(),
+            migrate_v16_dispatch_outcomes_identity_receipt(&conn, StoreProfile::TachiFull).unwrap(),
             0
         );
     }

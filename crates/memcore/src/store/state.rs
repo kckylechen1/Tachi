@@ -14,12 +14,22 @@ impl MemoryStore {
     }
 
     /// Insert a deterministic key-value state only when absent.
+    ///
+    /// Refuses the write-once `store_identity` namespace
+    /// (kckylechen1/Sigil#1579): that namespace is stamped exactly once, by
+    /// the schema-init transaction, through
+    /// `crate::db::store_identity::write_stamp_if_absent`, which calls the
+    /// lower-level `db::insert_state_if_absent` directly and never routes
+    /// through this pub wrapper — so this refusal cannot break the
+    /// legitimate stamp writer, only a caller reaching in through a bare
+    /// `&MemoryStore`.
     pub fn insert_state_if_absent(
         &self,
         namespace: &str,
         key: &str,
         value_json: &str,
     ) -> Result<bool, MemoryError> {
+        db::refuse_store_identity_namespace(namespace, "inserted")?;
         db::insert_state_if_absent(&self.conn, namespace, key, value_json)
     }
 

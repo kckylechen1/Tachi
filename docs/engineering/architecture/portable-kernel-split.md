@@ -10,13 +10,21 @@
 > admin features disabled. `portable-server` exposes that kernel over MCP.
 > The current Tachi Cargo inventory contains no direct ZeroClaw integration.
 >
-> **Owner ruling 2026-07-17 (#1195):** these packages stay as candidate
-> boundaries for a future ZeroClaw-native memory module. The design and direct
-> Cargo integration have not landed.
+> **Owner ruling 2026-08-03 (#1585), superseding the 2026-07-17 consumer
+> framing:** Hypermem is the supported external consumer of this boundary.
+> Tachi owns the reusable memory kernel; Hypermem is an independent component
+> (standalone or embedded in Hyperion) that depends on `portable-kernel`
+> **only**, opening explicitly supplied Hyperion-owned databases. Hyperion
+> owns A-share policy, HAPI aliases, model-provider configuration, runtime
+> projection, packaging, and cutover; Tachi product adapters remain
+> downstream. Hypermem does not consume Tachi Hub, Vault, Foundry, dispatch,
+> kanban, agent profile, the generic Wiki server, `tachi-llm`, or the full
+> Tachi server. The 2026-07-17 (#1195) ZeroClaw candidacy note stands as a
+> separate, non-exclusive direction.
 >
 > **Historical provenance:** this split was cut for HyperTachi, HyperMemory,
 > and adapter convergence. Hyperion-HyperTachi separated on 2026-07-14
-> (`9da2015`), so the original consumer framing below is retained only as the
+> (`9da2015`); the pre-#1585 consumer framing below is retained only as the
 > historical record of why the split was cut.
 
 ## Why
@@ -46,9 +54,11 @@ fork either:
 | `admin` | **on** | vault, hub, foundry job types, pack, agent_profile modules + store methods |
 | _(none)_ | use `default-features = false` | portable kernel only |
 
-Schema DDL still creates admin tables so a portable build can open DBs written
-by full Tachi. Empty tables are fine; portable code simply has no typed API for
-them.
+Since #1585, schema DDL is profile-scoped: a fresh `PortableKernel` store
+creates only kernel tables (no Hub/Vault/Foundry/ExecEnv/dispatch/…), while a
+portable build can still open a `TachiFull` database — the stored profile,
+never the caller's requirement, drives DDL and migrations, so opening never
+downgrades an existing store's schema.
 
 ### Facade crate `portable-kernel`
 
@@ -147,8 +157,9 @@ cargo test -p portable-kernel
 - Physical extract of vault/hub/foundry into separate crates (schema still shared;
   feature gate is enough for fork/compile isolation).
 - `memory-server-lite` binary profile (next step once portable packaging is
-  dogfooded on the ZeroClaw-native embedder per #1195; historically framed
-  around HyperTachi dogfooding, which is no longer the target consumer).
+  dogfooded on a native embedder per #1195; per the 2026-08-03 #1585 ruling,
+  Hypermem is the supported external consumer of the library boundary, and it
+  owns its own standalone/embedded shell — no server profile is owed here).
 - Moving schema admin tables behind feature flags (would break open of full DBs).
 
 ## Acceptance
@@ -184,3 +195,39 @@ Product policy that correctly stayed out of the kernel:
 **Conclusion:** portable-only catch-up is viable. Do not rsync operator crates.
 Full procedure: HyperTachi
 `docs/engineering/portable-memcore-catchup.md` on that experiment branch.
+
+## Supported dependency surface (owner-ratified 2026-08-03, #1585)
+
+The one supported dependency surface for Hypermem:
+
+- **`portable-kernel` library only.** No dependency on `tachi-server`,
+  `portable-server`, `tachi-llm`, Vault, Hub, Foundry, dispatch, GitHub/PR
+  lifecycle, or agent-harness crates. The dependency graph is verified clean
+  by the portable contract test and the build seat's no-default-features
+  check.
+- **Immutable pin.** Consumers pin a version tag (or commit SHA) of this
+  repository; the compatibility policy is that stable exports (typed
+  open/create/migrate via `DbOpenContext`, CRUD, hybrid search, injected
+  `KernelPolicy` scorer/decay/embed configuration, precomputed query vectors,
+  pure rerank blending, docs/wiki classification, and write/search receipts)
+  do not break within a pinned minor line; breaking changes land behind a new
+  tag with a migration note in this document.
+- **Schema profile.** Hypermem creates and opens `PortableKernel`-profile
+  stores only (#1585 §1). A full-Tachi database is refused typed at open, not
+  silently reinterpreted; profile and role identity are write-once stamps in
+  the store itself, never inferred from paths.
+- **Licensing** — `DECISION_REQUIRED (owner): AGPL-3.0-only embedding/distribution
+  terms in Hyperion artifacts.` Until that decision is recorded here, this
+  section documents the technical surface only, not a distribution grant.
+
+### Operational notes (#1585 D6)
+
+- **Conferral audit.** Every role/profile conferral is INFO-logged with role,
+  path, and resolver. Before the first post-upgrade daemon start, record the
+  inferred vs manifest-resolved label for each of the nine production
+  databases (pre-cutover audit artifact).
+- **Operator unstamp.** A wrong stamp is corrected on a stopped daemon by
+  clearing the `hard_state` rows in namespace `store_identity` for that
+  database; the next resolving open re-confers. The stamp is write-once at
+  the API level precisely so this is an operator action, never an ambient
+  one.

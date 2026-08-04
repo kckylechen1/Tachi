@@ -497,6 +497,7 @@ fn impression_retention_is_independent_and_memory_delete_preserves_history() {
             recall_impression_max_days: 10_000,
             ..GcConfig::default()
         },
+        crate::db::StoreProfile::TachiFull,
     )
     .unwrap();
     assert_eq!(

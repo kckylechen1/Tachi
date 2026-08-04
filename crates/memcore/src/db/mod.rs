@@ -29,6 +29,7 @@ pub mod mirror_eval;
 mod open;
 pub mod open_context;
 mod recall_cache;
+#[cfg(feature = "admin")]
 mod sandbox;
 mod schema;
 mod search_generation;
@@ -38,6 +39,8 @@ mod sqlite_extensions;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
+pub mod store_identity;
+pub mod store_profile;
 #[cfg(feature = "admin")]
 mod vault_db;
 #[cfg(feature = "admin")]
@@ -68,12 +71,17 @@ pub use dispatch_outcomes::{
     outcome_exists_for_dispatch, upsert_outcome, upsert_outcome_reconciling_terminal_placeholder,
     DispatchOutcomeRow, NewDispatchOutcome, OutcomeEvidenceClass,
 };
+// The three raw-`Connection` constructors are gated with the accessor pair on
+// `MemoryStore` (#1585 review round 3): a bare connection is a raw-SQL bypass
+// of the `store_identity` write-once guards, so the non-test portable surface
+// does not get one. The read-only probes below stay portable.
 pub use doctor_probe::{
     checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
-    count_memories_vec_rows, foundry_job_status_counts, open_for_wal_checkpoint,
-    open_immutable_readonly, open_raw, probe_keyword_suspects, schema_version, table_exists,
-    FoundryJobStatusCounts, KeywordSuspectProbe,
+    count_memories_vec_rows, foundry_job_status_counts, probe_keyword_suspects, schema_version,
+    table_exists, FoundryJobStatusCounts, KeywordSuspectProbe,
 };
+#[cfg(any(feature = "admin", test))]
+pub use doctor_probe::{open_for_wal_checkpoint, open_immutable_readonly, open_raw};
 pub use event_ledger::{
     continuity_metrics, insert_tachi_event, insert_tachi_event_if_absent, list_tachi_events,
 };
@@ -168,6 +176,7 @@ pub use recall_cache::{
     recall_cache_get, recall_cache_invalidate_all, recall_cache_purge_stale, recall_cache_put,
     recall_cache_record_hit, recall_cache_stats, RecallCacheHit, RecallCacheStats,
 };
+#[cfg(feature = "admin")]
 pub use sandbox::{
     check_sandbox_access, evaluate_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit,
     list_sandbox_exec_audit, list_sandbox_policies, list_sandbox_rules_for_role,
@@ -175,10 +184,11 @@ pub use sandbox::{
 };
 #[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
-pub use schema::{init_schema, init_schema_with_label_mut};
+pub use schema::{init_schema, init_schema_with_label_mut, SchemaInitOutcome};
 pub use search_generation::{bump_search_generation, search_generation};
 pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
+pub(crate) use state::refuse_store_identity_namespace;
 pub use state::{
     backfill_missing_expires_at, delete_state, get_state, insert_state_if_absent,
     list_derived_by_source, list_state, reap_expired_state, save_derived, save_derived_with_id,
@@ -188,6 +198,10 @@ pub(crate) use stats_gc::write_gc_archived_receipt;
 pub use stats_gc::{
     archive_stale_memories, archive_stale_memories_with_config, gc_tables, stats,
     GC_MEMORY_ARCHIVED_EVENT_TYPE,
+};
+pub use store_identity::StoreIdentity;
+pub use store_profile::{
+    StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
 };
 #[cfg(feature = "admin")]
 pub use vault_db::{

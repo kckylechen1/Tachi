@@ -176,7 +176,18 @@ pub(crate) fn generic_precision_multiplier_impl(
     query: &str,
     entry: &MemoryEntry,
 ) -> f64 {
-    generic_precision_multiplier_impl_with_config(is_id_like, query, entry, RecallConfig::get())
+    // tachi#1585 D5: pure default, not the process-wide `RecallConfig::get()`.
+    // This helper takes no `MemoryStore`/`SearchOptions` to draw a
+    // host-injected policy from; the crate's hot search path calls
+    // `generic_precision_multiplier_impl_with_config` directly with an
+    // explicit config (`search/ranking.rs`), so this default is reached only
+    // by the standalone `generic_precision_multiplier` convenience API.
+    generic_precision_multiplier_impl_with_config(
+        is_id_like,
+        query,
+        entry,
+        &RecallConfig::default(),
+    )
 }
 
 pub(crate) fn generic_precision_multiplier_impl_with_config(

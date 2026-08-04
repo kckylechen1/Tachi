@@ -16,6 +16,7 @@
 
 use rusqlite::Connection;
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
 use super::legacy_columns::table_has_column;
@@ -23,7 +24,20 @@ use super::legacy_columns::table_has_column;
 /// Back-fill the `env_class` column onto an existing `exec_envs` table. Returns
 /// `1` if the column was added, `0` if it was already present (fresh DB or a
 /// re-run).
-pub(super) fn migrate_v15_exec_envs_env_class(conn: &Connection) -> Result<usize, MemoryError> {
+pub(super) fn migrate_v15_exec_envs_env_class(
+    conn: &Connection,
+    profile: StoreProfile,
+) -> Result<usize, MemoryError> {
+    // #1585 D3: product-scoped migration. A PortableKernel store never
+    // created the table(s) this touches, so the work is vacuously done.
+    // Returning Ok here (rather than skipping the call) is deliberate:
+    // `apply_versioned_migration` still marks the sentinel, so a portable
+    // database is a COMPLETE stamped-28 database by every existing gate's
+    // definition (`validate_current_schema_integrity`,
+    // `MIGRATION_SENTINEL_KEYS`) — the sentinel set is profile-invariant.
+    if !profile.includes_product() {
+        return Ok(0);
+    }
     // Guard: a DB that never created the table has nothing to alter — the DDL
     // will create it with the column.
     if !table_exists(conn, "exec_envs")? {
@@ -74,7 +88,7 @@ mod tests {
         legacy_table(&conn);
         assert!(!table_has_column(&conn, "exec_envs", "env_class").unwrap());
 
-        let added = migrate_v15_exec_envs_env_class(&conn).unwrap();
+        let added = migrate_v15_exec_envs_env_class(&conn, StoreProfile::TachiFull).unwrap();
         assert_eq!(added, 1);
         assert!(table_has_column(&conn, "exec_envs", "env_class").unwrap());
 
@@ -90,12 +104,18 @@ mod tests {
         assert_eq!(class, "edit-only");
 
         // Second run is a no-op (idempotent add-column).
-        assert_eq!(migrate_v15_exec_envs_env_class(&conn).unwrap(), 0);
+        assert_eq!(
+            migrate_v15_exec_envs_env_class(&conn, StoreProfile::TachiFull).unwrap(),
+            0
+        );
     }
 
     #[test]
     fn v15_noops_when_table_absent() {
         let conn = Connection::open_in_memory().unwrap();
-        assert_eq!(migrate_v15_exec_envs_env_class(&conn).unwrap(), 0);
+        assert_eq!(
+            migrate_v15_exec_envs_env_class(&conn, StoreProfile::TachiFull).unwrap(),
+            0
+        );
     }
 }

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use memcore::path_router::UNKNOWN_DB_LABEL;
 use memcore::{get_foundry_config, set_foundry_config, MemoryStore, PerDbConfig};
 use serde_json::json;
 
@@ -74,7 +75,10 @@ pub(crate) async fn run_foundry(
             let path_str = target
                 .to_str()
                 .ok_or_else(|| format!("non-utf8 path: {}", target.display()))?;
-            let store = MemoryStore::open_with_label(path_str, "tachi-foundry-config")
+            // tachi#1579: `db_label` is a verified role claim resolved against
+            // the store's identity stamp, not a diagnostic tag. This CLI knows
+            // no role, so it claims none and lets the stamp decide.
+            let store = MemoryStore::open_with_label(path_str, UNKNOWN_DB_LABEL)
                 .map_err(|e| format!("open {}: {e}", target.display()))?;
             let mut cfg = get_foundry_config(store.connection())
                 .map_err(|e| format!("get_foundry_config: {e}"))?;
@@ -196,7 +200,9 @@ fn read_per_db_config(path: &Path) -> Result<PerDbConfig, Box<dyn std::error::Er
     let path_str = path
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", path.display()))?;
-    let store = MemoryStore::open_with_label(path_str, "tachi-foundry-config")
+    // tachi#1579: `db_label` is a verified role claim resolved against the
+    // store's identity stamp, not a diagnostic tag. Claim nothing here.
+    let store = MemoryStore::open_with_label(path_str, UNKNOWN_DB_LABEL)
         .map_err(|e| format!("open {}: {e}", path.display()))?;
     let cfg =
         get_foundry_config(store.connection()).map_err(|e| format!("get_foundry_config: {e}"))?;

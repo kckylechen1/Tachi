@@ -6,7 +6,7 @@ use super::runtime::{
 use super::tachi_server::MemoryServer;
 use super::{
     configured_memory_read_pool_size, DbRuntime, DbScope, ProjectDbState, RateLimiter,
-    ReadStorePool, VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
+    ReadStorePool, StoreLabel, VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
 };
 use crate::builtins::seed_builtin_capabilities;
 use crate::foundry_runtime_ops::{
@@ -17,7 +17,7 @@ use crate::mcp_proxy::McpToolExposureMode;
 use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 use crate::utils::parse_env_u64;
 use memcore::MemoryStore;
-use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
+use memcore::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -178,20 +178,51 @@ impl MemoryServer {
         let global_open_ctx = DbOpenContext {
             intent: OpenIntent::OpenExisting,
             migration: schema_migration.clone(),
+            // #1585 D2: the server's global store backs the full product
+            // surface (Vault, Hub, Foundry, dispatch ledgers).
+            required_profile: StoreProfile::TachiFull,
         };
+        // tachi#1579: `"global"` here is a RESOLVED role, not a guess — this is
+        // the server's own global store by construction — so it is a legitimate
+        // conferral. On a store already stamped `global` it verifies; on one
+        // stamped anything else the open fails loudly rather than the server
+        // quietly operating someone else's database as its global store.
+        // #1585 D5: resolve `TACHI_*` / `config.env` exactly ONCE, here, before
+        // the first store opens — `memcore` reads no environment of its own
+        // any more. Every store this server owns (global write handle, global
+        // read pool, the bound project DB, and every dynamic project open the
+        // `DbRuntime` performs later) carries this same resolution, so read
+        // and write handles for one file cannot rank with different weights.
+        let kernel_policy = crate::kernel_policy_adapter::resolve_kernel_policy();
         let global_store =
-            MemoryStore::open_with_label_and_context(global_db_str, "global", &global_open_ctx)?;
+            MemoryStore::open_with_label_and_context(global_db_str, "global", &global_open_ctx)?
+                .with_kernel_policy(kernel_policy.clone());
         let read_pool_size = configured_memory_read_pool_size();
         // Same label as the write store two lines up (tachi#1569): the read
         // pool's handles must not disagree with it about which store this is.
-        let global_read_pool =
-            ReadStorePool::open_read_only(global_db_str, read_pool_size, "global")?;
+        // Taken from the resolved handle rather than re-typed, so the two
+        // cannot drift.
+        let global_read_pool = ReadStorePool::open_read_only(
+            global_db_str,
+            read_pool_size,
+            global_store.db_label(),
+            &kernel_policy,
+        )?;
         let global_vec_available = global_store.vec_available;
 
         let project_db_state = if let Some(ref p) = project_db_path {
             Some(
-                ProjectDbState::open(p.clone(), read_pool_size, &schema_migration)
-                    .map_err(std::io::Error::other)?,
+                // The `--project-db` path is an operator-supplied path with no
+                // resolved manifest role, so it confers nothing: the store's
+                // own stamp answers (tachi#1579).
+                ProjectDbState::open(
+                    p.clone(),
+                    read_pool_size,
+                    &schema_migration,
+                    StoreLabel::inferred(p),
+                    &kernel_policy,
+                )
+                .map_err(std::io::Error::other)?,
             )
         } else {
             None
@@ -264,6 +295,11 @@ impl MemoryServer {
             attached_project_dbs: Arc::new(StdRwLock::new(HashMap::new())),
             project_attach_init_gate: Arc::new(StdMutex::new(())),
             schema_migration,
+            // #1585 D5: the same single resolution the startup opens above
+            // used, carried so dynamic project opens (activate/attach,
+            // request-scoped path reads) get it too instead of silently
+            // falling back to `RecallConfig::default()`.
+            kernel_policy,
         };
 
         let server = Self {

@@ -1,6 +1,8 @@
 use crate::scorer::HybridWeights;
 use std::collections::HashMap;
+#[cfg(any(feature = "admin", test))]
 use std::io::Read;
+#[cfg(any(feature = "admin", test))]
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -203,6 +205,14 @@ impl RecallConfig {
         CONFIG.get_or_init(Self::load)
     }
 
+    /// `admin`-gated: a portable-kernel build (`--no-default-features`) must
+    /// not read the process environment or the filesystem at all — a
+    /// downstream fork (HyperTachi/HyperMemory) syncing the portable kernel
+    /// gets pure, deterministic defaults, byte-identical to
+    /// `RecallConfig::default()`, with zero env/config.env reads. Full-Tachi
+    /// (`admin` on, the default) keeps today's env/config.env resolution
+    /// unchanged (kckylechen1/Sigil#1585 review).
+    #[cfg(feature = "admin")]
     pub fn load() -> RecallConfig {
         if env_truthy("TACHI_TEST_DISABLE_RECALL_CONFIG") || cfg!(test) {
             return Self::default();
@@ -215,6 +225,15 @@ impl RecallConfig {
         }
         config.apply_config_env(&process_recall_env());
         config.sanitized()
+    }
+
+    /// See the `admin`-gated `load` above: under `not(admin)` this is the
+    /// entire implementation — no env reads, no filesystem reads, not even
+    /// the `TACHI_TEST_DISABLE_RECALL_CONFIG` escape hatch (that hatch is
+    /// meaningless here since this path already never reads env).
+    #[cfg(not(feature = "admin"))]
+    pub fn load() -> RecallConfig {
+        Self::default()
     }
 
     /// Parse the same config.env source consumed by production `load` without
@@ -547,12 +566,14 @@ fn finite_or_default(value: f64, default: f64) -> f64 {
     }
 }
 
+#[cfg(any(feature = "admin", test))]
 fn process_recall_env() -> HashMap<String, String> {
     std::env::vars()
         .filter(|(key, _)| key.starts_with("TACHI_RECALL_"))
         .collect()
 }
 
+#[cfg(any(feature = "admin", test))]
 fn read_config_env_bounded(path: &std::path::Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
@@ -617,6 +638,7 @@ fn unquote_env_value(value: &str) -> &str {
 /// so a whitespace-only value like `SIGIL_HOME="   "` was NOT skipped here
 /// (unlike the canonical funnel, which moves on to the next key) — the app's
 /// resolved home and this crate's recall-config home silently disagreed.
+#[cfg(any(feature = "admin", test))]
 fn config_env_path() -> Option<PathBuf> {
     for key in ["TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"] {
         let Ok(value) = std::env::var(key) else {
@@ -638,6 +660,7 @@ fn config_env_path() -> Option<PathBuf> {
     Some(app_home.join("config.env"))
 }
 
+#[cfg(any(feature = "admin", test))]
 fn env_truthy(key: &str) -> bool {
     matches!(
         std::env::var(key).ok().as_deref(),
@@ -1017,6 +1040,54 @@ mod tests {
             Some(home_dir.path().join(".tachi").join("config.env")),
             "whitespace-only SIGIL_HOME must be treated as unset, matching the \
              canonical funnel's trim-then-empty-check skip semantics"
+        );
+    }
+}
+
+/// Portable-kernel pin (kckylechen1/Sigil#1585 review): under `not(admin)`,
+/// `RecallConfig::get()` (and therefore `load()`) must equal
+/// `RecallConfig::default()` even when a `TACHI_RECALL_*` var is set in the
+/// process environment — the `not(admin)` arm of `load()` never reads env or
+/// config.env at all. This is a separate module (not the `mod tests` above)
+/// because that module's tests call `config_env_path`/`read_config_env_bounded`
+/// directly (those private helpers stay unconditionally compiled and remain
+/// exercisable either way) rather than through the `admin`-gated `load`/`get`
+/// entry points this pin is specifically about. Only runs under
+/// `--no-default-features`, which the build seat runs.
+#[cfg(all(test, not(feature = "admin")))]
+mod portable_tests {
+    use super::RecallConfig;
+
+    /// Local RAII guard (the `EnvVarSnapshotRestore` above is scoped inside
+    /// the `admin`-only `mod tests` and not visible here).
+    struct EnvGuard(&'static str);
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    #[test]
+    // Accepted-weak-with-reason (#1585 review round 2, Task C): this cannot
+    // distinguish "the not(admin) arm is structurally pure" from "we're
+    // running under `cargo test`, and the *admin* arm's own `cfg!(test) ||
+    // env_truthy(...)` short-circuit (see `load()` above) would ALSO return
+    // `default()` here" — deleting the `not(admin)` split entirely and always
+    // compiling the admin `load()` would still pass this exact assertion in
+    // this exact test binary. A real strengthening needs `load()` itself to
+    // drop the `cfg!(test)` escape hatch, which is out of scope here; unlike
+    // `include_superseded_env_override_active`'s pin (search.rs), whose admin
+    // arm has no such escape and which this one is modeled on but cannot
+    // replicate.
+    fn get_equals_default_under_not_admin_even_with_env_set() {
+        std::env::set_var("TACHI_RECALL_RRF_K", "999");
+        let _guard = EnvGuard("TACHI_RECALL_RRF_K");
+
+        assert_eq!(
+            RecallConfig::get(),
+            &RecallConfig::default(),
+            "not(admin) RecallConfig::get() must never read TACHI_RECALL_* env"
         );
     }
 }

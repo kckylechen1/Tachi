@@ -6,7 +6,7 @@ fn delete_existing() {
     let e = make_entry("del-1", "to be deleted");
     upsert(&mut conn, &e, false).unwrap();
 
-    let deleted = delete(&mut conn, "del-1", false).unwrap();
+    let deleted = delete(&mut conn, "del-1", false, StoreProfile::TachiFull).unwrap();
     assert!(deleted, "should return true for existing entry");
 
     // Verify it's gone from main table
@@ -43,7 +43,7 @@ fn delete_returns_vector_cleanup_errors_and_rolls_back() {
     upsert(&mut conn, &e, false).unwrap();
     conn.execute("DROP TABLE memories_vec", []).unwrap();
 
-    let err = delete(&mut conn, "del-vec-error", true)
+    let err = delete(&mut conn, "del-vec-error", true, StoreProfile::TachiFull)
         .expect_err("vector cleanup errors must be returned");
     assert!(
         err.to_string().contains("memories_vec") || err.to_string().contains("no such table"),
@@ -63,7 +63,7 @@ fn delete_returns_vector_cleanup_errors_and_rolls_back() {
 #[test]
 fn delete_nonexistent() {
     let mut conn = make_conn();
-    let deleted = delete(&mut conn, "nonexistent-id", false).unwrap();
+    let deleted = delete(&mut conn, "nonexistent-id", false, StoreProfile::TachiFull).unwrap();
     assert!(!deleted, "should return false for non-existent entry");
 }
 
@@ -98,7 +98,7 @@ fn delete_cascades_access_history_and_known_state() {
     assert!(ah_before > 0);
     assert!(aks_before > 0);
 
-    delete(&mut conn, "del-cascade", false).unwrap();
+    delete(&mut conn, "del-cascade", false, StoreProfile::TachiFull).unwrap();
 
     let ah_after: i64 = conn
         .query_row(

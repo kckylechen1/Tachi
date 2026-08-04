@@ -2,6 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{Map, Value};
 use std::sync::{Mutex, MutexGuard};
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource};
 
@@ -826,15 +827,6 @@ fn merge_ordinary_reserved_metadata(
     Ok(sanitized)
 }
 
-fn atomic_evidence_path_validation_disabled() -> bool {
-    matches!(
-        std::env::var("TACHI_DISABLE_PATH_VALIDATION")
-            .ok()
-            .as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes")
-    )
-}
-
 impl crate::MemoryStore {
     /// Save through the normal upsert body while atomically preserving and
     /// mutating reserved reference metadata. The validated mutations and
@@ -867,7 +859,7 @@ impl crate::MemoryStore {
         metadata_removals: &[&str],
         mutations: &[ValidatedReferenceMutation],
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
-        if self.path_validation && !atomic_evidence_path_validation_disabled() {
+        if self.path_validation && !self.policy.path_validation_escape_hatch {
             let allow_cross = entry
                 .metadata
                 .get("allow_cross_project")
@@ -910,7 +902,7 @@ impl crate::MemoryStore {
         metadata_patch: &Map<String, Value>,
         mutations: &[ValidatedReferenceMutation],
     ) -> Result<InsertMemoryResult, MemoryError> {
-        if self.path_validation && !atomic_evidence_path_validation_disabled() {
+        if self.path_validation && !self.policy.path_validation_escape_hatch {
             let allow_cross = entry
                 .metadata
                 .get("allow_cross_project")
@@ -3323,7 +3315,12 @@ const IN_BATCH_SIZE: usize = 900;
 
 /// Delete a memory entry by ID from main table, FTS index, and vector table.
 /// Returns true if an entry was found and deleted.
-pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bool, MemoryError> {
+pub fn delete(
+    conn: &mut Connection,
+    id: &str,
+    vec_available: bool,
+    profile: StoreProfile,
+) -> Result<bool, MemoryError> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
         return Err(MemoryError::InvalidArg("empty ID".to_string()));
@@ -3356,11 +3353,15 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
             params![trimmed],
         )?;
 
-        // Clean up agent known state (CASCADE)
-        tx.execute(
-            "DELETE FROM agent_known_state WHERE memory_id = ?1",
-            params![trimmed],
-        )?;
+        // Clean up agent known state (CASCADE). PRODUCT table (#1585 D4): a
+        // PortableKernel store never created it, so there is nothing to
+        // cascade to. Explicit profile check, not a `table_exists` sniff.
+        if profile.includes_product() {
+            tx.execute(
+                "DELETE FROM agent_known_state WHERE memory_id = ?1",
+                params![trimmed],
+            )?;
+        }
     }
 
     tx.commit()?;

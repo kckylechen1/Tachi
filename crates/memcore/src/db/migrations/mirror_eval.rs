@@ -25,9 +25,23 @@
 
 use rusqlite::Connection;
 
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
-pub(super) fn migrate_v20_mirror_eval(conn: &Connection) -> Result<usize, MemoryError> {
+pub(super) fn migrate_v20_mirror_eval(
+    conn: &Connection,
+    profile: StoreProfile,
+) -> Result<usize, MemoryError> {
+    // #1585 D3: product-scoped migration. A PortableKernel store never
+    // created the table(s) this touches, so the work is vacuously done.
+    // Returning Ok here (rather than skipping the call) is deliberate:
+    // `apply_versioned_migration` still marks the sentinel, so a portable
+    // database is a COMPLETE stamped-28 database by every existing gate's
+    // definition (`validate_current_schema_integrity`,
+    // `MIGRATION_SENTINEL_KEYS`) — the sentinel set is profile-invariant.
+    if !profile.includes_product() {
+        return Ok(0);
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS mirror_eval_runs (
             eval_run_id         TEXT PRIMARY KEY,
@@ -90,8 +104,14 @@ mod tests {
     #[test]
     fn v20_creates_mirror_eval_tables_idempotently() {
         let conn = Connection::open_in_memory().unwrap();
-        assert_eq!(migrate_v20_mirror_eval(&conn).unwrap(), 1);
-        assert_eq!(migrate_v20_mirror_eval(&conn).unwrap(), 1);
+        assert_eq!(
+            migrate_v20_mirror_eval(&conn, StoreProfile::TachiFull).unwrap(),
+            1
+        );
+        assert_eq!(
+            migrate_v20_mirror_eval(&conn, StoreProfile::TachiFull).unwrap(),
+            1
+        );
         for table in [
             "mirror_eval_runs",
             "mirror_eval_observations",

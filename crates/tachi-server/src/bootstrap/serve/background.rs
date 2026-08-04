@@ -655,11 +655,14 @@ mod tests {
         let tachi_home = tmp.path().join("home");
         let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
 
-        let foreign_db = tachi_home
-            .join("projects")
-            .join("foreign")
-            .join(memcore::MEMORY_DB_FILENAME);
-        drop(MemoryServer::new(foreign_db.clone(), None).expect("foreign named-project DB"));
+        // Built as an unlabelled store, NOT via `MemoryServer::new` on this
+        // path: that constructor confers the role `"global"` on whatever file
+        // it is handed, and since tachi#1579 the conferral is a write-once
+        // stamp inside the file. A named-project DB stamped `"global"` refuses
+        // every later open that correctly claims `"foreign"`. Production never
+        // creates a named-project store that way — `create_named_project_db`
+        // is the fixture that matches how one really comes into existence.
+        let foreign_db = crate::tests::create_named_project_db(&tachi_home, "foreign");
 
         let server = MemoryServer::new(tachi_home.join("global.db"), None).expect("server");
         run_wal_checkpoint(&server, false);
@@ -906,25 +909,21 @@ mod tests {
         let tachi_home = tmp.path().join("home");
         let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
 
-        let foreign_db = tachi_home
-            .join("projects")
-            .join("foreign")
-            .join(memcore::MEMORY_DB_FILENAME);
-        {
-            let foreign_server =
-                MemoryServer::new(foreign_db.clone(), None).expect("foreign named-project DB");
-            foreign_server
-                .with_global_store(|store| {
-                    store
-                        .set_state(
-                            "capture_manifest",
-                            "expired-named",
-                            r#"{"expires_at":"2000-01-01T00:00:00Z"}"#,
-                        )
-                        .map_err(|e| e.to_string())
-                })
-                .expect("seed expired named-project hard_state row");
-        }
+        // Unlabelled seed open, for the same reason as
+        // `wal_checkpoint_scoped_to_active_dbs_does_not_attach_named_projects`:
+        // seeding through a `MemoryServer`'s *global* store would stamp this
+        // named-project file `"global"` (tachi#1579) and every
+        // `with_named_project_store("foreign", …)` below would then be refused
+        // with `StoreRoleConflict` before it could read anything.
+        let foreign_db = crate::tests::create_named_project_db(&tachi_home, "foreign");
+        memcore::MemoryStore::open(foreign_db.to_str().expect("utf8 foreign named-project DB"))
+            .expect("open foreign named-project DB")
+            .set_state(
+                "capture_manifest",
+                "expired-named",
+                r#"{"expires_at":"2000-01-01T00:00:00Z"}"#,
+            )
+            .expect("seed expired named-project hard_state row");
 
         let server = MemoryServer::new(tachi_home.join("global.db"), None).expect("server");
 

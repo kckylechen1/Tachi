@@ -54,6 +54,7 @@ pub mod error;
 pub mod foundry;
 #[cfg(feature = "admin")]
 pub mod hub;
+pub mod kernel_policy;
 pub mod namespace;
 pub mod near_dup;
 pub mod noise;
@@ -139,7 +140,7 @@ pub use db::{
     InsertMemoryResult, PathPrefixMemoryRow,
 };
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
-pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};
+pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
 pub use embed_config::embed_raw_tier_enabled;
 pub use error::{MemoryError, WorkClaimTransitionReason};
 #[cfg(feature = "admin")]
@@ -150,6 +151,7 @@ pub use foundry::{
 };
 #[cfg(feature = "admin")]
 pub use hub::{HubCapability, VirtualCapabilityBinding};
+pub use kernel_policy::{EmbedPolicy, KernelPolicy};
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
     is_handoff_entry, is_internal_only_row, is_kanban_entry, is_namespace_search_noise,
@@ -223,7 +225,19 @@ pub struct MemoryStore {
     pub vec_available: bool,
     /// Manifest label for this DB ("global", "wiki", a project name, or
     /// "unknown"). Used by path validation at write time.
+    ///
+    /// tachi#1579: **stamp-derived**. This is the role resolved from the
+    /// write-once `store_identity` rows inside the database file, not the
+    /// `db_label` argument a caller passed to `open_with_label` — that argument
+    /// is now a *claim* that the open verifies against the stamp and refuses on
+    /// conflict. Identity therefore travels with the bytes and cannot be forged
+    /// by moving the file into a differently-named directory.
     pub(crate) db_label: String,
+    /// This store's effective schema profile (#1585): whether it carries the
+    /// Tachi product tables or only the portable memory kernel. Read from the
+    /// store's own profile stamp at open — never from the caller's
+    /// `DbOpenContext::required_profile`, which is an admission check only.
+    pub(crate) profile: db::StoreProfile,
     /// Whether path validation is enforced for this store. Disabled when
     /// db_label is unknown to avoid breaking unlabeled callers.
     pub(crate) path_validation: bool,
@@ -231,6 +245,11 @@ pub struct MemoryStore {
     /// Long-lived runtimes use it to fail closed if the path is later replaced
     /// while SQLite still holds the original file descriptor.
     pub(crate) opened_physical_db_identity: Option<String>,
+    /// Host-injected recall/decay/embed configuration (tachi#1585 D5). Every
+    /// constructor sets this to [`KernelPolicy::default()`] (pure, no env) —
+    /// see [`Self::with_kernel_policy`] for how a caller attaches a
+    /// non-default policy after opening.
+    pub(crate) policy: KernelPolicy,
 }
 
 #[cfg(test)]

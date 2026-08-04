@@ -1168,7 +1168,7 @@ fn delete_cascades_edges() {
     )
     .unwrap();
 
-    delete(&mut conn, "del-e1", false).unwrap();
+    delete(&mut conn, "del-e1", false, StoreProfile::TachiFull).unwrap();
     let edges = get_edges(&conn, "del-e2", "both", None).unwrap();
     assert!(edges.is_empty(), "edges should be cleaned up on delete");
 }
@@ -1446,7 +1446,7 @@ fn confirmed_contradiction_skips_a_verdict_about_a_deleted_candidate() {
     upsert(&mut conn, &make_entry("gone-old", "old fact"), false).unwrap();
     let expected_entry = expected_state(&conn, "gone-new");
     let expected = expected_state(&conn, "gone-old");
-    assert!(delete(&mut conn, "gone-old", false).unwrap());
+    assert!(delete(&mut conn, "gone-old", false, StoreProfile::TachiFull).unwrap());
 
     let (contradicts, supersedes, at) =
         confirmed_contradiction_edges("gone-new", "gone-old", "complete");
@@ -1595,7 +1595,7 @@ fn confirmed_contradiction_skips_a_verdict_when_the_entry_was_deleted() {
     upsert(&mut conn, &make_entry("entry-gone-old", "old fact"), false).unwrap();
     let expected_entry = expected_state(&conn, "entry-gone-new");
     let expected = expected_state(&conn, "entry-gone-old");
-    assert!(delete(&mut conn, "entry-gone-new", false).unwrap());
+    assert!(delete(&mut conn, "entry-gone-new", false, StoreProfile::TachiFull).unwrap());
 
     let (contradicts, supersedes, at) =
         confirmed_contradiction_edges("entry-gone-new", "entry-gone-old", "complete");

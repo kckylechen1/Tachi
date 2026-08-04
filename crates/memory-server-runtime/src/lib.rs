@@ -1,5 +1,5 @@
 use memcore::MemoryStore;
-use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
+use memcore::{DbOpenContext, KernelPolicy, MigrationAuthority, OpenIntent, StoreProfile};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-support")]
@@ -270,23 +270,32 @@ pub struct ReadStorePool {
 
 impl ReadStorePool {
     /// Open `size` read-only handles on `db_path`, every one of them carrying
-    /// `db_label`.
+    /// `db_label` and the host's [`KernelPolicy`].
     ///
     /// tachi#1569: `db_label` must be the same manifest label the write store
     /// for this path was opened with (`global`, `wiki`, the project name).
     /// Pooled read stores used to be born unlabelled, which is why read-side
     /// gates could not be keyed on store identity at all.
+    ///
+    /// tachi#1585 D5: `policy` must be the same host-resolved policy the write
+    /// store for this path carries. `MemoryStore` no longer reads `TACHI_*`
+    /// itself, so a pooled read handle that is not given the policy silently
+    /// ranks with `RecallConfig::default()` while the writer ranks with the
+    /// operator's `config.env` — the read/write split tachi#1569 closed for
+    /// identity, reopened for tuning.
     pub fn open_read_only(
         db_path: &str,
         size: usize,
         db_label: &str,
+        policy: &KernelPolicy,
     ) -> Result<Self, memcore::MemoryError> {
         let size = size.clamp(1, MAX_MEMORY_READ_POOL_SIZE);
         let mut stores = Vec::with_capacity(size);
         for _ in 0..size {
-            stores.push(StdMutex::new(MemoryStore::open_read_only_with_label(
-                db_path, db_label,
-            )?));
+            stores.push(StdMutex::new(
+                MemoryStore::open_read_only_with_label(db_path, db_label)?
+                    .with_kernel_policy(policy.clone()),
+            ));
         }
         Ok(Self {
             inner: Arc::new(ReadPoolInner {
@@ -684,6 +693,14 @@ pub struct DbRuntime {
     /// refusing. The policy lives HERE, at the open site, not only in
     /// bootstrap — every runtime project open must express it.
     pub schema_migration: MigrationAuthority,
+    /// #1585 D5: host-injected kernel tuning (recall weights, decay, embed
+    /// raw-tier gate, path-validation escape hatch), resolved ONCE by the
+    /// host's adapter from `TACHI_*`/`config.env` and carried here for the
+    /// same reason `schema_migration` is — every *dynamic* store this runtime
+    /// opens (activate, attach, request-scoped path reads) must express it.
+    /// `memcore` reads no environment of its own, so a store opened without
+    /// this silently runs on `RecallConfig::default()`.
+    pub kernel_policy: KernelPolicy,
 }
 
 /// A request-owned read-only store.
@@ -766,10 +783,15 @@ impl DbRuntime {
     }
 
     pub fn activate_project_db(&self, db_path: PathBuf) -> Result<bool, String> {
+        // A bare path with no resolved manifest role: this route may not
+        // confer identity (tachi#1579). The store's own stamp answers.
+        let conferral = StoreLabel::inferred(&db_path);
         let state = ProjectDbState::open(
-            db_path,
+            db_path.clone(),
             configured_memory_read_pool_size(),
             &self.schema_migration,
+            conferral,
+            &self.kernel_policy,
         )
         .map_err(|e| format!("open project db: {e}"))?;
 
@@ -784,7 +806,11 @@ impl DbRuntime {
         db_path: &Path,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.with_path_store_with_label(db_path, path_store_label(db_path), f)
+        // tachi#1579: symmetrical with `with_path_store_read`. This route takes
+        // an arbitrary path and has no caller-declared role for it, so its
+        // label is a guess — usable for lock names and error text, never for
+        // conferring identity on the store.
+        self.with_path_store_labelled(db_path, StoreLabel::inferred(db_path), f)
     }
 
     pub fn with_path_store_read<T>(
@@ -828,19 +854,37 @@ impl DbRuntime {
         }
 
         let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
-        let mut store = open_read_store(&key, label)?;
+        let mut store = open_read_store(&key, label, &self.kernel_policy)?;
         f(&mut store)
     }
 
+    /// Write a DB whose manifest role the caller has already resolved — the
+    /// `validate_named_project`-checked project name whose path was derived
+    /// *from* that name (`server_methods::db`'s named-project resolver). Only
+    /// such a declared label may be conferred on a store that carries no
+    /// identity stamp yet, and only on the first attach; afterwards the stamp
+    /// answers and a disagreeing claim fails the open (tachi#1579).
     pub fn with_path_store_with_label<T>(
         &self,
         db_path: &Path,
         label: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let state = self.attached_project_state(db_path)?;
+        self.with_path_store_labelled(db_path, StoreLabel::Declared(label), f)
+    }
+
+    /// Shared body of [`Self::with_path_store`] and
+    /// [`Self::with_path_store_with_label`]; the two differ only in whether the
+    /// label carries authority to confer identity (see [`StoreLabel`]).
+    fn with_path_store_labelled<T>(
+        &self,
+        db_path: &Path,
+        label: StoreLabel<'_>,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let state = self.attached_project_state(db_path, label)?;
         let _gate = write_or_recover(&state.rw_gate, "path_db_rw_gate");
-        let mut store = lock_or_recover(&state.store, label);
+        let mut store = lock_or_recover(&state.store, label.text());
         f(&mut store)
     }
 
@@ -889,12 +933,22 @@ impl DbRuntime {
         // read closure does. It is dropped before the request session escapes.
         let store = {
             let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
-            open_read_store(&key, StoreLabel::Declared(label))?
+            open_read_store(&key, StoreLabel::Declared(label), &self.kernel_policy)?
         };
         Ok(Some(RequestScopedReadStore { store }))
     }
 
-    fn attached_project_state(&self, db_path: &Path) -> Result<ProjectDbState, String> {
+    /// `conferral` is consumed only on the attach that actually opens the
+    /// store; a cache hit returns the already-resolved state. That is safe now
+    /// in a way it was not before tachi#1579: identity no longer depends on
+    /// which caller attached first, because the losing caller's claim is
+    /// verified against the stamp on its own next open rather than silently
+    /// discarded.
+    fn attached_project_state(
+        &self,
+        db_path: &Path,
+        conferral: StoreLabel<'_>,
+    ) -> Result<ProjectDbState, String> {
         let key = project_db_cache_key(db_path)?;
         if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
             return Ok(state);
@@ -907,8 +961,13 @@ impl DbRuntime {
         }
 
         let migration = self.named_project_write_migration_authority(&key);
-        let state =
-            ProjectDbState::open(key.clone(), configured_memory_read_pool_size(), &migration)?;
+        let state = ProjectDbState::open(
+            key.clone(),
+            configured_memory_read_pool_size(),
+            &migration,
+            conferral,
+            &self.kernel_policy,
+        )?;
         let mut guard = self
             .attached_project_dbs
             .write()
@@ -1385,33 +1444,36 @@ impl ProjectDbState {
     /// normally the deploy-time value; dynamic named-project write attachment
     /// may instead pass the exact v22-to-v23 guard-migration authority above.
     ///
-    /// # Known narrow face: the label here is inferred, not resolved
+    /// # Identity comes from the database, not from its directory (tachi#1579)
     ///
-    /// `project_label` below is the parent directory's name. That predates
-    /// tachi#1569 and is already the identity the **write** path enforces
-    /// against (`path_router::validate_path_for_db`), so a DB placed at
-    /// `.../wiki/memory.db` has always been allowed to accept `/wiki` writes.
-    /// #1569 gives the read pool the *same* label, so reads and writes agree —
-    /// which also means a false positive here now over-filters reads instead
-    /// of only over-permitting writes.
+    /// This used to label the store with its parent directory's name — so a DB
+    /// that happened to sit under a directory called `wiki` acquired Wiki
+    /// authority for both reads and writes, and the real Wiki DB lost it the
+    /// moment it was relocated. That inference is gone.
     ///
-    /// It is left inferred deliberately. This function receives a `PathBuf`
-    /// and a `MigrationAuthority`; the authoritative mapping (manifest role /
-    /// validated named project) lives in `tachi-server` and is not passed in,
-    /// and both ways of plumbing it here are worse than the current rule:
-    /// taking the label from whichever caller happens to create the cached
-    /// state first is order-dependent and fails *open* (a wiki read that lost
-    /// the race would silently skip the gate), and defaulting the unlabelled
-    /// callers to `unknown` would change write-side path routing for stores
-    /// that rely on today's derivation. Under the shipped layout the two
-    /// agree anyway: attached paths are `~/.tachi/projects/<validated
-    /// name>/memory.db` (`path_utils::alias::plan_c_global_db_path_in_home`),
-    /// so parent-directory == project name. Giving a database a real
-    /// self-describing identity is its own issue.
+    /// `conferral` is the caller's *authority to name this store*, not a name:
+    /// [`StoreLabel::Declared`] only from a caller that RESOLVED the role (the
+    /// manifest-validated named project, the global store), and
+    /// [`StoreLabel::Inferred`] — which confers nothing — for the path-addressed
+    /// routes that are only guessing. Whatever is passed, the resulting
+    /// handle's `db_label` is what `MemoryStore` resolved from the store's own
+    /// write-once identity stamp; a declared claim that disagrees with the
+    /// stamp fails the open loudly rather than winning by arriving first.
+    ///
+    /// # Tuning comes from the host, not from the environment (tachi#1585 D5)
+    ///
+    /// `policy` is the host-resolved [`KernelPolicy`] (for the shipped daemon,
+    /// `tachi_server::kernel_policy_adapter::resolve_kernel_policy`'s single
+    /// `TACHI_*`/`config.env` resolution). `MemoryStore` itself no longer reads
+    /// the environment, so a project store opened without it would silently
+    /// fall back to `RecallConfig::default()` and lose every operator knob.
+    /// Both the write handle and its read pool receive the same policy.
     pub fn open(
         db_path: PathBuf,
         read_pool_size: usize,
         migration: &MigrationAuthority,
+        conferral: StoreLabel<'_>,
+        policy: &KernelPolicy,
     ) -> Result<Self, String> {
         project_db_leaf_exists_without_symlink(&db_path)?;
         let db_str = db_path.to_str().ok_or_else(|| {
@@ -1420,21 +1482,26 @@ impl ProjectDbState {
                 db_path.display()
             )
         })?;
-        let project_label = db_path
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|os| os.to_str())
-            .unwrap_or("project")
-            .to_string();
         let ctx = DbOpenContext {
             intent: OpenIntent::OpenExisting,
             migration: migration.clone(),
+            // #1585 D2: the runtime is the full Tachi product — it reaches
+            // exec_envs / session_claims / dispatch ledgers — so it demands
+            // the full profile. A portable store is refused loudly here
+            // rather than producing `no such table` at the first product call.
+            required_profile: StoreProfile::TachiFull,
         };
-        let store = MemoryStore::open_with_label_and_context(db_str, &project_label, &ctx)
-            .map_err(|e| format!("open project db: {e}"))?;
+        let store = MemoryStore::open_with_label_and_context(db_str, conferral.identity(), &ctx)
+            .map_err(|e| format!("open project db: {e}"))?
+            .with_kernel_policy(policy.clone());
         let vec_available = store.vec_available;
-        let read_pool = ReadStorePool::open_read_only(db_str, read_pool_size, &project_label)
-            .map_err(|e| format!("open project read db: {e}"))?;
+        // The RESOLVED role, not the conferral: on a stamped store this is the
+        // stamp even when the caller conferred nothing, which is exactly how
+        // the read pool stops depending on which caller attached first.
+        let resolved_label = store.db_label().to_string();
+        let read_pool =
+            ReadStorePool::open_read_only(db_str, read_pool_size, &resolved_label, policy)
+                .map_err(|e| format!("open project read db: {e}"))?;
         Ok(Self {
             store: Arc::new(StdMutex::new(store)),
             read_pool,
@@ -1621,9 +1688,14 @@ fn record_read_store_open(db_path: &Path) {
 }
 
 /// Name for a DB addressed by path: the directory that holds it
-/// (`.../wiki/memory.db` -> `wiki`), the same rule `ProjectDbState::open`
-/// uses. This is a *guess* about the store's role, fit for diagnostics; see
-/// [`StoreLabel`] for why it must not become the store's identity.
+/// (`.../wiki/memory.db` -> `wiki`). This is a *guess* about the store's role,
+/// fit for lock names and error text only; see [`StoreLabel`] for why it must
+/// not become the store's identity.
+///
+/// tachi#1579: `ProjectDbState::open` used to apply this same rule as
+/// *identity*. It no longer derives a label at all — this function is now the
+/// only place the directory name is read, and everything it feeds is
+/// [`StoreLabel::Inferred`], whose [`StoreLabel::identity`] is `unknown`.
 fn path_store_label(db_path: &Path) -> &str {
     db_path
         .parent()
@@ -1642,7 +1714,7 @@ fn path_store_label(db_path: &Path) -> &str {
 /// A leak is visible to whoever reads the output; over-filtering is not
 /// visible to anyone.
 #[derive(Clone, Copy)]
-enum StoreLabel<'a> {
+pub enum StoreLabel<'a> {
     /// The caller knows this store's manifest role: the global store, or a
     /// named project whose path was derived from its validated name. Becomes
     /// the handle's `db_label`.
@@ -1654,19 +1726,20 @@ enum StoreLabel<'a> {
 }
 
 impl<'a> StoreLabel<'a> {
-    fn inferred(db_path: &'a Path) -> Self {
+    pub fn inferred(db_path: &'a Path) -> Self {
         Self::Inferred(path_store_label(db_path))
     }
 
     /// The human-facing name, whatever its authority.
-    fn text(self) -> &'a str {
+    pub fn text(self) -> &'a str {
         match self {
             Self::Declared(label) | Self::Inferred(label) => label,
         }
     }
 
-    /// The label that may become `MemoryStore::db_label`.
-    fn identity(self) -> &'a str {
+    /// The claim that may be conferred on a store that carries no identity
+    /// stamp yet. An inferred name confers nothing.
+    pub fn identity(self) -> &'a str {
         match self {
             Self::Declared(label) => label,
             Self::Inferred(_) => memcore::path_router::UNKNOWN_DB_LABEL,
@@ -1679,7 +1752,15 @@ impl<'a> StoreLabel<'a> {
 /// read-side identity predicates (`is_wiki_corpus_store`) see the same
 /// identity the write path uses for the same file — and see *nothing* when
 /// the caller was only guessing.
-fn open_read_store(db_path: &Path, label: StoreLabel<'_>) -> Result<MemoryStore, String> {
+///
+/// tachi#1585 D5: `policy` is the host-resolved [`KernelPolicy`] every store
+/// this runtime opens carries, so a request-scoped read handle ranks with the
+/// same tuning as the pooled and write handles for the same file.
+fn open_read_store(
+    db_path: &Path,
+    label: StoreLabel<'_>,
+    policy: &KernelPolicy,
+) -> Result<MemoryStore, String> {
     let name = label.text();
     let db_str = db_path.to_str().ok_or_else(|| {
         format!(
@@ -1689,7 +1770,8 @@ fn open_read_store(db_path: &Path, label: StoreLabel<'_>) -> Result<MemoryStore,
         )
     })?;
     let store = MemoryStore::open_read_only_with_label(db_str, label.identity())
-        .map_err(|e| format!("open {name} read store: {e}"))?;
+        .map_err(|e| format!("open {name} read store: {e}"))?
+        .with_kernel_policy(policy.clone());
     #[cfg(feature = "test-support")]
     record_read_store_open(db_path);
     Ok(store)
@@ -1728,8 +1810,13 @@ mod tests {
             global_store: Arc::new(StdMutex::new(
                 MemoryStore::open_with_label(global_db_str, "global").expect("global store"),
             )),
-            global_read_pool: ReadStorePool::open_read_only(global_db_str, 1, "global")
-                .expect("global read pool"),
+            global_read_pool: ReadStorePool::open_read_only(
+                global_db_str,
+                1,
+                "global",
+                &KernelPolicy::default(),
+            )
+            .expect("global read pool"),
             global_rw_gate: Arc::new(StdRwLock::new(())),
             global_contention_recorder: Arc::new(OnceLock::new()),
             global_write_gate_contended_observers: Arc::new(StdMutex::new(Vec::new())),
@@ -1739,6 +1826,9 @@ mod tests {
             attached_project_dbs: Arc::new(StdRwLock::new(HashMap::new())),
             project_attach_init_gate: Arc::new(StdMutex::new(())),
             schema_migration: MigrationAuthority::Deny,
+            // Runtime unit tests assert routing/locking, not tuning: the pure
+            // default is the honest stand-in for a host that injected nothing.
+            kernel_policy: KernelPolicy::default(),
         }
     }
 
@@ -1902,7 +1992,11 @@ mod tests {
                 .expect("seed db"),
         );
         let db_str = db_path.to_str().expect("db path utf8").to_string();
-        let pool = ReadStorePool::open_read_only(&db_str, 4, "test-pool").expect("open pool");
+        // tachi#1579: the pool's label must be the role the seeding write
+        // store stamped into this file ("seed"), not a decorative one — a
+        // disagreeing claim is now a refused open, not a silent first-wins.
+        let pool = ReadStorePool::open_read_only(&db_str, 4, "seed", &KernelPolicy::default())
+            .expect("open pool");
 
         let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
         let (occupier_entered_tx, occupier_entered_rx) = std::sync::mpsc::channel();
@@ -2051,7 +2145,9 @@ mod tests {
                 .expect("seed db"),
         );
         let db_str = db_path.to_str().expect("db path utf8").to_string();
-        let pool = ReadStorePool::open_read_only(&db_str, 1, "test-pool").expect("open pool");
+        // Same tachi#1579 label rule as the convoy test above.
+        let pool = ReadStorePool::open_read_only(&db_str, 1, "seed", &KernelPolicy::default())
+            .expect("open pool");
 
         let panicker_gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
         let (panicker_entered_tx, panicker_entered_rx) = std::sync::mpsc::channel();
@@ -2584,17 +2680,60 @@ mod tests {
             })
             .expect("inferred-label read");
 
-        // The same file, opened by a caller that declares the role, does carry
-        // it — that is the half the gate is allowed to trust.
-        runtime
-            .with_path_store_read_with_label(&impostor_db, "wiki", |store| {
-                assert!(
-                    store.is_wiki_corpus_store(),
-                    "a declared role must reach the store handle"
-                );
-                Ok(())
-            })
-            .expect("declared-label read");
+        // tachi#1579 SUPERSEDES the second half of this test. It used to assert
+        // that a *declared* role always reaches the store handle — under #1569
+        // a declared label simply became `db_label`. It no longer can: this
+        // file was seeded under the role `seed`, that role is stamped inside
+        // it, and a declared claim of `wiki` now contradicts the store's own
+        // identity. The strictly stronger outcome is a refusal. Answering
+        // "yes, you are the wiki corpus" here is exactly the forgery #1579
+        // closes — the caller's word is a claim, not a conferral.
+        let err = runtime
+            .with_path_store_read_with_label(&impostor_db, "wiki", |_| Ok(()))
+            .expect_err("a declared role that contradicts the stamp must refuse");
+        assert!(
+            err.contains("store role conflict"),
+            "expected a role-conflict refusal, got: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// tachi#1579: the parent-directory inference inside `ProjectDbState::open`
+    /// is GONE. A database opened through the write-side attach path with no
+    /// resolved role gets its identity from its own stamp, or nothing at all —
+    /// never from the directory it happens to sit in.
+    #[test]
+    fn project_db_open_never_infers_identity_from_the_directory_name() {
+        let temp = unique_temp_dir("project-open-no-inference");
+        let global_db = temp.join("global/memory.db");
+        let impostor_db = temp.join("wiki/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        std::fs::create_dir_all(impostor_db.parent().expect("impostor parent"))
+            .expect("impostor dir");
+        // Seeded WITHOUT any label: no role stamp exists in this file at all.
+        drop(
+            MemoryStore::open(impostor_db.to_str().expect("impostor utf8"))
+                .expect("seed unlabelled impostor db"),
+        );
+
+        let state = ProjectDbState::open(
+            impostor_db.clone(),
+            1,
+            &MigrationAuthority::Deny,
+            StoreLabel::inferred(&impostor_db),
+            &KernelPolicy::default(),
+        )
+        .expect("open the impostor project db");
+        {
+            let store = lock_or_recover(&state.store, "impostor");
+            assert_eq!(
+                store.db_label(),
+                memcore::path_router::UNKNOWN_DB_LABEL,
+                "a `wiki` directory must confer nothing"
+            );
+            assert!(!store.is_wiki_corpus_store());
+        }
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -2810,7 +2949,7 @@ mod tests {
         // attempt, proving the map still points at the same ProjectDbState
         // rather than having recreated it under a new gate.
         let entry0_state_after = runtime
-            .attached_project_state(&project_dbs[0])
+            .attached_project_state(&project_dbs[0], StoreLabel::inferred(&project_dbs[0]))
             .expect("re-attach entry 0 after eviction attempt");
         assert!(
             Arc::ptr_eq(&entry0_state_before.rw_gate, &entry0_state_after.rw_gate),
@@ -2885,9 +3024,14 @@ mod bench {
             MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
                 .expect("seed db"),
         );
-        let pool =
-            ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4, "test-pool")
-                .expect("open pool");
+        let pool = ReadStorePool::open_read_only(
+            db_path.to_str().expect("db path utf8"),
+            4,
+            // tachi#1579: same role the seeding store stamped.
+            "seed",
+            &KernelPolicy::default(),
+        )
+        .expect("open pool");
 
         const ITERATIONS: usize = 500;
         let mut checkout_wait_us = Vec::with_capacity(ITERATIONS);
@@ -2952,9 +3096,14 @@ mod bench {
             MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
                 .expect("seed db"),
         );
-        let pool =
-            ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4, "test-pool")
-                .expect("open pool");
+        let pool = ReadStorePool::open_read_only(
+            db_path.to_str().expect("db path utf8"),
+            4,
+            // tachi#1579: same role the seeding store stamped.
+            "seed",
+            &KernelPolicy::default(),
+        )
+        .expect("open pool");
 
         const HOLD_DURATION: Duration = Duration::from_millis(200);
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();

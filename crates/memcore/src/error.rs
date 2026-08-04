@@ -159,4 +159,60 @@ pub enum MemoryError {
         group_id: String,
         reason: RecallReplayCompatibilityReason,
     },
+
+    /// #1579: a caller declared a manifest role that disagrees with the role
+    /// stamped inside the database.
+    ///
+    /// Deliberately NOT resolved by preferring either side. A conflict means
+    /// either the routing that produced the claim is wrong, or the file has
+    /// been moved/replaced — and both are worse to guess at than to refuse.
+    /// The pre-#1579 behavior (first writer's inferred label wins, silently)
+    /// is exactly the bug this replaces.
+    #[error(
+        "store role conflict at {db_path}: caller claims role {claimed:?} but the database is \
+         stamped {stored:?}. Store identity is written once inside the file and is not \
+         overridable by the caller or by the directory the file sits in \
+         (kckylechen1/Sigil#1579). Either route this open to the store that really holds \
+         {claimed:?}, or clear the `store_identity` namespace on a stopped daemon if this \
+         database was genuinely re-purposed."
+    )]
+    StoreRoleConflict {
+        claimed: String,
+        stored: String,
+        db_path: String,
+    },
+
+    /// #1585: this caller requires a schema profile the store does not
+    /// provide. In practice: full Tachi opening a `portable_kernel` database,
+    /// whose product tables (Vault/Hub/Foundry/ExecEnv/dispatch/…) were never
+    /// created. Refused at open rather than surfacing as `no such table` at
+    /// the first product call.
+    #[error(
+        "store profile mismatch at {db_path}: caller requires profile {required:?} but the \
+         database is stamped {stored:?}. A portable-kernel database does not carry the Tachi \
+         product tables and cannot be grown into one by opening it \
+         (kckylechen1/Sigil#1585). Point this process at a {required:?} database."
+    )]
+    StoreProfileMismatch {
+        required: String,
+        stored: String,
+        db_path: String,
+    },
+
+    /// #1585: a caller that requires only the portable kernel opened an
+    /// EXISTING database carrying no profile stamp.
+    ///
+    /// Adoption is asymmetric on purpose. An unstamped existing database is
+    /// pre-#1585, i.e. certainly a full Tachi store, so a `TachiFull` opener
+    /// adopts it silently and correctly. A portable opener must NOT: adopting
+    /// would let a portable binary claim authority over a product database and
+    /// then walk its migrations as if the product tables were absent.
+    #[error(
+        "store profile unstamped at {db_path}: this caller requires the portable-kernel \
+         profile, but the database carries no profile stamp, which means it predates \
+         kckylechen1/Sigil#1585 and is a full Tachi store. Open it once with a full-profile \
+         binary (which adopts and stamps it as tachi_full), or point this process at a \
+         database created by a portable-kernel build."
+    )]
+    StoreProfileUnstamped { db_path: String },
 }

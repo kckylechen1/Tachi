@@ -19,6 +19,15 @@ contract for convergence. The golden-corpus recall gate (#708) remains a
 required cutover prerequisite, and the scorer/decay hook (#791) remains the
 target non-fork path for A-share policy.
 
+> **Status update, 2026-08-03 (#1585):** the owner-ratified boundary now
+> frames convergence concretely — Hypermem embeds the `portable-kernel`
+> library only, opens explicitly supplied Hyperion-owned databases under the
+> `PortableKernel` schema profile, and injects policy via `KernelPolicy`
+> (recall/decay/embed) instead of any `TACHI_*` environment. This gate's
+> content remains the reference for what must be proven at cutover; read it
+> through the #1585 boundary and `portable-kernel-split.md` § "Supported
+> dependency surface".
+
 ## Boundary
 
 Tachi owns the portable kernel:

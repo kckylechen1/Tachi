@@ -12,6 +12,15 @@
 ///
 /// Default **on** when unset. Sentinel parsing mirrors
 /// `recall_config::apply_bool` so bool envs parse identically repo-wide.
+///
+/// `admin`-gated (kckylechen1/Sigil#1585 review): this is a `pub fn` re-
+/// exported at the crate root (`memcore::embed_raw_tier_enabled`), which
+/// `portable-kernel`'s `pub use memcore::*;` facade makes directly callable
+/// by any portable-kernel embedder — being "intended for the tachi-server
+/// adapter" was a documentation convention, not a structural guarantee. Under
+/// `not(admin)` this returns the pure historical-default with zero env
+/// reads, matching `RecallConfig::load`'s treatment.
+#[cfg(feature = "admin")]
 pub fn embed_raw_tier_enabled() -> bool {
     let mut enabled = true;
     if let Ok(value) = std::env::var("TACHI_EMBED_RAW_TIER") {
@@ -25,10 +34,24 @@ pub fn embed_raw_tier_enabled() -> bool {
     enabled
 }
 
-/// SQL fragment excluding raw tier when [`embed_raw_tier_enabled`] is false.
+/// See the `admin`-gated `embed_raw_tier_enabled` above: under `not(admin)`
+/// this is the entire implementation — no env read, the historical
+/// unset-default value.
+#[cfg(not(feature = "admin"))]
+pub fn embed_raw_tier_enabled() -> bool {
+    true
+}
+
+/// SQL fragment excluding raw tier when `raw_tier_enabled` is false.
 /// `$alias` is the memories table alias (e.g. `m` or none for unaliased).
-pub(crate) fn embed_raw_tier_sql_filter(table_prefix: &str) -> String {
-    if embed_raw_tier_enabled() {
+///
+/// tachi#1585 D5: takes the gate explicitly instead of calling
+/// [`embed_raw_tier_enabled`] (a `TACHI_EMBED_RAW_TIER` env read) itself.
+/// Callers pass `MemoryStore`'s `KernelPolicy::embed.raw_tier_enabled`; the
+/// env-reading function remains available for the tachi-server adapter to
+/// resolve that field's value once.
+pub(crate) fn embed_raw_tier_sql_filter(table_prefix: &str, raw_tier_enabled: bool) -> String {
+    if raw_tier_enabled {
         String::new()
     } else {
         format!("AND {table_prefix}tier != 'raw' ")
@@ -42,7 +65,10 @@ pub(crate) fn embed_selection_order_by(table_prefix: &str) -> String {
     )
 }
 
-#[cfg(test)]
+// These tests exercise the real `TACHI_EMBED_RAW_TIER` env-reading behavior,
+// which only exists under the `admin` build (see `embed_raw_tier_enabled`
+// above).
+#[cfg(all(test, feature = "admin"))]
 mod tests {
     use super::*;
 
@@ -103,5 +129,24 @@ mod tests {
             embed_raw_tier_enabled(),
             "unknown sentinel must leave the default (on), matching apply_bool"
         );
+    }
+}
+
+/// Portable-kernel pin (kckylechen1/Sigil#1585 review): under `not(admin)`,
+/// `embed_raw_tier_enabled()` must ignore `TACHI_EMBED_RAW_TIER` entirely and
+/// return the pure historical default, not read the environment. Only runs
+/// under `--no-default-features`, which the build seat runs.
+#[cfg(all(test, not(feature = "admin")))]
+mod portable_tests {
+    use super::embed_raw_tier_enabled;
+
+    #[test]
+    fn embed_raw_tier_enabled_ignores_env_under_not_admin() {
+        std::env::set_var("TACHI_EMBED_RAW_TIER", "0");
+        assert!(
+            embed_raw_tier_enabled(),
+            "not(admin) must return the pure default even with a false-sentinel env var set"
+        );
+        std::env::remove_var("TACHI_EMBED_RAW_TIER");
     }
 }
