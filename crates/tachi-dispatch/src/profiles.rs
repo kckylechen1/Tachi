@@ -1359,6 +1359,7 @@ pub fn dedupe_preserve_order(items: &mut Vec<String>) {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use tachi_params::TachiDispatchReason;
     use std::sync::{Mutex, OnceLock};
 
     struct EnvGuard {
@@ -1405,6 +1406,7 @@ mod tests {
 
     fn params(profile: &str) -> TachiDispatchParams {
         TachiDispatchParams {
+            staffing_reason: TachiDispatchReason::ExplicitUserRequest,
             agent: None,
             profile: Some(profile.to_string()),
             task: "dispatch test".to_string(),

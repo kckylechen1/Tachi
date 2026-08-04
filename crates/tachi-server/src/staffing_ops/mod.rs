@@ -414,6 +414,7 @@ mod tests {
     /// `status.json` at a known dispatch_id under the canonical runs root,
     /// calls the status core, asserts it returns the canonical content verbatim
     /// AND creates no new file (no parallel store).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn staff_status_reads_canonical_receipt_only() {
         let _guard = crate::utils::global_test_lock()
@@ -462,6 +463,7 @@ mod tests {
 
     /// `staff_status` returns `Err` for an unknown / malformed dispatch_id
     /// (fail-closed, uniform error — no oracle for a prober).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn staff_status_rejects_unknown_dispatch_id() {
         let _guard = crate::utils::global_test_lock()
