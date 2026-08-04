@@ -127,7 +127,7 @@ pub(super) fn record_progress_check_event(
     {
         return Err(format!("Invalid flow_id: '{flow_id}'"));
     }
-    let run_dir = crate::task_lifecycle::shell_runs_root().join(flow_id);
+    let run_dir = crate::task_lifecycle::flow_runs_root().join(flow_id);
     std::fs::create_dir_all(&run_dir).map_err(|e| format!("create progress run dir: {e}"))?;
     let path = run_dir.join("progress.jsonl");
     let line = serde_json::to_string(&json!({

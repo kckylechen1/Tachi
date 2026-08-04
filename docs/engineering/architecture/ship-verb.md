@@ -49,9 +49,8 @@ the worker contributes no judgment beyond following the checklist and reacting t
 | `tachi_gh ship` | `gh_ops/ship.rs` | mechanical stage/commit/push/PR-create (today: caller-authored prose) |
 | `tachi_gh safe_merge` | `gh_safe_merge/` | gated GitHub merge: verification.json, protected labels, preview-unless-confirm |
 | `tachi_verify` | `verify_ops/` | evidence ledger: seed required checks → runners record → merge gate consumes |
-| `tachi_task dispatch/wait/complete` | `dispatch_ops/` | spawn backend workers (claude/codex/grok/kimi/opencode, acpx/ACP), eval rows |
+| `tachi_staff start` / `tachi_task complete` | `staffing_ops/` + `dispatch_ops/` | admit + spawn backend workers (claude/codex/grok/kimi/opencode, acpx/ACP), eval rows |
 | `tachi_task intake/close_loop/merge` | task facade | issue→flow binding, closure write-back, local worktree merge |
-| `tachi_shell dispatch` | `shell_ops/` | prepares dispatch packets and injects the execution SOP; Shell has no ship action |
 | dispatch profile cards | `dispatch_profile/` | authority flags (`write_code`/`merge`/`github_write`), evidence contracts, model routing |
 
 Nothing here is replaced. `ship` composes these; it invents no parallel infrastructure.
@@ -177,8 +176,8 @@ A multi-contract campaign (umbrella issue) gets an integration branch `goal/<iss
 
 ## Convergence notes
 
-- `tachi_shell` intentionally does not front shipping; the canonical `tachi_gh ship`
-  surface and its pipeline own this contract without a second Shell door.
+- Shipping has one door: the canonical `tachi_gh ship` surface and its pipeline own
+  this contract; the Shell runtime was deleted in #1319-B7 and no second door is planned.
 - Worktree reap on terminal state is the same hook #484 (disk governor) needs; implement
   once, reference from both.
 - `codex-ship`'s constitution clauses (mandate ≠ contract; turn ends when the ledger is

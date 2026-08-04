@@ -107,7 +107,7 @@ pub(super) fn build_feature_doc_index(
                 "runtime_artifacts",
                 "runtime_artifact",
                 "runtime_state",
-                "Arena/dispatch/run artifacts describe execution state and handoffs.",
+                "Dispatch/run artifacts describe execution state and handoffs.",
                 run_artifacts,
             ),
         ],

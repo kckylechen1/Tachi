@@ -43,7 +43,7 @@ Inspired by [UltraCode-Shim](https://github.com/OnlyTerp/UltraCode-Shim/)'s prox
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Tachi Memory Server                           │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │ tachi_shell │  │tachi_briefing│  │tachi_memory │  │tachi_task │  │
+│  │tachi_staff │  │tachi_briefing│  │tachi_memory │  │tachi_task │  │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘  │
 │         └─────────────────┴─────────────────┴───────────────┘       │
 │                                 │                                   │

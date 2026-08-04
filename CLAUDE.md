@@ -8,7 +8,7 @@
 
 `AGENTS.md` states the abstract branch without naming a mechanism. For this harness:
 
-- **You are a dispatched lane** when you were launched via the `Agent` tool (a Task/sub-agent call) from a leader session, or via a Tachi dispatch (`tachi_task(action='dispatch')`) that handed you a packet with a base SHA and a defined file scope. Follow `AGENTS.md`'s workspace law, report contract, and frozen-assertion law as written.
+- **You are a dispatched lane** when you were launched via the `Agent` tool (a Task/sub-agent call) from a leader session, or via a Tachi staffing dispatch (`tachi_staff(action='start')`) that handed you a packet with a base SHA and a defined file scope. Follow `AGENTS.md`'s workspace law, report contract, and frozen-assertion law as written.
 - **You are the sole session** when you are the top-level Claude Code session the user is talking to directly, with nothing above you handing out packets. `AGENTS.md`'s packet-shaped mechanics (worktree-from-base-SHA, dispatch-id echo) do not apply to you directly — work in the current checkout, do not invent a packet or a base SHA.
 
 ## Top-level Claude is the project-manager conversation, not another truth store
@@ -25,7 +25,7 @@ Ownership is split across #954 (ask/conversation lifecycle; never dispatch from 
 
 ## Current default vendor assignment (owner-ratified; may change — the role invariant in `AGENTS.md` does not)
 
-All lanes below use Claude Code/OpenCode's native `Agent`/sub-agent mechanism by default. Do **not** translate this table into `tachi_task(action='dispatch')` merely because Tachi is connected. Tachi dispatch requires an explicit user request, durable cross-session work, cross-device/remote pickup, or an unavailable native subagent; otherwise Tachi remains memory + policy + ledger + receipts/eval.
+All lanes below use Claude Code/OpenCode's native `Agent`/sub-agent mechanism by default. Do **not** translate this table into `tachi_staff(action='start')` merely because Tachi is connected. Tachi staffing requires an explicit user request, durable cross-session work, cross-device/remote pickup, or an unavailable native subagent; otherwise Tachi remains memory + policy + ledger + receipts/eval.
 
 - **T0 trivial**: main agent inline, zero ceremony.
 - **T1 lookup / current-state mapping**: `Explore` agent, `model: sonnet`.
@@ -49,7 +49,7 @@ Follow `AGENTS.md`'s six-router native parent/sub-issue law; do not duplicate it
 ## Build/worktree specifics
 
 - `CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target` is stated in `AGENTS.md` itself as a repo fact (it applies to every carrier building this repo, not just Claude).
-- Native dispatched-lane worktrees are created via the `EnterWorktree` tool. A `tachi_task(action='dispatch')`-managed worktree exists only for one of the explicit native-first exceptions above. Ad-hoc `git worktree add` outside those mechanisms needs explicit user approval per the Operating Discipline in the global Claude adapter.
+- Native dispatched-lane worktrees are created via the `EnterWorktree` tool. A `tachi_staff(action='start')`-managed worktree exists only for one of the explicit native-first exceptions above. Ad-hoc `git worktree add` outside those mechanisms needs explicit user approval per the Operating Discipline in the global Claude adapter.
 
 ## Where the rest lives
 

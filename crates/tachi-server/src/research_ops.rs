@@ -633,7 +633,7 @@ struct FeedArtifacts {
 }
 
 fn research_runs_root() -> PathBuf {
-    crate::task_lifecycle::shell_runs_root()
+    crate::task_lifecycle::flow_runs_root()
 }
 
 fn new_research_run_id() -> String {

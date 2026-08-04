@@ -509,7 +509,7 @@ pub(crate) fn resolve_dispatch_depth(raw: Option<&str>, limit: u32) -> u32 {
 /// self-report trust boundary — same class as `TACHI_AGENT_SEAT`): this gate
 /// is CALLER-ASSERTED. It defends against ACCIDENTAL unbounded recursion via
 /// the normal MCP-dispatch path (a leader/worker that keeps calling
-/// `tachi_task(action='dispatch')` on itself). It does NOT defend against a
+/// `tachi_staff(action='start')` on itself). It does NOT defend against a
 /// DELIBERATE worker choosing to bypass the marker — e.g. invoking the raw
 /// `tachi task` CLI outside the env-stamped path, or a forged
 /// `X-Tachi-Dispatch-Depth` header on a direct HTTP connection — because

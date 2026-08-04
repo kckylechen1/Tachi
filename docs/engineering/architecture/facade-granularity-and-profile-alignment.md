@@ -38,12 +38,12 @@ It answers three questions raised during a facade review:
 | `tachi_task` | 24 | Overloaded — lifecycle + self-tuning still bundled (PR duplication resolved, #757) |
 | `tachi_memory` | 16 | Overloaded — `recall_*` tuning mixed with daily ops |
 | `tachi_gh` | 16 | Duplicates task's PR lifecycle |
-| `tachi_arena` | 7 | Healthy |
+| `tachi_arena` | 7 | Retired in #1319-D2 |
 | `tachi_skill` | 5 | Healthy |
 | `tachi_wiki` / `tachi_verify` | 4 / 4 | Healthy |
 
-`tachi_arena`, `tachi_skill`, and `tachi_wiki` demonstrate that a **medium-grained facade
-(~7 actions) works well**. The problem is not facades; it is unbounded facades.
+`tachi_skill` and `tachi_wiki` demonstrate that a **medium-grained facade
+(~5-7 actions) works well** (the 7-action `tachi_arena` was retired in #1319-D2). The problem is not facades; it is unbounded facades.
 
 ### Concrete confusion points
 

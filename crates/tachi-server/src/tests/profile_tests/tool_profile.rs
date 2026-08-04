@@ -88,22 +88,38 @@ async fn coordinate_profile_exposes_advanced_coordination_facades() {
     assert!(tools.contains("`tachi_orchestrator`"));
 }
 
-/// #919 CRITICAL — integration RED test: a Delegate worker is on the
-/// `tachi_task` tool-visibility allow-list (F3 lists the tool so it can call
-/// plan/complete/status/...), but the action-level gate must still deny
-/// `action='dispatch'` (recursive-dispatch prevention). This drives the
-/// actual `ServerHandler::call_tool` MCP entry point end-to-end (not just
-/// `facade_action_allowed` directly), so it catches the bug the pre-#919
-/// unit tests could not (they proved tool *visibility*, not that `call_tool`
-/// actually invokes the action gate). Two independent layers now enforce
-/// this (the `call_tool` choke-point gate, and a handler-level re-check in
-/// `task_router::reject_delegate_task_action`, mirroring `tachi_skill`'s
-/// defense in depth) — manually verified during #919: disabling EITHER layer
-/// alone still denies (the other layer catches it); disabling BOTH makes
-/// this test genuinely RED (`is_error` flips to `Some(false)` and the
-/// dispatch actually proceeds).
+/// #1319-E2 recursive-dispatch guard: a worker/delegate MUST NOT see
+/// `tachi_staff` (staff.start). A dispatched worker should not be able to spawn
+/// further external staff — only the coordinate/authorized Lead profile exposes
+/// `tachi_staff`. End-to-end via `tachi_tools` so a future regression that adds
+/// `tachi_staff` back to the delegate allow-list fails loudly.
 #[tokio::test]
-async fn delegate_tachi_task_dispatch_is_denied_end_to_end() {
+async fn delegate_profile_does_not_expose_tachi_staff_to_prevent_recursive_dispatch() {
+    let server = make_server();
+    server.set_tool_profile(Some(
+        tachi_hub::parse_tool_profile("delegate").expect("delegate profile should parse"),
+    ));
+
+    let tools = server
+        .tachi_tools()
+        .await
+        .expect("tool discovery should work");
+
+    assert!(
+        !tools.contains("`tachi_staff`"),
+        "delegate/worker must not see tachi_staff (staff.start) — recursive dispatch guard"
+    );
+}
+
+/// #1319-C2: `action='dispatch'` was removed from `tachi_task` wholesale
+/// (the worker launch lifecycle left Task). It must now be rejected for a
+/// delegate worker at the param-parse layer — no profile, not even admin,
+/// can dispatch via `tachi_task`. This supersedes the old #919 operator-only
+/// gate (which denied dispatch to non-admin profiles); the action is gone
+/// entirely rather than gated. End-to-end via `call_tool` so a future
+/// regression that re-adds the variant without re-routing fails loudly.
+#[tokio::test]
+async fn delegate_tachi_task_dispatch_is_rejected_end_to_end() {
     let server = make_server();
     server.set_tool_profile(Some(
         tachi_hub::parse_tool_profile("delegate").expect("delegate profile should parse"),
@@ -119,7 +135,7 @@ async fn delegate_tachi_task_dispatch_is_denied_end_to_end() {
 
     let result = call_tool_via_server(server, "tachi_task", Some(args))
         .await
-        .expect("denied action should return a tool result, not a transport error");
+        .expect("rejected action should return a tool result, not a transport error");
 
     assert_eq!(
         result.is_error,
@@ -132,25 +148,20 @@ async fn delegate_tachi_task_dispatch_is_denied_end_to_end() {
         .and_then(|content| content.as_text())
         .map(|text| text.text.as_str())
         .unwrap_or("");
-    // Either defense layer's wording is acceptable — the point is that some
-    // permission-denial fired, not which specific layer caught it.
-    assert!(
-        message.contains("not allowed") || message.contains("not available"),
-        "expected a permission-denied message, got: {message}"
-    );
     assert!(
         message.contains("dispatch"),
-        "denial message should name the denied action, got: {message}"
+        "rejection message should name the removed action, got: {message}"
     );
     // Not a "tool not found" — the tool IS visible to delegate; only the
-    // dispatch *action* is denied. Distinguishing these two failure modes is
-    // exactly what the F3 action-level gate (as opposed to tool-level
-    // filtering alone) exists for.
+    // dispatch *action* is rejected.
     assert!(!message.contains("tool not found"));
 }
 
+/// #1319-C2: dispatch is gone for every profile, including admin. The old
+/// operator-only distinction no longer exists for dispatch — it is rejected
+/// at the param-parse layer regardless of profile.
 #[tokio::test]
-async fn standard_tachi_task_dispatch_is_operator_only_end_to_end() {
+async fn standard_tachi_task_dispatch_is_rejected_end_to_end() {
     let server = make_server();
     server.set_tool_profile(Some(
         tachi_hub::parse_tool_profile("standard").expect("standard profile should parse"),
@@ -170,7 +181,7 @@ async fn standard_tachi_task_dispatch_is_operator_only_end_to_end() {
 
     let result = call_tool_via_server(server, "tachi_task", Some(args))
         .await
-        .expect("denied action should return a tool result");
+        .expect("rejected action should return a tool result");
 
     assert_eq!(result.is_error, Some(true));
     let message = result
@@ -179,7 +190,6 @@ async fn standard_tachi_task_dispatch_is_operator_only_end_to_end() {
         .and_then(|content| content.as_text())
         .map(|text| text.text.as_str())
         .unwrap_or("");
-    assert!(message.contains("not allowed"), "{message}");
     assert!(message.contains("dispatch"), "{message}");
 }
 

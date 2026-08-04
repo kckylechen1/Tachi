@@ -84,7 +84,7 @@ pub(crate) fn agent_readiness_json(
     json!({
         "rules": rules,
         "mcp_configs": mcp,
-        "runs_root": crate::task_lifecycle::shell_runs_root().display().to_string(),
+        "runs_root": crate::task_lifecycle::flow_runs_root().display().to_string(),
         "last_distill_marker": snapshot.distill_marker.as_ref().map(|m| m.path.clone()),
         "last_distill": snapshot.distill_marker.as_ref().and_then(|m| {
             // Only emit the quality block for new-format (JSON) markers; legacy
