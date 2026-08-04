@@ -3,7 +3,6 @@
 //! This keeps GitHub collaboration state inside existing flow artifacts:
 //! `.tachi/runs/<flow_id>/status.json`, `instruction.md`, and `events.jsonl`.
 
-use crate::shell_ops::{append_github_event, merge_github_status};
 use crate::tool_params::{TachiGhParams, TachiOrchestratorParams, TachiTaskParams};
 use crate::MemoryServer;
 use chrono::Utc;
@@ -157,6 +156,7 @@ pub(crate) fn resolve_task_pr_target(params: &TachiTaskParams) -> Result<GithubT
 mod cycle_plan;
 mod cycle_status;
 mod flow_artifacts;
+mod github_flow_state;
 mod github_io;
 mod issue_flow;
 mod release_ux;
@@ -166,6 +166,7 @@ mod utils;
 mod tests;
 
 use self::flow_artifacts::*;
+pub(crate) use self::github_flow_state::*;
 use self::github_io::*;
 use self::issue_flow::*;
 use self::release_ux::*;

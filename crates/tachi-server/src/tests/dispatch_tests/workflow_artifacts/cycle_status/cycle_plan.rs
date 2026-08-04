@@ -22,7 +22,7 @@ async fn tachi_task_cycle_plan_returns_ordered_next_actions() {
     crate::task_lifecycle::write_link_pr_artifacts(flow_id, &pr, None)
         .expect("write link_pr artifacts");
     let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
-    crate::shell_ops::merge_github_status(
+    crate::task_lifecycle::merge_github_status(
         &run_dir,
         json!({
             "merge_state": "ready",

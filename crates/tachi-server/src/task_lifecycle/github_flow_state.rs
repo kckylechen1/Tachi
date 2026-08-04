@@ -1,10 +1,16 @@
-//! GitHub workflow state tracking for Tachi Shell flows.
+//! Canonical GitHub workflow state tracking for Tachi flows.
 //!
-//! Manages the `github` block in `status.json` and emits typed events
-//! to `events.jsonl` for GitHub-related automation (PR gates, merge
-//! state tracking, etc.).
+//! Owns the `github` block in `status.json` and emits typed events to
+//! `events.jsonl` for GitHub-related automation (PR gates, merge-state
+//! tracking, issue/PR lifecycle coaching, safe-merge receipts, etc.).
+//!
+//! This is the canonical Task-lifecycle flow-artifact owner. It was relocated
+//! from `shell_ops` (kckylechen1/tachi#1490) so Shell can be retired without
+//! making GitHub, handoff, or Task lifecycle depend on a removed facade. The
+//! persisted `status.json` / `events.jsonl` shape, deep-merge/null-clear
+//! semantics, allow-lists, reserved framing keys, timestamps, and error text
+//! are byte-for-byte preserved.
 
-use super::read_status;
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -65,6 +71,36 @@ pub(crate) const GITHUB_EVENT_KINDS: &[&str] = &[
 /// - `merged`   — PR is merged, either by this process or observed from GitHub
 pub(crate) const GITHUB_MERGE_STATES: &[&str] = &["pending", "blocked", "ready", "merged"];
 
+/// Read the flow `status.json` for `run_dir`, returning an empty JSON object on
+/// a missing file or a parse failure (with a warning). This mirrors the
+/// canonical read helper that previously lived in `shell_ops::flow` so this
+/// module no longer depends on a Shell-owned read path. The warning text is
+/// preserved verbatim from the original (including the historical "shell
+/// status" wording) so log filters and downstream consumers see no change.
+fn read_status_for_github(run_dir: &Path) -> Value {
+    let status_path = run_dir.join("status.json");
+    match std::fs::read_to_string(&status_path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|err| {
+            tracing::warn!(
+                path = %status_path.display(),
+                error = %err,
+                "shell status JSON parse failed; continuing with empty status"
+            );
+            json!({})
+        }),
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %status_path.display(),
+                    error = %err,
+                    "shell status read failed; continuing with empty status"
+                );
+            }
+            json!({})
+        }
+    }
+}
+
 /// Recursively merge `patch` into `target` in-place. Object values are merged
 /// key-by-key (so a partial `{"checks": {"state": "success"}}` does not wipe
 /// `checks.updated_at`); non-object values are replaced wholesale; `null`
@@ -116,7 +152,7 @@ pub(crate) fn merge_github_status(run_dir: &Path, patch: Value) -> Result<Value,
             ));
         }
     }
-    let mut status = read_status(run_dir);
+    let mut status = read_status_for_github(run_dir);
     if !status.is_object() {
         status = json!({});
     }

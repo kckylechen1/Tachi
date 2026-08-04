@@ -92,8 +92,6 @@
       "crates/tachi-server/src/shell_ops/flow.rs::advance_stage::append_run_event#1",
       "crates/tachi-server/src/shell_ops/flow.rs::advance_stage::write_run_status_file#1",
       "crates/tachi-server/src/shell_ops/injection.rs::inject_meta_skill::tokio::fs::write#1",
-      "crates/tachi-server/src/shell_ops/shell_github.rs::append_github_event::append_run_event#1",
-      "crates/tachi-server/src/shell_ops/shell_github.rs::merge_github_status::write_run_status_file#1",
       "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch::append_flow_event#1",
       "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch::write_json_atomic#1",
       "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch::write_json_atomic#2",
@@ -111,7 +109,7 @@
     "request_builders": 5,
     "launch_advertising_facades": 3,
     "legacy_secondary_ledger_roots": 2,
-    "legacy_staffing_projection_writer_sites": 34,
+    "legacy_staffing_projection_writer_sites": 32,
     "linked_result_copies": 1,
     "direction": "budgets may only decrease as deletion leaves land"
   },

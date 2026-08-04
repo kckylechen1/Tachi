@@ -3,8 +3,7 @@ use crate::gh_safe_merge::{
     MergeDecision, MergeGatePolicy, MergeGatePolicyMode, MergeResult, MergeStrategy, Mergeable,
     PrLifecycleState, PrState, ReviewDecision,
 };
-use crate::shell_ops::{append_github_event, merge_github_status};
-use crate::task_lifecycle::run_dir_for_flow_id;
+use crate::task_lifecycle::{append_github_event, merge_github_status, run_dir_for_flow_id};
 use crate::tool_params::{
     GhCommentParams, GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhLabelParams,
     GhPrCommentsParams, GhPrListParams, GhPrReadParams, GhRepoViewParams, TachiGhParams,

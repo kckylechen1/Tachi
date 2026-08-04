@@ -39,6 +39,5 @@ fn temp_runs_root() -> RunsRootGuard {
 }
 
 mod flow_lifecycle;
-mod github_status_events;
 mod instructions;
 mod slices_convoy;
