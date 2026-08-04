@@ -242,18 +242,37 @@ fn remove_matching_row_exact(
 /// purposes of this refusal — it is not the verifiably, truly-gone state
 /// the stale-row close was planned against — so it must refuse too; only
 /// an outright missing directory entry counts as still-gone.
+///
+/// Round-3 cross-vendor review, check 6: a `symlink_metadata` error whose
+/// kind is NOT `NotFound` (permission denied, an inaccessible ancestor
+/// directory, etc.) is not proof the path is gone — it is proof the probe
+/// failed. Treating any error as "gone" (the pre-fix behavior) would let a
+/// path that may well still exist get its registry row deleted anyway.
+/// Only `Ok(_)` (present) and `Err(NotFound)` (verifiably gone) are
+/// decidable; every other error kind gets its own typed refusal so the row
+/// survives until the access problem is fixed and the check can actually
+/// run.
 pub fn remove_registry_entry_exact_if_still_gone(stored_path: &str) -> Result<bool, String> {
     let registry_path = registry_path()?;
     if !registry_path.exists() {
         return Ok(false);
     }
     let _lock = acquire_registry_lock(&registry_path)?;
-    if Path::new(stored_path).symlink_metadata().is_ok() {
-        return Err(format!(
-            "refusing registry-only close: {stored_path} now resolves to something on disk \
-             (it did not at plan time) — this row may no longer be stale; re-run `wt-remove` \
-             to re-plan against current state before dropping it"
-        ));
+    match Path::new(stored_path).symlink_metadata() {
+        Ok(_) => {
+            return Err(format!(
+                "refusing registry-only close: {stored_path} now resolves to something on disk \
+                 (it did not at plan time) — this row may no longer be stale; re-run `wt-remove` \
+                 to re-plan against current state before dropping it"
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "refusing registry-only close: cannot determine whether {stored_path} still \
+                 exists ({e}); a metadata error is not proof of absence — fix access and re-run"
+            ));
+        }
     }
     let mut registry = read_registry(&registry_path)?;
     if !remove_matching_row_exact(&mut registry, stored_path)? {
