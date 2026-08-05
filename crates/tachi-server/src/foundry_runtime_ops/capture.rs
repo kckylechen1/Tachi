@@ -224,6 +224,7 @@ pub(super) fn capture_search_options(
         // identity (tachi#1569); stated here only because this literal
         // is exhaustive.
         wiki_corpus_store: false,
+        bypass_wiki_lifecycle_gate: false,
         recall_config: None,
         decay_policy: None,
     }

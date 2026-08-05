@@ -450,6 +450,63 @@ pub fn path_prefix_opts_into_continuity_projection(path: &str, path_prefix: Opti
     })
 }
 
+/// tachi#1561 residual: whether `entry` is a `/wiki`-namespaced row whose
+/// derived lifecycle is not default-retrievable (a draft, a row explicitly
+/// marked `pending_review`/`stale`/`superseded`/`rejected`/`candidate`, or a
+/// present-but-malformed `metadata.lifecycle` value — the closed
+/// `WikiLifecycleV1` vocabulary (tachi-params) fails closed for anything
+/// that is not exactly `Active`).
+///
+/// This is a minimal, memcore-local mirror of tachi-params'
+/// `derive_wiki_lifecycle` / `WikiLifecycleV1::is_default_retrievable`
+/// (`crates/tachi-params/src/knowledge_artifact.rs`). It is a second
+/// implementation, not a re-export or a shared helper crate function,
+/// because the dependency edge between the two crates runs the *other*
+/// way: `tachi-params/Cargo.toml` depends on `memcore`, so memcore calling
+/// back into tachi-params would be a circular crate dependency. Byte-equal
+/// parity with the tachi-params original is pinned by
+/// `tachi_params::knowledge_artifact::tests::
+/// memcore_wiki_lifecycle_gate_matches_derive_wiki_lifecycle` — the only
+/// crate that can see both sides of the mirror, since tachi-params already
+/// depends on memcore.
+///
+/// Scope, matching `derive_wiki_lifecycle`'s own path-based defense in
+/// depth: only rows under `/wiki` are asked this question at all — a row
+/// outside that namespace was never a Wiki artifact, so it never earned a
+/// `metadata.lifecycle`/`metadata.review_status` marker from the Wiki
+/// writer in the first place. This mirrors how [`is_namespace_search_noise`]
+/// composes its own path-scoped classes (kanban, handoff, continuity
+/// projection) rather than trying every predicate against every row
+/// unconditionally.
+pub fn is_non_default_retrievable_wiki_row(entry: &MemoryEntry) -> bool {
+    path_in_namespace(&entry.path, "/wiki") && !wiki_row_lifecycle_is_default_retrievable(entry)
+}
+
+/// The retrievability half of the `derive_wiki_lifecycle` mirror — see
+/// [`is_non_default_retrievable_wiki_row`] for why this is a duplicate, not
+/// a re-export.
+fn wiki_row_lifecycle_is_default_retrievable(entry: &MemoryEntry) -> bool {
+    if let Some(explicit) = entry.metadata.get("lifecycle") {
+        // Only the literal `"active"` string is default-retrievable — any
+        // other string, and any non-string/malformed value, mirrors
+        // `derive_wiki_lifecycle`'s fail-closed `PendingReview` fallback for
+        // a present-but-unparseable `metadata.lifecycle`.
+        return explicit.as_str().map(str::trim) == Some("active");
+    }
+    if entry
+        .metadata
+        .get("review_status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("pending"))
+    {
+        return false;
+    }
+    if entry.path == "/wiki/drafts" || entry.path.starts_with("/wiki/drafts/") {
+        return false;
+    }
+    true
+}
+
 pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
     let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
     let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));

@@ -144,11 +144,16 @@ fn recall_cache_variants_are_search_noise_by_default() {
     );
     cache.path = "/openclaw/agent-main/recall-cache/Scout_pipeline".to_string();
     cache.topic = "recall_rerank_cache".to_string();
-    assert!(is_search_noise_entry(&cache, None));
-    assert!(is_search_noise_entry(&cache, Some("/openclaw/agent-main")));
+    assert!(is_search_noise_entry(&cache, None, false));
+    assert!(is_search_noise_entry(
+        &cache,
+        Some("/openclaw/agent-main"),
+        false
+    ));
     assert!(!is_search_noise_entry(
         &cache,
-        Some("/openclaw/agent-main/recall-cache")
+        Some("/openclaw/agent-main/recall-cache"),
+        false
     ));
 }
 

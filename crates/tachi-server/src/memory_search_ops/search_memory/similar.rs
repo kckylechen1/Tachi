@@ -53,6 +53,7 @@ pub(crate) async fn handle_find_similar_memory(
         // identity (tachi#1569); stated here only because this literal
         // is exhaustive.
         wiki_corpus_store: false,
+        bypass_wiki_lifecycle_gate: false,
         as_of: None,
         precision_matchers: Vec::new(),
         recall_config: None,
@@ -89,6 +90,7 @@ pub(crate) async fn handle_find_similar_memory(
             // identity (tachi#1569); stated here only because this literal
             // is exhaustive.
             wiki_corpus_store: false,
+            bypass_wiki_lifecycle_gate: false,
             as_of: None,
             precision_matchers: Vec::new(),
             recall_config: None,
@@ -129,6 +131,7 @@ pub(crate) async fn handle_find_similar_memory(
             // identity (tachi#1569); stated here only because this literal
             // is exhaustive.
             wiki_corpus_store: false,
+            bypass_wiki_lifecycle_gate: false,
             as_of: None,
             precision_matchers: Vec::new(),
             recall_config: None,

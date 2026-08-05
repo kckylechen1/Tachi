@@ -1258,6 +1258,107 @@ mod tests {
         }
     }
 
+    /// tachi#1561 residual: memcore's search/list surfaces cannot call this
+    /// crate's `derive_wiki_lifecycle` directly — `tachi-params/Cargo.toml`
+    /// depends on `memcore`, so the reverse edge would be circular — so
+    /// `memcore::namespace::is_non_default_retrievable_wiki_row` is a second,
+    /// independent implementation of the same retrievability boolean
+    /// (`derive_wiki_lifecycle(...).is_default_retrievable()`, negated).
+    /// This crate is the only one that can see both sides of the mirror
+    /// (it already depends on memcore), so it is the pinning point: every
+    /// fixture below must classify identically on both sides, or the mirror
+    /// has drifted.
+    ///
+    /// Scoped to `/wiki`-rooted paths, matching
+    /// `is_non_default_retrievable_wiki_row`'s own documented scope (a row
+    /// outside `/wiki` never earned a Wiki lifecycle marker in the first
+    /// place, so the two sides are not expected to agree there).
+    #[test]
+    fn memcore_wiki_lifecycle_gate_matches_derive_wiki_lifecycle() {
+        fn wiki_entry(path: &str, metadata: serde_json::Value) -> memcore::MemoryEntry {
+            serde_json::from_value(serde_json::json!({
+                "id": "memcore-parity-pin",
+                "text": "cross-crate lifecycle gate parity fixture",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "path": path,
+                "metadata": metadata,
+            }))
+            .expect("construct a minimal MemoryEntry for the parity fixture")
+        }
+
+        let fixtures: Vec<(&str, serde_json::Value)> = vec![
+            ("/wiki/engineering/foo", serde_json::json!({})),
+            ("/wiki/drafts/unmarked", serde_json::json!({})),
+            (
+                "/wiki/drafts/some-slug",
+                serde_json::json!({"review_status": "pending"}),
+            ),
+            (
+                "/wiki/drafts/some-slug",
+                serde_json::json!({"review_status": "Pending"}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": "active"}),
+            ),
+            (
+                // Explicit `active` wins over the drafts-path convention —
+                // same priority order `derive_wiki_lifecycle` documents.
+                "/wiki/drafts/promoted",
+                serde_json::json!({"lifecycle": "active"}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": "stale"}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": "pending_review"}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": "candidate"}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": "superseded"}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": "rejected"}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": "bogus-not-a-real-lifecycle"}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": 123}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": {"bad": true}}),
+            ),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"lifecycle": "stale", "review_status": "pending"}),
+            ),
+        ];
+
+        for (path, metadata) in fixtures {
+            let entry = wiki_entry(path, metadata.clone());
+            let tachi_params_excluded =
+                !derive_wiki_lifecycle(&metadata, path).is_default_retrievable();
+            let memcore_excluded = memcore::is_non_default_retrievable_wiki_row(&entry);
+            assert_eq!(
+                tachi_params_excluded, memcore_excluded,
+                "memcore's gate and tachi-params' derive_wiki_lifecycle disagree for \
+                 path={path:?} metadata={metadata:?}: tachi_params_excluded={tachi_params_excluded}, \
+                 memcore_excluded={memcore_excluded}"
+            );
+        }
+    }
+
     #[test]
     fn derive_wiki_authority_defaults_advisory() {
         assert_eq!(

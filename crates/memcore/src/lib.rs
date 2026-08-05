@@ -156,7 +156,7 @@ pub use kernel_policy::{EmbedPolicy, KernelPolicy};
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
     is_handoff_entry, is_internal_only_row, is_kanban_entry, is_namespace_search_noise,
-    is_recall_cache_entry, is_reserved_wiki_rem_id,
+    is_non_default_retrievable_wiki_row, is_recall_cache_entry, is_reserved_wiki_rem_id,
     is_user_facing_wiki_entry_allowing_recall_cache, is_wiki_entry, path_contains_recall_cache,
     path_in_namespace, path_prefix_opts_into_continuity_projection,
     path_prefix_opts_into_recall_cache, surface_of, surface_sql_clause, user_facing_wiki_sql_where,
