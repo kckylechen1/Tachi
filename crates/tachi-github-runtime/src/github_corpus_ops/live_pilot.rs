@@ -881,6 +881,10 @@ pub async fn run_owner_approved_corpus_pilot(
 }
 
 #[cfg(test)]
+// Inherited from the pre-carve tachi-server crate-level allow (lint debt,
+// not new API): 8 params. Collapse into a params struct in a follow-up;
+// this carve is behavior-frozen.
+#[allow(clippy::too_many_arguments)]
 async fn run_corpus_pilot_with_resolver(
     input_bytes: &[u8],
     reader: &dyn GithubCorpusReader,

@@ -711,7 +711,6 @@ fn candidate_never_established_and_preview_identity() {
         effective_version: Some("1".to_string()),
         fallback_chain: vec!["backup".to_string()],
         degraded: false,
-        ..Default::default()
     };
     let with_fallback =
         adapt_corpus_case("proj", &manifest, &bundle, None, Some(fallback)).expect("fallback");
@@ -724,7 +723,6 @@ fn candidate_never_established_and_preview_identity() {
         effective_version: Some("1".to_string()),
         fallback_chain: vec![],
         degraded: true,
-        ..Default::default()
     };
     let with_degraded =
         adapt_corpus_case("proj", &manifest, &bundle, None, Some(degraded)).expect("degraded");
