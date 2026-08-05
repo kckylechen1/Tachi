@@ -111,7 +111,7 @@ fn is_opencode_env_reference(value: &str) -> bool {
     value
         .strip_prefix(OPENCODE_ENV_REF_PREFIX)
         .and_then(|rest| rest.strip_suffix('}'))
-        .is_some_and(crate::utils::is_shell_env_name)
+        .is_some_and(tachi_params::util::is_shell_env_name)
 }
 
 pub(crate) fn apply_credential_materialization(

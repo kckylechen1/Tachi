@@ -1,10 +1,10 @@
 use super::types::CredentialMaterializeStepReport;
 use super::CREDENTIAL_MATERIALIZATION_NAMESPACE;
-use crate::utils::stable_hash;
 use memcore::MemoryStore;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use tachi_params::util::stable_hash;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(super) struct ManagedCredentialMaterialization {
