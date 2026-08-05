@@ -4,6 +4,7 @@ use crate::error::MemoryError;
 use crate::foundry::{FoundryJobKind, FoundryJobStatus, FoundryModelLane};
 
 use super::PersistedFoundryJob;
+use crate::db::now_utc_iso;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoundryJobLease {
@@ -21,7 +22,7 @@ pub fn claim_foundry_job_for_run(
     id: &str,
     running_before: &str,
 ) -> Result<Option<FoundryJobLease>, MemoryError> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = now_utc_iso();
     let changed = conn.execute(
         "UPDATE foundry_jobs
          SET status = 'running', updated_at = ?1
@@ -38,7 +39,7 @@ pub fn claim_foundry_job_for_run(
          SET status = 'running', updated_at = ?1
          WHERE id = ?2
            AND status = 'running'
-           AND updated_at < ?3",
+           AND datetime(updated_at) < datetime(?3)",
         params![now, id, running_before],
     )?;
     if changed > 0 {
@@ -122,7 +123,7 @@ pub fn requeue_retryable_foundry_jobs(
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
 
-    let now_str = now.to_rfc3339();
+    let now_str = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut outcome = RequeueOutcome::default();
     for (id, attempts, updated_at) in rows {
         if attempts >= policy.max_attempts {
@@ -183,8 +184,8 @@ pub fn load_pending_foundry_jobs(
                 target_agent_id, requested_by, evidence_count, goal_count, metadata, created_at
          FROM foundry_jobs
          WHERE status = 'queued'
-            OR (status = 'running' AND updated_at < ?1)
-         ORDER BY created_at ASC",
+            OR (status = 'running' AND datetime(updated_at) < datetime(?1))
+         ORDER BY datetime(created_at) ASC, id ASC",
     )?;
 
     let rows = stmt.query_map(params![running_before], |row| {

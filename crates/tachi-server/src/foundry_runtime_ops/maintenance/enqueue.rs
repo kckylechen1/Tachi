@@ -1,5 +1,4 @@
 use crate::server_state::{DbScope, MemoryServer};
-use chrono::Utc;
 use serde_json::json;
 
 use super::super::recall_cache::durable_recall_cache_enabled;
@@ -85,7 +84,7 @@ fn build_foundry_maintenance_job(
         status: memcore::FoundryJobStatus::Queued,
         target_agent_id: Some(agent_id.to_string()),
         requested_by: foundry_requested_by(server),
-        created_at: Utc::now().to_rfc3339(),
+        created_at: memcore::now_utc_iso(),
         evidence_count: sorted_memory_ids.len(),
         goal_count: 1,
         metadata: json!({
