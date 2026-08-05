@@ -403,7 +403,7 @@ fn portable_build_outbox_reconciliation_protocol() {
             &OutboxOutcome::Conflicted {
                 error_class: "divergent_revision".into(),
             },
-            &OutboxOutcomeEvidence::reported_by("portable_peer"),
+            &OutboxOutcomeEvidence::from_reporter("portable_peer"),
         )
         .expect("conflict");
     assert_eq!(conflicted.application, OutboxOutcomeApplication::Applied);
@@ -421,7 +421,7 @@ fn portable_build_outbox_reconciliation_protocol() {
         .apply_outbox_outcome(
             "portable-evt-a2-b",
             &OutboxOutcome::Acknowledged,
-            &OutboxOutcomeEvidence::reported_by("portable_peer"),
+            &OutboxOutcomeEvidence::from_reporter("portable_peer"),
         )
         .expect_err("an outcome for a never-claimed event must be refused");
     match &refusal {
@@ -464,14 +464,14 @@ fn portable_build_outbox_reconciliation_protocol() {
         .apply_outbox_outcome(
             &successor.event_id,
             &OutboxOutcome::Acknowledged,
-            &OutboxOutcomeEvidence::reported_by("portable_peer"),
+            &OutboxOutcomeEvidence::from_reporter("portable_peer"),
         )
         .expect("acknowledge");
     let second = store
         .apply_outbox_outcome(
             &successor.event_id,
             &OutboxOutcome::Acknowledged,
-            &OutboxOutcomeEvidence::reported_by("portable_peer"),
+            &OutboxOutcomeEvidence::from_reporter("portable_peer"),
         )
         .expect("a duplicate acknowledgement is not an error");
     assert_eq!(first.application, OutboxOutcomeApplication::Applied);

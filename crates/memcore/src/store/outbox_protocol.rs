@@ -179,7 +179,9 @@ impl OutboxOutcome {
     pub fn error_class(&self) -> Option<&str> {
         match self {
             Self::Acknowledged => None,
-            Self::Rejected { error_class } | Self::Conflicted { error_class } => Some(error_class),
+            Self::Rejected { error_class } | Self::Conflicted { error_class } => {
+                Some(error_class.as_str())
+            }
         }
     }
 
@@ -226,7 +228,7 @@ pub struct OutboxOutcomeEvidence {
 
 impl OutboxOutcomeEvidence {
     /// Evidence that names only the reporter.
-    pub fn reported_by(reporter: &str) -> Self {
+    pub fn from_reporter(reporter: &str) -> Self {
         Self {
             reported_by: reporter.to_string(),
             peer_revision: None,
@@ -352,6 +354,11 @@ pub fn outbox_local_wins_successor_id(conflicted_event_id: &str) -> String {
 /// What one resolution did. Three decisions, three receipt shapes — a caller
 /// cannot read one as another, and there is no `Option` field that quietly
 /// means "the other kind of resolution".
+///
+/// `LocalWins` boxes its second row for the reason `WorktreeOpenArgs` in
+/// `tachi-bootstrap` is a separate struct: two inline `OutboxEventRow`s would
+/// make every value of this enum — including a bare `Deferred` — pay for the
+/// biggest variant (`clippy::large_enum_variant`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboxConflictResolutionReceipt {
@@ -364,7 +371,7 @@ pub enum OutboxConflictResolutionReceipt {
         /// `source_revision` and `payload_digest` are read from the
         /// destination **now**, so it announces the object's current local
         /// state rather than replaying the state the conflict was about.
-        successor: OutboxEventRow,
+        successor: Box<OutboxEventRow>,
     },
     /// The peer's version stood; the local event is withdrawn.
     RemoteWins { quarantined: OutboxEventRow },
@@ -697,7 +704,7 @@ impl MemoryStore {
                         &tx,
                         event_id,
                         OutboxState::Quarantined,
-                        Some(error_class),
+                        Some(error_class.as_str()),
                     )?;
                     OutboxConflictResolutionReceipt::RemoteWins { quarantined }
                 }
@@ -721,7 +728,7 @@ impl MemoryStore {
                     )?;
                     OutboxConflictResolutionReceipt::LocalWins {
                         resolved,
-                        successor,
+                        successor: Box::new(successor),
                     }
                 }
             };
@@ -900,7 +907,7 @@ mod tests {
             other => panic!("a takeover must not be reported as a first claim: {other:?}"),
         }
         assert!(
-            reclaimed[0].event.state_changed_at > "2020-01-01T00:00:00.000Z",
+            reclaimed[0].event.state_changed_at.as_str() > "2020-01-01T00:00:00.000Z",
             "the takeover must renew the lease"
         );
         assert!(
@@ -923,7 +930,7 @@ mod tests {
     }
 
     fn evidence() -> OutboxOutcomeEvidence {
-        OutboxOutcomeEvidence::reported_by("peer_alpha")
+        OutboxOutcomeEvidence::from_reporter("peer_alpha")
     }
 
     /// The whole ordinary cycle, end to end: a committed mutation rests as
@@ -976,7 +983,7 @@ mod tests {
             .apply_outbox_outcome(
                 "evt-dup-ack",
                 &OutboxOutcome::Acknowledged,
-                &OutboxOutcomeEvidence::reported_by("peer_beta"),
+                &OutboxOutcomeEvidence::from_reporter("peer_beta"),
             )
             .expect("a duplicate acknowledgement must not be an error");
 
@@ -1195,7 +1202,7 @@ mod tests {
             .apply_outbox_outcome(
                 "evt-tokens",
                 &OutboxOutcome::Acknowledged,
-                &OutboxOutcomeEvidence::reported_by("   ")
+                &OutboxOutcomeEvidence::from_reporter("   ")
             )
             .is_err());
         assert!(
@@ -1544,14 +1551,14 @@ mod tests {
             .apply_outbox_outcome(
                 "evt-late",
                 &OutboxOutcome::Acknowledged,
-                &OutboxOutcomeEvidence::reported_by("peer_beta"),
+                &OutboxOutcomeEvidence::from_reporter("peer_beta"),
             )
             .expect("the new holder acknowledges");
         let by_original_holder = store
             .apply_outbox_outcome(
                 "evt-late",
                 &OutboxOutcome::Acknowledged,
-                &OutboxOutcomeEvidence::reported_by("peer_alpha"),
+                &OutboxOutcomeEvidence::from_reporter("peer_alpha"),
             )
             .expect("the late acknowledgement is not an error");
 
