@@ -49,11 +49,23 @@ async fn mock_handler(State(state): State<MockState>, request: Request) -> Respo
         .expect("mock response")
 }
 
+/// Start a loopback mock provider and hand back its URL, the requests it saw,
+/// and the serving task's `JoinHandle`.
+///
+/// The handle is returned (#1621) so each caller states how long its mock is
+/// meant to live instead of relying on "whenever this test's runtime drops".
+/// That matters most for the proxy-trap server in
+/// `ambient_proxy_cannot_receive_probe_bearer_or_own_transport`, whose whole
+/// job is to still be listening at assertion time so an empty observation log
+/// means "nothing was sent here", never "nobody was home".
+///
+/// `bind` → `local_addr` → `spawn` ordering is load-bearing and already
+/// correct: the port is reserved before any client is handed the URL.
 async fn start_mock(
     status: StatusCode,
     body: &'static str,
     redirect_to: Option<&'static str>,
-) -> (String, RequestObservations) {
+) -> (String, RequestObservations, tokio::task::JoinHandle<()>) {
     let observations = Arc::new(Mutex::new(Vec::new()));
     let state = MockState {
         observations: Arc::clone(&observations),
@@ -65,7 +77,7 @@ async fn start_mock(
         .await
         .expect("bind mock server");
     let address = listener.local_addr().expect("mock address");
-    tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         axum::serve(
             listener,
             Router::new().fallback(any(mock_handler)).with_state(state),
@@ -73,7 +85,7 @@ async fn start_mock(
         .await
         .expect("serve mock");
     });
-    (format!("http://{address}"), observations)
+    (format!("http://{address}"), observations, server)
 }
 
 fn lane(base_url: &str, model: &str) -> ChatLaneConfig {
@@ -106,7 +118,7 @@ fn client(reasoning: ChatLaneConfig) -> LlmClient {
 
 #[tokio::test]
 async fn deepseek_probe_is_one_exact_bodyless_get_and_finds_model() {
-    let (server, observations) = start_mock(
+    let (server, observations, _mock) = start_mock(
         StatusCode::OK,
         r#"{"data":[{"id":"deepseek-chat"},{"id":"deepseek-reasoner"}]}"#,
         None,
@@ -153,7 +165,7 @@ async fn deepseek_probe_is_one_exact_bodyless_get_and_finds_model() {
 
 #[tokio::test]
 async fn siliconflow_probe_reports_absent_model_without_dumping_ids() {
-    let (server, observations) = start_mock(
+    let (server, observations, _mock) = start_mock(
         StatusCode::OK,
         r#"{"data":[{"id":"public/model-a"}]}"#,
         None,
@@ -181,7 +193,7 @@ async fn siliconflow_probe_reports_absent_model_without_dumping_ids() {
 #[tokio::test]
 async fn hostile_auth_body_is_redacted_and_never_retried() {
     let hostile = "echo synthetic-probe-key and private source text";
-    let (server, observations) = start_mock(StatusCode::UNAUTHORIZED, hostile, None).await;
+    let (server, observations, _mock) = start_mock(StatusCode::UNAUTHORIZED, hostile, None).await;
     let client = client(lane(
         "https://api.deepseek.com/chat/completions",
         "deepseek-reasoner",
@@ -200,7 +212,7 @@ async fn hostile_auth_body_is_redacted_and_never_retried() {
 
 #[tokio::test]
 async fn redirect_is_refused_without_following_or_retrying() {
-    let (server, observations) = start_mock(
+    let (server, observations, _mock) = start_mock(
         StatusCode::FOUND,
         "hostile redirect body",
         Some("/followed"),
@@ -221,7 +233,7 @@ async fn redirect_is_refused_without_following_or_retrying() {
 
 #[tokio::test]
 async fn zai_is_unsupported_without_any_network_request() {
-    let (server, observations) = start_mock(StatusCode::OK, r#"{"data":[]}"#, None).await;
+    let (server, observations, _mock) = start_mock(StatusCode::OK, r#"{"data":[]}"#, None).await;
     let client = client(lane(
         "https://open.bigmodel.cn/api/paas/v4/chat/completions",
         "glm-4.5",
@@ -253,7 +265,7 @@ async fn documented_statuses_map_without_retry() {
         ),
         (StatusCode::BAD_GATEWAY, ProviderAuthProbeClass::Transient),
     ] {
-        let (server, observations) = start_mock(status, "must remain private", None).await;
+        let (server, observations, _mock) = start_mock(status, "must remain private", None).await;
         let client = client(lane(
             "https://api.deepseek.com/chat/completions",
             "deepseek-reasoner",
@@ -269,7 +281,7 @@ async fn documented_statuses_map_without_retry() {
 #[tokio::test]
 async fn malformed_success_body_fails_closed_without_body_disclosure() {
     let hostile = "not JSON; echo private source text";
-    let (server, observations) = start_mock(StatusCode::OK, hostile, None).await;
+    let (server, observations, _mock) = start_mock(StatusCode::OK, hostile, None).await;
     let client = client(lane(
         "https://api.deepseek.com/chat/completions",
         "deepseek-reasoner",
@@ -285,16 +297,30 @@ async fn malformed_success_body_fails_closed_without_body_disclosure() {
     assert_eq!(observations.lock().expect("observations").len(), 1);
 }
 
+/// CONCURRENCY NOTE (#1621): this test mutates process-global proxy env vars
+/// via `EnvRestore`, and `global_test_lock` does not hold back the ~20
+/// `chat_lanes` `#[tokio::test]`s running beside it in the same libtest
+/// process. It is safe only because *both* reqwest clients in this crate are
+/// unconditionally `.no_proxy()`: the probe's own at `llm/auth_probe.rs`, and
+/// the shared pooled client at `llm/provider_health/config.rs`. When the
+/// pooled one was proxy-honouring, this test's env vars pointed those 20 tests
+/// at the trap server below and they failed with 502s and connection errors.
+/// If either `.no_proxy()` is ever removed, that flake comes straight back —
+/// and the assertion here would stop meaning what it says.
+///
+/// The assertions keep their teeth regardless: `.no_proxy()` on the probe
+/// client is product code, not a test fixture, so what is verified here is the
+/// shipped behaviour.
 #[tokio::test(flavor = "current_thread")]
 async fn ambient_proxy_cannot_receive_probe_bearer_or_own_transport() {
     let _env_lock = crate::test_support::global_test_lock().lock();
-    let (intended_server, intended_observations) = start_mock(
+    let (intended_server, intended_observations, _intended_mock) = start_mock(
         StatusCode::OK,
         r#"{"data":[{"id":"deepseek-reasoner"}]}"#,
         None,
     )
     .await;
-    let (proxy_trap, proxy_observations) = start_mock(
+    let (proxy_trap, proxy_observations, proxy_mock) = start_mock(
         StatusCode::BAD_GATEWAY,
         "proxy must not receive request",
         None,
@@ -329,6 +355,12 @@ async fn ambient_proxy_cannot_receive_probe_bearer_or_own_transport() {
         )
         .await;
 
+    // An empty trap log must mean "nothing was sent here", never "the trap died
+    // before the probe ran" (#1621).
+    assert!(
+        !proxy_mock.is_finished(),
+        "proxy trap must still be serving, otherwise its empty log proves nothing"
+    );
     assert!(
         proxy_observations.lock().expect("proxy trap").is_empty(),
         "credential-bearing probe must bypass every ambient proxy"
