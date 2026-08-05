@@ -5958,6 +5958,12 @@ fn adoption_entry(
 /// destination and unknowable until it is open. That one is handled by the
 /// post-creation compensation path.
 fn adoption_preflight(entries: &[memcore::PortableImportEntry]) -> Result<(), String> {
+    // The destination carries the `wiki` label, so `validate_write_path`'s only
+    // rejection clause -- a `/wiki/...` path in a non-wiki store -- cannot fire
+    // for any entry. Asserted once rather than assumed.
+    if !memcore::path_router::db_label_is_wiki_corpus(memcore::path_router::WIKI_CORPUS_DB_LABEL) {
+        return Err("wiki corpus label no longer identifies the wiki corpus".to_string());
+    }
     let mut seen = BTreeSet::new();
     for import in entries {
         let entry = &import.entry;
@@ -5982,14 +5988,6 @@ fn adoption_preflight(entries: &[memcore::PortableImportEntry]) -> Result<(), St
                 entry.id
             ));
         }
-        // The destination carries the `wiki` label, so `validate_write_path`'s
-        // only rejection clause -- a `/wiki/...` path in a non-wiki store --
-        // cannot fire here. Asserted rather than assumed.
-        if !memcore::path_router::db_label_is_wiki_corpus(
-            memcore::path_router::WIKI_CORPUS_DB_LABEL,
-        ) {
-            return Err("wiki corpus label no longer identifies the wiki corpus".to_string());
-        }
     }
     Ok(())
 }
@@ -6002,7 +6000,11 @@ fn verify_adopted_paths(
     target: &Path,
     entries: &[memcore::PortableImportEntry],
 ) -> Result<(), String> {
-    let conn = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    // Opened read-write, not read-only: a read-only open of a WAL database
+    // whose `-shm` sidecar is absent has to create one, which is exactly the
+    // failure `open_preview_connection` exists to work around. This is a file
+    // this run created and owns, so there is nothing to protect it from.
+    let conn = Connection::open(target)
         .map_err(|error| format!("cannot reopen adopted store for path readback: {error}"))?;
     for import in entries {
         let expected = memcore::path_router::normalize_path(&import.entry.path);
@@ -6148,7 +6150,9 @@ pub(crate) fn run_wiki_corpus_legacy_adoption_command(
     // holds. `load_rows` selects the whole `memories` table; only wiki-related
     // rows carry a classification.
     let mut skipped = Vec::new();
-    let mut eligible = Vec::new();
+    // Owned clones, not borrows: the report below consumes `scans`, and the
+    // adoption set must outlive the inventory it was derived from.
+    let mut eligible: Vec<RawRow> = Vec::new();
     let mut wiki_related_rows = 0usize;
     for row in legacy.rows.iter() {
         if row.classification.is_none() {
@@ -6156,7 +6160,7 @@ pub(crate) fn run_wiki_corpus_legacy_adoption_command(
         }
         wiki_related_rows += 1;
         match adoption_eligibility(row) {
-            Ok(()) => eligible.push(row),
+            Ok(()) => eligible.push(row.clone()),
             Err(reason) => skipped.push(AdoptionSkip {
                 id: row.id.clone(),
                 path: row.path.clone(),
@@ -9533,7 +9537,7 @@ mod tests {
     }
 
     fn destination_row(target: &Path, id: &str) -> DestinationRow {
-        let conn = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let conn = Connection::open(target).unwrap();
         conn.query_row(
             "SELECT created_at, updated_at, revision, archived, valid_until, superseded_by,
                     metadata, path
@@ -9556,24 +9560,21 @@ mod tests {
         .unwrap_or_else(|error| panic!("adopted row {id} must exist: {error}"))
     }
 
-    /// Seed a row the ordinary write path refuses outright, which is the only
-    /// way to build a fixture for E3.
-    fn insert_reserved_legacy_row(path: &Path, id: &str, row_path: &str) {
+    /// Give an already-seeded row an id the ordinary write path would refuse,
+    /// which is the only way to build a fixture for E3. Renaming beats a raw
+    /// `INSERT`: the reserved-reference insert guard is a trigger over
+    /// `memories`, and preparing an `INSERT` on a connection that has not
+    /// registered memcore's guard function would fail for reasons unrelated to
+    /// what is being tested.
+    fn rename_legacy_row_id(path: &Path, from: &str, to: &str) {
         let conn = Connection::open(path).unwrap();
-        conn.execute(
-            "INSERT INTO memories
-                (id, path, summary, text, importance, timestamp, valid_from, category, topic,
-                 keywords, entities, source, scope, archived, created_at, updated_at,
-                 access_count, scored_count, revision, metadata, recall_count, query_diversity,
-                 tier)
-             VALUES (?1, ?2, 'reserved summary', 'reserved text', 0.5,
-                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'wiki', 'topic',
-                     '[]', '[]', 'wiki', 'general', 0,
-                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, 0, 1,
-                     '{\"lifecycle\":\"active\"}', 0, 0, 'raw')",
-            rusqlite::params![id, row_path],
-        )
-        .unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE memories SET id = ?2 WHERE id = ?1",
+                rusqlite::params![from, to],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "fixture row {from} must exist");
     }
 
     /// T1
@@ -9741,10 +9742,13 @@ mod tests {
                 "/wiki/b",
                 json!({"knowledge_scope": "project", "lifecycle": "active"}),
             ),
+            // `rem` would be the more natural operational marker, but the
+            // ordinary write path strips it from caller-supplied metadata, so
+            // a fixture seeded through `upsert` cannot carry it.
             adoption_entry_fixture(
                 "row-c",
                 "/wiki/c",
-                json!({"rem": {"operation": "seed"}, "lifecycle": "active"}),
+                json!({"operational_snapshot": true, "lifecycle": "active"}),
             ),
             adoption_entry_fixture(
                 "row-d",
@@ -9756,13 +9760,13 @@ mod tests {
                 "/kanban/e",
                 json!({"artifact_kind": "wiki", "lifecycle": "active"}),
             ),
+            adoption_entry_fixture("row-f", "/wiki/f", json!({"lifecycle": "active"})),
         ]);
         // E3's only case E1 does not already shadow. A `wiki-rem:` id or a
         // `/wiki/_log` row carries an operational marker and is excluded by E1
         // first; an `anchor:`-prefixed row on a wiki path is not, so it is the
-        // one that proves the reserved-identity rule is load-bearing. The
-        // ordinary write path refuses it outright, hence the raw insert.
-        insert_reserved_legacy_row(&fixture.global_path, "anchor:f", "/wiki/f");
+        // one that proves the reserved-identity rule is load-bearing.
+        rename_legacy_row_id(&fixture.global_path, "row-f", "anchor:f");
 
         let report = fixture.run(None).expect("preview");
         let adoption = report.legacy_adoption.unwrap();
@@ -9896,21 +9900,36 @@ mod tests {
     /// T8
     #[test]
     fn adopt_legacy_marker_is_the_only_metadata_delta() {
-        let source_metadata = json!({
-            "lifecycle": "active",
-            "artifact_kind": "wiki",
-            "nested": {"b": 1, "a": [true, null, "x"]},
-        });
         let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
             "marker",
             "/wiki/adopt/marker",
-            source_metadata.clone(),
+            json!({
+                "lifecycle": "active",
+                "artifact_kind": "wiki",
+                "nested": {"b": 1, "a": [true, null, "x"]},
+            }),
         )]);
 
         let adoption = fixture.adopt();
         assert_eq!(
             adoption.provenance_marker_key,
             WIKI_LEGACY_ADOPTION_MARKER_KEY
+        );
+
+        // Compared against the source row **as stored**, not against the
+        // literal this test passed in: the ordinary write path that seeded the
+        // fixture has its own metadata sanitization, and the claim under test
+        // is that adoption adds nothing beyond the marker to whatever the
+        // legacy store actually holds.
+        let stored_source = legacy_source_rows(&fixture.global_path)["marker"]["metadata"]
+            .as_str()
+            .map(|raw| serde_json::from_str::<Value>(raw).unwrap())
+            .expect("source metadata");
+        assert!(
+            stored_source
+                .as_object()
+                .is_some_and(|object| object.contains_key("nested")),
+            "the fixture must actually carry the metadata it claims: {stored_source}"
         );
 
         let metadata = destination_row(&fixture.target(), "marker").metadata;
@@ -9920,7 +9939,7 @@ mod tests {
             .expect("adoption marker");
         assert_eq!(
             Value::Object(object),
-            source_metadata,
+            stored_source,
             "the marker must be the only metadata delta"
         );
 
@@ -10006,7 +10025,7 @@ mod tests {
 
         // The stamp itself, read out of `hard_state` rather than inferred from
         // the label the bootstrap passed in.
-        let conn = Connection::open_with_flags(&target, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let conn = Connection::open(&target).unwrap();
         let stamp: String = conn
             .query_row(
                 "SELECT value_json FROM hard_state
@@ -10240,7 +10259,7 @@ mod tests {
     }
 
     fn legacy_source_rows(path: &Path) -> BTreeMap<String, Value> {
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let conn = Connection::open(path).unwrap();
         let mut statement = conn
             .prepare(
                 "SELECT id, path, revision, archived, metadata, superseded_by, created_at,
