@@ -151,6 +151,58 @@ pub(super) fn stores_for_wiki_plan(server: &MemoryServer, plan: &WikiReadPlan) -
     }
 }
 
+/// A resolved-empty store list on an ordinary read/search plan (Federated,
+/// ProjectOnly, SharedOnly) is a refusal-worthy state, not a clean "found
+/// nothing": the caller asked the corpus a question and no leg of the plan
+/// was even reachable. `MigrationAudit`/`GuideFederated` are hygiene/census
+/// plans, not ordinary retrieval, and are deliberately excluded — an empty
+/// audit result is a legitimate finding, not a resolution failure.
+///
+/// Emptiness is decided by `stores_for_wiki_plan` — via the caller-supplied
+/// `stores` slice, which callers get by calling that same resolver — and is
+/// never re-derived here. The per-leg probes below only run once `stores`
+/// is already known to be empty; they exist solely to explain WHY each leg
+/// didn't resolve, and must never be used to decide whether to refuse.
+pub(super) fn zero_store_refusal(plan: &WikiReadPlan, stores: &[StoreRef]) -> Option<String> {
+    if !stores.is_empty() {
+        return None;
+    }
+
+    let bound_missing = || "no bound project DB (daemon runs --no-project-db)".to_string();
+    let shared_missing = || {
+        format!("named project '{LOGICAL_SHARED_WIKI_PROJECT}' not found under ~/.tachi/projects")
+    };
+    let legacy_excluded = || "legacy global is excluded from Federated by design".to_string();
+
+    match plan {
+        WikiReadPlan::Federated => {
+            let reasons = [bound_missing(), shared_missing(), legacy_excluded()];
+            Some(format!(
+                "wiki search resolved zero stores: {} — run the wiki migration or pass --project <name>",
+                reasons.join("; ")
+            ))
+        }
+        WikiReadPlan::ProjectOnly => Some(format!(
+            "wiki search resolved zero stores: {} — run with a bound project or pass --project <name>",
+            bound_missing()
+        )),
+        WikiReadPlan::SharedOnly => Some(format!(
+            "wiki search resolved zero stores: {} — run the wiki migration or pass --project <name>",
+            shared_missing()
+        )),
+        // NamedOnly always resolves to exactly one store by construction
+        // (existence is checked separately by its callers before this ever
+        // runs), and `stores_for_wiki_plan` always pushes at least
+        // `LegacyGlobal` for MigrationAudit/GuideFederated — so `stores` is
+        // never empty on any of these three variants; this arm is
+        // unreachable in practice and kept only as the explicit "never
+        // refuse a census plan" backstop.
+        WikiReadPlan::NamedOnly(_)
+        | WikiReadPlan::MigrationAudit
+        | WikiReadPlan::GuideFederated => None,
+    }
+}
+
 pub(super) fn with_wiki_store_read<T>(
     server: &MemoryServer,
     store_ref: &StoreRef,

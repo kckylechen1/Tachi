@@ -51,7 +51,7 @@ use self::similarity::{contradiction_score, parse_rfc3339_utc, token_cosine_simi
 use self::store::{
     entry_shares_normalized_entity, find_related_by_entities, is_ordinary_related_wiki_entry,
     is_user_facing_wiki_entry, stores_for_wiki_plan, with_wiki_store, with_wiki_store_read,
-    StoredWikiEntry,
+    zero_store_refusal, StoredWikiEntry,
 };
 
 pub(crate) use self::export::export_wiki_obsidian;
