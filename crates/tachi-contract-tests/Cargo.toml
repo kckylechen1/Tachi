@@ -9,6 +9,7 @@ description = "Workspace contract/census tests (docs fixtures, schema shape, por
 [dependencies]
 
 [dev-dependencies]
+chrono = { workspace = true }
 serde_json = { workspace = true }
 tachi-params = { path = "../tachi-params" }
 tachi-hub = { path = "../tachi-hub" }
