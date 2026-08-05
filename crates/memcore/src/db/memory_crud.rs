@@ -3598,10 +3598,10 @@ mod idless_upsert_tests {
 
     /// tachi#1634 discriminator (i): an explicit-id `upsert` of a
     /// >0.9-Jaccard-similar body must never fold into the existing active
-    /// row — `NearDuplicatePolicy::NonSemantic` is the default for every
-    /// seam except the id-less `save_memory` opt-in. RED pre-#1634, which
-    /// ran `merge_into_jaccard_candidate` unconditionally on every new-id
-    /// write regardless of caller intent.
+    /// > row — `NearDuplicatePolicy::NonSemantic` is the default for every
+    /// > seam except the id-less `save_memory` opt-in. RED pre-#1634, which
+    /// > ran `merge_into_jaccard_candidate` unconditionally on every new-id
+    /// > write regardless of caller intent.
     #[test]
     fn explicit_id_upsert_near_duplicate_does_not_merge() {
         let mut store = crate::MemoryStore::open_in_memory().unwrap();
