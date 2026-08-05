@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # nextest-census.sh — append one JSONL row per failed test in the covered
-# packages (tachi-server + tachi-contract-tests) (#1278 step ①)
+# packages (tachi-server + tachi-contract-tests + tachi-credential-profile) (#1278 step ①)
 #
 # Usage:
 #   scripts/nextest-census.sh
 #
 # Behavior:
 #   1. Runs `cargo nextest run -p tachi-server -p tachi-contract-tests
-#      --no-fail-fast` once with JUnit output enabled. Set NEXTEST_TEST_THREADS
+#      -p tachi-credential-profile --no-fail-fast` once with JUnit output enabled. Set NEXTEST_TEST_THREADS
 #      to pass an explicit nextest concurrency setting through to the run. The
 #      package set must stay in sync with NEXTEST_PACKAGES in
 #      scripts/nextest-known-reds-diff.sh — both cover the same test set, and a

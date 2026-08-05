@@ -19,7 +19,7 @@
 #     known-reds group.
 #   * Completeness gate: before declaring OK, the report is checked against the
 #     full `cargo nextest list` set across ${NEXTEST_PACKAGES[@]} (today:
-#     tachi-server + tachi-contract-tests) — a valid-but-incomplete (truncated)
+#     tachi-server + tachi-contract-tests + tachi-credential-profile) — a valid-but-incomplete (truncated)
 #     JUnit is refused (exit 4), since it could hide a new red that never got
 #     to run.
 #
