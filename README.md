@@ -51,7 +51,7 @@ This line makes Tachi's project-cycle direction explicit:
   `action="pattern_feedback"` records reviewed `hit`, `miss`, and `stale`
   signals without promoting anything into skills automatically.
 - `tachi_task` can guide a full issue/PR/doc lifecycle: intake, doc index,
-  cycle plan, verification status, PR handoff, release notes, reference
+  verification status, PR handoff, release notes, reference
   building, and close-loop writes back to memory/wiki/docs.
 - Recall behavior is tunable and reviewable through simulation, rerank replay,
   and scored proposals instead of one-off hard-coded ranking changes.
