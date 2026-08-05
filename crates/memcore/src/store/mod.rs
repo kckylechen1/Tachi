@@ -57,6 +57,7 @@ pub mod recall_cache;
 pub mod rem;
 #[cfg(feature = "admin")]
 pub mod sandbox;
+pub mod snapshot_import;
 pub mod state;
 pub mod tasks;
 #[cfg(feature = "admin")]

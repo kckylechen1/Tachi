@@ -12,6 +12,7 @@ use super::sqlite_vec::serialize_f32;
 mod access;
 mod read;
 mod search;
+mod snapshot_import;
 mod update;
 
 #[cfg(test)]
@@ -35,6 +36,14 @@ pub(crate) use search::wiki_corpus_store_sql_splice;
 pub use search::{
     search_fts, search_symbolic_candidates, search_vec, symbolic_trigram_select_sql,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+};
+/// tachi#1607 snapshot-import seam: transaction-scoped, no public signature
+/// mentions a `Connection`/`Transaction` — the store-level
+/// `MemoryStore::import_snapshot_batch` owns the transaction.
+pub(crate) use snapshot_import::{
+    import_snapshot_row_within_tx, memory_row_exists_within_tx,
+    read_snapshot_lifecycle_row_within_tx, read_snapshot_vector_blob_within_tx,
+    SnapshotLifecycleRow, SnapshotVectorRow,
 };
 pub(crate) use update::{
     archive_with_metadata_if_expected_state, restore_with_metadata_if_expected_state,
@@ -187,7 +196,7 @@ fn acquire_fts_sync_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn sync_memories_fts(
+pub(crate) fn sync_memories_fts(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
     path: &str,
@@ -422,7 +431,7 @@ pub fn normalize_for_write(entry: &mut MemoryEntry) {
 }
 
 /// Serialize `entities` with legacy `persons` folded in.
-fn canonical_entities_json(entry: &MemoryEntry) -> Result<String, MemoryError> {
+pub(crate) fn canonical_entities_json(entry: &MemoryEntry) -> Result<String, MemoryError> {
     let mut entities = entry.entities.clone();
     crate::types::fold_person_names_into_entities(&mut entities, entry.persons.clone());
     Ok(serde_json::to_string(&entities)?)
@@ -2644,25 +2653,31 @@ fn upsert_within_tx_inner(
     )
 }
 
-fn upsert_prepared_within_tx(
-    tx: &rusqlite::Transaction<'_>,
-    entry: &MemoryEntry,
-    vec_available: bool,
-    idless_identity: Option<&str>,
-    allow_near_duplicate_merge: bool,
-    allow_wiki_operation_log: bool,
+/// The reserved-identity refusals every main-row writer must run, in one
+/// body so no writer can carry a drifted copy.
+///
+/// tachi#1602: the blank-id and reserved-`anchor:`-namespace refusals live
+/// here, at the shared transactional seam, not only at
+/// `upsert_with_idless_identity`'s top-level entry point. Every write path
+/// that reaches a main row — single-row `upsert`/`upsert_idless`,
+/// lifecycle-apply, immutable supersession, both batch paths (`upsert_batch`,
+/// admin-gated `upsert_batch_with_precommit`) and, since tachi#1607, the
+/// snapshot-import path — funnels through this function, so enforcing here is
+/// what makes every entry point refuse identically. Error text is
+/// byte-identical to the top-level guard's so callers cannot tell which layer
+/// refused.
+///
+/// `normalized_path` must be the value the caller is about to *write* (i.e.
+/// already through [`crate::path_router::normalize_path`]); validating one
+/// path and storing another would be a bypass of the Wiki-log guard below.
+pub(crate) fn refuse_reserved_write_identity(
+    id: &str,
+    normalized_path: &str,
+    topic: &str,
     allow_reserved_anchor_id: bool,
-) -> Result<IdlessUpsertResult, MemoryError> {
-    // tachi#1602: the blank-id and reserved-`anchor:`-namespace refusals live
-    // here, at the shared transactional seam, not only at
-    // `upsert_with_idless_identity`'s top-level entry point. Every write path
-    // that reaches a main row — single-row `upsert`/`upsert_idless`,
-    // lifecycle-apply, immutable supersession, and both batch paths
-    // (`upsert_batch`, admin-gated `upsert_batch_with_precommit`) — funnels
-    // through this body, so enforcing here is what makes single-row and batch
-    // refuse identically. Error text is byte-identical to the top-level
-    // guard's so callers cannot tell which layer refused.
-    if entry.id.trim().is_empty() {
+    allow_wiki_operation_log: bool,
+) -> Result<(), MemoryError> {
+    if id.trim().is_empty() {
         return Err(MemoryError::InvalidArg(
             "entry.id must be provided by caller".to_string(),
         ));
@@ -2673,33 +2688,50 @@ fn upsert_prepared_within_tx(
     // silently overwrite an anchor row through `ON CONFLICT DO UPDATE`. The
     // sole opt-out is `upsert_within_tx_allowing_reserved_anchor_ids`, the
     // trusted whole-store-copy seam used by tidy migration.
-    if !allow_reserved_anchor_id && entry.id.starts_with("anchor:") {
+    if !allow_reserved_anchor_id && id.starts_with("anchor:") {
         return Err(MemoryError::InvalidArg(format!(
-            "id '{}' is in the reserved 'anchor:' namespace; use ensure_anchor, not upsert",
-            entry.id
+            "id '{id}' is in the reserved 'anchor:' namespace; use ensure_anchor, not upsert"
         )));
     }
     // `wiki-rem:` rows are deterministic insert-once operation records. They
     // are created only through the REM claim + insert_if_absent transaction;
     // allowing ordinary ON CONFLICT upsert would let any caller rewrite the
     // recovery identity, producer receipt, or active winner in place.
-    if crate::namespace::is_reserved_wiki_rem_id(&entry.id) {
+    if crate::namespace::is_reserved_wiki_rem_id(id) {
         return Err(MemoryError::InvalidArg(format!(
-            "id '{}' is in the reserved 'wiki-rem:' namespace; use the REM insert-once operation seam, not upsert",
-            entry.id
+            "id '{id}' is in the reserved 'wiki-rem:' namespace; use the REM insert-once operation seam, not upsert"
         )));
     }
-    let path = crate::path_router::normalize_path(&entry.path);
     if !allow_wiki_operation_log
-        && (entry.id == "wiki-operation-log"
-            || path == "/wiki/_log"
-            || path.starts_with("/wiki/_log/")
-            || entry.topic.eq_ignore_ascii_case("wiki_log"))
+        && (id == "wiki-operation-log"
+            || normalized_path == "/wiki/_log"
+            || normalized_path.starts_with("/wiki/_log/")
+            || topic.eq_ignore_ascii_case("wiki_log"))
     {
         return Err(MemoryError::InvalidArg(
             "Wiki operation-log identity is reserved; use the trusted Wiki log seam".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn upsert_prepared_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+    allow_near_duplicate_merge: bool,
+    allow_wiki_operation_log: bool,
+    allow_reserved_anchor_id: bool,
+) -> Result<IdlessUpsertResult, MemoryError> {
+    let path = crate::path_router::normalize_path(&entry.path);
+    refuse_reserved_write_identity(
+        &entry.id,
+        &path,
+        &entry.topic,
+        allow_reserved_anchor_id,
+        allow_wiki_operation_log,
+    )?;
     // Normalize only the fields enforced by CHECK constraints; avoid cloning
     // the full entry/vector on the hot write path.
     let source = MemorySource::parse_or_external(&entry.source);

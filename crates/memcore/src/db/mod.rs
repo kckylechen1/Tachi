@@ -146,6 +146,12 @@ pub(crate) use memory_crud::{
 pub(crate) use memory_crud::{
     assert_memories_fixture_matches_select_columns, memory_select_required_columns,
 };
+/// tachi#1607 snapshot import: see `memory_crud::snapshot_import`.
+pub(crate) use memory_crud::{
+    import_snapshot_row_within_tx, memory_row_exists_within_tx,
+    read_snapshot_lifecycle_row_within_tx, read_snapshot_vector_blob_within_tx,
+    SnapshotLifecycleRow, SnapshotVectorRow,
+};
 /// Caller-transaction upsert seam for lifecycle-apply: runs the full upsert
 /// body (main row + FTS + vectors + idless semantics) inside a caller-owned
 /// `BEGIN IMMEDIATE` transaction. See `memory_crud::upsert_within_tx`.
