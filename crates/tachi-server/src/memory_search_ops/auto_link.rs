@@ -729,7 +729,7 @@ pub(crate) fn run_auto_linking(
                     continue;
                 }
 
-                let now = chrono::Utc::now().to_rfc3339();
+                let now = memcore::now_utc_iso();
                 let vector_similarity = vector_similarity_between(entry, &result.entry);
                 let supersedes =
                     should_supersede(entry, &result.entry, shared.len(), result.score.symbolic);
