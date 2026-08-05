@@ -47,9 +47,9 @@ pub mod runner;
 pub mod selection;
 pub mod source;
 mod secret_scan;
-// `storage` is `pub(crate)`, not `pub`: it is consumed inside this crate by
-// the recall containment gate, and nothing outside the crate has a use for a
-// bare domain tag.
-pub(crate) mod storage;
+// Keep the implementation module private; the domain tag is re-exported for
+// tachi-server's recall containment shim.
+mod storage;
 
 pub use secret_scan::{contains_secret_like, redact_secret_like_text, REDACTED_SECRET};
+pub use storage::LESSON_CANDIDATE_DOMAIN;

@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use tachi_server::lesson_forge_ops::selection::{
-    select_and_freeze_real_manifest_v1, PilotSelectionConfigV1,
-};
+use tachi_lesson_forge::selection::{select_and_freeze_real_manifest_v1, PilotSelectionConfigV1};
 
 #[derive(Debug, Parser)]
 #[command(name = "lesson-forge-freeze")]
