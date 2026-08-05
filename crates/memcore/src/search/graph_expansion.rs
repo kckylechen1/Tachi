@@ -93,7 +93,13 @@ pub(super) fn append_graph_expansion(
         .into_iter()
         .filter(|entry| !existing_ids.contains(&entry.id))
         .filter(|entry| valid_at(entry, as_of_utc))
-        .filter(|entry| !is_search_noise_entry(entry, opts.path_prefix.as_deref()))
+        .filter(|entry| {
+            !is_search_noise_entry(
+                entry,
+                opts.path_prefix.as_deref(),
+                opts.bypass_wiki_lifecycle_gate,
+            )
+        })
         // #1413 concern 2: graph expansion must not leak cross-surface
         // neighbors. When the caller scoped the base query to a surface, only
         // entries the canonical classifier `surface_of` places on that same

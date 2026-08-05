@@ -543,7 +543,11 @@ fn passes_final_candidate_eligibility(
 ) -> bool {
     if !valid_at(entry, as_of_utc)
         || (!include_superseded && superseded_ids.contains(id))
-        || is_search_noise_entry(entry, opts.path_prefix.as_deref())
+        || is_search_noise_entry(
+            entry,
+            opts.path_prefix.as_deref(),
+            opts.bypass_wiki_lifecycle_gate,
+        )
         || opts
             .path_prefix
             .as_ref()

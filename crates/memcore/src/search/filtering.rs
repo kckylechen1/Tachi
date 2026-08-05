@@ -126,8 +126,18 @@ fn is_openclaw_low_signal_entry(entry: &MemoryEntry) -> bool {
         || entry.topic.trim().is_empty() && entry.path.starts_with("/openclaw/")
 }
 
-pub(super) fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
+/// `bypass_wiki_lifecycle_gate` mirrors [`super::SearchOptions::bypass_wiki_lifecycle_gate`]
+/// — see its doc comment for why the Wiki search leg is the sole intended
+/// `true` caller (it already applies its own `requested_lifecycle`-scoped
+/// gate downstream, including the explicit drafts-browsing escape hatch).
+pub(super) fn is_search_noise_entry(
+    entry: &MemoryEntry,
+    path_prefix: Option<&str>,
+    bypass_wiki_lifecycle_gate: bool,
+) -> bool {
     crate::namespace::is_namespace_search_noise(entry, path_prefix)
+        || (!bypass_wiki_lifecycle_gate
+            && crate::namespace::is_non_default_retrievable_wiki_row(entry))
 }
 
 /// Path-scoped quality multipliers (tachi#708 Phase D / ops-audit same-store).

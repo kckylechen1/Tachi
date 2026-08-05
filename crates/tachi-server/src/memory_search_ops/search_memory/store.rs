@@ -81,10 +81,12 @@ fn search_store(
     params: &SearchMemoryParams,
     record_access: bool,
     recall_config: Option<&RecallConfig>,
+    bypass_wiki_lifecycle_gate: bool,
 ) -> Result<Vec<memcore::SearchResult>, String> {
     let mut opts =
         params.to_search_options_with_recall_config(store.vec_available, recall_config.cloned());
     opts.record_access = record_access;
+    opts.bypass_wiki_lifecycle_gate = bypass_wiki_lifecycle_gate;
     let results = store
         .search(&params.query, Some(opts))
         .map_err(|e| e.to_string())?;
@@ -117,10 +119,12 @@ fn search_store_recording(
     params: &SearchMemoryParams,
     record_access: bool,
     recall_config: Option<&RecallConfig>,
+    bypass_wiki_lifecycle_gate: bool,
 ) -> Result<(Vec<memcore::SearchResult>, memcore::SearchPhaseReceipt), String> {
     let mut opts =
         params.to_search_options_with_recall_config(store.vec_available, recall_config.cloned());
     opts.record_access = record_access;
+    opts.bypass_wiki_lifecycle_gate = bypass_wiki_lifecycle_gate;
     let (results, receipt) = store
         .search_with_receipt(&params.query, Some(opts))
         .map_err(|e| e.to_string())?;
@@ -137,14 +141,21 @@ pub(super) fn with_named_project_search(
     params: &SearchMemoryParams,
     record_access: bool,
     recall_config: Option<&RecallConfig>,
+    bypass_wiki_lifecycle_gate: bool,
     context: impl Into<String>,
 ) -> Result<Vec<memcore::SearchResult>, String> {
     let context = context.into();
     let effective_record_access =
         record_access && named_project_is_bound_project(server, project_name);
     let action = |store: &mut MemoryStore| {
-        search_store(store, params, effective_record_access, recall_config)
-            .map_err(|e| format!("{context}: {e}"))
+        search_store(
+            store,
+            params,
+            effective_record_access,
+            recall_config,
+            bypass_wiki_lifecycle_gate,
+        )
+        .map_err(|e| format!("{context}: {e}"))
     };
     if effective_record_access {
         server.with_named_project_store(project_name, action)
@@ -183,12 +194,19 @@ pub(super) fn with_project_search(
     params: &SearchMemoryParams,
     record_access: bool,
     recall_config: Option<&RecallConfig>,
+    bypass_wiki_lifecycle_gate: bool,
     context: impl Into<String>,
 ) -> Result<Vec<memcore::SearchResult>, String> {
     let context = context.into();
     let action = |store: &mut MemoryStore| {
-        search_store(store, params, record_access, recall_config)
-            .map_err(|e| format!("{context}: {e}"))
+        search_store(
+            store,
+            params,
+            record_access,
+            recall_config,
+            bypass_wiki_lifecycle_gate,
+        )
+        .map_err(|e| format!("{context}: {e}"))
     };
     if record_access {
         server.with_project_store(action)
@@ -202,12 +220,19 @@ pub(super) fn with_global_search(
     params: &SearchMemoryParams,
     record_access: bool,
     recall_config: Option<&RecallConfig>,
+    bypass_wiki_lifecycle_gate: bool,
     context: impl Into<String>,
 ) -> Result<Vec<memcore::SearchResult>, String> {
     let context = context.into();
     let action = |store: &mut MemoryStore| {
-        search_store(store, params, record_access, recall_config)
-            .map_err(|e| format!("{context}: {e}"))
+        search_store(
+            store,
+            params,
+            record_access,
+            recall_config,
+            bypass_wiki_lifecycle_gate,
+        )
+        .map_err(|e| format!("{context}: {e}"))
     };
     if record_access {
         server.with_global_store(action)
@@ -231,6 +256,7 @@ pub(super) fn with_global_search_recording(
     params: &SearchMemoryParams,
     record_access: bool,
     recall_config: Option<&RecallConfig>,
+    bypass_wiki_lifecycle_gate: bool,
     context: impl Into<String>,
 ) -> Result<
     (
@@ -242,8 +268,14 @@ pub(super) fn with_global_search_recording(
 > {
     let context = context.into();
     let action = |store: &mut MemoryStore| {
-        search_store_recording(store, params, record_access, recall_config)
-            .map_err(|e| format!("{context}: {e}"))
+        search_store_recording(
+            store,
+            params,
+            record_access,
+            recall_config,
+            bypass_wiki_lifecycle_gate,
+        )
+        .map_err(|e| format!("{context}: {e}"))
     };
     if record_access {
         let (results, receipt) = server.with_global_store(action)?;

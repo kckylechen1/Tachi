@@ -16,3 +16,4 @@ mod read_surface_leaks;
 mod save_policy;
 mod search_facade;
 mod store_project;
+mod wiki_lifecycle_listing;

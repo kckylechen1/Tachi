@@ -163,12 +163,19 @@ pub(crate) async fn search_wiki_store_candidates(
             StoreRef::LegacyGlobal => DbScope::Global,
             StoreRef::BoundProject | StoreRef::NamedProject { .. } => DbScope::Project,
         };
+        // bypass_wiki_lifecycle_gate=true: the Wiki search leg applies its own
+        // `requested_lifecycle`-scoped gate downstream
+        // (`wiki_entry_matches_lifecycle_scope` in `search_wiki_rows_for_plan`),
+        // including the explicit drafts-browsing escape hatch canon doc §7
+        // requires. Without the bypass, the shared lifecycle backstop would
+        // drop a non-Active row here before that downstream gate ever saw it.
         let results = match store {
             StoreRef::BoundProject => with_project_search(
                 server,
                 &params,
                 record_access,
                 None,
+                true,
                 "Wiki search failed in bound project DB",
             )?,
             StoreRef::NamedProject { project } => with_named_project_search(
@@ -178,6 +185,7 @@ pub(crate) async fn search_wiki_store_candidates(
                 &params,
                 record_access,
                 None,
+                true,
                 format!("Wiki search failed in named project DB '{project}'"),
             )?,
             StoreRef::LegacyGlobal => with_global_search(
@@ -185,6 +193,7 @@ pub(crate) async fn search_wiki_store_candidates(
                 &params,
                 record_access,
                 None,
+                true,
                 "Wiki search failed in legacy global DB",
             )?,
         };
@@ -433,6 +442,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                 &params,
                 record_access,
                 recall_config,
+                false,
                 format!("Search failed in project DB '{project_name}'"),
             )?;
             combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -443,6 +453,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                     &params,
                     record_access,
                     recall_config,
+                    false,
                     "Search failed in global DB",
                 )?;
                 combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
@@ -466,6 +477,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
             &params,
             record_access,
             recall_config,
+            false,
             "Search failed in default wiki project DB",
         ) {
             Ok(wiki_results) => {
@@ -504,6 +516,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                             &params,
                             record_access,
                             recall_config,
+                            false,
                             "Search failed in workspace project DB",
                         )?;
                         combined_results
@@ -518,6 +531,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                             &params,
                             record_access,
                             recall_config,
+                            false,
                             format!("Search failed in named project DB '{project_name}'"),
                         )?;
                         combined_results
@@ -529,6 +543,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                         &params,
                         record_access,
                         recall_config,
+                        false,
                         "Search failed in workspace project DB",
                     )?;
                     combined_results
@@ -540,6 +555,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                     &params,
                     record_access,
                     recall_config,
+                    false,
                     "Search failed in workspace project DB",
                 )?;
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -567,6 +583,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                 &params,
                 record_access,
                 recall_config,
+                false,
                 "Search failed in global DB",
             )?;
             combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
@@ -583,6 +600,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                         &params,
                         record_access,
                         recall_config,
+                        false,
                         format!("Search failed in inferred project DB '{project_name}'"),
                     ) {
                         Ok(project_results) => {
@@ -602,6 +620,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
                     &params,
                     record_access,
                     recall_config,
+                    false,
                     "Search failed in project DB",
                 )?;
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -881,6 +900,7 @@ mod receipt_assembly_tests {
             &params,
             false, // record_access=false → read pool path (the measurable one)
             None,
+            false,
             "global search receipt probe",
         )
         .expect("recording search");

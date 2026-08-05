@@ -82,6 +82,30 @@ pub struct SearchOptions {
     /// Default `false` reproduces the pre-#1569 query text byte for byte: the
     /// gate then fires on `path_prefix` alone, exactly as before.
     pub wiki_corpus_store: bool,
+    /// tachi#1561 residual: when `true`, suppresses the Wiki-lifecycle
+    /// backstop ([`crate::namespace::is_non_default_retrievable_wiki_row`],
+    /// applied at the same call sites as [`Self::wiki_corpus_store`]'s
+    /// namespace-noise backstop) that otherwise drops a `/wiki` row whose
+    /// derived lifecycle is not default-retrievable (drafts, superseded,
+    /// etc.).
+    ///
+    /// Set by the Wiki search leg (`tachi-server`'s
+    /// `search_wiki_store_candidates`), which already applies its own
+    /// `requested_lifecycle`-scoped gate downstream
+    /// (`wiki_entry_matches_lifecycle_scope`) — including the explicit
+    /// `lifecycle=pending_review` / `lifecycle=all` escape hatches canon doc
+    /// §7 requires for browsing drafts. Without this bypass, the backstop
+    /// would drop a non-Active row before that downstream gate ever saw it,
+    /// making the explicit-scope escape hatch unreachable. Default `false`:
+    /// every ordinary caller (`search_memory`, `list_memories`,
+    /// `tachi_search`'s Memory leg) gets the new default-retrievable-only
+    /// behavior; the Wiki leg is the sole intended `true` caller.
+    ///
+    /// Invariant (tachi#1561 review round): `true` ONLY for a caller that
+    /// re-filters on `WikiLifecycleV1` downstream of this options struct — a
+    /// new `true` caller that does not is a lifecycle-gate bypass bug, not a
+    /// valid use of this escape hatch.
+    pub bypass_wiki_lifecycle_gate: bool,
     /// Pre-computed query embedding; if None, skip vector channel.
     pub query_vec: Option<Vec<f32>>,
     /// Whether the sqlite-vec extension is available for vector search.
@@ -137,6 +161,7 @@ impl Default for SearchOptions {
             domain: None,
             surface: None,
             wiki_corpus_store: false,
+            bypass_wiki_lifecycle_gate: false,
             query_vec: None,
             vec_available: false,
             record_access: true,
