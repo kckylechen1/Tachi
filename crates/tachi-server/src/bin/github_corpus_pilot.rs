@@ -180,7 +180,9 @@ impl TachiReasoningModelClient {
         .map_err(|_| "serialize model request".to_string())
     }
 
-    fn parse_draft(raw: &str) -> Result<tachi_github_runtime::github_corpus_ops::adapt::CaseDraft, String> {
+    fn parse_draft(
+        raw: &str,
+    ) -> Result<tachi_github_runtime::github_corpus_ops::adapt::CaseDraft, String> {
         let payload = tachi_llm::LlmClient::extract_json_payload(raw)
             .map_err(|_| "model response did not contain a JSON object".to_string())?;
         let draft: ModelDraftV1 = serde_json::from_str(payload)
