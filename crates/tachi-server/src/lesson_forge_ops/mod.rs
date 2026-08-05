@@ -1,4 +1,5 @@
-#[allow(unused_imports)] // compatibility shim for old crate::lesson_forge_ops::* paths
+// Compatibility shim for old crate::lesson_forge_ops::* paths.
+#[allow(unused_imports)]
 pub(crate) use tachi_lesson_forge::{
     discrimination, forge, pilot, privacy, progress, report, runner, selection, source,
 };

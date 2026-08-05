@@ -44,9 +44,9 @@ pub mod privacy;
 pub mod progress;
 pub mod report;
 pub mod runner;
+mod secret_scan;
 pub mod selection;
 pub mod source;
-mod secret_scan;
 // Keep the implementation module private; the domain tag is re-exported for
 // tachi-server's recall containment shim.
 mod storage;

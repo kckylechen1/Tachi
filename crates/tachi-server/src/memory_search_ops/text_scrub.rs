@@ -56,5 +56,4 @@ mod tests {
         assert!(count > 0);
         assert!(output.contains(REDACTED_SECRET));
     }
-
 }

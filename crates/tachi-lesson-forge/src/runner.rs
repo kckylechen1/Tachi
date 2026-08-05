@@ -1013,9 +1013,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::pilot::{
-        freeze_pilot_manifest, PilotRowKindV1, PilotSourceRouteV1, PilotStratumV1,
-    };
+    use crate::pilot::{freeze_pilot_manifest, PilotRowKindV1, PilotSourceRouteV1, PilotStratumV1};
     use tachi_params::LessonCandidateKindV1;
 
     fn receipt(role: &str, provider: &str, model: &str) -> PilotEngineReceiptV1 {

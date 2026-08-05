@@ -478,8 +478,8 @@ mod tests {
         let mut rows = fifty_row_manifest().rows().to_vec();
         rows[0].source_id = "shared-id".to_string();
         rows[25].source_id = "shared-id".to_string();
-        let manifest = crate::pilot::freeze_pilot_manifest(rows)
-            .expect("cross-route ids may overlap");
+        let manifest =
+            crate::pilot::freeze_pilot_manifest(rows).expect("cross-route ids may overlap");
         let cases: Vec<CaseReport> = manifest
             .rows()
             .iter()
@@ -509,8 +509,8 @@ mod tests {
         let mut rows = fifty_row_manifest().rows().to_vec();
         rows[0].source_id = "shared-id".to_string();
         rows[25].source_id = "shared-id".to_string();
-        let manifest = crate::pilot::freeze_pilot_manifest(rows)
-            .expect("cross-route ids may overlap");
+        let manifest =
+            crate::pilot::freeze_pilot_manifest(rows).expect("cross-route ids may overlap");
         let mut cases: Vec<CaseReport> = manifest
             .rows()
             .iter()
@@ -652,9 +652,7 @@ mod tests {
         // "candidate as treated" (passes) is the reference-hit count itself
         // — a break in criterion-1's own logic cannot hide behind a
         // different criterion's failure here.
-        use crate::discrimination::{
-            ArmRunSet, CaseInput, ColdRunScore, FailReason,
-        };
+        use crate::discrimination::{ArmRunSet, CaseInput, ColdRunScore, FailReason};
 
         fn hit(matches: bool) -> ColdRunScore {
             ColdRunScore {
