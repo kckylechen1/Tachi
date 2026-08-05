@@ -38,3 +38,10 @@ tempfile = "3"
 name = "portable_contract"
 path = "tests/portable_contract.rs"
 required-features = ["portable-contract-test"]
+
+# tachi#1348-A: exact-dedupe plan/apply/restore goldens, gated the same way
+# and for the same reason as `portable_contract` above.
+[[test]]
+name = "exact_dedupe_contract"
+path = "tests/exact_dedupe_contract.rs"
+required-features = ["portable-contract-test"]
