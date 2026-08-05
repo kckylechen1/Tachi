@@ -91,7 +91,7 @@
       "implementation_status": "current_plus_target",
       "current_bindings": [
         "tachi_memory.search",
-        "tachi_memory.recall_simulate"
+        "tachi_tune.recall_simulate"
       ],
       "target_terms": [
         "recall_diagnostics"

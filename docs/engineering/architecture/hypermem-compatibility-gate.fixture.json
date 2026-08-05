@@ -5,7 +5,7 @@
   "current_kernel_bindings": [
     "tachi_memory.get",
     "tachi_memory.search",
-    "tachi_memory.recall_simulate"
+    "tachi_tune.recall_simulate"
   ],
   "target_kernel_exports": [
     "recall_diagnostics",

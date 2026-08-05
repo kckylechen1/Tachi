@@ -125,7 +125,7 @@ Promotion is a reviewed proposal, never an automatic write.
 3. Write an eval report with baseline versus candidate metrics.
 4. Record a compact `/eval` row or route-policy proposal referencing the report.
 5. Human review approves or rejects the proposal.
-6. `tachi_task(action="apply_proposals", confirm=true)` may apply only the
+6. `tachi_tune(action="route_apply", confirm=true)` may apply only the
    reviewed route-policy/profile-card delta.
 7. Keep rollback trivial: disable the proposal or remove the overlay; do not
    delete the baseline DispatchProfile logic.

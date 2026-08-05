@@ -574,7 +574,7 @@ carry the workflow.
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |
 | dispatch backend status/cancel | `tachi_task(action="status" \| "cancel", dispatch_id=...)` | starter implemented |
 | Poke smoke suite | `tachi poke run --suite smoke` | starter implemented |
-| Card evolution proposals | `tachi_task(action="proposals" \| "apply_proposals")` | implemented |
+| Card evolution proposals | `tachi_tune(action="route_proposals" \| "route_apply")` (moved off `tachi_task` in #1426) | implemented |
 
 The first native CLI convenience layer is read-only (`tachi card list` and
 `tachi card show <id>`) and calls the same task facade. Future convenience
@@ -737,7 +737,7 @@ Status as of 2026-06-27:
 - Poke probes are covered by
   `poke_smoke_suite_writes_report_and_probe_artifacts`.
 - Card evolution is review-required through
-  `tachi_task(action="proposals" | "review_proposal" | "apply_proposals")`
+  `tachi_tune(action="route_proposals" | "route_review" | "route_apply")`
   and persists approved changes as `dispatch_profile_card_overlays`.
 - Skill-source intake is read-only and review-gated through
   `tachi skill-surface sources --json` and
