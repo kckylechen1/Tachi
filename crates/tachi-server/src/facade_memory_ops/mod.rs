@@ -256,16 +256,6 @@ pub(crate) async fn handle_tachi_memory(
         "alerts" => readiness_ops::handle_memory_alerts(server, &params).await,
         "ask" => readiness_ops::handle_memory_ask(server, &params).await,
         "consolidate" => consolidate_ops::handle_memory_consolidate(server, &params).await,
-        "recall_simulate" => {
-            crate::tune_ops::handle_memory_recall_simulate(server, &params).await
-        }
-        "recall_proposals" => {
-            crate::tune_ops::handle_recall_config_proposals(server, &params).await
-        }
-        "review_recall_proposal" => {
-            crate::tune_ops::handle_recall_config_review(server, &params)
-        }
-        "apply_recall_proposals" => crate::tune_ops::handle_recall_config_apply(server, &params),
         "pattern_feedback" => {
             if let Some(body) =
                 crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)
@@ -442,8 +432,20 @@ pub(crate) async fn handle_tachi_memory(
             )
             .await
         }
+        "recall_simulate" => Err(
+            "Invalid tachi_memory action 'recall_simulate'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_simulate').".to_string()
+        ),
+        "recall_proposals" => Err(
+            "Invalid tachi_memory action 'recall_proposals'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_proposals').".to_string()
+        ),
+        "review_recall_proposal" => Err(
+            "Invalid tachi_memory action 'review_recall_proposal'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_review').".to_string()
+        ),
+        "apply_recall_proposals" => Err(
+            "Invalid tachi_memory action 'apply_recall_proposals'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_apply').".to_string()
+        ),
         _ => Err(format!(
-            "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'pattern_feedback', 'progress', 'readiness', 'claim', 'release', 'delete', 'gc', 'doctor_scan', 'ingest', 'ingest_source', 'sticky_leave', or 'sticky_check'.",
+            "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'pattern_feedback', 'progress', 'readiness', 'claim', 'release', 'delete', 'gc', 'doctor_scan', 'ingest', 'ingest_source', 'sticky_leave', or 'sticky_check'. Recall tuning lives on tachi_tune.",
             params.action
         )),
     }
@@ -452,7 +454,7 @@ pub(crate) async fn handle_tachi_memory(
 fn should_forward_facade_read(action: &str) -> bool {
     matches!(
         action,
-        "search" | "get" | "briefing" | "alerts" | "ask" | "recall_simulate" | "readiness"
+        "search" | "get" | "briefing" | "alerts" | "ask" | "readiness"
     )
 }
 
@@ -506,7 +508,6 @@ mod tests {
             "briefing",
             "alerts",
             "ask",
-            "recall_simulate",
             "readiness",
         ] {
             assert!(
