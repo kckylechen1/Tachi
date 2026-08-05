@@ -237,10 +237,30 @@ pub(super) async fn run_cli_command(
                 backup_dir,
                 plan,
                 repair_sibling_damage,
+                adopt_legacy,
             } => {
-                // Both modes take the same flag set; the flag-combination
+                // All three modes take the same flag set; the flag-combination
                 // policy lives with the migration code, not in this wiring.
-                let report = if repair_sibling_damage {
+                // The one exception is mode-vs-mode exclusion, which no single
+                // mode's own entry point can see.
+                if adopt_legacy && repair_sibling_damage {
+                    return Err(std::io::Error::other(
+                        "--adopt-legacy and --repair-sibling-damage are separate confirmed modes \
+                         and cannot be combined",
+                    )
+                    .into());
+                }
+                let report = if adopt_legacy {
+                    super::wiki_corpus::run_wiki_corpus_legacy_adoption_command(
+                        apply,
+                        confirm,
+                        backup_dir,
+                        plan,
+                        db_path,
+                        project_db_path.map(PathBuf::as_path),
+                        app_home,
+                    )
+                } else if repair_sibling_damage {
                     super::wiki_corpus::run_wiki_corpus_sibling_repair_command(
                         apply,
                         confirm,
@@ -262,8 +282,22 @@ pub(super) async fn run_cli_command(
                     )
                 }
                 .map_err(std::io::Error::other)?;
+                // A legacy adoption that created a store and then failed keeps
+                // its receipt -- that is the whole point of recording the
+                // failure instead of returning `Err` -- but it must not exit 0.
+                // Print first, then fail: the receipt is the evidence.
+                let had_failures = report.legacy_adoption_had_failures();
                 let report = serde_json::to_value(report).map_err(std::io::Error::other)?;
-                print_pretty_json(&report)
+                print_pretty_json(&report)?;
+                if had_failures {
+                    return Err(std::io::Error::other(
+                        "legacy adoption did not complete cleanly; see \
+                         `legacy_adoption.errors` and `legacy_adoption.remediation` in the \
+                         printed receipt",
+                    )
+                    .into());
+                }
+                Ok(())
             }
         },
         Commands::Remember {
