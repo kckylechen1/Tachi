@@ -14,12 +14,28 @@ use serde_json::json;
 /// Scans `s` (the text immediately after an opening `(` that is already
 /// consumed) for the matching close paren, tracking nesting depth so a paren
 /// inside the call's own arguments (e.g. a task string mentioning `(P1)`)
-/// doesn't truncate the example early. Returns the byte offset of the
-/// matching `)`.
+/// doesn't truncate the example early. Also tracks quote state for both `'`
+/// and `"` (the two quote styles the extractor below recognizes for
+/// `action='start'` / `action="start"`): a `)` inside an open quote (e.g.
+/// `task='review ) edge'`) does not count toward depth, since it isn't
+/// closing the call — it's part of the string literal. Returns the byte
+/// offset of the matching `)`, or `None` if depth never reaches zero (an
+/// unclosed paren) OR a quote opened inside the call is never closed before
+/// EOF (an unclosed quote is just as malformed as an unclosed paren, and
+/// must not be silently swallowed as "the rest of the doc isn't part of the
+/// example").
 fn find_balanced_close(s: &str) -> Option<usize> {
     let mut depth: i32 = 1;
+    let mut in_quote: Option<char> = None;
     for (i, c) in s.char_indices() {
+        if let Some(q) = in_quote {
+            if c == q {
+                in_quote = None;
+            }
+            continue;
+        }
         match c {
+            '\'' | '"' => in_quote = Some(c),
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
@@ -137,4 +153,34 @@ fn ux_matrix_names_only_the_corrected_staff_contract() {
     let matrix = crate::task_lifecycle::release_ux::handle_task_ux_matrix(&params)
         .expect("render ux matrix");
     assert_guidance_contract("handle_task_ux_matrix", &matrix);
+}
+
+/// #1319 cross-vendor review repro: a `)` inside a quoted `task=` value (a
+/// review comment quoting "review ) edge") must not be mistaken for the
+/// call's closing paren — that would truncate the example before
+/// `staffing_reason` is ever reached, silently dropping the field the
+/// contract check exists to catch.
+#[test]
+fn staff_start_example_survives_paren_inside_quoted_task_value() {
+    let guidance = "Call tachi_staff(action='start', task='review ) edge', \
+                     staffing_reason='bounded_implementation') to begin.";
+    let examples = staff_start_examples(guidance);
+    assert_eq!(examples.len(), 1, "expected exactly one extracted example");
+    assert_eq!(
+        examples[0],
+        "tachi_staff(action='start', task='review ) edge', \
+         staffing_reason='bounded_implementation')",
+        "extraction must reach the call's real closing paren (not the one \
+         inside the quoted task value) and must include staffing_reason"
+    );
+}
+
+/// An unclosed quote inside `tachi_staff(...)` is exactly as malformed as an
+/// unclosed paren — both must hard-fail instead of silently treating the
+/// rest of the document as part of (or not part of) the example.
+#[test]
+#[should_panic(expected = "unclosed tachi_staff(...) call")]
+fn staff_start_examples_hard_fails_on_unclosed_quote() {
+    let guidance = "Call tachi_staff(action='start', task='never closed) to begin.";
+    let _ = staff_start_examples(guidance);
 }
