@@ -59,7 +59,7 @@ use chrono::{SecondsFormat, Utc};
 
 use crate::{
     db::{self, OutboxEventRow, OutboxState},
-    error::MemoryError,
+    error::{MemoryError, OutboxOutcomeRefusal},
     MemoryStore,
 };
 
@@ -139,6 +139,158 @@ pub enum OutboxClaimKind {
 pub struct ClaimedOutboxEvent {
     pub event: OutboxEventRow,
     pub claim: OutboxClaimKind,
+}
+
+/// What a caller reports back about an event it was handed.
+///
+/// Three outcomes, matching the three edges out of `in_flight` in the frozen
+/// A1 matrix. There is deliberately no "retry" or "failed, try again" outcome:
+/// a push that never got an answer is not an outcome at all, and the event
+/// simply stays `in_flight` until its lease goes stale and a later drain takes
+/// it over. Manufacturing an outcome for a silent remote is precisely the
+/// failure #1630 forbids ("a silent remote outage cannot be reported as a
+/// successful synchronized capture").
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboxOutcome {
+    /// The consumer accepted it.
+    Acknowledged,
+    /// The consumer refused it. Terminal, and the local event survives with
+    /// the class recorded — a refusal never erases the local source event.
+    Rejected { error_class: String },
+    /// The consumer reports a divergent state for this object. Terminal until
+    /// an explicit typed decision; never auto-resolved.
+    Conflicted { error_class: String },
+}
+
+impl OutboxOutcome {
+    /// The state this outcome moves an `in_flight` event to.
+    pub fn target_state(&self) -> OutboxState {
+        match self {
+            Self::Acknowledged => OutboxState::Acknowledged,
+            Self::Rejected { .. } => OutboxState::Rejected,
+            Self::Conflicted { .. } => OutboxState::Conflicted,
+        }
+    }
+
+    /// The class stored in `last_error_class`, or `None` for an acceptance.
+    pub fn error_class(&self) -> Option<&str> {
+        match self {
+            Self::Acknowledged => None,
+            Self::Rejected { error_class } | Self::Conflicted { error_class } => Some(error_class),
+        }
+    }
+
+    fn validate(&self) -> Result<(), MemoryError> {
+        match self.error_class() {
+            Some(class) => db::refuse_invalid_class("outcome error_class", class),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The caller's supporting material for one reported outcome.
+///
+/// # Not durable, and named so it cannot be mistaken for durable
+///
+/// None of this is stored. The A1 table has twelve pinned columns and no
+/// evidence column, and adding one is a v30 migration this leaf does not have
+/// authority to mint. What survives into the row is the outcome's
+/// `error_class`, because `last_error_class` exists. Everything here is
+/// validated, bound into the returned receipt, and then gone — so a caller
+/// that needs it later must log the receipt.
+///
+/// It is validated rather than waved through because an unvalidated string
+/// field on a synchronization seam becomes a content channel: `reported_by` is
+/// a classification token under the same bound as every other class column
+/// (`db::MAX_OUTBOX_CLASS_BYTES`, no control characters), and a peer digest
+/// must be a canonical lowercase-hex SHA-256 or it is not a digest.
+///
+/// `peer_revision`/`peer_payload_digest` are what make a conflict report
+/// actionable: paired against the event's own `source_revision` and
+/// `payload_digest`, they say *how* the two sides diverge, which is the input
+/// a human or policy needs to choose a resolution.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutboxOutcomeEvidence {
+    /// Who reported the outcome — a token (a peer name, an adapter id), not a
+    /// message.
+    pub reported_by: String,
+    /// The revision the reporter says it holds for this object, if it said.
+    pub peer_revision: Option<i64>,
+    /// The payload digest the reporter says it holds, if it said. Canonical
+    /// lowercase-hex SHA-256, the same shape the event carries.
+    pub peer_payload_digest: Option<String>,
+}
+
+impl OutboxOutcomeEvidence {
+    /// Evidence that names only the reporter.
+    pub fn reported_by(reporter: &str) -> Self {
+        Self {
+            reported_by: reporter.to_string(),
+            peer_revision: None,
+            peer_payload_digest: None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), MemoryError> {
+        db::refuse_invalid_class("evidence reported_by", &self.reported_by)?;
+        match self.peer_payload_digest.as_deref() {
+            Some(digest) => db::refuse_non_canonical_digest(digest),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Whether a call performed the change or found it already recorded.
+///
+/// This is the field that makes idempotence *observable*. A protocol whose
+/// duplicate delivery silently returns the same success as the first delivery
+/// cannot tell a caller that its retry was a retry; one that errors on the
+/// duplicate forces every caller to treat a redelivery as a failure. So both
+/// are receipts, and they are different receipts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboxOutcomeApplication {
+    /// This call moved the event; `prior_state` was `in_flight`.
+    Applied,
+    /// The event already carried exactly this outcome. **Nothing was
+    /// written**: the row's `state_changed_at` still names the first
+    /// application, not this call.
+    AlreadyApplied,
+}
+
+/// Proof of what one reported outcome did to one event.
+///
+/// The packet's five bindings, and where each lives: `event.event_id` (which
+/// event), [`Self::prior_state`] (the state observed before the call),
+/// `event.state` (the state after), `event.created_at`/`event.state_changed_at`
+/// (canonical timestamps, as stored), and `event.last_error_class` +
+/// [`Self::evidence`] (why). Everything but `prior_state`, `application` and
+/// `evidence` is read back from the destination after the write, so the
+/// receipt reports what SQLite holds rather than what the caller asked for —
+/// A1's `OutboxCommitReceipt` idiom.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutboxOutcomeReceipt {
+    /// The row as stored after the call.
+    pub event: OutboxEventRow,
+    /// The state this call observed before writing anything.
+    pub prior_state: OutboxState,
+    /// Whether this call applied the outcome or found it already recorded.
+    pub application: OutboxOutcomeApplication,
+    /// The evidence the caller supplied. Echoed, never stored.
+    pub evidence: OutboxOutcomeEvidence,
+}
+
+fn outcome_refused(
+    reason: OutboxOutcomeRefusal,
+    event_id: &str,
+    state: OutboxState,
+) -> MemoryError {
+    MemoryError::OutboxOutcomeRefused {
+        reason,
+        event_id: event_id.to_string(),
+        state: state.as_str().to_string(),
+    }
 }
 
 /// Mint the staleness cutoff in the **same canonical shape** every stamp in
@@ -268,6 +420,116 @@ impl MemoryStore {
             rows.into_iter()
                 .map(|row| claimed_event(row, cutoff.as_deref()))
                 .collect()
+        })
+    }
+
+    /// Record what a consumer reported about one event it was handed, and
+    /// return a typed receipt.
+    ///
+    /// # The five cases, by the state the event is actually in
+    ///
+    /// * `in_flight` — the ordinary path. The outcome is applied through the
+    ///   frozen A1 machine, which enforces the edge's legality and the
+    ///   error-class rule (failure states require a class, acceptance refuses
+    ///   one). Receipt: [`OutboxOutcomeApplication::Applied`].
+    /// * already carrying **this same outcome and class** — an idempotent
+    ///   no-op. Nothing is written, no stamp moves, and the receipt says
+    ///   [`OutboxOutcomeApplication::AlreadyApplied`] so a caller can tell its
+    ///   retry was a retry. This is the duplicate-acknowledgement case: a
+    ///   redelivery of an ack is normal traffic, not an error.
+    /// * already carrying a **different** terminal outcome (or the same
+    ///   outcome with a different class) —
+    ///   [`OutboxOutcomeRefusal::OutcomeAlreadyDiffers`]. The recorded outcome
+    ///   stands. Overwriting it with whichever report arrived last is exactly
+    ///   the last-write-wins behaviour #1630 forbids for governed heads.
+    /// * `pending` — [`OutboxOutcomeRefusal::NeverClaimed`]. Nobody was handed
+    ///   this event, so nobody can report on it. Refusing loudly here is what
+    ///   turns a mis-addressed or replayed message into a visible protocol
+    ///   violation instead of a state jump that skips `in_flight`.
+    /// * `quarantined` — [`OutboxOutcomeRefusal::Withdrawn`]. The event was
+    ///   withdrawn for operator attention; a late acknowledgement does not get
+    ///   to un-withdraw it.
+    ///
+    /// An unknown `event_id` is [`MemoryError::NotFound`]. Every refusal
+    /// writes nothing.
+    ///
+    /// # What it never touches
+    ///
+    /// The `memories` row. An outcome is information about the event, not a
+    /// new mutation of the object — no reported outcome, including a conflict,
+    /// rewrites local memory to match a peer.
+    pub fn apply_outbox_outcome(
+        &mut self,
+        event_id: &str,
+        outcome: &OutboxOutcome,
+        evidence: &OutboxOutcomeEvidence,
+    ) -> Result<OutboxOutcomeReceipt, MemoryError> {
+        // Validate before opening a transaction: a malformed report must never
+        // take a write lock (the ordering `commit_with_outbox_event` uses for
+        // path validation).
+        outcome.validate()?;
+        evidence.validate()?;
+        let db_label = self.db_label.clone();
+        db::retry_memory_locked("apply_outbox_outcome", &db_label, || {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current = db::read_outbox_event(&tx, event_id)?.ok_or_else(|| {
+                MemoryError::NotFound(format!(
+                    "outbox event '{event_id}' does not exist; an outcome cannot be reported for \
+                     an event this store never enqueued"
+                ))
+            })?;
+
+            let receipt = match current.state {
+                OutboxState::InFlight => {
+                    let event = db::transition_outbox_event_within_tx(
+                        &tx,
+                        event_id,
+                        outcome.target_state(),
+                        outcome.error_class(),
+                    )?;
+                    OutboxOutcomeReceipt {
+                        event,
+                        prior_state: OutboxState::InFlight,
+                        application: OutboxOutcomeApplication::Applied,
+                        evidence: evidence.clone(),
+                    }
+                }
+                OutboxState::Pending => {
+                    return Err(outcome_refused(
+                        OutboxOutcomeRefusal::NeverClaimed,
+                        event_id,
+                        OutboxState::Pending,
+                    ))
+                }
+                OutboxState::Quarantined => {
+                    return Err(outcome_refused(
+                        OutboxOutcomeRefusal::Withdrawn,
+                        event_id,
+                        OutboxState::Quarantined,
+                    ))
+                }
+                terminal => {
+                    let same_outcome = terminal == outcome.target_state()
+                        && current.last_error_class.as_deref() == outcome.error_class();
+                    if !same_outcome {
+                        return Err(outcome_refused(
+                            OutboxOutcomeRefusal::OutcomeAlreadyDiffers,
+                            event_id,
+                            terminal,
+                        ));
+                    }
+                    OutboxOutcomeReceipt {
+                        event: current,
+                        prior_state: terminal,
+                        application: OutboxOutcomeApplication::AlreadyApplied,
+                        evidence: evidence.clone(),
+                    }
+                }
+            };
+            tx.commit()?;
+            Ok(receipt)
         })
     }
 }
@@ -453,6 +715,315 @@ mod tests {
                 .expect("claim")
                 .is_empty(),
             "the renewed lease is no longer stale"
+        );
+    }
+
+    /// Claim everything drainable and return the batch.
+    fn drain(store: &mut MemoryStore) -> Vec<ClaimedOutboxEvent> {
+        store
+            .claim_outbox_events(&OutboxClaimRequest::first_claims_only(16))
+            .expect("claim")
+    }
+
+    fn evidence() -> OutboxOutcomeEvidence {
+        OutboxOutcomeEvidence::reported_by("peer_alpha")
+    }
+
+    /// The whole ordinary cycle, end to end: a committed mutation rests as
+    /// backlog, a drain hands it out, and a reported acceptance lands it.
+    #[test]
+    fn a_full_protocol_walk_runs_pending_to_claimed_to_acknowledged() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-walk", "evt-walk");
+
+        let claimed = drain(&mut store);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].event.state, OutboxState::InFlight);
+
+        let receipt = store
+            .apply_outbox_outcome("evt-walk", &OutboxOutcome::Acknowledged, &evidence())
+            .expect("acknowledge");
+        assert_eq!(receipt.prior_state, OutboxState::InFlight);
+        assert_eq!(receipt.event.state, OutboxState::Acknowledged);
+        assert_eq!(receipt.application, OutboxOutcomeApplication::Applied);
+        assert_eq!(receipt.event.last_error_class, None);
+        assert_eq!(receipt.evidence, evidence());
+        assert_eq!(receipt.event.created_at, claimed[0].event.created_at);
+        assert!(
+            receipt.event.state_changed_at >= claimed[0].event.state_changed_at,
+            "the stamp must not move backwards"
+        );
+        assert_eq!(
+            store.outbox_event("evt-walk").expect("read").unwrap(),
+            receipt.event,
+            "the receipt must equal what a later reader sees"
+        );
+        assert!(
+            drain(&mut store).is_empty(),
+            "an acknowledged event is not re-drainable"
+        );
+    }
+
+    /// A redelivered acknowledgement is normal traffic, not an error — and the
+    /// receipt says which delivery it was.
+    #[test]
+    fn a_duplicate_acknowledgement_is_an_idempotent_no_op_that_moves_no_stamp() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-dup-ack", "evt-dup-ack");
+        drain(&mut store);
+
+        let first = store
+            .apply_outbox_outcome("evt-dup-ack", &OutboxOutcome::Acknowledged, &evidence())
+            .expect("first acknowledgement");
+        let second = store
+            .apply_outbox_outcome(
+                "evt-dup-ack",
+                &OutboxOutcome::Acknowledged,
+                &OutboxOutcomeEvidence::reported_by("peer_beta"),
+            )
+            .expect("a duplicate acknowledgement must not be an error");
+
+        assert_eq!(first.application, OutboxOutcomeApplication::Applied);
+        assert_eq!(second.application, OutboxOutcomeApplication::AlreadyApplied);
+        assert_eq!(second.prior_state, OutboxState::Acknowledged);
+        assert_eq!(second.event.state, OutboxState::Acknowledged);
+        assert_eq!(
+            second.event, first.event,
+            "the no-op must not rewrite a single column, including the stamp"
+        );
+        assert_eq!(
+            second.evidence.reported_by, "peer_beta",
+            "the receipt echoes this call's evidence, not the first call's"
+        );
+    }
+
+    /// The same rule for a rejection: re-reporting it is a no-op, but changing
+    /// the story is refused rather than overwritten.
+    #[test]
+    fn an_outcome_that_differs_from_the_recorded_one_is_refused_not_overwritten() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-differs", "evt-differs");
+        drain(&mut store);
+        let rejected = store
+            .apply_outbox_outcome(
+                "evt-differs",
+                &OutboxOutcome::Rejected {
+                    error_class: "schema_refused".to_string(),
+                },
+                &evidence(),
+            )
+            .expect("rejection");
+        assert_eq!(
+            rejected.event.last_error_class.as_deref(),
+            Some("schema_refused")
+        );
+
+        let repeat = store
+            .apply_outbox_outcome(
+                "evt-differs",
+                &OutboxOutcome::Rejected {
+                    error_class: "schema_refused".to_string(),
+                },
+                &evidence(),
+            )
+            .expect("the identical rejection is idempotent");
+        assert_eq!(repeat.application, OutboxOutcomeApplication::AlreadyApplied);
+
+        for contradiction in [
+            OutboxOutcome::Acknowledged,
+            OutboxOutcome::Rejected {
+                error_class: "some_other_reason".to_string(),
+            },
+            OutboxOutcome::Conflicted {
+                error_class: "divergent_revision".to_string(),
+            },
+        ] {
+            let error = store
+                .apply_outbox_outcome("evt-differs", &contradiction, &evidence())
+                .expect_err("a contradicting outcome must be refused");
+            match &error {
+                MemoryError::OutboxOutcomeRefused {
+                    reason,
+                    event_id,
+                    state,
+                } => {
+                    assert_eq!(*reason, OutboxOutcomeRefusal::OutcomeAlreadyDiffers);
+                    assert_eq!(event_id, "evt-differs");
+                    assert_eq!(state, "rejected");
+                }
+                other => panic!("unexpected error variant: {other:?}"),
+            }
+        }
+        assert_eq!(
+            store.outbox_event("evt-differs").expect("read").unwrap(),
+            rejected.event,
+            "the first recorded outcome must survive every contradiction"
+        );
+    }
+
+    #[test]
+    fn an_outcome_for_an_unknown_event_is_not_found() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let error = store
+            .apply_outbox_outcome("evt-nobody", &OutboxOutcome::Acknowledged, &evidence())
+            .expect_err("an unknown event must be refused");
+        assert!(
+            matches!(error, MemoryError::NotFound(_)),
+            "unexpected error variant: {error:?}"
+        );
+    }
+
+    /// Nobody was handed this event, so nobody can report on it. The refusal is
+    /// its own reason rather than a generic illegal transition, because it
+    /// diagnoses the caller's loop rather than the state machine.
+    #[test]
+    fn an_outcome_for_a_never_claimed_event_is_refused_as_a_protocol_violation() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-unclaimed", "evt-unclaimed");
+
+        let error = store
+            .apply_outbox_outcome("evt-unclaimed", &OutboxOutcome::Acknowledged, &evidence())
+            .expect_err("an outcome for a never-claimed event must be refused");
+        match &error {
+            MemoryError::OutboxOutcomeRefused {
+                reason,
+                event_id,
+                state,
+            } => {
+                assert_eq!(*reason, OutboxOutcomeRefusal::NeverClaimed);
+                assert_eq!(event_id, "evt-unclaimed");
+                assert_eq!(state, "pending");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+        assert_eq!(
+            store
+                .outbox_event("evt-unclaimed")
+                .expect("read")
+                .unwrap()
+                .state,
+            OutboxState::Pending,
+            "the refusal must write nothing"
+        );
+    }
+
+    #[test]
+    fn an_outcome_for_a_quarantined_event_is_refused_as_withdrawn() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-held", "evt-held");
+        store
+            .transition_outbox_event("evt-held", OutboxState::Quarantined, Some("operator_hold"))
+            .expect("quarantine");
+
+        let error = store
+            .apply_outbox_outcome("evt-held", &OutboxOutcome::Acknowledged, &evidence())
+            .expect_err("a withdrawn event must not be un-withdrawn by a late acknowledgement");
+        match &error {
+            MemoryError::OutboxOutcomeRefused { reason, state, .. } => {
+                assert_eq!(*reason, OutboxOutcomeRefusal::Withdrawn);
+                assert_eq!(state, "quarantined");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    /// A refusal from a consumer never erases the local source event, and never
+    /// touches the local object.
+    #[test]
+    fn a_rejection_records_its_class_and_leaves_the_local_object_untouched() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-reject", "evt-reject");
+        let before = store.get("obj-reject").expect("get").expect("present");
+        drain(&mut store);
+
+        let receipt = store
+            .apply_outbox_outcome(
+                "evt-reject",
+                &OutboxOutcome::Rejected {
+                    error_class: "remote_refused".to_string(),
+                },
+                &OutboxOutcomeEvidence {
+                    reported_by: "peer_alpha".to_string(),
+                    peer_revision: Some(7),
+                    peer_payload_digest: None,
+                },
+            )
+            .expect("rejection");
+        assert_eq!(receipt.event.state, OutboxState::Rejected);
+        assert_eq!(
+            receipt.event.last_error_class.as_deref(),
+            Some("remote_refused")
+        );
+        assert_eq!(receipt.evidence.peer_revision, Some(7));
+
+        let after = store.get("obj-reject").expect("get").expect("present");
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(
+            outbox_payload_digest(&after).expect("digest"),
+            outbox_payload_digest(&before).expect("digest"),
+            "a rejection must not rewrite local memory"
+        );
+        assert_eq!(
+            store
+                .outbox_health()
+                .expect("health")
+                .last_error_class
+                .as_deref(),
+            Some("remote_refused")
+        );
+    }
+
+    /// The tokens a caller reports are a vocabulary, not a message channel —
+    /// the same rule the storage layer enforces, applied before any lock is
+    /// taken.
+    #[test]
+    fn reported_tokens_are_validated_as_tokens_not_free_text() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-tokens", "evt-tokens");
+        drain(&mut store);
+
+        let oversized = OutboxOutcome::Rejected {
+            error_class: "c".repeat(crate::db::MAX_OUTBOX_CLASS_BYTES + 1),
+        };
+        assert!(store
+            .apply_outbox_outcome("evt-tokens", &oversized, &evidence())
+            .is_err());
+        let multiline = OutboxOutcome::Rejected {
+            error_class: "remote said:\nstack trace follows".to_string(),
+        };
+        assert!(store
+            .apply_outbox_outcome("evt-tokens", &multiline, &evidence())
+            .is_err());
+        assert!(store
+            .apply_outbox_outcome(
+                "evt-tokens",
+                &OutboxOutcome::Acknowledged,
+                &OutboxOutcomeEvidence::reported_by("   ")
+            )
+            .is_err());
+        assert!(
+            store
+                .apply_outbox_outcome(
+                    "evt-tokens",
+                    &OutboxOutcome::Acknowledged,
+                    &OutboxOutcomeEvidence {
+                        reported_by: "peer_alpha".to_string(),
+                        peer_revision: None,
+                        peer_payload_digest: Some("not-a-digest".to_string()),
+                    }
+                )
+                .is_err(),
+            "a peer digest that is not a canonical SHA-256 is not a digest"
+        );
+
+        assert_eq!(
+            store
+                .outbox_event("evt-tokens")
+                .expect("read")
+                .unwrap()
+                .state,
+            OutboxState::InFlight,
+            "every validation refusal must leave the event exactly where it was"
         );
     }
 

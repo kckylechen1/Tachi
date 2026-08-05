@@ -206,7 +206,10 @@ pub use store::outbox::{outbox_payload_digest, OutboxCommitReceipt, OutboxEventM
 /// tachi#1644 outbox reconciliation protocol (#1630 A2). Ungated for the same
 /// reason A1 is: a host-owned sync loop drives this from a portable build,
 /// with no Tachi daemon in the picture.
-pub use store::outbox_protocol::{ClaimedOutboxEvent, OutboxClaimKind, OutboxClaimRequest};
+pub use store::outbox_protocol::{
+    ClaimedOutboxEvent, OutboxClaimKind, OutboxClaimRequest, OutboxOutcome,
+    OutboxOutcomeApplication, OutboxOutcomeEvidence, OutboxOutcomeReceipt,
+};
 /// tachi#1607 portable snapshot-import contract. Re-exported at the root so
 /// an external portable consumer reaches it exactly like [`MemoryEntry`],
 /// without importing the internal `store::` module layout.
