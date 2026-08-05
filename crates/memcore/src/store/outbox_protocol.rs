@@ -1453,6 +1453,255 @@ mod tests {
         assert_eq!(events, 2, "exactly one successor, however many replays");
     }
 
+    /// #1630's acceptance anchor, walked: the same `event_id` redelivered
+    /// through the whole cycle cannot double-apply. The refusal lands at the
+    /// insert (A1's primary key) — before any second memory write becomes
+    /// durable, not after.
+    #[test]
+    fn replaying_a_completed_event_id_is_refused_at_insert_with_no_second_memory_write() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-replay-cycle", "evt-replay-cycle");
+        drain(&mut store);
+        let acknowledged = store
+            .apply_outbox_outcome(
+                "evt-replay-cycle",
+                &OutboxOutcome::Acknowledged,
+                &evidence(),
+            )
+            .expect("acknowledge");
+
+        let before = store
+            .get("obj-replay-cycle")
+            .expect("get")
+            .expect("present");
+        let error = store
+            .commit_with_outbox_event(
+                &entry("obj-replay-cycle", "a different body arriving on replay"),
+                &meta("evt-replay-cycle"),
+            )
+            .expect_err("a completed event_id must be refused at insert");
+        assert!(
+            matches!(error, MemoryError::Duplicate(_)),
+            "unexpected error variant: {error:?}"
+        );
+
+        let after = store
+            .get("obj-replay-cycle")
+            .expect("get")
+            .expect("present");
+        assert_eq!(
+            after.revision, before.revision,
+            "the refused replay must not write memory a second time"
+        );
+        assert_eq!(
+            outbox_payload_digest(&after).expect("digest"),
+            outbox_payload_digest(&before).expect("digest")
+        );
+        assert_eq!(
+            store
+                .outbox_event("evt-replay-cycle")
+                .expect("read")
+                .unwrap(),
+            acknowledged.event,
+            "the recorded outcome must survive the replay untouched"
+        );
+
+        let redelivered = store
+            .apply_outbox_outcome(
+                "evt-replay-cycle",
+                &OutboxOutcome::Acknowledged,
+                &evidence(),
+            )
+            .expect("a redelivered acknowledgement is not an error");
+        assert_eq!(
+            redelivered.application,
+            OutboxOutcomeApplication::AlreadyApplied
+        );
+        assert!(
+            drain(&mut store).is_empty(),
+            "nothing is re-drainable after a replay"
+        );
+    }
+
+    /// The duplicate delivery a takeover deliberately creates: the new holder
+    /// acknowledges, then the presumed-dead original holder's acknowledgement
+    /// finally arrives. It must land as a no-op, not a second application.
+    #[test]
+    fn a_late_acknowledgement_after_a_takeover_applies_once() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-late", "evt-late");
+        drain(&mut store);
+        age_claim(&store, "evt-late", "2020-01-01T00:00:00.000Z");
+        let reclaimed = store
+            .claim_outbox_events(&OutboxClaimRequest::with_reclaim(
+                10,
+                Duration::from_secs(60),
+            ))
+            .expect("reclaim");
+        assert_eq!(reclaimed.len(), 1);
+
+        let by_new_holder = store
+            .apply_outbox_outcome(
+                "evt-late",
+                &OutboxOutcome::Acknowledged,
+                &OutboxOutcomeEvidence::reported_by("peer_beta"),
+            )
+            .expect("the new holder acknowledges");
+        let by_original_holder = store
+            .apply_outbox_outcome(
+                "evt-late",
+                &OutboxOutcome::Acknowledged,
+                &OutboxOutcomeEvidence::reported_by("peer_alpha"),
+            )
+            .expect("the late acknowledgement is not an error");
+
+        assert_eq!(by_new_holder.application, OutboxOutcomeApplication::Applied);
+        assert_eq!(
+            by_original_holder.application,
+            OutboxOutcomeApplication::AlreadyApplied
+        );
+        assert_eq!(by_original_holder.event, by_new_holder.event);
+    }
+
+    /// The six health fields through the whole protocol, one step at a time.
+    /// The derivation itself is pinned by `db::outbox`'s tests; what this
+    /// walks is that the protocol's own moves land where the read model says
+    /// they do.
+    #[test]
+    fn health_reflects_the_distribution_through_the_whole_protocol_walk() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let empty = store.outbox_health().expect("health");
+        assert_eq!(empty.remote_sync_status, db::RemoteSyncStatus::Idle);
+        assert_eq!(empty.local_store_status, db::LocalStoreStatus::Healthy);
+
+        commit(&mut store, "obj-a", "evt-a");
+        commit(&mut store, "obj-b", "evt-b");
+        commit(&mut store, "obj-c", "evt-c");
+        let queued = store.outbox_health().expect("health");
+        assert_eq!(
+            queued.remote_sync_status,
+            db::RemoteSyncStatus::Backlogged { pending_count: 3 }
+        );
+        assert_eq!(queued.pending_count, 3);
+
+        let claimed = store
+            .claim_outbox_events(&OutboxClaimRequest::first_claims_only(2))
+            .expect("claim");
+        assert_eq!(claimed.len(), 2);
+        let drained = store.outbox_health().expect("health");
+        assert_eq!(
+            drained.remote_sync_status,
+            db::RemoteSyncStatus::InFlight { in_flight_count: 2 },
+            "live work outranks the remaining backlog"
+        );
+        assert_eq!(drained.pending_count, 1);
+        assert_eq!(drained.last_successful_sync, None);
+
+        let acknowledged = store
+            .apply_outbox_outcome("evt-a", &OutboxOutcome::Acknowledged, &evidence())
+            .expect("acknowledge");
+        let partly = store.outbox_health().expect("health");
+        assert_eq!(
+            partly.remote_sync_status,
+            db::RemoteSyncStatus::InFlight { in_flight_count: 1 }
+        );
+        assert_eq!(
+            partly.last_successful_sync.as_deref(),
+            Some(acknowledged.event.state_changed_at.as_str())
+        );
+
+        store
+            .apply_outbox_outcome(
+                "evt-b",
+                &OutboxOutcome::Conflicted {
+                    error_class: "divergent_revision".to_string(),
+                },
+                &evidence(),
+            )
+            .expect("conflict");
+        let conflicted = store.outbox_health().expect("health");
+        assert_eq!(
+            conflicted.remote_sync_status,
+            db::RemoteSyncStatus::Backlogged { pending_count: 1 },
+            "the untouched third event still outranks a historical failure"
+        );
+        assert_eq!(
+            conflicted.last_error_class.as_deref(),
+            Some("divergent_revision")
+        );
+
+        store
+            .claim_outbox_events(&OutboxClaimRequest::first_claims_only(10))
+            .expect("claim the rest");
+        store
+            .apply_outbox_outcome(
+                "evt-c",
+                &OutboxOutcome::Rejected {
+                    error_class: "remote_refused".to_string(),
+                },
+                &evidence(),
+            )
+            .expect("rejection");
+        let failing = store.outbox_health().expect("health");
+        assert_eq!(
+            failing.remote_sync_status,
+            db::RemoteSyncStatus::Failing {
+                rejected_count: 1,
+                conflicted_count: 1
+            }
+        );
+        assert_eq!(failing.pending_count, 0);
+        assert_eq!(failing.local_store_status, db::LocalStoreStatus::Healthy);
+
+        // Deciding the conflict turns it into new work, and marks the consumed
+        // event as withdrawn — so `conflicted` keeps meaning "still awaiting a
+        // decision".
+        store
+            .resolve_outbox_conflict("evt-b", &OutboxConflictResolution::LocalWins)
+            .expect("local wins");
+        let resolved = store.outbox_health().expect("health");
+        assert_eq!(
+            resolved.remote_sync_status,
+            db::RemoteSyncStatus::Backlogged { pending_count: 1 }
+        );
+        assert_eq!(
+            resolved.local_store_status,
+            db::LocalStoreStatus::Quarantined {
+                quarantined_count: 1
+            }
+        );
+        assert_eq!(
+            resolved.last_error_class.as_deref(),
+            Some(OUTBOX_LOCAL_WINS_RESOLVED_CLASS)
+        );
+
+        store
+            .claim_outbox_events(&OutboxClaimRequest::first_claims_only(10))
+            .expect("claim the successor");
+        let successor_ack = store
+            .apply_outbox_outcome(
+                &outbox_local_wins_successor_id("evt-b"),
+                &OutboxOutcome::Acknowledged,
+                &evidence(),
+            )
+            .expect("acknowledge the successor");
+        let settled = store.outbox_health().expect("health");
+        assert_eq!(
+            settled.remote_sync_status,
+            db::RemoteSyncStatus::Failing {
+                rejected_count: 1,
+                conflicted_count: 0
+            },
+            "the decided conflict no longer counts as an unresolved one"
+        );
+        assert_eq!(
+            settled.last_successful_sync.as_deref(),
+            Some(successor_ack.event.state_changed_at.as_str())
+        );
+        assert_eq!(settled.pending_count, 0);
+        assert_eq!(settled.oldest_pending_at, None);
+    }
+
     /// The cutoff is minted with the same formatter every stamp in the table
     /// uses. If that ever drifts, lexical comparison stops being chronological
     /// comparison and the staleness bound silently changes meaning.
