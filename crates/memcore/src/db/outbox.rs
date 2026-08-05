@@ -131,12 +131,15 @@ impl OutboxState {
     ///   is illegal, because for those a repeat is a caller bug, not a
     ///   re-classification.
     pub fn can_transition_to(self, next: Self) -> bool {
-        match (self, next) {
-            (_, Self::Quarantined) => true,
-            (Self::Pending, Self::InFlight) => true,
-            (Self::InFlight, Self::Acknowledged | Self::Rejected | Self::Conflicted) => true,
-            _ => false,
-        }
+        matches!(
+            (self, next),
+            (_, Self::Quarantined)
+                | (Self::Pending, Self::InFlight)
+                | (
+                    Self::InFlight,
+                    Self::Acknowledged | Self::Rejected | Self::Conflicted
+                )
+        )
     }
 
     /// States that model a failure and therefore require an error class.
@@ -617,6 +620,19 @@ pub struct OutboxHealth {
     pub last_error_class: Option<String>,
 }
 
+/// Raw column tuple read back for an outbox row (id, event fields, timestamps, error class).
+type OutboxRowColumns = (
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// Compute all six health fields in one statement.
 ///
 /// One statement, not several, because the fields are read together and must
@@ -638,17 +654,7 @@ pub(crate) fn read_outbox_health(conn: &Connection) -> Result<OutboxHealth, Memo
         oldest_pending_at,
         last_successful_sync,
         last_error_class,
-    ): (
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = conn.query_row(
+    ): OutboxRowColumns = conn.query_row(
         "SELECT
              COALESCE(SUM(state = 'pending'), 0),
              COALESCE(SUM(state = 'in_flight'), 0),
