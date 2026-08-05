@@ -380,6 +380,33 @@ impl MemoryStore {
         db::list_outbox_events_by_state(&self.conn, state, limit)
     }
 
+    /// The six #1643 health fields, from one consistent snapshot.
+    ///
+    /// `local_store_status` and `pending_count`/`oldest_pending_at` are
+    /// straightforward local facts. The other three need to be read with their
+    /// derivation in mind, because **this leaf contains no remote**:
+    ///
+    /// * `remote_sync_status` is computed entirely from the local state
+    ///   distribution (see [`db::RemoteSyncStatus`] for the precedence rules). It
+    ///   describes what the local queue implies, never what any remote did.
+    ///   With no sync loop wired up, a store rests at
+    ///   [`db::RemoteSyncStatus::Idle`] or [`db::RemoteSyncStatus::Backlogged`]
+    ///   forever — that is the honest report, and A2 is what changes it.
+    /// * `last_successful_sync` is the newest `state_changed_at` among
+    ///   `acknowledged` events, i.e. when a caller last *told this store* an
+    ///   event was accepted. It is `None` until something reports an
+    ///   acknowledgment.
+    /// * `last_error_class` is the class of the most recently changed event
+    ///   still in a failure state. Non-failure transitions clear the column,
+    ///   so it never reports a class the outbox has moved past.
+    ///
+    /// `oldest_pending_at` and `last_successful_sync` are `MIN`/`MAX` taken
+    /// **lexically**, which is chronologically correct only because every
+    /// writer stamps canonical UTC-ISO (tachi#1432).
+    pub fn outbox_health(&self) -> Result<db::OutboxHealth, MemoryError> {
+        db::read_outbox_health(&self.conn)
+    }
+
     /// Move one event through the frozen state machine, returning the stored
     /// row.
     ///
@@ -772,6 +799,84 @@ mod tests {
             "unexpected result: {result:?}"
         );
         assert!(store.outbox_event("evt-absent").expect("read").is_none());
+    }
+
+    /// The health read model over the public surface, walked across a state
+    /// mix. The derivation itself is pinned by `db::outbox`'s tests; this
+    /// proves the store wires through to it and that the fields move as a
+    /// commit progresses.
+    #[test]
+    fn health_tracks_a_commit_through_the_states_it_can_honestly_report() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+
+        let empty = store.outbox_health().expect("health");
+        assert_eq!(empty.local_store_status, db::LocalStoreStatus::Healthy);
+        assert_eq!(empty.remote_sync_status, db::RemoteSyncStatus::Idle);
+        assert_eq!(empty.pending_count, 0);
+        assert_eq!(empty.oldest_pending_at, None);
+        assert_eq!(empty.last_successful_sync, None);
+        assert_eq!(empty.last_error_class, None);
+
+        let first = store
+            .commit_with_outbox_event(&entry("outbox-health-1", "one"), &meta("evt-health-1"))
+            .expect("commit one");
+        store
+            .commit_with_outbox_event(&entry("outbox-health-2", "two"), &meta("evt-health-2"))
+            .expect("commit two");
+
+        let queued = store.outbox_health().expect("health");
+        assert_eq!(queued.pending_count, 2);
+        assert_eq!(
+            queued.remote_sync_status,
+            db::RemoteSyncStatus::Backlogged { pending_count: 2 },
+            "with no sync loop running, a committed mutation rests as backlog"
+        );
+        assert_eq!(
+            queued.oldest_pending_at.as_deref(),
+            Some(first.event.created_at.as_str())
+        );
+
+        store
+            .transition_outbox_event("evt-health-1", OutboxState::InFlight, None)
+            .expect("in_flight");
+        assert_eq!(
+            store.outbox_health().expect("health").remote_sync_status,
+            db::RemoteSyncStatus::InFlight {
+                in_flight_count: 1
+            },
+            "live work outranks the remaining backlog"
+        );
+
+        let acknowledged = store
+            .transition_outbox_event("evt-health-1", OutboxState::Acknowledged, None)
+            .expect("acknowledged");
+        let synced = store.outbox_health().expect("health");
+        assert_eq!(
+            synced.last_successful_sync.as_deref(),
+            Some(acknowledged.state_changed_at.as_str()),
+            "the stamp is when a caller reported acceptance, not when a remote confirmed"
+        );
+        assert_eq!(synced.pending_count, 1);
+
+        store
+            .transition_outbox_event(
+                "evt-health-2",
+                OutboxState::Quarantined,
+                Some("operator_hold"),
+            )
+            .expect("quarantined");
+        let held = store.outbox_health().expect("health");
+        assert_eq!(
+            held.local_store_status,
+            db::LocalStoreStatus::Quarantined {
+                quarantined_count: 1
+            },
+            "quarantine is a local-store condition, not a remote one"
+        );
+        assert_eq!(held.remote_sync_status, db::RemoteSyncStatus::Drained);
+        assert_eq!(held.pending_count, 0);
+        assert_eq!(held.oldest_pending_at, None);
+        assert_eq!(held.last_error_class.as_deref(), Some("operator_hold"));
     }
 
     #[test]
