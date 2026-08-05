@@ -266,6 +266,26 @@ pub struct IssueRelationV1 {
     pub evidence_refs: Vec<EvidenceRefV1>,
 }
 
+/// Live-verified state of a relation target. Produced two ways: peeled off a
+/// relation line's optional trailing `[state]` prose annotation by
+/// [`crate::gh_json_parse::parse_relation_lines`] (never authority by
+/// itself — an owner can write anything in an issue body), and derived from
+/// an authenticated cross-reference lookup by the refinery's live-signals
+/// seat (#1105), which is the authority. A disagreement between the two
+/// becomes a contradiction, never a silent override.
+///
+/// Deliberately carries no serde attributes: it is an in-process
+/// classification, not part of any serialized `*V1` payload. Adding a
+/// `Serialize`/`Deserialize` derive here would silently widen the frozen
+/// snapshot/proposal wire formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelatedIssueStateV1 {
+    Open,
+    ClosedShipped,
+    ClosedUnshipped,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageV1 {
     pub source_bytes: usize,

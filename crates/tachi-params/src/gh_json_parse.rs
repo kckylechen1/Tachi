@@ -27,18 +27,28 @@
 //! the live pipeline now classifies against, checking this prose annotation
 //! only for agreement/disagreement (a disagreement becomes a contradiction,
 //! never a silent override).
+//!
+//! Lives in `tachi-params` rather than in any one consumer crate (#1611
+//! Track T3, carve 1): every type it reads and writes ([`IssueSnapshotV1`],
+//! [`CommentRevisionV1`], [`IssueRelationKindV1`], [`SourceSpanV1`],
+//! [`RelatedIssueStateV1`]) and every helper it calls
+//! ([`crate::normalize_line_endings`], [`crate::sha256_hex`],
+//! [`crate::compute_issue_body_hash`]) already lives here. Both consumers —
+//! `tachi-server`'s refinery and `tachi-github-runtime`'s corpus adapter —
+//! reuse this one parser instead of duplicating it (#1059).
 
-use super::disposition::RelatedIssueStateV1;
-use tachi_params::{CommentRevisionV1, IssueRelationKindV1, IssueSnapshotV1, SourceSpanV1};
+use crate::refinery::{
+    CommentRevisionV1, IssueRelationKindV1, IssueSnapshotV1, RelatedIssueStateV1, SourceSpanV1,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SpecRefLine {
-    pub(crate) repo: String,
-    pub(crate) path: String,
-    pub(crate) commit_sha: String,
-    pub(crate) blob_sha: String,
-    pub(crate) section: String,
-    pub(crate) span: SourceSpanV1,
+pub struct SpecRefLine {
+    pub repo: String,
+    pub path: String,
+    pub commit_sha: String,
+    pub blob_sha: String,
+    pub section: String,
+    pub span: SourceSpanV1,
 }
 
 /// A line that declared itself a `Spec-Ref:` but failed to parse against
@@ -49,9 +59,9 @@ pub(crate) struct SpecRefLine {
 /// (F1: previously a malformed line was simply invisible to the grounding
 /// check, leaving the packet falsely `Grounded`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MalformedSpecRefLine {
-    pub(crate) raw: String,
-    pub(crate) span: SourceSpanV1,
+pub struct MalformedSpecRefLine {
+    pub raw: String,
+    pub span: SourceSpanV1,
 }
 
 /// Scan `text` line by line (byte-offset tracked) for `Spec-Ref:` lines,
@@ -59,7 +69,7 @@ pub(crate) struct MalformedSpecRefLine {
 /// started with `Spec-Ref:` but didn't match the frozen syntax) — the
 /// caller must treat every malformed line as a missing anchor, not ignore
 /// it (F1).
-pub(crate) fn parse_spec_ref_lines(text: &str) -> (Vec<SpecRefLine>, Vec<MalformedSpecRefLine>) {
+pub fn parse_spec_ref_lines(text: &str) -> (Vec<SpecRefLine>, Vec<MalformedSpecRefLine>) {
     let mut ok = Vec::new();
     let mut malformed = Vec::new();
     let mut offset = 0usize;
@@ -86,7 +96,7 @@ pub(crate) fn parse_spec_ref_lines(text: &str) -> (Vec<SpecRefLine>, Vec<Malform
     (ok, malformed)
 }
 
-pub(super) fn parse_spec_ref_value(value: &str) -> Option<SpecRefLine> {
+pub fn parse_spec_ref_value(value: &str) -> Option<SpecRefLine> {
     // owner/repo:path@commit_sha/blob_sha#section
     let (repo_and_path, rest) = value.split_once('@')?;
     let (repo, path) = repo_and_path.split_once(':')?;
@@ -112,11 +122,11 @@ pub(super) fn parse_spec_ref_value(value: &str) -> Option<SpecRefLine> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RelationLine {
-    pub(crate) kind: IssueRelationKindV1,
-    pub(crate) target_ref: String,
-    pub(crate) span: SourceSpanV1,
-    pub(crate) state: RelatedIssueStateV1,
+pub struct RelationLine {
+    pub kind: IssueRelationKindV1,
+    pub target_ref: String,
+    pub span: SourceSpanV1,
+    pub state: RelatedIssueStateV1,
 }
 
 const RELATION_PREFIXES: &[(&str, IssueRelationKindV1)] = &[
@@ -128,7 +138,7 @@ const RELATION_PREFIXES: &[(&str, IssueRelationKindV1)] = &[
     ("Related:", IssueRelationKindV1::Related),
 ];
 
-pub(crate) fn parse_relation_lines(text: &str) -> Vec<RelationLine> {
+pub fn parse_relation_lines(text: &str) -> Vec<RelationLine> {
     let mut out = Vec::new();
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
@@ -199,7 +209,7 @@ fn comment_has_structured_marker(body: &str) -> bool {
 /// into an `IssueSnapshotV1`. Pure: no I/O, no gh/git calls — takes the
 /// already-parsed JSON `Value` so tests can exercise this with fixture JSON
 /// and never touch the network (#1002 acceptance criterion 7).
-pub(crate) fn parse_issue_snapshot_from_gh_json(
+pub fn parse_issue_snapshot_from_gh_json(
     repo: &str,
     number: u64,
     result: &serde_json::Value,
@@ -215,7 +225,7 @@ pub(crate) fn parse_issue_snapshot_from_gh_json(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let body = tachi_params::normalize_line_endings(&raw_body);
+    let body = crate::normalize_line_endings(&raw_body);
     let state = result
         .get("state")
         .and_then(|v| v.as_str())
@@ -259,7 +269,7 @@ pub(crate) fn parse_issue_snapshot_from_gh_json(
             if !comment_has_structured_marker(raw_comment_body) {
                 return None;
             }
-            let normalized_body = tachi_params::normalize_line_endings(raw_comment_body);
+            let normalized_body = crate::normalize_line_endings(raw_comment_body);
             let comment_id = c
                 .get("id")
                 .and_then(|v| {
@@ -289,7 +299,7 @@ pub(crate) fn parse_issue_snapshot_from_gh_json(
                 .and_then(|a| a.get("login"))
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            let body_hash = tachi_params::sha256_hex(normalized_body.as_bytes());
+            let body_hash = crate::sha256_hex(normalized_body.as_bytes());
             Some(CommentRevisionV1 {
                 comment_id,
                 author,
@@ -321,7 +331,7 @@ pub(crate) fn parse_issue_snapshot_from_gh_json(
         refs
     };
 
-    let issue_body_hash = tachi_params::compute_issue_body_hash(&raw_body);
+    let issue_body_hash = crate::compute_issue_body_hash(&raw_body);
     let mut snapshot = IssueSnapshotV1 {
         issue_ref,
         repo: repo.to_string(),
