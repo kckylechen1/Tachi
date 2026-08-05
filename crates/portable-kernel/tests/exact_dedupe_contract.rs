@@ -412,9 +412,10 @@ fn portable_build_exact_dedupe_apply_receipt_round_trips_through_restore() {
         ExactDedupeReceiptDbState::NotApplied
     );
 
-    // A tampered-but-not-rehashed receipt fails schema/digest validation
-    // before it can touch the database — restoring the same apply twice
-    // must not be possible by replaying the receipt.
+    // Replaying the SAME untampered receipt a second time must not be
+    // possible: the row's live state no longer matches the receipt's
+    // archived-CAS binding (it was just restored to unarchived above), so
+    // the restore's per-row CAS predicate refuses it.
     let error = store
         .restore_exact_dedupe(&receipt)
         .expect_err("a second restore of an already-restored receipt must be refused");
