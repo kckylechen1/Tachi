@@ -29,7 +29,7 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 - **本地加密保险库**，用于 API 密钥与机密
 - **Agent 协调**：交接令牌、看板、发布订阅（幽灵低语）
 - **技能包与能力中心**：一次注册，各 Agent 共用
-- **工作流控制平面**：`tachi_task`、`tachi_arena`、`tachi_verify`、`tachi_gh`
+- **工作流控制平面**：`tachi_task`、`tachi_staff`、`tachi_verify`、`tachi_gh`
 
 所有状态都存储在嵌入式 SQLite 中。**无需任何外部数据库。**
 
@@ -60,7 +60,7 @@ Tachi 不是通用向量数据库，也不是托管记忆云服务。它是面�
 | **外部依赖** | 零（embedding provider 可选） | 中等 | 中等 | 低到中 | 高 |
 | **默认数据位置** | 本地优先 | 云优先，可自托管 | 自托管 | 自托管 / Cloud | 依赖实现 |
 | **记忆组织** | `path` 层级 + 因果图谱 + 域 | Entity + session | Agent 状态 + memory block | Collection + metadata | 无 |
-| **工作流控制** | `task` / `arena` / `verify` | 无 | Agent 编排 | 无 | 无 |
+| **工作流控制** | `task` / `staff` / `verify` | 无 | Agent 编排 | 无 | 无 |
 | **目标用户** | 个人/小团队运行自主 Agent | 应用开发者集成记忆 | 构建有状态 Agent | 需要向量检索的系统 | 基础设施工程师 |
 
 ---
@@ -139,26 +139,22 @@ tachi --version
   }
 }
 
-// tachi_arena —— 开启一个可跟踪工作 arena
+// tachi_staff —— 显式例外场景下派出可跟踪的外部 worker（普通本地委派仍用宿主原生 subagent）
 {
-  "tool": "tachi_arena",
+  "tool": "tachi_staff",
   "arguments": {
-    "action": "open",
-    "title": "API 边界审阅",
-    "objective": "编辑 API 前先收集外部审阅证据。"
+    "action": "start",
+    "task": "审阅 API 边界，并把发现写入 result.md。",
+    "staffing_reason": "native_subagent_unavailable"
   }
 }
 
-// tachi_arena —— 派发一个可跟踪 subagent / 顾问任务
+// tachi_staff —— 查询上一步返回的 dispatch_id 的运行状态
 {
-  "tool": "tachi_arena",
+  "tool": "tachi_staff",
   "arguments": {
-    "action": "spawn",
-    "arena_id": "<open 返回的 arena_id>",
-    "role": "critic",
-    "harness": "manual",
-    "launch": false,
-    "prompt": "审阅 API 边界，并把发现写入 result.md。"
+    "action": "status",
+    "dispatch_id": "<start 返回的 dispatch_id>"
   }
 }
 ```
@@ -266,7 +262,7 @@ graph TD
 Tachi 不只是记忆库；它正在演变为 Agent 工程的持久控制平面：
 
 - **`tachi_task`** —— 贯通 issue intake、docs/spec、路由建议、工作账本和 close-loop 写回；普通本地委派使用宿主原生 subagent。
-- **`tachi_arena`** —— 专家/适配器使用的工作任务账本，不是 `standard` Agent 的日常 subagent 入口。
+- **`tachi_staff`** —— 显式例外场景（用户明确要求、跨会话持久、跨设备/远程接力、原生 subagent 不可用）下的外部 staffing 出口（`action='start'`/`'status'`），要求填写 typed `staffing_reason`；不是 `standard` Agent 的日常 subagent 入口。
 - **`tachi_verify`** —— 记录后台验证证据（测试、类型检查、safe-merge gate）到 `.tachi/runs/<flow_id>/verification.json`。
 - **`tachi_gh`** —— 读取 issue/PR，写评论，汇总 review 状态，并用 lifecycle/verification 证据运行 safe-merge 检查。
 
@@ -285,8 +281,8 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
-| `standard` | 日常 Agent 意图面：`tachi_save`、`tachi_memory`、`tachi_task` 的非派发动作、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`peer_query`、Vault 会话/状态工具，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。Arena 和手工 eval intake 不暴露。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity；普通委派使用宿主原生 subagent。 |
-| `coordinate` | `remember` + `coordinate` bundles：增加高级 handoff/workflow/shell/arena 工具；Tachi 自有 worker launch 仍是 admin/operator 例外。 | 高级协调与适配器工作流，不替代宿主原生 subagent。 |
+| `standard` | 日常 Agent 意图面：`tachi_save`、`tachi_memory`、`tachi_task` 的非派发动作、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`peer_query`、Vault 会话/状态工具，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。`tachi_staff` 和手工 eval intake 不暴露。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity；普通委派使用宿主原生 subagent。 |
+| `coordinate` | `remember` + `coordinate` bundles：增加高级 handoff/workflow/orchestrator/agents/staff 工具；Tachi 自有 worker launch（`tachi_staff(action='start', task='审阅 API 边界，并把发现写入 result.md。', staffing_reason='native_subagent_unavailable')`）仍是显式例外，不是默认执行器。 | 高级协调与适配器工作流，不替代宿主原生 subagent。 |
 | `operate` | `remember` + `operate` bundles：增加 Foundry 生命周期、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
 | `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_event`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_task`、`tachi_complete`、`tachi_skill(action='discover'|'run'|'bundle')` 和只读 `peer_query`。 | 由显式准入的 admin 派发产生的工作 Agent；无递归派发、无交接、无技能候选注册。 |
 | `admin` | 完整目录，包括有类型理由的 durable/remote Tachi worker 例外。 | 维护、开发、治理和 operator 批准的执行例外。 |

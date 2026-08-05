@@ -14,7 +14,7 @@
 1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_memory(action="search")` 或 `tachi_wiki(action="search")`。命中就引用，未命中再 `tachi_save` / `tachi_memory(action="save")`。
 2. **结构化保存**。`tachi_save` 必须带 `path`、`topic`、`entities`、`keywords`。乱写一句话进 `/` 是垃圾，会被 capture gate 拦截或 distill 误吞。
 3. **Skill 优先**。复杂任务先 `tachi_skill(action="discover")` / `tachi_skill(action="run")`，不要自己重写 prompt。
-4. **原生 subagent 优先**。普通本地派工使用宿主 harness 自带的 subagent；Tachi 默认只负责 memory、policy、claims、ledger、receipt 和 eval。只有用户明确要求、任务必须跨当前会话持久化、跨设备/远程接力，或宿主没有可用 subagent 时，才使用带 `dispatch_reason` 的 `tachi_task(action="dispatch")`。
+4. **原生 subagent 优先**。普通本地派工使用宿主 harness 自带的 subagent；Tachi 默认只负责 memory、policy、claims、ledger、receipt 和 eval。只有用户明确要求、任务必须跨当前会话持久化、跨设备/远程接力，或宿主没有可用 subagent 时，才使用带 typed `staffing_reason` 的 `tachi_staff(action="start")`。
 
 ## 常用工具速查
 
@@ -23,26 +23,22 @@
 | 检索历史 | `tachi_memory(action="search")` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
 | 写入事实 | `tachi_save` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
 | 统一记忆面 | `tachi_memory(action=...)` | `search` / `get` / `save` / `extract_facts` / `briefing` / `ask` / `consolidate` / `progress` / `readiness`。 |
-| 任务与回执 | `tachi_task(action=...)` | `plan` / `briefing` / `recommend` / `complete` / `board` 为 memory/ledger 面；`dispatch` 不是默认 subagent，只用于明确的持久/远程例外并要求 `dispatch_reason`。PR 生命周期用 `tachi_gh`。 |
+| 任务与回执 | `tachi_task(action=...)` | `plan` / `briefing` / `recommend` / `complete` / `board` 为 memory/ledger 面；外部 worker 例外见下方 `tachi_staff`，不是默认 subagent。PR 生命周期用 `tachi_gh`。 |
 | 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board`，记录后台验证证据。 |
-| 工作 arena | `tachi_arena(action=...)` | 跟踪已显式派出的外部 Agent；普通本地并行仍使用宿主原生 subagent，不因 Tachi 存在而切换执行器。 |
+| 外部 staffing | `tachi_staff(action=...)` | `start`（要求 typed `staffing_reason`）派出可跟踪 worker，`status` 读运行状态；普通本地并行仍使用宿主原生 subagent，不因 Tachi 存在而切换执行器。 |
 | 查关联 | `tachi_memory(action="ask")` | 给 memory_id 或 query，返回邻居 + 边（底层 graph 原语已内化，非 MCP 表面）。 |
 | GitHub 生命周期 | `tachi_gh(action=...)` | issue/PR/review/safe-merge/close-loop。 |
 | 找技能 | `tachi_skill(action="discover")` | 按自然语言任务找技能。 |
 | 执行技能 | `tachi_skill(action="run")` | 入参 `skill_id` + `args`。 |
 | 列举技能 | `tachi hub list` (CLI) | 见下文 §tachi hub。 |
 
-## Arena 快速链路
+## Staffing 快速链路
 
-当主 Agent 需要给原生 subagent 准备可追踪的任务包，或记录已显式派出的持久/远程 worker 时，可用 `tachi_arena`；普通本地并行的 worker 生命周期仍由宿主 harness 管理，不要把临时 worker 状态塞进 memory。
+只有用户明确要求、任务必须跨当前会话持久化、跨设备/远程接力，或宿主没有可用 subagent 时，才用 `tachi_staff` 派出可跟踪 worker；普通本地并行的 worker 生命周期仍由宿主 harness 管理，不要把临时 worker 状态塞进 memory。
 
-1. `tachi_arena(action="open", title=..., objective=...)` 开一个 arena。
-2. 默认用 `tachi_arena(action="spawn", arena_id=..., prompt=..., role="explore|critic|executor|verifier", harness="manual", launch=false)` 创建 mission，拿到 `tracked_prompt` 后交给宿主原生 subagent。只有用户明确要求、跨会话持久、跨设备/远程接力，或原生 subagent 不可用时，才可对 launch-capable lane 使用 `launch=true`，并传相应的 typed `dispatch_reason`。
-3. `tachi_arena(action="board", arena_id=...)` 看 mission 状态；不传 `arena_id` 时列出最近 arenas，并显示 `mission_count` / `active_missions` / `pending_collect`。
-4. Worker 写好 `result.md` 后，主 Agent 调 `tachi_arena(action="collect", arena_id=..., mission_id=...)` 收结果。linked dispatch 的 `result.md` 会自动导入 mission。
-5. 全部收完后 `tachi_arena(action="close", arena_id=...)` 生成 `summary.md`。活跃 mission 会阻止关闭；超时 mission 用 `reap`，主动放弃用 `abort`。
-
-例外场景下，`spawn launch=true, dispatch_reason="durable_cross_session"` 如果启动失败，会返回 `launch_failed` 和 `prompt_path` / `status_path`，不要重开新 arena；先检查这些路径，再选择修 launcher、重新 spawn，或手动运行 `tracked_prompt`。
+1. `tachi_staff(action="start", task=..., staffing_reason=...)` 派出 worker。`staffing_reason` 是必填 typed 值：`explicit_user_request` | `durable_cross_session` | `cross_device_remote` | `native_subagent_unavailable`；Tachi 可用性、并行度或追踪需求本身都不算理由。可选 `profile`、`worker`、`flow_id`、`issue_ref`、`pr_ref` 绑定上下文。
+2. 响应带回 canonical `dispatch_id`；用 `tachi_staff(action="status", dispatch_id=...)` 查询该 worker 的运行状态。
+3. Worker 进程生命周期、超时与结果落盘由承接的 staffing kernel 管理；不再有 arena 的 open/spawn/board/collect/close 流程——该 API 已随 #1319 移除。
 
 ## tachi_save 范式
 

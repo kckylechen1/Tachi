@@ -21,6 +21,17 @@ fn portable_kernel_split_doc_names_feature_and_facade() {
     }
 }
 
+/// #1319-D2 deleted the `tachi_arena` facade; this is the guard that would
+/// have caught the D2 doc lag (README still advertising the retired tool).
+#[test]
+fn readme_does_not_reference_retired_tachi_arena() {
+    let readme = include_str!("../../../../../README.md");
+    assert!(
+        !readme.contains("tachi_arena"),
+        "README.md must not reference the retired tachi_arena facade (#1319-D2)"
+    );
+}
+
 #[test]
 fn zeroclaw_direction_is_not_documented_as_current_wiring() {
     let surfaces = [

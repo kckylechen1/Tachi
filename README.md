@@ -29,7 +29,7 @@ Tachi is a single-binary, local-first memory and coordination backend for AI age
 - **Encrypted local vault** for API keys and secrets
 - **Agent coordination** via handoff, kanban, and pub/sub (Ghost Whispers)
 - **Skill packs and capability hub** — register once, use from any agent
-- **Workflow control plane** — `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_gh`
+- **Workflow control plane** — `tachi_task`, `tachi_staff`, `tachi_verify`, `tachi_gh`
 - **Continuity memory** — typed events, pattern projections, outcome labels, and project-cycle context
 - **Lifecycle closure** — GitHub issues/PRs, docs/specs, wiki, memory, verification, and release notes in one loop
 
@@ -100,7 +100,7 @@ Tachi is not a general-purpose vector database or a managed memory cloud. It is 
 | **External dependencies** | Zero (embedding provider optional) | Medium | Medium | Low to medium | High |
 | **Default data locality** | Local-first | Cloud-first, self-hostable | Self-hosted | Self-hosted / Cloud | Depends |
 | **Memory organization** | `path` hierarchy + causal graph + domain | Entity + session | Agent state + memory blocks | Collection + metadata | None |
-| **Workflow control** | `task` / `arena` / `verify` | None | Agent orchestration | None | None |
+| **Workflow control** | `task` / `staff` / `verify` | None | Agent orchestration | None | None |
 | **Target user** | Individuals / small teams running autonomous agents | App developers adding memory | Builders of stateful agents | Systems needing vector search | Infrastructure engineers |
 
 ---
@@ -342,7 +342,7 @@ Tachi is not only a memory store; it is becoming the durable control plane for a
 
 - **`tachi_task`** — guide work from issue intake through docs/specs,
   dispatch recommendations, PR handoff, release notes, and close-loop writes.
-- **`tachi_arena`** — tracked worker/advisor mission ledger with auditable run state.
+- **`tachi_staff`** — external staffing exception (`action='start'`/`'status'`) for durable/remote worker launch when no native subagent applies; requires a typed `staffing_reason`.
 - **`tachi_verify`** — record background verification evidence (tests, type checks, safe-merge gates) under `.tachi/runs/<flow_id>/verification.json`.
 - **`tachi_gh`** — read issues/PRs, post comments, digest review state, and
   run safe-merge checks with lifecycle/verification evidence.
@@ -362,8 +362,8 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 
 | Profile | What is exposed | Best for |
 |---------|-----------------|----------|
-| `standard` | Daily agent-intent surface: `tachi_save`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. Arena and manual native-eval intake are adapter/internal surfaces, not ordinary agent tools. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. Ordinary delegation uses the host's native subagent. |
-| `coordinate` | `remember` + `coordinate` bundles: adds `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`, `tachi_agents`, `tachi_gh`, `tachi_shell`, `tachi_arena`, and `tachi_verify`. Tachi-owned `tachi_task(action='dispatch')` remains operator-only. | Advanced coordination and adapter workflows; not a replacement for host-native subagents. |
+| `standard` | Daily agent-intent surface: `tachi_save`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. `tachi_staff` and manual native-eval intake are adapter/internal surfaces, not ordinary agent tools. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. Ordinary delegation uses the host's native subagent. |
+| `coordinate` | `remember` + `coordinate` bundles: adds `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`, `tachi_agents`, `tachi_gh`, `tachi_staff`, and `tachi_verify`. `tachi_staff(action='start', task='review the API surface and write findings to result.md', staffing_reason='native_subagent_unavailable')` remains an explicit durable/remote exception, not the default worker launcher. | Advanced coordination and adapter workflows; not a replacement for host-native subagents. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters, OpenClaw, ops automation. |
 | `delegate` | Curated worker surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`, and read-only `peer_query`. Standalone `run_skill` remains a legacy compatibility route outside the default delegate profile. | Worker subagents spawned by an explicitly admitted admin dispatch. No recursive dispatch, no handoff, no skill candidate registration. |
 | `admin` | Full catalog, including explicitly justified durable/remote Tachi dispatch. | Maintenance, development, governance, and operator-approved execution exceptions. |

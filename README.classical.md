@@ -71,7 +71,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0
 - **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换。
 - **🎯 万宝楼**：Skill、MCP、仙诀一次登录，诸路灵核共享。
 - **👻 跨界传信**：幽灵低语、看板、交接令牌，跨灵核协同。
-- **⚔️ 工务总枢**：`tachi_task` 遣偏师（`action='dispatch'`），`tachi_arena` 记工籍，`tachi_verify` 存验据，`tachi_complete` 录因果。
+- **⚔️ 工务总枢**：`tachi_task` 掌纪略，`tachi_staff` 遣偏师记工籍（`action='start'`，唯例外方用），`tachi_verify` 存验据，`tachi_complete` 录因果。
 - **🏭 神经熔炉与维基**：上下文生灭、Agent 进化提案、薪火相传之典籍。
 
 ---
