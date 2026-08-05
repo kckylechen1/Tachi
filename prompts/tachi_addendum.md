@@ -14,7 +14,7 @@
 1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_memory(action="search")` 或 `tachi_wiki(action="search")`。命中就引用，未命中再 `tachi_save` / `tachi_memory(action="save")`。
 2. **结构化保存**。`tachi_save` 必须带 `path`、`topic`、`entities`、`keywords`。乱写一句话进 `/` 是垃圾，会被 capture gate 拦截或 distill 误吞。
 3. **Skill 优先**。复杂任务先 `tachi_skill(action="discover")` / `tachi_skill(action="run")`，不要自己重写 prompt。
-4. **原生 subagent 优先**。普通本地派工使用宿主 harness 自带的 subagent；Tachi 默认只负责 memory、policy、claims、ledger、receipt 和 eval。只有用户明确要求、任务必须跨当前会话持久化、跨设备/远程接力，或宿主没有可用 subagent 时，才使用带 `dispatch_reason` 的 `tachi_task(action="dispatch")`。
+4. **原生 subagent 优先**。普通本地派工使用宿主 harness 自带的 subagent；Tachi 默认只负责 memory、policy、claims、ledger、receipt 和 eval。只有用户明确要求、任务必须跨当前会话持久化、跨设备/远程接力，或宿主没有可用 subagent 时，才使用带 typed `staffing_reason` 的 `tachi_staff(action="start")`。
 
 ## 常用工具速查
 
@@ -23,7 +23,7 @@
 | 检索历史 | `tachi_memory(action="search")` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
 | 写入事实 | `tachi_save` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
 | 统一记忆面 | `tachi_memory(action=...)` | `search` / `get` / `save` / `extract_facts` / `briefing` / `ask` / `consolidate` / `progress` / `readiness`。 |
-| 任务与回执 | `tachi_task(action=...)` | `plan` / `briefing` / `recommend` / `complete` / `board` 为 memory/ledger 面；`dispatch` 不是默认 subagent，只用于明确的持久/远程例外并要求 `dispatch_reason`。PR 生命周期用 `tachi_gh`。 |
+| 任务与回执 | `tachi_task(action=...)` | `plan` / `briefing` / `recommend` / `complete` / `board` 为 memory/ledger 面；外部 worker 例外见下方 `tachi_staff`，不是默认 subagent。PR 生命周期用 `tachi_gh`。 |
 | 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board`，记录后台验证证据。 |
 | 外部 staffing | `tachi_staff(action=...)` | `start`（要求 typed `staffing_reason`）派出可跟踪 worker，`status` 读运行状态；普通本地并行仍使用宿主原生 subagent，不因 Tachi 存在而切换执行器。 |
 | 查关联 | `tachi_memory(action="ask")` | 给 memory_id 或 query，返回邻居 + 边（底层 graph 原语已内化，非 MCP 表面）。 |
