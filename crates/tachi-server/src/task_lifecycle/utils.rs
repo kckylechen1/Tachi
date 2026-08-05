@@ -28,40 +28,6 @@ pub(super) fn pr_to_json(pr: &PrSnapshot) -> Value {
     })
 }
 
-pub(super) fn ux_step(
-    id: &str,
-    label: &str,
-    tool: &str,
-    status: &str,
-    evidence: Vec<String>,
-    gaps: Vec<String>,
-    next_action: &str,
-    required: bool,
-) -> Value {
-    json!({
-        "id": id,
-        "label": label,
-        "tool": tool,
-        "status": status,
-        "required": required,
-        "evidence": evidence,
-        "gaps": gaps,
-        "next_action": next_action,
-    })
-}
-
-pub(super) fn vec_if<const N: usize>(items: [(bool, &'static str); N]) -> Vec<String> {
-    items
-        .into_iter()
-        .filter_map(|(include, message)| include.then_some(message.to_string()))
-        .collect()
-}
-
-pub(super) fn gaps_if<const N: usize>(items: [(bool, &'static str); N]) -> Vec<String> {
-    // Semantic alias for UX matrix call sites: evidence and gaps share shape.
-    vec_if(items)
-}
-
 pub(super) fn status_string(status: &Value, key: &str) -> Option<String> {
     status
         .get(key)

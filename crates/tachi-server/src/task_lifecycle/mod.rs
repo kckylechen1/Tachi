@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const UX_CLOSURE_STATES: &[&str] = &["closed_loop", "closed", "shipped"];
 static FLOW_MARKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
