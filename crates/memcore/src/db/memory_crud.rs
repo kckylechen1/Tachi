@@ -439,6 +439,38 @@ pub(crate) fn canonical_entities_json(entry: &MemoryEntry) -> Result<String, Mem
 
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
 
+/// Whether an upsert may fold write-time near-duplicate content into an
+/// existing active row instead of writing the row the caller asked for.
+///
+/// kckylechen1/tachi#1634 (the #1632 P0 leaf): ordinary upsert used to run
+/// [`merge_into_jaccard_candidate`] unconditionally on every new-id write,
+/// silently merging any two >0.9 token-Jaccard-similar rows into one
+/// regardless of caller intent — an explicit-id write, a fresh `upsert_batch`
+/// row, and a tidy-migration copy could all vanish into an unrelated row's
+/// `keywords`/`entities` with no signal to the caller beyond a normal
+/// `Saved`/`Ok` result. The owner ruling for #1634 (Option A) keeps that
+/// merge behavior, but only as an explicit, typed opt-in reserved for
+/// id-less `save_memory` (`upsert_idless_save_entry`); every other upsert
+/// seam defaults to [`Self::NonSemantic`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NearDuplicatePolicy {
+    /// Write exactly the row the caller asked for. Never search for or fold
+    /// into a near-duplicate. The default for every upsert seam.
+    #[default]
+    NonSemantic,
+    /// Run the write-time Jaccard near-duplicate search
+    /// ([`merge_into_jaccard_candidate`]) and, when a >0.9-similar active row
+    /// exists, fold into it instead of writing a new row. Reserved for
+    /// id-less `save_memory` (kckylechen1/tachi#1634 owner ruling).
+    AllowNearDuplicateMerge,
+}
+
+impl NearDuplicatePolicy {
+    fn allows_merge(self) -> bool {
+        matches!(self, Self::AllowNearDuplicateMerge)
+    }
+}
+
 /// Outcome of an id-less write protected by the modern identity constraint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdlessUpsertResult {
@@ -841,6 +873,14 @@ impl crate::MemoryStore {
     /// mutating reserved reference metadata. The validated mutations and
     /// metadata patch are separate arguments so caller-controlled metadata
     /// cannot impersonate an authorized server reference write.
+    ///
+    /// tachi#1634: always writes with [`NearDuplicatePolicy::NonSemantic`] —
+    /// this wrapper has many callers across the crate and none of them are
+    /// the id-less `save_memory` opt-in, so it never needs the merge
+    /// behavior. Callers that must choose the policy explicitly (today, only
+    /// `upsert_idless_save_entry`) call
+    /// [`Self::upsert_with_validated_reference_mutations_and_metadata_removals`]
+    /// directly.
     pub fn upsert_with_validated_reference_mutations(
         &mut self,
         entry: &MemoryEntry,
@@ -854,12 +894,17 @@ impl crate::MemoryStore {
             metadata_patch,
             &[],
             mutations,
+            NearDuplicatePolicy::NonSemantic,
         )
     }
 
     /// Trusted metadata-removal counterpart used when a server-side policy
     /// must atomically delete caller-forged authority while preserving typed
     /// reference metadata. Reserved reference keys cannot be removed here.
+    ///
+    /// `policy` is a required argument (tachi#1634), not a default, so every
+    /// call site states its near-duplicate-merge intent explicitly instead of
+    /// inheriting whatever the shared upsert body happened to hardcode.
     pub fn upsert_with_validated_reference_mutations_and_metadata_removals(
         &mut self,
         entry: &MemoryEntry,
@@ -867,6 +912,7 @@ impl crate::MemoryStore {
         metadata_patch: &Map<String, Value>,
         metadata_removals: &[&str],
         mutations: &[ValidatedReferenceMutation],
+        policy: NearDuplicatePolicy,
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
         if self.path_validation && !self.policy.path_validation_escape_hatch {
             let allow_cross = entry
@@ -898,6 +944,7 @@ impl crate::MemoryStore {
                 metadata_patch,
                 metadata_removals,
                 mutations,
+                policy,
             )
         })
     }
@@ -965,7 +1012,15 @@ impl crate::MemoryStore {
                 MemoryError::InvalidArg("Wiki operation-log metadata must be an object".to_string())
             })?;
             object.insert(RESERVED_WIKI_LOG_KEY.to_string(), Value::Bool(true));
-            upsert_prepared_within_tx(&tx, &trusted, vec_available, None, false, true, false)?;
+            upsert_prepared_within_tx(
+                &tx,
+                &trusted,
+                vec_available,
+                None,
+                NearDuplicatePolicy::NonSemantic,
+                true,
+                false,
+            )?;
             tx.commit()?;
             Ok(())
         })
@@ -1082,6 +1137,7 @@ fn merge_validated_reference_metadata(
     Ok(Value::Object(merged))
 }
 
+#[allow(clippy::too_many_arguments)] // fixed transaction seam; grouping these trust channels would blur them
 fn upsert_with_validated_reference_mutations(
     conn: &mut Connection,
     entry: &MemoryEntry,
@@ -1090,6 +1146,7 @@ fn upsert_with_validated_reference_mutations(
     metadata_patch: &Map<String, Value>,
     metadata_removals: &[&str],
     mutations: &[ValidatedReferenceMutation],
+    policy: NearDuplicatePolicy,
 ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let result = upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
@@ -1100,7 +1157,7 @@ fn upsert_with_validated_reference_mutations(
         metadata_patch,
         metadata_removals,
         mutations,
-        true,
+        policy,
     )?;
     tx.commit()?;
     Ok(result)
@@ -1115,7 +1172,7 @@ pub(crate) fn upsert_with_validated_reference_mutations_within_tx_and_metadata_r
     metadata_patch: &Map<String, Value>,
     metadata_removals: &[&str],
     mutations: &[ValidatedReferenceMutation],
-    allow_near_duplicate_merge: bool,
+    policy: NearDuplicatePolicy,
 ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
     let mut merged_entry = entry.clone();
     merged_entry.metadata = merge_validated_reference_metadata(
@@ -1130,7 +1187,7 @@ pub(crate) fn upsert_with_validated_reference_mutations_within_tx_and_metadata_r
         &merged_entry,
         vec_available,
         idless_identity,
-        allow_near_duplicate_merge,
+        policy,
         false,
         false,
     )?;
@@ -1526,6 +1583,7 @@ mod reserved_reference_tests {
                     &Map::new(),
                     &[key],
                     &[],
+                    NearDuplicatePolicy::NonSemantic,
                 )
                 .expect_err("metadata removal must not erase reserved references");
             assert!(
@@ -2607,7 +2665,19 @@ pub(crate) fn upsert_within_tx(
     vec_available: bool,
     idless_identity: Option<&str>,
 ) -> Result<IdlessUpsertResult, MemoryError> {
-    upsert_within_tx_inner(tx, entry, vec_available, idless_identity, false)
+    // tachi#1634: every caller of this seam (ordinary `upsert`, `upsert_idless`,
+    // both batch paths, lifecycle-apply, snapshot import) is NonSemantic —
+    // the sole near-duplicate-merge opt-in is id-less `save_memory`, which
+    // goes through `upsert_with_validated_reference_mutations_and_metadata_removals`,
+    // not this seam.
+    upsert_within_tx_inner(
+        tx,
+        entry,
+        vec_available,
+        idless_identity,
+        false,
+        NearDuplicatePolicy::NonSemantic,
+    )
 }
 
 /// Trusted whole-store-copy variant of [`upsert_within_tx`]: identical body,
@@ -2630,7 +2700,14 @@ pub(crate) fn upsert_within_tx_allowing_reserved_anchor_ids(
     vec_available: bool,
     idless_identity: Option<&str>,
 ) -> Result<IdlessUpsertResult, MemoryError> {
-    upsert_within_tx_inner(tx, entry, vec_available, idless_identity, true)
+    upsert_within_tx_inner(
+        tx,
+        entry,
+        vec_available,
+        idless_identity,
+        true,
+        NearDuplicatePolicy::NonSemantic,
+    )
 }
 
 fn upsert_within_tx_inner(
@@ -2639,6 +2716,7 @@ fn upsert_within_tx_inner(
     vec_available: bool,
     idless_identity: Option<&str>,
     allow_reserved_anchor_id: bool,
+    policy: NearDuplicatePolicy,
 ) -> Result<IdlessUpsertResult, MemoryError> {
     let mut sanitized = entry.clone();
     sanitized.metadata = merge_ordinary_reserved_metadata(tx, &entry.id, &entry.metadata)?;
@@ -2647,7 +2725,7 @@ fn upsert_within_tx_inner(
         &sanitized,
         vec_available,
         idless_identity,
-        true,
+        policy,
         false,
         allow_reserved_anchor_id,
     )
@@ -2720,7 +2798,7 @@ fn upsert_prepared_within_tx(
     entry: &MemoryEntry,
     vec_available: bool,
     idless_identity: Option<&str>,
-    allow_near_duplicate_merge: bool,
+    policy: NearDuplicatePolicy,
     allow_wiki_operation_log: bool,
     allow_reserved_anchor_id: bool,
 ) -> Result<IdlessUpsertResult, MemoryError> {
@@ -2784,7 +2862,7 @@ fn upsert_prepared_within_tx(
         |r| r.get::<_, i64>(0),
     )? == 0;
 
-    if allow_near_duplicate_merge && is_new && idless_identity.is_none() {
+    if policy.allows_merge() && is_new && idless_identity.is_none() {
         if let Some(cand_id) = merge_into_jaccard_candidate(tx, entry, importance, &write_time_utc)?
         {
             // Write this entry as superseded by the candidate
@@ -2930,7 +3008,7 @@ fn upsert_prepared_within_tx(
     // which origin/main's `upsert()` always deduped via this same
     // FTS+Jaccard search. Run it now, after the atomic decision, so the two
     // mechanisms never compete over the same row.
-    if allow_near_duplicate_merge && idless_identity.is_some() {
+    if policy.allows_merge() && idless_identity.is_some() {
         if let Some(cand_id) = merge_into_jaccard_candidate(tx, entry, importance, &write_time_utc)?
         {
             // `entry`'s row just won the identity race and is currently the
@@ -3020,6 +3098,36 @@ mod idless_upsert_tests {
             query_diversity: 0,
             tier: "raw".to_string(),
         }
+    }
+
+    /// tachi#1634: `MemoryStore::upsert_idless` now writes with
+    /// [`NearDuplicatePolicy::NonSemantic`] like every other upsert seam, so
+    /// tests that specifically exercise the write-time Jaccard near-duplicate
+    /// merge on the id-less path must opt in explicitly, the same way
+    /// `upsert_idless_save_entry` (the production id-less `save_memory`
+    /// opt-in) does — by going around `MemoryStore::upsert_idless` and
+    /// driving the transactional seam directly with
+    /// [`NearDuplicatePolicy::AllowNearDuplicateMerge`].
+    fn upsert_idless_allowing_merge(
+        store: &mut crate::MemoryStore,
+        entry: &MemoryEntry,
+        identity: &str,
+    ) -> IdlessUpsertResult {
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let result = upsert_within_tx_inner(
+            &tx,
+            entry,
+            store.vec_available,
+            Some(identity),
+            false,
+            NearDuplicatePolicy::AllowNearDuplicateMerge,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        result
     }
 
     #[test]
@@ -3247,6 +3355,13 @@ mod idless_upsert_tests {
     /// MCP `save_memory` primary path). This is a discriminating test for
     /// that regression: it MUST fail against PR #1167's tip (`16755394`)
     /// before this round's fix and pass after.
+    ///
+    /// kckylechen1/tachi#1634: near-duplicate merging is now an explicit,
+    /// typed opt-in ([`NearDuplicatePolicy::AllowNearDuplicateMerge`])
+    /// reserved for id-less `save_memory`, not `MemoryStore::upsert_idless`'s
+    /// default. This test drives that opt-in directly via
+    /// `upsert_idless_allowing_merge` to keep documenting the merge behavior
+    /// itself; the assertions are unchanged.
     #[test]
     fn idless_save_near_duplicate_merges_into_existing_active_row() {
         let mut store = crate::MemoryStore::open_in_memory().unwrap();
@@ -3269,7 +3384,7 @@ mod idless_upsert_tests {
         original.path = "/notes/near-dup".to_string();
         original.text = base_text;
         assert_eq!(
-            store.upsert_idless(&original, "identity-original").unwrap(),
+            upsert_idless_allowing_merge(&mut store, &original, "identity-original"),
             IdlessUpsertResult::Saved
         );
 
@@ -3279,11 +3394,11 @@ mod idless_upsert_tests {
         // A distinct identity: this is not an exact path+text duplicate (the
         // unique index would not fire on it), only a Jaccard-similar one.
         assert_eq!(
-            store.upsert_idless(&near_dup, "identity-near-dup").unwrap(),
+            upsert_idless_allowing_merge(&mut store, &near_dup, "identity-near-dup"),
             IdlessUpsertResult::Saved,
-            "a Jaccard near-duplicate id-less save must still report Saved \
-             — it is silently merged into the existing row, matching \
-             origin/main's upsert() behavior for explicit-id near-duplicates"
+            "a Jaccard near-duplicate id-less save under \
+             NearDuplicatePolicy::AllowNearDuplicateMerge must still report \
+             Saved — it is silently merged into the existing row"
         );
 
         let conn = store.connection();
@@ -3343,6 +3458,11 @@ mod idless_upsert_tests {
     /// #1331 BUG 2: id-less Jaccard early-return must sync the superseded
     /// loser into `memories_symbolic_fts` before commit so
     /// `include_superseded` symbolic recall sees it immediately.
+    ///
+    /// kckylechen1/tachi#1634: exercises the merge path via
+    /// `upsert_idless_allowing_merge`'s explicit
+    /// [`NearDuplicatePolicy::AllowNearDuplicateMerge`] opt-in — see that
+    /// helper's doc comment.
     #[test]
     fn idless_jaccard_loser_is_symbolic_searchable_when_include_superseded() {
         let mut store = crate::MemoryStore::open_in_memory().unwrap();
@@ -3358,9 +3478,7 @@ mod idless_upsert_tests {
         original.path = "/notes/sym-sync".to_string();
         original.text = base_text;
         assert_eq!(
-            store
-                .upsert_idless(&original, "identity-sym-original")
-                .unwrap(),
+            upsert_idless_allowing_merge(&mut store, &original, "identity-sym-original"),
             IdlessUpsertResult::Saved
         );
 
@@ -3368,9 +3486,7 @@ mod idless_upsert_tests {
         near_dup.path = "/notes/sym-sync".to_string();
         near_dup.text = near_dup_text;
         assert_eq!(
-            store
-                .upsert_idless(&near_dup, "identity-sym-loser")
-                .unwrap(),
+            upsert_idless_allowing_merge(&mut store, &near_dup, "identity-sym-loser"),
             IdlessUpsertResult::Saved
         );
 
