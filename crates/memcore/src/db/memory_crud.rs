@@ -3902,7 +3902,7 @@ pub fn supersede_memory_if_revision(
 
 #[cfg(test)]
 mod tests {
-    use super::{simple_query_input, supersede_memory_if_revision};
+    use super::{simple_query_input, supersede_memory, supersede_memory_if_revision};
     use rusqlite::Connection;
 
     #[test]
@@ -3931,6 +3931,80 @@ mod tests {
             .unwrap(),
             ("target".to_string(), 5)
         );
+    }
+
+    /// tachi#1635 (#1632 conformance, item 1): source == target must refuse,
+    /// not silently self-loop. `supersede_memory`'s guard is
+    /// `if id == superseded_by { return Ok(false); }` (this file, above) — pin
+    /// it as a no-write CAS refusal rather than an error, since the function's
+    /// contract is `Result<bool, _>` (changed vs not), not `Result<(), _>`.
+    #[test]
+    fn supersede_memory_refuses_self_supersession() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                superseded_by TEXT,
+                updated_at TEXT,
+                valid_until TEXT,
+                revision INTEGER NOT NULL
+            );
+            INSERT INTO memories (id, revision) VALUES ('self-loop', 1);",
+        )
+        .unwrap();
+
+        assert!(
+            !supersede_memory(&conn, "self-loop", "self-loop").unwrap(),
+            "id == superseded_by must be refused as a no-op, not applied"
+        );
+        let (superseded_by, revision): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT superseded_by, revision FROM memories WHERE id = 'self-loop'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            superseded_by, None,
+            "refused self-supersession must not write the edge"
+        );
+        assert_eq!(
+            revision, 1,
+            "refused self-supersession must not bump revision"
+        );
+    }
+
+    /// tachi#1635 (#1632 conformance, item 1): the revisioned CAS variant
+    /// shares the same `id == superseded_by` guard as `supersede_memory`
+    /// above — pin it separately since it is the seam migration paths use.
+    #[test]
+    fn supersede_memory_if_revision_refuses_self_supersession() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                superseded_by TEXT,
+                updated_at TEXT,
+                valid_until TEXT,
+                revision INTEGER NOT NULL
+            );
+            INSERT INTO memories (id, revision) VALUES ('self-loop-rev', 4);",
+        )
+        .unwrap();
+
+        assert!(
+            !supersede_memory_if_revision(&conn, "self-loop-rev", "self-loop-rev", 4).unwrap(),
+            "id == superseded_by must be refused even when the revision matches"
+        );
+        let (superseded_by, revision): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT superseded_by, revision FROM memories WHERE id = 'self-loop-rev'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(superseded_by, None);
+        assert_eq!(revision, 4);
     }
 
     #[test]
