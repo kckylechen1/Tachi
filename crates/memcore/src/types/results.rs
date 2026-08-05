@@ -62,12 +62,8 @@ fn is_false(b: &bool) -> bool {
 /// order (`db::graph_expand_limited`'s first-visit dedup that already
 /// establishes each entry's hop `distance`) rather than a newly-invented
 /// selection: when an entry is reachable via more than one candidate edge,
-/// the one recorded here is the strongest by the same
-/// `scorer::graph_relation_activation_weight(relation) * edge.weight`
-/// formula the spreading-activation scorer already uses to propagate
-/// `activation`, tie-broken by the expansion's own deterministic edge order
-/// (`source_id`, `target_id`, `relation` — the sort `graph_expand_limited`
-/// already applies).
+/// the one recorded here is the first eligible edge processed by the BFS
+/// batch order (`source_id`, `target_id`, `relation`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphInjectionProvenance {
     /// Relation of the edge that most directly attached this entry to its
@@ -135,4 +131,23 @@ pub struct GraphExpandResult {
     pub edges: Vec<MemoryEdge>,
     /// Hop distance for each entry ID
     pub distances: HashMap<String, u32>,
+    /// The edge that first inserted each non-seed id during BFS traversal.
+    ///
+    /// This is traversal provenance, not a scoring input: graph expansion
+    /// records it at first visit so receipts can report the actual injecting
+    /// edge instead of reconstructing one from the sorted edge list later.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub injection_edges: HashMap<String, GraphTraversalInjection>,
+}
+
+/// The concrete edge observed when BFS first inserted a graph expansion id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphTraversalInjection {
+    pub source_id: String,
+    pub target_id: String,
+    pub relation: String,
+    #[serde(default = "default_edge_weight")]
+    pub weight: f64,
+    /// Hop depth assigned to the inserted node at discovery time.
+    pub depth: u32,
 }

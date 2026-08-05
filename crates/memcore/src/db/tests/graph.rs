@@ -581,6 +581,51 @@ fn graph_expand_bfs() {
 }
 
 #[test]
+fn graph_expand_limited_records_first_injection_edge_at_traversal_time() {
+    let mut conn = make_conn();
+    for id in ["seed", "aa-parent", "zz-parent", "leaf"] {
+        upsert(&mut conn, &make_entry(id, &format!("node {id}")), false).unwrap();
+    }
+
+    let add = |source_id: &str, target_id: &str, relation: &str, weight: f64| {
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: source_id.into(),
+                target_id: target_id.into(),
+                relation: relation.into(),
+                weight,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+    };
+    add("seed", "aa-parent", "references", 1.0);
+    add("seed", "zz-parent", "references", 1.0);
+    add("aa-parent", "leaf", "follows", 0.1);
+    add("zz-parent", "leaf", "supports", 1.0);
+
+    let expanded =
+        graph_expand_limited(&conn, &["seed".into()], 2, None, usize::MAX, false).unwrap();
+    let leaf_injection = expanded
+        .injection_edges
+        .get("leaf")
+        .expect("leaf insertion edge must be recorded at first visit");
+    assert_eq!(leaf_injection.source_id, "aa-parent");
+    assert_eq!(leaf_injection.target_id, "leaf");
+    assert_eq!(
+        leaf_injection.relation, "follows",
+        "BFS provenance records the first processed edge, not the later stronger parent"
+    );
+    assert_eq!(leaf_injection.weight, 0.1);
+    assert_eq!(leaf_injection.depth, 2);
+    assert_eq!(expanded.distances.get("leaf"), Some(&2));
+}
+
+#[test]
 fn add_edge_rejects_illegal_relation() {
     let mut conn = make_conn();
     let e1 = make_entry("illegal-src", "source");
