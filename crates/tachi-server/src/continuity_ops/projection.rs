@@ -321,6 +321,53 @@ fn edge_endpoint(raw: &Value, keys: &[&str], projection_id: &str) -> Option<Stri
         })
 }
 
+/// tachi#1646 offender 1 (#1460 measurement): before this leaf, a payload
+/// that omitted `weight` defaulted to `1.0`, and one that supplied an
+/// explicit weight was bound only by the write-time `[0.0, 1.0]` clamp
+/// (`memcore::db::graph::clamp_edge_weight`) — either way an untrusted
+/// caller could reach the ceiling. `0.6` is a blanket cap, not just a new
+/// default: it applies whether the payload omits `weight` or asserts one.
+/// It sits below the product of a full-trust weight and every relation
+/// multiplier a `CollectOnly`-tier event can reach post-restriction
+/// (`follows`/`references` at 0.70, `scorer::graph_relation_activation_weight`
+/// @ scorer/graph.rs:77: `0.6 * 0.70 = 0.42`) and, for the higher-authority
+/// tiers this function also serves, below every named relation multiplier
+/// up to and including `supports` at 0.90 (scorer/graph.rs:73) times a
+/// full-trust weight of 1.0 — a caller-asserted edge can no longer reach the
+/// ceiling a `ModelReceiptBacked` or `StructuralBookkeeping` writer could.
+const CALLER_ASSERTED_WEIGHT_CAP: f64 = 0.6;
+
+/// tachi#1646 offender 1 (#1460 measurement, "auto-projects even
+/// `CollectOnly`-tier events"): `auto_projectable_event` admits
+/// `AuthorityLevel::CollectOnly` — the lowest-trust tier — into projection
+/// unconditionally, yet before this leaf that tier's `causal_edges` payload
+/// could still assert any of the 14 ontology-v1 relations, including
+/// `supports` at activation weight 0.90 (scorer/graph.rs:73). Restricting
+/// the writable relation SET (this list) rather than adding a second,
+/// tier-specific weight cap is the smaller honest change here: the general
+/// `CALLER_ASSERTED_WEIGHT_CAP` above already bounds every continuity edge's
+/// weight regardless of tier, so the only gap left for `CollectOnly`
+/// specifically is which relation multiplier it can reach — closing that
+/// needs one restriction, not a second cap dimension.
+const COLLECT_ONLY_ALLOWED_RELATIONS: [&str; 2] = ["follows", "references"];
+
+/// Remap an out-of-allowlist relation to the lowest-multiplier legal
+/// substitute for `CollectOnly`-tier events. Applied by authority tier, not
+/// by whether this call came from the background auto-sweep or an explicit
+/// `action=project` request: a `CollectOnly` event's `causal_edges` payload
+/// is exactly as untrusted either way, so gating on `auto_only` as well
+/// would add a second condition without closing any additional exposure —
+/// the tier alone is the correct and simpler predicate.
+fn restrict_relation_for_authority(relation: String, authority: AuthorityLevel) -> String {
+    if authority == AuthorityLevel::CollectOnly
+        && !COLLECT_ONLY_ALLOWED_RELATIONS.contains(&relation.as_str())
+    {
+        "references".to_string()
+    } else {
+        relation
+    }
+}
+
 fn persist_timeline_graph_edges(
     server: &MemoryServer,
     target: &ContinuityEventTarget,
@@ -359,6 +406,7 @@ fn persist_timeline_graph_edges(
             .filter(|value| !value.is_empty())
             .unwrap_or("causes")
             .to_string();
+        let relation = restrict_relation_for_authority(relation, event.authority);
         let source_exists = get_projection_memory(server, target, &source_id)
             .ok()
             .flatten()
@@ -380,7 +428,14 @@ fn persist_timeline_graph_edges(
             source_id: source_id.clone(),
             target_id: target_id.clone(),
             relation: relation.clone(),
-            weight: raw.get("weight").and_then(Value::as_f64).unwrap_or(1.0),
+            // tachi#1646: CallerAsserted blanket cap (see
+            // CALLER_ASSERTED_WEIGHT_CAP) — applies whether the payload
+            // omits weight or asserts one.
+            weight: raw
+                .get("weight")
+                .and_then(Value::as_f64)
+                .unwrap_or(CALLER_ASSERTED_WEIGHT_CAP)
+                .min(CALLER_ASSERTED_WEIGHT_CAP),
             metadata: json!({
                 "source_event_id": event.id,
                 "timeline_projection_id": entry.id,

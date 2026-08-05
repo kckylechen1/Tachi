@@ -394,18 +394,41 @@ async fn tachi_event_project_persists_explicit_timeline_graph_edges() {
         json!(1)
     );
 
-    let edges = server
+    // tachi#1646: the emitting event's authority is `collect_only` (the
+    // lowest tier — set above), so the payload's `relation: "supports"`
+    // (activation weight 0.90) is restricted down to `references` (0.70),
+    // and the payload's `weight: 0.8` is capped to
+    // `CALLER_ASSERTED_WEIGHT_CAP` (0.6) — no `supports` edge is written at
+    // all.
+    let no_supports_edges = server
         .with_global_store_read(|store| {
             store
                 .get_edges(&pattern_id, "outgoing", Some("supports"))
                 .map_err(|e| e.to_string())
         })
-        .expect("read graph edges");
+        .expect("read graph edges (supports)");
+    assert!(
+        no_supports_edges.is_empty(),
+        "a collect_only-tier causal_edges payload must not be able to assert 'supports'"
+    );
+
+    let edges = server
+        .with_global_store_read(|store| {
+            store
+                .get_edges(&pattern_id, "outgoing", Some("references"))
+                .map_err(|e| e.to_string())
+        })
+        .expect("read graph edges (references)");
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].target_id, timeline_id);
     assert_eq!(
         edges[0].metadata["source_event_id"],
         json!("timeline-edge-event")
+    );
+    assert!(
+        (edges[0].weight - 0.6).abs() < 1e-9,
+        "collect_only-tier weight must be capped at 0.6, got {}",
+        edges[0].weight
     );
 }
 
