@@ -348,8 +348,7 @@ impl MemoryStore {
         let db_label = self.db_label.clone();
         let reserved_reference_write = self.reserved_reference_write.clone();
         db::retry_memory_locked("commit_with_outbox_event", &db_label, || {
-            let _authorization =
-                db::authorize_reserved_reference_write(&reserved_reference_write)?;
+            let _authorization = db::authorize_reserved_reference_write(&reserved_reference_write)?;
             let tx = self
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -490,11 +489,9 @@ mod tests {
     fn count_memories(store: &MemoryStore, id: &str) -> i64 {
         store
             .connection()
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE id = ?1",
-                [id],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM memories WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
             .expect("count memories")
     }
 
@@ -703,7 +700,10 @@ mod tests {
             outbox_payload_digest(&changed).expect("digest")
         };
         for (field, changed) in [
-            ("text", digest_after(&|e| e.text = "different body".to_string())),
+            (
+                "text",
+                digest_after(&|e| e.text = "different body".to_string()),
+            ),
             ("archived", digest_after(&|e| e.archived = true)),
             ("revision", digest_after(&|e| e.revision = 9)),
             (
@@ -775,7 +775,10 @@ mod tests {
                     "injected failure after both writes".to_string(),
                 ))
             });
-        assert!(result.is_err(), "the injected failure must fail the operation");
+        assert!(
+            result.is_err(),
+            "the injected failure must fail the operation"
+        );
 
         assert!(
             store.get("outbox-composed").expect("get").is_none(),
@@ -790,8 +793,8 @@ mod tests {
     #[test]
     fn enqueue_for_an_object_the_transaction_never_wrote_is_refused() {
         let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
-        let result: Result<db::OutboxEventRow, MemoryError> =
-            store.with_immutable_supersession_transaction(|replacement| {
+        let result: Result<db::OutboxEventRow, MemoryError> = store
+            .with_immutable_supersession_transaction(|replacement| {
                 replacement.enqueue_outbox_event("outbox-absent", &meta("evt-absent"))
             });
         assert!(
@@ -841,9 +844,7 @@ mod tests {
             .expect("in_flight");
         assert_eq!(
             store.outbox_health().expect("health").remote_sync_status,
-            db::RemoteSyncStatus::InFlight {
-                in_flight_count: 1
-            },
+            db::RemoteSyncStatus::InFlight { in_flight_count: 1 },
             "live work outranks the remaining backlog"
         );
 

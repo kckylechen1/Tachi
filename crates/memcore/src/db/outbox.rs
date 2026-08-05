@@ -491,7 +491,9 @@ pub(crate) fn read_outbox_event(
 ) -> Result<Option<OutboxEventRow>, MemoryError> {
     let row = conn
         .query_row(
-            &format!("SELECT {OUTBOX_SELECT_COLUMNS} FROM memory_outbox_events WHERE event_id = ?1"),
+            &format!(
+                "SELECT {OUTBOX_SELECT_COLUMNS} FROM memory_outbox_events WHERE event_id = ?1"
+            ),
             params![event_id],
             row_to_outbox_event,
         )
@@ -1018,7 +1020,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(quarantined.state, OutboxState::Quarantined);
-        assert_eq!(quarantined.last_error_class.as_deref(), Some("operator_hold"));
+        assert_eq!(
+            quarantined.last_error_class.as_deref(),
+            Some("operator_hold")
+        );
     }
 
     #[test]
@@ -1152,14 +1157,20 @@ mod tests {
 
         let health = read_outbox_health(&conn).unwrap();
         assert_eq!(health.pending_count, 2);
-        assert_eq!(health.oldest_pending_at.as_deref(), Some(&*first.created_at));
+        assert_eq!(
+            health.oldest_pending_at.as_deref(),
+            Some(&*first.created_at)
+        );
         assert_eq!(
             health.remote_sync_status,
             RemoteSyncStatus::Backlogged { pending_count: 2 },
             "pending work outranks a historical failure"
         );
         assert_eq!(health.local_store_status, LocalStoreStatus::Healthy);
-        assert_eq!(health.last_error_class.as_deref(), Some("divergent_revision"));
+        assert_eq!(
+            health.last_error_class.as_deref(),
+            Some("divergent_revision")
+        );
         assert_eq!(health.last_successful_sync, None);
     }
 
@@ -1173,17 +1184,15 @@ mod tests {
         let health = read_outbox_health(&conn).unwrap();
         assert_eq!(
             health.remote_sync_status,
-            RemoteSyncStatus::InFlight {
-                in_flight_count: 1
-            }
+            RemoteSyncStatus::InFlight { in_flight_count: 1 }
         );
         assert_eq!(health.pending_count, 1);
         assert_eq!(health.last_successful_sync, None);
 
-        let acknowledged =
-            transition(&mut conn, "evt-q", OutboxState::Acknowledged, None).unwrap();
+        let acknowledged = transition(&mut conn, "evt-q", OutboxState::Acknowledged, None).unwrap();
         transition(&mut conn, "evt-p", OutboxState::InFlight, None).unwrap();
-        let acknowledged_p = transition(&mut conn, "evt-p", OutboxState::Acknowledged, None).unwrap();
+        let acknowledged_p =
+            transition(&mut conn, "evt-p", OutboxState::Acknowledged, None).unwrap();
         let health = read_outbox_health(&conn).unwrap();
         assert_eq!(health.remote_sync_status, RemoteSyncStatus::Drained);
         assert_eq!(health.pending_count, 0);
