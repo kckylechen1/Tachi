@@ -10506,6 +10506,79 @@ mod tests {
         }
     }
 
+    /// Round-2 bug B: a preexisting, empty `target_dir` -- no db file inside,
+    /// so `target_existed_before` is `false` and the confirmed run proceeds
+    /// past the Bug A gate -- is not this run's to remove wholesale on
+    /// failure. Only the db file (and its WAL/SHM sidecars) this run itself
+    /// writes belong to it. Forced deterministically: the preexisting
+    /// `target_dir` is made read-only before the confirmed run, so
+    /// `MemoryStore::open_with_label_and_context`'s `create_fresh()` cannot
+    /// write the db file into it and `adopt_into_bootstrapped_store` fails at
+    /// its very first step, before anything is written.
+    #[cfg(unix)]
+    #[test]
+    fn adopt_legacy_failure_cleanup_spares_preexisting_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "adopt-preexisting-dir",
+            "/wiki/adopt/preexisting-dir",
+            json!({"lifecycle": "active"}),
+        )]);
+        let target_dir = fixture.target_dir();
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+        // Elevated privileges (e.g. root in some CI containers) bypass
+        // directory write-permission checks entirely, which would make this
+        // probe meaningless (the bootstrap write would silently succeed).
+        // Detect that up front and skip rather than assert something
+        // environment-dependent.
+        let probe_path = target_dir.join("permission-probe");
+        let permission_enforced = File::create(&probe_path).is_err();
+        let _ = fs::remove_file(&probe_path);
+        if !permission_enforced {
+            fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            eprintln!(
+                "skipping adopt_legacy_failure_cleanup_spares_preexisting_dir: target_dir \
+                 write permission was not enforced (root?)"
+            );
+            return;
+        }
+
+        let report = fixture.adopt();
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(report.had_failures);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("cannot bootstrap wiki store")),
+            "expected a bootstrap failure: {:?}",
+            report.errors
+        );
+        assert!(
+            target_dir.is_dir(),
+            "the preexisting target_dir must survive the failure cleanup"
+        );
+        assert!(
+            !fixture.target().exists(),
+            "no db file may remain inside the preexisting target_dir"
+        );
+        assert_eq!(
+            report.target_removed_after_failure,
+            Some(true),
+            "nothing was written before the bootstrap failed, so file-only removal is a no-op \
+             success"
+        );
+        let remediation = report.remediation.expect("remediation must be set");
+        assert!(
+            remediation.contains("preexisted this run") && remediation.contains("untouched"),
+            "remediation must state the preexisting-dir semantics: {remediation}"
+        );
+    }
+
     fn legacy_source_rows(path: &Path) -> BTreeMap<String, Value> {
         let conn = Connection::open(path).unwrap();
         let mut statement = conn
