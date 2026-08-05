@@ -1,0 +1,21 @@
+[package]
+name = "tachi-lesson-forge"
+version = "1.9.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "Lesson-forge domain runtime for Tachi: public-pilot selection, forge, discrimination, progress, and reporting (#1611 Track T3, carve 3). Carved out of tachi-server with no MemoryServer coupling."
+
+[dependencies]
+chrono = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tachi-params = { path = "../tachi-params" }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
