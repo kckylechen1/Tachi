@@ -207,8 +207,10 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                     } else {
                         ComponentGovernanceRelation::Consumes
                     };
+                    // tachi#1646: component-registry seeding is deterministic
+                    // bookkeeping from the registry file, not an inference.
                     store
-                        .add_component_governance_edge(
+                        .add_component_governance_edge_with_provenance(
                             &MemoryEdge {
                                 source_id: entry_id.clone(),
                                 target_id: deterministic_component_id(target_id),
@@ -220,6 +222,10 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                                 valid_to: None,
                             },
                             relation,
+                            &memcore::db::EdgeProvenance {
+                                authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                                ..Default::default()
+                            },
                         )
                         .map_err(|e| format!("seed {} edge: {e}", relation.as_str()))?;
                 }
@@ -240,9 +246,10 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                     _ => None,
                 };
                 if let Some(rel) = relation {
-                    // self-edge documenting the drift classification on this record
+                    // self-edge documenting the drift classification on this
+                    // record (tachi#1646: also deterministic bookkeeping).
                     store
-                        .add_component_governance_edge(
+                        .add_component_governance_edge_with_provenance(
                             &MemoryEdge {
                                 source_id: entry_id.clone(),
                                 target_id: entry_id.clone(),
@@ -254,6 +261,10 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                                 valid_to: None,
                             },
                             rel,
+                            &memcore::db::EdgeProvenance {
+                                authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                                ..Default::default()
+                            },
                         )
                         .map_err(|e| format!("seed {} drift edge: {e}", rel.as_str()))?;
                 }

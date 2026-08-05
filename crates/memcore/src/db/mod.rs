@@ -99,9 +99,10 @@ pub(crate) use graph::persist_confirmed_contradiction_within_tx;
 pub use graph::{
     add_component_governance_edge, add_component_governance_edge_with_provenance, add_edge,
     add_edge_with_provenance, avg_importance, close_related_to_fog, count_active_observations,
-    count_same_topic, get_contradiction_count, get_edges, get_edges_limited, get_superseded_ids,
-    graph_expand, graph_expand_limited, invalidate_observation, list_observations_for_edge,
-    remove_edge, ConfirmedContradictionOutcome, EdgeObservation, EdgeProvenance,
+    count_same_topic, edge_authority, get_contradiction_count, get_edges, get_edges_limited,
+    get_superseded_ids, graph_expand, graph_expand_limited, invalidate_observation,
+    list_observations_for_edge, remove_edge, ConfirmedContradictionOutcome, EdgeAuthority,
+    EdgeObservation, EdgeProvenance,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{

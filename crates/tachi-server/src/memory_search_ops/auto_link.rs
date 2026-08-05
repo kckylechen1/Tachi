@@ -784,7 +784,18 @@ pub(crate) fn run_auto_linking(
                 let mut edge_outcome = EdgeWriteOutcome::InsertFailed;
                 let mut superseded_rows: usize = 0;
                 let save_edge_action = |store: &mut MemoryStore| -> Result<(), String> {
-                    store.add_edge(&edge).map_err(|e| e.to_string())?;
+                    // tachi#1646: auto-link `reinforces`/`supersedes` edges
+                    // are a vector-similarity heuristic Tachi computed
+                    // itself.
+                    store
+                        .add_edge_with_provenance(
+                            &edge,
+                            &memcore::db::EdgeProvenance {
+                                authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
+                                ..Default::default()
+                            },
+                        )
+                        .map_err(|e| e.to_string())?;
                     if sample {
                         edge_outcome = EdgeWriteOutcome::InsertOkPostWriteFailed;
                     }

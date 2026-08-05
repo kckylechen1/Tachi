@@ -1023,6 +1023,7 @@ fn edge_observations_accumulate_while_graph_row_collapses() {
             actor: "projector".into(),
             reason_code: "co_occurrence".into(),
             evidence_hash: None,
+            authority: None,
         },
     )
     .unwrap();
@@ -1042,6 +1043,7 @@ fn edge_observations_accumulate_while_graph_row_collapses() {
             actor: "projector".into(),
             reason_code: "co_occurrence".into(),
             evidence_hash: None,
+            authority: None,
         },
     )
     .unwrap();
@@ -1940,4 +1942,315 @@ fn graph_expansion_entries_are_gated_on_store_identity() {
         .iter()
         .any(|edge| edge.target_id == "gx-internal"));
     assert!(gated.distances.contains_key("gx-internal"));
+}
+
+// ─── tachi#1646: EdgeAuthority stamping + backward-compat read ─────────────
+
+/// A caller that does not classify itself (the plain `add_edge` door,
+/// `EdgeProvenance::default()`) must leave `metadata.authority` unset — this
+/// is what makes stamping additive rather than a blanket rewrite of every
+/// existing writer's persisted metadata. The name used to say
+/// "leaves...unstamped", which was only true when the caller's own metadata
+/// happened not to carry the reserved key; it now also covers the case where
+/// it does, so the plain door **scrubs** rather than merely "doesn't add".
+#[test]
+fn add_edge_without_authority_scrubs_reserved_key() {
+    let mut conn = make_conn();
+    for id in ["auth-none-src", "auth-none-tgt"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "auth-none-src".into(),
+            target_id: "auth-none-tgt".into(),
+            relation: "causes".into(),
+            weight: 0.5,
+            metadata: serde_json::json!({"existing": "field"}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let edges = get_edges(&conn, "auth-none-src", "outgoing", Some("causes")).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert!(
+        edges[0].metadata.get("authority").is_none(),
+        "unclassified caller must not gain an authority key: {:?}",
+        edges[0].metadata
+    );
+    assert_eq!(edges[0].metadata["existing"], serde_json::json!("field"));
+    assert_eq!(
+        edge_authority(&edges[0]),
+        None,
+        "no authority claim was made for this edge"
+    );
+}
+
+/// Authority spoofing via the unclassified door (tachi#1646 round-2
+/// MUST-FIX 1): a caller that never goes through `add_edge_with_provenance`
+/// (so `EdgeProvenance::authority` is `None`) but hands `add_edge` a
+/// pre-baked `metadata.authority` string — e.g. a trusted class like
+/// `"model_receipt_backed"` copy-pasted from an existing row, or crafted by
+/// an untrusted N-API `edge_json` blob — must not have that string persist.
+/// `stamp_authority` scrubs the reserved key on the `None` path precisely so
+/// `edge_authority` cannot read back a classification no writer ever
+/// actually made.
+#[test]
+fn add_edge_with_prebaked_authority_metadata_reads_back_none() {
+    let mut conn = make_conn();
+    for id in ["auth-spoof-src", "auth-spoof-tgt"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "auth-spoof-src".into(),
+            target_id: "auth-spoof-tgt".into(),
+            relation: "causes".into(),
+            weight: 0.5,
+            metadata: serde_json::json!({
+                "authority": EdgeAuthority::ModelReceiptBacked.as_str(),
+                "existing": "field",
+            }),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let edges = get_edges(&conn, "auth-spoof-src", "outgoing", Some("causes")).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert!(
+        edges[0].metadata.get("authority").is_none(),
+        "a plain add_edge must not persist a caller-supplied authority key: {:?}",
+        edges[0].metadata
+    );
+    assert_eq!(edges[0].metadata["existing"], serde_json::json!("field"));
+    assert_eq!(
+        edge_authority(&edges[0]),
+        None,
+        "no writer classified this edge, so no authority claim may read back — spoofed metadata must not be trusted"
+    );
+}
+
+/// `add_edge_with_provenance` with an explicit authority stamps
+/// `metadata.authority`, and `edge_authority` reads the same variant back —
+/// spot-checked for each of the four classes.
+#[test]
+fn add_edge_with_provenance_stamps_and_reads_back_every_authority_class() {
+    let mut conn = make_conn();
+    let classes = [
+        (EdgeAuthority::ModelReceiptBacked, "auth-mrb"),
+        (EdgeAuthority::DerivedHeuristic, "auth-dh"),
+        (EdgeAuthority::CallerAsserted, "auth-ca"),
+        (EdgeAuthority::StructuralBookkeeping, "auth-sb"),
+    ];
+    for (_, tgt) in &classes {
+        upsert(&mut conn, &make_entry(tgt, tgt), false).unwrap();
+    }
+    upsert(&mut conn, &make_entry("auth-src", "auth-src"), false).unwrap();
+
+    for (authority, tgt) in classes {
+        add_edge_with_provenance(
+            &conn,
+            &MemoryEdge {
+                source_id: "auth-src".into(),
+                target_id: tgt.into(),
+                relation: "causes".into(),
+                weight: 0.5,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+            &EdgeProvenance {
+                authority: Some(authority),
+                ..EdgeProvenance::default()
+            },
+        )
+        .unwrap();
+
+        let edge = get_edges(&conn, "auth-src", "outgoing", Some("causes"))
+            .unwrap()
+            .into_iter()
+            .find(|edge| edge.target_id == tgt)
+            .expect("stamped edge exists");
+        assert_eq!(
+            edge.metadata["authority"],
+            serde_json::json!(authority.as_str())
+        );
+        assert_eq!(edge_authority(&edge), Some(authority));
+    }
+}
+
+/// Backward compat (tachi#1646 step 4): a pre-#1646 row (no
+/// `metadata.authority` key at all) and a row carrying an unrecognized
+/// `authority` string both read back `None` from `edge_authority` — "no
+/// authority claim was made for this edge", never fabricated as a real
+/// class.
+#[test]
+fn edge_authority_reads_legacy_and_malformed_metadata_as_none() {
+    let mut conn = make_conn();
+    for id in ["auth-legacy-src", "auth-legacy-tgt", "auth-junk-tgt"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+    // Pre-#1646 row shape: no authority key at all.
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "auth-legacy-src".into(),
+            target_id: "auth-legacy-tgt".into(),
+            relation: "causes".into(),
+            weight: 0.5,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+    // A row that carries a string this build's enum does not recognize (a
+    // hand-edited row, or a future build's variant).
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "auth-legacy-src".into(),
+            target_id: "auth-junk-tgt".into(),
+            relation: "causes".into(),
+            weight: 0.5,
+            metadata: serde_json::json!({"authority": "not_a_real_class"}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let edges = get_edges(&conn, "auth-legacy-src", "outgoing", Some("causes")).unwrap();
+    assert_eq!(edges.len(), 2);
+    for edge in &edges {
+        assert_eq!(
+            edge_authority(edge),
+            None,
+            "legacy/malformed authority must read back None, not a guessed class: {edge:?}"
+        );
+    }
+}
+
+/// `stamp_authority` **overwrites** the reserved key when the writer passes
+/// `Some(authority)`, it does not merge with whatever the caller's own
+/// metadata already had there — a writer that explicitly classifies an edge
+/// is authoritative over that field even if the caller-supplied payload
+/// disagrees.
+#[test]
+fn add_edge_with_provenance_overwrites_caller_supplied_authority() {
+    let mut conn = make_conn();
+    for id in ["auth-overwrite-src", "auth-overwrite-tgt"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+    add_edge_with_provenance(
+        &conn,
+        &MemoryEdge {
+            source_id: "auth-overwrite-src".into(),
+            target_id: "auth-overwrite-tgt".into(),
+            relation: "causes".into(),
+            weight: 0.5,
+            metadata: serde_json::json!({"authority": "model_receipt_backed"}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+        &EdgeProvenance {
+            authority: Some(EdgeAuthority::DerivedHeuristic),
+            ..EdgeProvenance::default()
+        },
+    )
+    .unwrap();
+
+    let edge = get_edges(&conn, "auth-overwrite-src", "outgoing", Some("causes"))
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("stamped edge exists");
+    assert_eq!(
+        edge.metadata["authority"],
+        serde_json::json!("derived_heuristic"),
+        "the writer's classification must win, not the caller's payload"
+    );
+    assert_eq!(edge_authority(&edge), Some(EdgeAuthority::DerivedHeuristic));
+}
+
+/// `add_component_governance_edge_with_provenance` shares the same stamping
+/// as the generic door — spot-checked for `StructuralBookkeeping`, the
+/// census class for component-registry seeding.
+#[test]
+fn component_governance_edge_with_provenance_stamps_authority() {
+    let mut conn = make_conn();
+    for id in ["auth-cg-src", "auth-cg-tgt"] {
+        upsert(&mut conn, &make_entry(id, id), false).unwrap();
+    }
+    let edge = MemoryEdge {
+        relation: "IGNORED".into(),
+        ..clamp_edge("auth-cg-src", "auth-cg-tgt", 0.5)
+    };
+    add_component_governance_edge_with_provenance(
+        &conn,
+        &edge,
+        ComponentGovernanceRelation::Owns,
+        &EdgeProvenance {
+            authority: Some(EdgeAuthority::StructuralBookkeeping),
+            ..EdgeProvenance::default()
+        },
+    )
+    .unwrap();
+
+    let edges = get_edges(&conn, "auth-cg-src", "outgoing", Some("owns")).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(
+        edge_authority(&edges[0]),
+        Some(EdgeAuthority::StructuralBookkeeping)
+    );
+}
+
+/// tachi#1646 spot check: the contradiction pipeline — the only writer
+/// census-classified `ModelReceiptBacked` — stamps that class on both graph
+/// projections it writes, unconditionally (hard-coded in
+/// `persist_confirmed_contradiction_within_tx`, not caller-configurable).
+#[test]
+fn confirmed_contradiction_transaction_stamps_model_receipt_backed_authority() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("auth-mrb-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("auth-mrb-old", "old fact"), false).unwrap();
+    let (contradicts, supersedes, at) =
+        confirmed_contradiction_edges("auth-mrb-new", "auth-mrb-old", "complete");
+    let expected_entry = expected_state(&conn, "auth-mrb-new");
+    let expected = expected_state(&conn, "auth-mrb-old");
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let edges = get_edges(&conn, "auth-mrb-new", "outgoing", None).unwrap();
+    assert_eq!(edges.len(), 2, "contradicts + supersedes");
+    for edge in &edges {
+        assert_eq!(
+            edge_authority(edge),
+            Some(EdgeAuthority::ModelReceiptBacked),
+            "both contradiction-pipeline projections must stamp ModelReceiptBacked: {edge:?}"
+        );
+    }
 }

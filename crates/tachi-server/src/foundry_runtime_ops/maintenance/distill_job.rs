@@ -9,8 +9,8 @@ use chrono::Utc;
 use memcore::MemoryEntry;
 use serde_json::json;
 use tachi_foundry::{
-    build_memory_distill_input, plan_distill_edges, plan_guide_distill_memory,
-    select_memory_distill_bucket,
+    build_memory_distill_input, distill_edge_relation_is_structural, plan_distill_edges,
+    plan_guide_distill_memory, select_memory_distill_bucket,
 };
 
 fn candidate_guide_artifact_metadata(
@@ -227,9 +227,27 @@ pub(super) async fn process_memory_distill_job(
         &distill_entry.timestamp,
     );
     with_foundry_store(server, item, |store| {
+        // tachi#1646 round-2 MUST-FIX 2: only `distilled_from` is
+        // deterministic bookkeeping over this batch's own sources; the rest
+        // of `edges` (`references`/`follows`/`rejected_because`) were
+        // relation-selected by a keyword-substring match against the
+        // guide's own text (`classify_distill_guide_type` /
+        // `mentions_rejection`) and must be stamped `DerivedHeuristic`, not
+        // borrow the structural class's trust.
         for edge in &edges {
+            let authority = if distill_edge_relation_is_structural(&edge.relation) {
+                memcore::db::EdgeAuthority::StructuralBookkeeping
+            } else {
+                memcore::db::EdgeAuthority::DerivedHeuristic
+            };
             store
-                .add_edge(edge)
+                .add_edge_with_provenance(
+                    edge,
+                    &memcore::db::EdgeProvenance {
+                        authority: Some(authority),
+                        ..Default::default()
+                    },
+                )
                 .map_err(|e| format!("Failed to save foundry distill edge: {e}"))?;
         }
         Ok(())

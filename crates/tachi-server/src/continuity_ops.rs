@@ -206,6 +206,139 @@ mod tests {
             .expect("read edges");
     }
 
+    /// tachi#1646 companion to the kill-test above: pins the *distinction*
+    /// `restrict_relation_for_authority` must make, not just its negative
+    /// case. Two `CollectOnly`-tier timeline events, same shape, distinct
+    /// fixture bodies (separate endpoints/event ids so neither result can be
+    /// mistaken for the other):
+    ///
+    /// - `relation: "supports"` is ontology-legal (`is_legal_new_relation`)
+    ///   but outside the `CollectOnly` allowlist — the remap applies, and it
+    ///   lands as one weight-capped, authority-stamped `references` edge.
+    /// - `relation: "owns"` is the #772 grandfathered set — illegal on the
+    ///   generic write path — so the remap must NOT apply. It flows
+    ///   unchanged into `add_memory_edge` / `validate_relation_for_write`,
+    ///   which rejects it: zero edges land, same fail-soft outcome as the
+    ///   kill-test above.
+    #[test]
+    fn continuity_projection_remaps_legal_relation_but_not_grandfathered() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = dir.path().join("memory.db");
+        let server = MemoryServer::new(db, None).expect("test server");
+
+        server
+            .with_global_store(|store| {
+                for id in ["supports-src", "supports-tgt", "owns-src", "owns-tgt"] {
+                    store
+                        .upsert(&min_memory_entry(id))
+                        .map_err(|e| e.to_string())?;
+                }
+
+                let supports_event = TachiEventRecord {
+                    id: "timeline-supports-1".to_string(),
+                    source_repo: "tachi".to_string(),
+                    adapter: "test".to_string(),
+                    project: "sigil".to_string(),
+                    domain: "agent_os".to_string(),
+                    session_id: "s1".to_string(),
+                    actor: "codex".to_string(),
+                    event_type: "session.captured".to_string(),
+                    authority: AuthorityLevel::CollectOnly,
+                    effects: vec![EffectScope::None],
+                    projection_hints: vec![ProjectionKind::Timeline],
+                    payload: json!({
+                        "summary": "Timeline with an ontology-legal relation outside the CollectOnly allowlist",
+                        "text": "supports should be remapped down to references, not dropped",
+                        "projection_key": "timeline-supports-distinction",
+                        "causal_edges": [{
+                            "source_id": "supports-src",
+                            "target_id": "supports-tgt",
+                            "relation": "supports",
+                            "weight": 0.9,
+                        }],
+                    }),
+                    provenance: json!({"source": "test"}),
+                    created_at: now_rfc3339(),
+                };
+                let owns_event = TachiEventRecord {
+                    id: "timeline-owns-2".to_string(),
+                    source_repo: "tachi".to_string(),
+                    adapter: "test".to_string(),
+                    project: "sigil".to_string(),
+                    domain: "agent_os".to_string(),
+                    session_id: "s1".to_string(),
+                    actor: "codex".to_string(),
+                    event_type: "session.captured".to_string(),
+                    authority: AuthorityLevel::CollectOnly,
+                    effects: vec![EffectScope::None],
+                    projection_hints: vec![ProjectionKind::Timeline],
+                    payload: json!({
+                        "summary": "Timeline with a grandfathered governance relation",
+                        "text": "owns must never be laundered into a references edge",
+                        "projection_key": "timeline-owns-distinction",
+                        "causal_edges": [{
+                            "source_id": "owns-src",
+                            "target_id": "owns-tgt",
+                            "relation": "owns",
+                        }],
+                    }),
+                    provenance: json!({"source": "test"}),
+                    created_at: now_rfc3339(),
+                };
+
+                store
+                    .insert_tachi_event(&supports_event)
+                    .map_err(|e| e.to_string())?;
+                store.insert_tachi_event(&owns_event).map_err(|e| e.to_string())
+            })
+            .expect("seed events + memories");
+
+        let report = project_auto_continuity_events_for_target(
+            &server,
+            ContinuityEventTarget::new(DbScope::Global, None, None),
+            20,
+        )
+        .expect("projection must not hard-error");
+        assert_eq!(report["status"], json!("completed"), "got: {report}");
+
+        server
+            .with_global_store_read(|store| {
+                let supports_out = store
+                    .get_edges("supports-src", "outgoing", None)
+                    .map_err(|e| e.to_string())?;
+                assert_eq!(
+                    supports_out.len(),
+                    1,
+                    "ontology-legal, out-of-allowlist relation must remap to one references edge, got {supports_out:?}"
+                );
+                assert_eq!(supports_out[0].relation, "references");
+                assert!(
+                    (supports_out[0].weight - 0.6).abs() < 1e-9,
+                    "remapped edge must still carry the CallerAsserted weight cap, got {}",
+                    supports_out[0].weight
+                );
+                assert_eq!(
+                    supports_out[0]
+                        .metadata
+                        .get("authority")
+                        .and_then(|value| value.as_str()),
+                    Some("caller_asserted"),
+                    "remapped edge must still be authority-stamped, got {:?}",
+                    supports_out[0].metadata
+                );
+
+                let owns_out = store
+                    .get_edges("owns-src", "outgoing", None)
+                    .map_err(|e| e.to_string())?;
+                assert!(
+                    owns_out.is_empty(),
+                    "grandfathered relation must not be laundered by the remap, got {owns_out:?}"
+                );
+                Ok::<(), String>(())
+            })
+            .expect("read edges");
+    }
+
     #[test]
     fn parses_continuity_candidates_with_projection_aliases() {
         let raw = r#"{

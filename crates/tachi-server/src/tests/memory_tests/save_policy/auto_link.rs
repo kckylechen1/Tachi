@@ -202,6 +202,15 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
         "2 shared entities + same path root + newer timestamp must produce a supersedes edge, got {:?}",
         supersede_edge.relation
     );
+    // tachi#1646 spot check: auto_link is census-classified DerivedHeuristic
+    // (a vector/entity-overlap heuristic Tachi computed itself, not a
+    // receipt or a caller assertion).
+    assert_eq!(
+        memcore::db::edge_authority(&supersede_edge),
+        Some(memcore::db::EdgeAuthority::DerivedHeuristic),
+        "auto_link edges must stamp DerivedHeuristic authority, got metadata {:?}",
+        supersede_edge.metadata
+    );
 
     // Re-read the seeded entry. Its access_count MUST still be 0 — auto-link
     // is a write-side side effect, not a user read.

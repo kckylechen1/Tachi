@@ -274,10 +274,21 @@ impl JsMemoryStore {
     pub fn add_edge(&self, edge_json: String) -> napi::Result<()> {
         let edge: memcore::MemoryEdge = serde_json::from_str(&edge_json)
             .map_err(|e| napi::Error::from_reason(format!("invalid edge JSON: {e}")))?;
+        // tachi#1646: this N-API surface accepts an arbitrary caller-supplied
+        // edge (relation, weight, endpoints all from `edge_json`) — the
+        // Rust-side caller is not asserting anything Tachi computed or
+        // verified, so it is classified `CallerAsserted` regardless of who
+        // is embedding this binding.
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .add_edge(&edge)
+            .add_edge_with_provenance(
+                &edge,
+                &memcore::db::EdgeProvenance {
+                    authority: Some(memcore::db::EdgeAuthority::CallerAsserted),
+                    ..Default::default()
+                },
+            )
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 

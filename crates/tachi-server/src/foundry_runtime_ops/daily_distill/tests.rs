@@ -682,6 +682,62 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
             assert_eq!(derived_count, 1);
             assert_eq!(archived_sources, 3);
             assert_eq!(supersedes_edges, 3);
+
+            // tachi#1646 round-2 MUST-FIX 2: the distill edges this batch
+            // wrote must split honestly between the structural
+            // `distilled_from` link (fixed weight 1.0, StructuralBookkeeping)
+            // and the keyword-derived `follows`/`rejected_because` edges
+            // (weight capped at 0.6, DerivedHeuristic) — no relation this
+            // path emits may read back with an authority it did not earn.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT relation, weight, metadata FROM memory_edges
+                     WHERE (source_id=?1 OR target_id=?1) AND relation != 'supersedes'",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows: Vec<(String, f64, String)> = stmt
+                .query_map(rusqlite::params![&memory_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            assert!(
+                !rows.is_empty(),
+                "expected at least one distill edge to inspect"
+            );
+            let mut saw_structural = false;
+            let mut saw_keyword_derived = false;
+            for (relation, weight, metadata_raw) in rows {
+                let metadata: serde_json::Value =
+                    serde_json::from_str(&metadata_raw).map_err(|e| e.to_string())?;
+                let authority = metadata["authority"].as_str().map(str::to_string);
+                if relation == "distilled_from" {
+                    saw_structural = true;
+                    assert_eq!(weight, 1.0, "distilled_from keeps its fixed weight");
+                    assert_eq!(
+                        authority.as_deref(),
+                        Some("structural_bookkeeping"),
+                        "distilled_from is deterministic bookkeeping, not a heuristic: {metadata:?}"
+                    );
+                } else {
+                    saw_keyword_derived = true;
+                    assert!(
+                        weight <= 0.6,
+                        "keyword-derived relation {relation} must be capped at 0.6, got {weight}"
+                    );
+                    assert_eq!(
+                        authority.as_deref(),
+                        Some("derived_heuristic"),
+                        "{relation} came from a keyword-substring match and must not borrow structural trust: {metadata:?}"
+                    );
+                }
+            }
+            assert!(saw_structural, "expected a distilled_from edge");
+            assert!(
+                saw_keyword_derived,
+                "expected at least one keyword-derived distill edge (follows/rejected_because)"
+            );
             Ok(())
         })
         .expect("verify distill graph and derived rows");

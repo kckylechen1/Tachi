@@ -349,13 +349,22 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                     .filter(|candidate| candidate.id != winner_id)
                 {
                     projection.claim_immutable_supersession(&candidate.id, winner_id)?;
-                    projection.add_edge(&crate::copilot_ops::wiki_projection_supersedes_edge(
-                        winner_id,
-                        &candidate.id,
-                        &entry.path,
-                        &entry.topic,
-                        &created_at,
-                    ))?;
+                    // tachi#1646: this `supersedes` edge documents a
+                    // near-duplicate identity claim this transaction just
+                    // won — deterministic bookkeeping, not an inference.
+                    projection.add_edge_with_provenance(
+                        &crate::copilot_ops::wiki_projection_supersedes_edge(
+                            winner_id,
+                            &candidate.id,
+                            &entry.path,
+                            &entry.topic,
+                            &created_at,
+                        ),
+                        &memcore::db::EdgeProvenance {
+                            authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                            ..Default::default()
+                        },
+                    )?;
                     changed += 1;
                 }
                 Ok((result, metadata, changed, committed_previous_revision))

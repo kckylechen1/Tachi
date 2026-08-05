@@ -153,7 +153,19 @@ pub(crate) async fn handle_distill_trajectory(
             valid_from: String::new(),
             valid_to: None,
         };
-        let save_edge = |store: &mut MemoryStore| store.add_edge(&edge).map_err(|e| format!("{e}"));
+        // tachi#1646: the trajectory `follows` chain is deterministic
+        // bookkeeping over this call's own prior snapshot, not an inference.
+        let save_edge = |store: &mut MemoryStore| {
+            store
+                .add_edge_with_provenance(
+                    &edge,
+                    &memcore::db::EdgeProvenance {
+                        authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                        ..Default::default()
+                    },
+                )
+                .map_err(|e| format!("{e}"))
+        };
         if let Some(project_name) = named_project.as_deref() {
             let _ = server.with_named_project_store(project_name, save_edge);
         } else {

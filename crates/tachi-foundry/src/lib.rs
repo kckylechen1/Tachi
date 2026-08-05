@@ -825,17 +825,54 @@ fn mentions_rejection(text: &str) -> bool {
     )
 }
 
+/// tachi#1646 round-2 MUST-FIX 2 ("same disease as compact-import (offender
+/// 2) with a more trusted label"): `distilled_from` is the only relation this
+/// function emits unconditionally, regardless of `guide_type` or
+/// `distill_text` — it is the deterministic batch->source distillation link
+/// ([`EdgeAuthority::StructuralBookkeeping`]'s own doc example, "a
+/// distillation follows-chain"). Every other relation below is chosen by
+/// reading content: `fixed_by`/`causes` come from `guide_type`, and
+/// `classify_distill_guide_type` (this crate) that produces most callers'
+/// `guide_type` is itself a keyword-substring match against free text — the
+/// exact shape [`EdgeAuthority::DerivedHeuristic`] names; `rejected_because`
+/// comes straight from [`mentions_rejection`], also a keyword-substring
+/// match. Mirrors `compact/edges.rs:27-64`'s demotion exactly: `causes`
+/// (0.80 scorer activation multiplier, `scorer::graph_relation_activation_weight`)
+/// demotes to `follows` (0.70), `fixed_by` (0.80) demotes to `references`
+/// (0.70); `distilled_from` (0.70) and `rejected_because` (0.30) were
+/// already at or below the low-multiplier line and are unchanged.
 fn guide_edge_relations(guide_type: &str, distill_text: &str) -> Vec<&'static str> {
     let mut relations = vec!["distilled_from"];
     match guide_type {
-        GUIDE_TYPE_FIX_PATTERN => relations.push("fixed_by"),
-        _ => relations.push("causes"),
+        GUIDE_TYPE_FIX_PATTERN => relations.push("references"),
+        _ => relations.push("follows"),
     }
     if mentions_rejection(distill_text) {
         relations.push("rejected_because");
     }
     relations
 }
+
+/// True for the one relation [`guide_edge_relations`] emits without reading
+/// `guide_type` or `distill_text` — see that function's doc for why this is
+/// the structural/keyword-derived split. Callers that persist these edges
+/// use this to choose [`EdgeAuthority::StructuralBookkeeping`] (`true`) vs
+/// [`EdgeAuthority::DerivedHeuristic`] (`false`) per edge, rather than
+/// blanket-stamping the whole batch with one class
+/// (tachi#1646 round-2 MUST-FIX 2).
+///
+/// [`EdgeAuthority::StructuralBookkeeping`]: memcore::db::EdgeAuthority::StructuralBookkeeping
+/// [`EdgeAuthority::DerivedHeuristic`]: memcore::db::EdgeAuthority::DerivedHeuristic
+pub fn distill_edge_relation_is_structural(relation: &str) -> bool {
+    relation == "distilled_from"
+}
+
+/// tachi#1646 round-2 MUST-FIX 2: written weight caps at 0.6 under
+/// `DerivedHeuristic` authority for the keyword-derived relations
+/// (`references`/`follows`/`rejected_because`) — mirrors
+/// `compact/edges.rs`'s `COMPACT_IMPORT_WEIGHT_CAP`. `distilled_from` is
+/// structural bookkeeping with fixed topology and keeps its fixed weight.
+const DISTILL_KEYWORD_EDGE_WEIGHT_CAP: f64 = 0.6;
 
 fn build_distill_edges(
     distill_entry: &MemoryEntry,
@@ -849,9 +886,21 @@ fn build_distill_edges(
         for relation in guide_edge_relations(guide_type, &distill_entry.text) {
             let (source_id, target_id, weight) = match relation {
                 "distilled_from" => (distill_entry.id.clone(), source.id.clone(), 1.0),
-                "fixed_by" => (source.id.clone(), distill_entry.id.clone(), 0.9),
-                "rejected_because" => (distill_entry.id.clone(), source.id.clone(), 0.75),
-                _ => (source.id.clone(), distill_entry.id.clone(), 0.7),
+                "references" => (
+                    source.id.clone(),
+                    distill_entry.id.clone(),
+                    DISTILL_KEYWORD_EDGE_WEIGHT_CAP,
+                ),
+                "rejected_because" => (
+                    distill_entry.id.clone(),
+                    source.id.clone(),
+                    DISTILL_KEYWORD_EDGE_WEIGHT_CAP,
+                ),
+                _ => (
+                    source.id.clone(),
+                    distill_entry.id.clone(),
+                    DISTILL_KEYWORD_EDGE_WEIGHT_CAP,
+                ),
             };
             if seen.insert((source_id.clone(), target_id.clone(), relation.to_string())) {
                 edges.push(memcore::MemoryEdge {
@@ -1355,12 +1404,35 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("linker error"))
         );
-        let relations = build_distill_edges(&guide, &[source], "fix_pattern", &guide.timestamp)
-            .into_iter()
-            .map(|edge| edge.relation)
+        let edges = build_distill_edges(&guide, &[source], "fix_pattern", &guide.timestamp);
+        let relations = edges
+            .iter()
+            .map(|edge| edge.relation.clone())
             .collect::<HashSet<_>>();
         assert!(relations.contains("distilled_from"));
-        assert!(relations.contains("fixed_by"));
+        assert!(
+            relations.contains("references"),
+            "tachi#1646 round-2: keyword-derived fix_pattern relation must demote to references, not fixed_by: {relations:?}"
+        );
         assert!(relations.contains("rejected_because"));
+        assert!(
+            !relations.contains("fixed_by"),
+            "fixed_by (0.80 scorer multiplier) must not survive demotion: {relations:?}"
+        );
+
+        for edge in &edges {
+            if edge.relation == "distilled_from" {
+                assert_eq!(edge.weight, 1.0, "structural edge keeps its fixed weight");
+                assert!(distill_edge_relation_is_structural(&edge.relation));
+            } else {
+                assert!(
+                    edge.weight <= DISTILL_KEYWORD_EDGE_WEIGHT_CAP,
+                    "keyword-derived edge {} must be capped at {DISTILL_KEYWORD_EDGE_WEIGHT_CAP}: {}",
+                    edge.relation,
+                    edge.weight
+                );
+                assert!(!distill_edge_relation_is_structural(&edge.relation));
+            }
+        }
     }
 }

@@ -305,27 +305,41 @@ pub(super) fn get_projection_memory(
     }
 }
 
+/// tachi#1646: this is `persist_timeline_graph_edges`'s only edge-write
+/// door, and that caller lifts relation/weight straight out of an agent
+/// session's event payload — hard-coded `CallerAsserted` here, not a
+/// parameter, because there is exactly one caller and its authority class is
+/// not a per-call decision. A second caller with a different authority
+/// class must not reuse this function unmodified.
+fn continuity_edge_provenance() -> memcore::db::EdgeProvenance {
+    memcore::db::EdgeProvenance {
+        authority: Some(memcore::db::EdgeAuthority::CallerAsserted),
+        ..Default::default()
+    }
+}
+
 pub(super) fn add_memory_edge(
     server: &MemoryServer,
     target: &ContinuityEventTarget,
     edge: &MemoryEdge,
 ) -> Result<(), String> {
+    let provenance = continuity_edge_provenance();
     if let Some(project_name) = target.named_project.as_deref() {
         server.with_named_project_store(project_name, |store| {
             store
-                .add_edge(edge)
+                .add_edge_with_provenance(edge, &provenance)
                 .map_err(|e| format!("add continuity graph edge: {e}"))
         })
     } else if let Some(db_path) = target.db_path.as_ref() {
         server.with_path_store(db_path, |store| {
             store
-                .add_edge(edge)
+                .add_edge_with_provenance(edge, &provenance)
                 .map_err(|e| format!("add continuity graph edge: {e}"))
         })
     } else {
         server.with_store_for_scope(target.target_db, |store| {
             store
-                .add_edge(edge)
+                .add_edge_with_provenance(edge, &provenance)
                 .map_err(|e| format!("add continuity graph edge: {e}"))
         })
     }

@@ -87,7 +87,17 @@ pub(crate) fn apply_confidence_reinforcement_links(
             valid_from: String::new(),
             valid_to: None,
         };
-        store.add_edge(&edge).map_err(|e| format!("{e}"))?;
+        // tachi#1646: vector-similarity `reinforces` edges are a heuristic
+        // Tachi computed itself.
+        store
+            .add_edge_with_provenance(
+                &edge,
+                &memcore::db::EdgeProvenance {
+                    authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| format!("{e}"))?;
         apply_confidence_reinforcement(store, &candidate.id, increment, &now)?;
         reinforced += 1;
     }
