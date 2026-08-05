@@ -1,6 +1,6 @@
 [package]
 name = "memory-server-prompt-envelope"
-version = "1.9.0"
+version = "1.9.1"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Prompt envelope registry — structured instruction overlays per agent/mode. Extracted from tachi-server (#833 slice 3)."

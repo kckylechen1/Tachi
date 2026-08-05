@@ -1,6 +1,6 @@
 [package]
 name = "memory-server-rescue"
-version = "1.9.0"
+version = "1.9.1"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Antigravity DB rescue tool — split a multi-project memory.db into per-project Tachi DBs. Extracted from tachi-server (#833 slice 1)."

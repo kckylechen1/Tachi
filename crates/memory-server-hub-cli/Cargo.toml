@@ -1,6 +1,6 @@
 [package]
 name = "memory-server-hub-cli"
-version = "1.9.0"
+version = "1.9.1"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Hub registry CLI commands (list/show/packs/bindings/doctor/stats). Extracted from tachi-server (#833)."
