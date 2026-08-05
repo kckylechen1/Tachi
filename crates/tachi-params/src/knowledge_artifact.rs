@@ -1269,10 +1269,21 @@ mod tests {
     /// fixture below must classify identically on both sides, or the mirror
     /// has drifted.
     ///
-    /// Scoped to `/wiki`-rooted paths, matching
-    /// `is_non_default_retrievable_wiki_row`'s own documented scope (a row
-    /// outside `/wiki` never earned a Wiki lifecycle marker in the first
-    /// place, so the two sides are not expected to agree there).
+    /// `is_non_default_retrievable_wiki_row`'s scope check is now
+    /// `Surface::Docs` classification (path, `category`, `domain`, or
+    /// `metadata.wiki`), not a bare `/wiki` path check — see its doc comment
+    /// (tachi#1561 review round, BUG 1). Every fixture below only varies
+    /// `path` and `metadata`, leaving `category`/`domain`/`source` at their
+    /// entry defaults (`category = "fact"`, `domain = None`,
+    /// `source = "manual"`), so `Surface::Docs` reduces to the path check for
+    /// all of them and this fixture set exercises that reduction, not the
+    /// classifier's other signals — those get dedicated, adversarial
+    /// coverage in `memcore::namespace::tests::
+    /// wiki_lifecycle_gate_catches_off_path_domain_classified_pending_rows`
+    /// and `..._does_not_capture_unrelated_lifecycle_key_usage`, which
+    /// `derive_wiki_lifecycle` (path-only, no domain/category awareness)
+    /// cannot mirror — those two sides are not expected to agree once
+    /// `category`/`domain`/`metadata.wiki` enter the picture.
     #[test]
     fn memcore_wiki_lifecycle_gate_matches_derive_wiki_lifecycle() {
         fn wiki_entry(path: &str, metadata: serde_json::Value) -> memcore::MemoryEntry {

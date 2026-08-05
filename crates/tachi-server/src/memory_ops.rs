@@ -55,8 +55,10 @@ fn readable_entry(entry: Option<MemoryEntry>) -> Option<MemoryEntry> {
 /// surface but are not Wiki-corpus bookkeeping), and it is the only line for
 /// stores that are not the Wiki corpus.
 ///
-/// tachi#1561 residual: also drops a `/wiki` row whose derived lifecycle is
-/// not default-retrievable (drafts, etc — see
+/// tachi#1561 residual: also drops a Wiki/guide-classified row (`/wiki`
+/// path, `category`/`domain` "wiki"/"guide", or `metadata.wiki` — see
+/// `memcore::namespace::Surface::Docs`) whose derived lifecycle is not
+/// default-retrievable (drafts, etc — see
 /// `memcore::is_non_default_retrievable_wiki_row`). Unlike the Wiki search
 /// leg (`memcore::SearchOptions::bypass_wiki_lifecycle_gate`), `list_memories`
 /// has no `requested_lifecycle` escape hatch of its own, so this check is

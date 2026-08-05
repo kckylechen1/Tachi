@@ -450,7 +450,7 @@ pub fn path_prefix_opts_into_continuity_projection(path: &str, path_prefix: Opti
     })
 }
 
-/// tachi#1561 residual: whether `entry` is a `/wiki`-namespaced row whose
+/// tachi#1561 residual: whether `entry` is a Wiki/guide-classified row whose
 /// derived lifecycle is not default-retrievable (a draft, a row explicitly
 /// marked `pending_review`/`stale`/`superseded`/`rejected`/`candidate`, or a
 /// present-but-malformed `metadata.lifecycle` value — the closed
@@ -470,16 +470,30 @@ pub fn path_prefix_opts_into_continuity_projection(path: &str, path_prefix: Opti
 /// crate that can see both sides of the mirror, since tachi-params already
 /// depends on memcore.
 ///
-/// Scope, matching `derive_wiki_lifecycle`'s own path-based defense in
-/// depth: only rows under `/wiki` are asked this question at all — a row
+/// Scope (tachi#1561 review round, BUG 1 — corrected): this used to gate on
+/// `path_in_namespace(path, "/wiki")` alone, on the theory that "a row
 /// outside that namespace was never a Wiki artifact, so it never earned a
-/// `metadata.lifecycle`/`metadata.review_status` marker from the Wiki
-/// writer in the first place. This mirrors how [`is_namespace_search_noise`]
-/// composes its own path-scoped classes (kanban, handoff, continuity
-/// projection) rather than trying every predicate against every row
-/// unconditionally.
+/// lifecycle marker from the Wiki writer in the first place." That theory is
+/// false: `tachi_server::memory_search_ops::save_memory::handler::
+/// constrain_public_wiki_metadata` stamps an explicit
+/// `metadata.lifecycle = "pending_review"` on every save its sibling
+/// `is_wiki_classified` marks as Wiki — by `domain == "wiki"`, `category` in
+/// `{"wiki", "guide"}`, or `metadata.wiki == true` — none of which require
+/// the row's *path* to be under `/wiki`. The old path-only gate never asked
+/// such an off-path row the lifecycle question at all, so it sailed through
+/// generic and `Surface::Docs`-scoped search as an unreviewed draft. The
+/// gate now scopes on [`surface_of`] returning [`Surface::Docs`] instead of
+/// the bare path check — the same "does anything already treat this row as
+/// wiki/guide reference material" classification the writer itself used, not
+/// a third divergent one. Rows that merely reuse the `metadata.lifecycle`
+/// JSON key for an unrelated purpose (e.g. the self-evolution
+/// "corrected"/superseded legacy-note shape) stay unaffected: they are
+/// `Surface::Memory`, not `Surface::Docs`, so this function still never asks
+/// them the lifecycle question. See
+/// `wiki_lifecycle_gate_catches_off_path_domain_classified_pending_rows` and
+/// `wiki_lifecycle_gate_does_not_capture_unrelated_lifecycle_key_usage`.
 pub fn is_non_default_retrievable_wiki_row(entry: &MemoryEntry) -> bool {
-    path_in_namespace(&entry.path, "/wiki") && !wiki_row_lifecycle_is_default_retrievable(entry)
+    matches!(surface_of(entry), Surface::Docs) && !wiki_row_lifecycle_is_default_retrievable(entry)
 }
 
 /// The retrievability half of the `derive_wiki_lifecycle` mirror — see
@@ -902,6 +916,86 @@ mod tests {
                  still be gated: {entry:?}"
             );
         }
+    }
+
+    /// tachi#1561 review round (BUG 1): `save_memory`'s public-metadata wiki
+    /// classifier (`tachi_server::memory_search_ops::save_memory::handler::
+    /// is_wiki_classified` / `constrain_public_wiki_metadata`) stamps an
+    /// explicit `metadata.lifecycle = "pending_review"` on every save it
+    /// classifies as Wiki — by `domain == "wiki"`, `category` in
+    /// `{"wiki", "guide"}`, or `metadata.wiki == true` — with no requirement
+    /// that the row's `path` be under `/wiki`. Before this fix
+    /// `is_non_default_retrievable_wiki_row` gated on the bare path check
+    /// alone, so a pending row classified this way at an off-path location
+    /// never got asked the lifecycle question and stayed retrievable through
+    /// generic and `Surface::Docs`-scoped search.
+    #[test]
+    fn wiki_lifecycle_gate_catches_off_path_domain_classified_pending_rows() {
+        let mut off_path_domain_wiki = fixture_entry(
+            "off-path-domain",
+            "/decisions/some-note",
+            "domain-classified pending wiki draft outside /wiki",
+        );
+        off_path_domain_wiki.domain = Some("wiki".to_string());
+        off_path_domain_wiki.metadata = json!({"lifecycle": "pending_review"});
+        assert!(
+            is_non_default_retrievable_wiki_row(&off_path_domain_wiki),
+            "a domain='wiki' row explicitly marked pending_review must be \
+             gated even when its path is not under /wiki: {off_path_domain_wiki:?}"
+        );
+
+        let mut off_path_category_guide = fixture_entry(
+            "off-path-category",
+            "/notes/random",
+            "category-classified pending guide draft outside /guide",
+        );
+        off_path_category_guide.category = "guide".to_string();
+        off_path_category_guide.metadata = json!({"lifecycle": "candidate"});
+        assert!(
+            is_non_default_retrievable_wiki_row(&off_path_category_guide),
+            "a category='guide' row explicitly marked non-active must be \
+             gated even off-path: {off_path_category_guide:?}"
+        );
+
+        let mut off_path_metadata_flag = fixture_entry(
+            "off-path-metadata-flag",
+            "/scratch/idea",
+            "metadata.wiki-flagged pending draft outside /wiki",
+        );
+        off_path_metadata_flag.metadata = json!({"wiki": true, "review_status": "pending"});
+        assert!(
+            is_non_default_retrievable_wiki_row(&off_path_metadata_flag),
+            "a metadata.wiki=true row explicitly marked pending must be \
+             gated even off-path: {off_path_metadata_flag:?}"
+        );
+    }
+
+    /// Regression guard for the widened scope above: a row that reuses the
+    /// `metadata.lifecycle` JSON key for an unrelated, non-wiki purpose (the
+    /// self-evolution "corrected"/superseded legacy-note shape written by
+    /// `foundry_runtime_ops::handlers::capture_session`) must not be swept
+    /// into the wiki gate just because it carries that key — it is neither
+    /// `/wiki`-pathed nor wiki/guide-classified by domain, category, or the
+    /// `metadata.wiki` flag, so [`surface_of`] leaves it `Surface::Memory`
+    /// and this function must never ask it the lifecycle question at all.
+    #[test]
+    fn wiki_lifecycle_gate_does_not_capture_unrelated_lifecycle_key_usage() {
+        let mut legacy_corrected = fixture_entry(
+            "legacy-corrected-note",
+            "/openclaw/legacy-agent",
+            "old rule has been corrected",
+        );
+        legacy_corrected.metadata = json!({
+            "lifecycle": "corrected",
+            "authority": "legacy-owner",
+            "superseded_by": "replacement-7"
+        });
+        assert!(
+            !is_non_default_retrievable_wiki_row(&legacy_corrected),
+            "a non-wiki-classified row must not be gated merely for reusing \
+             the 'lifecycle' metadata key for unrelated semantics: \
+             {legacy_corrected:?}"
+        );
     }
 
     #[test]
