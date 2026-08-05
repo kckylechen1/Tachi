@@ -1173,7 +1173,7 @@ async fn generate_recall_source_proposal(
         .expect("recall source proposal")
 }
 
-fn recall_source_proposal_params(suffix: &str) -> crate::tool_params::TachiMemoryParams {
+fn recall_source_proposal_params(suffix: &str) -> TachiTuneParams {
     let mut proposals = tachi_tune_params("recall_proposals");
     proposals.format = Some("json".to_string());
     proposals.scope = Some("memory".to_string());
