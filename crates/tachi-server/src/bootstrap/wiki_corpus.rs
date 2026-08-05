@@ -739,6 +739,19 @@ struct RawRow {
     scope: String,
     archived: bool,
     revision: i64,
+    // Round-2 bug C: usage counters, loaded verbatim so adoption can carry
+    // them through. `import_snapshot_batch` writes these four fields from
+    // `MemoryEntry` (memcore's `snapshot_import.rs`), but they are outside
+    // the lifecycle checksum's coverage (archived/created_at/id/revision/
+    // superseded_by/updated_at/valid_until, per #1607's scope) -- same
+    // category as `path`, which gets its own `verify_adopted_paths` readback
+    // for the same reason. Preservation here is asserted by
+    // `adopt_legacy_preserves_usage_counters_verbatim`, not by the checksum;
+    // deliberately not widening the checksum's scope to cover them.
+    access_count: i64,
+    scored_count: i64,
+    last_access: Option<String>,
+    last_use_at: Option<String>,
     retention_policy: Option<String>,
     domain: Option<String>,
     metadata: Value,
@@ -930,6 +943,12 @@ fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize, bool), String> {
         expression("query_diversity", "0"),
         expression("tier", "'raw'"),
         expression("superseded_by", "NULL"),
+        // Round-2 bug C: appended rather than interleaved so every existing
+        // positional `row.get(N)` above keeps its index unchanged.
+        expression("access_count", "0"),
+        expression("scored_count", "0"),
+        expression("last_access", "NULL"),
+        expression("last_use_at", "NULL"),
     ]
     .join(", ");
     let sql = format!("SELECT {select} FROM memories ORDER BY id ASC");
@@ -973,6 +992,10 @@ fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize, bool), String> {
                 query_diversity: row.get(20)?,
                 tier: row.get(21)?,
                 superseded_by: row.get(22)?,
+                access_count: row.get(23)?,
+                scored_count: row.get(24)?,
+                last_access: row.get(25)?,
+                last_use_at: row.get(26)?,
                 metadata_parse_error,
                 classification: None,
                 reasons: Vec::new(),
@@ -1107,10 +1130,14 @@ fn memory_entry_from_raw(row: &RawRow) -> MemoryEntry {
         source: row.source.clone(),
         scope: row.scope.clone(),
         archived: row.archived,
-        access_count: 0,
-        scored_count: 0,
-        last_access: None,
-        last_use_at: None,
+        // Round-2 bug C: loaded verbatim from the legacy row instead of
+        // hardcoded to zero/None -- `import_snapshot_batch` writes these
+        // straight from this `MemoryEntry`, so hardcoding them here silently
+        // dropped every adopted row's usage history.
+        access_count: row.access_count,
+        scored_count: row.scored_count,
+        last_access: row.last_access.clone(),
+        last_use_at: row.last_use_at.clone(),
         revision: row.revision,
         vector: row.vector.clone(),
         retention_policy: row.retention_policy.clone(),
@@ -4203,6 +4230,10 @@ fn raw_from_entry(entry: &MemoryEntry) -> RawRow {
         scope: entry.scope.clone(),
         archived: entry.archived,
         revision: entry.revision,
+        access_count: entry.access_count,
+        scored_count: entry.scored_count,
+        last_access: entry.last_access.clone(),
+        last_use_at: entry.last_use_at.clone(),
         retention_policy: entry.retention_policy.clone(),
         domain: entry.domain.clone(),
         metadata: entry.metadata.clone(),
@@ -6763,6 +6794,10 @@ mod tests {
             .to_string(),
             archived: false,
             revision: 1,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
             retention_policy: Some("permanent".to_string()),
             domain: Some("wiki".to_string()),
             metadata,
@@ -9529,6 +9564,33 @@ mod tests {
         assert_eq!(changed, 1, "fixture row {id} must exist");
     }
 
+    /// Round-2 bug C. Overwrite the usage-counter columns directly, bypassing
+    /// `upsert` the same way `force_legacy_lifecycle` does: the ordinary
+    /// write path does not accept caller-supplied `access_count`/
+    /// `scored_count`/`last_access`/`last_use_at` (they are bumped by the
+    /// search/recall path, never set by a write), so this is the only way to
+    /// build a fixture carrying values a legacy row genuinely accumulated
+    /// before adoption.
+    fn force_legacy_usage_counters(
+        path: &Path,
+        id: &str,
+        access_count: i64,
+        scored_count: i64,
+        last_access: Option<&str>,
+        last_use_at: Option<&str>,
+    ) {
+        let conn = Connection::open(path).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE memories
+                 SET access_count = ?2, scored_count = ?3, last_access = ?4, last_use_at = ?5
+                 WHERE id = ?1",
+                rusqlite::params![id, access_count, scored_count, last_access, last_use_at],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "fixture row {id} must exist");
+    }
+
     /// Overwrite the `path` column directly, bypassing `upsert`'s
     /// `normalize_path` call so the fixture can hold a raw legacy path the
     /// current write path would never itself persist -- the shape genuinely
@@ -9554,13 +9616,18 @@ mod tests {
         superseded_by: Option<String>,
         metadata: Value,
         path: String,
+        // Round-2 bug C.
+        access_count: i64,
+        scored_count: i64,
+        last_access: Option<String>,
+        last_use_at: Option<String>,
     }
 
     fn destination_row(target: &Path, id: &str) -> DestinationRow {
         let conn = Connection::open(target).unwrap();
         conn.query_row(
             "SELECT created_at, updated_at, revision, archived, valid_until, superseded_by,
-                    metadata, path
+                    metadata, path, access_count, scored_count, last_access, last_use_at
              FROM memories WHERE id = ?1",
             [id],
             |row| {
@@ -9574,6 +9641,10 @@ mod tests {
                     superseded_by: row.get(5)?,
                     metadata: serde_json::from_str(&metadata).unwrap(),
                     path: row.get(7)?,
+                    access_count: row.get(8)?,
+                    scored_count: row.get(9)?,
+                    last_access: row.get(10)?,
+                    last_use_at: row.get(11)?,
                 })
             },
         )
@@ -9879,6 +9950,44 @@ mod tests {
         );
         assert_eq!(stored.superseded_by, None);
         assert_eq!(stored.path, "/wiki/adopt/verbatim");
+    }
+
+    /// T6b, round-2 bug C: `access_count`/`scored_count`/`last_access`/
+    /// `last_use_at` are usage history, not lifecycle policy, but
+    /// `import_snapshot_batch` writes them straight from the `MemoryEntry`
+    /// it is handed (memcore `snapshot_import.rs`). The loader used to
+    /// hardcode all four to zero/None regardless of what the legacy row
+    /// actually carried, so every adopted row silently lost its usage
+    /// history while `checksums_match` still passed -- the lifecycle
+    /// checksum's coverage is `archived`/`created_at`/`id`/`revision`/
+    /// `superseded_by`/`updated_at`/`valid_until` only (see the field
+    /// comment on `RawRow`), deliberately not widened here to cover these
+    /// four; this test is the thing that would catch a regression, not the
+    /// checksum.
+    #[test]
+    fn adopt_legacy_preserves_usage_counters_verbatim() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "usage-verbatim",
+            "/wiki/adopt/usage-verbatim",
+            json!({"lifecycle": "active"}),
+        )]);
+        force_legacy_usage_counters(
+            &fixture.global_path,
+            "usage-verbatim",
+            42,
+            17,
+            Some("2024-03-01T00:00:00Z"),
+            Some("2024-03-02T00:00:00Z"),
+        );
+
+        let adoption = fixture.adopt();
+        assert_eq!(adoption.rows_imported, 1);
+
+        let stored = destination_row(&fixture.target(), "usage-verbatim");
+        assert_eq!(stored.access_count, 42);
+        assert_eq!(stored.scored_count, 17);
+        assert_eq!(stored.last_access, Some("2024-03-01T00:00:00Z".to_string()));
+        assert_eq!(stored.last_use_at, Some("2024-03-02T00:00:00Z".to_string()));
     }
 
     /// T7
