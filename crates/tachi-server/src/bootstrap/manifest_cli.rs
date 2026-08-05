@@ -533,6 +533,132 @@ mod tests {
             cache_write,
         }
     }
+
+    /// #1605 part B. Live measurement: `tachi doctor --json --run-daily` on the
+    /// owner machine exhausted every distill tier with "Missing API key" ~70ms
+    /// after process start — zero network attempts — while the Vault was
+    /// unlocked and held `SILICONFLOW_API_KEY`/`ZAI_API_KEY` verbatim.
+    ///
+    /// Cause: the run-daily distill step built its own server with a bare
+    /// `MemoryServer::new_with_migration_authority`. That constructor's
+    /// `LlmClient` loads key *health* from the DB and nothing else, so
+    /// `provider_state.secrets` is empty; only
+    /// `provider_config::bootstrap_provider_runtime` materializes Vault
+    /// secrets into it. `select_secret` then found no pool entry and no env
+    /// value (Vault-stored keys are deliberately absent from env), so
+    /// `provider_secret_unavailable_error` reported `configured == 0` —
+    /// "Missing API key" — which reads as "no key configured" for a machine
+    /// whose Vault holds 34 of them.
+    ///
+    /// Deadlock shape, pinned by the first half of this test: the only route
+    /// from the Vault into the pool is materialization, and nothing on the
+    /// lane-call path performs it, so the process can never recover on its own.
+    ///
+    /// macOS-only: the Vault→pool route for a freshly built server goes through
+    /// Keychain auto-unlock, which is macOS-only and here driven by the
+    /// deterministic `TACHI_TEST_KEYCHAIN_PASSWORD` override (same pattern as
+    /// `vault_ops::tests::bootstrap_auto_unlock_owns_one_provider_refresh`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn doctor_run_daily_distill_server_materializes_vault_provider_keys() {
+        use crate::test_support::EnvRestore;
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _allow_auto_unlock = EnvRestore::set("TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK", "1");
+        let _keychain_password = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", "r1605-password");
+        // The env fallback inside `select_secret` must not stand in for the
+        // Vault route this test is about: a stray exported provider key on the
+        // host would otherwise satisfy the chain without any materialization.
+        let _env_guards: Vec<EnvRestore> = [
+            "DISTILL_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "REASONING_API_KEY",
+            "ZAI_API_KEY",
+            "BIGMODEL_API_KEY",
+            "EXTRACT_API_KEY",
+            "SILICONFLOW_API_KEY",
+            "DISTILL_FALLBACK_API_KEY",
+        ]
+        .into_iter()
+        .map(EnvRestore::remove)
+        .collect();
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let global_db = dir.path().join("global.db");
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let seed = crate::MemoryServer::new(global_db.clone(), None).expect("seed server");
+            crate::vault_ops::handle_vault_init(
+                &seed,
+                crate::vault_ops::VaultInitParams {
+                    password: "r1605-password".to_string(),
+                },
+            )
+            .await
+            .expect("vault init");
+            crate::vault_ops::handle_vault_set(
+                &seed,
+                crate::vault_ops::VaultSetParams {
+                    name: "SILICONFLOW_API_KEY".to_string(),
+                    value: "r1605-distill-secret".to_string(),
+                    agent_id: None,
+                    secret_type: "api_key".to_string(),
+                    description: "#1605 run-daily distill fixture".to_string(),
+                    allowed_agents: None,
+                    enable_rotation: false,
+                    rotation_strategy: None,
+                },
+            )
+            .await
+            .expect("vault set");
+            crate::vault_ops::handle_vault_lock(&seed)
+                .await
+                .expect("vault lock");
+        });
+
+        // Pre-fix construction: the exact call the run-daily step used to make.
+        let bare = crate::MemoryServer::new_with_migration_authority(
+            global_db.clone(),
+            None,
+            memcore::MigrationAuthority::Deny,
+        )
+        .expect("bare server");
+        let chain = bare.llm.distill_api_key_envs_for_tests();
+        assert!(
+            chain.contains(&"SILICONFLOW_API_KEY"),
+            "test precondition: the distill lane chain consults SILICONFLOW_API_KEY, got {chain:?}"
+        );
+        assert_eq!(
+            bare.llm.provider_secret_count(),
+            0,
+            "a server built without bootstrap_provider_runtime has an empty provider pool"
+        );
+        assert!(
+            bare.llm.provider_secret_for_tests(&chain).is_none(),
+            "deadlock shape: the Vault holds the key, nothing on the lane path materializes it, \
+             so the lane resolves nothing and reports 'Missing API key'"
+        );
+        drop(bare);
+
+        // The seam the run-daily distill step builds through now.
+        let server = crate::cli_client::build_in_process_server_with_migration_authority(
+            &global_db,
+            None,
+            memcore::MigrationAuthority::Deny,
+        )
+        .expect("in-process server");
+        assert_eq!(
+            server
+                .llm
+                .provider_secret_for_tests(&server.llm.distill_api_key_envs_for_tests())
+                .as_deref(),
+            Some("r1605-distill-secret"),
+            "the distill lane's own key chain must resolve the pooled Vault secret"
+        );
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -590,76 +716,98 @@ async fn run_daily_pipeline_remediation(
     .await;
     let probe_summary = provider_probe_refresh_summary(&probe_refresh);
 
-    // Step 2: run distill batch (requires a project DB). Only an explicit
-    // successful receipt may authorize the next write-capable owner. Missing,
-    // timeout, and failure all fail closed; cache-write failure cannot erase
-    // the in-memory typed receipt (#1505).
+    // Step 2: run the distill batch. Only an explicit successful receipt may
+    // authorize the next write-capable owner. Missing, timeout, and failure all
+    // fail closed; cache-write failure cannot erase the in-memory typed receipt
+    // (#1505).
     let distill_summary = if !provider_persistence_allows_distill(&probe_refresh) {
         provider_persistence_distill_skip_summary(&probe_refresh)
     } else {
-        match project_db_path {
-            Some(_) => {
-                let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
-                // Codex review (2026-07-17, checkpoint 7, MERGE-BLOCKING) + leader
-                // adjudication: `doctor --allow-schema-migration --fix --run-daily`
-                // must thread the resolved authority into this in-process open,
-                // same as every other CLI in-process DB open (#1181's frozen
-                // contract) — `MemoryServer::new` hardcodes Deny and would
-                // silently refuse the distill step on a stamped-older DB even
-                // when the operator explicitly authorized migration.
-                match crate::MemoryServer::new_with_migration_authority(
-                    global_db_path.to_path_buf(),
-                    project_db_path.map(|p| p.to_path_buf()),
-                    schema_migration.clone(),
-                ) {
-                    Ok(server) => {
-                        match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {
-                            Ok(report) => {
-                                // Write success marker (same shape as the scheduler).
-                                if let Some(parent) = marker_path.parent() {
-                                    let _ = std::fs::create_dir_all(parent);
-                                }
-                                let marker_body = serde_json::json!({
-                                    "ts": chrono::Utc::now().to_rfc3339(),
-                                    "groups_distilled": report.groups_distilled,
-                                    "groups_skipped": report.groups_skipped,
-                                    "fallback_used": report.fallback_used,
-                                    "errors": report.errors.len(),
-                                })
-                                .to_string();
-                                let _ = std::fs::write(&marker_path, marker_body);
-                                format!(
-                                "distill: dispatched={} distilled={} skipped={} fallback={} errors={}",
-                                report.batches_dispatched,
-                                report.groups_distilled,
-                                report.groups_skipped,
-                                report.fallback_used,
-                                report.errors.len()
-                            )
-                            }
-                            Err(e) => {
-                                // Write failure marker so status surfaces the reason.
-                                if let Some(parent) = marker_path.parent() {
-                                    let _ = std::fs::create_dir_all(parent);
-                                }
-                                let marker_body = serde_json::json!({
-                                    "ts": chrono::Utc::now().to_rfc3339(),
-                                    "error": e.to_string(),
-                                    "groups_distilled": 0,
-                                    "groups_skipped": 0,
-                                    "fallback_used": 0,
-                                    "errors": 0,
-                                })
-                                .to_string();
-                                let _ = std::fs::write(&marker_path, marker_body);
-                                format!("distill batch failed: {e}")
-                            }
+        let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
+        // Codex review (2026-07-17, checkpoint 7, MERGE-BLOCKING) + leader
+        // adjudication: `doctor --allow-schema-migration --fix --run-daily`
+        // must thread the resolved authority into this in-process open,
+        // same as every other CLI in-process DB open (#1181's frozen
+        // contract) — `MemoryServer::new` hardcodes Deny and would
+        // silently refuse the distill step on a stamped-older DB even
+        // when the operator explicitly authorized migration.
+        //
+        // #1605: built through the CLI in-process seam instead of
+        // `MemoryServer::new_with_migration_authority` directly. That
+        // constructor's `LlmClient` starts with an EMPTY provider-secret
+        // pool — construction loads key *health* from the DB and nothing
+        // else (`provider_health/config.rs`'s
+        // `initial_key_health_from_db`); only
+        // `provider_config::bootstrap_provider_runtime` (Keychain
+        // auto-unlock + materialization) fills `provider_state.secrets`.
+        // Without it every lane call died as "Missing API key" in ~70ms
+        // with zero network attempts while the Vault held the keys, because
+        // `select_secret` reads that empty map and the env fallback finds
+        // nothing (vault-stored keys are deliberately not in env). Every
+        // other in-process server — daemon serve and the CLI builder —
+        // already goes through this seam.
+        //
+        // The old `match project_db_path { Some(_) => .., None => skip }`
+        // gate is gone for the same reason the scheduler gate widened:
+        // `run_daily_batch_distill` distills every manifest-attached
+        // named-project DB and treats the bound project as one extra
+        // target, so a global-only invocation — the owner daemon's own
+        // shape — still has real work. The skip made the documented
+        // manual remediation a no-op on exactly the host that needed it.
+        match crate::cli_client::build_in_process_server_with_migration_authority(
+            &global_db_path.to_path_buf(),
+            project_db_path.map(|p| p.to_path_buf()).as_ref(),
+            schema_migration.clone(),
+        ) {
+            Ok(server) => {
+                // Names the credential state the batch actually ran with,
+                // so a "Missing API key" run is self-diagnosing in the
+                // doctor report instead of needing a code-level trace.
+                let provider_keys = server.llm.provider_secret_count();
+                match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {
+                    Ok(report) => {
+                        // Write success marker (same shape as the scheduler).
+                        if let Some(parent) = marker_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
                         }
+                        let marker_body = serde_json::json!({
+                            "ts": chrono::Utc::now().to_rfc3339(),
+                            "groups_distilled": report.groups_distilled,
+                            "groups_skipped": report.groups_skipped,
+                            "fallback_used": report.fallback_used,
+                            "errors": report.errors.len(),
+                        })
+                        .to_string();
+                        let _ = std::fs::write(&marker_path, marker_body);
+                        format!(
+                        "distill: dispatched={} distilled={} skipped={} fallback={} errors={} provider_keys={provider_keys}",
+                        report.batches_dispatched,
+                        report.groups_distilled,
+                        report.groups_skipped,
+                        report.fallback_used,
+                        report.errors.len()
+                    )
                     }
-                    Err(e) => format!("distill skipped (server init failed): {e}"),
+                    Err(e) => {
+                        // Write failure marker so status surfaces the reason.
+                        if let Some(parent) = marker_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let marker_body = serde_json::json!({
+                            "ts": chrono::Utc::now().to_rfc3339(),
+                            "error": e.to_string(),
+                            "groups_distilled": 0,
+                            "groups_skipped": 0,
+                            "fallback_used": 0,
+                            "errors": 0,
+                        })
+                        .to_string();
+                        let _ = std::fs::write(&marker_path, marker_body);
+                        format!("distill batch failed: {e} provider_keys={provider_keys}")
+                    }
                 }
             }
-            None => "distill skipped (no project DB)".to_string(),
+            Err(e) => format!("distill skipped (server init failed): {e}"),
         }
     };
 
