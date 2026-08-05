@@ -159,7 +159,7 @@ These entries record the completed compatibility-route deletion. They are not a 
 | --- | --- | --- | --- | --- |
 | `tachi_dispatch` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal handler remains reachable through the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_task(action="dispatch")` | Deleted. | — |
 | `tachi_board` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal board handler remains behind the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_task(action="board")` | Deleted. | — |
-| `approve_merge` | **DONE Batch C (PR #822):** the direct route is absent; local task merge still reuses the internal operation and PR merge remains on `tachi_gh(action="safe_merge")`. Open migration tracker #757 remains active for other surfaces. | `tachi_task(action="merge")` for local worktrees; `tachi_gh(action="safe_merge")` for PRs. | Deleted direct route. | — |
+| `approve_merge` | **DONE Batch C (PR #822); task merge retired in #1683:** the direct route is absent; PR merge remains on `tachi_gh(action="safe_merge")`. | `tachi_gh(action="safe_merge")` for PRs. | Deleted direct route; `tachi_task(action="merge")` retired in #1683. | — |
 
 ### Batch D: Split Overloaded Facades Before Deleting Actions
 

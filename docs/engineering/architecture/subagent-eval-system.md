@@ -106,7 +106,7 @@ ledger or generated-column indexes instead of storing duplicate live state.
 Use `tachi_agent_eval(action="telemetry")` or `action="perf"` as readable aliases
 when the goal is specifically to inspect the live performance matrix. These
 aliases use the same `/eval` memory source; they do not create a second ledger.
-`tachi_task(action="recommend")` also consumes this matrix: high human override
+`tachi_tune(action="route_simulate")` also consumes this matrix: high human override
 rates, repeated retries, failures, slow average latency, and high average cost
 reduce profile confidence, while low-cost high-quality rows can add a small
 efficiency bonus.

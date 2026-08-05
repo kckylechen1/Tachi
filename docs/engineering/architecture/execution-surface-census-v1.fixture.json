@@ -2,8 +2,8 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-08-05",
-    "revision": "931ce32cd (codex/1426-phase1-migration; tachi_tune routed, tuning actions migrated off Task/Memory)",
+    "date": "2026-08-06",
+    "revision": "1683-retire-six-task-actions",
     "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
   },
   "provisional_budgets": {
@@ -164,7 +164,7 @@
         ]
       },
       "tachi_task": {
-        "action_count": 23,
+        "action_count": 17,
         "actions": [
           "adjudicate",
           "board",
@@ -174,21 +174,15 @@
           "claim",
           "close_loop",
           "complete",
-          "cycle_plan",
           "cycle_status",
           "doc_index",
           "handoff",
           "heartbeat",
           "intake",
-          "merge",
-          "plan",
           "profile",
           "profiles",
-          "recommend",
-          "refine_issues",
           "release",
-          "status",
-          "ux_matrix"
+          "status"
         ]
       },
       "tachi_tune": {
@@ -225,8 +219,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 186408,
-        "total_tool_definition_bytes": 224016,
+        "total_input_schema_bytes": 184284,
+        "total_tool_definition_bytes": 221624,
         "visible_tool_count": 103,
         "visible_tools": [
           "archive_memory",
@@ -335,8 +329,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 127918,
-        "total_tool_definition_bytes": 145993,
+        "total_input_schema_bytes": 126475,
+        "total_tool_definition_bytes": 144531,
         "visible_tool_count": 39,
         "visible_tools": [
           "extract_facts",
@@ -381,8 +375,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 70354,
-        "total_tool_definition_bytes": 75830,
+        "total_input_schema_bytes": 68972,
+        "total_tool_definition_bytes": 74463,
         "visible_tool_count": 11,
         "visible_tools": [
           "peer_query",
@@ -399,8 +393,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 124047,
-        "total_tool_definition_bytes": 143144,
+        "total_input_schema_bytes": 122624,
+        "total_tool_definition_bytes": 141736,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
@@ -456,8 +450,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 66342,
-        "total_tool_definition_bytes": 75629,
+        "total_input_schema_bytes": 64899,
+        "total_tool_definition_bytes": 74152,
         "visible_tool_count": 16,
         "visible_tools": [
           "peer_query",
@@ -649,8 +643,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 30671,
-            "property_count": 84,
+            "input_schema_bytes": 28547,
+            "property_count": 79,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -666,11 +660,9 @@
               "claim_role",
               "claim_scope",
               "compact",
-              "confirm",
               "cost_tokens",
               "cost_usd",
               "cwd",
-              "delete_worktree",
               "diff",
               "diff_present",
               "dispatch_id",
@@ -679,13 +671,11 @@
               "duration_ms",
               "eval_run_ids",
               "evidence_refs",
-              "execution_level",
               "expected_head",
               "feedback_rules_applied",
               "flow_id",
               "force",
               "format",
-              "include_card",
               "include_global",
               "include_result",
               "issue_ref",
@@ -712,7 +702,6 @@
               "spec_paths",
               "stage",
               "state_filter",
-              "strategy",
               "subagents",
               "task",
               "task_id",
@@ -799,8 +788,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 28682,
-            "property_count": 84,
+            "input_schema_bytes": 27239,
+            "property_count": 79,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -816,11 +805,9 @@
               "claim_role",
               "claim_scope",
               "compact",
-              "confirm",
               "cost_tokens",
               "cost_usd",
               "cwd",
-              "delete_worktree",
               "diff",
               "diff_present",
               "dispatch_id",
@@ -829,13 +816,11 @@
               "duration_ms",
               "eval_run_ids",
               "evidence_refs",
-              "execution_level",
               "expected_head",
               "feedback_rules_applied",
               "flow_id",
               "force",
               "format",
-              "include_card",
               "include_global",
               "include_result",
               "issue_ref",
@@ -862,7 +847,6 @@
               "spec_paths",
               "stage",
               "state_filter",
-              "strategy",
               "subagents",
               "task",
               "task_id",
@@ -1074,8 +1058,8 @@
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 28682,
-          "property_count": 84,
+          "input_schema_bytes": 27239,
+          "property_count": 79,
           "property_names": [
             "__tachi_project_explicit",
             "action",
@@ -1091,11 +1075,9 @@
             "claim_role",
             "claim_scope",
             "compact",
-            "confirm",
             "cost_tokens",
             "cost_usd",
             "cwd",
-            "delete_worktree",
             "diff",
             "diff_present",
             "dispatch_id",
@@ -1104,13 +1086,11 @@
             "duration_ms",
             "eval_run_ids",
             "evidence_refs",
-            "execution_level",
             "expected_head",
             "feedback_rules_applied",
             "flow_id",
             "force",
             "format",
-            "include_card",
             "include_global",
             "include_result",
             "issue_ref",
@@ -1137,7 +1117,6 @@
             "spec_paths",
             "stage",
             "state_filter",
-            "strategy",
             "subagents",
             "task",
             "task_id",

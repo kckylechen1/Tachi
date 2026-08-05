@@ -353,7 +353,7 @@ pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Siz
     // branch + target dir when the caller supplied a worktree path. This is
     // best-effort: a missing worktree (PR opened from a non-Tachi checkout)
     // logs a warning and never fails the merge. Mirrors the cleanup that
-    // `tachi_task(action='merge')`/`approve_merge` already performs on the
+    // local worktree merge helpers already perform on the
     // local dispatch path.
     let reclamation = reclaim_worktree_after_merge(
         merged_sha.as_deref(),

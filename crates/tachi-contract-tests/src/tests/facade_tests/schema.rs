@@ -321,7 +321,6 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     let values = action["enum"].as_array().expect("action enum");
     assert!(values.contains(&json!("briefing")));
     assert!(values.contains(&json!("doc_index")));
-    assert!(values.contains(&json!("plan")));
     // #1319-C2: dispatch/cancel/wait were removed from tachi_task (external
     // staffing now flows through tachi_staff). The schema must NOT list them.
     assert!(
@@ -337,7 +336,6 @@ fn tachi_task_action_schema_declares_feature_briefing() {
         "tachi_task must not advertise wait after [1319-C2]"
     );
     assert!(values.contains(&json!("complete")));
-    assert!(values.contains(&json!("recommend")));
     for removed in [
         "route_simulate",
         "proposals",
@@ -351,8 +349,7 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     }
     assert!(values.contains(&json!("status")));
     assert!(values.contains(&json!("intake")));
-    assert!(values.contains(&json!("cycle_plan")));
-    assert!(values.contains(&json!("ux_matrix")));
+    assert!(values.contains(&json!("cycle_status")));
     assert!(values.contains(&json!("build_references")));
     assert!(values.contains(&json!("close_loop")));
     // #757: GH PR lifecycle is tachi_gh only — not on tachi_task schema at all.
@@ -362,7 +359,14 @@ fn tachi_task_action_schema_declares_feature_briefing() {
             "tachi_task schema must not advertise removed lifecycle action {removed}"
         );
     }
+    for removed in tachi_params::TACHI_TASK_REMOVED_SIX_ACTIONS {
+        assert!(
+            !values.contains(&json!(*removed)),
+            "tachi_task schema must not advertise retired #1683 action {removed}"
+        );
+    }
     assert_eq!(values.len(), tachi_params::TachiTaskAction::PRIMARY.len());
+    assert_eq!(values.len(), 17);
 }
 
 #[test]
@@ -667,8 +671,6 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
 ///   explicitness signal (task_router.rs complete arm); its schema property
 ///   name is the serde rename `__tachi_project_explicit`, which IS the wire
 ///   name clients send;
-/// - `execution_level` is read by the Recommend arm for host admission
-///   (task_router.rs);
 /// - `timeout_secs` is read by the Status arm for the acpx control command
 ///   timeout (task_facade.rs handle_tachi_task_status).
 #[test]
@@ -681,7 +683,6 @@ fn tachi_task_schema_keeps_fields_read_by_surviving_actions() {
         ("cwd", "action=briefing"),
         ("auto_capability_bundle", "action=briefing"),
         ("__tachi_project_explicit", "action=complete"),
-        ("execution_level", "action=recommend"),
         ("timeout_secs", "action=status"),
     ] {
         let property = properties.get(field).unwrap_or_else(|| {

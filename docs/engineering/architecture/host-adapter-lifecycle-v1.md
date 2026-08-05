@@ -86,7 +86,7 @@ before_stop
   -> emit a host-native continuation directive or allow stop
 ```
 
-The continuation gate must read `.tachi/runs/<flow_id>/` artifacts, `cycle_plan`,
+The continuation gate must read `.tachi/runs/<flow_id>/` artifacts, `cycle_status`,
 and verification evidence. It must not depend on `.omo/boulder.json` or any
 host-specific state file.
 
@@ -455,7 +455,7 @@ current task.
 Lifecycle hooks should enrich, not replace, Project Cycle:
 
 ```
-issue/spec -> cycle_plan -> dispatch -> verify -> PR -> release_note -> close_loop
+issue/spec -> cycle_status -> dispatch -> verify -> PR -> release_note -> close_loop
 ```
 
 `before_prompt` reads this state. `before_stop` checks it. `after_session`
@@ -465,7 +465,7 @@ distills it.
 
 Host adapters may run downstream agents, but the leader remains accountable.
 Typed host adapters should record transport, model, role, verification impact,
-and failure mode so `tachi_task(action="recommend")` can learn from actual
+and failure mode so route-policy replay (`tachi_tune(action="route_simulate")`) can learn from actual
 outcomes.
 
 ### Continuity Memory
@@ -497,7 +497,7 @@ append-only event ledger plus project-cycle artifacts.
 
 - Extend verification artifacts with optional `criteria[]`.
 - Allow `tachi_verify` to record evidence against a criterion id.
-- Make `cycle_plan` and `close_loop` report missing required criteria.
+- Make `cycle_status` and `close_loop` report missing required criteria.
 
 ### Phase 4: Continuation Gate
 
@@ -534,7 +534,7 @@ append-only event ledger plus project-cycle artifacts.
   OpenCode runs.
 - `tachi_verify` can record criterion-scoped evidence without breaking existing
   verification ledgers.
-- `cycle_plan` surfaces missing required criteria as blockers.
+- `cycle_status` surfaces missing required criteria as blockers.
 - `close_loop` records required evidence coverage or explicit evidence gaps.
 - A `before_stop` lifecycle read model can allow stop or return one bounded
   continuation directive.
@@ -549,7 +549,7 @@ Run targeted Rust tests as the implementation lands:
 
 - `cargo test -p tachi-server opencode_transport --locked`
 - `cargo test -p tachi-server profile_resolution --locked`
-- `cargo test -p tachi-server cycle_plan --locked`
+- `cargo test -p tachi-server cycle_status --locked`
 - `cargo test -p tachi-server verify --locked`
 - `cargo test -p tachi-server agent_profile --locked`
 

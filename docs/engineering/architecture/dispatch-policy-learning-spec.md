@@ -49,7 +49,7 @@ invent calls that are not exposed yet.
 |---|---|---|
 | feature intake and board | `tachi_task(action="intake"|"briefing")` | implemented |
 | profile/card listing | `tachi_task(action="profiles"|"profile"|"card")` | implemented |
-| route recommendation | `tachi_task(action="recommend")` | implemented |
+| route recommendation | `tachi_tune(action="route_simulate")` / profiles | implemented (#1683 retired task recommend) |
 | route policy replay | `tachi_tune(action="route_simulate")` | implemented |
 | route policy proposals | `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` (admin-only since #1426) | implemented |
 | external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (the retired `tachi_task(action="dispatch")` was deleted in #1319-C2) | implemented; not ordinary delegation |
@@ -57,7 +57,7 @@ invent calls that are not exposed yet.
 | completion and eval | `tachi_task(action="complete")` / `tachi_complete` | implemented |
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
 | skill bundle/loadout | `tachi_skill(action="bundle"|"loadout")` | implemented |
-| lifecycle UX audit | `tachi_task(action="ux_matrix")` | implemented |
+| lifecycle UX audit | retired from `tachi_task` in #1683 | retired |
 | PR gate preview | `tachi_gh(action="pr_status")` | implemented |
 | release and closure | `tachi_gh(action="release_note")` / `tachi_task(action="close_loop")` | implemented |
 
@@ -182,7 +182,7 @@ Ordinary recall excludes this evidence. `tachi_agent_eval(action="aggregate_live
 reads the live eval rows and produces aggregate scores and the performance
 matrix.
 
-`tachi_task(action="recommend")` consumes that matrix. Matching telemetry can:
+Route-policy replay (`tachi_tune(action="route_simulate")`) consumes that matrix. Matching telemetry can:
 
 - penalize failures;
 - penalize human overrides;
@@ -199,9 +199,9 @@ Every substantial policy-learning slice should be able to pass this workflow:
 
 1. `tachi_task(action="intake", issue_ref=...)`
 2. `tachi_task(action="briefing", flow_id=...)`
-3. `tachi_task(action="cycle_plan", flow_id=...)`
-4. `tachi_task(action="ux_matrix", flow_id=...)`
-5. `tachi_task(action="recommend", task=..., doc_paths=[...])`
+3. `tachi_task(action="cycle_status", flow_id=...)`
+4. `tachi_task(action="briefing", flow_id=...)`
+5. `tachi_task(action="profiles")`
 6. launch the host harness's native subagent with the frozen packet; use the
    admin/operator external staffing exception only when a proven boundary
    requirement exceeds host-native guarantees
@@ -209,7 +209,7 @@ Every substantial policy-learning slice should be able to pass this workflow:
 8. leader verification and `tachi_verify`
 9. submit evidence and independently adjudicate the outcome; legacy explicit
    Tachi runs may still use `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
-10. rerun `tachi_task(action="cycle_plan", flow_id=...)` before PR handoff
+10. rerun `tachi_task(action="cycle_status", flow_id=...)` before PR handoff
 11. `tachi_gh(action="link_pr", flow_id=..., pr_ref=...)`
 12. `tachi_gh(action="pr_status", flow_id=..., pr_ref=...)`
 13. `tachi_gh(action="release_note", flow_id=...)`
@@ -248,11 +248,11 @@ As of 2026-06-28, the baseline includes:
   weakness markers and skill demotion targets, and merged weak-against signals
   affect route recommendation scoring;
 - credentialed `opencode_builder` profile;
-- feature lifecycle: `tachi_task` owns `intake` / `cycle_status` / `cycle_plan` /
-  `ux_matrix` / `build_references` / `close_loop`; `tachi_gh` owns `link_pr` /
+- feature lifecycle: `tachi_task` owns `intake` / `cycle_status` /
+  `build_references` / `close_loop`; `tachi_gh` owns `link_pr` /
   `pr_status` / `release_note` / `pr_handoff`;
 - feature briefing, intake instructions, issue automation plans, and GitHub
-  handoff text route flow/issue/PR-backed work through read-only `cycle_plan`
+  handoff text route flow/issue/PR-backed work through read-only `cycle_status`
   before recommend, dispatch, PR handoff, release notes, or close-loop;
 - `dispatch(profile=...)` records flow-visible dispatch ids and compact dispatch
   card artifacts when `flow_id` is valid;
@@ -275,7 +275,7 @@ Implemented route-policy loader:
 
 - `tachi_tune(action="route_apply")` persists approved route-policy rules
   into `dispatch_route_policy_rules`.
-- `tachi_task(action="recommend")` now loads applied rules, requires approved
+- `tachi_tune(action="route_simulate")` loads applied rules, requires approved
   review plus a minimum sample threshold, respects risk `blocked_profiles`, and
   explains applied/skipped rules under `route_policy_rules`.
 - Applied rules add explainable weight rather than hard-overriding routing, so

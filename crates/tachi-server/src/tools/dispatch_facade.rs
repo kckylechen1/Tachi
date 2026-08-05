@@ -23,7 +23,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Declare task completion and write an entry to the eval ledger. Records agent, outcome, duration, cost, skills used, and (optionally) trajectory/diff for later distillation. Returns a review bundle. Does NOT auto-merge worktrees — use tachi_task(action='merge') for that."
+        description = "Declare task completion and write an entry to the eval ledger. Records agent, outcome, duration, cost, skills used, and (optionally) trajectory/diff for later distillation. Returns a review bundle. Does NOT auto-merge worktrees — use tachi_gh(action='safe_merge') for GitHub PR merges."
     )]
     pub(crate) async fn tachi_complete(
         &self,

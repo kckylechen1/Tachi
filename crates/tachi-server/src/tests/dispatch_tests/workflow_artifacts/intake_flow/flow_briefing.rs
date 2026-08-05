@@ -58,8 +58,8 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
     assert!(run_dir.join("instruction.md").exists());
     let instruction = std::fs::read_to_string(run_dir.join("instruction.md")).unwrap();
     assert!(
-        instruction.contains("tachi_task(action='cycle_plan', flow_id=...)"),
-        "intake instruction should route agents through cycle_plan: {instruction}"
+        instruction.contains("tachi_task(action='cycle_status', flow_id=...)"),
+        "intake instruction should route agents through cycle_status: {instruction}"
     );
     let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
     assert!(events.contains("github_issue_linked"), "{events}");
@@ -99,7 +99,7 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
     assert!(
         briefing["next_action"]
             .as_str()
-            .is_some_and(|action| action.contains("tachi_task(action='cycle_plan'")),
-        "flow-bound briefing should route agents through cycle_plan when no worker is active: {briefing:#}"
+            .is_some_and(|action| action.contains("tachi_task(action='cycle_status'")),
+        "flow-bound briefing should route agents through cycle_status when no worker is active: {briefing:#}"
     );
 }

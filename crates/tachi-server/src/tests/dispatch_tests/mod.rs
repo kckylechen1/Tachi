@@ -1,7 +1,5 @@
 use crate::server_state::MemoryServer;
-use crate::tool_params::{
-    TachiDispatchParams, TachiMemoryParams, TachiTaskParams, TachiTuneParams,
-};
+use crate::tool_params::{TachiDispatchParams, TachiMemoryParams, TachiTaskParams};
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
@@ -11,7 +9,6 @@ mod board_first;
 mod completion_eval;
 mod profiles_action;
 mod prompt_credentials_board;
-mod recommend_policy;
 mod signature_evidence;
 mod workflow_artifacts;
 
@@ -61,9 +58,7 @@ fn task_params(action: &str) -> TachiTaskParams {
             .unwrap_or_else(|e| panic!("valid tachi_task action '{action}': {e}")),
         format: Some("json".to_string()),
         verbose: None,
-        include_card: None,
         task: None,
-        execution_level: None,
         agent_id: None,
         domain: None,
         path_prefix: None,
@@ -136,11 +131,8 @@ fn task_params(action: &str) -> TachiTaskParams {
         review_status: None,
         worktree: None,
         branch: None,
-        strategy: None,
         merge_policy: None,
         allow_umbrella_close: false,
-        delete_worktree: true,
-        confirm: false,
         wiki_title: None,
         wiki_text: None,
         wiki_path: None,
@@ -164,53 +156,6 @@ fn task_params(action: &str) -> TachiTaskParams {
         claim_id: None,
         release_reason: None,
     }
-}
-
-/// #1426: route tuning left `tachi_task` for the admin-only `tachi_tune`
-/// surface. These are the same route-policy handlers under their new action
-/// spellings (`proposals` -> `route_proposals`, `review_proposal` ->
-/// `route_review`, `apply_proposals` -> `route_apply`).
-fn tune_params(action: &str) -> TachiTuneParams {
-    TachiTuneParams {
-        action: action
-            .parse()
-            .unwrap_or_else(|e| panic!("valid tachi_tune action '{action}': {e}")),
-        format: Some("json".to_string()),
-        task: None,
-        execution_level: None,
-        doc_paths: Vec::new(),
-        spec_paths: Vec::new(),
-        risk: None,
-        limit: None,
-        state_filter: None,
-        proposal_id: None,
-        review_status: None,
-        notes: None,
-        confirm: false,
-        top_k: 6,
-        metadata: None,
-        text: None,
-        enable_rerank: false,
-        scope: None,
-        path_prefix: None,
-        project: None,
-        domain: None,
-        file_context: None,
-        error_context: None,
-        include_archived: false,
-        include_training: false,
-        force: false,
-        as_of: None,
-    }
-}
-
-/// `tachi_tune` is invisible to every non-admin profile (it is omitted from
-/// all four bundle pattern arrays), and the default test profile is
-/// `standard`. Route-tuning tests are operator-surface tests, so they run
-/// under the admin profile the real caller would need.
-async fn run_tune(server: &MemoryServer, params: TachiTuneParams) -> Result<String, String> {
-    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
-    server.tachi_tune(Parameters(params)).await
 }
 
 fn memory_params(action: &str) -> TachiMemoryParams {

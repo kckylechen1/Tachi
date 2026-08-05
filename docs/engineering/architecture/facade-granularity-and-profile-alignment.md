@@ -78,7 +78,7 @@ by the **agent's mental task**.
 ```diagram
 Now                            Proposed
 tachi_task (24) ─────┬──▶ tachi_task    execution core: plan/dispatch/complete/status/board/wait (6)
-                     ├──▶ tachi_flow    lifecycle: intake/cycle_status/cycle_plan/close_loop/ux_matrix (5)
+                     ├──▶ tachi_flow    lifecycle: intake/cycle_status/close_loop/build_references (4)
                      ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
                      └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
 

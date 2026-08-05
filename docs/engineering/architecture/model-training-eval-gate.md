@@ -27,7 +27,7 @@ Allowed today:
   fixture_path=...)` only for local replay with
   `TACHI_AGENT_EVAL_ALLOW_FIXTURE=1`.
 - Live routing uses `tachi_agent_eval(action="aggregate_live")`,
-  `tachi_task(action="recommend")`, `route_simulate`, and reviewed policy /
+  `tachi_tune(action="route_simulate")`, and reviewed policy /
   profile-card proposals.
 
 Not allowed by default:

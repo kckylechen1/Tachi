@@ -25,15 +25,15 @@ It is not a new workflow engine. The existing surfaces remain the write paths:
 - `tachi_gh(action="release_note")` writes release context.
 - `tachi_task(action="close_loop")` records the final issue/docs/wiki sink.
 - `tachi_gh(action="safe_merge")` remains the GitHub PR merge surface.
-- `tachi_task(action="merge")` remains local dispatched worktree merge only.
+- Local worktree merge left `tachi_task` in #1683; GitHub PR merges use `tachi_gh(action="safe_merge")`.
 
 `tachi_task(action="cycle_status")` is the read-only projection across those artifacts.
-`tachi_task(action="cycle_plan")` is the read-only agent navigation layer on top of
+`tachi_task(action="cycle_status")` is the read-only agent navigation layer on top of
 that projection: it turns the same evidence into an ordered checklist, current
 blockers, readiness flags, and concrete next command suggestions.
 
 Host adapters should consume this read model rather than inventing host-specific
-project state. In particular, `before_prompt` should use `cycle_plan` to attach
+project state. In particular, `before_prompt` should use `cycle_status` to attach
 the current lifecycle checklist, and `before_stop` should use the same evidence
 to decide whether the host can stop or needs a bounded continuation directive.
 
@@ -95,7 +95,7 @@ evidence, including missing docs/specs, missing verification, mismatched refs,
 unclosed result artifacts, stale verification heads, or release notes that were
 written before the PR gate became ready.
 
-The `cycle_plan` response is also read-only. It does not dispatch, comment, merge,
+The `cycle_status` response is also read-only. It does not dispatch, comment, merge,
 or close anything. It derives:
 
 - `steps`: ordered lifecycle checkpoints from intake through close_loop.
@@ -106,7 +106,7 @@ or close anything. It derives:
 - `status_summary`: the status evidence used to derive the plan.
 
 This gives agents a single "what should I do next?" surface without making
-`cycle_plan` another write path.
+`cycle_status` another write path.
 
 ## Why This Belongs With Memory
 
@@ -134,7 +134,7 @@ similarity. See
 
 - Do not create a second GitHub sync database.
 - Do not merge PRs through `tachi_task(action="cycle_status")` or
-  `tachi_task(action="cycle_plan")`.
+  `tachi_task(action="cycle_status")`.
 - Do not treat memory/wiki summaries as higher authority than linked docs/specs or
   verification.
 - Do not require live GitHub reads when a local flow already contains the needed

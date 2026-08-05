@@ -50,7 +50,7 @@ articles' findings into #495/#516/#468 and the pattern-memory spec.
 
 - research → issue: routed findings land as issue comments / new issues (the "工作进
   issue" discipline, mechanized).
-- issue → research: pre-spec blind-spot pass — intake/cycle_plan may suggest a light
+- issue → research: pre-spec blind-spot pass — intake/cycle_status may suggest a light
   research when a leaf touches unfamiliar territory (the Fable field guide's
   blind-spot pass, in-pipeline).
 - PR → research: review packets may attach relevant research (official docs digest
