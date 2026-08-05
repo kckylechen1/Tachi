@@ -2372,6 +2372,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-lesson-forge"
+version = "1.9.2"
+dependencies = [
+ "chrono",
+ "rand 0.8.6",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tachi-params",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "tachi-llm"
 version = "1.9.2"
 dependencies = [
@@ -2459,6 +2475,7 @@ dependencies = [
  "tachi-foundry",
  "tachi-github-runtime",
  "tachi-hub",
+ "tachi-lesson-forge",
  "tachi-llm",
  "tachi-merge-ops",
  "tachi-params",
