@@ -1189,24 +1189,13 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct Cold {
         calls: usize,
         fail_once_at: Option<(String, usize)>,
         failed_once: bool,
         receipt_override: Option<PilotEngineReceiptV1>,
         baseline_receipt_overrides: BTreeMap<usize, PilotEngineReceiptV1>,
-    }
-
-    impl Default for Cold {
-        fn default() -> Self {
-            Self {
-                calls: 0,
-                fail_once_at: None,
-                failed_once: false,
-                receipt_override: None,
-                baseline_receipt_overrides: BTreeMap::new(),
-            }
-        }
     }
 
     impl PilotColdRunnerV1 for Cold {
@@ -1270,20 +1259,11 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct Adjudicator {
         calls: usize,
         fail_unknown_spend: bool,
         receipt_override: Option<PilotEngineReceiptV1>,
-    }
-
-    impl Default for Adjudicator {
-        fn default() -> Self {
-            Self {
-                calls: 0,
-                fail_unknown_spend: false,
-                receipt_override: None,
-            }
-        }
     }
 
     impl PilotAdjudicatorV1 for Adjudicator {

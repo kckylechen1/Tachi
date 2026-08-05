@@ -611,7 +611,6 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
-            ..Default::default()
         };
         let candidate = forge_lesson_candidate(
             "proj",

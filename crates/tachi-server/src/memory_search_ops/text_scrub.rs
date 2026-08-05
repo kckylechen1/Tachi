@@ -1,3 +1,4 @@
+#[cfg(test)]
 const REDACTED_SECRET: &str = tachi_lesson_forge::REDACTED_SECRET;
 
 pub(crate) fn scrub_secrets(text: &str) -> (String, usize) {
