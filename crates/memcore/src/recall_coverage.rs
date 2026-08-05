@@ -1141,7 +1141,7 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
     {
         writeln!(
             output,
-            "miss id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
+            "miss id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}{}{}",
             target.id,
             target.outcome,
             target.rank,
@@ -1154,13 +1154,15 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
             format_candidate_legs(target.canonical_candidate_legs),
             target.fact_evidence.kind,
             target.fact_evidence.source,
+            format_lineage_suffix(&target.fact_evidence.lineage),
+            format_filter_reason_suffix(target.filter_reason),
         )
         .expect("writing to String cannot fail");
     }
     for target in &report.expected_id_lane.cases {
         writeln!(
             output,
-            "expected_id_case id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
+            "expected_id_case id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}{}{}",
             target.id,
             target.outcome,
             target.rank,
@@ -1173,10 +1175,27 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
             format_candidate_legs(target.canonical_candidate_legs),
             target.fact_evidence.kind,
             target.fact_evidence.source,
+            format_lineage_suffix(&target.fact_evidence.lineage),
+            format_filter_reason_suffix(target.filter_reason),
         )
         .expect("writing to String cannot fail");
     }
     output
+}
+
+fn format_lineage_suffix(lineage: &[String]) -> String {
+    if lineage.is_empty() {
+        String::new()
+    } else {
+        format!(" lineage={}", lineage.join("->"))
+    }
+}
+
+fn format_filter_reason_suffix(filter_reason: Option<RecallCoverageFilterReason>) -> String {
+    match filter_reason {
+        Some(reason) => format!(" filter_reason={reason:?}"),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
