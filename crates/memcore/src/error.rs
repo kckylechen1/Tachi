@@ -91,6 +91,21 @@ pub enum MemoryError {
     #[error("WorkClaim incompatible state: {0}")]
     WorkClaimIncompatibleState(String),
 
+    /// tachi#1643: a durable-outbox transition the frozen #1630 state machine
+    /// does not permit. Typed rather than a generic `InvalidArg` string so a
+    /// reconciliation loop can branch on "this outcome no longer applies to
+    /// this event" without string-sniffing, and so both endpoints survive the
+    /// trip to the caller. The fields carry the canonical state tokens
+    /// (`OutboxState::as_str`) as `String` rather than the enum itself: this
+    /// module deliberately depends on nothing in `crate::db`, the same reason
+    /// [`WorkClaimTransitionReason`] is declared here instead of imported.
+    #[error("outbox event '{event_id}' cannot transition from '{from}' to '{to}'")]
+    OutboxIllegalTransition {
+        event_id: String,
+        from: String,
+        to: String,
+    },
+
     /// An admitted caller attempted a transition that only the persisted
     /// holder may perform. The stable reason is typed so API boundaries can
     /// distinguish authorization refusal from state/version conflicts.

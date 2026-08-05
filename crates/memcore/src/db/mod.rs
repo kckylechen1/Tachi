@@ -28,6 +28,10 @@ pub mod migrations;
 pub mod mirror_eval;
 mod open;
 pub mod open_context;
+// tachi#1643: NOT admin-gated. #1630's premise is a host-owned sync loop with
+// no Tachi daemon, so the outbox is portable surface — the same reason the v29
+// migration takes no `StoreProfile`.
+pub mod outbox;
 mod recall_cache;
 #[cfg(feature = "admin")]
 mod sandbox;
@@ -175,6 +179,19 @@ pub(crate) use open::{
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
+};
+/// tachi#1643 durable outbox write/read seams. Crate-internal on purpose: they
+/// take a `Transaction`/`Connection`, and the invariant this leaf exists to
+/// hold — an event is only ever durable in the same transaction as the object
+/// it announces — is enforced by `crate::store::outbox`, which owns the
+/// `BEGIN IMMEDIATE` boundary. See `outbox`'s module doc.
+pub(crate) use outbox::{
+    insert_outbox_event_within_tx, list_outbox_events_by_state, read_outbox_event,
+    read_outbox_health, transition_outbox_event_within_tx,
+};
+pub use outbox::{
+    LocalStoreStatus, NewOutboxEvent, OutboxEventRow, OutboxHealth, OutboxState, RemoteSyncStatus,
+    MAX_OUTBOX_CLASS_BYTES, OUTBOX_PAYLOAD_DIGEST_HEX_LEN,
 };
 pub use recall_cache::{
     recall_cache_get, recall_cache_invalidate_all, recall_cache_purge_stale, recall_cache_put,
