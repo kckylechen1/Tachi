@@ -135,8 +135,9 @@ fn quarantine_purge_uses_default_deny_v23_connection() {
 fn r4_jobs_purge_dead_letter() {
     let dir = TempDir::new().unwrap();
     let (path, conn) = fresh_db(&dir, "jobs.db");
-    let old = (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339();
-    let recent = chrono::Utc::now().to_rfc3339();
+    let old = (chrono::Utc::now() - chrono::Duration::days(60))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let recent = memcore::now_utc_iso();
     conn.execute(
         "INSERT INTO foundry_jobs (id, kind, lane, status, created_at, updated_at)
          VALUES ('j_old', 'distill', 'distill', 'dead_letter', ?1, ?1)",
