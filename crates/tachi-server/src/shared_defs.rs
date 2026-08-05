@@ -259,6 +259,27 @@ pub(super) fn slim_search_result(
             "final": round_score(result.score.final_score),
         }),
     );
+    // tachi#1647 2c: this is a hand-built field whitelist, not a
+    // `serde_json::to_value(result)` passthrough, so `graph_injected` /
+    // `graph_provenance` must be forwarded explicitly or an ordinary
+    // consumer (search_memory, tachi_search, wiki search — every caller of
+    // `slim_search_result`) would silently lose them. Only present on
+    // graph-injected rows, so an expansion-off search adds zero new bytes
+    // here (mirrors `SearchResult`'s own `skip_serializing_if`).
+    if result.graph_injected {
+        obj.insert("graph_injected".into(), json!(true));
+    }
+    if let Some(provenance) = &result.graph_provenance {
+        obj.insert(
+            "graph_provenance".into(),
+            json!({
+                "via_edge": provenance.via_edge,
+                "from_id": provenance.from_id,
+                "activation": round_score(provenance.activation as f64),
+                "distance": provenance.distance,
+            }),
+        );
+    }
     serde_json::Value::Object(obj)
 }
 
