@@ -455,6 +455,18 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
     }
 }
 
+/// tachi#1645 (#1635 finding 3): route-1's automated bypass CAS
+/// (`ImmutableSupersessionTransaction::claim_immutable_supersession` ->
+/// `db::supersede_memory`) only gates on `superseded_by IS NULL` — it never
+/// takes or checks a caller-supplied `expected_revision`, unlike route 2's
+/// `apply_lifecycle_proposal` (`memcore::store::memory_lifecycle`), which
+/// re-derives and CASes against `LifecycleApplyPayload`'s stored revision.
+/// This is therefore a distinct policy identity from
+/// `lifecycle::LIFECYCLE_POLICY_VERSION` ("memory-lifecycle-v2") — reusing
+/// that string on a receipt this mechanism produces would overstate the
+/// drift guarantee the caller actually got.
+pub(crate) const ROUTE1_MERGE_POLICY_VERSION: &str = "memory-lifecycle-route1-merge-v1";
+
 fn apply_lifecycle_action(
     server: &MemoryServer,
     params: &TachiMemoryParams,
@@ -498,6 +510,12 @@ fn apply_lifecycle_action(
                     .get(target)
                     .map_err(|e| format!("load target: {e}"))?
                     .ok_or_else(|| format!("target not found: {target}"))?;
+                // tachi#1645 (#1635 finding 3): the revisions the CAS below
+                // actually consumes, captured before the in-memory keyword/
+                // entity/importance fold — `survivor.revision` is untouched
+                // by that fold (only the DB write, if any, bumps it).
+                let source_revision = source.revision;
+                let target_revision = survivor.revision;
                 // Canonical on both sides of the no-op guard below — the fold
                 // is sorted+deduplicated while the stored column keeps the last
                 // writer's serialization order, so a raw comparison would
@@ -538,10 +556,13 @@ fn apply_lifecycle_action(
                     "lifecycle_action": action,
                     "source_id": source_id,
                     "target_id": target,
+                    "source_revision": source_revision,
+                    "target_revision": target_revision,
                     "merged_keywords": survivor.keywords.len(),
                     "merged_entities": survivor.entities.len(),
                     "superseded": true,
                     "archived": true,
+                    "policy_version": ROUTE1_MERGE_POLICY_VERSION,
                 }))
             })
         }
