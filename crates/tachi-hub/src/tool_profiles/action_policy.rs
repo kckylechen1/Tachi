@@ -203,9 +203,6 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
                 Some(ToolBundle::Coordinate)
             }
             "handoff" => Some(ToolBundle::Coordinate),
-            "route_simulate" | "proposals" | "review_proposal" | "apply_proposals" => {
-                Some(ToolBundle::Operate)
-            }
             _ => None,
         },
         "tachi_memory" => match action.as_str() {
@@ -221,12 +218,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             "save" | "extract_facts" | "checkpoint" | "claim" | "release" | "sticky_leave" => {
                 Some(ToolBundle::Remember)
             }
-            "consolidate"
-            | "recall_simulate"
-            | "recall_proposals"
-            | "review_recall_proposal"
-            | "apply_recall_proposals"
-            | "pattern_feedback" => Some(ToolBundle::Operate),
+            "consolidate" | "pattern_feedback" => Some(ToolBundle::Operate),
             // #757-fold fail-safe fix (gpt-5.6-terra review): delete/gc/
             // ingest/ingest_source were standalone ADMIN-ONLY tools pre-fold
             // (absent from every bundle pattern list — no non-admin profile
@@ -350,11 +342,6 @@ mod tests {
         assert!(!facade_action_allowed(
             "tachi_memory",
             Some("release"),
-            profile
-        ));
-        assert!(!facade_action_allowed(
-            "tachi_memory",
-            Some("apply_recall_proposals"),
             profile
         ));
         assert!(!facade_action_allowed(

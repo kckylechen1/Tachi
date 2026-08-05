@@ -211,52 +211,6 @@ pub(super) async fn handle_tachi_task_facade(
                 attach_host_admission(raw, &admission)
             }
         }
-        TachiTaskAction::RouteSimulate => {
-            let mut file_paths = params.doc_paths.clone();
-            file_paths.extend(params.spec_paths.clone());
-            let admission = crate::host_profile::admit_execution_level(params.execution_level);
-            if !admission.allowed {
-                serde_json::to_string(&serde_json::json!({
-                    "action": "route_simulate",
-                    "host_admission": admission.to_json(),
-                }))
-                .map_err(|e| format!("serialize host admission decline: {e}"))
-            } else {
-                let raw = crate::dispatch_profile::handle_route_simulation(
-                    server,
-                    params.limit.unwrap_or(500),
-                    params.task.as_deref(),
-                    params.risk.as_deref(),
-                    &file_paths,
-                )?;
-                attach_host_admission(raw, &admission)
-            }
-        }
-        TachiTaskAction::Proposals => crate::dispatch_profile::handle_route_policy_proposals(
-            server,
-            params.limit.unwrap_or(500),
-            params.state_filter.as_deref(),
-        ),
-        TachiTaskAction::ReviewProposal => {
-            let proposal_id = params.proposal_id.as_deref().ok_or_else(|| {
-                "proposal_id is required when action='review_proposal'".to_string()
-            })?;
-            let review_status = params.review_status.as_deref().ok_or_else(|| {
-                "review_status is required when action='review_proposal'".to_string()
-            })?;
-            crate::dispatch_profile::handle_route_policy_review(
-                server,
-                proposal_id,
-                review_status,
-                params.notes.as_deref(),
-            )
-        }
-        TachiTaskAction::ApplyProposals => {
-            let proposal_id = params.proposal_id.as_deref().ok_or_else(|| {
-                "proposal_id is required when action='apply_proposals'".to_string()
-            })?;
-            crate::dispatch_profile::handle_route_policy_apply(server, proposal_id, params.confirm)
-        }
         TachiTaskAction::Adjudicate => {
             let adjudication = params
                 .adjudication

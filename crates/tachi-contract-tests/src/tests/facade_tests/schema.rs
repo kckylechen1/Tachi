@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use tachi_params::{
     TachiEventParams, TachiMemoryParams, TachiSearchParams, TachiSkillParams, TachiTaskParams,
+    TachiTuneParams,
 };
 
 fn enum_values(property: &Value, name: &str) -> Vec<String> {
@@ -36,22 +37,20 @@ fn tachi_memory_action_schema_declares_enum_values() {
         .as_array()
         .expect("action enum")
         .contains(&json!("readiness")));
-    assert!(action["enum"]
-        .as_array()
-        .expect("action enum")
-        .contains(&json!("recall_simulate")));
-    assert!(action["enum"]
-        .as_array()
-        .expect("action enum")
-        .contains(&json!("recall_proposals")));
-    assert!(action["enum"]
-        .as_array()
-        .expect("action enum")
-        .contains(&json!("review_recall_proposal")));
-    assert!(action["enum"]
-        .as_array()
-        .expect("action enum")
-        .contains(&json!("apply_recall_proposals")));
+    for removed in [
+        "recall_simulate",
+        "recall_proposals",
+        "review_recall_proposal",
+        "apply_recall_proposals",
+    ] {
+        assert!(
+            !action["enum"]
+                .as_array()
+                .expect("action enum")
+                .contains(&json!(removed)),
+            "tachi_memory must not advertise recall tuning action {removed} after #1426"
+        );
+    }
     // #757 fold: standalone tools re-fronted as tachi_memory actions.
     for folded in ["delete", "gc", "doctor_scan", "ingest", "ingest_source"] {
         assert!(
@@ -67,6 +66,44 @@ fn tachi_memory_action_schema_declares_enum_values() {
         tachi_params::TACHI_MEMORY_ACTIONS.len(),
         "advertised action enum must match the TACHI_MEMORY_ACTIONS inventory"
     );
+}
+
+#[test]
+fn tachi_tune_action_schema_declares_migrated_enum_values() {
+    let schema = rmcp::schemars::schema_for!(TachiTuneParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let action = &value["properties"]["action"];
+
+    assert_eq!(action["type"], json!("string"));
+    let values = action["enum"].as_array().expect("action enum");
+    for expected in [
+        "route_simulate",
+        "route_proposals",
+        "route_review",
+        "route_apply",
+        "recall_simulate",
+        "recall_proposals",
+        "recall_review",
+        "recall_apply",
+    ] {
+        assert!(
+            values.contains(&json!(expected)),
+            "tachi_tune must advertise migrated action {expected}"
+        );
+    }
+    for removed_alias in [
+        "proposals",
+        "review_proposal",
+        "apply_proposals",
+        "review_recall_proposal",
+        "apply_recall_proposals",
+    ] {
+        assert!(
+            !values.contains(&json!(removed_alias)),
+            "tachi_tune must not advertise retired alias {removed_alias}"
+        );
+    }
+    assert_eq!(values.len(), tachi_params::TACHI_TUNE_ACTIONS.len());
 }
 
 #[test]
@@ -301,10 +338,17 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     );
     assert!(values.contains(&json!("complete")));
     assert!(values.contains(&json!("recommend")));
-    assert!(values.contains(&json!("route_simulate")));
-    assert!(values.contains(&json!("proposals")));
-    assert!(values.contains(&json!("review_proposal")));
-    assert!(values.contains(&json!("apply_proposals")));
+    for removed in [
+        "route_simulate",
+        "proposals",
+        "review_proposal",
+        "apply_proposals",
+    ] {
+        assert!(
+            !values.contains(&json!(removed)),
+            "tachi_task must not advertise route tuning action {removed} after #1426"
+        );
+    }
     assert!(values.contains(&json!("status")));
     assert!(values.contains(&json!("intake")));
     assert!(values.contains(&json!("cycle_plan")));
@@ -595,8 +639,8 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
 ///   explicitness signal (task_router.rs complete arm); its schema property
 ///   name is the serde rename `__tachi_project_explicit`, which IS the wire
 ///   name clients send;
-/// - `execution_level` is read by the Recommend and RouteSimulate arms for
-///   host admission (task_router.rs);
+/// - `execution_level` is read by the Recommend arm for host admission
+///   (task_router.rs);
 /// - `timeout_secs` is read by the Status arm for the acpx control command
 ///   timeout (task_facade.rs handle_tachi_task_status).
 #[test]

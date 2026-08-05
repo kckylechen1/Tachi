@@ -6,4 +6,4 @@ mod markdown;
 mod runner;
 mod types;
 
-pub(crate) use runner::{build_recall_simulation_report, handle_memory_recall_simulate};
+pub(crate) use runner::{build_recall_simulation_report, handle_tune_recall_simulate};

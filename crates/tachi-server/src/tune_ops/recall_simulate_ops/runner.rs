@@ -15,9 +15,9 @@ use crate::memory_search_ops::{
 use crate::tool_params::*;
 use crate::MemoryServer;
 
-pub(crate) async fn handle_memory_recall_simulate(
+pub(crate) async fn handle_tune_recall_simulate(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<String, String> {
     let report = build_recall_simulation_report(server, params).await?;
     if wants_json(params.format.as_deref()) {
@@ -28,7 +28,7 @@ pub(crate) async fn handle_memory_recall_simulate(
 
 pub(crate) async fn build_recall_simulation_report(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<Value, String> {
     let cases = parse_cases(params)?;
     let default_top_k = crate::clamp_facade_top_k(params.top_k);
@@ -75,7 +75,7 @@ pub(crate) async fn build_recall_simulation_report(
 
 async fn run_variant(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     cases: &[RecallSimCase],
     default_top_k: usize,
     name: &str,
@@ -271,7 +271,7 @@ impl CaseBaseline {
 
 async fn baseline_replay(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     case: &RecallSimCase,
     top_k: usize,
     expected_ids: &[String],
@@ -317,7 +317,7 @@ async fn baseline_replay(
 }
 
 fn build_search_params(
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     case: &RecallSimCase,
     top_k: usize,
 ) -> Result<SearchMemoryParams, String> {

@@ -151,9 +151,10 @@ mod tests {
         // 24 -> 26. #1253 WorkClaim lifecycle then intentionally adds four
         // canonical task actions: claim, release, heartbeat, and handoff.
         // #1319-C2 removes three (dispatch/wait/cancel) as worker launch
-        // moves to tachi_staff: 30 -> 27.
+        // moves to tachi_staff: 30 -> 27. #1426 then moves four route-tuning
+        // actions to tachi_tune: 27 -> 23.
         // Keep this exact so the next inventory addition gets explicit review.
-        assert_eq!(primary.len(), 27);
+        assert_eq!(primary.len(), 23);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 
@@ -172,12 +173,9 @@ mod tests {
     #[test]
     fn f0_memory_and_verify_counts() {
         // Merge of #1001 (claim, release) and #964 (sticky_leave,
-        // sticky_check) landing together bumps this from 23 -> 25, which
-        // lands exactly AT TACHI_MEMORY_ACTION_SOFT_MAX — the soft-ceiling
-        // assertion below still passes (`<=`), but the next legitimate
-        // addition needs an explicit look at whether the ceiling itself
-        // should move, not just this exact-count tripwire.
-        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 25);
+        // sticky_check) landed at 25. #1426 moves four recall-tuning actions
+        // to tachi_tune: 25 -> 21.
+        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 21);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
         assert_eq!(TachiVerifyAction::ALL.len(), 4);
     }

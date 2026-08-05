@@ -77,7 +77,7 @@ async fn run_recall_eval(
         .iter()
         .map(|loaded| loaded.case.clone())
         .collect::<Vec<_>>();
-    let params: crate::tool_params::TachiMemoryParams = serde_json::from_value(json!({
+    let params: crate::tool_params::TachiTuneParams = serde_json::from_value(json!({
         "action": "recall_simulate",
         "format": "json",
         "top_k": top_k,
@@ -87,7 +87,7 @@ async fn run_recall_eval(
         }
     }))?;
     let server = crate::MemoryServer::new(db_path.to_path_buf(), project_db_path.cloned())?;
-    let report = crate::facade_memory_ops::build_recall_simulation_report(&server, &params).await?;
+    let report = crate::tune_ops::build_recall_simulation_report(&server, &params).await?;
 
     let status = build_aggregate_status(&report, &loaded, skipped_rows, top_k, min_recall, min_mrr);
     write_status_artifact(app_home, &status)?;

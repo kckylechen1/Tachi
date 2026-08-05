@@ -23,7 +23,6 @@ use evidence_format::parse_json_or_empty;
 pub(crate) use evidence_format::{
     shape_complete_response, shape_save_facade_response, wants_full_format, wants_json,
 };
-pub(crate) use crate::tune_ops::build_recall_simulation_report;
 use serde_json::json;
 
 fn json_search_section(name: String, value: serde_json::Value) -> serde_json::Value {

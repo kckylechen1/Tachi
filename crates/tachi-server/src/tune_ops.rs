@@ -2,16 +2,15 @@ pub(crate) mod route_policy;
 mod recall_proposal_ops;
 mod recall_simulate_ops;
 
-use crate::tool_params::{TachiMemoryParams, TachiTuneAction, TachiTuneParams};
+use crate::tool_params::{TachiTuneAction, TachiTuneParams};
 use crate::MemoryServer;
-use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 pub(crate) use recall_proposal_ops::{
     handle_recall_config_apply, handle_recall_config_proposals, handle_recall_config_review,
 };
 pub(crate) use recall_simulate_ops::{
-    build_recall_simulation_report, handle_memory_recall_simulate,
+    build_recall_simulation_report, handle_tune_recall_simulate,
 };
 
 pub(crate) async fn handle_tachi_tune(
@@ -57,24 +56,10 @@ pub(crate) async fn handle_tachi_tune(
             let raw = route_policy::handle_route_policy_apply(server, proposal_id, params.confirm)?;
             relabel_json_action(raw, params.action.as_str())
         }
-        TachiTuneAction::RecallSimulate => {
-            let memory_params = memory_params_for_tune(&params, "recall_simulate")?;
-            handle_memory_recall_simulate(server, &memory_params).await
-        }
-        TachiTuneAction::RecallProposals => {
-            let memory_params = memory_params_for_tune(&params, "recall_proposals")?;
-            handle_recall_config_proposals(server, &memory_params).await
-        }
-        TachiTuneAction::RecallReview => {
-            let memory_params = memory_params_for_tune(&params, "review_recall_proposal")?;
-            let raw = handle_recall_config_review(server, &memory_params)?;
-            relabel_json_action(raw, params.action.as_str())
-        }
-        TachiTuneAction::RecallApply => {
-            let memory_params = memory_params_for_tune(&params, "apply_recall_proposals")?;
-            let raw = handle_recall_config_apply(server, &memory_params)?;
-            relabel_json_action(raw, params.action.as_str())
-        }
+        TachiTuneAction::RecallSimulate => handle_tune_recall_simulate(server, &params).await,
+        TachiTuneAction::RecallProposals => handle_recall_config_proposals(server, &params).await,
+        TachiTuneAction::RecallReview => handle_recall_config_review(server, &params),
+        TachiTuneAction::RecallApply => handle_recall_config_apply(server, &params),
     }
 }
 
@@ -113,26 +98,6 @@ fn attach_host_admission(
     })?;
     object.insert("host_admission".to_string(), admission.to_json());
     serde_json::to_string(&value).map_err(|err| format!("serialize host admission attach: {err}"))
-}
-
-fn memory_params_for_tune(
-    params: &TachiTuneParams,
-    action: &str,
-) -> Result<TachiMemoryParams, String> {
-    remap_tune_params(params, action)
-}
-
-fn remap_tune_params<T>(params: &TachiTuneParams, action: &str) -> Result<T, String>
-where
-    T: DeserializeOwned,
-{
-    let mut value =
-        serde_json::to_value(params).map_err(|err| format!("serialize tachi_tune params: {err}"))?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "serialize tachi_tune params: expected object".to_string())?;
-    object.insert("action".to_string(), Value::String(action.to_string()));
-    serde_json::from_value(value).map_err(|err| format!("map tachi_tune params: {err}"))
 }
 
 fn relabel_json_action(raw: String, action: &str) -> Result<String, String> {
