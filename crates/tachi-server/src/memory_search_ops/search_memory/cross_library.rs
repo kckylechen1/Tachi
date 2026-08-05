@@ -193,6 +193,7 @@ mod tests {
                     decay: 0.0,
                     final_score: score,
                 },
+                graph_injected: false,
             },
             scope,
         )

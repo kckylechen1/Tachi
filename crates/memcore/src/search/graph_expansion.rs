@@ -141,6 +141,15 @@ pub(super) fn append_graph_expansion(
                 ms,
                 SearchResult {
                     entry,
+                    // The all-zero component scores below are the shape a
+                    // consumer previously had to pattern-match on to detect
+                    // a graph-injected result (tachi#1647): none of the
+                    // vector/FTS/symbolic/decay channels ran for this
+                    // candidate, only `final_score` (the graph boost). That
+                    // shape is still produced here — it is an honest report
+                    // of "these channels did not run" — but `graph_injected`
+                    // below is now the documented, explicit marker; do not
+                    // reintroduce a new all-zero-sniffing consumer.
                     score: HybridScore {
                         vector: 0.0,
                         fts: 0.0,
@@ -148,6 +157,7 @@ pub(super) fn append_graph_expansion(
                         decay: 0.0,
                         final_score: graph_boost,
                     },
+                    graph_injected: true,
                 },
             )
         })

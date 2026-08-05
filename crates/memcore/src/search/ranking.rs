@@ -247,7 +247,11 @@ pub(super) fn rank_candidate_entries(
         .filter_map(|id| {
             let entry = entries_map.remove(id)?;
             let score = scores.get(id)?.clone();
-            Some(SearchResult { entry, score })
+            Some(SearchResult {
+                entry,
+                score,
+                graph_injected: false,
+            })
         })
         .collect();
     let ranked_result_count = results.len();

@@ -27,6 +27,27 @@ pub struct HybridScore {
 pub struct SearchResult {
     pub entry: MemoryEntry,
     pub score: HybridScore,
+    /// `true` when this result was appended by post-ranking graph expansion
+    /// (`search/graph_expansion.rs::append_graph_expansion`) rather than
+    /// surfaced by the primary vector/FTS/symbolic channels — tachi#1647.
+    ///
+    /// Before this field existed, the only signal a consumer had for "was
+    /// this a graph hit" was that graph-injected results carry an
+    /// all-zero [`HybridScore`] on every component except `final_score`
+    /// (`vector: 0.0, fts: 0.0, symbolic: 0.0, decay: 0.0` — see the
+    /// construction site in `graph_expansion.rs`): an undocumented,
+    /// pattern-matched heuristic. This field replaces that heuristic with an
+    /// explicit, documented marker; the all-zero shape is still produced (it
+    /// is honest — none of those channels ran) but is no longer the API.
+    ///
+    /// `skip_serializing_if` keeps every non-injected result byte-identical
+    /// to before this field existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub graph_injected: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Aggregate statistics about the memory store.
