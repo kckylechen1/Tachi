@@ -3108,11 +3108,24 @@ mod idless_upsert_tests {
     /// opt-in) does — by going around `MemoryStore::upsert_idless` and
     /// driving the transactional seam directly with
     /// [`NearDuplicatePolicy::AllowNearDuplicateMerge`].
+    ///
+    /// Every production caller of this seam acquires
+    /// `authorize_reserved_reference_write` before opening its writer
+    /// transaction (see `MemoryStore::upsert_idless`,
+    /// `upsert_with_validated_reference_mutations_and_metadata_removals`);
+    /// the shared connection authorizer denies the main-row INSERT/UPDATE
+    /// otherwise (`reserved_reference_authorizer`'s `protected_memory_write`
+    /// branch, `crates/memcore/src/db/open.rs`). This helper must do the
+    /// same, or the write-time Jaccard merge fails with
+    /// `AuthorizationForStatementDenied` before it ever reaches the
+    /// candidate scan.
     fn upsert_idless_allowing_merge(
         store: &mut crate::MemoryStore,
         entry: &MemoryEntry,
         identity: &str,
     ) -> IdlessUpsertResult {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
         let tx = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
