@@ -126,8 +126,6 @@ pub(super) fn format_facade_response(
     }
     let mut lines = vec![format!("## {title}")];
     lines.push(format!("action: `{action}`"));
-    append_known_field(&mut lines, &value, "arena_id");
-    append_known_field(&mut lines, &value, "mission_id");
     append_known_field(&mut lines, &value, "flow_id");
     append_known_field(&mut lines, &value, "dispatch_id");
     append_known_field(&mut lines, &value, "task_id");
@@ -140,8 +138,6 @@ pub(super) fn format_facade_response(
     append_known_field(&mut lines, &value, "eval_path");
     append_known_field(&mut lines, &value, "eval_memory_id");
     append_known_field(&mut lines, &value, "run_dir");
-    append_known_field(&mut lines, &value, "arena_dir");
-    append_known_field(&mut lines, &value, "mission_dir");
     append_known_field(&mut lines, &value, "instruction_path");
     append_known_field(&mut lines, &value, "prompt_file");
     append_known_field(&mut lines, &value, "trajectory_file");
