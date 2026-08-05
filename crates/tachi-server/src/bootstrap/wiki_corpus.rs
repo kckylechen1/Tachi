@@ -5742,9 +5742,11 @@ struct LegacyAdoptionReport {
     /// `Some(false)` is a hard failure, not a warning: an unstamped store is
     /// not the wiki corpus and must not be left holding adopted rows.
     target_store_role_stamped: Option<bool>,
-    /// Set when a post-creation failure was compensated by removing the store
-    /// the run had created. `Some(false)` means the removal itself failed and
-    /// the operator must clean up by hand.
+    /// Set when a post-creation failure was compensated by removing what this
+    /// run wrote: the whole `target_dir` if this run created it, or just the
+    /// db file (and its WAL/SHM sidecars) if `target_dir` preexisted this
+    /// run. `Some(false)` means the removal itself failed and the operator
+    /// must clean up by hand; `remediation` states exactly what to remove.
     target_removed_after_failure: Option<bool>,
     legacy_open_path: Option<String>,
     legacy_physical_id: Option<String>,
@@ -5801,6 +5803,23 @@ fn legacy_adoption_target_path(app_home: &Path) -> PathBuf {
         .join("projects")
         .join("wiki")
         .join(memcore::MEMORY_DB_FILENAME)
+}
+
+/// Removes exactly the files a bootstrap-and-import of `target` could have
+/// written -- the main db file plus its `-wal`/`-shm` sidecars -- and nothing
+/// else in `target`'s directory. Used by the round-2 bug B failure path,
+/// where `target_dir` preexisted this run and so is not this run's to
+/// remove wholesale. Missing files are not an error: a failure early in
+/// `adopt_into_bootstrapped_store` may have written none of the three.
+fn remove_adopted_store_files(target: &Path) -> std::io::Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        match fs::remove_file(preview_sidecar_path(target, suffix)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// `Ok(())` when the row is adopted; `Err(reason)` is the exact reported
@@ -6120,6 +6139,37 @@ pub(crate) fn run_wiki_corpus_legacy_adoption_command(
         }
     };
 
+    // Round-2 bug A: this existing-target gate must run before the legacy
+    // store is opened at all, not merely before the destination is written.
+    // `target_existed_before` is a pure function of `app_home` and the wiki
+    // store path -- it touches nothing legacy -- so hoisting it ahead of
+    // `store_specs`/`inventory_store` (which does open and read the legacy
+    // global) costs nothing and closes the window where a second confirmed
+    // run against an occupied target would still read the legacy source
+    // before refusing.
+    let target = legacy_adoption_target_path(app_home);
+    let target_dir = target
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "wiki store path has no parent directory".to_string())?;
+    let target_existed_before =
+        MemoryServer::resolve_existing_named_project_db_path_in_home("wiki", app_home)
+            .map_err(|error| format!("cannot resolve the named wiki store: {error}"))?
+            .is_some()
+            || fs::symlink_metadata(&target).is_ok();
+    if target_existed_before && confirmed {
+        // B1: the remedy is removal and re-run, not `--apply`. `--apply`
+        // refuses any absent involved store, and on a host with no bound
+        // project DB the `bound_project` store is always absent -- so naming
+        // it here would send the operator to a command that cannot run.
+        return Err(format!(
+            "wiki store already exists at {}; --adopt-legacy is a bootstrap-only mode — remove {} \
+             and re-run if you intend to rebuild it",
+            target.display(),
+            target_dir.display()
+        ));
+    }
+
     let mut scans = store_specs(global_db, project_db, app_home)
         .into_iter()
         .map(inventory_store)
@@ -6157,29 +6207,6 @@ pub(crate) fn run_wiki_corpus_legacy_adoption_command(
         .ok_or_else(|| "legacy global store has no physical identity".to_string())?;
     let legacy_row_digest_before = legacy.row_digest.clone();
     let legacy_spec = legacy.spec.clone();
-
-    let target = legacy_adoption_target_path(app_home);
-    let target_dir = target
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "wiki store path has no parent directory".to_string())?;
-    let target_existed_before =
-        MemoryServer::resolve_existing_named_project_db_path_in_home("wiki", app_home)
-            .map_err(|error| format!("cannot resolve the named wiki store: {error}"))?
-            .is_some()
-            || fs::symlink_metadata(&target).is_ok();
-    if target_existed_before && confirmed {
-        // B1: the remedy is removal and re-run, not `--apply`. `--apply`
-        // refuses any absent involved store, and on a host with no bound
-        // project DB the `bound_project` store is always absent -- so naming
-        // it here would send the operator to a command that cannot run.
-        return Err(format!(
-            "wiki store already exists at {}; --adopt-legacy is a bootstrap-only mode — remove {} \
-             and re-run if you intend to rebuild it",
-            target.display(),
-            target_dir.display()
-        ));
-    }
 
     // B3: the corpus is the classified rows, not every row the legacy store
     // holds. `load_rows` selects the whole `memories` table; only wiki-related
@@ -6338,6 +6365,14 @@ pub(crate) fn run_wiki_corpus_legacy_adoption_command(
     // while nothing exists on disk.
     adoption_preflight(&entries)?;
 
+    // Round-2 bug B: `target_existed_before` is a statement about the target
+    // *file* (or a named resolution), not about `target_dir`. A preexisting,
+    // empty `target_dir` -- no db, possibly holding unrelated content --
+    // passes that gate and lands here with `target_existed_before == false`.
+    // Failure cleanup must not conflate "this run's writes" with "the whole
+    // directory": record, before creating anything, whether this run is the
+    // one bringing the directory into existence.
+    let target_dir_created_by_this_run = !target_dir.exists();
     fs::create_dir_all(&target_dir).map_err(|error| {
         format!(
             "cannot create wiki store directory {}: {error}",
@@ -6370,30 +6405,67 @@ pub(crate) fn run_wiki_corpus_legacy_adoption_command(
         report.had_failures = true;
         // An empty or half-built store is worse than no store: its mere
         // existence flips the named-store gate and silences the zero-store
-        // search refusal. Remove what this run created, and say whether the
-        // removal worked.
-        match fs::remove_dir_all(&target_dir) {
+        // search refusal. Remove what *this run* wrote, and say whether the
+        // removal worked. If this run also created `target_dir`, the whole
+        // directory is this run's to remove; if the directory preexisted,
+        // only the db file (and its WAL/SHM sidecars) this run wrote belong
+        // to it -- the directory and anything else inside it is left alone.
+        let removal = if target_dir_created_by_this_run {
+            fs::remove_dir_all(&target_dir)
+        } else {
+            remove_adopted_store_files(&target)
+        };
+        match removal {
             Ok(()) => {
                 report.target_removed_after_failure = Some(true);
-                report.remediation = Some(format!(
-                    "the store this run created at {} was removed; the legacy global is \
-                     untouched, so re-running `tachi wiki corpus --adopt-legacy --confirm {}` \
-                     after fixing the reported error is safe",
-                    target_dir.display(),
-                    WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
-                ));
+                report.remediation = Some(if target_dir_created_by_this_run {
+                    format!(
+                        "the store this run created at {} was removed; the legacy global is \
+                         untouched, so re-running `tachi wiki corpus --adopt-legacy --confirm {}` \
+                         after fixing the reported error is safe",
+                        target_dir.display(),
+                        WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
+                    )
+                } else {
+                    format!(
+                        "the wiki store file this run wrote at {} was removed; {} preexisted this \
+                         run and was left untouched. The legacy global is untouched, so \
+                         re-running `tachi wiki corpus --adopt-legacy --confirm {}` after fixing \
+                         the reported error is safe",
+                        target.display(),
+                        target_dir.display(),
+                        WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
+                    )
+                });
             }
             Err(remove_error) => {
                 report.target_removed_after_failure = Some(false);
-                report.errors.push(format!(
-                    "cannot remove the wiki store this run created at {}: {remove_error}",
-                    target_dir.display()
-                ));
-                report.remediation = Some(format!(
-                    "remove {} by hand and re-run `tachi wiki corpus --adopt-legacy --confirm {}`",
-                    target_dir.display(),
-                    WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
-                ));
+                report.errors.push(if target_dir_created_by_this_run {
+                    format!(
+                        "cannot remove the wiki store this run created at {}: {remove_error}",
+                        target_dir.display()
+                    )
+                } else {
+                    format!(
+                        "cannot remove the wiki store file this run wrote at {}: {remove_error}",
+                        target.display()
+                    )
+                });
+                report.remediation = Some(if target_dir_created_by_this_run {
+                    format!(
+                        "remove {} by hand and re-run `tachi wiki corpus --adopt-legacy --confirm {}`",
+                        target_dir.display(),
+                        WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
+                    )
+                } else {
+                    format!(
+                        "remove {} by hand (leave {} in place unless you intend to rebuild it) \
+                         and re-run `tachi wiki corpus --adopt-legacy --confirm {}`",
+                        target.display(),
+                        target_dir.display(),
+                        WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
+                    )
+                });
             }
         }
     }
@@ -9821,6 +9893,45 @@ mod tests {
         let adoption = preview.legacy_adoption.unwrap();
         assert!(adoption.target_existed_before);
         assert!(!adoption.target_created);
+    }
+
+    /// T4b, round-2 bug A: the existing-target refusal must fire before the
+    /// legacy store is opened at all, not merely before the destination is
+    /// written. Proven with a discriminator rather than instrumentation: the
+    /// legacy source is corrupted after the fixture is built, so *if* the
+    /// confirmed path ever opened it, `inventory_store` would capture a read
+    /// failure and the command would surface "legacy global store is
+    /// unreadable" instead of the bootstrap-only refusal. Getting the
+    /// bootstrap-only wording proves the legacy open never happened.
+    #[test]
+    fn adopt_legacy_refuses_existing_target_before_touching_legacy_store() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "adopt-order",
+            "/wiki/adopt/order",
+            json!({"lifecycle": "active"}),
+        )]);
+        fs::create_dir_all(fixture.target_dir()).unwrap();
+        create_current_fixture(&fixture.target(), &[]);
+
+        // Corrupt the legacy source only after the fixture (and the
+        // preexisting target) are built. A second confirmed run against an
+        // occupied target with a legacy source that would error if opened is
+        // exactly the shape a refusal-ordering regression would mishandle.
+        fs::write(&fixture.global_path, b"not a sqlite database").unwrap();
+
+        let error = fixture
+            .run(Some(WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN))
+            .expect_err("adoption is bootstrap-only");
+        assert!(
+            error.contains("bootstrap-only mode"),
+            "the existing-target refusal must fire before the corrupt legacy store is ever \
+             opened: {error}"
+        );
+        assert!(
+            !error.contains("legacy global store is unreadable"),
+            "a legacy-read error here would mean the legacy store was opened before the \
+             existing-target check: {error}"
+        );
     }
 
     /// T5
