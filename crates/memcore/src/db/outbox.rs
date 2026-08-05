@@ -653,16 +653,17 @@ pub(crate) fn claim_outbox_events_within_tx(
                 OR (state = ?2 AND ?3 IS NOT NULL AND state_changed_at <= ?3) \
              ORDER BY created_at ASC, event_id ASC LIMIT ?4"
         ))?;
-        let rows = stmt.query_map(
-            params![
-                OutboxState::Pending.as_str(),
-                OutboxState::InFlight.as_str(),
-                reclaim_stamped_at_or_before,
-                i64::try_from(limit).unwrap_or(i64::MAX)
-            ],
-            row_to_outbox_event,
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+        let rows = stmt
+            .query_map(
+                params![
+                    OutboxState::Pending.as_str(),
+                    OutboxState::InFlight.as_str(),
+                    reclaim_stamped_at_or_before,
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                row_to_outbox_event,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
         rows
     };
 
