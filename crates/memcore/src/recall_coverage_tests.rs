@@ -2,8 +2,9 @@ use crate::{
     hybrid_search, is_recall_coverage_path_list_only, run_recall_coverage_probe,
     run_recall_coverage_probe_with_corpus, run_recall_coverage_probe_with_equivalences,
     MemoryEntry, MemoryStore, RecallCoverageEquivalenceCorpus, RecallCoverageEquivalenceSet,
-    RecallCoverageEvidenceKind, RecallCoverageOptions, RecallCoverageOutcome,
-    RecallCoverageQuerySource, SearchOptions, RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION,
+    RecallCoverageEvidenceKind, RecallCoverageFilterReason, RecallCoverageOptions,
+    RecallCoverageOutcome, RecallCoverageQuerySource, SearchOptions,
+    RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -1282,6 +1283,220 @@ fn dangling_stored_lineage_defers_to_explicit_reviewed_equivalence() {
         "private reviewed canonical content sentinel",
     ] {
         assert!(!json.contains(secret));
+        assert!(!human.contains(secret));
+    }
+}
+
+#[test]
+fn recall_coverage_scope_filtered_expected_id_still_probes_and_reports_true_miss() {
+    const CANDIDATES_PER_CHANNEL: usize = 1;
+    const VECTOR_DIMENSIONS: usize = 1024;
+    const FIXTURES: [(&str, &str); 5] = [
+        ("scope-row-a", "aurora cobalt zephyr"),
+        ("scope-row-b", "bramble delta quartz"),
+        ("scope-row-c", "cinder fjord maple"),
+        ("scope-row-d", "ember glacial orbit"),
+        ("scope-row-e", "harbor juniper prism"),
+    ];
+    const SCOPE_FILTERED_PATH: &str = "/guide/scope-filtered";
+    assert!(
+        is_recall_coverage_path_list_only(SCOPE_FILTERED_PATH),
+        "fixture path must actually be a path-list-only namespace"
+    );
+
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    assert!(
+        store.vec_available,
+        "sqlite-vec required to force a real vector-leg exclusion"
+    );
+    let vector = vec![0.25; VECTOR_DIMENSIONS];
+    for (id, content) in FIXTURES {
+        let mut entry = fixture_entry(id, SCOPE_FILTERED_PATH, content);
+        entry.vector = Some(vector.clone());
+        insert(&mut store, entry);
+    }
+
+    // Same identical-vector, narrow-candidate-width construction used by the
+    // existing vector-exclusion fixtures: with five tied vectors and a
+    // candidate width of one, only one id wins the vector leg and the rest
+    // are genuinely, deterministically excluded from it.
+    let vector_candidates = crate::db::search_vec(
+        store.connection(),
+        &vector,
+        CANDIDATES_PER_CHANNEL,
+        false,
+        false,
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("vector candidate search");
+    let mut omitted_ids: Vec<&str> = FIXTURES
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| !vector_candidates.contains_key(*id))
+        .collect();
+    omitted_ids.sort_unstable();
+    let target_id = omitted_ids
+        .first()
+        .expect("more tied-vector rows than candidate width must leave an omitted target")
+        .to_string();
+
+    let corpus = RecallCoverageEquivalenceCorpus {
+        schema_version: RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        expected_ids: vec![target_id.clone()],
+        equivalences: Vec::new(),
+    };
+    let report = run_recall_coverage_probe_with_corpus(
+        &store,
+        RecallCoverageOptions {
+            top_k: 2,
+            candidates_per_channel: CANDIDATES_PER_CHANNEL,
+            limit: None,
+        },
+        &corpus,
+    )
+    .expect("scope-filtered expected-id report");
+
+    let target = report
+        .expected_id_lane
+        .cases
+        .first()
+        .expect("one reviewed expected-id case");
+    assert_eq!(target.id, target_id);
+    assert_eq!(
+        target.filter_reason,
+        Some(RecallCoverageFilterReason::PathListOnly),
+        "a path-list-only row referenced from expected_ids must carry its filter reason"
+    );
+    assert_eq!(
+        target.outcome,
+        RecallCoverageOutcome::NotSurfaced,
+        "the filtered row must still be probed rather than skipped, and this fixture is a real miss"
+    );
+
+    // The exact metric stays honest: a filtered row is counted like any
+    // other probed case, not silently dropped from the denominator or
+    // faked into a hit because it carries a filter reason.
+    assert_eq!(report.expected_id_lane.requested, 1);
+    assert_eq!(report.expected_id_lane.probed, 1);
+    assert_eq!(report.expected_id_lane.exact_metrics.denominator, 1);
+    assert_eq!(report.expected_id_lane.exact_metrics.hits, 0);
+
+    let human = crate::format_recall_coverage_human(&report);
+    assert!(human.contains(&format!("expected_id_case id={target_id}")));
+    assert!(human.contains("filter_reason=PathListOnly"));
+}
+
+#[test]
+fn recall_coverage_lifecycle_filtered_expected_ids_report_reasons_and_superseded_lineage() {
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    assert!(
+        store.vec_available,
+        "sqlite-vec required for vector-backed coverage"
+    );
+
+    let mut archived = fixture_entry(
+        "lifecycle-archived",
+        "/notes/lifecycle-archived",
+        "lifecycle archived coverage needle",
+    );
+    archived.archived = true;
+    archived.vector = Some(vec![0.5; 1024]);
+    insert(&mut store, archived);
+
+    let mut superseded_old = fixture_entry(
+        "lifecycle-superseded-old",
+        "/notes/lifecycle-superseded-old",
+        "lifecycle superseded coverage needle",
+    );
+    superseded_old.vector = Some(vec![0.5; 1024]);
+    insert(&mut store, superseded_old);
+
+    let mut superseded_successor = fixture_entry(
+        "lifecycle-superseded-successor",
+        "/notes/lifecycle-superseded-successor",
+        "lifecycle superseded successor needle",
+    );
+    superseded_successor.vector = Some(vec![0.5; 1024]);
+    insert(&mut store, superseded_successor);
+
+    assert!(store
+        .supersede_memory("lifecycle-superseded-old", "lifecycle-superseded-successor")
+        .expect("link old row to its successor"));
+
+    let corpus = RecallCoverageEquivalenceCorpus {
+        schema_version: RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        expected_ids: vec![
+            "lifecycle-archived".to_string(),
+            "lifecycle-superseded-old".to_string(),
+        ],
+        equivalences: Vec::new(),
+    };
+    let report =
+        run_recall_coverage_probe_with_corpus(&store, RecallCoverageOptions::default(), &corpus)
+            .expect("lifecycle-filtered expected-id report");
+    assert_eq!(report.expected_id_lane.requested, 2);
+
+    let archived_case = report
+        .expected_id_lane
+        .cases
+        .iter()
+        .find(|case| case.id == "lifecycle-archived")
+        .expect("archived case present");
+    assert_eq!(
+        archived_case.filter_reason,
+        Some(RecallCoverageFilterReason::Archived)
+    );
+    assert_eq!(
+        archived_case.outcome,
+        RecallCoverageOutcome::NotSurfaced,
+        "an archived row is excluded from the search index itself, so it still probes but never surfaces"
+    );
+
+    let superseded_case = report
+        .expected_id_lane
+        .cases
+        .iter()
+        .find(|case| case.id == "lifecycle-superseded-old")
+        .expect("superseded case present");
+    assert_eq!(
+        superseded_case.filter_reason,
+        Some(RecallCoverageFilterReason::Superseded),
+        "supersede_memory alone must not also mark the row archived"
+    );
+    assert_eq!(superseded_case.outcome, RecallCoverageOutcome::NotSurfaced);
+    // The two systems composing is the point: filter_reason explains why the
+    // exact row is excluded from the legacy population, and independently
+    // the canonical fact/lineage verdict resolves the same row to its stored
+    // successor via `superseded_by`.
+    assert_eq!(
+        superseded_case.fact_evidence.kind,
+        RecallCoverageEvidenceKind::StoredSupersessionLineage
+    );
+    assert_eq!(
+        superseded_case.fact_evidence.lineage,
+        ["lifecycle-superseded-old", "lifecycle-superseded-successor"]
+    );
+    assert_eq!(
+        superseded_case.canonical_id.as_deref(),
+        Some("lifecycle-superseded-successor")
+    );
+    assert_eq!(
+        superseded_case.canonical_fact_outcome,
+        RecallCoverageOutcome::Surfaced
+    );
+
+    let human = crate::format_recall_coverage_human(&report);
+    assert!(human.contains("filter_reason=Archived"));
+    assert!(human.contains("filter_reason=Superseded"));
+    assert!(human.contains("lineage=lifecycle-superseded-old->lifecycle-superseded-successor"));
+    for secret in [
+        "lifecycle archived coverage needle",
+        "lifecycle superseded coverage needle",
+        "lifecycle superseded successor needle",
+    ] {
         assert!(!human.contains(secret));
     }
 }
