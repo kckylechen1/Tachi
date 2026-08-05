@@ -51,6 +51,7 @@ pub mod maintenance;
 pub mod memory_lifecycle;
 pub mod open;
 pub mod outbox;
+pub mod outbox_protocol;
 pub mod policy;
 #[cfg(test)]
 mod profile_identity_tests;
