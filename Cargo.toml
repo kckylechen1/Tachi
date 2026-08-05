@@ -18,6 +18,15 @@ members = [
     # portable-kernel library for the HyperMem runtime cutover.
     "crates/portable-server",
     "crates/tachi-bootstrap",
+    # Test-only member (#1610 Track T): workspace contract/census tests lifted
+    # out of tachi-server's test binary. Membership is load-bearing, not
+    # bookkeeping — `census_scan_roots_come_from_workspace_membership` in
+    # crates/tachi-contract-tests/src/tests/docs_tests/store_trigger_ddl_census.rs
+    # REDs on any directory under crates/ that is not a member, and the DDL
+    # census derives its scan roots from this list. Deliberately NOT in
+    # default-members: it has an empty lib and only dev-dependencies, so
+    # `cargo build --release` compiles nothing from it either way.
+    "crates/tachi-contract-tests",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",
     "crates/tachi-hub",
