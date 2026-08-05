@@ -1,3 +1,4 @@
+use memcore::relation_ontology::is_legal_new_relation;
 use memcore::{
     AuthorityLevel, MemoryEdge, MemoryEntry, ProjectionKind, TachiEventQuery, TachiEventRecord,
 };
@@ -358,8 +359,25 @@ const COLLECT_ONLY_ALLOWED_RELATIONS: [&str; 2] = ["follows", "references"];
 /// is exactly as untrusted either way, so gating on `auto_only` as well
 /// would add a second condition without closing any additional exposure —
 /// the tier alone is the correct and simpler predicate.
+///
+/// The remap is gated on [`is_legal_new_relation`] — "would this relation
+/// validate for a generic writer via the `add_edge` choke point" — not on
+/// mere allowlist-membership. Only ontology-legal-but-not-`CollectOnly`
+/// relations (e.g. `supports`, `causes`, `elaborates`) get downgraded to
+/// `references`. Relations that are illegal on the generic path — the #772
+/// `COMPONENT_GOVERNANCE_GRANDFATHERED` set (`owns`/`consumes`/
+/// `backflow_candidate`/`blocked_by`, caller-scoped to the typed
+/// `add_component_governance_edge` door) and any unknown string — must NOT
+/// be remapped: laundering them into a legal `references` edge here would
+/// let a dynamic string caller forge a governance relation by relabeling it,
+/// bypassing the ontology's generic-path rejection entirely
+/// (tachi#1646 kill-test `continuity_projection_rejects_grandfathered_relation_fail_soft`).
+/// Leaving them unchanged routes them to `add_memory_edge` /
+/// `validate_relation_for_write`, which rejects and fail-soft-drops them —
+/// the same outcome as before this remap existed.
 fn restrict_relation_for_authority(relation: String, authority: AuthorityLevel) -> String {
     if authority == AuthorityLevel::CollectOnly
+        && is_legal_new_relation(&relation)
         && !COLLECT_ONLY_ALLOWED_RELATIONS.contains(&relation.as_str())
     {
         "references".to_string()
