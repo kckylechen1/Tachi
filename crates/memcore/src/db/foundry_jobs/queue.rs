@@ -185,7 +185,7 @@ pub fn load_pending_foundry_jobs(
          FROM foundry_jobs
          WHERE status = 'queued'
             OR (status = 'running' AND datetime(updated_at) < datetime(?1))
-         ORDER BY datetime(created_at) ASC, id ASC",
+         ORDER BY datetime(created_at) ASC, rowid ASC",
     )?;
 
     let rows = stmt.query_map(params![running_before], |row| {
