@@ -2822,21 +2822,19 @@ async fn consolidate_apply_receipt_binds_source_target_revisions_policy_and_comm
     assert_eq!(apply_json["apply_result"]["archived"], json!(true));
 }
 
-/// tachi#1635 (#1632 conformance, item 8) — FINDING, not a passing
-/// conformance pin: `merge_into_for_project` (the automated, non-human-
-/// reviewed bypass documented at `apply_lifecycle_action`'s "supersede"/
-/// "merge_into" arms in `consolidate_ops.rs`) returns only the bare
-/// `apply_result` shape (`lifecycle_action`/`source_id`/`target_id`/
-/// `merged_keywords`/`merged_entities`/`superseded`/`archived`) with no
-/// `proposal` wrapper — so, unlike the human-reviewed loop pinned above, its
-/// caller-visible receipt carries neither a revision for source/target nor a
-/// `policy_version`. Reported per #1635 task instructions ("if the receipt
-/// lacks any of these fields, finding -> report, don't add fields"); not
-/// fixed here (edit-only leaf, and the caller of this seam — the distill
-/// batch's dedup pre-selection pass, tachi#1043 D3 — may not need the extra
-/// fields, so whether to add them is a product decision, not a test fix).
+/// tachi#1645 (#1635 finding 3, item 8 — flipped from finding-pin to a
+/// positive binding assertion): `merge_into_for_project`'s receipt (the
+/// bare `apply_result` shape returned by `apply_lifecycle_action`'s
+/// "merge_into"/"near_dup_merge" arm in `consolidate_ops.rs`, with no
+/// `proposal` wrapper) now carries `source_revision`/`target_revision` (the
+/// revisions the CAS actually consumed, mirroring the human-reviewed v2
+/// loop's `apply_payload.source.revision`/`apply_payload.target.revision`
+/// binding pinned above) and a `policy_version` — but a route-1-specific
+/// one (`ROUTE1_MERGE_POLICY_VERSION`), not `lifecycle::LIFECYCLE_POLICY_VERSION`,
+/// since this bypass's CAS does not carry route 2's revision-checked drift
+/// guarantee.
 #[tokio::test]
-async fn merge_into_for_project_receipt_omits_revision_and_policy_fields_finding() {
+async fn merge_into_for_project_receipt_binds_source_target_revisions_and_policy() {
     let server = make_server();
     let mut source = make_entry("wrapper-receipt-gap-source");
     source.text = "receipt gap source".to_string();
@@ -2858,18 +2856,20 @@ async fn merge_into_for_project_receipt_omits_revision_and_policy_fields_finding
     )
     .expect("merge_into_for_project succeeds");
 
-    let receipt_object = receipt.as_object().expect("receipt is a JSON object");
-    assert!(
-        !receipt_object.contains_key("revision")
-            && !receipt_object.contains_key("source_revision")
-            && !receipt_object.contains_key("target_revision"),
-        "FINDING (tachi#1635 item 8): merge_into_for_project's receipt \
-         does not bind either endpoint's revision: {receipt}"
+    assert_eq!(
+        receipt["source_revision"],
+        json!(source.revision),
+        "receipt must bind the source revision the CAS actually consumed: {receipt}"
     );
-    assert!(
-        !receipt_object.contains_key("policy_version"),
-        "FINDING (tachi#1635 item 8): merge_into_for_project's receipt \
-         does not bind a policy: {receipt}"
+    assert_eq!(
+        receipt["target_revision"],
+        json!(target.revision),
+        "receipt must bind the target revision the CAS actually consumed: {receipt}"
+    );
+    assert_eq!(
+        receipt["policy_version"],
+        json!(crate::facade_memory_ops::consolidate_ops::ROUTE1_MERGE_POLICY_VERSION),
+        "receipt must bind route 1's own policy identity: {receipt}"
     );
 }
 

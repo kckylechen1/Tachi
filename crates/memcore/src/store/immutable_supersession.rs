@@ -7,7 +7,7 @@
 //! or any later mutation error drops the `BEGIN IMMEDIATE` transaction and
 //! rolls every earlier mutation back.
 
-use rusqlite::{Transaction, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{Map, Value};
 
 use crate::{
@@ -16,6 +16,13 @@ use crate::{
     types::{MemoryEdge, MemoryEntry},
     MemoryStore,
 };
+
+/// tachi#1645 (#1635 finding 2): bound the `superseded_by` chain walk
+/// `claim_immutable_supersession` performs before installing a new edge. A
+/// legitimate lineage should never need anywhere close to this many hops;
+/// hitting the cap is treated as a refusal (see
+/// `refuse_supersession_cycle`), not an unbounded scan.
+const MAX_SUPERSESSION_CHAIN_WALK: u32 = 32;
 
 /// Narrow mutation handle passed only inside
 /// [`MemoryStore::with_immutable_supersession_transaction`].
@@ -30,6 +37,46 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     ///
     /// A same-edge replay and a conflicting edge both fail loudly, so callers
     /// cannot accidentally run side effects as though their requested edge won.
+    ///
+    /// tachi#1645 (#1635 findings 1+2) caller audit: every non-test caller of
+    /// this method as of this change points `target_id` at either (a) a row
+    /// that does not exist yet and gets materialized later in the SAME
+    /// `BEGIN IMMEDIATE` transaction, or (b) a row just freshly
+    /// inserted/verified active earlier in the same transaction — never at
+    /// an already-retired row a caller *intends* to keep superseding onto.
+    /// `refuse_ineligible_supersession_target`/`refuse_supersession_cycle`
+    /// were therefore safe to make load-bearing here with no caller-side
+    /// STOP:
+    /// - `wiki_ops/ingest.rs:729` (`persist_wiki_ingest_entry`) — target is
+    ///   `replacement_entry.id`, upserted AFTER the claim loop, in-flight (b
+    ///   above, materialize-later case).
+    /// - `facade_memory_ops/consolidate_ops.rs:486,548`
+    ///   (`apply_lifecycle_action`'s "supersede"/"merge_into"/
+    ///   "near_dup_merge" arms) — target is caller-supplied and, pre-#1645,
+    ///   was NEVER eligibility-checked; this IS the gap findings 1/2 close,
+    ///   not a caller that needs special-casing.
+    /// - `memory_search_ops/save_memory/persist.rs:351`
+    ///   (wiki-projection dedup) — target is `winner_id`, either the entry
+    ///   just upserted in this same transaction or the pre-existing active
+    ///   winner `list_all_wiki_duplicate_candidates` resolved; `candidate`s
+    ///   being folded in are filtered `candidate.id != winner_id`.
+    /// - `foundry_runtime_ops/daily_distill/persist.rs:174`
+    ///   (`claim_distilled_sources`) — target is `distill_entry.id`, only
+    ///   reached after `replacement.insert_if_absent(entry)` already
+    ///   returned `InsertMemoryResult::default` (fresh row) earlier in the
+    ///   same transaction; the `Existing` branch returns before ever
+    ///   calling this method.
+    ///
+    /// Two adjacent modules do NOT call this method at all, so findings 1/2
+    /// do not reach them: `foundry_runtime_ops/wiki_evolver.rs` (REM draft
+    /// occupancy) enforces its own `memory_is_active_unsuperseded` checks
+    /// without ever installing a `superseded_by` edge here, and
+    /// `store/rem.rs` uses raw SQL state checks plus the unguarded
+    /// `MemoryStore::supersede_memory` — same path the read-side
+    /// `stored_supersession_cycle_still_fails_content_free_end_to_end` test
+    /// (memcore `recall_coverage_tests.rs`) seeds its cycle through, which is
+    /// why that test is untouched and unaffected by the cycle guard added
+    /// here.
     pub fn claim_immutable_supersession(
         &mut self,
         source_id: &str,
@@ -37,10 +84,92 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     ) -> Result<(), MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        // Cycle guard first: it gives the more specific diagnosis when a
+        // target is already-superseded *and* the chain closes back onto
+        // `source_id` (see `claim_immutable_supersession_permits_a_two_hop_cycle_finding`'s
+        // successor test below). Eligibility second: it catches every other
+        // way a target can be retired (archived, or superseded by something
+        // that does NOT lead back to `source_id`).
+        self.refuse_supersession_cycle(source_id, target_id)?;
+        self.refuse_ineligible_supersession_target(target_id)?;
         let changed = db::supersede_memory(&self.tx, source_id, target_id)?;
         if !changed {
             return Err(MemoryError::InvalidArg(format!(
                 "immutable supersession CAS refused for {source_id} -> {target_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// tachi#1645 (#1635 finding 2): walk `target_id`'s `superseded_by`
+    /// chain forward, bounded at [`MAX_SUPERSESSION_CHAIN_WALK`] hops. A row
+    /// that does not exist yet — e.g. a target a caller is about to
+    /// materialize later in this same `BEGIN IMMEDIATE` transaction, such as
+    /// Wiki ingest's replacement row (`persist_wiki_ingest_entry` claims
+    /// each predecessor onto the NEW entry's id before upserting it) — has
+    /// no chain and passes trivially; the surrounding transaction still
+    /// guarantees that id either gets created before commit or this claim
+    /// rolls back with it.
+    ///
+    /// Returns a distinct, differently-worded error for "the chain closes
+    /// back onto `source_id`" (a genuine cycle) vs "the chain did not
+    /// terminate within the depth cap" (refuse rather than risk an
+    /// undetected cycle past the cap) — both refuse the claim.
+    fn refuse_supersession_cycle(
+        &self,
+        source_id: &str,
+        target_id: &str,
+    ) -> Result<(), MemoryError> {
+        let mut current = target_id.to_string();
+        for _ in 0..MAX_SUPERSESSION_CHAIN_WALK {
+            let next: Option<String> = self
+                .tx
+                .query_row(
+                    "SELECT superseded_by FROM memories WHERE id = ?1",
+                    [current.as_str()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            match next {
+                None => return Ok(()),
+                Some(next_id) if next_id == source_id => {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "immutable supersession refused: {source_id} -> {target_id} would \
+                         close a superseded_by cycle back to {source_id}"
+                    )));
+                }
+                Some(next_id) => current = next_id,
+            }
+        }
+        Err(MemoryError::InvalidArg(format!(
+            "immutable supersession refused: {source_id} -> {target_id}'s superseded_by chain \
+             did not terminate within {MAX_SUPERSESSION_CHAIN_WALK} hops; refusing rather than \
+             risk an undetected cycle past the depth cap"
+        )))
+    }
+
+    /// tachi#1645 (#1635 finding 1): a target must be active + eligible
+    /// (not archived, not itself already superseded) to receive a new
+    /// predecessor — the mechanism must enforce this itself, not rely on
+    /// caller self-defense (some callers already re-check with
+    /// `memory_is_active_unsuperseded` before claiming; `apply_lifecycle_action`'s
+    /// "supersede"/"merge_into" arms in
+    /// `tachi-server/facade_memory_ops/consolidate_ops.rs` did not).
+    ///
+    /// A target with no row yet is not "retired" and is left eligible for
+    /// the same claim-before-materialize reason documented on
+    /// `refuse_supersession_cycle` above.
+    fn refuse_ineligible_supersession_target(&self, target_id: &str) -> Result<(), MemoryError> {
+        let retired = self.tx.query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = ?1 AND (archived = 1 OR superseded_by IS NOT NULL)",
+            [target_id],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if retired {
+            return Err(MemoryError::InvalidArg(format!(
+                "immutable supersession target ineligible: {target_id} is archived or already \
+                 superseded"
             )));
         }
         Ok(())
@@ -448,25 +577,18 @@ mod tests {
         );
     }
 
-    /// tachi#1635 (#1632 conformance, item 2) — FINDING, not a passing
-    /// conformance pin: this test characterizes CURRENT behavior, which
-    /// contradicts the acceptance item. `claim_immutable_supersession` ->
-    /// `db::supersede_memory` (`crates/memcore/src/db/memory_crud.rs:3869-
-    /// 3876`) only guards `WHERE id = ?3 AND superseded_by IS NULL` on the
-    /// SOURCE row; it never reads the TARGET's `archived`/`superseded_by`
-    /// state. Some callers self-defend (e.g.
-    /// `crates/tachi-server/src/wiki_ops/ingest.rs:757` and
-    /// `crates/tachi-server/src/foundry_runtime_ops/wiki_evolver.rs:779,815`
-    /// call `memory_is_active_unsuperseded` on their target before claiming),
-    /// but the mechanism itself does not enforce it — a caller that omits
-    /// that check (e.g. `apply_lifecycle_action`'s "supersede"/"merge_into"
-    /// arms in `crates/tachi-server/src/facade_memory_ops/consolidate_ops.rs`,
-    /// which only call `refuse_if_protected` on the SOURCE) can point a fresh
-    /// source at an already-archived, already-superseded target and the claim
-    /// succeeds. Reported per #1635 task instructions ("target must be
-    /// active+eligible... if not, FINDING"); not fixed here (edit-only leaf).
+    /// tachi#1645 (#1635 finding 1, item 2 — flipped from finding-pin to
+    /// enforcement assertion): `claim_immutable_supersession` ->
+    /// `refuse_ineligible_supersession_target` now reads the TARGET's
+    /// `archived`/`superseded_by` state before ever reaching
+    /// `db::supersede_memory`'s source-only CAS, so a caller that omits its
+    /// own target check (e.g. `apply_lifecycle_action`'s "supersede"/
+    /// "merge_into" arms in
+    /// `crates/tachi-server/src/facade_memory_ops/consolidate_ops.rs`, which
+    /// only call `refuse_if_protected` on the SOURCE) can no longer point a
+    /// fresh source at an already-archived, already-superseded target.
     #[test]
-    fn claim_immutable_supersession_does_not_gate_target_eligibility_finding() {
+    fn claim_immutable_supersession_refuses_ineligible_target() {
         let mut store = MemoryStore::open_in_memory().expect("open memory store");
         store
             .insert_if_absent(&fixture_entry("ineligible-target"))
@@ -479,8 +601,7 @@ mod tests {
             .expect("seed source");
 
         // The target is already archived AND already superseded before the
-        // claim under test — it is neither active nor eligible by the
-        // acceptance item's own definition.
+        // claim under test — it is neither active nor eligible.
         store
             .with_immutable_supersession_transaction(|operation| {
                 operation.claim_immutable_supersession(
@@ -491,31 +612,55 @@ mod tests {
             })
             .expect("pre-condition: target becomes archived+superseded");
 
-        let result = store.with_immutable_supersession_transaction(|operation| {
-            operation.claim_immutable_supersession("source-onto-dead-target", "ineligible-target")
-        });
+        let error = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation
+                    .claim_immutable_supersession("source-onto-dead-target", "ineligible-target")
+            })
+            .expect_err("superseding onto an archived/already-superseded target must refuse");
         assert!(
-            result.is_ok(),
-            "FINDING (tachi#1635 item 2): expected the mechanism to refuse \
-             superseding onto an archived/already-superseded target, but it \
-             succeeded: {result:?}"
+            error.to_string().contains("target ineligible"),
+            "unexpected error: {error}"
+        );
+
+        let unsuperseded = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.memory_is_active_unsuperseded("source-onto-dead-target")
+            })
+            .expect("read back after refused claim");
+        assert!(
+            unsuperseded,
+            "a refused claim onto an ineligible target must leave the would-be \
+             source active and unsuperseded"
         );
     }
 
-    /// tachi#1635 (#1632 conformance, item 3) — FINDING, not a passing
-    /// conformance pin: the mutation primitive itself performs no chain walk.
-    /// `crates/memcore/src/recall_coverage_tests.rs::stored_supersession_cycle_still_fails_content_free_end_to_end`
-    /// already proves the SAME thing through the public `MemoryStore::supersede_memory`
-    /// wrapper and shows a downstream reader (`run_recall_coverage_probe`)
-    /// detects and fails closed on the resulting cycle. This test pins the
-    /// same absence of a guard directly at the `ImmutableSupersessionTransaction`
-    /// mechanism the task names as canonical: A -> B then B -> A both succeed
-    /// with no chain-walk refusal anywhere in `claim_immutable_supersession` /
-    /// `db::supersede_memory`. Reported per #1635 task instructions ("no
-    /// cycle creatable... if no chain check exists in code, that's a
-    /// finding"); not fixed here (edit-only leaf).
+    /// tachi#1645 (#1635 finding 1): a target that does not exist yet is not
+    /// "retired" — Wiki ingest's `persist_wiki_ingest_entry` claims each
+    /// predecessor onto its brand-new replacement id BEFORE upserting that
+    /// row in the same transaction, and the eligibility guard must not break
+    /// that ordering.
     #[test]
-    fn claim_immutable_supersession_permits_a_two_hop_cycle_finding() {
+    fn claim_immutable_supersession_permits_a_not_yet_materialized_target() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .insert_if_absent(&fixture_entry("predecessor"))
+            .expect("seed predecessor");
+
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("predecessor", "not-yet-inserted")?;
+                operation.upsert(&fixture_entry("not-yet-inserted"))
+            })
+            .expect("claim onto a target materialized later in the same transaction");
+    }
+
+    /// tachi#1645 (#1635 finding 2, item 3 — flipped from finding-pin to
+    /// enforcement assertion): `claim_immutable_supersession` now walks the
+    /// proposed target's `superseded_by` chain before installing a new edge,
+    /// so A -> B then B -> A refuses instead of both committing.
+    #[test]
+    fn claim_immutable_supersession_refuses_a_two_hop_cycle() {
         let mut store = MemoryStore::open_in_memory().expect("open memory store");
         store
             .insert_if_absent(&fixture_entry("cycle-a"))
@@ -530,13 +675,98 @@ mod tests {
             })
             .expect("A -> B installs");
 
-        let b_to_a = store.with_immutable_supersession_transaction(|operation| {
-            operation.claim_immutable_supersession("cycle-b", "cycle-a")
-        });
+        let error = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("cycle-b", "cycle-a")
+            })
+            .expect_err("B -> A after A -> B must refuse (cycle)");
         assert!(
-            b_to_a.is_ok(),
-            "FINDING (tachi#1635 item 3): expected B -> A to refuse after \
-             A -> B (cycle), but it succeeded: {b_to_a:?}"
+            error.to_string().contains("cycle"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// tachi#1645 (#1635 finding 2): the chain walk must catch a cycle that
+    /// closes more than one hop past the immediate target — not just the
+    /// two-hop case a bare target-eligibility check would also happen to
+    /// catch (an already-superseded immediate target is refused by
+    /// `refuse_ineligible_supersession_target` regardless of whether it
+    /// leads back to `source_id`). A -> B -> C, then C -> A must refuse
+    /// specifically because A's chain (A -> B -> C) reaches back to C.
+    #[test]
+    fn claim_immutable_supersession_refuses_a_deeper_chain_cycle() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        for id in ["chain-a", "chain-b", "chain-c"] {
+            store
+                .insert_if_absent(&fixture_entry(id))
+                .expect("seed chain node");
+        }
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("chain-a", "chain-b")
+            })
+            .expect("A -> B installs");
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("chain-b", "chain-c")
+            })
+            .expect("B -> C installs");
+
+        let error = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("chain-c", "chain-a")
+            })
+            .expect_err("C -> A must refuse: A's chain (A -> B -> C) closes back to C");
+        assert!(
+            error.to_string().contains("cycle"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// tachi#1645 (#1635 finding 2): a chain walk that does not terminate
+    /// within [`MAX_SUPERSESSION_CHAIN_WALK`] hops refuses with a distinct,
+    /// differently-worded error than the cycle-found case above — even
+    /// though `probe` never appears anywhere in the chain (so this is NOT a
+    /// cycle, just an implausibly long lineage the walk refuses to keep
+    /// scanning past the cap).
+    #[test]
+    fn claim_immutable_supersession_refuses_when_chain_walk_exceeds_depth_cap() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        let chain_len = MAX_SUPERSESSION_CHAIN_WALK as usize + 8;
+        let node_id = |i: usize| format!("cap-chain-{i}");
+        for i in 0..=chain_len {
+            store
+                .insert_if_absent(&fixture_entry(&node_id(i)))
+                .expect("seed cap-chain node");
+        }
+        for i in 0..chain_len {
+            store
+                .with_immutable_supersession_transaction(|operation| {
+                    operation.claim_immutable_supersession(&node_id(i), &node_id(i + 1))
+                })
+                .unwrap_or_else(|error| {
+                    panic!("{} -> {} installs: {error}", node_id(i), node_id(i + 1))
+                });
+        }
+        store
+            .insert_if_absent(&fixture_entry("probe"))
+            .expect("seed probe (never part of the chain)");
+
+        let error = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("probe", &node_id(0))
+            })
+            .expect_err(
+                "a chain longer than the depth cap must refuse even though it is not a cycle",
+            );
+        let message = error.to_string();
+        assert!(
+            message.contains("did not terminate within"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !message.contains("would close a superseded_by cycle"),
+            "cap exhaustion must not be reported as a cycle-found error: {message}"
         );
     }
 
