@@ -283,19 +283,14 @@ pub(crate) fn facade_action_effect(
                 "briefing",
                 "doc_index",
                 "cycle_status",
-                "cycle_plan",
-                "refine_issues",
                 "profiles",
                 "profile",
             ],
-            &["recommend"],
+            &[],
             &[
-                "plan",
                 "complete",
                 "card",
-                "merge",
                 "intake",
-                "ux_matrix",
                 "build_references",
                 "close_loop",
                 "adjudicate",
@@ -577,7 +572,6 @@ mod tests {
             ("tachi_event", "emit"),
             ("tachi_wiki", "write"),
             ("tachi_task", "complete"),
-            ("tachi_task", "merge"),
             ("tachi_staff", "start"),
         ] {
             assert!(

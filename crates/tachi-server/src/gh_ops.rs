@@ -59,10 +59,10 @@ use self::transport::*;
 pub(crate) use self::ci_watch::{daemon_ci_reader, spawn_ci_watch};
 pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};
 pub(crate) use self::issue_freshness::{
-    briefing_freshness_queues, extract_referenced_issue_numbers, fetch_and_scan_same_surface_churn,
-    fetch_and_scan_stale_candidates, fetch_and_scan_zombies, fetch_merged_prs,
-    fetch_merged_prs_since, reap_stale_kind_rows, save_freshness_row, FreshnessRow, MergedPr,
-    KIND_CHURN_CANDIDATE, KIND_STALE_CANDIDATE, KIND_ZOMBIE, STALE_CANDIDATE_NS, ZOMBIE_NS,
+    briefing_freshness_queues, fetch_and_scan_same_surface_churn, fetch_and_scan_stale_candidates,
+    fetch_and_scan_zombies, fetch_merged_prs_since, reap_stale_kind_rows, save_freshness_row,
+    FreshnessRow, KIND_CHURN_CANDIDATE, KIND_STALE_CANDIDATE, KIND_ZOMBIE, STALE_CANDIDATE_NS,
+    ZOMBIE_NS,
 };
 pub(crate) use self::issues::read_issue_snapshot_bounded;
 pub(crate) use self::router::handle_tachi_gh;

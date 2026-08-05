@@ -151,7 +151,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
     match tool_name {
         "tachi_task" => matches!(
             action,
-            "plan" | "complete" | "status" | "board" | "wait" | "briefing" | "doc_index"
+            "complete" | "status" | "board" | "wait" | "briefing" | "doc_index"
         ),
         "tachi_memory" => matches!(
             action,
@@ -193,15 +193,12 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
     let action = action.trim().to_ascii_lowercase();
     match tool_name {
         "tachi_task" => match action.as_str() {
-            "plan" | "briefing" | "doc_index" | "status" | "board" | "wait" | "profiles"
-            | "profile" | "card" | "cycle_status" | "cycle_plan" | "ux_matrix"
-            | "build_references" | "refine_issues" => Some(ToolBundle::Observe),
+            "briefing" | "doc_index" | "status" | "board" | "wait" | "profiles" | "profile"
+            | "card" | "cycle_status" | "build_references" => Some(ToolBundle::Observe),
             "complete" | "adjudicate" | "claim" | "release" | "heartbeat" => {
                 Some(ToolBundle::Remember)
             }
-            "dispatch" | "recommend" | "cancel" | "merge" | "intake" | "close_loop" => {
-                Some(ToolBundle::Coordinate)
-            }
+            "dispatch" | "cancel" | "intake" | "close_loop" => Some(ToolBundle::Coordinate),
             "handoff" => Some(ToolBundle::Coordinate),
             _ => None,
         },
@@ -290,7 +287,7 @@ mod tests {
         );
         assert!(
             !facade_action_allowed("tachi_task", Some("recommend"), profile),
-            "delegate must not recommend/dispatch"
+            "delegate must not call retired recommend"
         );
         assert!(facade_action_allowed(
             "tachi_task",
@@ -298,7 +295,7 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_task", Some("status"), profile));
-        assert!(facade_action_allowed("tachi_task", Some("plan"), profile));
+        assert!(!facade_action_allowed("tachi_task", Some("plan"), profile));
         assert!(facade_action_allowed("tachi_task", Some("board"), profile));
         assert!(facade_action_allowed("tachi_task", Some("wait"), profile));
     }
@@ -360,7 +357,12 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_task", Some("status"), profile));
-        assert!(facade_action_allowed("tachi_task", Some("plan"), profile));
+        assert!(facade_action_allowed(
+            "tachi_task",
+            Some("briefing"),
+            profile
+        ));
+        assert!(!facade_action_allowed("tachi_task", Some("plan"), profile));
         assert!(!facade_action_allowed(
             "tachi_memory",
             Some("save"),
@@ -390,7 +392,7 @@ mod tests {
             Some("dispatch"),
             Some(ToolProfile::coordinate())
         ));
-        assert!(facade_action_allowed(
+        assert!(!facade_action_allowed(
             "tachi_task",
             Some("recommend"),
             Some(ToolProfile::standard())
