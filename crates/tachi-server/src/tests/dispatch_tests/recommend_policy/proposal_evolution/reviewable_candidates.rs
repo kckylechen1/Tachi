@@ -47,7 +47,7 @@ async fn mint_loadout_v3_fixture(server: &MemoryServer, fixture: &str) -> String
 
     let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
-    let raw = run_tune(&server, proposal_params)
+    let raw = run_tune(server, proposal_params)
         .await
         .expect("proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -68,7 +68,7 @@ async fn approve_loadout_v3_fixture(server: &MemoryServer, proposal_id: &str) {
     let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.to_string());
     review.review_status = Some("approved".to_string());
-    run_tune(&server, review)
+    run_tune(server, review)
         .await
         .expect("loadout proposal approval should succeed");
 }
@@ -89,7 +89,7 @@ async fn remint_loadout_proposal_id(
 ) -> String {
     let mut params = tune_params("route_proposals");
     params.limit = Some(50);
-    let raw = run_tune(&server, params)
+    let raw = run_tune(server, params)
         .await
         .expect("re-mint proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("re-mint proposals JSON");

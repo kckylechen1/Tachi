@@ -50,7 +50,7 @@ async fn seed_route_policy_inputs(server: &crate::MemoryServer, suffix: &str) {
 async fn generate_route_policy_proposal(server: &crate::MemoryServer) -> serde_json::Value {
     let mut params = tune_params("route_proposals");
     params.limit = Some(50);
-    let body = run_tune(&server, params)
+    let body = run_tune(server, params)
         .await
         .expect("generate route policy proposal");
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("route proposal JSON");
