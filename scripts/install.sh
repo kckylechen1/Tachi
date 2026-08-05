@@ -2,7 +2,7 @@
 #
 # One-command installer for Tachi + OpenClaw plugin.
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.1/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh | bash
 #   bash install.sh --version 1.2.0
 #
 set -euo pipefail

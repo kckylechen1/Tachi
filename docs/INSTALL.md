@@ -45,7 +45,7 @@ tachi status             # runtime.build.git_sha / runtime.binary
 ### macOS / Linux (Shell Installer)
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.1/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh)" -- --skip-plugin
 ```
 
 On macOS, the shell installer also installs and restarts a user LaunchAgent for
@@ -449,7 +449,7 @@ Live SQLite databases should stay local. Sync encrypted bundles, append-only eve
 If you use OpenClaw, the full installer configures both the binary and the plugin:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.1/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh)"
 ```
 
 This will:
