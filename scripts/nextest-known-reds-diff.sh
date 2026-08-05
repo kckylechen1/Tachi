@@ -19,7 +19,7 @@
 #     known-reds group.
 #   * Completeness gate: before declaring OK, the report is checked against the
 #     full `cargo nextest list` set across ${NEXTEST_PACKAGES[@]} (today:
-#     tachi-server + tachi-contract-tests + tachi-credential-profile) — a valid-but-incomplete (truncated)
+#     tachi-server + tachi-contract-tests + tachi-credential-profile + tachi-github-runtime) — a valid-but-incomplete (truncated)
 #     JUnit is refused (exit 4), since it could hide a new red that never got
 #     to run.
 #
@@ -78,7 +78,8 @@ RAW_FILE="$(mktemp)"
 trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}" "${RAW_FILE}"' EXIT
 
 # Packages whose tests this gate covers. Widened whenever tests MOVE OUT of
-# tachi-server into a workspace test-only crate (#1610 Track T). The covered
+# tachi-server into another workspace crate — a test-only one (#1610 Track T)
+# or a carved production crate (#1611 Track T3). The covered
 # SET must stay identical across a move: a destination crate that is not listed
 # here silently drops its tests out of EXPECTED, and the completeness gate keeps
 # reporting OK over fewer tests — the exact silent-pass this gate exists to stop.
@@ -86,7 +87,7 @@ trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}
 # Deliberately NOT `--workspace`: that would pull thousands of unrelated inline
 # tests from every other crate into EXPECTED, which is a different gate with
 # different semantics.
-NEXTEST_PACKAGES=(-p tachi-server -p tachi-contract-tests -p tachi-credential-profile)
+NEXTEST_PACKAGES=(-p tachi-server -p tachi-contract-tests -p tachi-credential-profile -p tachi-github-runtime)
 
 # Refuse a list whose binary-id-stripped names are not unique.
 #

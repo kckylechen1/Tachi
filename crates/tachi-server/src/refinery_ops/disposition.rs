@@ -21,13 +21,13 @@ use tachi_params::{
     IssueRelationKindV1, RepoRevisionV1, SourceKindV1,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RelatedIssueStateV1 {
-    Open,
-    ClosedShipped,
-    ClosedUnshipped,
-    Unknown,
-}
+// Moved down into `tachi-params` beside its `*V1` siblings (#1611 Track T3,
+// carve 1): the parser that peels the prose `[state]` annotation and the
+// live-signals seat that overrides it with the authenticated lookup now sit
+// in different crates, so the shared vocabulary has to sit below both.
+// Re-exported under the same local name so every `disposition::RelatedIssueStateV1`
+// path in this module tree is unchanged.
+pub(crate) use tachi_params::RelatedIssueStateV1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelatedSignalV1 {

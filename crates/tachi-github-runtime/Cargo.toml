@@ -1,0 +1,17 @@
+[package]
+name = "tachi-github-runtime"
+version = "1.9.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "GitHub-domain runtime for Tachi: the read-only gh corpus adapter (#1059). Carved out of tachi-server (#1610 Track T / #1611 Track T3, carve 1): zero MemoryServer coupling, so it lifts whole."
+
+[dependencies]
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tachi-params = { path = "../tachi-params" }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

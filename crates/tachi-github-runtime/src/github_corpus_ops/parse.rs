@@ -1,7 +1,7 @@
 //! Pure parsers: already-fetched gh JSON → typed corpus snapshots.
 //!
 //! No I/O. Issue parsing reuses
-//! [`crate::refinery_ops::parse::parse_issue_snapshot_from_gh_json`].
+//! [`tachi_params::gh_json_parse::parse_issue_snapshot_from_gh_json`].
 
 use serde_json::Value;
 use tachi_params::{
@@ -9,7 +9,7 @@ use tachi_params::{
     PullRequestSnapshotV1,
 };
 
-use crate::refinery_ops::parse::parse_issue_snapshot_from_gh_json;
+use tachi_params::gh_json_parse::parse_issue_snapshot_from_gh_json;
 
 /// Closed provenance vocabulary for a corpus case's append-only event chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
