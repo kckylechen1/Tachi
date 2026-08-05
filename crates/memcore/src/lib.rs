@@ -212,9 +212,9 @@ pub use store::snapshot_import::{
 pub use types::{
     AuthorityLevel, ContinuityCandidate, ContinuityCandidateBatch, ContinuityMetrics,
     ContinuityOutcomeLabel, EffectScope, ExpectedMemoryState, GcConfig, GraphExpandResult,
-    HybridScore, MemoryEdge, MemoryEntry, MetricCount, OutcomeEvidenceBasis, ProjectionKind,
-    RetentionPolicy, SearchResult, SessionOutcomeKind, SessionOutcomeMetrics, StatsResult,
-    TachiEventQuery, TachiEventRecord,
+    GraphInjectionProvenance, HybridScore, MemoryEdge, MemoryEntry, MetricCount,
+    OutcomeEvidenceBasis, ProjectionKind, RetentionPolicy, SearchResult, SessionOutcomeKind,
+    SessionOutcomeMetrics, StatsResult, TachiEventQuery, TachiEventRecord,
 };
 #[cfg(feature = "admin")]
 pub use vault::{

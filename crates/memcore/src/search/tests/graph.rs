@@ -173,3 +173,163 @@ fn receipt_covers_graph_enabled_and_disabled_branches() {
         "graph-disabled search must not surface the support neighbor"
     );
 }
+
+/// tachi#1647 2d: two-hop fixture — `seed` matches the FTS query directly
+/// (an ordinary hit); `hop1` is reachable only via a `supports` edge from
+/// `seed`; `hop2` is reachable only via an `elaborates` edge from `hop1`,
+/// two hops from `seed`. Covers every conformance clause in the packet in
+/// one fixture: every injected result is attributable, the ordinary hit is
+/// never marked, expansion-off carries no graph fields, and the receipt's
+/// per-relation counts match what was actually returned.
+#[test]
+fn graph_injection_provenance_attributes_every_result_to_its_seed() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "seed",
+        "TrendLock durable decision rule",
+        &["trendlock"],
+    );
+    insert(
+        &mut conn,
+        "hop1",
+        "One-hop neighbor only reachable by graph",
+        &["hop1"],
+    );
+    insert(
+        &mut conn,
+        "hop2",
+        "Two-hop neighbor only reachable by graph",
+        &["hop2"],
+    );
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "seed".to_string(),
+            target_id: "hop1".to_string(),
+            relation: "supports".to_string(),
+            weight: 1.0,
+            metadata: json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "hop1".to_string(),
+            target_id: "hop2".to_string(),
+            relation: "elaborates".to_string(),
+            weight: 1.0,
+            metadata: json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let opts = SearchOptions {
+        top_k: 3,
+        record_access: false,
+        graph_expand_hops: 2,
+        ..Default::default()
+    };
+    let (results, receipt) = hybrid_search_with_receipt(&conn, "TrendLock", &opts).unwrap();
+    let ids = results
+        .iter()
+        .map(|r| r.entry.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec!["seed", "hop1", "hop2"],
+        "both graph hops must be injected to fill the unused top_k slots"
+    );
+
+    // Ordinary hit: never marked.
+    let seed = results.iter().find(|r| r.entry.id == "seed").unwrap();
+    assert!(
+        !seed.graph_injected,
+        "the FTS-matched seed is not a graph injection"
+    );
+    assert!(
+        seed.graph_provenance.is_none(),
+        "an ordinary hit must never carry graph_provenance"
+    );
+
+    // Every injected result is attributable: marker + relation + from_id.
+    let hop1 = results.iter().find(|r| r.entry.id == "hop1").unwrap();
+    assert!(hop1.graph_injected);
+    let hop1_provenance = hop1
+        .graph_provenance
+        .as_ref()
+        .expect("hop1 must be attributable — it was discovered via graph BFS");
+    assert_eq!(
+        hop1_provenance.via_edge, "supports",
+        "hop1's discovery edge is seed->hop1 (supports)"
+    );
+    assert_eq!(hop1_provenance.from_id, "seed");
+    assert_eq!(hop1_provenance.distance, 1);
+    assert!(
+        hop1_provenance.activation.is_finite() && hop1_provenance.activation > 0.0,
+        "a real BFS discovery must carry non-zero spreading activation"
+    );
+
+    let hop2 = results.iter().find(|r| r.entry.id == "hop2").unwrap();
+    assert!(hop2.graph_injected);
+    let hop2_provenance = hop2
+        .graph_provenance
+        .as_ref()
+        .expect("hop2 must be attributable — it was discovered via graph BFS");
+    assert_eq!(
+        hop2_provenance.via_edge, "elaborates",
+        "hop2's discovery edge is hop1->hop2 (elaborates)"
+    );
+    assert_eq!(
+        hop2_provenance.from_id, "seed",
+        "the parent chain traces back through hop1 to the originating seed"
+    );
+    assert_eq!(hop2_provenance.distance, 2);
+    assert!(
+        hop2_provenance.activation.is_finite() && hop2_provenance.activation > 0.0,
+        "a real BFS discovery must carry non-zero spreading activation"
+    );
+
+    // Receipt counts match what was actually returned, keyed by relation.
+    let graph_receipt = receipt
+        .graph_expansion
+        .as_ref()
+        .expect("graph_expansion receipt must be Some when sampled");
+    assert_eq!(graph_receipt.expanded_count, 2);
+    let expected_counts: std::collections::BTreeMap<String, usize> =
+        [("elaborates".to_string(), 1), ("supports".to_string(), 1)]
+            .into_iter()
+            .collect();
+    assert_eq!(graph_receipt.relation_counts, expected_counts);
+    assert_eq!(
+        graph_receipt.relation_counts.values().sum::<usize>(),
+        graph_receipt.expanded_count,
+        "relation_counts must always sum to expanded_count"
+    );
+
+    // Expansion-off: no graph fields survive on any result — zero new bytes.
+    let opts_off = SearchOptions {
+        top_k: 1,
+        record_access: false,
+        graph_expand_hops: 0,
+        ..Default::default()
+    };
+    let (results_off, receipt_off) =
+        hybrid_search_with_receipt(&conn, "TrendLock", &opts_off).unwrap();
+    assert!(
+        results_off
+            .iter()
+            .all(|r| !r.graph_injected && r.graph_provenance.is_none()),
+        "expansion-off must not mark or attribute any result"
+    );
+    let graph_receipt_off = receipt_off.graph_expansion.as_ref().unwrap();
+    assert!(!graph_receipt_off.enabled);
+    assert!(graph_receipt_off.relation_counts.is_empty());
+}
