@@ -673,11 +673,21 @@ async fn wiki_lint_stale_check_ignores_retention_policy_for_contradicted_permane
 /// (`derive_wiki_lifecycle(..).is_default_retrievable()`) and the exact
 /// search entry point (`tachi_wiki_search`) truthful retrieval depends on,
 /// not a bespoke assertion.
+///
+/// #1624 fix-round: fixtures moved from `with_global_store` (LegacyGlobal)
+/// to a bound-project server + `with_project_store`. `tachi_wiki_search`'s
+/// default (`project: None`) plan is `Federated`, which by design excludes
+/// LegacyGlobal (see `wiki_ops::store::stores_for_wiki_plan`) — with the old
+/// fixture placement the search calls below always returned an empty
+/// result, so the post-lint `!search_markdown.contains(..)` assertion
+/// passed vacuously on both RED and GREEN. The pre-lint positive search
+/// assertion right below is the anti-vacuity guard: it fails loudly if the
+/// search entry point ever stops reaching the seeded store again.
 #[tokio::test]
 async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
-    let server = make_server();
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
     server
-        .with_global_store(|store| {
+        .with_project_store(|store| {
             let mut contradicted = make_entry("wiki-persist-stale-target");
             contradicted.path = "/wiki/test/persist-stale/target".to_string();
             contradicted.summary = "SemanticStalePersistNeedle target entry".to_string();
@@ -733,6 +743,35 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
         "RED baseline: contradicted entry must start default-retrievable (unchanged behavior)"
     );
 
+    let search_params = WikiSearchParams {
+        query: "SemanticStalePersistNeedle".to_string(),
+        path_prefix: Some("/wiki/test/persist-stale".to_string()),
+        category: None,
+        top_k: 10,
+        include_archived: false,
+        agent_role: None,
+        project: None,
+        domain: None,
+        file_context: None,
+        error_context: None,
+        weights: None,
+        lifecycle: None,
+    };
+
+    // Anti-vacuity guard (#1624): prove the real MCP search entry point
+    // actually reaches the seeded store BEFORE the lint run, so the later
+    // `!contains` assertion can never pass vacuously (e.g. because the
+    // fixture lives in a store the search plan excludes by design).
+    let pre_lint_search_markdown = server
+        .tachi_wiki_search(Parameters(search_params.clone()))
+        .await
+        .expect("pre-lint search should succeed");
+    assert!(
+        pre_lint_search_markdown.contains("/wiki/test/persist-stale/target"),
+        "pre-lint search must find the still-active entry (anti-vacuity guard): \
+         {pre_lint_search_markdown}"
+    );
+
     let lint_response = server
         .wiki_lint(Parameters(WikiLintParams {
             path_prefix: Some("/wiki/test/persist-stale".to_string()),
@@ -768,22 +807,8 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
     );
 
     // End-to-end proof through the real MCP search entry point: the entry
-    // must have been default-retrievable by exact-needle search before the
-    // lint run and excluded after it.
-    let search_params = WikiSearchParams {
-        query: "SemanticStalePersistNeedle".to_string(),
-        path_prefix: Some("/wiki/test/persist-stale".to_string()),
-        category: None,
-        top_k: 10,
-        include_archived: false,
-        agent_role: None,
-        project: None,
-        domain: None,
-        file_context: None,
-        error_context: None,
-        weights: None,
-        lifecycle: None,
-    };
+    // was default-retrievable by exact-needle search before the lint run
+    // (asserted above, pre-lint) and is excluded after it (asserted here).
     let search_markdown = server
         .tachi_wiki_search(Parameters(search_params))
         .await
