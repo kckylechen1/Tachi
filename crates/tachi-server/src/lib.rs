@@ -96,7 +96,6 @@ mod component_governance_ops;
 mod continuity_ops;
 mod continuity_projector;
 mod copilot_ops;
-mod credential_profile;
 mod daemon_lock;
 mod daily_pipeline;
 mod db_ownership;

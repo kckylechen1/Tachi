@@ -27,6 +27,7 @@ members = [
     # default-members: it has an empty lib and only dev-dependencies, so
     # `cargo build --release` compiles nothing from it either way.
     "crates/tachi-contract-tests",
+    "crates/tachi-credential-profile",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",
     "crates/tachi-hub",

@@ -2315,6 +2315,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-credential-profile"
+version = "1.9.2"
+dependencies = [
+ "chrono",
+ "dirs",
+ "libc",
+ "memcore",
+ "serde",
+ "serde_json",
+ "tachi-params",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "tachi-dispatch"
 version = "1.9.2"
 dependencies = [
@@ -2427,6 +2442,7 @@ dependencies = [
  "sha2",
  "tachi-bootstrap",
  "tachi-clean",
+ "tachi-credential-profile",
  "tachi-dispatch",
  "tachi-foundry",
  "tachi-hub",

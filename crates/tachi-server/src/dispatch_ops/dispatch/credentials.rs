@@ -68,7 +68,7 @@ pub(super) fn credential_search_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
 pub(super) fn find_dispatch_credential_profile(
     profile_name: &str,
     cwd: Option<&Path>,
-) -> Result<(PathBuf, crate::credential_profile::CredentialProfile), String> {
+) -> Result<(PathBuf, tachi_credential_profile::CredentialProfile), String> {
     let mut searched = Vec::new();
     let mut skipped = Vec::new();
     for dir in credential_search_dirs(cwd) {
@@ -96,7 +96,7 @@ pub(super) fn find_dispatch_credential_profile(
 pub(super) fn dispatch_credential_consumer(
     agent_norm: &str,
     selected_profile: Option<&str>,
-    profile: &crate::credential_profile::CredentialProfile,
+    profile: &tachi_credential_profile::CredentialProfile,
 ) -> String {
     let allowed = &profile.allowed_consumers;
     if allowed.agents.is_empty() && allowed.profiles.is_empty() {

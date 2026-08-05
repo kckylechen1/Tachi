@@ -174,14 +174,14 @@ fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, Strin
     // never get a TTL.
     total += store
         .backfill_missing_expires_at(
-            crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE,
+            tachi_credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE,
             &thirty_days,
             Some(("$.cleanup_status", &["cleaned"])),
         )
         .map_err(|e| {
             format!(
                 "backfill {}: {e}",
-                crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE
+                tachi_credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE
             )
         })?;
 

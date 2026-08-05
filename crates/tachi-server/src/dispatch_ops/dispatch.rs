@@ -17,11 +17,6 @@ use crate::agent_registry::{
     dispatch_agent_help_list, mcp_inject_supported, normalize_dispatch_agent_name,
     resolve_dispatch_agent,
 };
-use crate::credential_profile::{
-    apply_credential_materialization, credential_materialize_report_json, default_credentials_dir,
-    find_credential_profile, plan_credential_materialization_with_run_dir, profile_secret_names,
-    CredentialApplyOptions, CredentialMaterializeReport,
-};
 use crate::dispatch_profile::{
     resolve_and_apply_dispatch_profile_for_server, ResolvedDispatchProfile,
 };
@@ -33,6 +28,11 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tachi_credential_profile::{
+    apply_credential_materialization, credential_materialize_report_json, default_credentials_dir,
+    find_credential_profile, plan_credential_materialization_with_run_dir, profile_secret_names,
+    CredentialApplyOptions, CredentialMaterializeReport,
+};
 
 const DISPATCH_DEDUPE_STALE_LOCK_SECS: i64 = 300;
 

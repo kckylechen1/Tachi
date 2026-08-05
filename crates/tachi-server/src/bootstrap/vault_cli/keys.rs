@@ -238,7 +238,7 @@ pub(super) fn run_vault_setup_keys(
 
 pub(super) fn decrypt_profile_secret_values(
     global_db_path: &PathBuf,
-    profile: &crate::credential_profile::CredentialProfile,
+    profile: &tachi_credential_profile::CredentialProfile,
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&Path>,
@@ -258,7 +258,7 @@ pub(super) fn decrypt_profile_secret_values(
     )?;
 
     let mut values = std::collections::HashMap::new();
-    for name in crate::credential_profile::profile_secret_names(profile) {
+    for name in tachi_credential_profile::profile_secret_names(profile) {
         let entry = store
             .vault_get_entry(&name)
             .map_err(|e| format!("vault_get_entry: {e}"))?
