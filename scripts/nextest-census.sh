@@ -89,7 +89,7 @@ echo "nextest-census: target_dir=${TARGET_DIR} source=${TARGET_SOURCE} state_at_
 set +e
 (
   cd "${ROOT}"
-  nextest_args=(nextest run -p tachi-server -p tachi-contract-tests --no-fail-fast --profile census --target-dir "${TARGET_DIR}")
+  nextest_args=(nextest run -p tachi-server -p tachi-contract-tests -p tachi-credential-profile --no-fail-fast --profile census --target-dir "${TARGET_DIR}")
   if [[ "${TEST_THREADS}" != "default" ]]; then
     nextest_args+=(--test-threads "${TEST_THREADS}")
   fi

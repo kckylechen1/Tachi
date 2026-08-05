@@ -86,7 +86,7 @@ trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}
 # Deliberately NOT `--workspace`: that would pull thousands of unrelated inline
 # tests from every other crate into EXPECTED, which is a different gate with
 # different semantics.
-NEXTEST_PACKAGES=(-p tachi-server -p tachi-contract-tests)
+NEXTEST_PACKAGES=(-p tachi-server -p tachi-contract-tests -p tachi-credential-profile)
 
 # Refuse a list whose binary-id-stripped names are not unique.
 #
