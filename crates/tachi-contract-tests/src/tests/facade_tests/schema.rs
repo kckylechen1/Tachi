@@ -584,6 +584,25 @@ fn tachi_task_schema_descriptions_do_not_reference_removed_actions() {
             "tachi_task schema must not reference removed action text '{stale}' after [1319-C2]"
         );
     }
+    // #1426: same rule for the four route-tuning actions that left Task for
+    // the admin-only tachi_tune surface.
+    for stale in [
+        "action=route_simulate",
+        "action='route_simulate'",
+        "action=proposals",
+        "action='proposals'",
+        "action=review_proposal",
+        "action='review_proposal'",
+        "action=apply_proposals",
+        "action='apply_proposals'",
+        "|route_simulate",
+        "|proposals]",
+    ] {
+        assert!(
+            !serialized.contains(stale),
+            "tachi_task schema must not reference removed route-tuning action text '{stale}' after #1426"
+        );
+    }
 }
 
 /// #1319-C2 discriminator: dispatch-only execution knobs (fields with no live
@@ -622,6 +641,15 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
         assert!(
             !properties.contains_key(knob),
             "dispatch-only execution knob '{knob}' must be hidden from the public tachi_task schema after [1319-C2]"
+        );
+    }
+    // #1426: proposal_id/review_status lost their only readers (the removed
+    // review_proposal/apply_proposals arms) when route tuning moved to
+    // tachi_tune. Same treatment, same reason.
+    for orphaned in ["proposal_id", "review_status"] {
+        assert!(
+            !properties.contains_key(orphaned),
+            "route-tuning parameter '{orphaned}' must be hidden from the public tachi_task schema after #1426"
         );
     }
 }

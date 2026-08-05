@@ -84,10 +84,7 @@ pub(crate) use self::cards::{
     profile_demotion_targets, profile_required_skill_ids, profile_required_skill_ids_for_server,
     profile_skill_loadout_json_for_server, profile_weak_against_for_server,
 };
-pub(crate) use self::policy::{
-    handle_route_policy_apply, handle_route_policy_proposals, handle_route_policy_review,
-    handle_route_simulation, route_simulation_caveats, simulate_route_policy,
-};
+pub(crate) use self::policy::{route_simulation_caveats, simulate_route_policy};
 #[cfg(test)]
 pub(crate) use self::routing::resolve_and_apply_dispatch_profile;
 pub(crate) use self::routing::{

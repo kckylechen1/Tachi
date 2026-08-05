@@ -14,10 +14,6 @@
         "profiles",
         "profile",
         "card",
-        "route_simulate",
-        "proposals",
-        "review_proposal",
-        "apply_proposals",
         "status",
         "board",
         "merge",
@@ -87,12 +83,11 @@
     },
     "execution_level": {
       "used_by_actions": [
-        "recommend",
-        "route_simulate"
+        "recommend"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Read by Recommend and RouteSimulate arms for host admission (task_router.rs); stays in the public schema after [1319-C2]."
+      "rationale": "Read by the Recommend arm for host admission (task_router.rs); the RouteSimulate reader left Task with route tuning in #1426. Stays in the public schema."
     },
     "agent_id": {
       "used_by_actions": [
@@ -134,7 +129,6 @@
       "used_by_actions": [
         "briefing",
         "recommend",
-        "route_simulate",
         "cycle_status",
         "ux_matrix",
         "build_references",
@@ -157,7 +151,6 @@
       "used_by_actions": [
         "briefing",
         "recommend",
-        "route_simulate",
         "cycle_status",
         "ux_matrix",
         "build_references",
@@ -259,13 +252,12 @@
     "notes": {
       "used_by_actions": [
         "complete",
-        "review_proposal",
         "build_references",
         "close_loop"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Free-text completion/review/workflow notes; spec-named shared."
+      "rationale": "Free-text completion/workflow notes; spec-named shared."
     },
     "trajectory": {
       "used_by_actions": [
@@ -609,12 +601,11 @@
     "risk": {
       "used_by_actions": [
         "recommend",
-        "route_simulate",
         "intake"
       ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
-      "rationale": "Risk override for recommendation/routing/intake automation plan; tuning/profile surface, defer to #1467."
+      "rationale": "Risk override for recommendation/intake automation plan; tuning/profile surface, defer to #1467."
     },
     "tool_profile": {
       "used_by_actions": [],
@@ -644,40 +635,32 @@
     },
     "state_filter": {
       "used_by_actions": [
-        "board",
-        "proposals"
+        "board"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Board/proposals ledger row filter; survives on board surface."
+      "rationale": "Board ledger row filter; survives on the board surface."
     },
     "limit": {
       "used_by_actions": [
         "board",
-        "recommend",
-        "route_simulate",
-        "proposals"
+        "recommend"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Maximum ledger/proposal rows to return; survives on board/recommend surfaces."
+      "rationale": "Maximum ledger/recommendation rows to return; survives on board/recommend surfaces."
     },
     "proposal_id": {
-      "used_by_actions": [
-        "review_proposal",
-        "apply_proposals"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "defer_1467",
-      "rationale": "Route-policy proposal id; routing/profile/recommendation surface, defer to #1467."
+      "used_by_actions": [],
+      "canonical_future_owner": "CLI/internal",
+      "disposition": "operator_only_internal",
+      "rationale": "Route-policy/loadout proposal id; its only readers (review_proposal/apply_proposals) left Task for the admin-only tachi_tune surface in #1426. Hidden from the public tachi_task schema (field retained for stored-JSON back-compat, same template as the [1319-C2] dispatch knobs)."
     },
     "review_status": {
-      "used_by_actions": [
-        "review_proposal"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "defer_1467",
-      "rationale": "Review status for route-policy proposal review; routing/profile surface, defer to #1467."
+      "used_by_actions": [],
+      "canonical_future_owner": "CLI/internal",
+      "disposition": "operator_only_internal",
+      "rationale": "Proposal review status; its only readers (review_proposal/apply_proposals) left Task for the admin-only tachi_tune surface in #1426. Hidden from the public tachi_task schema (field retained for stored-JSON back-compat, same template as the [1319-C2] dispatch knobs)."
     },
     "worktree": {
       "used_by_actions": [
@@ -727,12 +710,11 @@
     },
     "confirm": {
       "used_by_actions": [
-        "merge",
-        "apply_proposals"
+        "merge"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Leader confirmation gate for merge/apply_proposals; survives."
+      "rationale": "Leader confirmation gate for the local worktree merge; survives."
     },
     "wiki_title": {
       "used_by_actions": [
@@ -941,8 +923,8 @@
   "disposition_summary": {
     "keep_task_ledger": 3,
     "keep_task_shared": 64,
-    "defer_1467": 11,
+    "defer_1467": 9,
     "move_to_staff": 8,
-    "operator_only_internal": 19
+    "operator_only_internal": 21
   }
 }

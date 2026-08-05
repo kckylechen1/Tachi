@@ -401,13 +401,15 @@ pub struct TachiTaskParams {
     #[serde(default)]
     #[schemars(description = "[action=board|recommend] Maximum ledger/recommendation rows to return.")]
     pub limit: Option<usize>,
+    // #1426: proposal review/apply left Task for the admin-only `tachi_tune`
+    // surface, so no surviving `tachi_task` action reads these two. They stay
+    // on the struct for stored-JSON back-compat but are hidden from the public
+    // schema — the same treatment [1319-C2] gave its orphaned dispatch knobs.
     #[serde(default)]
-    #[schemars(
-        description = "Proposal id retained for stored task JSON compatibility; route-policy proposal review/apply lives on tachi_tune."
-    )]
+    #[schemars(skip)]
     pub proposal_id: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Review status retained for stored task JSON compatibility.")]
+    #[schemars(skip)]
     pub review_status: Option<String>,
     // merge fields. These apply only to local dispatch worktree merge via
     // approve_merge; GitHub PR gates/merges go through tachi_gh safe_merge.

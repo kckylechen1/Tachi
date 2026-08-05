@@ -196,7 +196,7 @@ fn legacy_approved_route_policy_proposal_cannot_be_applied() {
         .expect("list rules before");
     assert!(rules_before.is_empty(), "no rule should exist yet");
 
-    let err = crate::dispatch_profile::policy::handle_route_policy_apply(
+    let err = crate::tune_ops::route_policy::handle_route_policy_apply(
         &server,
         proposal_id,
         true, // confirm

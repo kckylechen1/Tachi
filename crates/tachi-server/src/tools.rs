@@ -54,7 +54,7 @@ mod component_facade;
 mod continuity_facade;
 mod dispatch_complete_defaults;
 mod dispatch_facade;
-mod formatting;
+pub(crate) mod formatting;
 mod handoff_facade;
 mod hub_facade;
 mod memory_facade;

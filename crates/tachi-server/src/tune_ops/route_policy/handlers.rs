@@ -294,7 +294,7 @@ pub(super) fn validate_loadout_evolution_proposal(
 ) -> Result<Value, String> {
     if !is_v3_loadout_evolution_proposal(value) {
         return Err(format!(
-            "legacy_unbound_proposal: loadout_evolution proposal {proposal_id} predates the v3 content-addressed identity; regenerate with action='proposals' to mint a fresh pending v3 proposal"
+            "legacy_unbound_proposal: loadout_evolution proposal {proposal_id} predates the v3 content-addressed identity; regenerate with tachi_tune(action='route_proposals') to mint a fresh pending v3 proposal"
         ));
     }
     if value.get("kind").and_then(Value::as_str) != Some(LOADOUT_EVOLUTION_PROPOSAL_KIND) {
@@ -631,7 +631,7 @@ pub(crate) fn handle_route_policy_proposals(
     }
 
     serde_json::to_string(&json!({
-        "action": "proposals",
+        "action": "route_proposals",
         "kind": "dispatch_policy",
         "proposal_kinds": ["route_policy", "loadout_evolution"],
         "read_only": false,
@@ -645,9 +645,9 @@ pub(crate) fn handle_route_policy_proposals(
         "count": out.len(),
         "proposals": out,
         "next_actions": [
-            "tachi_task(action='review_proposal', proposal_id=..., review_status='approved')",
-            "tachi_task(action='apply_proposals', proposal_id=..., confirm=true) for approved route_policy rules",
-            "tachi_task(action='apply_proposals', proposal_id=..., confirm=true) for approved loadout_evolution proposals to project reviewed profile/card loadout overlays"
+            "tachi_tune(action='route_review', proposal_id=..., review_status='approved')",
+            "tachi_tune(action='route_apply', proposal_id=..., confirm=true) for approved route_policy rules",
+            "tachi_tune(action='route_apply', proposal_id=..., confirm=true) for approved loadout_evolution proposals to project reviewed profile/card loadout overlays"
         ],
     }))
     .map_err(|e| format!("serialize route policy proposals: {e}"))
@@ -661,7 +661,7 @@ pub(crate) fn handle_route_policy_review(
 ) -> Result<String, String> {
     let proposal_id = proposal_id.trim();
     if proposal_id.is_empty() {
-        return Err("proposal_id is required when action='review_proposal'".to_string());
+        return Err("proposal_id is required when action='route_review'".to_string());
     }
     let status = match review_status.trim().to_ascii_lowercase().as_str() {
         "approved" | "approve" => "approved",
@@ -705,12 +705,12 @@ pub(crate) fn handle_route_policy_review(
             .unwrap_or("route_policy");
         if kind == "route_policy" && !is_v3_proposal(&value) {
             return Err(format!(
-                "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be reviewed; regenerate with action='proposals' to mint a fresh pending v3 proposal"
+                "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be reviewed; regenerate with tachi_tune(action='route_proposals') to mint a fresh pending v3 proposal"
             ));
         }
         if kind == "loadout_evolution" && !is_v3_loadout_evolution_proposal(&value) {
             return Err(format!(
-                "legacy_unbound_proposal: loadout_evolution proposal {proposal_id} predates the v3 content-addressed identity and cannot be reviewed; regenerate with action='proposals' to mint a fresh pending v3 proposal"
+                "legacy_unbound_proposal: loadout_evolution proposal {proposal_id} predates the v3 content-addressed identity and cannot be reviewed; regenerate with tachi_tune(action='route_proposals') to mint a fresh pending v3 proposal"
             ));
         }
         // Re-validate the persisted content_digest against the identity_payload
@@ -796,7 +796,7 @@ pub(crate) fn handle_route_policy_review(
     })?;
 
     serde_json::to_string(&json!({
-        "action": "review_proposal",
+        "action": "route_review",
         "proposal_id": proposal_id,
         "proposal": updated,
     }))

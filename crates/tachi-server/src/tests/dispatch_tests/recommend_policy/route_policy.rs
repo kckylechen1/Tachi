@@ -48,10 +48,9 @@ async fn seed_route_policy_inputs(server: &crate::MemoryServer, suffix: &str) {
 }
 
 async fn generate_route_policy_proposal(server: &crate::MemoryServer) -> serde_json::Value {
-    let mut params = task_params("proposals");
+    let mut params = tune_params("route_proposals");
     params.limit = Some(50);
-    let body = server
-        .tachi_task(Parameters(params))
+    let body = run_tune(&server, params)
         .await
         .expect("generate route policy proposal");
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("route proposal JSON");
@@ -199,10 +198,9 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
             .expect("seed eval row");
     }
 
-    let mut params = task_params("route_simulate");
+    let mut params = tune_params("route_simulate");
     params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(params))
+    let raw = run_tune(&server, params)
         .await
         .expect("route_simulate should succeed");
     let sim: serde_json::Value = serde_json::from_str(&raw).expect("route simulation JSON");
@@ -348,10 +346,9 @@ async fn tachi_task_route_simulate_matches_dispatch_completed_without_explicit_p
         .await
         .expect("complete without explicit profile should still succeed");
 
-    let mut params = task_params("route_simulate");
+    let mut params = tune_params("route_simulate");
     params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(params))
+    let raw = run_tune(&server, params)
         .await
         .expect("route_simulate should succeed");
     let sim: serde_json::Value = serde_json::from_str(&raw).expect("route simulation JSON");
@@ -454,10 +451,9 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
             .expect("seed eval row");
     }
 
-    let mut proposal_params = task_params("proposals");
+    let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposal_params))
+    let raw = run_tune(&server, proposal_params)
         .await
         .expect("proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -472,39 +468,35 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
     assert_eq!(proposal["status"], json!("pending"));
     assert_eq!(proposal["requires_human_approval"], json!(true));
 
-    let mut premature_apply = task_params("apply_proposals");
+    let mut premature_apply = tune_params("route_apply");
     premature_apply.proposal_id = Some(proposal_id.clone());
     premature_apply.confirm = true;
-    let err = server
-        .tachi_task(Parameters(premature_apply))
+    let err = run_tune(&server, premature_apply)
         .await
         .expect_err("pending proposal must not apply");
     assert!(err.contains("must be approved before apply"));
 
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
     review.notes = Some("Human approved cost-sensitive route rule.".to_string());
-    let reviewed_raw = server
-        .tachi_task(Parameters(review))
+    let reviewed_raw = run_tune(&server, review)
         .await
         .expect("review should succeed");
     let reviewed: serde_json::Value = serde_json::from_str(&reviewed_raw).expect("review JSON");
     assert_eq!(reviewed["proposal"]["status"], json!("approved"));
 
-    let mut missing_confirm = task_params("apply_proposals");
+    let mut missing_confirm = tune_params("route_apply");
     missing_confirm.proposal_id = Some(proposal_id.clone());
-    let err = server
-        .tachi_task(Parameters(missing_confirm))
+    let err = run_tune(&server, missing_confirm)
         .await
         .expect_err("apply requires confirm");
     assert!(err.contains("confirm=true"));
 
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id);
     apply.confirm = true;
-    let applied_raw = server
-        .tachi_task(Parameters(apply))
+    let applied_raw = run_tune(&server, apply)
         .await
         .expect("apply should succeed");
     let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply JSON");
@@ -670,10 +662,9 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     .await;
     seed_one("regen-fallback-A3", "glm_51_impl", "success", 3.00, 0.98).await;
 
-    let mut proposals = task_params("proposals");
+    let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposals))
+    let raw = run_tune(&server, proposals)
         .await
         .expect("proposals A");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON A");
@@ -710,11 +701,10 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
 
     // Approve the v3-id-rotation proposal so we can prove the regenerated
     // proposal under a different id does NOT inherit this approval.
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(first_id.clone());
     review.review_status = Some("approved".to_string());
-    let _ = server
-        .tachi_task(Parameters(review))
+    let _ = run_tune(&server, review)
         .await
         .expect("review A");
 
@@ -731,10 +721,9 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     seed_one("regen-fallback-B2", "claude_plan", "success", 1.55, 0.95).await;
     seed_one("regen-fallback-B3", "claude_plan", "success", 1.55, 0.95).await;
 
-    let mut proposals_b = task_params("proposals");
+    let mut proposals_b = tune_params("route_proposals");
     proposals_b.limit = Some(50);
-    let raw_b = server
-        .tachi_task(Parameters(proposals_b))
+    let raw_b = run_tune(&server, proposals_b)
         .await
         .expect("proposals B");
     let parsed_b: serde_json::Value = serde_json::from_str(&raw_b).expect("proposals JSON B");
@@ -839,10 +828,9 @@ async fn route_terminal_state_cannot_be_rereviewed() {
             .expect("seed eval row");
     }
 
-    let mut proposals = task_params("proposals");
+    let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposals))
+    let raw = run_tune(&server, proposals)
         .await
         .expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -857,10 +845,10 @@ async fn route_terminal_state_cannot_be_rereviewed() {
     let proposal_id = first["proposal_id"].as_str().expect("id").to_string();
 
     // Move the proposal to terminal "rejected".
-    let mut reject = task_params("review_proposal");
+    let mut reject = tune_params("route_review");
     reject.proposal_id = Some(proposal_id.clone());
     reject.review_status = Some("rejected".to_string());
-    let _ = server.tachi_task(Parameters(reject)).await.expect("reject");
+    let _ = run_tune(&server, reject).await.expect("reject");
 
     let (before_raw, before_version) = read_route_policy_row(&server, &proposal_id);
     let before_value: serde_json::Value =
@@ -872,11 +860,10 @@ async fn route_terminal_state_cannot_be_rereviewed() {
     );
 
     // Re-review the rejected row: must refuse with a terminal-state error.
-    let mut re_approve = task_params("review_proposal");
+    let mut re_approve = tune_params("route_review");
     re_approve.proposal_id = Some(proposal_id.clone());
     re_approve.review_status = Some("approved".to_string());
-    let err = server
-        .tachi_task(Parameters(re_approve))
+    let err = run_tune(&server, re_approve)
         .await
         .expect_err("a rejected proposal must not be re-reviewable");
     assert!(
@@ -923,11 +910,10 @@ async fn route_review_identity_tamper_refuses_with_exact_row_unchanged() {
     let stored = assert_stale_route_digest_with_matching_display(&before.0);
     assert_eq!(stored["status"], json!("pending"));
 
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    let err = server
-        .tachi_task(Parameters(review))
+    let err = run_tune(&server, review)
         .await
         .expect_err("identity tamper with stale content_digest must refuse review");
     assert!(
@@ -956,11 +942,10 @@ async fn route_apply_identity_tamper_refuses_without_rule_or_row_mutation() {
         .to_string();
     assert_eq!(proposal["schema_version"], json!(3));
 
-    let mut approve = task_params("review_proposal");
+    let mut approve = tune_params("route_review");
     approve.proposal_id = Some(proposal_id.clone());
     approve.review_status = Some("approved".to_string());
-    server
-        .tachi_task(Parameters(approve))
+    run_tune(&server, approve)
         .await
         .expect("approve intact route proposal");
 
@@ -969,11 +954,10 @@ async fn route_apply_identity_tamper_refuses_without_rule_or_row_mutation() {
     let stored = assert_stale_route_digest_with_matching_display(&before.0);
     assert_eq!(stored["status"], json!("approved"));
 
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let err = server
-        .tachi_task(Parameters(apply))
+    let err = run_tune(&server, apply)
         .await
         .expect_err("identity tamper with stale content_digest must refuse apply");
     assert!(
@@ -1061,10 +1045,9 @@ async fn route_two_applies_yield_one_terminal_receipt() {
             .expect("seed eval row");
     }
 
-    let mut proposals = task_params("proposals");
+    let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposals))
+    let raw = run_tune(&server, proposals)
         .await
         .expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -1078,19 +1061,17 @@ async fn route_two_applies_yield_one_terminal_receipt() {
         .expect("at least one route_policy proposal");
     let proposal_id = first["proposal_id"].as_str().expect("id").to_string();
 
-    let mut approve = task_params("review_proposal");
+    let mut approve = tune_params("route_review");
     approve.proposal_id = Some(proposal_id.clone());
     approve.review_status = Some("approved".to_string());
-    let _ = server
-        .tachi_task(Parameters(approve))
+    let _ = run_tune(&server, approve)
         .await
         .expect("approve");
 
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let applied_raw = server
-        .tachi_task(Parameters(apply.clone()))
+    let applied_raw = run_tune(&server, apply.clone())
         .await
         .expect("apply #1");
     let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply #1 JSON");
@@ -1099,8 +1080,7 @@ async fn route_two_applies_yield_one_terminal_receipt() {
 
     // Second apply: must refuse because status is now `applied`, not
     // `approved`. Exactly one terminal receipt exists.
-    let err = server
-        .tachi_task(Parameters(apply))
+    let err = run_tune(&server, apply)
         .await
         .expect_err("second apply must be refused; status is no longer approved");
     assert!(
@@ -1210,10 +1190,9 @@ async fn route_apply_refuses_tampered_unbound_top_level_policy_rule() {
             .expect("seed eval row");
     }
 
-    let mut proposals = task_params("proposals");
+    let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposals))
+    let raw = run_tune(&server, proposals)
         .await
         .expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -1227,11 +1206,10 @@ async fn route_apply_refuses_tampered_unbound_top_level_policy_rule() {
         .expect("at least one route_policy proposal");
     let proposal_id = first["proposal_id"].as_str().expect("id").to_string();
 
-    let mut approve = task_params("review_proposal");
+    let mut approve = tune_params("route_review");
     approve.proposal_id = Some(proposal_id.clone());
     approve.review_status = Some("approved".to_string());
-    let _ = server
-        .tachi_task(Parameters(approve))
+    let _ = run_tune(&server, approve)
         .await
         .expect("approve");
 
@@ -1268,11 +1246,10 @@ async fn route_apply_refuses_tampered_unbound_top_level_policy_rule() {
         .expect("load proposal row")
         .expect("proposal row exists");
 
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let err = server
-        .tachi_task(Parameters(apply))
+    let err = run_tune(&server, apply)
         .await
         .expect_err("a drifted display copy must refuse to apply, even though the digest matches");
     assert!(
@@ -1397,10 +1374,9 @@ async fn route_review_refuses_tampered_unbound_top_level_policy_rule() {
             .expect("seed eval row");
     }
 
-    let mut proposals = task_params("proposals");
+    let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposals))
+    let raw = run_tune(&server, proposals)
         .await
         .expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -1445,10 +1421,10 @@ async fn route_review_refuses_tampered_unbound_top_level_policy_rule() {
         .expect("load proposal row")
         .expect("proposal row exists");
 
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    let err = server.tachi_task(Parameters(review)).await.expect_err(
+    let err = run_tune(&server, review).await.expect_err(
         "review of a proposal whose display copy drifted from its bound copy must refuse",
     );
     assert!(
@@ -1503,11 +1479,10 @@ async fn route_source_rule_drift_refuses_review_apply_and_rotates_pending_identi
         .expect("mutate active route source");
 
     let (before_review, before_review_version) = read_route_policy_row(&server, &first_id);
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(first_id.clone());
     review.review_status = Some("approved".to_string());
-    let err = server
-        .tachi_task(Parameters(review))
+    let err = run_tune(&server, review)
         .await
         .expect_err("review after active-route drift must refuse");
     assert!(
@@ -1531,11 +1506,10 @@ async fn route_source_rule_drift_refuses_review_apply_and_rotates_pending_identi
     );
     assert_eq!(regenerated["status"], json!("pending"));
 
-    let mut approve = task_params("review_proposal");
+    let mut approve = tune_params("route_review");
     approve.proposal_id = Some(regenerated_id.clone());
     approve.review_status = Some("approved".to_string());
-    server
-        .tachi_task(Parameters(approve))
+    run_tune(&server, approve)
         .await
         .expect("approve regenerated proposal");
     server
@@ -1551,11 +1525,10 @@ async fn route_source_rule_drift_refuses_review_apply_and_rotates_pending_identi
         .expect("mutate route source after approval");
 
     let (before_apply, before_apply_version) = read_route_policy_row(&server, &regenerated_id);
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(regenerated_id.clone());
     apply.confirm = true;
-    let err = server
-        .tachi_task(Parameters(apply))
+    let err = run_tune(&server, apply)
         .await
         .expect_err("approved proposal must refuse after route-source drift");
     assert!(
@@ -1621,11 +1594,10 @@ async fn route_stale_current_policy_with_recomputed_digest_refuses_review_and_ap
 
     mutate_policy(None);
     let (before_review, before_review_version) = read_route_policy_row(&server, &proposal_id);
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    let err = server
-        .tachi_task(Parameters(review))
+    let err = run_tune(&server, review)
         .await
         .expect_err("stale current policy must refuse review");
     assert!(
@@ -1642,20 +1614,18 @@ async fn route_stale_current_policy_with_recomputed_digest_refuses_review_and_ap
     // the same internally consistent stale-policy mutation before apply.
     let regenerated = generate_route_policy_proposal(&server).await;
     assert_eq!(regenerated["status"], json!("pending"));
-    let mut approve = task_params("review_proposal");
+    let mut approve = tune_params("route_review");
     approve.proposal_id = Some(proposal_id.clone());
     approve.review_status = Some("approved".to_string());
-    server
-        .tachi_task(Parameters(approve))
+    run_tune(&server, approve)
         .await
         .expect("approve restored proposal");
     mutate_policy(Some("approved"));
     let (before_apply, before_apply_version) = read_route_policy_row(&server, &proposal_id);
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let err = server
-        .tachi_task(Parameters(apply))
+    let err = run_tune(&server, apply)
         .await
         .expect_err("stale current policy must refuse apply");
     assert!(
