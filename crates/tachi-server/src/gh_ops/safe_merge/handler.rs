@@ -352,9 +352,9 @@ pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Siz
     // successful non-dry-run GitHub PR merge, reclaim the local worktree +
     // branch + target dir when the caller supplied a worktree path. This is
     // best-effort: a missing worktree (PR opened from a non-Tachi checkout)
-    // logs a warning and never fails the merge. Mirrors the cleanup that
-    // `tachi_task(action='merge')`/`approve_merge` already performs on the
-    // local dispatch path.
+    // logs a warning and never fails the merge. (The retired
+    // `tachi_task(action='merge')` path performed the same cleanup before
+    // #1683 C1a removed it; this is now the sole owner.)
     let reclamation = reclaim_worktree_after_merge(
         merged_sha.as_deref(),
         dry_run,
