@@ -12,9 +12,42 @@
 pub const TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS: &[&str] =
     &["link_pr", "pr_status", "pr_handoff", "release_note"];
 
+/// Task actions retired in #1683. Kept as a machine-checkable deny-list for
+/// schema/router/FromStr tests.
+pub const TACHI_TASK_REMOVED_SIX_ACTIONS: &[&str] = &[
+    "plan",
+    "recommend",
+    "merge",
+    "cycle_plan",
+    "ux_matrix",
+    "refine_issues",
+];
+
 /// Canonical WorkClaim lifecycle actions exposed on `tachi_task` by #1253.
 #[cfg(test)]
 const TACHI_TASK_WORKCLAIM_ACTIONS: &[&str] = &["claim", "release", "heartbeat", "handoff"];
+
+/// Exact #1683 primary inventory — assert list, not just count.
+#[cfg(test)]
+const TACHI_TASK_PRIMARY_EXACT: &[&str] = &[
+    "intake",
+    "claim",
+    "heartbeat",
+    "handoff",
+    "release",
+    "board",
+    "status",
+    "complete",
+    "adjudicate",
+    "briefing",
+    "doc_index",
+    "cycle_status",
+    "profiles",
+    "profile",
+    "card",
+    "build_references",
+    "close_loop",
+];
 
 /// Canonical `tachi_gh` actions (includes lifecycle).
 pub const TACHI_GH_ACTIONS: &[&str] = &[
@@ -152,10 +185,34 @@ mod tests {
         // canonical task actions: claim, release, heartbeat, and handoff.
         // #1319-C2 removes three (dispatch/wait/cancel) as worker launch
         // moves to tachi_staff: 30 -> 27. #1426 then moves four route-tuning
-        // actions to tachi_tune: 27 -> 23.
+        // actions to tachi_tune: 27 -> 23. #1683 retires six Task actions
+        // (plan/recommend/merge/cycle_plan/ux_matrix/refine_issues): 23 -> 17.
         // Keep this exact so the next inventory addition gets explicit review.
-        assert_eq!(primary.len(), 23);
+        assert_eq!(primary.len(), 17);
+        assert_eq!(primary.as_slice(), TACHI_TASK_PRIMARY_EXACT);
+        for action in TACHI_TASK_REMOVED_SIX_ACTIONS {
+            assert!(
+                !primary.contains(action),
+                "primary task schema must not advertise retired #1683 action {action}"
+            );
+        }
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
+    }
+
+    #[test]
+    fn f1683_removed_six_actions_deny_list() {
+        assert_eq!(TACHI_TASK_REMOVED_SIX_ACTIONS.len(), 6);
+        assert_eq!(
+            TACHI_TASK_REMOVED_SIX_ACTIONS,
+            &[
+                "plan",
+                "recommend",
+                "merge",
+                "cycle_plan",
+                "ux_matrix",
+                "refine_issues",
+            ]
+        );
     }
 
     #[test]

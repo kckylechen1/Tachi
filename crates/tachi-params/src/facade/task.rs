@@ -22,39 +22,35 @@ fn tachi_task_action_schema(
 ) -> rmcp::schemars::Schema {
     // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
     // #1319-C2: worker launch/wait/cancel left Task; use tachi_staff instead.
+    // #1683: plan/recommend/merge/cycle_plan/ux_matrix/refine_issues left Task.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. action='recommend' is advisory and does not authorize launch. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. Route tuning lives on tachi_tune. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'board' read existing worker state (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend' manages routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. Route tuning lives on tachi_tune. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='profiles'/'profile'/'card' inspect cards; action='status'/'board' read existing worker state (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='intake' binds issues; action='cycle_status' is a lifecycle read model; action='build_references'/'close_loop' close the issue loop.",
         generator,
     )
 }
 
-// ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle) ──
+// ─── Facade: task (briefing / complete / board / lifecycle / claims) ──
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
-    /// Primary actions (F4 enum): plan, briefing,
-    /// doc_index, recommend, complete, adjudicate, profiles, profile, card,
-    /// status, board, merge, intake, cycle_status, cycle_plan, ux_matrix,
-    /// build_references, close_loop, claim, release, heartbeat, handoff.
+    /// Primary actions (F4 enum): intake, claim, heartbeat, handoff, release,
+    /// board, status, complete, adjudicate, briefing, doc_index, cycle_status,
+    /// profiles, profile, card, build_references, close_loop.
     /// Worker launch/wait/cancel left Task in #1319-C2 — use
     /// tachi_staff(action='start'|'status') for worker lifecycle.
-    /// action="merge" is local dispatched worktree git merge only; use
-    /// tachi_gh(action='safe_merge') for GitHub PR merges.
     /// action="intake" binds a GitHub issue to a flow.
-    /// action="cycle_status" / "cycle_plan" are read-only lifecycle models.
-    /// action="ux_matrix" / "build_references" / "close_loop" close the issue loop.
-    /// action="refine_issues" (#1002) reads one GitHub issue and returns typed
-    /// evidence + a proposal-only disposition; uses `issue_ref` (or `repo`+`number`).
+    /// action="cycle_status" is a read-only lifecycle model.
+    /// action="build_references" / "close_loop" close the issue loop.
     /// GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note): use **tachi_gh only** (#757).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,
-    /// Response shape: default JSON for agent automation, with two
-    /// exceptions — [action=recommend|profiles|profile|card] (tachi#1201)
+    /// Response shape: default JSON for agent automation, with one
+    /// exception — [action=profiles|profile|card] (tachi#1201)
     /// default to compact markdown (a table plus key fields) when `format`
     /// is omitted, since these are read-heavy discovery endpoints most often
     /// consumed by a human/agent skimming a summary, not parsing JSON. Pass
-    /// format="json" to get the machine-readable shape for those four
+    /// format="json" to get the machine-readable shape for those three
     /// actions; every other action's default is unaffected. Pass "markdown"
     /// on any action for human-readable text.
     #[serde(default)]
@@ -68,51 +64,22 @@ pub struct TachiTaskParams {
     /// [action=board]: forwarded to `TachiBoardParams.verbose` -- restores
     /// identity_receipt/acpx/acpx_events per row and stops folding terminal
     /// rows into count rows.
-    /// [action=recommend] (tachi#1201, format="json" only): when true, the
-    /// response includes `identity_receipt`; when omitted/false it is
-    /// dropped from the slim JSON shape.
     #[serde(default)]
     pub verbose: Option<bool>,
-    /// [action=recommend] (tachi#1201, format="json" only): when true,
-    /// include one top-level `mbit_card` for the recommended profile in the
-    /// JSON response. Default false keeps the JSON response to a
-    /// candidate-summary shape (`profile`/`role`/`score`/`reasons` per row,
-    /// no per-row or top-level `mbit_card`). Has no effect on markdown
-    /// output or on other actions.
     #[serde(default)]
-    pub include_card: Option<bool>,
-    // plan fields
-    #[serde(default)]
-    #[schemars(
-        description = "[action=plan|recommend|complete|intake|ux_matrix] Task description / prompt text."
-    )]
+    #[schemars(description = "[action=complete|intake] Task description / prompt text.")]
     pub task: Option<String>,
-    /// [action=recommend] Declared side-effect level:
-    /// L0 source/metadata read, L1 temporary local state, L2 product-data
-    /// diagnostics, or L3 product data/resident runtime side effects. Omitted
-    /// values resolve to L1 for host-profile admission without task-text inference.
     #[serde(default)]
-    #[schemars(
-        description = "[action=recommend] Declared side-effect level L0–L3. Omitted → L1 for host admission."
-    )]
-    pub execution_level: Option<super::ExecutionLevel>,
-    #[serde(default)]
-    #[schemars(description = "[action=plan|briefing] Requesting agent id.")]
+    #[schemars(description = "[action=briefing] Requesting agent id.")]
     pub agent_id: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=plan|recommend|briefing] Area tag (e.g. rust, mcp) to scope context."
-    )]
+    #[schemars(description = "[action=briefing] Area tag (e.g. rust, mcp) to scope context.")]
     pub domain: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=plan|recommend|briefing] Optional recall path prefix filter."
-    )]
+    #[schemars(description = "[action=briefing] Optional recall path prefix filter.")]
     pub path_prefix: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=plan|recommend|briefing] Maximum context fragments to recall."
-    )]
+    #[schemars(description = "[action=briefing] Maximum context fragments to recall.")]
     pub top_k: Option<usize>,
     // feature briefing fields
     #[serde(default)]
@@ -358,7 +325,7 @@ pub struct TachiTaskParams {
     pub pr_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Tachi flow id for feature-scoped artifacts, also linking a completion back to its flow (briefing/intake/ux_matrix/close_loop/status/complete)."
+        description = "Tachi flow id for feature-scoped artifacts, also linking a completion back to its flow (briefing/intake/close_loop/status/complete)."
     )]
     pub flow_id: Option<String>,
     /// [action=complete|status] Dispatch id linked to this task lifecycle event.
@@ -376,9 +343,7 @@ pub struct TachiTaskParams {
     #[serde(default)]
     pub include_result: bool,
     #[serde(default)]
-    #[schemars(
-        description = "Risk override for recommendation/intake: low | medium | high | critical."
-    )]
+    #[schemars(description = "Risk override for intake: low | medium | high | critical.")]
     pub risk: Option<String>,
     #[serde(default)]
     #[schemars(skip)]
@@ -399,9 +364,7 @@ pub struct TachiTaskParams {
     #[schemars(description = "[action=board] Filter dispatch ledger rows by state.")]
     pub state_filter: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=board|recommend] Maximum ledger/recommendation rows to return."
-    )]
+    #[schemars(description = "[action=board] Maximum ledger rows to return.")]
     pub limit: Option<usize>,
     // #1426: proposal review/apply left Task for the admin-only `tachi_tune`
     // surface, so no surviving `tachi_task` action reads these two. They stay
@@ -413,23 +376,18 @@ pub struct TachiTaskParams {
     #[serde(default)]
     #[schemars(skip)]
     pub review_status: Option<String>,
-    // merge fields. These apply only to local dispatch worktree merge via
-    // approve_merge; GitHub PR gates/merges go through tachi_gh safe_merge.
+    // Local worktree path recorded by complete; GitHub PR gates/merges go
+    // through tachi_gh safe_merge. #1683 retired tachi_task(action='merge').
     #[serde(default)]
     #[schemars(
-        description = "Local dispatched worktree path to merge. Do not pass a GitHub PR ref here; use tachi_gh(action='safe_merge') for PR gates/merges."
+        description = "[action=complete] Local dispatched worktree path recorded with completion evidence."
     )]
     pub worktree: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=merge] Branch to merge from the local dispatched worktree. For PR handoff branch recording use tachi_gh(action='pr_handoff')."
+        description = "[action=claim] Branch hint for claim scope. For PR handoff branch recording use tachi_gh(action='pr_handoff')."
     )]
     pub branch: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "Local dispatch worktree merge strategy for action='merge'. For PR gate preview use tachi_gh(action='pr_status')."
-    )]
-    pub strategy: Option<String>,
     #[serde(default)]
     #[schemars(
         description = "GitHub PR gate policy passed through to tachi_gh lifecycle helpers (not a tachi_task action): permissive | standard | strict."
@@ -440,16 +398,6 @@ pub struct TachiTaskParams {
         description = "Explicit umbrella/no-close override for tachi_gh safe_merge/pr_status helpers shared via lifecycle field bags. Defaults false."
     )]
     pub allow_umbrella_close: bool,
-    #[serde(default = "super::default_true")]
-    #[schemars(
-        description = "[action=merge] Remove the local worktree after a successful merge. Defaults true."
-    )]
-    pub delete_worktree: bool,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=merge] Leader confirmation gate for the local worktree merge."
-    )]
-    pub confirm: bool,
     // close_loop fields
     #[serde(default)]
     #[schemars(description = "[action=close_loop] Wiki closure entry title.")]
@@ -491,9 +439,7 @@ pub struct TachiTaskParams {
     #[schemars(description = "[action=close_loop] Wiki closure area/domain tag.")]
     pub wiki_domain: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "Bypass wiki noise filtering for action='close_loop'. Does not force merge behavior."
-    )]
+    #[schemars(description = "Bypass wiki noise filtering for action='close_loop'.")]
     pub force: bool,
     // --- canonical WorkClaim fields (#1253) ---
     #[serde(default)]

@@ -72,87 +72,70 @@ impl FromStr for TachiVerifyAction {
 /// is **not** accepted here — use `tachi_gh` (#757). Worker launch/wait/cancel
 /// left Task in #1319-C2; use `tachi_staff(action='start'|'status')` instead.
 /// Route tuning left Task in #1426; use `tachi_tune` instead.
+/// Plan/Recommend/Merge/CyclePlan/UxMatrix/RefineIssues left Task in #1683.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TachiTaskAction {
-    Plan,
+    Intake,
+    Claim,
+    Heartbeat,
+    Handoff,
+    Release,
+    Board,
+    Status,
+    Complete,
+    Adjudicate,
     Briefing,
     DocIndex,
-    Recommend,
-    Complete,
+    CycleStatus,
     Profiles,
     Profile,
     Card,
-    Status,
-    Board,
-    Merge,
-    Intake,
-    CycleStatus,
-    CyclePlan,
-    UxMatrix,
     BuildReferences,
     CloseLoop,
-    RefineIssues,
-    Adjudicate,
-    Claim,
-    Release,
-    Heartbeat,
-    Handoff,
 }
 
 impl TachiTaskAction {
     /// Schema-advertised primary actions.
     pub const PRIMARY: &'static [Self] = &[
-        Self::Plan,
+        Self::Intake,
+        Self::Claim,
+        Self::Heartbeat,
+        Self::Handoff,
+        Self::Release,
+        Self::Board,
+        Self::Status,
+        Self::Complete,
+        Self::Adjudicate,
         Self::Briefing,
         Self::DocIndex,
-        Self::Recommend,
-        Self::Complete,
+        Self::CycleStatus,
         Self::Profiles,
         Self::Profile,
         Self::Card,
-        Self::Status,
-        Self::Board,
-        Self::Merge,
-        Self::Intake,
-        Self::CycleStatus,
-        Self::CyclePlan,
-        Self::UxMatrix,
         Self::BuildReferences,
         Self::CloseLoop,
-        Self::RefineIssues,
-        Self::Adjudicate,
-        Self::Claim,
-        Self::Release,
-        Self::Heartbeat,
-        Self::Handoff,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Plan => "plan",
+            Self::Intake => "intake",
+            Self::Claim => "claim",
+            Self::Heartbeat => "heartbeat",
+            Self::Handoff => "handoff",
+            Self::Release => "release",
+            Self::Board => "board",
+            Self::Status => "status",
+            Self::Complete => "complete",
+            Self::Adjudicate => "adjudicate",
             Self::Briefing => "briefing",
             Self::DocIndex => "doc_index",
-            Self::Recommend => "recommend",
-            Self::Complete => "complete",
+            Self::CycleStatus => "cycle_status",
             Self::Profiles => "profiles",
             Self::Profile => "profile",
             Self::Card => "card",
-            Self::Status => "status",
-            Self::Board => "board",
-            Self::Merge => "merge",
-            Self::Intake => "intake",
-            Self::CycleStatus => "cycle_status",
-            Self::CyclePlan => "cycle_plan",
-            Self::UxMatrix => "ux_matrix",
             Self::BuildReferences => "build_references",
             Self::CloseLoop => "close_loop",
-            Self::RefineIssues => "refine_issues",
-            Self::Adjudicate => "adjudicate",
-            Self::Claim => "claim",
-            Self::Release => "release",
-            Self::Heartbeat => "heartbeat",
-            Self::Handoff => "handoff",
         }
     }
 
@@ -174,29 +157,23 @@ impl FromStr for TachiTaskAction {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "plan" => Ok(Self::Plan),
+            "intake" => Ok(Self::Intake),
+            "claim" => Ok(Self::Claim),
+            "heartbeat" => Ok(Self::Heartbeat),
+            "handoff" => Ok(Self::Handoff),
+            "release" => Ok(Self::Release),
+            "board" => Ok(Self::Board),
+            "status" => Ok(Self::Status),
+            "complete" => Ok(Self::Complete),
+            "adjudicate" => Ok(Self::Adjudicate),
             "briefing" => Ok(Self::Briefing),
             "doc_index" => Ok(Self::DocIndex),
-            "recommend" => Ok(Self::Recommend),
-            "complete" => Ok(Self::Complete),
+            "cycle_status" => Ok(Self::CycleStatus),
             "profiles" => Ok(Self::Profiles),
             "profile" => Ok(Self::Profile),
             "card" => Ok(Self::Card),
-            "status" => Ok(Self::Status),
-            "board" => Ok(Self::Board),
-            "merge" => Ok(Self::Merge),
-            "intake" => Ok(Self::Intake),
-            "cycle_status" => Ok(Self::CycleStatus),
-            "cycle_plan" => Ok(Self::CyclePlan),
-            "ux_matrix" => Ok(Self::UxMatrix),
             "build_references" => Ok(Self::BuildReferences),
             "close_loop" => Ok(Self::CloseLoop),
-            "refine_issues" => Ok(Self::RefineIssues),
-            "adjudicate" => Ok(Self::Adjudicate),
-            "claim" => Ok(Self::Claim),
-            "release" => Ok(Self::Release),
-            "heartbeat" => Ok(Self::Heartbeat),
-            "handoff" => Ok(Self::Handoff),
             // #1319-C2: dispatch/wait/cancel left Task (worker launch moved to
             // tachi_staff). Point callers at the canonical worker surface.
             "dispatch" | "wait" | "cancel" => Err(format!(
@@ -221,6 +198,12 @@ impl FromStr for TachiTaskAction {
             "link_pr" | "pr_status" | "pr_handoff" | "release_note" => Err(format!(
                 "Invalid tachi_task action '{s}'. GitHub PR lifecycle actions live on tachi_gh(action='{s}')."
             )),
+            // #1683: six Task actions retired; keep typed rejects explicit.
+            "plan" | "recommend" | "merge" | "cycle_plan" | "ux_matrix" | "refine_issues" => {
+                Err(format!(
+                    "Invalid tachi_task action '{s}'. Retired from tachi_task in #1683."
+                ))
+            }
             other => Err(format!(
                 "Invalid tachi_task action '{other}'. See primary task actions or use tachi_gh for GitHub PR lifecycle."
             )),
@@ -230,7 +213,9 @@ impl FromStr for TachiTaskAction {
 
 #[cfg(test)]
 mod tests {
-    use super::super::action_inventory::TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS;
+    use super::super::action_inventory::{
+        TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_TASK_REMOVED_SIX_ACTIONS,
+    };
     use super::*;
 
     #[test]
@@ -286,6 +271,19 @@ mod tests {
             assert!(
                 err.contains(&format!("tachi_tune(action='{target}')")),
                 "error for {retired} should point at tachi_tune {target}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn f1683_task_rejects_retired_six_actions() {
+        for &s in TACHI_TASK_REMOVED_SIX_ACTIONS {
+            let err = s
+                .parse::<TachiTaskAction>()
+                .expect_err("retired #1683 action must not parse as tachi_task action");
+            assert!(
+                err.contains("#1683"),
+                "error for {s} should cite #1683, got: {err}"
             );
         }
     }
