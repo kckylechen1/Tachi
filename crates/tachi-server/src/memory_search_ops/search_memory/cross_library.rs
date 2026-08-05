@@ -194,7 +194,7 @@ mod tests {
                     final_score: score,
                 },
                 graph_injected: false,
-                    graph_provenance: None,
+                graph_provenance: None,
             },
             scope,
         )

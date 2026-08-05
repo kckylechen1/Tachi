@@ -251,7 +251,7 @@ pub(super) fn rank_candidate_entries(
                 entry,
                 score,
                 graph_injected: false,
-                    graph_provenance: None,
+                graph_provenance: None,
             })
         })
         .collect();
