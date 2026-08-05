@@ -207,8 +207,8 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
     let action = action.trim().to_ascii_lowercase();
     match tool_name {
         "tachi_task" => match action.as_str() {
-            "briefing" | "doc_index" | "status" | "board" | "profiles" | "profile"
-            | "card" | "cycle_status" | "build_references" => Some(ToolBundle::Observe),
+            "briefing" | "doc_index" | "status" | "board" | "profiles" | "profile" | "card"
+            | "cycle_status" | "build_references" => Some(ToolBundle::Observe),
             "complete" | "adjudicate" | "claim" | "release" | "heartbeat" => {
                 Some(ToolBundle::Remember)
             }
@@ -414,7 +414,14 @@ mod tests {
 
     #[test]
     fn f1683_c1a_retired_task_actions_are_denied_by_active_contract() {
-        for action in ["plan", "cycle_plan", "recommend", "refine_issues", "merge", "ux_matrix"] {
+        for action in [
+            "plan",
+            "cycle_plan",
+            "recommend",
+            "refine_issues",
+            "merge",
+            "ux_matrix",
+        ] {
             assert_eq!(
                 facade_action_required_bundle("tachi_task", action),
                 None,

@@ -221,11 +221,10 @@ pub(super) async fn handle_tachi_task_facade(
                 }
             }
             Ok(result)
-        }
-        // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched above
-        // (#919 concern) — a new variant fails to compile here until it is
-        // explicitly routed, instead of silently returning "Invalid action" for
-        // a value that already deserialized successfully.
+        } // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched above
+          // (#919 concern) — a new variant fails to compile here until it is
+          // explicitly routed, instead of silently returning "Invalid action" for
+          // a value that already deserialized successfully.
     }?;
     if action == "complete" && crate::facade_memory_ops::wants_full_format(params.format.as_deref())
     {

@@ -583,7 +583,14 @@ mod tests {
 
     #[test]
     fn f1683_c1a_retired_task_actions_are_unclassified() {
-        for action in ["plan", "cycle_plan", "recommend", "refine_issues", "merge", "ux_matrix"] {
+        for action in [
+            "plan",
+            "cycle_plan",
+            "recommend",
+            "refine_issues",
+            "merge",
+            "ux_matrix",
+        ] {
             assert_eq!(
                 facade_action_effect("tachi_task", Some(action)),
                 None,

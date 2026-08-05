@@ -192,5 +192,4 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
         .as_array()
         .expect("loadout weak_against")
         .contains(&json!("plan_request")));
-
 }

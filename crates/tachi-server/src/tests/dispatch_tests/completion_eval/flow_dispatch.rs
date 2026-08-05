@@ -70,7 +70,6 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card() {
         json!(true),
         "{card:#}"
     );
-
 }
 
 /// A successful replay must resume missing completion derives without

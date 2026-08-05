@@ -67,27 +67,19 @@ pub struct TachiTaskParams {
     pub verbose: Option<bool>,
     // task text fields
     #[serde(default)]
-    #[schemars(
-        description = "[action=complete|intake] Task description / prompt text."
-    )]
+    #[schemars(description = "[action=complete|intake] Task description / prompt text.")]
     pub task: Option<String>,
     #[serde(default)]
     #[schemars(description = "[action=briefing] Requesting agent id.")]
     pub agent_id: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=briefing] Area tag (e.g. rust, mcp) to scope context."
-    )]
+    #[schemars(description = "[action=briefing] Area tag (e.g. rust, mcp) to scope context.")]
     pub domain: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=briefing] Optional recall path prefix filter."
-    )]
+    #[schemars(description = "[action=briefing] Optional recall path prefix filter.")]
     pub path_prefix: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=briefing] Maximum context fragments to recall."
-    )]
+    #[schemars(description = "[action=briefing] Maximum context fragments to recall.")]
     pub top_k: Option<usize>,
     // feature briefing fields
     #[serde(default)]
@@ -350,9 +342,7 @@ pub struct TachiTaskParams {
     #[serde(default)]
     pub include_result: bool,
     #[serde(default)]
-    #[schemars(
-        description = "Risk override for intake: low | medium | high | critical."
-    )]
+    #[schemars(description = "Risk override for intake: low | medium | high | critical.")]
     pub risk: Option<String>,
     #[serde(default)]
     #[schemars(skip)]
@@ -373,9 +363,7 @@ pub struct TachiTaskParams {
     #[schemars(description = "[action=board] Filter dispatch ledger rows by state.")]
     pub state_filter: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=board] Maximum ledger rows to return."
-    )]
+    #[schemars(description = "[action=board] Maximum ledger rows to return.")]
     pub limit: Option<usize>,
     // #1426: proposal review/apply left Task for the admin-only `tachi_tune`
     // surface, so no surviving `tachi_task` action reads these two. They stay
@@ -393,9 +381,7 @@ pub struct TachiTaskParams {
     )]
     pub worktree: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=claim] Branch associated with a WorkClaim."
-    )]
+    #[schemars(description = "[action=claim] Branch associated with a WorkClaim.")]
     pub branch: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -448,9 +434,7 @@ pub struct TachiTaskParams {
     #[schemars(description = "[action=close_loop] Wiki closure area/domain tag.")]
     pub wiki_domain: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "Bypass wiki noise filtering for action='close_loop'."
-    )]
+    #[schemars(description = "Bypass wiki noise filtering for action='close_loop'.")]
     pub force: bool,
     // --- canonical WorkClaim fields (#1253) ---
     #[serde(default)]

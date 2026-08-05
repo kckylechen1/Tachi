@@ -4,21 +4,15 @@ use std::collections::BTreeMap;
 #[test]
 fn facade_response_defaults_to_json_and_preserves_markdown_opt_in() {
     let raw = r#"{"flow_id":"flow_1","stage":"build","state":"instruction_ready","tasks":[{"dispatch_id":"d1","state":"running","agent":"codex","task":"Fix search"}]}"#;
-    let json =
-        format_facade_response("Tachi task status", "status", raw, None, false).unwrap();
+    let json = format_facade_response("Tachi task status", "status", raw, None, false).unwrap();
     let value = serde_json::from_str::<Value>(&json).unwrap();
     assert_eq!(value["action"], "status");
     assert_eq!(value["status"], "completed");
     assert_eq!(value["flow_id"], "flow_1");
 
-    let markdown = format_facade_response(
-        "Tachi task status",
-        "status",
-        raw,
-        Some("markdown"),
-        false,
-    )
-    .unwrap();
+    let markdown =
+        format_facade_response("Tachi task status", "status", raw, Some("markdown"), false)
+            .unwrap();
     assert!(markdown.starts_with("## Tachi task status"));
     assert!(markdown.contains("flow_id: `flow_1`"));
     assert!(markdown.contains("- `d1` running agent=codex - Fix search"));
@@ -27,18 +21,11 @@ fn facade_response_defaults_to_json_and_preserves_markdown_opt_in() {
 #[test]
 fn facade_response_markdown_parse_failure_is_visible() {
     let raw = "not json";
-    let json =
-        format_facade_response("Tachi task status", "status", raw, None, false).unwrap();
+    let json = format_facade_response("Tachi task status", "status", raw, None, false).unwrap();
     assert_eq!(json, raw);
 
-    let err = format_facade_response(
-        "Tachi task status",
-        "status",
-        raw,
-        Some("markdown"),
-        false,
-    )
-    .expect_err("markdown formatting should fail on invalid JSON");
+    let err = format_facade_response("Tachi task status", "status", raw, Some("markdown"), false)
+        .expect_err("markdown formatting should fail on invalid JSON");
     assert!(err.contains("format Tachi task status markdown response"));
     assert!(err.contains("expected JSON"));
 }
@@ -65,14 +52,9 @@ async fn facade_board_markdown_surfaces_capped_empty_response() {
     .await
     .expect("bounded board response");
 
-    let markdown = format_facade_response(
-        "Tachi task board",
-        "board",
-        &raw,
-        Some("markdown"),
-        false,
-    )
-    .expect("format incomplete board");
+    let markdown =
+        format_facade_response("Tachi task board", "board", &raw, Some("markdown"), false)
+            .expect("format incomplete board");
 
     assert!(markdown.contains("incomplete: `true`"), "{markdown}");
     assert!(
@@ -112,14 +94,9 @@ async fn facade_board_markdown_surfaces_invalid_empty_fallback() {
     .await
     .expect("invalid fallback board response");
 
-    let markdown = format_facade_response(
-        "Tachi task board",
-        "board",
-        &raw,
-        Some("markdown"),
-        false,
-    )
-    .expect("format invalid fallback board");
+    let markdown =
+        format_facade_response("Tachi task board", "board", &raw, Some("markdown"), false)
+            .expect("format invalid fallback board");
 
     assert!(markdown.contains("incomplete: `true`"), "{markdown}");
     assert!(
