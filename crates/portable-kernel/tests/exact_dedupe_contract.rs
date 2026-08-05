@@ -398,23 +398,20 @@ fn portable_build_exact_dedupe_apply_receipt_round_trips_through_restore() {
         .expect("get")
         .expect("loser visible again after restore");
     assert!(!loser.archived);
-    // `revision` is a CAS counter, not a value that restore rewinds: every
-    // UPDATE in exact_dedupe.rs (apply's archive mutation *and* restore's
-    // un-archive mutation) does `revision=revision+1`
+    // `revision` is a CAS counter, not a value that restore rewinds: apply
+    // bumps it exactly once via the archive CAS UPDATE
     // (crates/memcore/src/store/exact_dedupe.rs apply_exact_dedupe L814,
-    // restore_exact_dedupe L1009/L1026). So a round trip through
-    // apply -> restore bumps revision twice (before_revision -> +1 on
-    // apply -> +1 on restore), landing on before_revision + 2, never back
-    // on before_revision. The restore contract is "lifecycle fields
-    // reopened, revision advances monotonically" — not "revision returns
-    // to its pre-apply value". memcore's own restore tests (e.g.
-    // `apply_lineage_preserves_non_object_metadata_and_remains_restorable`
-    // in exact_dedupe.rs) likewise never assert revision equality after a
-    // real restore.
-    assert!(
-        loser.revision > before_revision,
-        "restore must advance revision monotonically, not rewind it: before={before_revision} after={}",
-        loser.revision
+    // `revision=revision+1`), and restore bumps it exactly once more via the
+    // un-archive CAS UPDATE (restore_exact_dedupe L1009/L1026, same
+    // `revision=revision+1`). The round trip through apply -> restore
+    // therefore advances the monotonic counter exactly twice: before_revision
+    // -> +1 on apply -> +1 on restore, landing on precisely
+    // before_revision + 2 — restore's own bump is contract, not incident, so
+    // the delta is pinned exactly rather than left as a loose inequality.
+    assert_eq!(
+        loser.revision,
+        before_revision + 2,
+        "apply bumps once (archive CAS) and restore bumps once (un-archive CAS): the monotonic counter advances exactly twice through the round trip"
     );
     assert_eq!(
         store
