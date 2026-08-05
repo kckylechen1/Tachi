@@ -22,7 +22,7 @@ fn credential_profile_json_parse_supports_core_materializers() {
       }
     }"#;
 
-    let doc: crate::credential_profile::CredentialProfileDocument =
+    let doc: crate::CredentialProfileDocument =
         serde_json::from_str(raw).expect("profile document parses");
     let profile = doc
         .credential_profiles
@@ -54,7 +54,7 @@ fn credential_profile_discovery_skips_unrelated_malformed_json() {
     .expect("write valid profile");
 
     let (path, profile) =
-        crate::credential_profile::find_credential_profile(dir.path(), "codex_shared")
+        crate::find_credential_profile(dir.path(), "codex_shared")
             .expect("valid profile should be found despite malformed sibling");
     assert_eq!(
         path.file_name().and_then(|name| name.to_str()),

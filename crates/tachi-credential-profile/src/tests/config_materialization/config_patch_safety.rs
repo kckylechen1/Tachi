@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_config_patch_refuses_unsafe_targets() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-config-patch-risk-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -13,14 +13,14 @@ fn credential_config_patch_refuses_unsafe_targets() {
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
     let unsafe_target = out_dir.path().join(".claude/settings.json");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: Some("claude".to_string()),
         description: None,
         entries: [("api_key".to_string(), "CLAUDE_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_patch".to_string(),
             source: "api_key".to_string(),
             target: unsafe_target.to_string_lossy().to_string(),
@@ -32,13 +32,13 @@ fn credential_config_patch_refuses_unsafe_targets() {
         .into_iter()
         .collect();
 
-    let err = crate::credential_profile::apply_credential_materialization(
+    let err = crate::apply_credential_materialization(
         "claude_shared",
         &profile,
         "claude_code",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions {
+        &crate::CredentialApplyOptions {
             allow_existing: true,
             run_dir: None,
         },
@@ -70,14 +70,14 @@ fn opencode_config_patch_refuses_plaintext_api_key_without_writing() {
     let target = out_dir.path().join("opencode.json");
     let original = r#"{"provider":{"openai":{"baseURL":"https://api.example.test"}}}"#;
     std::fs::write(&target, original).expect("seed config");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: Some("opencode".to_string()),
         description: None,
         entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_patch".to_string(),
             source: "api_key".to_string(),
             target: target.to_string_lossy().to_string(),
@@ -92,13 +92,13 @@ fn opencode_config_patch_refuses_plaintext_api_key_without_writing() {
         .into_iter()
         .collect();
 
-    let err = crate::credential_profile::apply_credential_materialization(
+    let err = crate::apply_credential_materialization(
         "opencode_shared",
         &profile,
         "opencode",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions {
+        &crate::CredentialApplyOptions {
             allow_existing: true,
             run_dir: None,
         },
@@ -123,14 +123,14 @@ fn opencode_profile_name_guard_works_without_provider_metadata() {
     let target = out_dir.path().join("custom-config.json");
     let original = r#"{"keep":true}"#;
     std::fs::write(&target, original).expect("seed config");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_patch".to_string(),
             source: "api_key".to_string(),
             target: target.to_string_lossy().to_string(),
@@ -145,13 +145,13 @@ fn opencode_profile_name_guard_works_without_provider_metadata() {
     .into_iter()
     .collect();
 
-    let err = crate::credential_profile::apply_credential_materialization(
+    let err = crate::apply_credential_materialization(
         "custom_opencode_profile",
         &profile,
         "opencode",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions {
+        &crate::CredentialApplyOptions {
             allow_existing: true,
             run_dir: None,
         },
@@ -176,14 +176,14 @@ fn normalized_opencode_target_guard_catches_aliased_custom_profile() {
     let aliased_target = alias_dir.join("../opencode/opencode.json");
     let original = r#"{"keep":true}"#;
     std::fs::write(&target, original).expect("seed config");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_patch".to_string(),
             source: "api_key".to_string(),
             target: aliased_target.to_string_lossy().to_string(),
@@ -198,13 +198,13 @@ fn normalized_opencode_target_guard_catches_aliased_custom_profile() {
     .into_iter()
     .collect();
 
-    let err = crate::credential_profile::apply_credential_materialization(
+    let err = crate::apply_credential_materialization(
         "custom_alias",
         &profile,
         "custom_consumer",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions {
+        &crate::CredentialApplyOptions {
             allow_existing: true,
             run_dir: None,
         },
@@ -224,14 +224,14 @@ fn opencode_file_copy_fails_closed_without_writing_raw_secret() {
     let config_dir = out_dir.path().join(".config/opencode");
     std::fs::create_dir_all(&config_dir).expect("create OpenCode fixture dir");
     let target = config_dir.join("opencode.json");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: Some("opencode".to_string()),
         description: None,
         entries: [("config".to_string(), "OPENCODE_CONFIG_JSON".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "file_copy".to_string(),
             source: "config".to_string(),
             target: target.to_string_lossy().to_string(),
@@ -244,13 +244,13 @@ fn opencode_file_copy_fails_closed_without_writing_raw_secret() {
         .into_iter()
         .collect();
 
-    let err = crate::credential_profile::apply_credential_materialization(
+    let err = crate::apply_credential_materialization(
         "opencode_config_copy",
         &profile,
         "opencode",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions::default(),
+        &crate::CredentialApplyOptions::default(),
     )
     .expect_err("OpenCode file_copy cannot prove env-ref-only output");
     assert!(err.contains("file_copy"), "{err}");
@@ -260,15 +260,15 @@ fn opencode_file_copy_fails_closed_without_writing_raw_secret() {
 
 fn opencode_unrelated_patch_profile(
     target: &std::path::Path,
-) -> crate::credential_profile::CredentialProfile {
-    crate::credential_profile::CredentialProfile {
+) -> crate::CredentialProfile {
+    crate::CredentialProfile {
         provider: Some("opencode".to_string()),
         description: None,
         entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_patch".to_string(),
             source: "api_key".to_string(),
             target: target.to_string_lossy().to_string(),
@@ -302,13 +302,13 @@ fn apply_opencode_unrelated_patch(
     )]
     .into_iter()
     .collect();
-    crate::credential_profile::apply_credential_materialization(
+    crate::apply_credential_materialization(
         "opencode_final_json_guard",
         &profile,
         "opencode",
         store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions {
+        &crate::CredentialApplyOptions {
             allow_existing: true,
             run_dir: None,
         },

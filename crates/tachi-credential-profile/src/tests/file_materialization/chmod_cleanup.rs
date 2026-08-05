@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_materialize_cleans_temp_file_on_chmod_failure() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-temp-cleanup-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -13,14 +13,14 @@ fn credential_materialize_cleans_temp_file_on_chmod_failure() {
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
     let target = out_dir.path().join("auth.json");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: Some("codex".to_string()),
         description: None,
         entries: [("auth_json".to_string(), "CODEX_AUTH_JSON".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "file_copy".to_string(),
             source: "auth_json".to_string(),
             target: target.to_string_lossy().to_string(),
@@ -35,13 +35,13 @@ fn credential_materialize_cleans_temp_file_on_chmod_failure() {
     .into_iter()
     .collect();
 
-    let err = crate::credential_profile::apply_credential_materialization(
+    let err = crate::apply_credential_materialization(
         "codex_shared",
         &profile,
         "codex_cli",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions::default(),
+        &crate::CredentialApplyOptions::default(),
     )
     .expect_err("invalid chmod should fail materialization");
     assert!(err.contains("invalid chmod"), "{err}");

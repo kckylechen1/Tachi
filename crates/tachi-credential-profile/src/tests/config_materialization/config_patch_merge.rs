@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn opencode_config_patch_merges_env_reference_without_retaining_plaintext_backup() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-config-patch-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -22,14 +22,14 @@ fn opencode_config_patch_merges_env_reference_without_retaining_plaintext_backup
     std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644))
         .expect("set initial broad permissions");
 
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: Some("opencode".to_string()),
         description: None,
         entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_patch".to_string(),
             source: "api_key".to_string(),
             target: config_path.to_string_lossy().to_string(),
@@ -47,13 +47,13 @@ fn opencode_config_patch_merges_env_reference_without_retaining_plaintext_backup
         .into_iter()
         .collect();
 
-    let result = crate::credential_profile::apply_credential_materialization(
+    let result = crate::apply_credential_materialization(
         "opencode_shared",
         &profile,
         "opencode",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions {
+        &crate::CredentialApplyOptions {
             allow_existing: true,
             run_dir: None,
         },

@@ -14,6 +14,11 @@ mod render;
 mod safety;
 mod types;
 
+#[cfg(test)]
+mod test_fixtures;
+#[cfg(test)]
+mod tests;
+
 pub const CREDENTIAL_MATERIALIZATION_NAMESPACE: &str = "credential_materialization";
 
 pub use apply::apply_credential_materialization;

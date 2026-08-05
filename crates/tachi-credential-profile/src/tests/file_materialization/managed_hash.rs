@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_materialize_apply_records_managed_hash_metadata() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-materialize-managed-hash-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -17,7 +17,7 @@ fn credential_materialize_apply_records_managed_hash_metadata() {
     apply_codex_auth_file_materialization(&store, &profile);
 
     let rows = store
-        .list_state(crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
         .expect("list managed credential metadata");
     assert_eq!(rows.len(), 1);
     assert!(rows[0].key.starts_with("managed:"));
@@ -39,7 +39,7 @@ fn credential_materialize_apply_records_managed_hash_metadata() {
         .starts_with("stable-fnv1a:"));
     assert!(!rows[0].value_json.contains("secret-token"));
 
-    let doctor = crate::credential_profile::doctor_credential_profile(
+    let doctor = crate::doctor_credential_profile(
         "codex_shared",
         &profile,
         "codex_cli",

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_doctor_reports_plaintext_config_overlay_secret_drift() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-doctor-plaintext-config-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -22,14 +22,14 @@ fn credential_doctor_reports_plaintext_config_overlay_secret_drift() {
     std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644))
         .expect("set broad permissions");
 
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_overlay".to_string(),
             source: "api_key".to_string(),
             target: config_path.to_string_lossy().to_string(),
@@ -38,7 +38,7 @@ fn credential_doctor_reports_plaintext_config_overlay_secret_drift() {
         }],
     };
 
-    let report = crate::credential_profile::doctor_credential_profile(
+    let report = crate::doctor_credential_profile(
         "opencode_shared",
         &profile,
         "opencode",
@@ -66,7 +66,7 @@ fn credential_doctor_reports_plaintext_config_overlay_secret_drift() {
 
 #[test]
 fn credential_doctor_allows_config_overlay_env_and_vault_references() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-doctor-config-ref-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -86,14 +86,14 @@ fn credential_doctor_allows_config_overlay_env_and_vault_references() {
     std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
         .expect("set safe permissions");
 
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_overlay".to_string(),
             source: "api_key".to_string(),
             target: config_path.to_string_lossy().to_string(),
@@ -104,7 +104,7 @@ fn credential_doctor_allows_config_overlay_env_and_vault_references() {
         }],
     };
 
-    let report = crate::credential_profile::doctor_credential_profile(
+    let report = crate::doctor_credential_profile(
         "opencode_shared",
         &profile,
         "opencode",
@@ -123,7 +123,7 @@ fn credential_doctor_allows_config_overlay_env_and_vault_references() {
 
 #[test]
 fn credential_doctor_detects_compound_secretish_config_keys() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-doctor-compound-config-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -140,14 +140,14 @@ fn credential_doctor_detects_compound_secretish_config_keys() {
     )
     .expect("write compound plaintext config target");
 
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_overlay".to_string(),
             source: "api_key".to_string(),
             target: config_path.to_string_lossy().to_string(),
@@ -158,7 +158,7 @@ fn credential_doctor_detects_compound_secretish_config_keys() {
         }],
     };
 
-    let report = crate::credential_profile::doctor_credential_profile(
+    let report = crate::doctor_credential_profile(
         "custom_shared",
         &profile,
         "custom_agent",

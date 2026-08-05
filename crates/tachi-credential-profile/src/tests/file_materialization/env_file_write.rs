@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn credential_materialize_apply_writes_file_0600_and_returns_env_map() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-materialize-apply-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -19,7 +19,7 @@ fn credential_materialize_apply_writes_file_0600_and_returns_env_map() {
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
     let auth_path = out_dir.path().join("auth.json");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: Some("openai_codex".to_string()),
         description: None,
         entries: [
@@ -28,16 +28,16 @@ fn credential_materialize_apply_writes_file_0600_and_returns_env_map() {
         ]
         .into_iter()
         .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
+        allowed_consumers: crate::AllowedConsumers::default(),
         materializers: vec![
-            crate::credential_profile::CredentialMaterializer {
+            crate::CredentialMaterializer {
                 kind: "env".to_string(),
                 source: "api_key".to_string(),
                 target: "OPENAI_API_KEY".to_string(),
                 chmod: None,
                 template: None,
             },
-            crate::credential_profile::CredentialMaterializer {
+            crate::CredentialMaterializer {
                 kind: "file_copy".to_string(),
                 source: "auth_json".to_string(),
                 target: auth_path.to_string_lossy().to_string(),
@@ -56,13 +56,13 @@ fn credential_materialize_apply_writes_file_0600_and_returns_env_map() {
     .into_iter()
     .collect();
 
-    let result = crate::credential_profile::apply_credential_materialization(
+    let result = crate::apply_credential_materialization(
         "codex_shared",
         &profile,
         "codex_cli",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions::default(),
+        &crate::CredentialApplyOptions::default(),
     )
     .expect("apply materialization");
     assert_eq!(

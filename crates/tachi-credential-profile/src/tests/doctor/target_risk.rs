@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_doctor_reports_missing_secret_existing_target_and_permissions() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-doctor-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -18,7 +18,7 @@ fn credential_doctor_reports_missing_secret_existing_target_and_permissions() {
     std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o644))
         .expect("set broad permissions");
 
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [
@@ -27,16 +27,16 @@ fn credential_doctor_reports_missing_secret_existing_target_and_permissions() {
         ]
         .into_iter()
         .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
+        allowed_consumers: crate::AllowedConsumers::default(),
         materializers: vec![
-            crate::credential_profile::CredentialMaterializer {
+            crate::CredentialMaterializer {
                 kind: "file_copy".to_string(),
                 source: "auth_json".to_string(),
                 target: auth_path.to_string_lossy().to_string(),
                 chmod: None,
                 template: None,
             },
-            crate::credential_profile::CredentialMaterializer {
+            crate::CredentialMaterializer {
                 kind: "env".to_string(),
                 source: "missing".to_string(),
                 target: "MISSING_SECRET".to_string(),
@@ -46,7 +46,7 @@ fn credential_doctor_reports_missing_secret_existing_target_and_permissions() {
         ],
     };
 
-    let report = crate::credential_profile::doctor_credential_profile(
+    let report = crate::doctor_credential_profile(
         "codex_shared",
         &profile,
         "codex_cli",
@@ -67,7 +67,7 @@ fn credential_doctor_reports_missing_secret_existing_target_and_permissions() {
 
 #[test]
 fn credential_doctor_reports_high_risk_targets() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-doctor-risk-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -78,14 +78,14 @@ fn credential_doctor_reports_high_risk_targets() {
 
     let home = tempfile::tempdir().expect("temp home");
     let target = home.path().join(".claude/settings.json");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [("auth_json".to_string(), "CLAUDE_AUTH_JSON".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "file_copy".to_string(),
             source: "auth_json".to_string(),
             target: target.to_string_lossy().to_string(),
@@ -94,7 +94,7 @@ fn credential_doctor_reports_high_risk_targets() {
         }],
     };
 
-    let report = crate::credential_profile::doctor_credential_profile(
+    let report = crate::doctor_credential_profile(
         "claude_shared",
         &profile,
         "claude_code",

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_materialize_cleanup_removes_run_scoped_credentials() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-cleanup-run-scoped-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -12,22 +12,22 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
         .expect("insert auth json metadata");
 
     let run_dir = tempfile::tempdir().expect("temp run dir");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [("auth_json".to_string(), "CODEX_AUTH_JSON".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
+        allowed_consumers: crate::AllowedConsumers::default(),
         materializers: vec![
-            crate::credential_profile::CredentialMaterializer {
+            crate::CredentialMaterializer {
                 kind: "file_copy".to_string(),
                 source: "auth_json".to_string(),
                 target: "{credentials_dir}/auth.json".to_string(),
                 chmod: None,
                 template: None,
             },
-            crate::credential_profile::CredentialMaterializer {
+            crate::CredentialMaterializer {
                 kind: "config_overlay".to_string(),
                 source: "auth_json".to_string(),
                 target: "{run_dir}/config.json".to_string(),
@@ -43,13 +43,13 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
     .into_iter()
     .collect();
 
-    let result = crate::credential_profile::apply_credential_materialization(
+    let result = crate::apply_credential_materialization(
         "codex_shared",
         &profile,
         "codex_cli",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions {
+        &crate::CredentialApplyOptions {
             allow_existing: false,
             run_dir: Some(run_dir.path().to_path_buf()),
         },
@@ -74,7 +74,7 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
         r#"{"auth":"{\"token\":\"secret-token\"}"}"#
     );
 
-    let dry_run = crate::credential_profile::cleanup_ephemeral_credential_materializations(
+    let dry_run = crate::cleanup_ephemeral_credential_materializations(
         &store,
         run_dir.path(),
         true,
@@ -89,7 +89,7 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
     assert!(auth_path.exists(), "dry-run must not remove the file");
     assert!(config_path.exists(), "dry-run must not remove the file");
 
-    let applied = crate::credential_profile::cleanup_ephemeral_credential_materializations(
+    let applied = crate::cleanup_ephemeral_credential_materializations(
         &store,
         run_dir.path(),
         false,
@@ -111,7 +111,7 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
     );
 
     let rows = store
-        .list_state(crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
         .expect("list managed credential metadata");
     assert_eq!(rows.len(), 2);
     for row in &rows {
@@ -125,7 +125,7 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
         assert!(!row.value_json.contains("secret-token"));
     }
 
-    let doctor = crate::credential_profile::doctor_credential_profile(
+    let doctor = crate::doctor_credential_profile(
         "codex_shared",
         &profile,
         "codex_cli",

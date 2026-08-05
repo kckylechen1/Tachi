@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-manual-cleanup-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -21,7 +21,7 @@ fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
     // reap could delete this row's own bookkeeping while the credential file
     // it describes is still live on disk.
     let rows_before_cleanup = store
-        .list_state(crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
         .expect("list managed credential metadata before cleanup");
     let metadata_before: serde_json::Value =
         serde_json::from_str(&rows_before_cleanup[0].value_json).expect("metadata JSON");
@@ -30,9 +30,9 @@ fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
         "a not-yet-cleaned row must carry no expires_at at all: {metadata_before}"
     );
 
-    let dry_run = crate::credential_profile::cleanup_managed_credential_materializations(
+    let dry_run = crate::cleanup_managed_credential_materializations(
         &store,
-        &crate::credential_profile::CredentialCleanupOptions {
+        &crate::CredentialCleanupOptions {
             run_dir: None,
             profile: Some("codex_shared".to_string()),
             consumer: Some("codex_cli".to_string()),
@@ -47,9 +47,9 @@ fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
     );
     assert!(auth_path.exists(), "dry-run must not remove target");
 
-    let applied = crate::credential_profile::cleanup_managed_credential_materializations(
+    let applied = crate::cleanup_managed_credential_materializations(
         &store,
-        &crate::credential_profile::CredentialCleanupOptions {
+        &crate::CredentialCleanupOptions {
             run_dir: None,
             profile: Some("codex_shared".to_string()),
             consumer: Some("codex_cli".to_string()),
@@ -68,7 +68,7 @@ fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
     assert!(!raw.contains("CODEX_AUTH_JSON\":"));
 
     let rows = store
-        .list_state(crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
         .expect("list managed credential metadata");
     let metadata: serde_json::Value =
         serde_json::from_str(&rows[0].value_json).expect("metadata JSON");

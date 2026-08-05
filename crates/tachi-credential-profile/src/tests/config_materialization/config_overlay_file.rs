@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn credential_materialize_apply_writes_config_overlay_file_0600() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-materialize-config-file-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -16,14 +16,14 @@ fn credential_materialize_apply_writes_config_overlay_file_0600() {
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
     let config_path = out_dir.path().join("router-config.json");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: Some("router".to_string()),
         description: None,
         entries: [("api_key".to_string(), "ROUTER_API_KEY".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "config_overlay".to_string(),
             source: "api_key".to_string(),
             target: config_path.to_string_lossy().to_string(),
@@ -41,13 +41,13 @@ fn credential_materialize_apply_writes_config_overlay_file_0600() {
         .into_iter()
         .collect();
 
-    let result = crate::credential_profile::apply_credential_materialization(
+    let result = crate::apply_credential_materialization(
         "router_shared",
         &profile,
         "opencode",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions::default(),
+        &crate::CredentialApplyOptions::default(),
     )
     .expect("apply config overlay file materialization");
 

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn credential_run_scoped_cleanup_rejects_parent_dir_targets() {
-    let db_path = crate::utils::test_fixture_path(format!(
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-cleanup-parent-dir-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
@@ -15,14 +15,14 @@ fn credential_run_scoped_cleanup_rejects_parent_dir_targets() {
     let run_dir = parent.path().join("run");
     std::fs::create_dir_all(&run_dir).expect("create run dir");
     let outside_path = parent.path().join("outside-auth.json");
-    let profile = crate::credential_profile::CredentialProfile {
+    let profile = crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [("auth_json".to_string(), "CODEX_AUTH_JSON".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "file_copy".to_string(),
             source: "auth_json".to_string(),
             target: "{run_dir}/../outside-auth.json".to_string(),
@@ -37,13 +37,13 @@ fn credential_run_scoped_cleanup_rejects_parent_dir_targets() {
     .into_iter()
     .collect();
 
-    crate::credential_profile::apply_credential_materialization(
+    crate::apply_credential_materialization(
         "codex_shared",
         &profile,
         "codex_cli",
         &store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions {
+        &crate::CredentialApplyOptions {
             allow_existing: false,
             run_dir: Some(run_dir.clone()),
         },
@@ -51,7 +51,7 @@ fn credential_run_scoped_cleanup_rejects_parent_dir_targets() {
     .expect("apply parent-dir materialization");
     assert!(outside_path.exists());
 
-    let cleanup = crate::credential_profile::cleanup_ephemeral_credential_materializations(
+    let cleanup = crate::cleanup_ephemeral_credential_materializations(
         &store, &run_dir, false,
     )
     .expect("run-scoped cleanup");

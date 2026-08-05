@@ -19,15 +19,15 @@ fn test_vault_entry(name: &str, allowed_agents: Option<Vec<String>>) -> VaultEnt
 
 fn codex_auth_file_profile(
     auth_path: &std::path::Path,
-) -> crate::credential_profile::CredentialProfile {
-    crate::credential_profile::CredentialProfile {
+) -> crate::CredentialProfile {
+    crate::CredentialProfile {
         provider: None,
         description: None,
         entries: [("auth_json".to_string(), "CODEX_AUTH_JSON".to_string())]
             .into_iter()
             .collect(),
-        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
-        materializers: vec![crate::credential_profile::CredentialMaterializer {
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
             kind: "file_copy".to_string(),
             source: "auth_json".to_string(),
             target: auth_path.to_string_lossy().to_string(),
@@ -39,7 +39,7 @@ fn codex_auth_file_profile(
 
 fn apply_codex_auth_file_materialization(
     store: &memcore::MemoryStore,
-    profile: &crate::credential_profile::CredentialProfile,
+    profile: &crate::CredentialProfile,
 ) {
     let secret_values = [(
         "CODEX_AUTH_JSON".to_string(),
@@ -48,13 +48,13 @@ fn apply_codex_auth_file_materialization(
     .into_iter()
     .collect();
 
-    crate::credential_profile::apply_credential_materialization(
+    crate::apply_credential_materialization(
         "codex_shared",
         profile,
         "codex_cli",
         store,
         &secret_values,
-        &crate::credential_profile::CredentialApplyOptions::default(),
+        &crate::CredentialApplyOptions::default(),
     )
     .expect("apply materialization");
 }
