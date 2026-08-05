@@ -78,23 +78,17 @@ retries = 0
 path = "junit.xml"
 
 # Known deterministic reds for the machine-readable gate (#1278 / shift #1383 T5).
-# These three fail on current main for reasons tracked separately from random
-# flakes; `scripts/nextest-known-reds-diff.sh` diffs a JUnit failure set against
-# this named group and exits nonzero on any outsider.
+# The roster is currently EMPTY: the last two members (tests::dispatch_tests::
+# board_first x2) were re-verified GREEN on 2026-08-05 and removed; the third
+# historical member's test was deleted on main by 280983bea (#1319 C2).
+# `scripts/nextest-known-reds-diff.sh` still diffs JUnit failures against this
+# group and exits nonzero on any outsider — with an empty roster, ANY failure
+# is an outsider, which is exactly the contract a clean main should hold.
 #
-# #1413 concern 5: the `test(/regex/)` filter is a substring match, so the three
-# names are written as their EXACT full nextest test paths and anchored with
-# `^...$`. An unanchored (or short-fragment) regex would silently absorb any
-# future test whose path has one of these as a substring/prefix into the known-
-# reds group, turning a genuine new red into a false OK. The full paths below
-# are the `cargo nextest list -p tachi-server` names (binary id stripped).
+# To re-admit a known red: add anchored [[profile.default.overrides]] AND
+# [[profile.ci.overrides]] entries (#1413 concern 5: EXACT full nextest test
+# paths, `^...$`-anchored — substring filters would silently absorb future
+# tests into the group and turn genuine new reds into false OKs).
 [test-groups]
 known-deterministic-reds = { max-threads = "num-cpus" }
 
-[[profile.default.overrides]]
-filter = 'test(/^(tests::dispatch_tests::board_first::successful_dispatch_seeds_status_and_kanban_before_plan_completes|tests::dispatch_tests::board_first::plan_review_pending_response_projects_input_required_kanban_state|tests::dispatch_tests::workflow_artifacts::ux_dispatch_gates::dispatch_confirmation::tachi_task_dispatch_requires_leader_confirmation_for_blocked_issue_flow)$/)'
-test-group = 'known-deterministic-reds'
-
-[[profile.ci.overrides]]
-filter = 'test(/^(tests::dispatch_tests::board_first::successful_dispatch_seeds_status_and_kanban_before_plan_completes|tests::dispatch_tests::board_first::plan_review_pending_response_projects_input_required_kanban_state|tests::dispatch_tests::workflow_artifacts::ux_dispatch_gates::dispatch_confirmation::tachi_task_dispatch_requires_leader_confirmation_for_blocked_issue_flow)$/)'
-test-group = 'known-deterministic-reds'

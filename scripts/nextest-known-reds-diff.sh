@@ -6,7 +6,11 @@
 #
 # Extracts the failed-test set from a nextest JUnit report and diffs it against
 # the `known-deterministic-reds` nextest test-group declared in
-# `.config/nextest.toml` (board_first ×2 + dispatch_confirmation).
+# `.config/nextest.toml` (currently EMPTY — the last two members, board_first
+# x2, were re-verified green and removed 2026-08-05; the third historical
+# member's test was deleted on main by 280983bea, #1319 C2). With an empty
+# roster the gate reduces to "any failure fails the gate". Keep this header
+# in sync with the group.
 #
 # #1413 concern 5 — two hardening passes:
 #   * Exact membership: the group is resolved from live nextest config, and the
@@ -41,6 +45,14 @@
 # No test source edits. No retries.
 
 set -euo pipefail
+
+# Pin collation: `comm` requires both inputs in identical order, and this
+# script mixes shell `sort -u` (locale collation) with Python `sorted()`
+# (codepoint order). Under a non-C locale (e.g. en_SG.UTF-8) the orderings
+# diverge and `comm -23 expected present` fabricates "missing" tests —
+# observed as a false INCOMPLETE_JUNIT (96 phantom absences) on a complete
+# report. CI runs C locale, so this only ever fired on developer machines.
+export LC_ALL=C
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JUNIT="${1:-}"
@@ -101,8 +113,17 @@ else
 fi
 
 if [[ ! -s "${KNOWN_FILE}" ]]; then
-  echo "nextest-known-reds-diff: group(known-deterministic-reds) resolved to zero tests — is .config/nextest.toml present?" >&2
-  exit 2
+  # Zero members is ambiguous: an intentionally-empty roster (every known red
+  # fixed and removed) is a legitimate end-state, but zero can also mean the
+  # config never loaded (drift → every red would silently pass as "outsider
+  # handling" never engages the roster). Disambiguate against the group
+  # DEFINITION, which must exist either way.
+  if grep -q '^known-deterministic-reds[[:space:]]*=' "${ROOT}/.config/nextest.toml" 2>/dev/null; then
+    echo "nextest-known-reds-diff: roster is intentionally empty (group defined, no member overrides) — any failure in the report is an outsider" >&2
+  else
+    echo "nextest-known-reds-diff: group(known-deterministic-reds) has no DEFINITION in .config/nextest.toml — config drift, refusing" >&2
+    exit 2
+  fi
 fi
 
 # Resolve the FULL expected test set for the completeness gate (#1413 concern 5).
