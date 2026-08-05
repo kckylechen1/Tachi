@@ -2570,6 +2570,309 @@ async fn merge_into_for_project_rolls_back_claim_when_archive_fails() {
         .expect("verify archive failure rolled the replacement transaction back");
 }
 
+/// tachi#1635 (#1632 conformance, item 6): the dependent-write half of
+/// `merge_into_for_project_rolls_back_claim_when_archive_fails` above is a
+/// false positive for this specific invariant — that fixture's source/target
+/// share identical (empty) keywords/entities/importance, so
+/// `apply_lifecycle_action`'s `survivor_changed` guard is false and the
+/// survivor `upsert` (the real dependent write) never actually runs; the
+/// "target byte-unchanged" assertion there is trivially true regardless of
+/// whether rollback works. This test gives source and target genuinely
+/// different keywords so the merge fold's `upsert` fires, then injects the
+/// same archive failure and asserts the target's keyword fold is rolled back
+/// together with the claim — the merge fold and the claim/archive share one
+/// physical transaction, so a downstream write failure must unwind both.
+#[tokio::test]
+async fn merge_into_for_project_rolls_back_dependent_keyword_fold_when_archive_fails() {
+    let server = make_server();
+    let mut source = make_entry("wrapper-rollback-kw-source");
+    source.text = "source with a distinct keyword set".to_string();
+    source.summary = "rollback kw source".to_string();
+    source.keywords = vec!["source-only-keyword".to_string()];
+    source.entities = vec!["SourceEntity".to_string()];
+    let mut target = make_entry("wrapper-rollback-kw-target");
+    target.text = "target with a distinct keyword set".to_string();
+    target.summary = "rollback kw target".to_string();
+    target.keywords = vec!["target-only-keyword".to_string()];
+    target.entities = vec!["TargetEntity".to_string()];
+
+    server
+        .with_global_store(|store| {
+            store.insert_if_absent(&source).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&target).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed merge rollback fixture with divergent keywords");
+    let global_db: String = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("resolve global DB path");
+    let offline = rusqlite::Connection::open(global_db).expect("open archive failure fixture");
+    offline
+        .create_scalar_function(
+            "tachi_reserved_reference_write_enabled",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok(0_i64),
+        )
+        .expect("register reserved-reference guard fixture");
+    offline
+        .execute_batch(
+            r#"
+            INSERT INTO memories
+                (id, path, summary, text, archived, created_at, updated_at, timestamp)
+            VALUES
+                ('archive-failure-blocker-kw', '/test/archive-failure-blocker-kw',
+                 'archive failure blocker', 'archive failure blocker', 1,
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+            CREATE UNIQUE INDEX "injected lifecycle archive failure kw"
+                ON memories ((1)) WHERE archived = 1;
+            "#,
+        )
+        .expect("install archive-failure constraint");
+    drop(offline);
+
+    let target_before = server
+        .with_global_store_read(|store| {
+            store
+                .get("wrapper-rollback-kw-target")
+                .map_err(|e| e.to_string())
+                .map(|e| e.expect("target exists before merge"))
+        })
+        .expect("capture target before injected failure");
+    assert_eq!(
+        target_before.keywords,
+        vec!["target-only-keyword".to_string()]
+    );
+
+    let err = crate::facade_memory_ops::consolidate_ops::merge_into_for_project(
+        &server,
+        None,
+        "wrapper-rollback-kw-source",
+        "wrapper-rollback-kw-target",
+    )
+    .expect_err("injected archive failure must abort the merge transaction");
+    assert!(
+        err.contains("injected lifecycle archive failure kw"),
+        "downstream archive failure must surface: {err}"
+    );
+
+    server
+        .with_global_store_read(|store| {
+            let source_after = store
+                .get_with_options("wrapper-rollback-kw-source", true)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "source must remain present".to_string())?;
+            let target_after = store
+                .get("wrapper-rollback-kw-target")
+                .map_err(|e| e.to_string())?
+                .expect("target remains present");
+            assert!(
+                !source_after.archived,
+                "archive failure must leave A active"
+            );
+            assert_eq!(
+                store
+                    .supersession_target("wrapper-rollback-kw-source")
+                    .map_err(|e| e.to_string())?,
+                Some(None),
+                "archive failure must roll back the just-claimed A -> B edge"
+            );
+            assert_eq!(
+                target_after.keywords, target_before.keywords,
+                "the dependent keyword-fold write on the target must roll back \
+                 together with the claim, not partially land"
+            );
+            assert!(
+                !target_after
+                    .keywords
+                    .contains(&"source-only-keyword".to_string()),
+                "a rolled-back merge fold must not leak the source's keyword onto the target"
+            );
+            Ok(())
+        })
+        .expect("verify the dependent keyword-fold write rolled back with the claim");
+}
+
+/// tachi#1635 (#1632 conformance, item 8): the v2 propose/review/apply
+/// receipt (the `LifecycleApplyResult` `apply_lifecycle_proposal` returns,
+/// surfaced by the facade as `{"apply_result":..,"proposal":..}`) is not one
+/// flat struct, but the combined response does bind everything item 8 asks
+/// for: source id + revision and target id + revision (via
+/// `proposal.apply_payload.source|target`), the policy
+/// (`proposal.policy_version`), and the commit result
+/// (`apply_result.archived`/`superseded`). Pin that combination explicitly so
+/// a future refactor that drops one of these fields fails a test instead of
+/// silently shipping an incomplete receipt.
+#[tokio::test]
+async fn consolidate_apply_receipt_binds_source_target_revisions_policy_and_commit_result() {
+    let server = make_server();
+    let older = seed_scratch(
+        "life-receipt-old",
+        "/scratch/receipt/topic",
+        "Older draft of the receipt-binding lifecycle note",
+        10,
+    );
+    let newer = seed_scratch(
+        "life-receipt-new",
+        "/scratch/receipt/topic",
+        "Newer draft of the receipt-binding lifecycle note",
+        1,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&older).map_err(|e| e.to_string())?;
+            store.upsert(&newer).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed receipt-binding pair");
+
+    let source_revision_before = server
+        .with_global_store_read(|store| {
+            store
+                .get("life-receipt-old")
+                .map_err(|e| e.to_string())
+                .map(|e| e.expect("source exists").revision)
+        })
+        .expect("read source revision before apply");
+    let target_revision_before = server
+        .with_global_store_read(|store| {
+            store
+                .get("life-receipt-new")
+                .map_err(|e| e.to_string())
+                .map(|e| e.expect("target exists").revision)
+        })
+        .expect("read target revision before apply");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch/receipt".to_string());
+    let proposed: Value = serde_json::from_str(
+        &crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+            .await
+            .expect("propose"),
+    )
+    .expect("propose json");
+    let proposal_id = proposed["generated"]
+        .as_array()
+        .expect("generated proposals")
+        .iter()
+        .find(|p| p["source_id"] == json!("life-receipt-old"))
+        .expect("proposal for the seeded pair")["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+
+    let mut review = tachi_memory_params("consolidate");
+    review.format = Some("json".to_string());
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("approve");
+
+    let mut apply = tachi_memory_params("consolidate");
+    apply.format = Some("json".to_string());
+    apply.proposal_id = Some(proposal_id);
+    apply.confirm = true;
+    let apply_body = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect("apply");
+    let apply_json: Value = serde_json::from_str(&apply_body).expect("apply json");
+
+    // Source/target ids + revisions, bound via the proposal's typed apply payload.
+    let apply_payload = &apply_json["proposal"]["apply_payload"];
+    assert_eq!(apply_payload["source"]["id"], json!("life-receipt-old"));
+    assert_eq!(
+        apply_payload["source"]["revision"],
+        json!(source_revision_before),
+        "receipt must bind the source revision the CAS actually consumed"
+    );
+    let target_field = apply_payload["target"]
+        .as_object()
+        .expect("supersede/merge_into carry a target snapshot");
+    assert_eq!(target_field["id"], json!("life-receipt-new"));
+    assert_eq!(
+        target_field["revision"],
+        json!(target_revision_before),
+        "receipt must bind the target revision the CAS actually consumed"
+    );
+    // Policy.
+    assert_eq!(
+        apply_json["proposal"]["policy_version"],
+        json!("memory-lifecycle-v2")
+    );
+    // Commit result.
+    assert_eq!(
+        apply_json["apply_result"]["source_id"],
+        json!("life-receipt-old")
+    );
+    assert_eq!(
+        apply_json["apply_result"]["target_id"],
+        json!("life-receipt-new")
+    );
+    assert_eq!(apply_json["apply_result"]["archived"], json!(true));
+}
+
+/// tachi#1635 (#1632 conformance, item 8) — FINDING, not a passing
+/// conformance pin: `merge_into_for_project` (the automated, non-human-
+/// reviewed bypass documented at `apply_lifecycle_action`'s "supersede"/
+/// "merge_into" arms in `consolidate_ops.rs`) returns only the bare
+/// `apply_result` shape (`lifecycle_action`/`source_id`/`target_id`/
+/// `merged_keywords`/`merged_entities`/`superseded`/`archived`) with no
+/// `proposal` wrapper — so, unlike the human-reviewed loop pinned above, its
+/// caller-visible receipt carries neither a revision for source/target nor a
+/// `policy_version`. Reported per #1635 task instructions ("if the receipt
+/// lacks any of these fields, finding -> report, don't add fields"); not
+/// fixed here (edit-only leaf, and the caller of this seam — the distill
+/// batch's dedup pre-selection pass, tachi#1043 D3 — may not need the extra
+/// fields, so whether to add them is a product decision, not a test fix).
+#[tokio::test]
+async fn merge_into_for_project_receipt_omits_revision_and_policy_fields_finding() {
+    let server = make_server();
+    let mut source = make_entry("wrapper-receipt-gap-source");
+    source.text = "receipt gap source".to_string();
+    let mut target = make_entry("wrapper-receipt-gap-target");
+    target.text = "receipt gap target".to_string();
+    server
+        .with_global_store(|store| {
+            store.insert_if_absent(&source).map_err(|e| e.to_string())?;
+            store.insert_if_absent(&target).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed receipt-gap fixture");
+
+    let receipt = crate::facade_memory_ops::consolidate_ops::merge_into_for_project(
+        &server,
+        None,
+        "wrapper-receipt-gap-source",
+        "wrapper-receipt-gap-target",
+    )
+    .expect("merge_into_for_project succeeds");
+
+    let receipt_object = receipt.as_object().expect("receipt is a JSON object");
+    assert!(
+        !receipt_object.contains_key("revision")
+            && !receipt_object.contains_key("source_revision")
+            && !receipt_object.contains_key("target_revision"),
+        "FINDING (tachi#1635 item 8): merge_into_for_project's receipt \
+         does not bind either endpoint's revision: {receipt}"
+    );
+    assert!(
+        !receipt_object.contains_key("policy_version"),
+        "FINDING (tachi#1635 item 8): merge_into_for_project's receipt \
+         does not bind a policy: {receipt}"
+    );
+}
+
 #[tokio::test]
 async fn consolidate_propose_near_dup_merge_for_cross_path_raw_twins() {
     let server = make_server();
