@@ -16,7 +16,7 @@ Tachi is a local-first context and memory database for AI agents. It runs as an 
 Current architecture:
 
 - `memcore` owns SQLite storage, migrations, hybrid search, graph/domain state, packs, vault metadata, and sqlite-vec integration.
-- `tachi-server` owns the MCP/CLI surface, profile filtering, Hub routing, dispatch/workflow tools, wiki operations, vault encryption, daemon locking, Foundry background work, and verification/arena/eval ledgers.
+- `tachi-server` owns the MCP/CLI surface, profile filtering, Hub routing, dispatch/workflow tools, wiki operations, vault encryption, daemon locking, Foundry background work, and verification/staffing/eval ledgers.
 - Hosts should connect through the profile-based MCP surface instead of exposing every low-level tool by default.
 
 ---
@@ -683,8 +683,8 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 
 | Profile | Exposed surface | Best for |
 |---|---|---|
-| `standard` | Daily agent-intent surface: `tachi_save`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. Arena and manual native-eval intake are hidden. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). Ordinary delegation uses the host's native subagent. |
-| `coordinate` | `remember` + `coordinate` bundles: adds advanced handoff/workflow/shell/arena tools. Tachi-owned staffing (`tachi_staff(action='start')`) remains operator-only. | Advanced coordination and adapter workflows. |
+| `standard` | Daily agent-intent surface: `tachi_save`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. `tachi_staff` and manual native-eval intake are hidden. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). Ordinary delegation uses the host's native subagent. |
+| `coordinate` | `remember` + `coordinate` bundles: adds advanced handoff/workflow/orchestrator/agents/staff tools. Tachi-owned staffing (`tachi_staff(action='start')`) remains operator-only. | Advanced coordination and adapter workflows. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
 | `delegate` | Curated 11-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`, and read-only `peer_query`. Standalone `run_skill` is a legacy compatibility route outside the default delegate profile. | Worker subagents spawned via `tachi_staff(action='start')`. |
 | `admin` | Full catalog, including explicitly justified durable/remote Tachi dispatch. | Maintenance, development, and operator-approved execution exceptions. |
