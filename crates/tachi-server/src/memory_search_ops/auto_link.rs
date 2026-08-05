@@ -864,6 +864,20 @@ mod tests {
     use rmcp::handler::server::wrapper::Parameters;
     use serde_json::json;
 
+    /// tachi#1432: same canonical-shape idiom pinned in memcore's
+    /// `db/common.rs` (`canonical_shape()`/`assert_canonical`) — millisecond
+    /// precision, `Z` suffix, no numeric offset. Reused here as a
+    /// writer-output discriminator for this crate's `memcore::now_utc_iso()`
+    /// call site in `run_auto_linking`.
+    fn assert_canonical_timestamp_shape(ts: &str) {
+        let canonical =
+            regex::Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$").unwrap();
+        assert!(
+            canonical.is_match(ts),
+            "not canonical Millis+Z shape: {ts:?}"
+        );
+    }
+
     fn test_entry(id: &str, text: &str) -> MemoryEntry {
         MemoryEntry {
             id: id.into(),
@@ -1430,6 +1444,31 @@ mod tests {
             "the supersede insert must have landed, got written={} post_write_failures={}",
             receipt.edges_written,
             receipt.post_write_failures
+        );
+
+        // tachi#1432 CONCERN 3: the fixture above forces a real supersede, so
+        // `mark_superseded_closing_validity` ran against `seeded_id` with the
+        // `now = memcore::now_utc_iso()` stamp this call site (line ~732)
+        // computes. Read the row back and pin its shape — reintroducing a
+        // bare `Utc::now().to_rfc3339()` at that call site must RED here,
+        // not just in the renderer's own unit test.
+        let (updated_at, valid_until): (String, Option<String>) = server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT updated_at, valid_until FROM memories WHERE id = ?1",
+                        [&seeded_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read back superseded row");
+        assert_canonical_timestamp_shape(&updated_at);
+        assert_canonical_timestamp_shape(
+            valid_until
+                .as_deref()
+                .expect("supersede must close valid_until"),
         );
 
         // Timer 1 — `read_timer` (brackets the per-entity store search).
