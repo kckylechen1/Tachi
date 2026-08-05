@@ -3678,9 +3678,7 @@ mod idless_upsert_tests {
         near_dup.text = near_dup_text;
 
         store
-            .upsert_batch_with_precommit_preserving_anchor_rows(&[original, near_dup], |_tx| {
-                Ok(())
-            })
+            .upsert_batch_with_precommit_preserving_anchor_rows(&[original, near_dup], |_tx| Ok(()))
             .expect("tidy-migration batch copy of a near-duplicate pair");
 
         assert_near_duplicates_both_survive(&store, "/notes/tidy-nonmerge", "tidy-nonmerge-second");
