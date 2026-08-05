@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# nextest-census.sh — append one JSONL row per failed tachi-server test (#1278 step ①)
+# nextest-census.sh — append one JSONL row per failed test in the covered
+# packages (tachi-server + tachi-contract-tests) (#1278 step ①)
 #
 # Usage:
 #   scripts/nextest-census.sh
 #
 # Behavior:
-#   1. Runs `cargo nextest run -p tachi-server --no-fail-fast` once with JUnit
-#      output enabled. Set NEXTEST_TEST_THREADS to pass an explicit nextest
-#      concurrency setting through to the run.
+#   1. Runs `cargo nextest run -p tachi-server -p tachi-contract-tests
+#      --no-fail-fast` once with JUnit output enabled. Set NEXTEST_TEST_THREADS
+#      to pass an explicit nextest concurrency setting through to the run. The
+#      package set must stay in sync with NEXTEST_PACKAGES in
+#      scripts/nextest-known-reds-diff.sh — both cover the same test set, and a
+#      package listed in one but not the other makes the two disagree about
+#      what a complete run is.
 #   2. Parses the JUnit XML into one JSONL line per failed test:
 #        {run_id, test_threads, target_dir, target_state_at_invocation,
 #         run_runtime_s, test_id, failure_line1_hash, recurrence, ...}
@@ -84,7 +89,7 @@ echo "nextest-census: target_dir=${TARGET_DIR} source=${TARGET_SOURCE} state_at_
 set +e
 (
   cd "${ROOT}"
-  nextest_args=(nextest run -p tachi-server --no-fail-fast --profile census --target-dir "${TARGET_DIR}")
+  nextest_args=(nextest run -p tachi-server -p tachi-contract-tests --no-fail-fast --profile census --target-dir "${TARGET_DIR}")
   if [[ "${TEST_THREADS}" != "default" ]]; then
     nextest_args+=(--test-threads "${TEST_THREADS}")
   fi
@@ -261,6 +266,15 @@ for suite in suites:
             continue
         classname = case.get("classname") or ""
         name = case.get("name") or ""
+        # test_id KEEPS the binary id (classname). Deliberate, and the reason
+        # this script needed no dedupe guard when it was widened to a second
+        # package (#1610 Track T): the accumulated signature key is
+        # (test_id, failure_line1_hash), so two same-named tests in different
+        # binaries stay distinct rows. scripts/nextest-known-reds-diff.sh does
+        # the opposite — it STRIPS the binary id to match JUnit names against
+        # `cargo nextest list` output — which is exactly why that script carries
+        # an AMBIGUOUS_TEST_NAME guard and this one does not. Do not "harmonize"
+        # the two.
         test_id = f"{classname}::{name}" if classname else name
         # Prefer message attr; fall back to element text.
         msg = (node.get("message") or "").strip()

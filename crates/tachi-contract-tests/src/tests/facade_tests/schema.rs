@@ -1,4 +1,7 @@
-use super::*;
+use serde_json::{json, Value};
+use tachi_params::{
+    TachiEventParams, TachiMemoryParams, TachiSearchParams, TachiSkillParams, TachiTaskParams,
+};
 
 fn enum_values(property: &Value, name: &str) -> Vec<String> {
     property["enum"]
@@ -61,7 +64,7 @@ fn tachi_memory_action_schema_declares_enum_values() {
     }
     assert_eq!(
         action["enum"].as_array().expect("action enum").len(),
-        crate::tool_params::TACHI_MEMORY_ACTIONS.len(),
+        tachi_params::TACHI_MEMORY_ACTIONS.len(),
         "advertised action enum must match the TACHI_MEMORY_ACTIONS inventory"
     );
 }
@@ -152,7 +155,7 @@ fn tachi_skill_action_schema_declares_bundle_and_loadout() {
 
 #[test]
 fn tachi_staff_schema_exposes_only_start_and_status() {
-    let schema = rmcp::schemars::schema_for!(crate::tool_params::TachiStaffParams);
+    let schema = rmcp::schemars::schema_for!(tachi_params::TachiStaffParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
     let properties = value["properties"].as_object().expect("staff properties");
     let actions = properties["action"]["enum"]
@@ -190,7 +193,7 @@ fn tachi_staff_schema_exposes_only_start_and_status() {
 /// pressure.
 #[test]
 fn staff_status_deserializes_without_reason() {
-    use crate::tool_params::TachiStaffParams;
+    use tachi_params::TachiStaffParams;
     let params = serde_json::from_value::<TachiStaffParams>(serde_json::json!({
         "action": "status",
         "dispatch_id": "20260804T000000Z-claude-deadbeef",
@@ -214,7 +217,7 @@ fn staff_status_deserializes_without_reason() {
 /// concern, not a cross-action struct requirement.
 #[test]
 fn staff_start_deserializes_with_reason_none_then_handler_rejects() {
-    use crate::tool_params::TachiStaffParams;
+    use tachi_params::TachiStaffParams;
     let params = serde_json::from_value::<TachiStaffParams>(serde_json::json!({
         "action": "start",
         "task": "launch a worker",
@@ -230,7 +233,7 @@ fn staff_start_deserializes_with_reason_none_then_handler_rejects() {
 /// Discrimination test: `staffing_reason` is a closed typed enum, not free-form.
 #[test]
 fn staff_start_reason_is_typed_not_free_form() {
-    use crate::tool_params::TachiStaffParams;
+    use tachi_params::TachiStaffParams;
     let admitted = serde_json::from_value::<TachiStaffParams>(serde_json::json!({
         "action": "start",
         "task": "typed reason",
@@ -259,7 +262,7 @@ fn staff_start_reason_is_typed_not_free_form() {
 /// it semantically). This pins that the read path requires its own identifier.
 #[test]
 fn staff_status_without_dispatch_id_is_handler_rejected() {
-    use crate::tool_params::TachiStaffParams;
+    use tachi_params::TachiStaffParams;
     // Schema-optional, so this deserializes (None). The handler rejects.
     let params = serde_json::from_value::<TachiStaffParams>(serde_json::json!({
         "action": "status",
@@ -320,7 +323,7 @@ fn tachi_task_action_schema_declares_feature_briefing() {
 
 #[test]
 fn tachi_gh_action_schema_mentions_lifecycle_actions() {
-    let schema = rmcp::schemars::schema_for!(crate::tool_params::TachiGhParams);
+    let schema = rmcp::schemars::schema_for!(tachi_params::TachiGhParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
     let action = &value["properties"]["action"];
     let description = action["description"].as_str().expect("action description");
@@ -407,20 +410,16 @@ fn tachi_task_numeric_params_schema_accepts_string_or_number() {
 
 #[test]
 fn tachi_gh_numeric_params_schema_accepts_string_or_number() {
-    let value = serde_json::to_value(rmcp::schemars::schema_for!(
-        crate::tool_params::TachiGhParams
-    ))
-    .expect("schema serializes");
+    let value = serde_json::to_value(rmcp::schemars::schema_for!(tachi_params::TachiGhParams))
+        .expect("schema serializes");
     assert_field_accepts_string_and_number(&value, "number", "integer");
     assert_field_accepts_string_and_number(&value, "limit", "integer");
 }
 
 #[test]
 fn tachi_verify_numeric_params_schema_accepts_string_or_number() {
-    let value = serde_json::to_value(rmcp::schemars::schema_for!(
-        crate::tool_params::TachiVerifyParams
-    ))
-    .expect("schema serializes");
+    let value = serde_json::to_value(rmcp::schemars::schema_for!(tachi_params::TachiVerifyParams))
+        .expect("schema serializes");
     assert_field_accepts_string_and_number(&value, "exit_code", "integer");
     assert_field_accepts_string_and_number(&value, "limit", "integer");
 }
@@ -428,7 +427,7 @@ fn tachi_verify_numeric_params_schema_accepts_string_or_number() {
 #[test]
 fn tachi_complete_numeric_params_schema_accepts_string_or_number() {
     let value = serde_json::to_value(rmcp::schemars::schema_for!(
-        crate::tool_params::TachiCompleteParams
+        tachi_params::TachiCompleteParams
     ))
     .expect("schema serializes");
     assert_field_accepts_string_and_number(&value, "duration_ms", "integer");
@@ -439,25 +438,19 @@ fn tachi_complete_numeric_params_schema_accepts_string_or_number() {
 
 #[test]
 fn tachi_save_and_remember_importance_schema_accepts_string_or_number() {
-    let save = serde_json::to_value(rmcp::schemars::schema_for!(
-        crate::tool_params::TachiSaveParams
-    ))
-    .expect("schema serializes");
+    let save = serde_json::to_value(rmcp::schemars::schema_for!(tachi_params::TachiSaveParams))
+        .expect("schema serializes");
     assert_field_accepts_string_and_number(&save, "importance", "number");
 
-    let remember = serde_json::to_value(rmcp::schemars::schema_for!(
-        crate::tool_params::RememberParams
-    ))
-    .expect("schema serializes");
+    let remember = serde_json::to_value(rmcp::schemars::schema_for!(tachi_params::RememberParams))
+        .expect("schema serializes");
     assert_field_accepts_string_and_number(&remember, "importance", "number");
 }
 
 #[test]
 fn tachi_save_schema_advertises_both_fact_extraction_kinds() {
-    let value = serde_json::to_value(rmcp::schemars::schema_for!(
-        crate::tool_params::TachiSaveParams
-    ))
-    .expect("schema serializes");
+    let value = serde_json::to_value(rmcp::schemars::schema_for!(tachi_params::TachiSaveParams))
+        .expect("schema serializes");
     let kinds = enum_values(&value["properties"]["kind"], "kind");
 
     for kind in ["facts", "extract_facts"] {
@@ -471,7 +464,7 @@ fn tachi_save_schema_advertises_both_fact_extraction_kinds() {
 #[test]
 fn search_memory_mmr_threshold_schema_accepts_string_or_number() {
     let value = serde_json::to_value(rmcp::schemars::schema_for!(
-        crate::tool_params::SearchMemoryParams
+        tachi_params::SearchMemoryParams
     ))
     .expect("schema serializes");
     assert_field_accepts_string_and_number(&value, "mmr_threshold", "number");
@@ -499,7 +492,7 @@ fn tachi_task_runtime_accepts_numeric_strings() {
 
 #[test]
 fn tachi_gh_runtime_accepts_numeric_strings() {
-    let params: crate::tool_params::TachiGhParams = serde_json::from_value(json!({
+    let params: tachi_params::TachiGhParams = serde_json::from_value(json!({
         "action": "issue_read",
         "number": "42",
         "limit": "5"
@@ -511,7 +504,7 @@ fn tachi_gh_runtime_accepts_numeric_strings() {
 
 #[test]
 fn tachi_verify_runtime_accepts_numeric_strings() {
-    let params: crate::tool_params::TachiVerifyParams = serde_json::from_value(json!({
+    let params: tachi_params::TachiVerifyParams = serde_json::from_value(json!({
         "action": "record",
         "exit_code": "0",
         "limit": "3"

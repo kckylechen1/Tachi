@@ -1,7 +1,6 @@
 mod cleaner_bin;
 mod delete_policy;
 mod preview;
-mod static_safety;
 
 fn run_git(cwd: &std::path::Path, args: &[&str]) {
     let out = std::process::Command::new("git")

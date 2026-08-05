@@ -18,9 +18,10 @@
 #     full test paths, so a future test cannot be substring-absorbed into the
 #     known-reds group.
 #   * Completeness gate: before declaring OK, the report is checked against the
-#     full `cargo nextest list -p tachi-server` set — a valid-but-incomplete
-#     (truncated) JUnit is refused (exit 4), since it could hide a new red that
-#     never got to run.
+#     full `cargo nextest list` set across ${NEXTEST_PACKAGES[@]} (today:
+#     tachi-server + tachi-contract-tests) — a valid-but-incomplete (truncated)
+#     JUnit is refused (exit 4), since it could hide a new red that never got
+#     to run.
 #
 # Exit codes:
 #   0 — every failure is in the known-red list AND the JUnit covers the full
@@ -28,7 +29,10 @@
 #       and missing expected tests are both forbidden).
 #   1 — at least one failure is outside the known-red list (outsiders printed).
 #   2 — usage error; the JUnit report at <junit.xml> is missing/malformed; the
-#       known group resolved to zero tests; or the expected set resolved empty.
+#       known group resolved to zero tests; the expected set resolved empty; or
+#       AMBIGUOUS_TEST_NAME — the same binary-id-stripped test path appears in
+#       more than one covered package's binary, so the keys this gate compares
+#       are no longer unique (see the dedupe guard below).
 #   3 — `cargo nextest list` itself failed (nonzero exit). cargo's stderr is
 #       printed, not swallowed, so the failure has a visible diagnostic.
 #   4 — INCOMPLETE_JUNIT: the JUnit parsed cleanly but is missing one or more
@@ -66,7 +70,45 @@ KNOWN_FILE="$(mktemp)"
 EXPECTED_FILE="$(mktemp)"
 FAILED_FILE="$(mktemp)"
 PRESENT_FILE="$(mktemp)"
-trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}"' EXIT
+# Pre-`sort -u` capture used by the duplicate-name guard. Allocated here, next
+# to the others, so it is covered by the EXIT trap: the guard runs inside a
+# `set -euo pipefail` script and can exit at any point between writing this
+# file and consuming it.
+RAW_FILE="$(mktemp)"
+trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}" "${RAW_FILE}"' EXIT
+
+# Packages whose tests this gate covers. Widened whenever tests MOVE OUT of
+# tachi-server into a workspace test-only crate (#1610 Track T). The covered
+# SET must stay identical across a move: a destination crate that is not listed
+# here silently drops its tests out of EXPECTED, and the completeness gate keeps
+# reporting OK over fewer tests — the exact silent-pass this gate exists to stop.
+#
+# Deliberately NOT `--workspace`: that would pull thousands of unrelated inline
+# tests from every other crate into EXPECTED, which is a different gate with
+# different semantics.
+NEXTEST_PACKAGES=(-p tachi-server -p tachi-contract-tests)
+
+# Refuse a list whose binary-id-stripped names are not unique.
+#
+# This became possible only when the gate started spanning more than one test
+# binary. `resolve_nextest_list` strips the binary-id prefix so names match the
+# JUnit <testcase name> attribute; with a single binary those names were unique
+# by construction. With two, an identical test path in both binaries collapses
+# under `sort -u` into ONE key in both EXPECTED and PRESENT — so a failure in
+# one binary can be masked by a pass in the other, and the completeness gate
+# would not notice the missing testcase either. Loud refusal, not a silent
+# collapse: exit 2 (config/usage), never 3, which is reserved for a real
+# `cargo nextest list` failure and prints a misleading cargo-blaming message.
+assert_unique_test_names() {
+  local list_file="$1" dupes
+  dupes="$(sort "${list_file}" | uniq -d)"
+  if [[ -n "${dupes}" ]]; then
+    echo "nextest-known-reds-diff: AMBIGUOUS_TEST_NAME — the same test path exists in more than one binary, so the binary-id-stripped keys are no longer unique and a failure in one binary can be masked by a pass in another:" >&2
+    # shellcheck disable=SC2086 # nextest test paths never contain whitespace.
+    printf '  - %s\n' ${dupes} >&2
+    exit 2
+  fi
+}
 
 # Resolve a set of nextest test names into $1 (one fully-qualified name per
 # line, binary id stripped, sorted+unique). $2 is an optional nextest -E filter
@@ -85,25 +127,29 @@ resolve_nextest_list() {
   (
     cd "${ROOT}"
     # Default human list lines look like: `tachi-server tests::path::to::test`
+    # (the prefix is the binary id, which may now be ANY covered package).
     # JUnit <testcase name="..."> carries only the `tests::…` path — strip the
     # binary-id prefix so the sets compare.
     if [[ -n "${filter_expr}" ]]; then
-      cargo nextest list -p tachi-server -E "${filter_expr}" --color never \
+      cargo nextest list "${NEXTEST_PACKAGES[@]}" -E "${filter_expr}" --color never \
         --target-dir "${CARGO_TARGET_DIR:-/Users/kckylechen/.cache/sigil-shared-target}"
     else
-      cargo nextest list -p tachi-server --color never \
+      cargo nextest list "${NEXTEST_PACKAGES[@]}" --color never \
         --target-dir "${CARGO_TARGET_DIR:-/Users/kckylechen/.cache/sigil-shared-target}"
     fi \
       | sed -E 's/\x1b\[[0-9;]*m//g' \
       | sed -n 's/^[^ ]\{1,\} //p' \
-      | sed '/^$/d' \
-      | sort -u
-  ) > "${out_file}"
+      | sed '/^$/d'
+  ) > "${RAW_FILE}" || return $?
+  assert_unique_test_names "${RAW_FILE}"
+  sort -u "${RAW_FILE}" > "${out_file}"
 }
 
 # Resolve the known-red group (source of truth = .config/nextest.toml).
 if [[ -n "${NEXTEST_KNOWN_REDS_KNOWN_LIST:-}" && -s "${NEXTEST_KNOWN_REDS_KNOWN_LIST}" ]]; then
-  # Pre-resolved/test seam: trust the supplied list verbatim.
+  # Pre-resolved/test seam: trust the supplied list verbatim — but not its
+  # uniqueness. The seam must not be a hole around the dedupe guard.
+  assert_unique_test_names "${NEXTEST_KNOWN_REDS_KNOWN_LIST}"
   sort -u "${NEXTEST_KNOWN_REDS_KNOWN_LIST}" > "${KNOWN_FILE}"
 else
   if ! resolve_nextest_list "${KNOWN_FILE}" 'group(known-deterministic-reds)'; then
@@ -128,6 +174,7 @@ fi
 
 # Resolve the FULL expected test set for the completeness gate (#1413 concern 5).
 if [[ -n "${NEXTEST_KNOWN_REDS_EXPECTED_LIST:-}" && -s "${NEXTEST_KNOWN_REDS_EXPECTED_LIST}" ]]; then
+  assert_unique_test_names "${NEXTEST_KNOWN_REDS_EXPECTED_LIST}"
   sort -u "${NEXTEST_KNOWN_REDS_EXPECTED_LIST}" > "${EXPECTED_FILE}"
 else
   if ! resolve_nextest_list "${EXPECTED_FILE}" ''; then
@@ -185,7 +232,7 @@ PRESENT_N=$(wc -l < "${PRESENT_FILE}" | tr -d ' ')
 echo "nextest-known-reds-diff: known_group=${KNOWN_N} junit_failures=${FAIL_N} expected=${EXPECTED_N} junit_present=${PRESENT_N}"
 
 OUTSIDERS="$(mktemp)"
-trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}" "${OUTSIDERS}"' EXIT
+trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}" "${RAW_FILE}" "${OUTSIDERS}"' EXIT
 # Failures not in the known list.
 comm -23 "${FAILED_FILE}" "${KNOWN_FILE}" > "${OUTSIDERS}"
 
@@ -202,7 +249,7 @@ fi
 # (a truncated run could hide a new red that never got to run). Supersets (a
 # workspace-wide JUnit) are fine — only a missing expected test is a refusal.
 MISSING="$(mktemp)"
-trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}" "${OUTSIDERS}" "${MISSING}"' EXIT
+trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}" "${RAW_FILE}" "${OUTSIDERS}" "${MISSING}"' EXIT
 comm -23 "${EXPECTED_FILE}" "${PRESENT_FILE}" > "${MISSING}"
 if [[ -s "${MISSING}" ]]; then
   MISSING_N=$(wc -l < "${MISSING}" | tr -d ' ')

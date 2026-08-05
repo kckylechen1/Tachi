@@ -65,14 +65,30 @@ def write_list(path: Path, names: list[str]) -> None:
     path.write_text("\n".join(sorted(set(names))) + "\n", encoding="utf-8")
 
 
-def run_gate(junit_path: Path, known: list[str], expected: list[str]) -> subprocess.CompletedProcess:
+def write_list_verbatim(path: Path, names: list[str]) -> None:
+    """Write a list WITHOUT sorting or de-duplicating.
+
+    `write_list` passes its input through `sorted(set(...))`, which would erase
+    the very duplicate the AMBIGUOUS_TEST_NAME guard exists to catch.
+    """
+    path.write_text("\n".join(names) + "\n", encoding="utf-8")
+
+
+def run_gate(
+    junit_path: Path,
+    known: list[str],
+    expected: list[str],
+    *,
+    dedupe: bool = True,
+) -> subprocess.CompletedProcess:
     """Invoke the gate with both cargo resolutions bypassed via the seams."""
     with tempfile.TemporaryDirectory() as tmp:
         tmpd = Path(tmp)
         known_file = tmpd / "known.txt"
         expected_file = tmpd / "expected.txt"
-        write_list(known_file, known)
-        write_list(expected_file, expected)
+        writer = write_list if dedupe else write_list_verbatim
+        writer(known_file, known)
+        writer(expected_file, expected)
         env = {
             **os.environ,
             "NEXTEST_KNOWN_REDS_KNOWN_LIST": str(known_file),
@@ -164,6 +180,23 @@ class KnownRedsGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             res = run_gate(Path(tmp) / "does-not-exist.xml", KNOWN_REDS, KNOWN_REDS)
             self.assertEqual(2, res.returncode, res.stdout + res.stderr)
+
+    def test_duplicate_expected_name_is_ambiguous_exit2(self) -> None:
+        # #1610 Track T: the gate now spans more than one test binary, and it
+        # strips the binary-id prefix so names match JUnit <testcase name>.
+        # A test path present in TWO binaries therefore collapses under
+        # `sort -u` into one key, letting a pass in one binary mask a failure in
+        # the other. That must be a loud refusal (exit 2), not a silent merge.
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = self._write_junit(
+                Path(tmp),
+                [(KNOWN_REDS[0], True), (PASSING, False)],
+            )
+            expected = [KNOWN_REDS[0], PASSING, PASSING]
+            res = run_gate(junit, KNOWN_REDS[:1], expected, dedupe=False)
+            self.assertEqual(2, res.returncode, res.stdout + res.stderr)
+            self.assertIn("AMBIGUOUS_TEST_NAME", res.stderr)
+            self.assertIn(PASSING, res.stderr)
 
 
 class NextestTomlFilterTests(unittest.TestCase):

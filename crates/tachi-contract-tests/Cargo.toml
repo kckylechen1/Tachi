@@ -1,0 +1,22 @@
+[package]
+name = "tachi-contract-tests"
+version = "1.9.1"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "Workspace contract/census tests (docs fixtures, schema shape, portable mirror). Test-only: the lib is empty and every dependency is a dev-dependency, so `cargo build --release` compiles nothing here. Extracted from tachi-server's test binary (#1610 Track T)."
+
+[dependencies]
+
+[dev-dependencies]
+chrono = { workspace = true }
+serde_json = { workspace = true }
+tachi-params = { path = "../tachi-params" }
+tachi-hub = { path = "../tachi-hub" }
+tachi-merge-ops = { path = "../tachi-merge-ops" }
+# `server` is load-bearing, not surplus: hub_tests/schema.rs calls
+# rmcp::handler::server::tool::schema_for_type, and rmcp gates `handler::server`
+# behind feature = "server" (rmcp-1.8.0 src/handler.rs:3). Without it this crate
+# compiles only under workspace feature unification and breaks under
+# `cargo test -p tachi-contract-tests`.
+rmcp = { version = "1.2", features = ["schemars", "server"] }

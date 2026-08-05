@@ -2303,6 +2303,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-contract-tests"
+version = "1.9.1"
+dependencies = [
+ "chrono",
+ "rmcp",
+ "serde_json",
+ "tachi-hub",
+ "tachi-merge-ops",
+ "tachi-params",
+]
+
+[[package]]
 name = "tachi-dispatch"
 version = "1.9.1"
 dependencies = [
