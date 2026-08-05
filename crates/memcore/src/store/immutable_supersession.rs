@@ -418,6 +418,35 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         db::add_edge(&self.tx, edge)
     }
 
+    /// Record a durable outbox event for an object this transaction has
+    /// already written (tachi#1643).
+    ///
+    /// This is how a multi-write replacement gets #1630's atomicity guarantee
+    /// without collapsing into
+    /// [`MemoryStore::commit_with_outbox_event`], which owns its own
+    /// transaction and therefore cannot be nested inside this one: the event
+    /// commits with the supersession claim, the archive, the edges and the
+    /// projections, or none of them do.
+    ///
+    /// The payload digest is computed from the object as this transaction now
+    /// holds it, so ordering matters — call this *after* the write whose
+    /// result the event should announce. An `object_id` this transaction has
+    /// not written is a typed [`MemoryError::NotFound`], which is the same
+    /// refusal that makes "no event without its object" enforceable at the
+    /// simple seam.
+    ///
+    /// No reserved-reference authorization is taken here: the enclosing
+    /// operation already holds it, that guard is a non-reentrant
+    /// compare-and-swap, and the outbox table is not a reserved-reference
+    /// surface.
+    pub fn enqueue_outbox_event(
+        &mut self,
+        object_id: &str,
+        event: &crate::store::outbox::OutboxEventMeta,
+    ) -> Result<db::OutboxEventRow, MemoryError> {
+        crate::store::outbox::enqueue_outbox_event_within_tx(&self.tx, object_id, event)
+    }
+
     /// Save a caller-stable derived item inside the replacement transaction.
     #[allow(clippy::too_many_arguments)]
     pub fn save_derived_with_id(

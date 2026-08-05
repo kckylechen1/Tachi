@@ -1,6 +1,7 @@
 use portable_kernel::{
-    DanglingSupersession, MemoryEntry, MemoryError, MemoryStore, PortableImportEntry,
-    PortableImportReceipt, ADMIN_SURFACE_ENABLED, IS_PORTABLE_BUILD,
+    outbox_payload_digest, DanglingSupersession, LocalStoreStatus, MemoryEntry, MemoryError,
+    MemoryStore, OutboxEventMeta, OutboxState, PortableImportEntry, PortableImportReceipt,
+    RemoteSyncStatus, ADMIN_SURFACE_ENABLED, IS_PORTABLE_BUILD,
 };
 
 #[test]
@@ -207,4 +208,157 @@ fn portable_build_import_snapshot_batch_reports_dangling_and_refuses_existing_id
         empty.lifecycle_checksum,
         PortableImportReceipt::expected_lifecycle_checksum(&[]).expect("expected lifecycle")
     );
+}
+
+fn outbox_meta(event_id: &str) -> OutboxEventMeta {
+    OutboxEventMeta {
+        event_id: event_id.into(),
+        object_class: "memory".into(),
+        authority_class: "host".into(),
+        source_store: "portable".into(),
+        source_partition: "default".into(),
+    }
+}
+
+/// tachi#1643: the durable outbox is PORTABLE surface, so the whole leaf —
+/// commit boundary, state machine, health read model — must be callable and
+/// resolve in a build that has genuinely disabled the admin feature. #1630's
+/// premise is a host-owned sync loop with no Tachi daemon, so an outbox that
+/// only worked in the product build would miss its only consumer. Compiled in
+/// isolation via `required-features = ["portable-contract-test"]` so workspace
+/// feature unification cannot mask an accidental admin dependency.
+///
+/// Note what this test cannot use: `MemoryStore::connection()` is absent
+/// outside admin/test builds, so every assertion here goes through the same
+/// public API an external portable consumer has. That is the point.
+#[test]
+fn portable_build_commit_with_outbox_event_is_atomic() {
+    let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+    assert_eq!(
+        store.outbox_health().expect("health").remote_sync_status,
+        RemoteSyncStatus::Idle,
+        "an untouched outbox has never held an event"
+    );
+
+    let receipt = store
+        .commit_with_outbox_event(
+            &smoke_entry("portable-outbox-1"),
+            &outbox_meta("portable-evt-1"),
+        )
+        .expect("commit_with_outbox_event must succeed on a portable-build store");
+    assert_eq!(receipt.event.state, OutboxState::Pending);
+    assert_eq!(receipt.event.object_id, "portable-outbox-1");
+    assert_eq!(receipt.event.source_revision, receipt.object_revision);
+
+    let stored = store
+        .get("portable-outbox-1")
+        .expect("get")
+        .expect("the committed row must be visible");
+    assert_eq!(
+        receipt.event.payload_digest,
+        outbox_payload_digest(&stored).expect("digest"),
+        "the event records the digest of the payload as stored"
+    );
+
+    // A duplicate event_id fails between the memory write and the event
+    // insert, so neither half may survive.
+    let error = store
+        .commit_with_outbox_event(
+            &smoke_entry("portable-outbox-2"),
+            &outbox_meta("portable-evt-1"),
+        )
+        .expect_err("a duplicate event_id must fail the commit");
+    assert!(
+        matches!(error, MemoryError::Duplicate(_)),
+        "unexpected error variant: {error:?}"
+    );
+    assert!(
+        store.get("portable-outbox-2").expect("get").is_none(),
+        "the memory write must roll back with its failed event"
+    );
+    assert_eq!(
+        store
+            .list_outbox_events(OutboxState::Pending, 16)
+            .expect("list pending")
+            .len(),
+        1,
+        "only the first commit's event may exist"
+    );
+}
+
+/// The typed state machine and the six health fields, over the portable API.
+#[test]
+fn portable_build_outbox_state_machine_and_health() {
+    let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+    store
+        .commit_with_outbox_event(
+            &smoke_entry("portable-outbox-fsm"),
+            &outbox_meta("portable-evt-fsm"),
+        )
+        .expect("commit");
+
+    let error = store
+        .transition_outbox_event("portable-evt-fsm", OutboxState::Acknowledged, None)
+        .expect_err("pending -> acknowledged skips in_flight and must be refused");
+    assert!(
+        matches!(error, MemoryError::OutboxIllegalTransition { .. }),
+        "unexpected error variant: {error:?}"
+    );
+
+    let backlog = store.outbox_health().expect("health");
+    assert_eq!(backlog.pending_count, 1);
+    assert_eq!(
+        backlog.remote_sync_status,
+        RemoteSyncStatus::Backlogged { pending_count: 1 },
+        "no remote exists in this leaf, so a committed mutation rests as backlog"
+    );
+    assert!(
+        backlog.oldest_pending_at.is_some(),
+        "a pending event must carry an oldest-pending stamp"
+    );
+    assert_eq!(backlog.last_successful_sync, None);
+    assert_eq!(backlog.last_error_class, None);
+    assert_eq!(backlog.local_store_status, LocalStoreStatus::Healthy);
+
+    store
+        .transition_outbox_event("portable-evt-fsm", OutboxState::InFlight, None)
+        .expect("pending -> in_flight");
+    let acknowledged = store
+        .transition_outbox_event("portable-evt-fsm", OutboxState::Acknowledged, None)
+        .expect("in_flight -> acknowledged");
+    assert_eq!(acknowledged.state, OutboxState::Acknowledged);
+    assert_eq!(acknowledged.last_error_class, None);
+
+    let drained = store.outbox_health().expect("health");
+    assert_eq!(drained.remote_sync_status, RemoteSyncStatus::Drained);
+    assert_eq!(drained.pending_count, 0);
+    assert_eq!(drained.oldest_pending_at, None);
+    assert_eq!(
+        drained.last_successful_sync.as_deref(),
+        Some(acknowledged.state_changed_at.as_str())
+    );
+
+    // Quarantine is reachable from any state and requires its class; it is
+    // reported as a local-store condition, not a remote-sync one.
+    assert!(
+        store
+            .transition_outbox_event("portable-evt-fsm", OutboxState::Quarantined, None)
+            .is_err(),
+        "a failure state without its class must be refused"
+    );
+    store
+        .transition_outbox_event(
+            "portable-evt-fsm",
+            OutboxState::Quarantined,
+            Some("operator_hold"),
+        )
+        .expect("acknowledged -> quarantined");
+    let held = store.outbox_health().expect("health");
+    assert_eq!(
+        held.local_store_status,
+        LocalStoreStatus::Quarantined {
+            quarantined_count: 1
+        }
+    );
+    assert_eq!(held.last_error_class.as_deref(), Some("operator_hold"));
 }

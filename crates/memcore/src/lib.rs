@@ -119,6 +119,13 @@ pub use db::mirror_eval::{
     MirrorEvalRun, MirrorEvalRunView, NewMirrorEvalAdjudication, NewMirrorEvalObservation,
     NewMirrorEvalRun,
 };
+/// tachi#1643 durable outbox (#1630 A1). Ungated: the outbox is portable
+/// surface, so a `StoreProfile::PortableKernel` database carries it and a
+/// portable build can drive it.
+pub use db::outbox::{
+    LocalStoreStatus, OutboxEventRow, OutboxHealth, OutboxState, RemoteSyncStatus,
+    MAX_OUTBOX_CLASS_BYTES,
+};
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]
 pub use db::session_claims::{
@@ -193,6 +200,9 @@ pub use search::{
     SearchReceiptDatabaseScope, SearchReceiptOperation, TypoFallbackPhaseReceipt,
     HYBRID_HEAD_FRACTION,
 };
+/// tachi#1643 single-transaction commit boundary. Re-exported at the root for
+/// the same reason as the snapshot-import contract below.
+pub use store::outbox::{outbox_payload_digest, OutboxCommitReceipt, OutboxEventMeta};
 /// tachi#1607 portable snapshot-import contract. Re-exported at the root so
 /// an external portable consumer reaches it exactly like [`MemoryEntry`],
 /// without importing the internal `store::` module layout.

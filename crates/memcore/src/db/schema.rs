@@ -34,6 +34,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     validate_recall_impression_ledger_schema(&tx)?;
     validate_typo_fallback_attribution_schema(&tx)?;
     validate_wiki_recovery_ledgers_schema(&tx)?;
+    validate_memory_outbox_schema(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -123,6 +124,7 @@ pub fn init_schema_with_label_mut(
     validate_recall_impression_ledger_schema(&tx)?;
     validate_typo_fallback_attribution_schema(&tx)?;
     validate_wiki_recovery_ledgers_schema(&tx)?;
+    validate_memory_outbox_schema(&tx)?;
     tx.commit()?;
 
     remember_migration_fingerprint(conn, current_db_path)?;
@@ -670,6 +672,110 @@ pub(crate) fn validate_typo_fallback_attribution_schema(
         }
     }
     Ok(())
+}
+
+/// Canonical v29 installer for the durable outbox (tachi#1643). Production
+/// callers reach this only through the sentinel-gated migration runner after
+/// migration authority has been checked.
+pub(crate) fn install_memory_outbox_schema(conn: &Connection) -> Result<(), MemoryError> {
+    execute_batch_retry(conn, ddl::MEMORY_OUTBOX_V29_SQL)
+}
+
+/// Refuse a `memory_outbox_events` shape this kernel's typed writers cannot
+/// trust: a missing table/index, a drifted column list, or — the one
+/// `pragma_table_info` cannot see — a missing or rewritten state CHECK
+/// constraint. A table without that CHECK would accept a state token
+/// [`crate::db::outbox::OutboxState`] cannot parse, turning every later read
+/// into a typed refusal against data the schema itself allowed in.
+pub(crate) fn validate_memory_outbox_schema(conn: &Connection) -> Result<(), MemoryError> {
+    const REQUIRED_OBJECTS: &[(&str, &str)] = &[
+        ("table", "memory_outbox_events"),
+        ("index", "idx_memory_outbox_events_state_created"),
+        ("index", "idx_memory_outbox_events_state_changed"),
+        ("index", "idx_memory_outbox_events_object"),
+    ];
+    for (object_type, name) in REQUIRED_OBJECTS {
+        let present = match conn.query_row(
+            "SELECT 1 FROM main.sqlite_schema
+             WHERE type = ?1 AND name = ?2 AND tbl_name = 'memory_outbox_events'",
+            params![object_type, name],
+            |_| Ok(()),
+        ) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v29 memory outbox: required {object_type} '{name}' on \
+                 'memory_outbox_events' is missing"
+            )));
+        }
+    }
+
+    const OUTBOX_COLUMNS: &[(&str, &str, bool, i64)] = &[
+        ("event_id", "TEXT", true, 1),
+        ("object_id", "TEXT", true, 0),
+        ("object_class", "TEXT", true, 0),
+        ("authority_class", "TEXT", true, 0),
+        ("source_store", "TEXT", true, 0),
+        ("source_partition", "TEXT", true, 0),
+        ("source_revision", "INTEGER", true, 0),
+        ("payload_digest", "TEXT", true, 0),
+        ("state", "TEXT", true, 0),
+        ("last_error_class", "TEXT", false, 0),
+        ("created_at", "TEXT", true, 0),
+        ("state_changed_at", "TEXT", true, 0),
+    ];
+    let mut stmt = conn.prepare(
+        "SELECT name, upper(type), [notnull] != 0, pk
+         FROM pragma_table_info('memory_outbox_events') ORDER BY cid",
+    )?;
+    let actual = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = OUTBOX_COLUMNS
+        .iter()
+        .map(|(name, ty, not_null, pk)| ((*name).to_string(), (*ty).to_string(), *not_null, *pk))
+        .collect::<Vec<_>>();
+    if actual != expected {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v29 memory outbox: table 'memory_outbox_events' has non-canonical column \
+             shape"
+                .to_string(),
+        ));
+    }
+
+    let table_sql: String = conn.query_row(
+        "SELECT COALESCE(sql, '') FROM main.sqlite_schema
+         WHERE type = 'table' AND name = 'memory_outbox_events'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !normalize_schema_sql(&table_sql)
+        .contains(&normalize_schema_sql(ddl::MEMORY_OUTBOX_STATE_CHECK_CLAUSE))
+    {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v29 memory outbox: table 'memory_outbox_events' is missing the canonical \
+             state CHECK constraint"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Collapse every run of ASCII whitespace to one space so a stored
+/// `sqlite_schema.sql` can be compared against a canonical clause without the
+/// comparison depending on the formatting SQLite echoed back.
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Canonical v28 installer. Production callers reach this only through the
