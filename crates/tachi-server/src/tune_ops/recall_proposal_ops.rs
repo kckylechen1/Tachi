@@ -1,7 +1,7 @@
 //! Evidence-backed RecallConfig proposal review/apply loop.
 
-use crate::facade_memory_ops::{json_string, wants_json};
 use super::recall_simulate_ops::build_recall_simulation_report;
+use crate::facade_memory_ops::{json_string, wants_json};
 use crate::tool_params::*;
 use crate::MemoryServer;
 use chrono::{Duration, Utc};
@@ -189,9 +189,7 @@ fn run_recall_apply_missing_create_test_hook(
 }
 
 #[cfg(test)]
-fn run_recall_apply_post_write_pre_sync_test_hook(
-    params: &TachiTuneParams,
-) -> Result<(), String> {
+fn run_recall_apply_post_write_pre_sync_test_hook(params: &TachiTuneParams) -> Result<(), String> {
     if params
         .metadata
         .as_ref()
@@ -205,9 +203,7 @@ fn run_recall_apply_post_write_pre_sync_test_hook(
 }
 
 #[cfg(not(test))]
-fn run_recall_apply_post_write_pre_sync_test_hook(
-    _params: &TachiTuneParams,
-) -> Result<(), String> {
+fn run_recall_apply_post_write_pre_sync_test_hook(_params: &TachiTuneParams) -> Result<(), String> {
     Ok(())
 }
 

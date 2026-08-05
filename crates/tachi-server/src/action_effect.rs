@@ -244,7 +244,14 @@ pub(crate) fn facade_action_effect(
         // `handle_search_memory_with_access(..., true)` and is therefore not
         // replay-safe. The remaining classifications are preserved.
         "tachi_memory" => (
-            &["get", "briefing", "alerts", "ask", "readiness", "doctor_scan"],
+            &[
+                "get",
+                "briefing",
+                "alerts",
+                "ask",
+                "readiness",
+                "doctor_scan",
+            ],
             &["progress"],
             &[
                 "search",
@@ -301,7 +308,12 @@ pub(crate) fn facade_action_effect(
         "tachi_tune" => (
             &["route_simulate", "recall_simulate"],
             &["route_proposals", "recall_proposals"],
-            &["route_review", "route_apply", "recall_review", "recall_apply"],
+            &[
+                "route_review",
+                "route_apply",
+                "recall_review",
+                "recall_apply",
+            ],
         ),
         "tachi_gh" => (
             &[

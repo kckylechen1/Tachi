@@ -664,9 +664,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
 
     let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = run_tune(&server, proposals)
-        .await
-        .expect("proposals A");
+    let raw = run_tune(&server, proposals).await.expect("proposals A");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON A");
     let first = parsed["proposals"]
         .as_array()
@@ -704,9 +702,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     let mut review = tune_params("route_review");
     review.proposal_id = Some(first_id.clone());
     review.review_status = Some("approved".to_string());
-    let _ = run_tune(&server, review)
-        .await
-        .expect("review A");
+    let _ = run_tune(&server, review).await.expect("review A");
 
     // Phase B: flip the CURRENT-policy winner for fix_request from `glm_impl`
     // to `claude_plan`, which is exactly what the apply payload's
@@ -723,9 +719,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
 
     let mut proposals_b = tune_params("route_proposals");
     proposals_b.limit = Some(50);
-    let raw_b = run_tune(&server, proposals_b)
-        .await
-        .expect("proposals B");
+    let raw_b = run_tune(&server, proposals_b).await.expect("proposals B");
     let parsed_b: serde_json::Value = serde_json::from_str(&raw_b).expect("proposals JSON B");
     let route_proposals_b: Vec<&serde_json::Value> = parsed_b["proposals"]
         .as_array()
@@ -830,9 +824,7 @@ async fn route_terminal_state_cannot_be_rereviewed() {
 
     let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = run_tune(&server, proposals)
-        .await
-        .expect("proposals");
+    let raw = run_tune(&server, proposals).await.expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
     let first = parsed["proposals"]
         .as_array()
@@ -1047,9 +1039,7 @@ async fn route_two_applies_yield_one_terminal_receipt() {
 
     let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = run_tune(&server, proposals)
-        .await
-        .expect("proposals");
+    let raw = run_tune(&server, proposals).await.expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
     let first = parsed["proposals"]
         .as_array()
@@ -1064,16 +1054,12 @@ async fn route_two_applies_yield_one_terminal_receipt() {
     let mut approve = tune_params("route_review");
     approve.proposal_id = Some(proposal_id.clone());
     approve.review_status = Some("approved".to_string());
-    let _ = run_tune(&server, approve)
-        .await
-        .expect("approve");
+    let _ = run_tune(&server, approve).await.expect("approve");
 
     let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let applied_raw = run_tune(&server, apply.clone())
-        .await
-        .expect("apply #1");
+    let applied_raw = run_tune(&server, apply.clone()).await.expect("apply #1");
     let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply #1 JSON");
     assert_eq!(applied["applied"], json!(true));
     assert_eq!(applied["proposal"]["status"], json!("applied"));
@@ -1192,9 +1178,7 @@ async fn route_apply_refuses_tampered_unbound_top_level_policy_rule() {
 
     let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = run_tune(&server, proposals)
-        .await
-        .expect("proposals");
+    let raw = run_tune(&server, proposals).await.expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
     let first = parsed["proposals"]
         .as_array()
@@ -1209,9 +1193,7 @@ async fn route_apply_refuses_tampered_unbound_top_level_policy_rule() {
     let mut approve = tune_params("route_review");
     approve.proposal_id = Some(proposal_id.clone());
     approve.review_status = Some("approved".to_string());
-    let _ = run_tune(&server, approve)
-        .await
-        .expect("approve");
+    let _ = run_tune(&server, approve).await.expect("approve");
 
     // Tamper ONLY the unbound top-level `policy_rule.prefer_profile` field —
     // identity_payload / content_digest are left byte-for-byte untouched, so
@@ -1376,9 +1358,7 @@ async fn route_review_refuses_tampered_unbound_top_level_policy_rule() {
 
     let mut proposals = tune_params("route_proposals");
     proposals.limit = Some(50);
-    let raw = run_tune(&server, proposals)
-        .await
-        .expect("proposals");
+    let raw = run_tune(&server, proposals).await.expect("proposals");
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
     let first = parsed["proposals"]
         .as_array()

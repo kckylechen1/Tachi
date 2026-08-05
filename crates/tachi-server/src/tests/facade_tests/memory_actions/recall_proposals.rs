@@ -2343,12 +2343,10 @@ async fn recall_config_env_read_limit_accepts_boundary_and_refuses_over_limit() 
     let over_limit = format!("{boundary}x");
     std::fs::write(&config_env_path, &over_limit).expect("write oversized config");
     seed_recall_pair(&server, "config-size-over");
-    let err = handle_tachi_tune_for_test(
-        &server,
-        recall_source_proposal_params("config-size-over"),
-    )
-    .await
-    .expect_err("oversized config.env must refuse before proposal persistence");
+    let err =
+        handle_tachi_tune_for_test(&server, recall_source_proposal_params("config-size-over"))
+            .await
+            .expect_err("oversized config.env must refuse before proposal persistence");
     assert!(
         err.contains("config_env_too_large"),
         "unexpected oversized-config refusal: {err}"

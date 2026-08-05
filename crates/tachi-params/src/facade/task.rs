@@ -399,7 +399,9 @@ pub struct TachiTaskParams {
     #[schemars(description = "[action=board] Filter dispatch ledger rows by state.")]
     pub state_filter: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=board|recommend] Maximum ledger/recommendation rows to return.")]
+    #[schemars(
+        description = "[action=board|recommend] Maximum ledger/recommendation rows to return."
+    )]
     pub limit: Option<usize>,
     // #1426: proposal review/apply left Task for the admin-only `tachi_tune`
     // surface, so no surviving `tachi_task` action reads these two. They stay

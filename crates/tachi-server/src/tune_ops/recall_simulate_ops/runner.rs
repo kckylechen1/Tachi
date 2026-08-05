@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use memcore::RecallConfig;
 use serde_json::{json, Value};
 
-use crate::facade_memory_ops::{json_string, wants_json};
 use super::config::{recall_config_env_diff, recall_config_summary};
 use super::input::{parse_cases, parse_variants};
 use super::markdown::format_recall_simulate_markdown;
 use super::types::RecallSimCase;
+use crate::facade_memory_ops::{json_string, wants_json};
 use crate::memory_search_ops::{
     apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
     search_memory_rows_with_recall_config, SearchRerankPolicy,

@@ -104,45 +104,65 @@ pub struct TachiTuneParams {
     #[schemars(description = "[action=route_simulate] Declared side-effect level L0-L3.")]
     pub execution_level: Option<super::ExecutionLevel>,
     #[serde(default)]
-    #[schemars(description = "[action=route_simulate] Documentation paths used as routing evidence.")]
+    #[schemars(
+        description = "[action=route_simulate] Documentation paths used as routing evidence."
+    )]
     pub doc_paths: Vec<String>,
     #[serde(default)]
     #[schemars(description = "[action=route_simulate] Spec paths used as routing evidence.")]
     pub spec_paths: Vec<String>,
     #[serde(default)]
-    #[schemars(description = "[action=route_simulate] Risk override: low, medium, high, or critical.")]
+    #[schemars(
+        description = "[action=route_simulate] Risk override: low, medium, high, or critical."
+    )]
     pub risk: Option<String>,
     #[serde(default)]
     #[schemars(description = "[action=route_simulate|route_proposals] Maximum rows/proposals.")]
     pub limit: Option<usize>,
     #[serde(default)]
-    #[schemars(description = "[action=route_proposals|recall_proposals] Optional proposal status filter.")]
+    #[schemars(
+        description = "[action=route_proposals|recall_proposals] Optional proposal status filter."
+    )]
     pub state_filter: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=route_review|route_apply|recall_review|recall_apply] Proposal id.")]
+    #[schemars(
+        description = "[action=route_review|route_apply|recall_review|recall_apply] Proposal id."
+    )]
     pub proposal_id: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=route_review|recall_review] Review status: approved or rejected.")]
+    #[schemars(
+        description = "[action=route_review|recall_review] Review status: approved or rejected."
+    )]
     pub review_status: Option<String>,
     #[serde(default)]
     #[schemars(description = "[action=route_review|recall_review] Optional review note.")]
     pub notes: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=route_apply|recall_apply] Required true to apply an approved proposal.")]
+    #[schemars(
+        description = "[action=route_apply|recall_apply] Required true to apply an approved proposal."
+    )]
     pub confirm: bool,
 
     // Recall tuning fields.
     #[serde(default = "default_tune_top_k")]
-    #[schemars(description = "[action=recall_simulate|recall_proposals] Default top_k for labeled cases.")]
+    #[schemars(
+        description = "[action=recall_simulate|recall_proposals] Default top_k for labeled cases."
+    )]
     pub top_k: usize,
     #[serde(default)]
-    #[schemars(description = "[action=recall_simulate|recall_proposals] Cases/eval_cases and optional variants.")]
+    #[schemars(
+        description = "[action=recall_simulate|recall_proposals] Cases/eval_cases and optional variants."
+    )]
     pub metadata: Option<Value>,
     #[serde(default)]
-    #[schemars(description = "[action=recall_simulate|recall_proposals] JSON cases/variants text fallback.")]
+    #[schemars(
+        description = "[action=recall_simulate|recall_proposals] JSON cases/variants text fallback."
+    )]
     pub text: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=recall_simulate|recall_proposals] Enable adaptive reranking during replay.")]
+    #[schemars(
+        description = "[action=recall_simulate|recall_proposals] Enable adaptive reranking during replay."
+    )]
     pub enable_rerank: bool,
     #[serde(default)]
     #[schemars(schema_with = "super::memory_scope_schema")]
@@ -162,7 +182,9 @@ pub struct TachiTuneParams {
     #[serde(default)]
     pub include_training: bool,
     #[serde(default)]
-    #[schemars(description = "[action=recall_proposals] Persist variants even when they do not improve metrics.")]
+    #[schemars(
+        description = "[action=recall_proposals] Persist variants even when they do not improve metrics."
+    )]
     pub force: bool,
     #[serde(default)]
     pub as_of: Option<String>,

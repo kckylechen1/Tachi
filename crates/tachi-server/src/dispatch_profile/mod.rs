@@ -79,9 +79,9 @@ use self::routing::*;
 #[cfg(test)]
 pub(crate) use self::cards::profile_evidence_required;
 pub(crate) use self::cards::{
-    profile_eval_feedback_json, profile_evidence_contract_json_for_server,
-    profile_evidence_required_for_server, profile_json, profile_json_for_server,
-    profile_demotion_targets, profile_required_skill_ids, profile_required_skill_ids_for_server,
+    profile_demotion_targets, profile_eval_feedback_json,
+    profile_evidence_contract_json_for_server, profile_evidence_required_for_server, profile_json,
+    profile_json_for_server, profile_required_skill_ids, profile_required_skill_ids_for_server,
     profile_skill_loadout_json_for_server, profile_weak_against_for_server,
 };
 pub(crate) use self::policy::{route_simulation_caveats, simulate_route_policy};

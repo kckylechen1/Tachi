@@ -1,6 +1,6 @@
-pub(crate) mod route_policy;
 mod recall_proposal_ops;
 mod recall_simulate_ops;
+pub(crate) mod route_policy;
 
 use crate::tool_params::{TachiTuneAction, TachiTuneParams};
 use crate::MemoryServer;
@@ -9,9 +9,7 @@ use serde_json::{json, Value};
 pub(crate) use recall_proposal_ops::{
     handle_recall_config_apply, handle_recall_config_proposals, handle_recall_config_review,
 };
-pub(crate) use recall_simulate_ops::{
-    build_recall_simulation_report, handle_tune_recall_simulate,
-};
+pub(crate) use recall_simulate_ops::{build_recall_simulation_report, handle_tune_recall_simulate};
 
 pub(crate) async fn handle_tachi_tune(
     server: &MemoryServer,
@@ -44,55 +42,46 @@ pub(crate) async fn handle_tachi_tune(
     }
 }
 
-fn handle_route_action(
-    server: &MemoryServer,
-    params: &TachiTuneParams,
-) -> Result<String, String> {
-    let raw = match params.action {
-        TachiTuneAction::RouteSimulate => handle_route_simulation(server, params)?,
-        TachiTuneAction::RouteProposals => route_policy::handle_route_policy_proposals(
-            server,
-            params.limit.unwrap_or(500),
-            params.state_filter.as_deref(),
-        )?,
-        TachiTuneAction::RouteReview => {
-            let proposal_id = params
-                .proposal_id
-                .as_deref()
-                .ok_or_else(|| "proposal_id is required when action='route_review'".to_string())?;
-            let review_status = params
-                .review_status
-                .as_deref()
-                .ok_or_else(|| "review_status is required when action='route_review'".to_string())?;
-            route_policy::handle_route_policy_review(
+fn handle_route_action(server: &MemoryServer, params: &TachiTuneParams) -> Result<String, String> {
+    let raw =
+        match params.action {
+            TachiTuneAction::RouteSimulate => handle_route_simulation(server, params)?,
+            TachiTuneAction::RouteProposals => route_policy::handle_route_policy_proposals(
                 server,
-                proposal_id,
-                review_status,
-                params.notes.as_deref(),
-            )?
-        }
-        TachiTuneAction::RouteApply => {
-            let proposal_id = params
-                .proposal_id
-                .as_deref()
-                .ok_or_else(|| "proposal_id is required when action='route_apply'".to_string())?;
-            route_policy::handle_route_policy_apply(server, proposal_id, params.confirm)?
-        }
-        other => {
-            return Err(format!(
-                "handle_route_action called with non-route action '{}'",
-                other.as_str()
-            ))
-        }
-    };
+                params.limit.unwrap_or(500),
+                params.state_filter.as_deref(),
+            )?,
+            TachiTuneAction::RouteReview => {
+                let proposal_id = params.proposal_id.as_deref().ok_or_else(|| {
+                    "proposal_id is required when action='route_review'".to_string()
+                })?;
+                let review_status = params.review_status.as_deref().ok_or_else(|| {
+                    "review_status is required when action='route_review'".to_string()
+                })?;
+                route_policy::handle_route_policy_review(
+                    server,
+                    proposal_id,
+                    review_status,
+                    params.notes.as_deref(),
+                )?
+            }
+            TachiTuneAction::RouteApply => {
+                let proposal_id = params.proposal_id.as_deref().ok_or_else(|| {
+                    "proposal_id is required when action='route_apply'".to_string()
+                })?;
+                route_policy::handle_route_policy_apply(server, proposal_id, params.confirm)?
+            }
+            other => {
+                return Err(format!(
+                    "handle_route_action called with non-route action '{}'",
+                    other.as_str()
+                ))
+            }
+        };
     Ok(raw)
 }
 
-fn format_tune_response(
-    action: &str,
-    raw: String,
-    format: Option<&str>,
-) -> Result<String, String> {
+fn format_tune_response(action: &str, raw: String, format: Option<&str>) -> Result<String, String> {
     crate::tools::formatting::format_facade_response(
         &format!("Tachi tune {action}"),
         action,

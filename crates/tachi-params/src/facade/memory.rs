@@ -457,7 +457,9 @@ pub struct TachiMemoryParams {
     #[schemars(description = "[action=save] Validity end (ISO 8601) for time-bounded facts.")]
     pub valid_until: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=save] Arbitrary JSON metadata merged into the stored entry.")]
+    #[schemars(
+        description = "[action=save] Arbitrary JSON metadata merged into the stored entry."
+    )]
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
     #[schemars(
