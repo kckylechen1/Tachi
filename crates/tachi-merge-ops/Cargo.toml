@@ -1,6 +1,6 @@
 [package]
 name = "tachi-merge-ops"
-version = "1.9.0"
+version = "1.9.1"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Local worktree merge toolkit (approve_merge, safety gates, cleaner integration). Extracted from tachi-server (#833)."
