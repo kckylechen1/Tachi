@@ -92,6 +92,91 @@ async fn tachi_search_wiki_scope_excludes_pending_review_drafts_by_default() {
     );
 }
 
+/// tachi#1561 residual (generic surfaces): `tachi_search(scope="all")`
+/// combines both legs `collect_tachi_search_sections` builds. The Memory-leg
+/// section builder (`facade_search_ops::parse_memory_rows`) already strips
+/// every `/wiki`-path row from its output via a pre-existing, path-based
+/// `is_wiki_row` filter unrelated to this leaf — so a `/wiki` draft was never
+/// independently a "RED" case in the Memory section the way it is for bare
+/// `search_memory` (see
+/// `memory_tests::search_facade::scope_boundaries::wiki_lifecycle_gate::
+/// search_memory_project_wiki_excludes_pending_review_draft_by_default`,
+/// which has no such pre-filter). This test still pins the non-leak in both
+/// sections of a combined `scope="all"` call, and separately pins that the
+/// Wiki leg's own `requested_lifecycle`-scoped gate
+/// (`bypass_wiki_lifecycle_gate=true` for `search_wiki_store_candidates`) is
+/// unchanged under `scope="all"`, matching the sibling
+/// `tachi_search_wiki_scope_excludes_pending_review_drafts_by_default` above.
+#[tokio::test]
+async fn tachi_search_scope_all_memory_leg_and_wiki_leg_both_exclude_pending_review_draft() {
+    let mut active = make_entry("scope-all-active-wiki");
+    active.path = "/wiki/engineering/scope-all-lifecycle/active".to_string();
+    active.summary = "Scope-all active wiki row".to_string();
+    active.text = "ScopeAllLifecycleNeedle documents the reviewed active entry.".to_string();
+    active.metadata = json!({"lifecycle": "active"});
+
+    let mut draft = make_entry("scope-all-draft-wiki");
+    draft.path = "/wiki/drafts/scope-all-lifecycle-draft".to_string();
+    draft.summary = "Scope-all pending draft wiki row".to_string();
+    draft.text = "ScopeAllLifecycleNeedle documents the unreviewed pending draft.".to_string();
+    draft.metadata = json!({"review_status": "pending"});
+
+    let (server, _home) = seed_wiki_project_entries(vec![active, draft]);
+
+    let (sections, _remapped, _scope) = crate::facade_search_ops::collect_tachi_search_sections(
+        &server,
+        &TachiSearchParams {
+            query: "ScopeAllLifecycleNeedle".to_string(),
+            scope: "all".to_string(),
+            top_k: 10,
+            path_prefix: None,
+            project: Some("wiki".to_string()),
+            domain: None,
+            file_context: None,
+            error_context: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            category: None,
+            include_archived: false,
+            include_training: false,
+            enable_rerank: false,
+            as_of: None,
+        },
+    )
+    .await;
+
+    let memory_paths: Vec<&str> = sections
+        .iter()
+        .find(|(name, _)| name == "Memory")
+        .and_then(|(_, rows)| rows.as_array())
+        .expect("scope=\"all\" must include a Memory section")
+        .iter()
+        .filter_map(|row| row["path"].as_str())
+        .collect();
+    assert!(
+        !memory_paths.contains(&"/wiki/drafts/scope-all-lifecycle-draft"),
+        "the Memory section must not surface the draft: {memory_paths:?}"
+    );
+
+    let wiki_paths: Vec<&str> = sections
+        .iter()
+        .find(|(name, _)| name == "Wiki")
+        .and_then(|(_, rows)| rows.as_array())
+        .expect("scope=\"all\" must include a Wiki section")
+        .iter()
+        .filter_map(|row| row["path"].as_str())
+        .collect();
+    assert!(
+        !wiki_paths.contains(&"/wiki/drafts/scope-all-lifecycle-draft"),
+        "RED: the Wiki leg's own default-scope draft exclusion must be unchanged \
+         under scope=\"all\": {wiki_paths:?}"
+    );
+    assert!(
+        wiki_paths.contains(&"/wiki/engineering/scope-all-lifecycle/active"),
+        "the Wiki leg must still surface the active entry under scope=\"all\": {wiki_paths:?}"
+    );
+}
+
 #[tokio::test]
 async fn tachi_search_explicit_project_cannot_relabel_same_id_global_row() {
     let mut named = make_entry("wiki-same-id-boundary");

@@ -961,3 +961,55 @@ async fn wiki_lint_clamps_path_prefix_to_the_knowledge_artifact_roots() {
             .unwrap_or_else(|error| panic!("{in_root} must stay lintable: {error}"));
     }
 }
+
+/// tachi#1561 non-regression: the new lifecycle backstop this leaf adds to
+/// the generic search/list surfaces
+/// (`memcore::namespace::is_non_default_retrievable_wiki_row`) is deliberately
+/// NOT wired into `user_facing_wiki_sql_where` — the SQL predicate
+/// `list_user_facing_wiki_entries` uses, which backs `wiki_lint`'s
+/// `MigrationAudit` read plan (`project: None`) — per the landed commit
+/// message: lint/migration hygiene tooling must keep seeing drafts so an
+/// unreviewed row can still be flagged (orphan, stale, duplicate, ...).
+/// Pins that a `pending_review` draft still surfaces through `wiki_lint`'s
+/// `orphans` check, unaffected by this leaf.
+#[tokio::test]
+async fn wiki_lint_still_sees_pending_review_drafts() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut draft = make_entry("wiki-lint-sees-draft");
+            draft.path = "/wiki/drafts/lint-sees-draft".to_string();
+            draft.domain = Some("wiki".to_string());
+            draft.metadata = json!({"wiki": true, "review_status": "pending"});
+            store.upsert(&draft).map_err(|e| e.to_string())
+        })
+        .expect("seed wiki lint draft fixture");
+
+    let response = server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki".to_string()),
+            checks: vec!["orphans".to_string()],
+            limit: 50,
+            stale_days: 90,
+            missing_edge_threshold: 0.6,
+            contradiction_threshold: 0.6,
+            include_skill_quality: false,
+            persist_stale: false,
+            project: None,
+        }))
+        .await
+        .expect("wiki_lint should succeed");
+    let parsed: Value = serde_json::from_str(&response).expect("wiki_lint json");
+    let orphan_ids = parsed["orphans"]
+        .as_array()
+        .expect("orphans array")
+        .iter()
+        .map(|row| row["id"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(
+        orphan_ids.contains(&"wiki-lint-sees-draft"),
+        "non-regression: wiki_lint's MigrationAudit path must still see pending_review \
+         drafts (SQL user_facing_wiki_sql_where is deliberately not lifecycle-gated \
+         by this leaf): {orphan_ids:?}"
+    );
+}
