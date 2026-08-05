@@ -151,8 +151,16 @@ fn run_skill_quality_guards_for_scope(
         let edges = graph_edges.clone();
         let _ = server.with_store_for_scope(scope, |store| {
             for edge in &edges {
+                // tachi#1646: `merge_hint` edges are a token-similarity
+                // heuristic Tachi computed itself.
                 store
-                    .add_edge(edge)
+                    .add_edge_with_provenance(
+                        edge,
+                        &memcore::db::EdgeProvenance {
+                            authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
+                            ..Default::default()
+                        },
+                    )
                     .map_err(|e| format!("skill graph edge: {e}"))?;
             }
             Ok(())

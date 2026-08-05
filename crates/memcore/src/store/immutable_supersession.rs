@@ -418,6 +418,16 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         db::add_edge(&self.tx, edge)
     }
 
+    /// [`Self::add_edge`] plus an explicit authority classification
+    /// (tachi#1646) for the appended `edge_observations` row.
+    pub fn add_edge_with_provenance(
+        &mut self,
+        edge: &MemoryEdge,
+        provenance: &db::EdgeProvenance,
+    ) -> Result<(), MemoryError> {
+        db::add_edge_with_provenance(&self.tx, edge, provenance)
+    }
+
     /// Record a durable outbox event for an object this transaction has
     /// already written (tachi#1643).
     ///

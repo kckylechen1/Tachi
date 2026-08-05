@@ -198,7 +198,16 @@ fn archive_claimed_distilled_sources(
             valid_from: distill_entry.timestamp.clone(),
             valid_to: None,
         };
-        replacement.add_edge(&edge)?;
+        // tachi#1646: this archival `supersedes` edge documents a
+        // supersession claim this transaction just won — deterministic
+        // bookkeeping, not an inference.
+        replacement.add_edge_with_provenance(
+            &edge,
+            &memcore::db::EdgeProvenance {
+                authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                ..Default::default()
+            },
+        )?;
         replacement.archive_claimed_source(&source.id)?;
     }
     Ok(claimed_sources.len())
@@ -236,8 +245,16 @@ fn write_distill_entry(
                 return Ok(inserted);
             }
             let claimed_sources = claim_distilled_sources(replacement, entry, source_entries)?;
+            // tachi#1646: `follows` distill-trajectory edges are
+            // deterministic bookkeeping over this batch's own sources.
             for edge in plan_distill_edges(entry, source_entries, "daily_batch", &entry.timestamp) {
-                replacement.add_edge(&edge)?;
+                replacement.add_edge_with_provenance(
+                    &edge,
+                    &memcore::db::EdgeProvenance {
+                        authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                        ..Default::default()
+                    },
+                )?;
             }
             replacement.save_derived_with_id(
                 derived_id,

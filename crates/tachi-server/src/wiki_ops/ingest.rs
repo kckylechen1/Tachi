@@ -761,9 +761,20 @@ fn persist_wiki_ingest_entry(
                 {
                     continue;
                 }
-                replacement.add_edge(edge).map_err(|error| {
-                    memcore::MemoryError::Internal(format!("wiki ingest edge: {error}"))
-                })?;
+                // tachi#1646: entity-overlap similarity edges are a
+                // heuristic Tachi computed itself, not a receipt or a
+                // caller assertion.
+                replacement
+                    .add_edge_with_provenance(
+                        edge,
+                        &memcore::db::EdgeProvenance {
+                            authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(|error| {
+                        memcore::MemoryError::Internal(format!("wiki ingest edge: {error}"))
+                    })?;
                 committed_related_ids.push(edge.target_id.clone());
             }
             Ok(committed_related_ids)

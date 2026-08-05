@@ -227,9 +227,17 @@ pub(super) async fn process_memory_distill_job(
         &distill_entry.timestamp,
     );
     with_foundry_store(server, item, |store| {
+        // tachi#1646: distill provenance edges are deterministic bookkeeping
+        // over this batch's own sources.
         for edge in &edges {
             store
-                .add_edge(edge)
+                .add_edge_with_provenance(
+                    edge,
+                    &memcore::db::EdgeProvenance {
+                        authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                        ..Default::default()
+                    },
+                )
                 .map_err(|e| format!("Failed to save foundry distill edge: {e}"))?;
         }
         Ok(())

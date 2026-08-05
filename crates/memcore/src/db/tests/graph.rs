@@ -1023,6 +1023,7 @@ fn edge_observations_accumulate_while_graph_row_collapses() {
             actor: "projector".into(),
             reason_code: "co_occurrence".into(),
             evidence_hash: None,
+            authority: None,
         },
     )
     .unwrap();
@@ -1042,6 +1043,7 @@ fn edge_observations_accumulate_while_graph_row_collapses() {
             actor: "projector".into(),
             reason_code: "co_occurrence".into(),
             evidence_hash: None,
+            authority: None,
         },
     )
     .unwrap();

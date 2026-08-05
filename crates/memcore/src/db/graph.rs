@@ -66,6 +66,89 @@ pub struct EdgeProvenance {
     pub reason_code: String,
     /// Optional content hash of the evidence backing this observation.
     pub evidence_hash: Option<String>,
+    /// Writer-class stamp (tachi#1646 / #1460 disposition A). `None` — the
+    /// [`Default`] value, and what every unclassified caller still gets by
+    /// building `EdgeProvenance::default()` and going through the plain
+    /// [`add_edge`] / [`add_component_governance_edge`] doors — deliberately
+    /// leaves `metadata.authority` unset rather than being promoted to a
+    /// fifth "unknown" enum variant a lazy writer could mint to look
+    /// classified. See [`edge_authority`] for how reads treat the absence.
+    pub authority: Option<EdgeAuthority>,
+}
+
+/// Authority classification for a graph edge write (tachi#1646 / #1460
+/// disposition A, "the two measured worst offenders"). Every production
+/// writer that has been census-reviewed states which tier it belongs to by
+/// setting [`EdgeProvenance::authority`] and calling [`add_edge_with_provenance`]
+/// / [`add_component_governance_edge_with_provenance`]; scoring does not yet
+/// consume this (that is #1646's own explicit non-goal, left to the
+/// rank-moving-allowlist follow-up leaf) — this is a recorded classification,
+/// not yet an enforcement lever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeAuthority {
+    /// Backed by an actual model-invocation receipt bound to specific
+    /// content — the #1524 contradiction pipeline
+    /// ([`persist_confirmed_contradiction_within_tx`]) is the only current
+    /// producer.
+    ModelReceiptBacked,
+    /// A heuristic/statistical signal Tachi computed itself (vector/token
+    /// similarity, symbolic overlap, keyword-substring match against free
+    /// text) — no external assertion and no model receipt behind it.
+    DerivedHeuristic,
+    /// The relation/weight/endpoints were asserted verbatim by an external
+    /// caller (an agent session's event payload, an N-API `edge_json` blob)
+    /// — Tachi neither computed nor verified the claim.
+    CallerAsserted,
+    /// Deterministic bookkeeping the system performs as a side effect of an
+    /// already-decided structural transaction (a won supersession claim, a
+    /// distillation follows-chain, component-registry seeding) — not an
+    /// inference about the world.
+    StructuralBookkeeping,
+}
+
+impl EdgeAuthority {
+    /// The stored `metadata.authority` string for this class.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelReceiptBacked => "model_receipt_backed",
+            Self::DerivedHeuristic => "derived_heuristic",
+            Self::CallerAsserted => "caller_asserted",
+            Self::StructuralBookkeeping => "structural_bookkeeping",
+        }
+    }
+
+    /// Parse a stored `metadata.authority` string back into a variant.
+    /// Unrecognized strings — including ones a future build's enum knows
+    /// that this one does not — return `None`, the same
+    /// "legacy/unclassified" bucket a wholly absent key reads as (see
+    /// [`edge_authority`]); this function never guesses.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "model_receipt_backed" => Some(Self::ModelReceiptBacked),
+            "derived_heuristic" => Some(Self::DerivedHeuristic),
+            "caller_asserted" => Some(Self::CallerAsserted),
+            "structural_bookkeeping" => Some(Self::StructuralBookkeeping),
+            _ => None,
+        }
+    }
+}
+
+/// Read back a persisted edge's authority classification (tachi#1646).
+///
+/// `None` deliberately covers two indistinguishable-on-purpose cases: a
+/// pre-#1646 row that predates the concept entirely (no schema/migration was
+/// added — see [`write_edge_row`]'s doc for why authority lives in
+/// `metadata` instead), and a post-#1646 write through a still-unclassified
+/// caller. Both honestly mean "no authority claim was made for this edge",
+/// never "verified absence of authority" — a caller that needs to
+/// distinguish "never classified" from "explicitly legacy" has no way to,
+/// by design, since fabricating that distinction from data that was never
+/// recorded would be worse than admitting it is unknown.
+pub fn edge_authority(edge: &MemoryEdge) -> Option<EdgeAuthority> {
+    edge.metadata
+        .get("authority")
+        .and_then(serde_json::Value::as_str)
+        .and_then(EdgeAuthority::parse)
 }
 
 /// A row in the append-only `edge_observations` ledger (#774).
@@ -209,18 +292,15 @@ pub(crate) fn persist_confirmed_contradiction_within_tx(
         return Ok(ConfirmedContradictionOutcome::StaleSkipped);
     }
 
-    write_edge_row(
-        tx,
-        contradicts_edge,
-        "contradicts",
-        &EdgeProvenance::default(),
-    )?;
-    write_edge_row(
-        tx,
-        supersedes_edge,
-        "supersedes",
-        &EdgeProvenance::default(),
-    )?;
+    // tachi#1646: the only writer census-classified `ModelReceiptBacked` —
+    // this function's whole contract (validated above) is that both edges
+    // carry a bound, schema-checked `provenance.model_invocation` receipt.
+    let receipt_provenance = EdgeProvenance {
+        authority: Some(EdgeAuthority::ModelReceiptBacked),
+        ..EdgeProvenance::default()
+    };
+    write_edge_row(tx, contradicts_edge, "contradicts", &receipt_provenance)?;
+    write_edge_row(tx, supersedes_edge, "supersedes", &receipt_provenance)?;
 
     let superseded_at = super::normalize_utc_iso(superseded_at)?;
     // `revision` advances here (unlike `mark_superseded_closing_validity`,
@@ -447,6 +527,35 @@ fn clamp_edge_weight(weight: f64) -> f64 {
     }
 }
 
+/// Merge the writer's authority classification (tachi#1646) into a clone of
+/// the edge's metadata. `authority == None` returns `metadata` unchanged
+/// (clone only) — the common case for every caller this leaf did not
+/// classify, so their persisted rows are byte-for-byte identical to before
+/// this change. A non-object `metadata` (e.g. `component_governance_ops`
+/// seeds `Value::Null`) is replaced with a fresh object rather than left
+/// non-stampable, since a caller that explicitly asked for a classification
+/// must get one.
+fn stamp_authority(
+    metadata: &serde_json::Value,
+    authority: Option<EdgeAuthority>,
+) -> serde_json::Value {
+    let Some(authority) = authority else {
+        return metadata.clone();
+    };
+    let mut stamped = if metadata.is_object() {
+        metadata.clone()
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    if let Some(obj) = stamped.as_object_mut() {
+        obj.insert(
+            "authority".to_string(),
+            serde_json::Value::String(authority.as_str().to_string()),
+        );
+    }
+    stamped
+}
+
 /// Shared INSERT/UPSERT for the edge write doors above. `relation` is the
 /// (already-validated) relation string to persist; all timestamp normalization
 /// is identical across every entry point, and the weight is clamped into
@@ -468,6 +577,19 @@ fn clamp_edge_weight(weight: f64) -> f64 {
 /// holds a transaction (see `migrate_v9_relocate_and_drop_location`), unlike a
 /// raw `BEGIN`; when there is no enclosing transaction the savepoint starts one
 /// and `RELEASE` commits it, so the two writes are always atomic.
+///
+/// `provenance.authority` (tachi#1646) is stamped into `metadata.authority`,
+/// not a new column — this follows the #1524 contradiction-receipt precedent
+/// (`metadata.provenance.model_invocation`, validated in
+/// [`validate_confirmed_contradiction`] above), which landed the *previous*
+/// edge-provenance addition through the same JSON channel without a schema
+/// migration. `memory_edges.metadata` is an unindexed free-form JSON blob
+/// already read generically by every edge consumer, so a new key is
+/// additive and legacy rows with no `metadata.authority` key simply read
+/// back `None` from [`edge_authority`] — no `CHECK` constraint, no `NOT
+/// NULL`, no backfill. A `None` authority (every caller that still builds
+/// `EdgeProvenance::default()`) leaves `metadata` byte-for-byte unstamped, so
+/// this is a no-op for every write path this leaf did not touch.
 fn write_edge_row(
     conn: &Connection,
     edge: &MemoryEdge,
@@ -496,7 +618,8 @@ fn write_edge_row(
         .as_deref()
         .filter(|s| !s.is_empty())
         .map(normalize_utc_iso_or_now);
-    let meta_str = serde_json::to_string(&edge.metadata).unwrap_or_else(|_| "{}".to_string());
+    let stamped_metadata = stamp_authority(&edge.metadata, provenance.authority);
+    let meta_str = serde_json::to_string(&stamped_metadata).unwrap_or_else(|_| "{}".to_string());
     let weight = clamp_edge_weight(edge.weight);
 
     conn.execute_batch("SAVEPOINT write_edge_row")?;

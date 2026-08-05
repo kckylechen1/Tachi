@@ -96,8 +96,20 @@ pub(crate) async fn build_similarity_edges(
                 valid_from: String::new(),
                 valid_to: None,
             };
+            // tachi#1646: `similar_to` links are a search-score heuristic
+            // Tachi computed itself.
             lease
-                .write_owned(|store| store.add_edge(&edge).map_err(|e| format!("{e}")))
+                .write_owned(|store| {
+                    store
+                        .add_edge_with_provenance(
+                            &edge,
+                            &memcore::db::EdgeProvenance {
+                                authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
+                                ..Default::default()
+                            },
+                        )
+                        .map_err(|e| format!("{e}"))
+                })
                 .await
                 .map_err(|error| format!("persist source similarity link: {error}"))?;
             existing_targets.insert(result.entry.id);
