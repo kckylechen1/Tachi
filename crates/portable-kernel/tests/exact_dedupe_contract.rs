@@ -221,11 +221,12 @@ fn portable_build_exact_dedupe_apply_refuses_revision_drift_with_batch_rollback(
             .get_with_options(id, true)
             .expect("get_with_options")
             .unwrap_or_else(|| panic!("{id} must still exist"));
-        assert!(!row.archived, "{id} must not be archived after a refused apply");
+        assert!(
+            !row.archived,
+            "{id} must not be archived after a refused apply"
+        );
         assert_eq!(
-            store
-                .supersession_target(id)
-                .expect("supersession_target"),
+            store.supersession_target(id).expect("supersession_target"),
             Some(None),
             "{id} must not have gained a supersession edge"
         );
