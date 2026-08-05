@@ -317,6 +317,29 @@ impl super::super::LlmClient {
     /// of timeouts poisons the connection pool.
     pub(in crate::llm) fn build_http_client() -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
+            // SECURITY (#1621): every request this pooled client carries is
+            // credential-bearing — chat lanes attach `Bearer {api_key}` (see
+            // `llm/chat_lanes/lane_calls.rs`), as do embed and rerank. This is
+            // the same class of request the auth probe already refuses to send
+            // through a proxy at `llm/auth_probe.rs`: reqwest's `system-proxy`
+            // feature (`Cargo.toml`) otherwise lets HTTP_PROXY, HTTPS_PROXY,
+            // ALL_PROXY or OS proxy configuration receive the request and own
+            // DNS/TCP. The two builders in this crate now agree: documented
+            // provider endpoints are always contacted directly.
+            //
+            // This is also what makes this crate's own test binary sound.
+            // reqwest 0.13 has no implicit loopback bypass, so a
+            // `http://127.0.0.1:PORT` mock request is genuinely handed to the
+            // proxy, and reqwest snapshots proxy configuration at `.build()`.
+            // `tests/auth_probe.rs`'s
+            // `ambient_proxy_cannot_receive_probe_bearer_or_own_transport`
+            // sets those vars process-globally under `EnvRestore` while ~20
+            // `chat_lanes` `#[tokio::test]`s — which do NOT take
+            // `global_test_lock` — are building clients, which produced the
+            // "502 Bad Gateway then connection errors" flake under
+            // `cargo test` (libtest shares one process; nextest's
+            // process-per-test hid it).
+            .no_proxy()
             .connect_timeout(Duration::from_secs(Self::RECALL_CONNECT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(60))
             .build()
