@@ -653,7 +653,7 @@ pub(crate) fn claim_outbox_events_within_tx(
                 OR (state = ?2 AND ?3 IS NOT NULL AND state_changed_at <= ?3) \
              ORDER BY created_at ASC, event_id ASC LIMIT ?4"
         ))?;
-        stmt.query_map(
+        let rows = stmt.query_map(
             params![
                 OutboxState::Pending.as_str(),
                 OutboxState::InFlight.as_str(),
@@ -662,7 +662,8 @@ pub(crate) fn claim_outbox_events_within_tx(
             ],
             row_to_outbox_event,
         )?
-        .collect::<Result<Vec<_>, _>>()?
+        .collect::<Result<Vec<_>, _>>()?;
+        rows
     };
 
     let mut claimed = Vec::with_capacity(candidates.len());
