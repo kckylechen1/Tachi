@@ -30,6 +30,14 @@ members = [
     "crates/tachi-credential-profile",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",
+    # GitHub-domain runtime (#1611 Track T3, carve 1). Membership is
+    # load-bearing, not bookkeeping — `census_scan_roots_come_from_workspace_membership`
+    # in crates/tachi-contract-tests/src/tests/docs_tests/store_trigger_ddl_census.rs
+    # REDs on any directory under crates/ that is not a member, and the DDL
+    # census derives its scan roots from this list. Deliberately NOT in
+    # default-members: it is a dependency of tachi-server, which is a default
+    # member, so it is already built transitively.
+    "crates/tachi-github-runtime",
     "crates/tachi-hub",
     "crates/tachi-llm",
     "crates/tachi-merge-ops",
