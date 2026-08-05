@@ -150,7 +150,7 @@ pub use db::{
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
 pub use embed_config::embed_raw_tier_enabled;
-pub use error::{MemoryError, WorkClaimTransitionReason};
+pub use error::{MemoryError, OutboxOutcomeRefusal, WorkClaimTransitionReason};
 #[cfg(feature = "admin")]
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,
