@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::error::MemoryError;
 use crate::relation_ontology::ComponentGovernanceRelation;
-use crate::types::{ExpectedMemoryState, GraphExpandResult, MemoryEdge};
+use crate::types::{ExpectedMemoryState, GraphExpandResult, GraphTraversalInjection, MemoryEdge};
 
 use super::common::{normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::{fetch_by_ids, fetch_by_ids_excluding_store_internal};
@@ -1087,6 +1087,7 @@ pub fn graph_expand_limited(
 
     let mut visited: HashSet<String> = HashSet::new();
     let mut distances: HashMap<String, u32> = HashMap::new();
+    let mut injection_edges: HashMap<String, GraphTraversalInjection> = HashMap::new();
     let mut all_edges: Vec<MemoryEdge> = Vec::new();
     let mut seen_edges: HashSet<(String, String, String)> = HashSet::new();
     let mut queue: VecDeque<(String, u32)> = VecDeque::new();
@@ -1158,6 +1159,16 @@ pub fn graph_expand_limited(
                 if visited.insert(neighbor.clone()) {
                     let new_depth = current_depth + 1;
                     distances.insert(neighbor.clone(), new_depth);
+                    injection_edges.insert(
+                        neighbor.clone(),
+                        GraphTraversalInjection {
+                            source_id: edge.source_id.clone(),
+                            target_id: edge.target_id.clone(),
+                            relation: edge.relation.clone(),
+                            weight: edge.weight,
+                            depth: new_depth,
+                        },
+                    );
                     queue.push_back((neighbor.clone(), new_depth));
                 }
             }
@@ -1201,5 +1212,6 @@ pub fn graph_expand_limited(
         entries,
         edges: all_edges,
         distances,
+        injection_edges,
     })
 }

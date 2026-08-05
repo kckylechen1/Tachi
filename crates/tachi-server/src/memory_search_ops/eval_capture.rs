@@ -395,6 +395,8 @@ mod tests {
                 decay: 1.0,
                 final_score: 1.0,
             },
+            graph_injected: false,
+            graph_provenance: None,
         }
     }
 

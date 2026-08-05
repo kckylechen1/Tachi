@@ -259,6 +259,27 @@ pub(super) fn slim_search_result(
             "final": round_score(result.score.final_score),
         }),
     );
+    // tachi#1647 2c: this is a hand-built field whitelist, not a
+    // `serde_json::to_value(result)` passthrough, so `graph_injected` /
+    // `graph_provenance` must be forwarded explicitly or an ordinary
+    // consumer (search_memory, tachi_search, wiki search — every caller of
+    // `slim_search_result`) would silently lose them. Only present on
+    // graph-injected rows, so an expansion-off search adds zero new bytes
+    // here (mirrors `SearchResult`'s own `skip_serializing_if`).
+    if result.graph_injected {
+        obj.insert("graph_injected".into(), json!(true));
+    }
+    if let Some(provenance) = &result.graph_provenance {
+        obj.insert(
+            "graph_provenance".into(),
+            json!({
+                "via_edge": provenance.via_edge,
+                "from_id": provenance.from_id,
+                "activation": round_score(provenance.activation as f64),
+                "distance": provenance.distance,
+            }),
+        );
+    }
     serde_json::Value::Object(obj)
 }
 
@@ -276,6 +297,99 @@ pub(super) fn slim_l0_rule(rule: &MemoryEntry, db: DbScope) -> serde_json::Value
         "summary": summary,
         "l0_rule": true,
     })
+}
+
+#[cfg(test)]
+mod slim_search_result_graph_tests {
+    use super::*;
+    use memcore::{GraphInjectionProvenance, HybridScore, SearchResult};
+    use serde_json::json as jsonval;
+
+    fn entry(id: &str) -> MemoryEntry {
+        let now = Utc::now().to_rfc3339();
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/test".to_string(),
+            summary: String::new(),
+            text: String::new(),
+            importance: 0.5,
+            timestamp: now.clone(),
+            valid_from: now,
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: String::new(),
+            scope: "user".to_string(),
+            archived: false,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
+            revision: 1,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            metadata: jsonval!({}),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    /// tachi#1647 2c: `slim_search_result` is a hand-built field whitelist —
+    /// without explicit forwarding, `graph_injected`/`graph_provenance`
+    /// would silently vanish between `SearchResult` and every production
+    /// row-shaping caller (search_memory, tachi_search, wiki search).
+    #[test]
+    fn forwards_graph_injected_and_provenance_when_present() {
+        let result = SearchResult {
+            entry: entry("hop2"),
+            score: HybridScore {
+                vector: 0.0,
+                fts: 0.0,
+                symbolic: 0.0,
+                decay: 0.0,
+                final_score: 0.4,
+            },
+            graph_injected: true,
+            graph_provenance: Some(GraphInjectionProvenance {
+                via_edge: "elaborates".to_string(),
+                from_id: "seed".to_string(),
+                activation: 0.42,
+                distance: 2,
+            }),
+        };
+        let row = slim_search_result(&result, DbScope::Project, false);
+        assert_eq!(row["graph_injected"], jsonval!(true));
+        assert_eq!(row["graph_provenance"]["via_edge"], jsonval!("elaborates"));
+        assert_eq!(row["graph_provenance"]["from_id"], jsonval!("seed"));
+        assert_eq!(row["graph_provenance"]["distance"], jsonval!(2));
+    }
+
+    /// Ordinary (non-injected) rows must carry neither key — expansion-off
+    /// search adds zero new bytes to the response.
+    #[test]
+    fn omits_graph_fields_for_ordinary_rows() {
+        let result = SearchResult {
+            entry: entry("ordinary"),
+            score: HybridScore {
+                vector: 0.5,
+                fts: 0.5,
+                symbolic: 0.0,
+                decay: 1.0,
+                final_score: 0.5,
+            },
+            graph_injected: false,
+            graph_provenance: None,
+        };
+        let row = slim_search_result(&result, DbScope::Project, false);
+        assert!(row.get("graph_injected").is_none());
+        assert!(row.get("graph_provenance").is_none());
+    }
 }
 
 #[cfg(test)]
