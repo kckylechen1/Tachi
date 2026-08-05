@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::memory_search_ops::contains_secret_like;
+use crate::contains_secret_like;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PilotPrivacyErrorV1 {
