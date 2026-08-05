@@ -1343,6 +1343,31 @@ mod tests {
                 "/wiki/engineering/foo",
                 serde_json::json!({"lifecycle": "stale", "review_status": "pending"}),
             ),
+            // tachi#1561 review round (finding 5): segment-boundary path
+            // scoping fixtures. `derive_wiki_lifecycle` has no `/wiki`
+            // scoping of its own (it only special-cases `/wiki/drafts`), so
+            // every case below is deliberately left at the default
+            // (metadata-absent) lifecycle — the boundary predicate under
+            // test lives entirely on the memcore side
+            // (`is_non_default_retrievable_wiki_row`'s `path_in_namespace`
+            // call), and both sides must still agree that an unmarked row
+            // resolves to `Active`/retrievable regardless of where the path
+            // boundary falls. Near-miss paths that share the `/wiki` byte
+            // prefix without a `/`-delimited boundary (`/wikiX`,
+            // `/wiki-drafts/foo`-shaped inputs) get their own adversarial
+            // (non-default-metadata) regression coverage in
+            // `memcore::namespace::tests::
+            // wiki_lifecycle_gate_path_scoping_uses_segment_boundary_not_bare_prefix`,
+            // where only one side's scoping decision determines the outcome.
+            ("/wiki", serde_json::json!({})),
+            ("/wiki/", serde_json::json!({})),
+            ("/wikiX", serde_json::json!({})),
+            ("/WIKI/x", serde_json::json!({})),
+            ("", serde_json::json!({})),
+            (
+                "/wiki/engineering/foo",
+                serde_json::json!({"review_status": "approved"}),
+            ),
         ];
 
         for (path, metadata) in fixtures {

@@ -864,6 +864,46 @@ mod tests {
         assert_eq!(wiki_sql_kept_ids(&rows, true), vec![rows[0].id.clone()]);
     }
 
+    /// tachi#1561 review round: `is_non_default_retrievable_wiki_row`'s
+    /// `/wiki` scope check must use segment-boundary semantics
+    /// ([`path_in_namespace`]), not a bare `starts_with("/wiki")` — the
+    /// review flagged `/wikiology/foo` and `/wiki-drafts/foo` as paths that
+    /// share the `/wiki` byte prefix without a `/`-delimited boundary and
+    /// would wrongly match a bare-prefix check. Each near-miss fixture below
+    /// carries an explicit non-`Active` lifecycle marker so a regression to
+    /// bare-prefix matching would flip the assertion (wrongly gate the row);
+    /// the correct scoped check leaves out-of-namespace rows alone
+    /// regardless of their metadata. The positive fixtures (`/wiki` exact,
+    /// `/wiki/` trailing slash) confirm the boundary isn't over-corrected to
+    /// reject legitimate in-namespace rows.
+    #[test]
+    fn wiki_lifecycle_gate_path_scoping_uses_segment_boundary_not_bare_prefix() {
+        let mut near_miss_prefix = fixture_entry("nm-1", "/wikiology/foo", "not a wiki row");
+        near_miss_prefix.metadata = json!({"lifecycle": "stale"});
+        let mut near_miss_hyphen = fixture_entry("nm-2", "/wiki-drafts/foo", "not a wiki row");
+        near_miss_hyphen.metadata = json!({"review_status": "pending"});
+        for entry in [&near_miss_prefix, &near_miss_hyphen] {
+            assert!(
+                !is_non_default_retrievable_wiki_row(entry),
+                "a path that merely shares the '/wiki' byte prefix without a \
+                 '/'-delimited boundary must not be treated as /wiki-namespaced: \
+                 {entry:?}"
+            );
+        }
+
+        let mut exact_root = fixture_entry("exact-root", "/wiki", "wiki root itself");
+        exact_root.metadata = json!({"lifecycle": "stale"});
+        let mut trailing_slash = fixture_entry("trailing", "/wiki/", "trailing slash child");
+        trailing_slash.metadata = json!({"review_status": "pending"});
+        for entry in [&exact_root, &trailing_slash] {
+            assert!(
+                is_non_default_retrievable_wiki_row(entry),
+                "a path exactly at, or one segment under, the /wiki root must \
+                 still be gated: {entry:?}"
+            );
+        }
+    }
+
     #[test]
     fn namespace_search_noise_keeps_user_facing_wiki_rows() {
         let user_wiki_entry = fixture_entry(
