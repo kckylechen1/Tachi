@@ -26,6 +26,16 @@ fn raw_memory_connection_cannot_promote_rows_into_trusted_namespaces() {
     // i.e. the trust boundary was only ever exercised once. Distinct bodies
     // keep all eleven rows live so each attack hits a real classifier-bearing
     // row.
+    //
+    // kckylechen1/tachi#1634: `seed_wiki_project_entries` seeds through
+    // `store.upsert()`, an explicit-id write, which now defaults to
+    // `NearDuplicatePolicy::NonSemantic` — the merge this workaround guards
+    // against can no longer happen on this path at all, so distinct bodies
+    // are no longer strictly necessary here. Left as-is rather than
+    // reverted to identical bodies: this is a security boundary test, the
+    // "only exercised once" failure mode it documents is exactly the kind
+    // of regression a future change to the default could reintroduce, and
+    // keeping distinct bodies costs nothing.
     let entries = cases
         .iter()
         .map(|(id, _)| {

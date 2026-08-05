@@ -145,7 +145,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
             metadata_patch,
             &[],
             mutations,
-            false,
+            db::NearDuplicatePolicy::NonSemantic,
         )
         .map(|_| ())
     }
@@ -226,7 +226,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         metadata_patch: &Map<String, Value>,
         metadata_removals: &[&str],
         mutations: &[db::ValidatedReferenceMutation],
-        allow_near_duplicate_merge: bool,
+        policy: db::NearDuplicatePolicy,
     ) -> Result<(db::IdlessUpsertResult, Value), MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
@@ -238,7 +238,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
             metadata_patch,
             metadata_removals,
             mutations,
-            allow_near_duplicate_merge,
+            policy,
         )
     }
 

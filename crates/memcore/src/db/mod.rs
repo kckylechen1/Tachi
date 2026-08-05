@@ -129,10 +129,10 @@ pub use memory_crud::{
     set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
     supersede_memory_if_revision, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
     try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
-    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, ValidatedReferenceMutation,
-    MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES,
-    MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
-    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy,
+    ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
+    MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES,
+    MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 pub(crate) use memory_crud::{
     archive_with_metadata_if_expected_state, restore_with_metadata_if_expected_state,

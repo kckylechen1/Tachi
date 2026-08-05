@@ -128,6 +128,14 @@ fn build_capture_entry(query: &str, expected_id: &str, top_k: usize) -> MemoryEn
     let id = format!("eval-recall-{date}-{short_id}");
     // Unique placeholder text (ids only) so Jaccard write-dedup does not collapse cases.
     // Never copies the accessed memory body.
+    //
+    // kckylechen1/tachi#1634: this call reaches `store.upsert()`, an
+    // explicit-id write, which now defaults to
+    // `NearDuplicatePolicy::NonSemantic` — write-time Jaccard dedup never
+    // runs on this path at all anymore, so the uniqueness dodge below is
+    // obsolete. Left in place (removing it is a behavior-neutral cleanup a
+    // later pass can do) rather than removed as part of the #1634 default
+    // flip.
     let text = format!(
         "auto-captured recall eval case id={id} expected_id={expected_id} (query+ids only; no body)"
     );

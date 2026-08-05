@@ -141,6 +141,13 @@ pub(in crate::memory_search_ops::save_memory) fn mark_save_target_used(
     }
 }
 
+/// Explicit-id `save_memory`. kckylechen1/tachi#1634: writes with
+/// `NearDuplicatePolicy::NonSemantic` — an explicit-id save must land as the
+/// exact row the caller asked for, never silently fold into an unrelated
+/// >0.9-Jaccard-similar row. The census for #1634 found no test locking the
+/// > old AllowNearDuplicateMerge behavior on this branch; matching the id-less
+/// > path's merge behavior here was design-history inertia, not a requirement,
+/// > and the owner ruling names only the id-less path as the merge opt-in.
 pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
     server: &MemoryServer,
     entry: &mut MemoryEntry,
@@ -156,6 +163,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
                 &evidence_write.metadata_patch,
                 &evidence_write.metadata_removals,
                 &evidence_write.mutations,
+                memcore::db::NearDuplicatePolicy::NonSemantic,
             )
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
         entry.metadata = metadata;
@@ -168,6 +176,10 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
     }
 }
 
+/// Id-less `save_memory` — the sole `NearDuplicatePolicy::AllowNearDuplicateMerge`
+/// opt-in in the codebase (kckylechen1/tachi#1634 owner ruling, Option A:
+/// everything else defaults non-semantic; id-less save_memory keeps merging
+/// via this explicit typed opt-in).
 pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
     server: &MemoryServer,
     entry: &mut MemoryEntry,
@@ -184,6 +196,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
                 &evidence_write.metadata_patch,
                 &evidence_write.metadata_removals,
                 &evidence_write.mutations,
+                memcore::db::NearDuplicatePolicy::AllowNearDuplicateMerge,
             )
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
         entry.metadata = metadata;
@@ -318,7 +331,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                         &metadata_patch,
                         &evidence_write.metadata_removals,
                         &evidence_write.mutations,
-                        false,
+                        memcore::db::NearDuplicatePolicy::NonSemantic,
                     )?;
                 let (winner_id, committed_previous_revision) = match &result {
                     IdlessUpsertResult::Saved => (entry.id.as_str(), previous_revision),
