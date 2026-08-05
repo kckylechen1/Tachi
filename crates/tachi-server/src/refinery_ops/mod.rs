@@ -121,9 +121,13 @@ mod compiler;
 mod disposition;
 mod doc_resolver;
 mod live_signals;
-// `pub(crate)` so sibling leaves (e.g. `github_corpus_ops`) can reuse the
-// pure gh-JSON → IssueSnapshotV1 parser without duplicating it (#1059).
-pub(crate) mod parse;
+// The pure gh-JSON → IssueSnapshotV1 parser moved down into `tachi-params`
+// (#1611 Track T3, carve 1), beside the `*V1` types it produces and the
+// hashing helpers it calls, so the corpus adapter in `tachi-github-runtime`
+// can still reuse it without duplicating it (#1059) and without either crate
+// depending on the other. Re-exported under the same local name so every
+// `parse::` call site below is unchanged.
+pub(crate) use tachi_params::gh_json_parse as parse;
 
 #[cfg(test)]
 mod fixtures;

@@ -8,14 +8,14 @@ use async_trait::async_trait;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tachi_server::github_corpus_ops::live_pilot::{
+use tachi_github_runtime::github_corpus_ops::live_pilot::{
     dry_run_owner_approved_corpus_pilot, rebaseline_owner_approved_corpus_pilot,
     run_owner_approved_corpus_pilot, CorpusPilotCheckpointStore, CorpusPilotCheckpointV1,
     CorpusPilotFailureClassV1, CorpusPilotModelClient, CorpusPilotModelCompletionV1,
     CorpusPilotModelFailureV1, CorpusPilotModelRequestV1, CorpusPilotModelResolver,
     CorpusPilotReportV1, ProviderResolutionReceiptV1, ResolvedCorpusPilotModelV1,
 };
-use tachi_server::github_corpus_ops::GithubCorpusReader;
+use tachi_github_runtime::github_corpus_ops::GithubCorpusReader;
 
 const ISSUE_FIELDS: &str = "number,title,body,state,labels,milestone,updatedAt,comments";
 const PR_FIELDS: &str =
@@ -180,7 +180,7 @@ impl TachiReasoningModelClient {
         .map_err(|_| "serialize model request".to_string())
     }
 
-    fn parse_draft(raw: &str) -> Result<tachi_server::github_corpus_ops::adapt::CaseDraft, String> {
+    fn parse_draft(raw: &str) -> Result<tachi_github_runtime::github_corpus_ops::adapt::CaseDraft, String> {
         let payload = tachi_llm::LlmClient::extract_json_payload(raw)
             .map_err(|_| "model response did not contain a JSON object".to_string())?;
         let draft: ModelDraftV1 = serde_json::from_str(payload)
@@ -196,7 +196,7 @@ impl TachiReasoningModelClient {
         {
             return Err("model response contained an empty required draft field".to_string());
         }
-        Ok(tachi_server::github_corpus_ops::adapt::CaseDraft {
+        Ok(tachi_github_runtime::github_corpus_ops::adapt::CaseDraft {
             situation: draft.situation,
             proposed_ruling: draft.proposed_ruling,
             why: draft.why,
