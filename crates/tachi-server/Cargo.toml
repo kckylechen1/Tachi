@@ -137,10 +137,30 @@ tokio = { version = "1", features = ["test-util", "macros", "rt", "time"] }
 name = "tachi_server"
 path = "src/lib.rs"
 
-# Primary product binary name. Keeps the default test/bench targets.
+# Primary product binary name.
+#
+# `test = false` / `bench = false` for the same reason as the `tachi` alias
+# below (Refs #1095): this bin compiles the SAME `src/main.rs`, which is three
+# lines with no `#[test]` / `#[cfg(test)]` / `mod tests`, so its default test
+# TARGET is a full libtest harness that statically links the entire
+# `tachi_server` rlib in order to run ZERO tests. Cargo built it on every
+# `cargo test` / `cargo nextest run` / `--all-targets`.
+#
+# What is NOT affected:
+#   * The bin ARTIFACT still builds (`cargo build`, `--bin tachi-server`,
+#     scripts/update_homebrew_formula.py) -- `test`/`bench` only gate
+#     test/bench TARGET discovery.
+#   * `env!("CARGO_BIN_EXE_tachi-server")` in
+#     tests/doctor_run_daily_process.rs still resolves: Cargo sets
+#     CARGO_BIN_EXE_<name> from the bin TARGET, which is untouched here.
+#   * `cargo clippy --all-targets` still lints the bin target itself.
+#   * There is no `[[bench]]` / `#[bench]` in this crate, so `bench = false`
+#     removes nothing.
 [[bin]]
 name = "tachi-server"
 path = "src/main.rs"
+test = false
+bench = false
 
 [[bin]]
 name = "github-corpus-pilot"
@@ -161,10 +181,12 @@ path = "src/bin/github_corpus_pilot.rs"
 #     and `cargo build --release` still produce the bin ARTIFACT, so release
 #     packaging (scripts/package_release_binary.sh -> the `tachi` binary) and
 #     the install/PATH surface are unchanged.
-#   * No `CARGO_BIN_EXE_*` reference exists anywhere in the repo (verified by
-#     grep, zero hits), so no integration test depends on this bin's test
-#     target; and there is no `[[bench]]` / `#[bench]` in this crate, so
-#     `bench = false` removes nothing.
+#   * The repo's one `CARGO_BIN_EXE_*` reference
+#     (tests/doctor_run_daily_process.rs -> CARGO_BIN_EXE_tachi-server) names
+#     the `tachi-server` bin, not this alias, and reads the bin TARGET rather
+#     than its test target -- so no integration test depends on this bin's
+#     test target either way; and there is no `[[bench]]` / `#[bench]` in this
+#     crate, so `bench = false` removes nothing.
 #
 # The `memory-server` [[bin]] alias that used to live here (the #890/#912
 # brand-rename PATH-compat shim) is retired (tachi#1132, owner-ratified
