@@ -88,7 +88,7 @@ pub(crate) fn profile_weak_against_for_server(
     ))
 }
 
-pub(in crate::dispatch_profile) fn profile_demotion_targets(
+pub(crate) fn profile_demotion_targets(
     server: &MemoryServer,
     profile: &DispatchProfileDef,
 ) -> Result<Vec<String>, String> {

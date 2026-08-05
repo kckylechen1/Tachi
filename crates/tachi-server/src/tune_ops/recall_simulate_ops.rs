@@ -1,4 +1,4 @@
-//! Labeled recall replay for `tachi_memory(action="recall_simulate")`.
+//! Labeled recall replay for `tachi_tune(action="recall_simulate")`.
 
 mod config;
 mod input;

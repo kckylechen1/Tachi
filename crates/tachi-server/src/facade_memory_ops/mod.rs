@@ -12,19 +12,18 @@ mod evidence_format;
 mod pattern_feedback_ops;
 mod progress_ops;
 mod readiness_ops;
-mod recall_proposal_ops;
-mod recall_simulate_ops;
 
 use crate::facade_save_ops::finalize_tachi_save_response;
 use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
 use crate::MemoryServer;
 pub(crate) use evidence_format::format_extract_result;
-use evidence_format::{json_string, parse_json_or_empty};
+pub(crate) use evidence_format::json_string;
+use evidence_format::parse_json_or_empty;
 pub(crate) use evidence_format::{
     shape_complete_response, shape_save_facade_response, wants_full_format, wants_json,
 };
-pub(crate) use recall_simulate_ops::build_recall_simulation_report;
+pub(crate) use crate::tune_ops::build_recall_simulation_report;
 use serde_json::json;
 
 fn json_search_section(name: String, value: serde_json::Value) -> serde_json::Value {
@@ -258,15 +257,15 @@ pub(crate) async fn handle_tachi_memory(
         "ask" => readiness_ops::handle_memory_ask(server, &params).await,
         "consolidate" => consolidate_ops::handle_memory_consolidate(server, &params).await,
         "recall_simulate" => {
-            recall_simulate_ops::handle_memory_recall_simulate(server, &params).await
+            crate::tune_ops::handle_memory_recall_simulate(server, &params).await
         }
         "recall_proposals" => {
-            recall_proposal_ops::handle_recall_config_proposals(server, &params).await
+            crate::tune_ops::handle_recall_config_proposals(server, &params).await
         }
         "review_recall_proposal" => {
-            recall_proposal_ops::handle_recall_config_review(server, &params)
+            crate::tune_ops::handle_recall_config_review(server, &params)
         }
-        "apply_recall_proposals" => recall_proposal_ops::handle_recall_config_apply(server, &params),
+        "apply_recall_proposals" => crate::tune_ops::handle_recall_config_apply(server, &params),
         "pattern_feedback" => {
             if let Some(body) =
                 crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)

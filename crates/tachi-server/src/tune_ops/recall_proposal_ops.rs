@@ -1,6 +1,6 @@
 //! Evidence-backed RecallConfig proposal review/apply loop.
 
-use super::evidence_format::{json_string, wants_json};
+use crate::facade_memory_ops::{json_string, wants_json};
 use super::recall_simulate_ops::build_recall_simulation_report;
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -1313,7 +1313,7 @@ fn list_proposals(
 }
 
 /// SHA-256 hex of a canonical identity payload. Mirrors the helper in
-/// `dispatch_profile/policy/handlers.rs`; kept local because the two modules
+/// `tune_ops/route_policy/handlers.rs`; kept local because the two modules
 /// are in different crate sub-trees and a shared util would expand this PR's
 /// scope. Both must serialize through the same `recall_config_v3_identity_payload`
 /// canonical form first.

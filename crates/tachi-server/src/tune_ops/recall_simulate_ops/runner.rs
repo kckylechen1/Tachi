@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use memcore::RecallConfig;
 use serde_json::{json, Value};
 
-use super::super::evidence_format::{json_string, wants_json};
+use crate::facade_memory_ops::{json_string, wants_json};
 use super::config::{recall_config_env_diff, recall_config_summary};
 use super::input::{parse_cases, parse_variants};
 use super::markdown::format_recall_simulate_markdown;
@@ -390,8 +390,8 @@ fn returned_ids(rows: &[Value]) -> Vec<String> {
 /// miss even when its active successor is returned. Canonical/lineage
 /// semantics (stored `superseded_by` resolution, reviewed equivalence) live
 /// in `memcore::recall_coverage` (#1504), not here. The staleness this
-/// implies for simulate-ops expected-id fixtures rides the #1426
-/// `tachi_tune` migration, not this issue.
+/// implies for simulate-ops expected-id fixtures now rides in `tune_ops` as
+/// part of the #1426 `tachi_tune` migration, not this issue.
 fn first_expected_rank(returned_ids: &[String], expected_ids: &[String]) -> Option<usize> {
     returned_ids
         .iter()

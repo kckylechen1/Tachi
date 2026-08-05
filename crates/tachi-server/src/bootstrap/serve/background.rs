@@ -157,7 +157,7 @@ fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, Strin
         // `recall_proposal_ops::RECALL_CONFIG_PROPOSAL_NS` is still
         // module-private (not reachable from here) — hardcoded literal, source
         // of truth:
-        // crates/tachi-server/src/facade_memory_ops/recall_proposal_ops.rs:12.
+        // crates/tachi-server/src/tune_ops/recall_proposal_ops.rs:12.
         "recall_config_proposals",
     ] {
         total += store
