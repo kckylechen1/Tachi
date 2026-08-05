@@ -9529,6 +9529,22 @@ mod tests {
         assert_eq!(changed, 1, "fixture row {id} must exist");
     }
 
+    /// Overwrite the `path` column directly, bypassing `upsert`'s
+    /// `normalize_path` call so the fixture can hold a raw legacy path the
+    /// current write path would never itself persist -- the shape genuinely
+    /// legacy data (written before normalization existed, or by a path
+    /// outside this write seam) can carry.
+    fn force_legacy_path(path: &Path, id: &str, raw_path: &str) {
+        let conn = Connection::open(path).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE memories SET path = ?2 WHERE id = ?1",
+                rusqlite::params![id, raw_path],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "fixture row {id} must exist");
+    }
+
     struct DestinationRow {
         created_at: String,
         updated_at: String,
@@ -10065,7 +10081,7 @@ mod tests {
             "/wiki/adopt/vectored",
             json!({"lifecycle": "active"}),
         );
-        vectored.vector = Some(vec![0.25_f32, -0.5, 0.75, 1.0]);
+        vectored.vector = Some(vec![0.25_f32; crate::status_ops::EXPECTED_EMBEDDING_DIM]);
         let plain =
             adoption_entry_fixture("plain", "/wiki/adopt/plain", json!({"lifecycle": "active"}));
         let fixture = AdoptionFixture::new(&[vectored, plain]);
@@ -10143,9 +10159,17 @@ mod tests {
     fn adopt_legacy_discloses_and_verifies_path_normalization() {
         let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
             "rewritten",
-            "/wiki/adopt/rewritten/",
+            "/wiki/adopt/rewritten",
             json!({"lifecycle": "active"}),
         )]);
+        // `AdoptionFixture::new` seeds the legacy row through `upsert`, which
+        // normalizes `path` on write (memcore's `normalize_path` call in
+        // `upsert_prepared_within_tx`) -- so no fixture path passed through
+        // that constructor can ever land in the legacy DB un-normalized.
+        // Force the raw legacy path in directly, the same idiom
+        // `force_legacy_lifecycle` uses for columns the current write path
+        // would never itself produce.
+        force_legacy_path(&fixture.global_path, "rewritten", "/wiki/adopt/rewritten/");
 
         let preview = fixture.run(None).expect("preview").legacy_adoption.unwrap();
         assert_eq!(preview.path_rewrites.len(), 1);
