@@ -44,10 +44,45 @@ pub struct SearchResult {
     /// to before this field existed.
     #[serde(default, skip_serializing_if = "is_false")]
     pub graph_injected: bool,
+    /// Per-result attribution for a graph-injected result: which edge and
+    /// which seed brought this candidate in. Always `None` when
+    /// `graph_injected` is `false`; omitted from JSON in that case so an
+    /// expansion-off search carries zero new bytes — tachi#1647.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_provenance: Option<GraphInjectionProvenance>,
 }
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// Per-result provenance for a graph-injected [`SearchResult`] — tachi#1647.
+///
+/// `via_edge` and `from_id` mirror the graph expansion's own BFS discovery
+/// order (`db::graph_expand_limited`'s first-visit dedup that already
+/// establishes each entry's hop `distance`) rather than a newly-invented
+/// selection: when an entry is reachable via more than one candidate edge,
+/// the one recorded here is the strongest by the same
+/// `scorer::graph_relation_activation_weight(relation) * edge.weight`
+/// formula the spreading-activation scorer already uses to propagate
+/// `activation`, tie-broken by the expansion's own deterministic edge order
+/// (`source_id`, `target_id`, `relation` — the sort `graph_expand_limited`
+/// already applies).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphInjectionProvenance {
+    /// Relation of the edge that most directly attached this entry to its
+    /// BFS parent — the entry's immediate discovery edge.
+    pub via_edge: String,
+    /// Id of the seed result (a member of the pre-graph ranked set that
+    /// `append_graph_expansion` was called with) this entry's BFS parent
+    /// chain traces back to.
+    pub from_id: String,
+    /// Spreading-activation value computed for this entry
+    /// (`scorer::graph_spreading_activation_with_seed_weights`).
+    pub activation: f32,
+    /// BFS hop distance from the nearest seed
+    /// (`db::graph_expand`'s `distances` map).
+    pub distance: u8,
 }
 
 /// Aggregate statistics about the memory store.

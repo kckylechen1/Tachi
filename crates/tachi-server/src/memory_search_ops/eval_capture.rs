@@ -396,6 +396,7 @@ mod tests {
                 final_score: 1.0,
             },
             graph_injected: false,
+                    graph_provenance: None,
         }
     }
 
