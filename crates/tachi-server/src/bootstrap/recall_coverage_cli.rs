@@ -17,6 +17,15 @@ pub(super) fn run_recall_coverage_command(
     top_k: Option<usize>,
     candidates_per_channel: Option<usize>,
     limit: Option<usize>,
+    // `--equivalence-file` accepts a `RecallCoverageEquivalenceCorpus` JSON
+    // document: schema id `tachi.recall_coverage.reviewed_equivalence.v1`
+    // (`RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION`), carrying only IDs, an
+    // optional `expected_ids` reviewed lane, and content-free
+    // `evidence_source` references (never memory content; see
+    // `RecallCoverageEquivalenceSet`/`validate_reviewed_equivalences`).
+    // By design no in-repo corpus file ships with this crate: it is an
+    // operator-supplied, reviewed artifact built and audited outside version
+    // control (tachi#1504), not a fixture this codebase maintains or seeds.
     equivalence_file: Option<&Path>,
     human: bool,
 ) -> Result<(), Box<dyn Error>> {

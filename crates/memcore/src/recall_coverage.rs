@@ -209,6 +209,19 @@ pub enum RecallCoverageEvidenceKind {
     StoredSupersessionLineage,
 }
 
+/// Why a row was excluded from the legacy exact-ID population partition,
+/// mirroring the mutually exclusive branches in the partition classification.
+/// This never mutates `outcome`: it explains a miss, it does not skip the probe.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallCoverageFilterReason {
+    Archived,
+    Superseded,
+    NamespaceSearchNoise,
+    PathListOnly,
+    AlreadySurfaced,
+}
+
 /// Content-free evidence for resolving one expected row to one canonical row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecallCoverageFactEvidence {
@@ -284,6 +297,12 @@ pub struct RecallCoverageTarget {
     pub canonical_rank: Option<usize>,
     pub canonical_candidate_legs: Option<CandidateLegEvidence>,
     pub fact_evidence: RecallCoverageFactEvidence,
+    /// Why this row was excluded from the legacy exact-ID population partition,
+    /// if it was. The partition classification is carried through rather than
+    /// discarded so the expected-ID lane can explain a miss without ever
+    /// skipping its probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_reason: Option<RecallCoverageFilterReason>,
 }
 
 /// Serializable report for an offline self-query coverage run.
@@ -335,6 +354,33 @@ pub fn is_recall_coverage_path_list_only(path: &str) -> bool {
     PATH_LIST_ONLY_NAMESPACES
         .iter()
         .any(|namespace| path_in_namespace(path, namespace))
+}
+
+/// Classify one row against the same mutually exclusive partition the legacy
+/// population loop uses, without discarding the branch taken: `None` means
+/// the row is eligible for the legacy exact-ID population, `Some(reason)`
+/// names which non-eligible bucket it falls into. Shared by the legacy
+/// partition loop and the expected-ID lane so both apply an identical check.
+fn recall_coverage_filter_reason(
+    entry: &MemoryEntry,
+    supersession_links: &HashMap<String, Option<String>>,
+) -> Option<RecallCoverageFilterReason> {
+    if entry.archived {
+        Some(RecallCoverageFilterReason::Archived)
+    } else if supersession_links
+        .get(&entry.id)
+        .is_some_and(Option::is_some)
+    {
+        Some(RecallCoverageFilterReason::Superseded)
+    } else if is_namespace_search_noise(entry, None) {
+        Some(RecallCoverageFilterReason::NamespaceSearchNoise)
+    } else if is_recall_coverage_path_list_only(&entry.path) {
+        Some(RecallCoverageFilterReason::PathListOnly)
+    } else if entry.access_count > 0 {
+        Some(RecallCoverageFilterReason::AlreadySurfaced)
+    } else {
+        None
+    }
 }
 
 fn supersession_links(conn: &Connection) -> Result<HashMap<String, Option<String>>, MemoryError> {
@@ -593,6 +639,7 @@ fn probe_entry(
     options: &RecallCoverageOptions,
     entry: &MemoryEntry,
     planned_canonical: CanonicalResolution,
+    filter_reason: Option<RecallCoverageFilterReason>,
 ) -> Result<RecallCoverageTarget, MemoryError> {
     let stored_vector_present = entry.vector.is_some();
     let Some((query_source, query)) = deterministic_self_query(entry) else {
@@ -613,6 +660,7 @@ fn probe_entry(
             canonical_rank: None,
             canonical_candidate_legs: None,
             fact_evidence: planned_canonical.evidence,
+            filter_reason,
         });
     };
 
@@ -640,6 +688,7 @@ fn probe_entry(
             canonical_rank: None,
             canonical_candidate_legs: None,
             fact_evidence: planned_canonical.evidence,
+            filter_reason,
         });
     }
 
@@ -710,6 +759,7 @@ fn probe_entry(
         canonical_rank,
         canonical_candidate_legs,
         fact_evidence: canonical.evidence,
+        filter_reason,
     })
 }
 
@@ -737,7 +787,19 @@ fn run_expected_id_lane(
         })?;
         let planned_canonical =
             canonical_resolution(supersession_links, reviewed_equivalences, expected_id)?;
-        cases.push(probe_entry(conn, store, options, entry, planned_canonical)?);
+        // The legacy population loop applies this same partition check before
+        // deciding eligibility; the expected-ID lane skipped it entirely. A
+        // filtered expected id still probes below — the reason explains a
+        // miss, it never substitutes for one.
+        let filter_reason = recall_coverage_filter_reason(entry, supersession_links);
+        cases.push(probe_entry(
+            conn,
+            store,
+            options,
+            entry,
+            planned_canonical,
+            filter_reason,
+        )?);
     }
 
     let probed = cases
@@ -859,22 +921,20 @@ fn run_recall_coverage_probe_internal(
     };
     let mut eligible = Vec::new();
     for entry in all_entries {
-        if entry.archived {
-            partition.archived += 1;
-        } else if supersession_links
-            .get(&entry.id)
-            .is_some_and(Option::is_some)
-        {
-            partition.superseded += 1;
-        } else if is_namespace_search_noise(&entry, None) {
-            partition.search_noise += 1;
-        } else if is_recall_coverage_path_list_only(&entry.path) {
-            partition.path_list_only += 1;
-        } else if entry.access_count > 0 {
-            partition.already_surfaced += 1;
-        } else {
-            partition.eligible += 1;
-            eligible.push(entry);
+        // Carried through `RecallCoverageFilterReason` rather than discarded
+        // as a bare counter increment: `None` here is exactly the condition
+        // that admits the row to `eligible`, and `Some(reason)` is the same
+        // value the expected-ID lane attaches to a filtered row below.
+        match recall_coverage_filter_reason(&entry, &supersession_links) {
+            Some(RecallCoverageFilterReason::Archived) => partition.archived += 1,
+            Some(RecallCoverageFilterReason::Superseded) => partition.superseded += 1,
+            Some(RecallCoverageFilterReason::NamespaceSearchNoise) => partition.search_noise += 1,
+            Some(RecallCoverageFilterReason::PathListOnly) => partition.path_list_only += 1,
+            Some(RecallCoverageFilterReason::AlreadySurfaced) => partition.already_surfaced += 1,
+            None => {
+                partition.eligible += 1;
+                eligible.push(entry);
+            }
         }
     }
     partition.validate_identity()?;
@@ -911,7 +971,19 @@ fn run_recall_coverage_probe_internal(
         })?;
         let planned_canonical =
             canonical_resolution(&supersession_links, &reviewed_equivalences, &entry.id)?;
-        let target = probe_entry(&transaction, store, &options, entry, planned_canonical)?;
+        // `entry` is drawn from `eligible`, so this is always `None` by
+        // construction (see the partition loop above); passed explicitly
+        // rather than omitted so both lanes populate the same field the
+        // same way instead of one silently leaving it unset.
+        let filter_reason = recall_coverage_filter_reason(entry, &supersession_links);
+        let target = probe_entry(
+            &transaction,
+            store,
+            &options,
+            entry,
+            planned_canonical,
+            filter_reason,
+        )?;
         match target.outcome {
             RecallCoverageOutcome::Surfaced => {
                 probed += 1;
@@ -1069,7 +1141,7 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
     {
         writeln!(
             output,
-            "miss id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
+            "miss id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}{}{}",
             target.id,
             target.outcome,
             target.rank,
@@ -1082,13 +1154,15 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
             format_candidate_legs(target.canonical_candidate_legs),
             target.fact_evidence.kind,
             target.fact_evidence.source,
+            format_lineage_suffix(&target.fact_evidence.lineage),
+            format_filter_reason_suffix(target.filter_reason),
         )
         .expect("writing to String cannot fail");
     }
     for target in &report.expected_id_lane.cases {
         writeln!(
             output,
-            "expected_id_case id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}",
+            "expected_id_case id={} exact_outcome={:?} exact_rank={:?} exact_legs=[{}] canonical_outcome={:?} canonical_vector_qualified_outcome={:?} canonical_id={:?} matched_canonical_id={:?} canonical_rank={:?} canonical_legs=[{}] evidence_kind={:?} evidence_source={}{}{}",
             target.id,
             target.outcome,
             target.rank,
@@ -1101,10 +1175,27 @@ pub fn format_recall_coverage_human(report: &RecallCoverageReport) -> String {
             format_candidate_legs(target.canonical_candidate_legs),
             target.fact_evidence.kind,
             target.fact_evidence.source,
+            format_lineage_suffix(&target.fact_evidence.lineage),
+            format_filter_reason_suffix(target.filter_reason),
         )
         .expect("writing to String cannot fail");
     }
     output
+}
+
+fn format_lineage_suffix(lineage: &[String]) -> String {
+    if lineage.is_empty() {
+        String::new()
+    } else {
+        format!(" lineage={}", lineage.join("->"))
+    }
+}
+
+fn format_filter_reason_suffix(filter_reason: Option<RecallCoverageFilterReason>) -> String {
+    match filter_reason {
+        Some(reason) => format!(" filter_reason={reason:?}"),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]

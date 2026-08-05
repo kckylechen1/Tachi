@@ -170,10 +170,10 @@ pub use recall_coverage::{
     format_recall_coverage_human, is_recall_coverage_path_list_only, run_recall_coverage_probe,
     run_recall_coverage_probe_with_corpus, run_recall_coverage_probe_with_equivalences,
     RecallCoverageEquivalenceCorpus, RecallCoverageEquivalenceSet, RecallCoverageEvidenceKind,
-    RecallCoverageExpectedIdLane, RecallCoverageFactEvidence, RecallCoverageMetrics,
-    RecallCoverageOptions, RecallCoverageOutcome, RecallCoveragePartitionCounts,
-    RecallCoveragePriorScoredCountSplit, RecallCoverageQuerySource, RecallCoverageReport,
-    RecallCoverageTarget, DEFAULT_RECALL_COVERAGE_CANDIDATES_PER_CHANNEL,
+    RecallCoverageExpectedIdLane, RecallCoverageFactEvidence, RecallCoverageFilterReason,
+    RecallCoverageMetrics, RecallCoverageOptions, RecallCoverageOutcome,
+    RecallCoveragePartitionCounts, RecallCoveragePriorScoredCountSplit, RecallCoverageQuerySource,
+    RecallCoverageReport, RecallCoverageTarget, DEFAULT_RECALL_COVERAGE_CANDIDATES_PER_CHANNEL,
     DEFAULT_RECALL_COVERAGE_TOP_K, RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION,
 };
 pub use recall_impressions::{
