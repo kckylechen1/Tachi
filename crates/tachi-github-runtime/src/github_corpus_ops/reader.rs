@@ -11,7 +11,7 @@ use super::parse::{
     ProvenanceEventV1,
 };
 use super::pilot::CorpusCaseV1;
-use crate::refinery_ops::parse::parse_issue_snapshot_from_gh_json;
+use tachi_params::gh_json_parse::parse_issue_snapshot_from_gh_json;
 
 /// Forbidden GitHub mutation verbs — the adapter surface must refuse each.
 pub const FORBIDDEN_GITHUB_MUTATIONS: &[&str] = &[
