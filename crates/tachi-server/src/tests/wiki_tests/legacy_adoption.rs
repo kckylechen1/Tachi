@@ -46,6 +46,13 @@ fn seed_legacy_needle(global_db: &std::path::Path) {
     entry.summary = format!("{NEEDLE} adoption discriminator summary");
     entry.text = format!("{NEEDLE} is the one token this discriminator searches for");
     entry.metadata = json!({"lifecycle": "active"});
+    // `make_entry` defaults to `source: "test"`, which the corpus classifier
+    // reads as explicit test-fixture evidence and excludes from adoption. This
+    // row has to look like ordinary wiki content, because that is the class
+    // adoption is for.
+    entry.source = "wiki".to_string();
+    entry.category = "wiki".to_string();
+    entry.domain = Some("wiki".to_string());
     let mut store = MemoryStore::open(global_db.to_str().expect("utf8 global db"))
         .expect("open the legacy global store");
     store.upsert(&entry).expect("seed the legacy global needle");

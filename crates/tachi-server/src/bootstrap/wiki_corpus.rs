@@ -5703,6 +5703,10 @@ struct LegacyAdoptionReport {
     confirm_token_required: String,
     target_path: String,
     target_existed_before: bool,
+    /// True once this run has created the store's directory, i.e. from the
+    /// first side effect onward — not only after a successful import. Read it
+    /// together with `target_removed_after_failure`: `true`/`Some(true)` means
+    /// the run created something and then cleaned it up again.
     target_created: bool,
     /// `Some(false)` is a hard failure, not a warning: an unstamped store is
     /// not the wiki corpus and must not be left holding adopted rows.
