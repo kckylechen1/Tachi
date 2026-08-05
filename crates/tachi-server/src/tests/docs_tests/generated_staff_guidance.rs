@@ -11,19 +11,51 @@
 
 use serde_json::json;
 
+/// Scans `s` (the text immediately after an opening `(` that is already
+/// consumed) for the matching close paren, tracking nesting depth so a paren
+/// inside the call's own arguments (e.g. a task string mentioning `(P1)`)
+/// doesn't truncate the example early. Returns the byte offset of the
+/// matching `)`.
+fn find_balanced_close(s: &str) -> Option<usize> {
+    let mut depth: i32 = 1;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Every `tachi_staff(...)` occurrence in `guidance` whose action is `start`,
-/// extracted as the balanced parenthesized example.
+/// extracted as the balanced parenthesized example. An unclosed
+/// `tachi_staff(` is a hard test failure (not a silent fallback to
+/// end-of-document) — swallowing the rest of the guidance as "the example"
+/// would let unrelated `task=`/`staffing_reason=` text elsewhere in the doc
+/// paper over a genuinely malformed generated call (a false GREEN).
 fn staff_start_examples(guidance: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = guidance;
     while let Some(start) = rest.find("tachi_staff(") {
         let after = &rest[start + "tachi_staff(".len()..];
-        let end = after.find(')').map(|i| i + 1).unwrap_or(after.len());
-        let example = format!("tachi_staff({})", &after[..end]);
+        let end = find_balanced_close(after).unwrap_or_else(|| {
+            panic!(
+                "unclosed tachi_staff(...) call in generated guidance (no matching ')'); \
+                 near: {:?}",
+                &after[..after.len().min(200)]
+            )
+        });
+        let example = format!("tachi_staff({})", &after[..=end]);
         if example.contains("action='start'") || example.contains("action=\"start\"") {
             out.push(example);
         }
-        rest = &after[end..];
+        rest = &after[end + 1..];
     }
     out
 }
