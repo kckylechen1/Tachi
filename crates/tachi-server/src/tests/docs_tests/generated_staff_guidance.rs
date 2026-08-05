@@ -67,7 +67,7 @@ fn staff_start_examples(guidance: &str) -> Vec<String> {
                 &after[..after.len().min(200)]
             )
         });
-        let example = format!("tachi_staff({})", &after[..=end]);
+        let example = format!("tachi_staff({}", &after[..=end]);
         if example.contains("action='start'") || example.contains("action=\"start\"") {
             out.push(example);
         }
