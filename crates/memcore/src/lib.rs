@@ -207,8 +207,10 @@ pub use store::outbox::{outbox_payload_digest, OutboxCommitReceipt, OutboxEventM
 /// reason A1 is: a host-owned sync loop drives this from a portable build,
 /// with no Tachi daemon in the picture.
 pub use store::outbox_protocol::{
-    ClaimedOutboxEvent, OutboxClaimKind, OutboxClaimRequest, OutboxOutcome,
+    outbox_local_wins_successor_id, ClaimedOutboxEvent, OutboxClaimKind, OutboxClaimRequest,
+    OutboxConflictResolution, OutboxConflictResolutionReceipt, OutboxOutcome,
     OutboxOutcomeApplication, OutboxOutcomeEvidence, OutboxOutcomeReceipt,
+    OUTBOX_LOCAL_WINS_RESOLVED_CLASS, OUTBOX_LOCAL_WINS_SUCCESSOR_SUFFIX,
 };
 /// tachi#1607 portable snapshot-import contract. Re-exported at the root so
 /// an external portable consumer reaches it exactly like [`MemoryEntry`],

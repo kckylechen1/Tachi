@@ -63,6 +63,8 @@ use crate::{
     MemoryStore,
 };
 
+use super::outbox::{enqueue_outbox_event_within_tx, OutboxEventMeta};
+
 /// What one drain asks for.
 ///
 /// `limit` bounds the batch; `0` yields an empty batch rather than a refusal,
@@ -279,6 +281,96 @@ pub struct OutboxOutcomeReceipt {
     pub application: OutboxOutcomeApplication,
     /// The evidence the caller supplied. Echoed, never stored.
     pub evidence: OutboxOutcomeEvidence,
+}
+
+/// The explicit decisions that can end a conflict.
+///
+/// # Why there is no automatic arm
+///
+/// #1630 forbids last-write-wins for governed heads, so the kernel has no
+/// policy for choosing between a local head and a peer's. A `conflicted` event
+/// therefore sits where it is until somebody — an operator, or a host policy
+/// that took responsibility for the choice — calls this with one of three
+/// answers. Two of them consume the event; the third records that the decision
+/// was deliberately postponed.
+///
+/// **No arm rewrites the local `memories` row.** "RemoteWins" means the local
+/// *event* is withdrawn, not that the peer's payload is written over local
+/// memory: importing a peer's version is a memory write on its own terms, with
+/// its own event, and never a side effect of resolving an outbox conflict.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboxConflictResolution {
+    /// The local mutation stands. A **new** event is enqueued for the same
+    /// object, re-read and re-digested from the destination as it is now, and
+    /// the conflicted event is withdrawn as consumed. The old event is never
+    /// rewritten into a retry of itself — its history stays exactly what
+    /// happened.
+    LocalWins,
+    /// The peer's version stands. The local event is withdrawn for operator
+    /// attention under the caller's class; nothing is re-enqueued, and local
+    /// memory is untouched.
+    RemoteWins { error_class: String },
+    /// Deliberately not decided now. Writes nothing at all — not even a
+    /// restamp — so the event's history still shows when the conflict was
+    /// reported rather than when someone last looked at it.
+    Deferred,
+}
+
+/// Suffix appended to a conflicted event's id to mint its `LocalWins`
+/// successor.
+///
+/// The successor's id **is** the lineage record. The A1 row has no lineage
+/// column and adding one is a v30 migration this leaf does not have authority
+/// to mint, so the one durable field a new event can carry a reference in is
+/// its own caller-stable id. Two properties fall out of deriving it rather
+/// than minting a fresh opaque id, and both are wanted:
+///
+/// * a reader of the raw table can see which event a successor came from, with
+///   no join and no side table;
+/// * the derivation is deterministic, so a replayed resolution cannot produce
+///   a *second* successor — the primary key refuses it.
+pub const OUTBOX_LOCAL_WINS_SUCCESSOR_SUFFIX: &str = "::local-wins";
+
+/// The class stamped on a conflicted event that a `LocalWins` decision
+/// consumed.
+///
+/// Kernel-fixed rather than caller-supplied: this token is the durable record
+/// of *which* resolution consumed the event, and a caller-chosen string could
+/// describe it as anything. `RemoteWins` takes the caller's class because
+/// there the interesting fact is why the peer's version won, which the kernel
+/// does not know.
+pub const OUTBOX_LOCAL_WINS_RESOLVED_CLASS: &str = "conflict_resolved_local_wins";
+
+/// The id [`OutboxConflictResolution::LocalWins`] mints for the successor of
+/// `conflicted_event_id`. Public so a caller can find the successor without
+/// having kept the receipt.
+pub fn outbox_local_wins_successor_id(conflicted_event_id: &str) -> String {
+    format!("{conflicted_event_id}{OUTBOX_LOCAL_WINS_SUCCESSOR_SUFFIX}")
+}
+
+/// What one resolution did. Three decisions, three receipt shapes — a caller
+/// cannot read one as another, and there is no `Option` field that quietly
+/// means "the other kind of resolution".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboxConflictResolutionReceipt {
+    /// The local mutation stood.
+    LocalWins {
+        /// The conflicted event, now withdrawn as consumed, carrying
+        /// [`OUTBOX_LOCAL_WINS_RESOLVED_CLASS`].
+        resolved: OutboxEventRow,
+        /// The freshly enqueued `pending` event for the same object. Its
+        /// `source_revision` and `payload_digest` are read from the
+        /// destination **now**, so it announces the object's current local
+        /// state rather than replaying the state the conflict was about.
+        successor: OutboxEventRow,
+    },
+    /// The peer's version stood; the local event is withdrawn.
+    RemoteWins { quarantined: OutboxEventRow },
+    /// The decision was postponed. The row is returned exactly as it was
+    /// found, unwritten.
+    Deferred { unresolved: OutboxEventRow },
 }
 
 fn outcome_refused(
@@ -525,6 +617,111 @@ impl MemoryStore {
                         prior_state: terminal,
                         application: OutboxOutcomeApplication::AlreadyApplied,
                         evidence: evidence.clone(),
+                    }
+                }
+            };
+            tx.commit()?;
+            Ok(receipt)
+        })
+    }
+
+    /// End a conflict by an explicit typed decision.
+    ///
+    /// The kernel never ends one on its own. `conflicted` is terminal until
+    /// this call arrives with one of [`OutboxConflictResolution`]'s three
+    /// answers, and no path here writes the peer's version over local memory —
+    /// that is the "no LWW for governed heads" clause stated as code.
+    ///
+    /// # What each decision does, in one transaction
+    ///
+    /// * [`OutboxConflictResolution::LocalWins`] — enqueues a **new** pending
+    ///   event for the same object (id derived by
+    ///   [`outbox_local_wins_successor_id`], class/authority/source inherited
+    ///   from the conflicted event, revision and digest re-read from the
+    ///   destination now), then withdraws the conflicted event under
+    ///   [`OUTBOX_LOCAL_WINS_RESOLVED_CLASS`]. Both halves land together or
+    ///   neither does, so there is no state in which the old event was
+    ///   consumed without a successor to carry the mutation.
+    /// * [`OutboxConflictResolution::RemoteWins`] — withdraws the local event
+    ///   under the caller's class. Nothing is re-enqueued and the object is
+    ///   untouched.
+    /// * [`OutboxConflictResolution::Deferred`] — writes nothing.
+    ///
+    /// # Refusals
+    ///
+    /// * Unknown `event_id` — [`MemoryError::NotFound`].
+    /// * Any state other than `conflicted` —
+    ///   [`OutboxOutcomeRefusal::NotConflicted`], carrying the state found. A
+    ///   *second* resolution of the same event lands here: the first one
+    ///   consumed it into `quarantined`, and the refusal names that state, so
+    ///   a caller replaying its decision learns the decision already landed
+    ///   rather than producing a second successor.
+    /// * `LocalWins` when the derived successor id is already taken —
+    ///   [`MemoryError::Duplicate`], and the conflict stays conflicted. The
+    ///   primary key is the enforcement; nothing is half-applied.
+    /// * `LocalWins` when the object no longer exists —
+    ///   [`MemoryError::NotFound`] from A1's enqueue seam, which refuses an
+    ///   event whose object this transaction cannot see.
+    pub fn resolve_outbox_conflict(
+        &mut self,
+        event_id: &str,
+        resolution: &OutboxConflictResolution,
+    ) -> Result<OutboxConflictResolutionReceipt, MemoryError> {
+        if let OutboxConflictResolution::RemoteWins { error_class } = resolution {
+            db::refuse_invalid_class("resolution error_class", error_class)?;
+        }
+        let db_label = self.db_label.clone();
+        db::retry_memory_locked("resolve_outbox_conflict", &db_label, || {
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current = db::read_outbox_event(&tx, event_id)?.ok_or_else(|| {
+                MemoryError::NotFound(format!(
+                    "outbox event '{event_id}' does not exist; there is no conflict to resolve"
+                ))
+            })?;
+            if current.state != OutboxState::Conflicted {
+                return Err(outcome_refused(
+                    OutboxOutcomeRefusal::NotConflicted,
+                    event_id,
+                    current.state,
+                ));
+            }
+
+            let receipt = match resolution {
+                OutboxConflictResolution::Deferred => OutboxConflictResolutionReceipt::Deferred {
+                    unresolved: current,
+                },
+                OutboxConflictResolution::RemoteWins { error_class } => {
+                    let quarantined = db::transition_outbox_event_within_tx(
+                        &tx,
+                        event_id,
+                        OutboxState::Quarantined,
+                        Some(error_class),
+                    )?;
+                    OutboxConflictResolutionReceipt::RemoteWins { quarantined }
+                }
+                OutboxConflictResolution::LocalWins => {
+                    let successor = enqueue_outbox_event_within_tx(
+                        &tx,
+                        &current.object_id,
+                        &OutboxEventMeta {
+                            event_id: outbox_local_wins_successor_id(event_id),
+                            object_class: current.object_class.clone(),
+                            authority_class: current.authority_class.clone(),
+                            source_store: current.source_store.clone(),
+                            source_partition: current.source_partition.clone(),
+                        },
+                    )?;
+                    let resolved = db::transition_outbox_event_within_tx(
+                        &tx,
+                        event_id,
+                        OutboxState::Quarantined,
+                        Some(OUTBOX_LOCAL_WINS_RESOLVED_CLASS),
+                    )?;
+                    OutboxConflictResolutionReceipt::LocalWins {
+                        resolved,
+                        successor,
                     }
                 }
             };
@@ -1025,6 +1222,235 @@ mod tests {
             OutboxState::InFlight,
             "every validation refusal must leave the event exactly where it was"
         );
+    }
+
+    /// Commit an object, drain it, and have a consumer report a conflict.
+    fn conflict(store: &mut MemoryStore, object_id: &str, event_id: &str) -> OutboxEventRow {
+        commit(store, object_id, event_id);
+        drain(store);
+        store
+            .apply_outbox_outcome(
+                event_id,
+                &OutboxOutcome::Conflicted {
+                    error_class: "divergent_revision".to_string(),
+                },
+                &OutboxOutcomeEvidence {
+                    reported_by: "peer_alpha".to_string(),
+                    peer_revision: Some(41),
+                    peer_payload_digest: None,
+                },
+            )
+            .expect("conflict")
+            .event
+    }
+
+    /// The local mutation stands: a NEW event carries it, the old event is
+    /// consumed with a class saying which decision consumed it, and the
+    /// successor announces the object as it is *now*.
+    #[test]
+    fn local_wins_consumes_the_conflicted_event_and_enqueues_a_lineage_successor() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let conflicted = conflict(&mut store, "obj-lw", "evt-lw");
+
+        // The local object moves on after the conflict was reported.
+        store
+            .upsert(&entry("obj-lw", "body rewritten after the conflict"))
+            .expect("local update");
+
+        let receipt = store
+            .resolve_outbox_conflict("evt-lw", &OutboxConflictResolution::LocalWins)
+            .expect("local wins");
+        let (resolved, successor) = match receipt {
+            OutboxConflictResolutionReceipt::LocalWins {
+                resolved,
+                successor,
+            } => (resolved, successor),
+            other => panic!("unexpected receipt shape: {other:?}"),
+        };
+
+        assert_eq!(resolved.event_id, "evt-lw");
+        assert_eq!(resolved.state, OutboxState::Quarantined);
+        assert_eq!(
+            resolved.last_error_class.as_deref(),
+            Some(OUTBOX_LOCAL_WINS_RESOLVED_CLASS)
+        );
+        assert_eq!(
+            resolved.payload_digest, conflicted.payload_digest,
+            "the consumed event's history must not be rewritten"
+        );
+        assert_eq!(resolved.source_revision, conflicted.source_revision);
+
+        assert_eq!(successor.event_id, outbox_local_wins_successor_id("evt-lw"));
+        assert_eq!(successor.event_id, "evt-lw::local-wins");
+        assert_eq!(successor.state, OutboxState::Pending);
+        assert_eq!(successor.last_error_class, None);
+        assert_eq!(successor.object_id, "obj-lw");
+        assert_eq!(successor.object_class, conflicted.object_class);
+        assert_eq!(successor.authority_class, conflicted.authority_class);
+        assert_eq!(successor.source_store, conflicted.source_store);
+        assert_eq!(successor.source_partition, conflicted.source_partition);
+
+        let stored = store.get("obj-lw").expect("get").expect("present");
+        assert_eq!(
+            successor.payload_digest,
+            outbox_payload_digest(&stored).expect("digest"),
+            "the successor announces the object as it is now"
+        );
+        assert!(
+            successor.source_revision > conflicted.source_revision,
+            "the successor carries the current revision, not the conflicted one: {} vs {}",
+            successor.source_revision,
+            conflicted.source_revision
+        );
+        assert_ne!(successor.payload_digest, conflicted.payload_digest);
+
+        // And it is ordinary drainable work again.
+        let claimed = drain(&mut store);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].event.event_id, "evt-lw::local-wins");
+        assert_eq!(claimed[0].claim, OutboxClaimKind::First);
+    }
+
+    /// "RemoteWins" withdraws the local *event*. It does not write the peer's
+    /// version over local memory — importing a peer's payload is a memory write
+    /// on its own terms, never a side effect of resolving a conflict.
+    #[test]
+    fn remote_wins_withdraws_the_local_event_without_rewriting_local_memory() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        conflict(&mut store, "obj-rw", "evt-rw");
+        let before = store.get("obj-rw").expect("get").expect("present");
+
+        let receipt = store
+            .resolve_outbox_conflict(
+                "evt-rw",
+                &OutboxConflictResolution::RemoteWins {
+                    error_class: "peer_authority_wins".to_string(),
+                },
+            )
+            .expect("remote wins");
+        let quarantined = match receipt {
+            OutboxConflictResolutionReceipt::RemoteWins { quarantined } => quarantined,
+            other => panic!("unexpected receipt shape: {other:?}"),
+        };
+        assert_eq!(quarantined.state, OutboxState::Quarantined);
+        assert_eq!(
+            quarantined.last_error_class.as_deref(),
+            Some("peer_authority_wins")
+        );
+
+        let after = store.get("obj-rw").expect("get").expect("present");
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(
+            outbox_payload_digest(&after).expect("digest"),
+            outbox_payload_digest(&before).expect("digest"),
+            "no resolution may overwrite local memory with a peer's version"
+        );
+        assert!(
+            store
+                .outbox_event("evt-rw::local-wins")
+                .expect("read")
+                .is_none(),
+            "RemoteWins re-enqueues nothing"
+        );
+        assert_eq!(
+            store.outbox_health().expect("health").local_store_status,
+            db::LocalStoreStatus::Quarantined {
+                quarantined_count: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_deferred_resolution_writes_nothing_and_is_repeatable() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let conflicted = conflict(&mut store, "obj-def", "evt-def");
+
+        for _ in 0..2 {
+            let receipt = store
+                .resolve_outbox_conflict("evt-def", &OutboxConflictResolution::Deferred)
+                .expect("deferred");
+            match receipt {
+                OutboxConflictResolutionReceipt::Deferred { unresolved } => {
+                    assert_eq!(
+                        unresolved, conflicted,
+                        "postponing a decision must not move a single column, including the stamp"
+                    );
+                }
+                other => panic!("unexpected receipt shape: {other:?}"),
+            }
+        }
+        assert_eq!(
+            store.outbox_event("evt-def").expect("read").unwrap(),
+            conflicted
+        );
+    }
+
+    #[test]
+    fn a_resolution_of_an_event_that_is_not_conflicted_is_refused() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        commit(&mut store, "obj-notcon", "evt-notcon");
+
+        for state_token in ["pending", "acknowledged"] {
+            if state_token == "acknowledged" {
+                drain(&mut store);
+                store
+                    .apply_outbox_outcome("evt-notcon", &OutboxOutcome::Acknowledged, &evidence())
+                    .expect("acknowledge");
+            }
+            let error = store
+                .resolve_outbox_conflict("evt-notcon", &OutboxConflictResolution::LocalWins)
+                .expect_err("only a conflicted event can be resolved");
+            match &error {
+                MemoryError::OutboxOutcomeRefused { reason, state, .. } => {
+                    assert_eq!(*reason, OutboxOutcomeRefusal::NotConflicted);
+                    assert_eq!(state, state_token);
+                }
+                other => panic!("unexpected error variant: {other:?}"),
+            }
+            assert!(
+                store
+                    .outbox_event("evt-notcon::local-wins")
+                    .expect("read")
+                    .is_none(),
+                "a refused resolution must enqueue nothing"
+            );
+        }
+    }
+
+    /// A replayed decision cannot fork the lineage: the first resolution
+    /// consumed the event, so the second is refused by state — and even if the
+    /// state check were bypassed, the derived successor id is already taken.
+    #[test]
+    fn a_replayed_resolution_cannot_produce_a_second_successor() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        conflict(&mut store, "obj-replay", "evt-replay");
+        store
+            .resolve_outbox_conflict("evt-replay", &OutboxConflictResolution::LocalWins)
+            .expect("first resolution");
+
+        let error = store
+            .resolve_outbox_conflict("evt-replay", &OutboxConflictResolution::LocalWins)
+            .expect_err("a replayed resolution must be refused");
+        match &error {
+            MemoryError::OutboxOutcomeRefused { reason, state, .. } => {
+                assert_eq!(*reason, OutboxOutcomeRefusal::NotConflicted);
+                assert_eq!(
+                    state, "quarantined",
+                    "the refusal must name the state the first decision left behind"
+                );
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        let events: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM memory_outbox_events WHERE object_id = 'obj-replay'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count events");
+        assert_eq!(events, 2, "exactly one successor, however many replays");
     }
 
     /// The cutoff is minted with the same formatter every stamp in the table
