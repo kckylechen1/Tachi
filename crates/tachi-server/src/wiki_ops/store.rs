@@ -158,11 +158,16 @@ pub(super) fn stores_for_wiki_plan(server: &MemoryServer, plan: &WikiReadPlan) -
 /// plans, not ordinary retrieval, and are deliberately excluded — an empty
 /// audit result is a legitimate finding, not a resolution failure.
 ///
-/// Returns `None` when the plan resolves at least one store (nothing to
-/// refuse) or when `plan` is one of the excluded audit-only variants.
-/// Builds its message from the same runtime facts `stores_for_wiki_plan`
-/// checks, so it never claims a leg failed for a reason it didn't observe.
-pub(super) fn zero_store_refusal(server: &MemoryServer, plan: &WikiReadPlan) -> Option<String> {
+/// Emptiness is decided by `stores_for_wiki_plan` — via the caller-supplied
+/// `stores` slice, which callers get by calling that same resolver — and is
+/// never re-derived here. The per-leg probes below only run once `stores`
+/// is already known to be empty; they exist solely to explain WHY each leg
+/// didn't resolve, and must never be used to decide whether to refuse.
+pub(super) fn zero_store_refusal(plan: &WikiReadPlan, stores: &[StoreRef]) -> Option<String> {
+    if !stores.is_empty() {
+        return None;
+    }
+
     let bound_missing = || "no bound project DB (daemon runs --no-project-db)".to_string();
     let shared_missing = || {
         format!("named project '{LOGICAL_SHARED_WIKI_PROJECT}' not found under ~/.tachi/projects")
@@ -171,45 +176,27 @@ pub(super) fn zero_store_refusal(server: &MemoryServer, plan: &WikiReadPlan) -> 
 
     match plan {
         WikiReadPlan::Federated => {
-            let has_bound = server.has_project_db();
-            let has_shared = crate::memory_search_ops::named_project_db_exists(
-                server,
-                LOGICAL_SHARED_WIKI_PROJECT,
-            );
-            if has_bound || has_shared {
-                return None;
-            }
             let reasons = [bound_missing(), shared_missing(), legacy_excluded()];
             Some(format!(
                 "wiki search resolved zero stores: {} — run the wiki migration or pass --project <name>",
                 reasons.join("; ")
             ))
         }
-        WikiReadPlan::ProjectOnly => {
-            if server.has_project_db() {
-                return None;
-            }
-            Some(format!(
-                "wiki search resolved zero stores: {} — run with a bound project or pass --project <name>",
-                bound_missing()
-            ))
-        }
-        WikiReadPlan::SharedOnly => {
-            if crate::memory_search_ops::named_project_db_exists(
-                server,
-                LOGICAL_SHARED_WIKI_PROJECT,
-            ) {
-                return None;
-            }
-            Some(format!(
-                "wiki search resolved zero stores: {} — run the wiki migration or pass --project <name>",
-                shared_missing()
-            ))
-        }
+        WikiReadPlan::ProjectOnly => Some(format!(
+            "wiki search resolved zero stores: {} — run with a bound project or pass --project <name>",
+            bound_missing()
+        )),
+        WikiReadPlan::SharedOnly => Some(format!(
+            "wiki search resolved zero stores: {} — run the wiki migration or pass --project <name>",
+            shared_missing()
+        )),
         // NamedOnly always resolves to exactly one store by construction
         // (existence is checked separately by its callers before this ever
-        // runs). MigrationAudit/GuideFederated are census plans, not
-        // ordinary reads, and must never refuse on an empty result.
+        // runs), and `stores_for_wiki_plan` always pushes at least
+        // `LegacyGlobal` for MigrationAudit/GuideFederated — so `stores` is
+        // never empty on any of these three variants; this arm is
+        // unreachable in practice and kept only as the explicit "never
+        // refuse a census plan" backstop.
         WikiReadPlan::NamedOnly(_)
         | WikiReadPlan::MigrationAudit
         | WikiReadPlan::GuideFederated => None,

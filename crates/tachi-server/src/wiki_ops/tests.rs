@@ -250,6 +250,56 @@ mod reference_validation_tests {
 }
 
 #[cfg(test)]
+mod zero_store_refusal_drift_tests {
+    use super::super::store::{stores_for_wiki_plan, zero_store_refusal};
+    use crate::tool_params::{StoreRef, WikiReadPlan};
+
+    fn all_wiki_read_plan_variants() -> Vec<WikiReadPlan> {
+        vec![
+            WikiReadPlan::NamedOnly(StoreRef::named("wiki")),
+            WikiReadPlan::Federated,
+            WikiReadPlan::ProjectOnly,
+            WikiReadPlan::SharedOnly,
+            WikiReadPlan::MigrationAudit,
+            WikiReadPlan::GuideFederated,
+        ]
+    }
+
+    /// #1624 drift guard: `zero_store_refusal` must never refuse while
+    /// `stores_for_wiki_plan` — the real resolver — reports a non-empty
+    /// store list. This is deliberately black-box on `zero_store_refusal`'s
+    /// internals: it iterates every `WikiReadPlan` variant against the same
+    /// server the resolver sees, so a future edit that re-derives emptiness
+    /// instead of consuming the resolver's output reds the moment the two
+    /// disagree, on either topology.
+    fn assert_refusal_never_disagrees_with_resolver(server: &crate::server_state::MemoryServer) {
+        for plan in all_wiki_read_plan_variants() {
+            let stores = stores_for_wiki_plan(server, &plan);
+            let refusal = zero_store_refusal(&plan, &stores);
+            assert!(
+                refusal.is_none() || stores.is_empty(),
+                "plan {plan:?} refused ({refusal:?}) while stores_for_wiki_plan resolved a \
+                 non-empty store list {stores:?} — zero_store_refusal must consume the resolver's \
+                 output, never re-derive it"
+            );
+        }
+    }
+
+    #[test]
+    fn refusal_agrees_with_resolver_on_bare_temp_home_server() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        assert_refusal_never_disagrees_with_resolver(&server);
+    }
+
+    #[test]
+    fn refusal_agrees_with_resolver_on_bound_project_fixture_server() {
+        let (server, _project_db) =
+            crate::tests::make_server_with_project_fixture("zero-store-refusal-drift-fixture");
+        assert_refusal_never_disagrees_with_resolver(&server);
+    }
+}
+
+#[cfg(test)]
 mod wiki_search_filter_tests {
     use super::super::search::wiki_row_has_direct_match_signal;
     use serde_json::json;

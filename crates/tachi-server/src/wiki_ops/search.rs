@@ -128,7 +128,11 @@ pub(crate) async fn collect_wiki_search_value(
     // named "wiki" project) must refuse loudly, not report a clean
     // `status:"completed", count:0` — that shape is indistinguishable from
     // "searched everywhere, found nothing" and hides the misconfiguration.
-    if let Some(refusal) = zero_store_refusal(server, &plan) {
+    // Resolve once here and reuse below for the response's "stores" field —
+    // `zero_store_refusal` consumes this resolved list rather than
+    // re-deriving emptiness itself.
+    let stores = stores_for_wiki_plan(server, &plan);
+    if let Some(refusal) = zero_store_refusal(&plan, &stores) {
         return Err(refusal);
     }
     let path_prefix = params
@@ -184,7 +188,7 @@ pub(crate) async fn collect_wiki_search_value(
         "query": query,
         "path_prefix": path_prefix,
         "project": params.project,
-        "stores": stores_for_wiki_plan(server, &plan),
+        "stores": stores,
         "domain": params.domain,
         "unfiltered_count": search_result.unfiltered_count,
         "candidate_counts": search_result.candidate_counts,
