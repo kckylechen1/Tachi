@@ -1,6 +1,7 @@
 //! Portable, strict same-path byte-exact duplicate maintenance.
 
 use super::super::{MemoryError, MemoryStore};
+use crate::db;
 use crate::path_router::normalize_path;
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -797,7 +798,7 @@ impl MemoryStore {
                 }
             }
         }
-        let now = Utc::now().to_rfc3339();
+        let now = db::now_utc_iso();
         let apply_id = uuid::Uuid::new_v4().to_string();
         // The complete text-digest revalidation above runs after BEGIN IMMEDIATE,
         // which excludes intervening writers until commit. The UPDATE therefore
