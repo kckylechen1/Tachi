@@ -528,19 +528,51 @@ fn clamp_edge_weight(weight: f64) -> f64 {
 }
 
 /// Merge the writer's authority classification (tachi#1646) into a clone of
-/// the edge's metadata. `authority == None` returns `metadata` unchanged
-/// (clone only) — the common case for every caller this leaf did not
-/// classify, so their persisted rows are byte-for-byte identical to before
-/// this change. A non-object `metadata` (e.g. `component_governance_ops`
-/// seeds `Value::Null`) is replaced with a fresh object rather than left
-/// non-stampable, since a caller that explicitly asked for a classification
-/// must get one.
+/// the edge's metadata.
+///
+/// `authority == None` **scrubs** any `"authority"` key already present in
+/// `metadata` before returning the clone — it does not pass `metadata`
+/// through untouched. `metadata.authority` is a reserved key: `edge_authority`
+/// (above) trusts whatever string sits there, so if an unclassified caller's
+/// `add_edge` handed a pre-baked `{"authority":"model_receipt_backed"}`
+/// straight through, that string would round-trip as a trusted
+/// classification no writer ever actually made — authority spoofing via the
+/// unclassified door (tachi#1646 round-2 MUST-FIX 1). An unclassified write
+/// carries *no* authority claim, full stop, so the key must be **absent**,
+/// never merely "whatever the caller happened to put there". Legacy rows
+/// (pre-#1646, no migration) and post-#1646 unclassified rows both read back
+/// `None` from `edge_authority` because the key is absent — never because we
+/// trusted a caller-supplied string. This is a behavior change from the
+/// pre-round-2 "clone only" version: metadata is no longer guaranteed
+/// byte-for-byte identical when the caller's own payload happened to contain
+/// the reserved key, but it *is* guaranteed byte-for-byte identical for every
+/// caller that never touches `metadata.authority`, which is every legitimate
+/// caller of the plain (unclassified) doors.
+///
+/// When `authority == Some(_)`, the reserved key is **overwritten**, not
+/// merged with whatever the caller supplied — `insert` on an existing key
+/// replaces its value, so a caller-asserted `metadata.authority` cannot
+/// survive a writer that explicitly classifies the edge either.
+///
+/// A non-object `metadata` (e.g. `component_governance_ops` seeds
+/// `Value::Null`) is replaced with a fresh object when `authority` is
+/// `Some`, since a caller that explicitly asked for a classification must
+/// get one; when `authority` is `None` a non-object `metadata` has no
+/// `"authority"` key to scrub in the first place and is returned unchanged.
 fn stamp_authority(
     metadata: &serde_json::Value,
     authority: Option<EdgeAuthority>,
 ) -> serde_json::Value {
     let Some(authority) = authority else {
-        return metadata.clone();
+        let Some(obj) = metadata.as_object() else {
+            return metadata.clone();
+        };
+        if !obj.contains_key("authority") {
+            return metadata.clone();
+        }
+        let mut scrubbed = obj.clone();
+        scrubbed.remove("authority");
+        return serde_json::Value::Object(scrubbed);
     };
     let mut stamped = if metadata.is_object() {
         metadata.clone()
@@ -588,8 +620,11 @@ fn stamp_authority(
 /// additive and legacy rows with no `metadata.authority` key simply read
 /// back `None` from [`edge_authority`] — no `CHECK` constraint, no `NOT
 /// NULL`, no backfill. A `None` authority (every caller that still builds
-/// `EdgeProvenance::default()`) leaves `metadata` byte-for-byte unstamped, so
-/// this is a no-op for every write path this leaf did not touch.
+/// `EdgeProvenance::default()`) leaves `metadata` byte-for-byte unstamped
+/// *unless* the caller's own payload already carried an `"authority"` key —
+/// [`stamp_authority`] scrubs that reserved key on the unclassified path so a
+/// plain `add_edge` cannot be used to spoof a trusted classification no
+/// writer actually made (tachi#1646 round-2 MUST-FIX 1).
 fn write_edge_row(
     conn: &Connection,
     edge: &MemoryEdge,
