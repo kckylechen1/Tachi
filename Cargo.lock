@@ -2350,6 +2350,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-github-runtime"
+version = "1.9.2"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tachi-params",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "tachi-hub"
 version = "1.9.2"
 dependencies = [
@@ -2445,6 +2457,7 @@ dependencies = [
  "tachi-credential-profile",
  "tachi-dispatch",
  "tachi-foundry",
+ "tachi-github-runtime",
  "tachi-hub",
  "tachi-llm",
  "tachi-merge-ops",
