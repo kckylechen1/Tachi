@@ -10,6 +10,7 @@ description = "Credential-profile discovery, planning, materialization, cleanup 
 memcore = { path = "../memcore" }
 tachi-params = { path = "../tachi-params" }
 chrono = { workspace = true }
+dirs = "5.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
