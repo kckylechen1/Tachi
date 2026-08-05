@@ -82,9 +82,7 @@ fn build_compact_session_import_edges(
         for rollup in &rollups {
             for relation in import_signal_relations(&signal.text) {
                 let (source_id, target_id) = match relation {
-                    "distilled_from" | "rejected_because" => {
-                        (signal.id.clone(), rollup.id.clone())
-                    }
+                    "distilled_from" | "rejected_because" => (signal.id.clone(), rollup.id.clone()),
                     _ => (rollup.id.clone(), signal.id.clone()),
                 };
                 if seen.insert((source_id.clone(), target_id.clone(), relation.to_string())) {
@@ -143,5 +141,120 @@ pub(in crate::foundry_runtime_ops::handlers::compact) fn persist_compact_session
         server.with_path_store(db_path, save_edges)
     } else {
         server.with_store_for_scope(target_db, save_edges)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// tachi#1646 offender 2: the relation multipliers this door may reach
+    /// (`scorer::graph_relation_activation_weight`, scorer/graph.rs:71-83).
+    const LOW_MULTIPLIER_RELATIONS: [&str; 4] = [
+        "distilled_from",
+        "follows",
+        "references",
+        "rejected_because",
+    ];
+
+    fn compact_entry(id: &str, artifact_kind: &str, text: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/compact".to_string(),
+            summary: text.chars().take(30).collect(),
+            text: text.to_string(),
+            importance: 0.6,
+            timestamp: "2026-08-05T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "compact".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
+            revision: 1,
+            metadata: json!({"artifact_kind": artifact_kind}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    /// No keyword combination — including the "fix" and "reject" trigger
+    /// groups this function's own base set — may select a relation above
+    /// the low-multiplier tier. This is the direct regression test for
+    /// offender 2: before this leaf, every signal (regardless of text)
+    /// picked `causes` (0.80), and a "fix" keyword additionally picked
+    /// `fixed_by` (0.80).
+    #[test]
+    fn import_signal_relations_never_exceeds_low_multiplier_tier() {
+        for text in [
+            "plain observation, no trigger words",
+            "this fixed a bug and repaired the failure",
+            "reject this pattern, avoid it, do not repeat",
+            "修复了一个错误",
+            "拒绝这个模式",
+        ] {
+            for relation in import_signal_relations(text) {
+                assert!(
+                    LOW_MULTIPLIER_RELATIONS.contains(&relation),
+                    "import_signal_relations({text:?}) picked {relation:?}, outside the \
+                     low-multiplier allowlist {LOW_MULTIPLIER_RELATIONS:?}"
+                );
+                assert_ne!(
+                    relation, "causes",
+                    "causes (0.80) must never be reachable here"
+                );
+                assert_ne!(
+                    relation, "fixed_by",
+                    "fixed_by (0.80) must never be reachable here"
+                );
+                assert_ne!(
+                    relation, "supports",
+                    "supports (0.90) must never be reachable here"
+                );
+            }
+        }
+    }
+
+    /// End-to-end through the edge builder: every produced edge caps its
+    /// weight at `COMPACT_IMPORT_WEIGHT_CAP` and its relation stays inside
+    /// the low-multiplier allowlist, for a signal whose text trips every
+    /// keyword group at once.
+    #[test]
+    fn build_compact_session_import_edges_caps_weight_and_relation_set() {
+        let rollup = compact_entry("compact-rollup-1", "compact_rollup", "rollup body");
+        let signal = compact_entry(
+            "compact-signal-1",
+            "durable_signal",
+            "this fixed a bug; reject the old approach, avoid it",
+        );
+        let edges = build_compact_session_import_edges(&[rollup, signal], "2026-08-05T00:00:00Z");
+        assert!(
+            !edges.is_empty(),
+            "keyword-tripping signal must produce edges"
+        );
+        for edge in &edges {
+            assert_eq!(
+                edge.weight, COMPACT_IMPORT_WEIGHT_CAP,
+                "every compact-import edge weight must be exactly the DerivedHeuristic cap"
+            );
+            assert!(
+                LOW_MULTIPLIER_RELATIONS.contains(&edge.relation.as_str()),
+                "edge relation {:?} outside the low-multiplier allowlist",
+                edge.relation
+            );
+        }
     }
 }

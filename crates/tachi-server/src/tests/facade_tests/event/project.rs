@@ -433,6 +433,92 @@ async fn tachi_event_project_persists_explicit_timeline_graph_edges() {
 }
 
 #[tokio::test]
+async fn tachi_event_project_timeline_edge_weight_defaults_to_capped_not_one() {
+    let server = make_server();
+
+    let mut pattern = tachi_event_params("emit");
+    pattern.id = Some("timeline-weight-default-pattern".to_string());
+    pattern.source_repo = Some("sigil".to_string());
+    pattern.adapter = Some("facade-test".to_string());
+    pattern.domain = Some("agent_os".to_string());
+    pattern.session_id = Some("session-timeline-weight-default".to_string());
+    pattern.actor = Some("codex".to_string());
+    pattern.event_type = Some("pattern.observed".to_string());
+    pattern.authority = Some("collect_only".to_string());
+    pattern.projection_hints = vec!["pattern".to_string()];
+    pattern.payload = Some(json!({
+        "pattern_key": "timeline-weight-default-pattern",
+        "summary": "Timeline weight default pattern",
+        "text": "Timeline graph edges without an explicit weight must not default to 1.0.",
+    }));
+    crate::event_ops::handle_tachi_event(&server, pattern)
+        .await
+        .expect("emit pattern");
+
+    let mut project_pattern = tachi_event_params("project");
+    project_pattern.projection_hints = vec!["pattern".to_string()];
+    let pattern_projected = crate::event_ops::handle_tachi_event(&server, project_pattern)
+        .await
+        .expect("project pattern");
+    let pattern_json: Value =
+        serde_json::from_str(&pattern_projected).expect("pattern project JSON");
+    let pattern_id = pattern_json["projections"][0]["memory_id"]
+        .as_str()
+        .expect("pattern memory id")
+        .to_string();
+
+    let mut timeline = tachi_event_params("emit");
+    timeline.id = Some("timeline-weight-default-event".to_string());
+    timeline.source_repo = Some("sigil".to_string());
+    timeline.adapter = Some("facade-test".to_string());
+    timeline.domain = Some("agent_os".to_string());
+    timeline.session_id = Some("session-timeline-weight-default".to_string());
+    timeline.actor = Some("codex".to_string());
+    timeline.event_type = Some("timeline.candidate".to_string());
+    timeline.authority = Some("collect_only".to_string());
+    timeline.projection_hints = vec!["timeline".to_string()];
+    // tachi#1646: `causal_edges[0]` deliberately omits `weight` entirely, and
+    // uses `follows` (already inside the collect_only allowlist) so this
+    // test isolates the weight-default behavior from the relation
+    // restriction covered above.
+    timeline.payload = Some(json!({
+        "projection_key": "timeline-weight-default",
+        "summary": "Timeline weight default projection",
+        "discoveries": ["omitted weight must not default to 1.0"],
+        "causal_edges": [
+            {
+                "source_id": pattern_id,
+                "target_id": "$projection",
+                "relation": "follows"
+            }
+        ],
+    }));
+    crate::event_ops::handle_tachi_event(&server, timeline)
+        .await
+        .expect("emit timeline");
+
+    let mut project_timeline = tachi_event_params("project");
+    project_timeline.projection_hints = vec!["timeline".to_string()];
+    crate::event_ops::handle_tachi_event(&server, project_timeline)
+        .await
+        .expect("project timeline");
+
+    let edges = server
+        .with_global_store_read(|store| {
+            store
+                .get_edges(&pattern_id, "outgoing", Some("follows"))
+                .map_err(|e| e.to_string())
+        })
+        .expect("read graph edges (follows)");
+    assert_eq!(edges.len(), 1);
+    assert!(
+        (edges[0].weight - 0.6).abs() < 1e-9,
+        "an omitted causal_edges weight must default to the CallerAsserted cap (0.6), not 1.0, got {}",
+        edges[0].weight
+    );
+}
+
+#[tokio::test]
 async fn tachi_event_promote_rejects_immature_pattern_without_force() {
     let server = make_server();
 
