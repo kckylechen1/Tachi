@@ -100,6 +100,11 @@ pub struct SearchOptions {
     /// every ordinary caller (`search_memory`, `list_memories`,
     /// `tachi_search`'s Memory leg) gets the new default-retrievable-only
     /// behavior; the Wiki leg is the sole intended `true` caller.
+    ///
+    /// Invariant (tachi#1561 review round): `true` ONLY for a caller that
+    /// re-filters on `WikiLifecycleV1` downstream of this options struct — a
+    /// new `true` caller that does not is a lifecycle-gate bypass bug, not a
+    /// valid use of this escape hatch.
     pub bypass_wiki_lifecycle_gate: bool,
     /// Pre-computed query embedding; if None, skip vector channel.
     pub query_vec: Option<Vec<f32>>,
