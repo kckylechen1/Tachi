@@ -1,3 +1,17 @@
+//! This table family intentionally still writes the bare `to_rfc3339()` form for
+//! `created_at`/`updated_at` (see `insert_foundry_job` below, and the queue/status
+//! submodules' cutoff comparisons and `gc_foundry_jobs`). All of this family's
+//! writers AND lexical readers are internally consistent on that bare form — the
+//! `queued`/`running`/GC cutoff queries in `queue.rs` and `status.rs` compare
+//! `created_at`/`updated_at` lexically against a bare `to_rfc3339()` cutoff, so
+//! canonicalizing one side without the other would create a mixed bare/canonical
+//! boundary that breaks those comparisons.
+//!
+//! Do NOT migrate these writers to `now_utc_iso` piecemeal. The migration needs a
+//! reader/backfill strategy for pre-existing rows (this family has a 30-day GC
+//! window, so old bare-form rows persist for weeks) and must land as its own leaf,
+//! not folded into an unrelated change. Tracked as a `tachi#1432` follow-up.
+
 use rusqlite::{params, Connection};
 use serde_json;
 
