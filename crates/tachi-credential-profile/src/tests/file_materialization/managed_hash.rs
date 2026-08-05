@@ -39,13 +39,8 @@ fn credential_materialize_apply_records_managed_hash_metadata() {
         .starts_with("stable-fnv1a:"));
     assert!(!rows[0].value_json.contains("secret-token"));
 
-    let doctor = crate::doctor_credential_profile(
-        "codex_shared",
-        &profile,
-        "codex_cli",
-        &store,
-    )
-    .expect("doctor report");
+    let doctor = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
+        .expect("doctor report");
     assert!(
         !doctor
             .issues

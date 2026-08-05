@@ -21,13 +21,8 @@ fn credential_doctor_reports_managed_target_hash_mismatch() {
     std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))
         .expect("keep safe permissions");
 
-    let doctor = crate::doctor_credential_profile(
-        "codex_shared",
-        &profile,
-        "codex_cli",
-        &store,
-    )
-    .expect("doctor report");
+    let doctor = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
+        .expect("doctor report");
     let codes = doctor
         .issues
         .iter()
@@ -54,13 +49,8 @@ fn credential_doctor_reports_managed_target_missing() {
     apply_codex_auth_file_materialization(&store, &profile);
     std::fs::remove_file(&auth_path).expect("remove managed target");
 
-    let doctor = crate::doctor_credential_profile(
-        "codex_shared",
-        &profile,
-        "codex_cli",
-        &store,
-    )
-    .expect("doctor report");
+    let doctor = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
+        .expect("doctor report");
     let codes = doctor
         .issues
         .iter()
@@ -103,13 +93,8 @@ fn credential_doctor_reports_unreadable_managed_metadata() {
         )
         .expect("corrupt managed metadata");
 
-    let doctor = crate::doctor_credential_profile(
-        "codex_shared",
-        &profile,
-        "codex_cli",
-        &store,
-    )
-    .expect("doctor report");
+    let doctor = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
+        .expect("doctor report");
     let codes = doctor
         .issues
         .iter()

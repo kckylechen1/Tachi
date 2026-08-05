@@ -258,9 +258,7 @@ fn opencode_file_copy_fails_closed_without_writing_raw_secret() {
     assert!(!target.exists(), "refused file_copy must not create config");
 }
 
-fn opencode_unrelated_patch_profile(
-    target: &std::path::Path,
-) -> crate::CredentialProfile {
+fn opencode_unrelated_patch_profile(target: &std::path::Path) -> crate::CredentialProfile {
     crate::CredentialProfile {
         provider: Some("opencode".to_string()),
         description: None,

@@ -51,10 +51,8 @@ fn credential_run_scoped_cleanup_rejects_parent_dir_targets() {
     .expect("apply parent-dir materialization");
     assert!(outside_path.exists());
 
-    let cleanup = crate::cleanup_ephemeral_credential_materializations(
-        &store, &run_dir, false,
-    )
-    .expect("run-scoped cleanup");
+    let cleanup = crate::cleanup_ephemeral_credential_materializations(&store, &run_dir, false)
+        .expect("run-scoped cleanup");
 
     assert!(
         cleanup.removed.is_empty(),

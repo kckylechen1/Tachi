@@ -53,9 +53,8 @@ fn credential_profile_discovery_skips_unrelated_malformed_json() {
     )
     .expect("write valid profile");
 
-    let (path, profile) =
-        crate::find_credential_profile(dir.path(), "codex_shared")
-            .expect("valid profile should be found despite malformed sibling");
+    let (path, profile) = crate::find_credential_profile(dir.path(), "codex_shared")
+        .expect("valid profile should be found despite malformed sibling");
     assert_eq!(
         path.file_name().and_then(|name| name.to_str()),
         Some("valid.json")

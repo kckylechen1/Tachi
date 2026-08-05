@@ -26,9 +26,7 @@ pub use cleanup::{
     cleanup_ephemeral_credential_materializations, cleanup_managed_credential_materializations,
 };
 pub use doctor::doctor_credential_profile;
-pub use io::{
-    default_credentials_dir, find_credential_profile, load_credential_profile_from_path,
-};
+pub use io::{default_credentials_dir, find_credential_profile, load_credential_profile_from_path};
 pub use plan::{
     credential_materialize_report_json, plan_credential_materialization,
     plan_credential_materialization_with_run_dir, profile_secret_names,

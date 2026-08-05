@@ -48,13 +48,9 @@ fn credential_materialize_dry_run_reports_redacted_outputs() {
         ],
     };
 
-    let report = crate::plan_credential_materialization(
-        "codex_shared",
-        &profile,
-        "codex_cli",
-        &store,
-    )
-    .expect("dry-run report");
+    let report =
+        crate::plan_credential_materialization("codex_shared", &profile, "codex_cli", &store)
+            .expect("dry-run report");
     assert!(report.allowed);
     assert!(report.missing_secrets.is_empty());
     assert!(report.denied_secrets.is_empty());
@@ -103,13 +99,9 @@ fn credential_materialize_dry_run_enforces_consumer_and_entry_allowlists() {
         }],
     };
 
-    let report = crate::plan_credential_materialization(
-        "codex_shared",
-        &profile,
-        "opencode",
-        &store,
-    )
-    .expect("dry-run report");
+    let report =
+        crate::plan_credential_materialization("codex_shared", &profile, "opencode", &store)
+            .expect("dry-run report");
     assert!(!report.allowed);
     assert_eq!(report.steps[0].status, "denied_secret");
     assert_eq!(report.denied_secrets, vec!["CODEX_AUTH_JSON"]);

@@ -74,12 +74,9 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
         r#"{"auth":"{\"token\":\"secret-token\"}"}"#
     );
 
-    let dry_run = crate::cleanup_ephemeral_credential_materializations(
-        &store,
-        run_dir.path(),
-        true,
-    )
-    .expect("dry-run cleanup");
+    let dry_run =
+        crate::cleanup_ephemeral_credential_materializations(&store, run_dir.path(), true)
+            .expect("dry-run cleanup");
     assert!(dry_run
         .would_remove
         .contains(&auth_path.to_string_lossy().to_string()));
@@ -89,12 +86,9 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
     assert!(auth_path.exists(), "dry-run must not remove the file");
     assert!(config_path.exists(), "dry-run must not remove the file");
 
-    let applied = crate::cleanup_ephemeral_credential_materializations(
-        &store,
-        run_dir.path(),
-        false,
-    )
-    .expect("apply cleanup");
+    let applied =
+        crate::cleanup_ephemeral_credential_materializations(&store, run_dir.path(), false)
+            .expect("apply cleanup");
     assert!(applied
         .removed
         .contains(&auth_path.to_string_lossy().to_string()));
@@ -125,13 +119,8 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
         assert!(!row.value_json.contains("secret-token"));
     }
 
-    let doctor = crate::doctor_credential_profile(
-        "codex_shared",
-        &profile,
-        "codex_cli",
-        &store,
-    )
-    .expect("doctor report");
+    let doctor = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
+        .expect("doctor report");
     assert!(
         !doctor
             .issues

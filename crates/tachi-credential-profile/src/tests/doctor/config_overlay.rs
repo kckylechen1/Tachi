@@ -38,13 +38,8 @@ fn credential_doctor_reports_plaintext_config_overlay_secret_drift() {
         }],
     };
 
-    let report = crate::doctor_credential_profile(
-        "opencode_shared",
-        &profile,
-        "opencode",
-        &store,
-    )
-    .expect("doctor report");
+    let report = crate::doctor_credential_profile("opencode_shared", &profile, "opencode", &store)
+        .expect("doctor report");
     let codes = report
         .issues
         .iter()
@@ -104,13 +99,8 @@ fn credential_doctor_allows_config_overlay_env_and_vault_references() {
         }],
     };
 
-    let report = crate::doctor_credential_profile(
-        "opencode_shared",
-        &profile,
-        "opencode",
-        &store,
-    )
-    .expect("doctor report");
+    let report = crate::doctor_credential_profile("opencode_shared", &profile, "opencode", &store)
+        .expect("doctor report");
     assert!(
         !report
             .issues
@@ -158,13 +148,9 @@ fn credential_doctor_detects_compound_secretish_config_keys() {
         }],
     };
 
-    let report = crate::doctor_credential_profile(
-        "custom_shared",
-        &profile,
-        "custom_agent",
-        &store,
-    )
-    .expect("doctor report");
+    let report =
+        crate::doctor_credential_profile("custom_shared", &profile, "custom_agent", &store)
+            .expect("doctor report");
     assert!(
         report
             .issues

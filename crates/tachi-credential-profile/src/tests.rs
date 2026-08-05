@@ -17,9 +17,7 @@ fn test_vault_entry(name: &str, allowed_agents: Option<Vec<String>>) -> VaultEnt
     }
 }
 
-fn codex_auth_file_profile(
-    auth_path: &std::path::Path,
-) -> crate::CredentialProfile {
+fn codex_auth_file_profile(auth_path: &std::path::Path) -> crate::CredentialProfile {
     crate::CredentialProfile {
         provider: None,
         description: None,
