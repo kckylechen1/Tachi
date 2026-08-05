@@ -238,20 +238,52 @@ pub(crate) fn enqueue_outbox_event_within_tx(
     object_id: &str,
     event: &OutboxEventMeta,
 ) -> Result<OutboxEventRow, MemoryError> {
+    let new_event = build_new_outbox_event(tx, object_id, event)?;
+    db::insert_outbox_event_within_tx(tx, &new_event)
+}
+
+/// The [`OutboxConflictResolution::LocalWins`] counterpart to
+/// [`enqueue_outbox_event_within_tx`] (tachi#1644 review fix).
+///
+/// Identical digest/revision derivation, but the insert goes through
+/// [`db::insert_resolution_successor_event_within_tx`] instead of
+/// [`db::insert_outbox_event_within_tx`]: `event.event_id` here is
+/// `crate::store::outbox_protocol::outbox_local_wins_successor_id`'s output,
+/// which legitimately carries the reserved `::local-wins` suffix that the
+/// ordinary caller-facing entry refuses. Reached from exactly one call
+/// site — `resolve_outbox_conflict`'s `LocalWins` arm.
+///
+/// [`OutboxConflictResolution::LocalWins`]: crate::store::outbox_protocol::OutboxConflictResolution::LocalWins
+pub(crate) fn enqueue_outbox_resolution_successor_event_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    object_id: &str,
+    event: &OutboxEventMeta,
+) -> Result<OutboxEventRow, MemoryError> {
+    let new_event = build_new_outbox_event(tx, object_id, event)?;
+    db::insert_resolution_successor_event_within_tx(tx, &new_event)
+}
+
+/// Shared digest/revision derivation for both
+/// [`enqueue_outbox_event_within_tx`] and
+/// [`enqueue_outbox_resolution_successor_event_within_tx`]; the only
+/// difference between the two callers is which `db` insert entry the result
+/// goes to.
+fn build_new_outbox_event(
+    tx: &rusqlite::Transaction<'_>,
+    object_id: &str,
+    event: &OutboxEventMeta,
+) -> Result<db::NewOutboxEvent, MemoryError> {
     let stored = read_object_within_tx(tx, object_id)?;
     let payload_digest = outbox_payload_digest(&stored)?;
-    db::insert_outbox_event_within_tx(
-        tx,
-        &db::NewOutboxEvent {
-            event_id: event.event_id.clone(),
-            object_id: object_id.to_string(),
-            object_class: event.object_class.clone(),
-            authority_class: event.authority_class.clone(),
-            source_store: event.source_store.clone(),
-            source_partition: event.source_partition.clone(),
-            payload_digest,
-        },
-    )
+    Ok(db::NewOutboxEvent {
+        event_id: event.event_id.clone(),
+        object_id: object_id.to_string(),
+        object_class: event.object_class.clone(),
+        authority_class: event.authority_class.clone(),
+        source_store: event.source_store.clone(),
+        source_partition: event.source_partition.clone(),
+        payload_digest,
+    })
 }
 
 /// Build the receipt from the destination's post-write state, still inside the

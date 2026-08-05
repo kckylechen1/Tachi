@@ -284,6 +284,43 @@ pub(crate) fn refuse_invalid_class(field: &str, value: &str) -> Result<(), Memor
     Ok(())
 }
 
+/// The suffix reserved for a [`OutboxConflictResolution::LocalWins`]
+/// resolution's own minted successor id (tachi#1644 review fix).
+///
+/// Pinned as its own literal rather than imported: `db` is the lower layer
+/// and does not depend on `store` (see this module's `//!` doc, "class law"),
+/// so this mirrors
+/// [`crate::store::outbox_protocol::OUTBOX_LOCAL_WINS_SUCCESSOR_SUFFIX`]
+/// rather than referencing it, the same way
+/// [`OUTBOX_RESOLVED_CONFLICT_CLASS_LIKE_PATTERN`] mirrors that module's
+/// resolved-conflict class constants.
+///
+/// [`OutboxConflictResolution::LocalWins`]: crate::store::outbox_protocol::OutboxConflictResolution::LocalWins
+const OUTBOX_RESERVED_SUCCESSOR_SUFFIX: &str = "::local-wins";
+
+/// Refuse an `event_id` a caller supplied that ends with the reserved
+/// successor suffix (tachi#1644 review fix).
+///
+/// Without this, a caller could mint `"evt-x::local-wins"` directly through
+/// the ordinary enqueue path, and a later `LocalWins` resolution of some
+/// other conflicted event `"evt-x"` would collide with it on the primary key
+/// — a collision [`insert_outbox_event_within_tx`]'s existing duplicate check
+/// catches, but only after the caller's own legitimate event already holds
+/// the id the kernel needs for a future resolution. Only
+/// [`insert_resolution_successor_event_within_tx`] — reached exclusively from
+/// `resolve_outbox_conflict`'s `LocalWins` arm, which mints this exact
+/// suffix — is exempt from this refusal.
+fn refuse_reserved_successor_suffix(field: &str, value: &str) -> Result<(), MemoryError> {
+    if value.ends_with(OUTBOX_RESERVED_SUCCESSOR_SUFFIX) {
+        return Err(MemoryError::InvalidArg(format!(
+            "outbox event {field} '{value}' ends with the reserved successor suffix \
+             '{OUTBOX_RESERVED_SUCCESSOR_SUFFIX}', which only a LocalWins conflict resolution's \
+             own minted successor id may carry"
+        )));
+    }
+    Ok(())
+}
+
 /// Refuse anything that is not a lowercase-hex SHA-256.
 ///
 /// This is a storage-level backstop on the same invariant
@@ -345,6 +382,8 @@ pub(crate) fn outbox_event_exists(conn: &Connection, event_id: &str) -> Result<b
 /// row **as stored**.
 ///
 /// Refusals, in order: blank/oversized/non-canonical caller fields, an
+/// `event_id` carrying the suffix reserved for a `LocalWins` successor
+/// (tachi#1644 review fix — see [`refuse_reserved_successor_suffix`]), an
 /// `event_id` that already exists ([`MemoryError::Duplicate`]), and an
 /// `object_id` with no `memories` row in this transaction
 /// ([`MemoryError::NotFound`]).
@@ -359,7 +398,43 @@ pub(crate) fn outbox_event_exists(conn: &Connection, event_id: &str) -> Result<b
 /// The returned row is read back from the destination rather than assembled
 /// from the input, so the caller's receipt reflects what SQLite stored — the
 /// tachi#1607 receipt idiom.
+///
+/// This is the entry point for every **caller-supplied** `event_id`. A
+/// resolution's own minted successor id — which legitimately carries the
+/// reserved suffix this function refuses — goes through the separate
+/// [`insert_resolution_successor_event_within_tx`] entry instead of this one.
 pub(crate) fn insert_outbox_event_within_tx(
+    tx: &Transaction<'_>,
+    event: &NewOutboxEvent,
+) -> Result<OutboxEventRow, MemoryError> {
+    refuse_reserved_successor_suffix("event_id", &event.event_id)?;
+    insert_outbox_event_within_tx_impl(tx, event)
+}
+
+/// Insert a [`OutboxConflictResolution::LocalWins`] resolution's own successor
+/// event (tachi#1644 review fix).
+///
+/// Identical to [`insert_outbox_event_within_tx`] except it does **not**
+/// apply [`refuse_reserved_successor_suffix`]: this is the one seam whose
+/// `event_id` is minted by the kernel itself
+/// (`crate::store::outbox_protocol::outbox_local_wins_successor_id`), not
+/// supplied by a caller, so the suffix that seam refuses everywhere else is
+/// exactly what this insert is expected to carry. Reached from exactly one
+/// call site — `resolve_outbox_conflict`'s `LocalWins` arm — through
+/// `crate::store::outbox::enqueue_outbox_resolution_successor_event_within_tx`.
+/// Every other refusal (`refuse_blank`, `refuse_invalid_class`,
+/// `refuse_non_canonical_digest`, the duplicate check, the missing-object
+/// check) still applies unchanged.
+///
+/// [`OutboxConflictResolution::LocalWins`]: crate::store::outbox_protocol::OutboxConflictResolution::LocalWins
+pub(crate) fn insert_resolution_successor_event_within_tx(
+    tx: &Transaction<'_>,
+    event: &NewOutboxEvent,
+) -> Result<OutboxEventRow, MemoryError> {
+    insert_outbox_event_within_tx_impl(tx, event)
+}
+
+fn insert_outbox_event_within_tx_impl(
     tx: &Transaction<'_>,
     event: &NewOutboxEvent,
 ) -> Result<OutboxEventRow, MemoryError> {
@@ -1171,6 +1246,52 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// tachi#1644 review fix: a caller minting `"<id>::local-wins"` directly
+    /// through the ordinary insert path — instead of via a real `LocalWins`
+    /// resolution — must be refused, because that id is exactly what a future
+    /// resolution of `"<id>"` would need to mint and a caller-owned row
+    /// sitting on it first would collide on the primary key.
+    #[test]
+    fn caller_event_id_carrying_the_reserved_successor_suffix_is_refused() {
+        let mut conn = open_conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        crate::db::upsert_within_tx(&tx, &memory_entry("obj-reserved"), false, None).unwrap();
+
+        let error = insert_outbox_event_within_tx(
+            &tx,
+            &new_event("evt-caller::local-wins", "obj-reserved"),
+        )
+        .expect_err("a caller-supplied id carrying the reserved suffix must be refused");
+        drop(tx);
+
+        assert!(
+            matches!(error, MemoryError::InvalidArg(_)),
+            "unexpected error variant: {error:?}"
+        );
+    }
+
+    /// The other half of the same fix: the seam a real `LocalWins` resolution
+    /// uses to mint its successor is exempt from the refusal above, because
+    /// its id legitimately carries the suffix.
+    #[test]
+    fn resolution_successor_entry_accepts_the_reserved_suffix_the_caller_entry_refuses() {
+        let mut conn = open_conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        crate::db::upsert_within_tx(&tx, &memory_entry("obj-succ"), false, None).unwrap();
+
+        let row = insert_resolution_successor_event_within_tx(
+            &tx,
+            &new_event("evt-succ::local-wins", "obj-succ"),
+        )
+        .expect("the resolution-successor entry must accept the reserved suffix");
+        assert_eq!(row.event_id, "evt-succ::local-wins");
+        tx.commit().unwrap();
     }
 
     /// The frozen matrix, every ordered pair. This is the test that fails if

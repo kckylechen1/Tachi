@@ -63,7 +63,7 @@ use crate::{
     MemoryStore,
 };
 
-use super::outbox::{enqueue_outbox_event_within_tx, OutboxEventMeta};
+use super::outbox::{enqueue_outbox_resolution_successor_event_within_tx, OutboxEventMeta};
 
 /// What one drain asks for.
 ///
@@ -737,7 +737,7 @@ impl MemoryStore {
                     OutboxConflictResolutionReceipt::RemoteWins { quarantined }
                 }
                 OutboxConflictResolution::LocalWins => {
-                    let successor = enqueue_outbox_event_within_tx(
+                    let successor = enqueue_outbox_resolution_successor_event_within_tx(
                         &tx,
                         &current.object_id,
                         &OutboxEventMeta {

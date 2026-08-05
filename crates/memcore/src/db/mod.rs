@@ -186,8 +186,9 @@ pub use open_context::{
 /// it announces — is enforced by `crate::store::outbox`, which owns the
 /// `BEGIN IMMEDIATE` boundary. See `outbox`'s module doc.
 pub(crate) use outbox::{
-    claim_outbox_events_within_tx, insert_outbox_event_within_tx, list_outbox_events_by_state,
-    read_outbox_event, read_outbox_health, refuse_invalid_class, refuse_non_canonical_digest,
+    claim_outbox_events_within_tx, insert_outbox_event_within_tx,
+    insert_resolution_successor_event_within_tx, list_outbox_events_by_state, read_outbox_event,
+    read_outbox_health, refuse_invalid_class, refuse_non_canonical_digest,
     transition_outbox_event_within_tx, ClaimedOutboxRow,
 };
 pub use outbox::{
