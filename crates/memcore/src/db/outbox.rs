@@ -259,7 +259,14 @@ fn refuse_blank(field: &str, value: &str) -> Result<(), MemoryError> {
     Ok(())
 }
 
-fn refuse_invalid_class(field: &str, value: &str) -> Result<(), MemoryError> {
+/// Refuse anything that is not a classification token.
+///
+/// `pub(crate)` rather than private since tachi#1644: the reconciliation
+/// protocol validates the tokens a caller reports (an error class, a reporter
+/// name) before it opens a transaction, and it must apply *this* rule rather
+/// than a second copy of it that could drift from the one the storage layer
+/// enforces.
+pub(crate) fn refuse_invalid_class(field: &str, value: &str) -> Result<(), MemoryError> {
     refuse_blank(field, value)?;
     if value.len() > MAX_OUTBOX_CLASS_BYTES {
         return Err(MemoryError::InvalidArg(format!(
@@ -283,7 +290,7 @@ fn refuse_invalid_class(field: &str, value: &str) -> Result<(), MemoryError> {
 /// `crate::store::outbox` establishes by construction: the column is a digest,
 /// so a caller (or a future composition seam) cannot quietly park a summary,
 /// an error message, or a payload fragment in it.
-fn refuse_non_canonical_digest(value: &str) -> Result<(), MemoryError> {
+pub(crate) fn refuse_non_canonical_digest(value: &str) -> Result<(), MemoryError> {
     if value.len() != OUTBOX_PAYLOAD_DIGEST_HEX_LEN
         || !value
             .bytes()
@@ -530,6 +537,158 @@ pub(crate) fn list_outbox_events_by_state(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// One event a claim moved (or kept) in `in_flight`, with the storage facts
+/// the protocol layer needs to name *what kind* of claim it was.
+///
+/// The `previous_*` fields are the row as this claim observed it before
+/// writing, so a receipt built from this can be checked against the durable
+/// state rather than asserted: a reclaim carries the stamp it replaced, and a
+/// reader can verify that stamp is at or before the cutoff the claim used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaimedOutboxRow {
+    /// The row as stored after the claim: `state` is
+    /// [`OutboxState::InFlight`] and `state_changed_at` is this claim's lease
+    /// stamp.
+    pub event: OutboxEventRow,
+    /// [`OutboxState::Pending`] for a first hand-off, [`OutboxState::InFlight`]
+    /// for a takeover of a claim that outlived the caller's staleness bound.
+    pub previous_state: OutboxState,
+    /// The `state_changed_at` this claim replaced.
+    pub previous_state_changed_at: String,
+}
+
+/// Renew the lease on an event that is already `in_flight`.
+///
+/// This is deliberately **not** a transition, and it does not go through
+/// [`transition_outbox_event_within_tx`]: `in_flight -> in_flight` is illegal
+/// in the frozen #1643 matrix and stays illegal. Nothing about the event's
+/// state changes here — the only column touched is `state_changed_at`, which
+/// is the lease stamp a staleness bound is measured against.
+///
+/// Restamping is required for correctness rather than cosmetic: if a takeover
+/// left the old stamp in place, the event would remain past the cutoff and
+/// every subsequent drain — including the very next one by the same caller —
+/// would take it over again, so the bound would stop bounding anything.
+///
+/// The `AND state = 'in_flight' AND state_changed_at = ?3` clause is a
+/// compare-and-swap against the row as observed, for the same reason
+/// [`transition_outbox_event_within_tx`] carries one: inside one transaction
+/// the row cannot move under us, so a `changed != 1` here means the seam was
+/// reached outside a transaction and must fail loudly instead of silently
+/// taking over a claim someone else just renewed.
+fn renew_outbox_claim_within_tx(
+    tx: &Transaction<'_>,
+    observed: &OutboxEventRow,
+) -> Result<OutboxEventRow, MemoryError> {
+    let now = now_utc_iso();
+    let changed = tx.execute(
+        "UPDATE memory_outbox_events SET state_changed_at = ?2 \
+         WHERE event_id = ?1 AND state = 'in_flight' AND state_changed_at = ?3",
+        params![observed.event_id, now, observed.state_changed_at],
+    )?;
+    if changed != 1 {
+        return Err(MemoryError::Internal(format!(
+            "outbox event '{}' moved under a transaction that had already observed it in flight \
+             since {}",
+            observed.event_id, observed.state_changed_at
+        )));
+    }
+    read_outbox_event(tx, &observed.event_id)?.ok_or_else(|| {
+        MemoryError::Internal(format!(
+            "outbox event '{}' vanished between claim renewal and readback in the same transaction",
+            observed.event_id
+        ))
+    })
+}
+
+/// Hand a bounded batch of drainable events to one consumer, in one
+/// transaction (tachi#1644, #1630 workstream A leaf A2).
+///
+/// Drainable means either of two things, and the difference is preserved in
+/// the returned rows rather than flattened:
+///
+/// * `pending` — never handed to anyone. Claiming it is the ordinary
+///   `pending -> in_flight` edge, taken through the frozen A1 machine.
+/// * `in_flight` whose `state_changed_at` is at or before
+///   `reclaim_stamped_at_or_before` — a claim whose holder never reported an
+///   outcome (the crash case). Claiming it renews the lease via
+///   [`renew_outbox_claim_within_tx`]; the state does not change, because a
+///   takeover is not a transition.
+///
+/// `reclaim_stamped_at_or_before` of `None` disables takeover entirely: only
+/// `pending` events are claimed. That is the conservative default a caller
+/// must opt out of, because taking over another consumer's in-flight event is
+/// only safe if the caller can say how long a claim may live.
+///
+/// The comparison is lexical on canonical UTC-ISO (tachi#1432), which is
+/// chronological **only** because every writer in this module stamps that one
+/// shape; the caller mints the cutoff with the same formatter. `<=` rather
+/// than `<` so a zero-length bound means "every in-flight event is
+/// reclaimable", which is the reading a caller passing zero intends.
+///
+/// Ordering and bounding are `list_outbox_events_by_state`'s: `created_at ASC,
+/// event_id ASC`, `LIMIT limit`, and `limit == 0` returns an empty batch
+/// rather than a refusal. Candidates are selected first and written after, so
+/// no event can appear twice in one batch.
+///
+/// Terminal events (`acknowledged`, `rejected`, `conflicted`, `quarantined`)
+/// are never selected by any bound: an outcome, once reported, is not
+/// re-drainable, and a retry is a new event rather than a rewrite of this
+/// one's history.
+pub(crate) fn claim_outbox_events_within_tx(
+    tx: &Transaction<'_>,
+    limit: usize,
+    reclaim_stamped_at_or_before: Option<&str>,
+) -> Result<Vec<ClaimedOutboxRow>, MemoryError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let candidates = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT {OUTBOX_SELECT_COLUMNS} FROM memory_outbox_events \
+             WHERE state = ?1 \
+                OR (state = ?2 AND ?3 IS NOT NULL AND state_changed_at <= ?3) \
+             ORDER BY created_at ASC, event_id ASC LIMIT ?4"
+        ))?;
+        stmt.query_map(
+            params![
+                OutboxState::Pending.as_str(),
+                OutboxState::InFlight.as_str(),
+                reclaim_stamped_at_or_before,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            row_to_outbox_event,
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut claimed = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let event = match candidate.state {
+            OutboxState::Pending => transition_outbox_event_within_tx(
+                tx,
+                &candidate.event_id,
+                OutboxState::InFlight,
+                None,
+            )?,
+            OutboxState::InFlight => renew_outbox_claim_within_tx(tx, &candidate)?,
+            other => {
+                return Err(MemoryError::Internal(format!(
+                    "outbox claim selected event '{}' in state '{other}', which is not drainable",
+                    candidate.event_id
+                )))
+            }
+        };
+        claimed.push(ClaimedOutboxRow {
+            event,
+            previous_state: candidate.state,
+            previous_state_changed_at: candidate.state_changed_at,
+        });
+    }
+    Ok(claimed)
 }
 
 /// Local-store half of the #1643 health read model.
@@ -823,6 +982,27 @@ mod tests {
             tx.commit().unwrap();
         }
         result
+    }
+
+    fn claim(
+        conn: &mut Connection,
+        limit: usize,
+        reclaim_stamped_at_or_before: Option<&str>,
+    ) -> Vec<ClaimedOutboxRow> {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let claimed =
+            claim_outbox_events_within_tx(&tx, limit, reclaim_stamped_at_or_before).unwrap();
+        tx.commit().unwrap();
+        claimed
+    }
+
+    fn claimed_ids(claimed: &[ClaimedOutboxRow]) -> Vec<&str> {
+        claimed
+            .iter()
+            .map(|row| row.event.event_id.as_str())
+            .collect()
     }
 
     fn assert_canonical_timestamp(value: &str) {
@@ -1246,6 +1426,115 @@ mod tests {
         );
         assert_eq!(health.pending_count, 0);
         assert_eq!(health.oldest_pending_at, None);
+    }
+
+    #[test]
+    fn claim_hands_out_pending_events_in_enqueue_order_and_bounded_by_limit() {
+        let mut conn = open_conn();
+        for index in 0..4 {
+            seed_event(&mut conn, &format!("evt-{index}"), &format!("obj-{index}"));
+        }
+
+        let first = claim(&mut conn, 2, None);
+        assert_eq!(claimed_ids(&first), vec!["evt-0", "evt-1"]);
+        for row in &first {
+            assert_eq!(row.event.state, OutboxState::InFlight);
+            assert_eq!(row.previous_state, OutboxState::Pending);
+            assert!(row.event.state_changed_at >= row.previous_state_changed_at);
+        }
+
+        // With no staleness bound, a second drain never takes what the first
+        // one is still holding.
+        assert_eq!(
+            claimed_ids(&claim(&mut conn, 10, None)),
+            vec!["evt-2", "evt-3"]
+        );
+        assert!(claim(&mut conn, 10, None).is_empty());
+        assert!(claim(&mut conn, 0, None).is_empty());
+    }
+
+    /// The crash case: an `in_flight` event whose holder never reported an
+    /// outcome is re-claimable once it is older than the caller's bound — and
+    /// the takeover restamps the lease, so the same bound does not hand it out
+    /// again on the very next drain.
+    #[test]
+    fn claim_reclaims_only_the_in_flight_events_at_or_before_the_cutoff() {
+        let mut conn = open_conn();
+        seed_event(&mut conn, "evt-stale", "obj-stale");
+        seed_event(&mut conn, "evt-live", "obj-live");
+        assert_eq!(claim(&mut conn, 10, None).len(), 2);
+
+        // Age one lease deterministically rather than by sleeping.
+        conn.execute(
+            "UPDATE memory_outbox_events SET state_changed_at = '2020-01-01T00:00:00.000Z' \
+             WHERE event_id = 'evt-stale'",
+            [],
+        )
+        .unwrap();
+
+        let reclaimed = claim(&mut conn, 10, Some("2021-01-01T00:00:00.000Z"));
+        assert_eq!(claimed_ids(&reclaimed), vec!["evt-stale"]);
+        let taken = &reclaimed[0];
+        assert_eq!(
+            taken.previous_state,
+            OutboxState::InFlight,
+            "a takeover is not a state change"
+        );
+        assert_eq!(taken.previous_state_changed_at, "2020-01-01T00:00:00.000Z");
+        assert_eq!(taken.event.state, OutboxState::InFlight);
+        assert!(
+            taken.event.state_changed_at > taken.previous_state_changed_at,
+            "the lease must be restamped or the bound stops bounding anything"
+        );
+        assert!(
+            claim(&mut conn, 10, Some("2021-01-01T00:00:00.000Z")).is_empty(),
+            "the restamped lease is no longer past the cutoff"
+        );
+    }
+
+    /// No cutoff, however wide, re-drains an event whose outcome was already
+    /// reported. A retry is a new event, not a second hand-off of this one.
+    #[test]
+    fn claim_never_selects_a_terminal_event_at_any_cutoff() {
+        let mut conn = open_conn();
+        for (event_id, object_id) in [
+            ("evt-ack", "obj-ack"),
+            ("evt-rej", "obj-rej"),
+            ("evt-con", "obj-con"),
+            ("evt-quar", "obj-quar"),
+        ] {
+            seed_event(&mut conn, event_id, object_id);
+        }
+        transition(&mut conn, "evt-ack", OutboxState::InFlight, None).unwrap();
+        transition(&mut conn, "evt-ack", OutboxState::Acknowledged, None).unwrap();
+        transition(&mut conn, "evt-rej", OutboxState::InFlight, None).unwrap();
+        transition(
+            &mut conn,
+            "evt-rej",
+            OutboxState::Rejected,
+            Some("remote_refused"),
+        )
+        .unwrap();
+        transition(&mut conn, "evt-con", OutboxState::InFlight, None).unwrap();
+        transition(
+            &mut conn,
+            "evt-con",
+            OutboxState::Conflicted,
+            Some("divergent_revision"),
+        )
+        .unwrap();
+        transition(
+            &mut conn,
+            "evt-quar",
+            OutboxState::Quarantined,
+            Some("operator_hold"),
+        )
+        .unwrap();
+
+        assert!(
+            claim(&mut conn, 10, Some("2999-01-01T00:00:00.000Z")).is_empty(),
+            "a terminal event is not drainable at any staleness bound"
+        );
     }
 
     /// A state token the CHECK constraint should have made impossible must
