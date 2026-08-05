@@ -266,6 +266,22 @@ fn refuse_blank(field: &str, value: &str) -> Result<(), MemoryError> {
 /// name) before it opens a transaction, and it must apply *this* rule rather
 /// than a second copy of it that could drift from the one the storage layer
 /// enforces.
+///
+/// A conforming token is nonempty, at most [`MAX_OUTBOX_CLASS_BYTES`] bytes,
+/// and every byte is in `[a-z0-9_.-]` (tachi#1644 review fix — tightened from
+/// "reject only blank/oversized/control-character" to a positive allowlist).
+/// `.` is in the allowlist, not merely tolerated: a
+/// [`OutboxConflictResolution::RemoteWins`] resolution stores
+/// `"{OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX}.{caller class}"` (see that
+/// constant's doc comment), and that composed value round-trips through this
+/// same function at transition time, so the prefix's own separator has to be
+/// a byte this allowlist admits. Every class literal this crate stamps —
+/// [`OUTBOX_LOCAL_WINS_RESOLVED_CLASS`], `OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX`
+/// composed with a caller class, and every fixture/test literal — was swept
+/// against this allowlist when it was tightened; none needed to change.
+///
+/// [`OutboxConflictResolution::RemoteWins`]: crate::store::outbox_protocol::OutboxConflictResolution::RemoteWins
+/// [`OUTBOX_LOCAL_WINS_RESOLVED_CLASS`]: crate::store::outbox_protocol::OUTBOX_LOCAL_WINS_RESOLVED_CLASS
 pub(crate) fn refuse_invalid_class(field: &str, value: &str) -> Result<(), MemoryError> {
     refuse_blank(field, value)?;
     if value.len() > MAX_OUTBOX_CLASS_BYTES {
@@ -275,13 +291,18 @@ pub(crate) fn refuse_invalid_class(field: &str, value: &str) -> Result<(), Memor
             value.len()
         )));
     }
-    if value.chars().any(char::is_control) {
+    if !value.bytes().all(is_outbox_class_token_byte) {
         return Err(MemoryError::InvalidArg(format!(
-            "outbox event {field} must be a classification token, not free text with control \
-             characters"
+            "outbox event {field} must be a classification token: only lowercase ascii letters, \
+             digits, '_', '.', and '-' are allowed, not '{value}'"
         )));
     }
     Ok(())
+}
+
+/// A byte a classification token may contain: `[a-z0-9_.-]`.
+fn is_outbox_class_token_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
 }
 
 /// The suffix reserved for a [`OutboxConflictResolution::LocalWins`]
@@ -1246,6 +1267,27 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// tachi#1644 review fix: `refuse_invalid_class` tightened from
+    /// "reject blank/oversized/control-character" to a positive
+    /// `[a-z0-9_.-]` allowlist. A space and an uppercase letter are both
+    /// ordinary, printable, non-control text — the prior rule let them
+    /// through — but neither is in the allowlist, so both must now refuse.
+    #[test]
+    fn class_tokens_with_a_space_or_uppercase_letter_are_refused() {
+        assert!(matches!(
+            refuse_invalid_class("object_class", "operator hold"),
+            Err(MemoryError::InvalidArg(_))
+        ));
+        assert!(matches!(
+            refuse_invalid_class("object_class", "Operator_Hold"),
+            Err(MemoryError::InvalidArg(_))
+        ));
+        // The allowlist itself: lowercase letters, digits, '_', '.', '-'.
+        assert!(
+            refuse_invalid_class("object_class", "conflict_resolved_remote_wins.peer-1").is_ok()
+        );
     }
 
     /// tachi#1644 review fix: a caller minting `"<id>::local-wins"` directly

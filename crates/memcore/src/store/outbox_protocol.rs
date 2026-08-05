@@ -597,6 +597,12 @@ impl MemoryStore {
         evidence.validate()?;
         let db_label = self.db_label.clone();
         db::retry_memory_locked("apply_outbox_outcome", &db_label, || {
+            // Even the replay branch that resolves to
+            // `OutboxOutcomeApplication::AlreadyApplied` and writes nothing
+            // opens this same `BEGIN IMMEDIATE`, because the state has to be
+            // read and the write decision made as one atomic observation —
+            // a real contention cost under a busy retry storm, not a bug
+            // (tachi#1644 review).
             let tx = self
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1226,6 +1232,27 @@ mod tests {
         assert!(store
             .apply_outbox_outcome("evt-tokens", &multiline, &evidence())
             .is_err());
+        // tachi#1644 review fix: the allowlist is `[a-z0-9_.-]`, not merely
+        // "no control characters" — an ordinary space and an uppercase letter
+        // are both free text, not a classification token.
+        let spaced = OutboxOutcome::Rejected {
+            error_class: "remote refused".to_string(),
+        };
+        assert!(
+            store
+                .apply_outbox_outcome("evt-tokens", &spaced, &evidence())
+                .is_err(),
+            "a space is not in the [a-z0-9_.-] allowlist"
+        );
+        let uppercase = OutboxOutcome::Rejected {
+            error_class: "Remote_Refused".to_string(),
+        };
+        assert!(
+            store
+                .apply_outbox_outcome("evt-tokens", &uppercase, &evidence())
+                .is_err(),
+            "uppercase ascii is not in the [a-z0-9_.-] allowlist"
+        );
         assert!(store
             .apply_outbox_outcome(
                 "evt-tokens",
