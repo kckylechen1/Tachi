@@ -187,7 +187,10 @@ impl OutboxOutcome {
 
     fn validate(&self) -> Result<(), MemoryError> {
         match self.error_class() {
-            Some(class) => db::refuse_invalid_class("outcome error_class", class),
+            Some(class) => {
+                db::refuse_invalid_class("outcome error_class", class)?;
+                db::refuse_reserved_resolved_class("outcome error_class", class)
+            }
             None => Ok(()),
         }
     }
@@ -358,10 +361,10 @@ pub const OUTBOX_LOCAL_WINS_RESOLVED_CLASS: &str = "conflict_resolved_local_wins
 /// tell "this conflict was decided" from "this store is holding an
 /// unresolved problem" — every `RemoteWins` resolution read as permanent
 /// local degradation forever. The prefix is what
-/// `read_outbox_health`'s `conflict_resolved_%` match recognizes; the
-/// caller's own reason survives as the suffix rather than being discarded, so
-/// the fix does not cost an operator the original diagnosis to get a correct
-/// health signal.
+/// `read_outbox_health`'s exact `conflict_resolved_` prefix comparison
+/// recognizes; the caller's own reason survives as the suffix rather than
+/// being discarded, so the fix does not cost an operator the original
+/// diagnosis to get a correct health signal.
 pub const OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX: &str = "conflict_resolved_remote_wins";
 
 /// Compose the class stamped on a `RemoteWins` withdrawal from the caller's
@@ -709,6 +712,7 @@ impl MemoryStore {
     ) -> Result<OutboxConflictResolutionReceipt, MemoryError> {
         if let OutboxConflictResolution::RemoteWins { error_class } = resolution {
             db::refuse_invalid_class("resolution error_class", error_class)?;
+            db::refuse_reserved_resolved_class("resolution error_class", error_class)?;
             // tachi#1644 review fix: the stamped class is
             // `"{OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX}.{error_class}"`, not
             // `error_class` alone — validating only the caller's raw token here
@@ -757,11 +761,10 @@ impl MemoryStore {
                 },
                 OutboxConflictResolution::RemoteWins { error_class } => {
                     let stamped_class = outbox_remote_wins_resolved_class(error_class);
-                    let quarantined = db::transition_outbox_event_within_tx(
+                    let quarantined = db::transition_outbox_resolved_conflict_within_tx(
                         &tx,
                         event_id,
-                        OutboxState::Quarantined,
-                        Some(stamped_class.as_str()),
+                        stamped_class.as_str(),
                     )?;
                     OutboxConflictResolutionReceipt::RemoteWins { quarantined }
                 }
@@ -777,11 +780,10 @@ impl MemoryStore {
                             source_partition: current.source_partition.clone(),
                         },
                     )?;
-                    let resolved = db::transition_outbox_event_within_tx(
+                    let resolved = db::transition_outbox_resolved_conflict_within_tx(
                         &tx,
                         event_id,
-                        OutboxState::Quarantined,
-                        Some(OUTBOX_LOCAL_WINS_RESOLVED_CLASS),
+                        OUTBOX_LOCAL_WINS_RESOLVED_CLASS,
                     )?;
                     OutboxConflictResolutionReceipt::LocalWins {
                         resolved,
@@ -871,6 +873,16 @@ mod tests {
             .iter()
             .map(|item| item.event.event_id.as_str())
             .collect()
+    }
+
+    fn assert_reserved_resolved_class_refusal(error: MemoryError) {
+        match error {
+            MemoryError::InvalidArg(message) => assert!(
+                message.contains("reserved resolved-conflict class prefix"),
+                "unexpected refusal text: {message}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     #[test]
@@ -1276,6 +1288,19 @@ mod tests {
                 .is_err(),
             "uppercase ascii is not in the [a-z0-9_.-] allowlist"
         );
+        for reserved in [
+            OutboxOutcome::Rejected {
+                error_class: "conflict_resolved_operator_hold".to_string(),
+            },
+            OutboxOutcome::Conflicted {
+                error_class: "conflict_resolved_operator_hold".to_string(),
+            },
+        ] {
+            let error = store
+                .apply_outbox_outcome("evt-tokens", &reserved, &evidence())
+                .expect_err("an outcome error_class in the reserved namespace must be refused");
+            assert_reserved_resolved_class_refusal(error);
+        }
         assert!(store
             .apply_outbox_outcome(
                 "evt-tokens",
@@ -1394,6 +1419,13 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].event.event_id, "evt-lw::local-wins");
         assert_eq!(claimed[0].claim, OutboxClaimKind::First);
+        let health = store.outbox_health().expect("health");
+        assert_eq!(
+            health.local_store_status,
+            db::LocalStoreStatus::Healthy,
+            "a LocalWins resolution is a decided conflict, not a live local degradation"
+        );
+        assert_eq!(health.resolved_count, 1);
     }
 
     /// "RemoteWins" withdraws the local *event*. It does not write the peer's
@@ -1445,6 +1477,30 @@ mod tests {
             "a RemoteWins resolution is a decided conflict, not a live local degradation"
         );
         assert_eq!(health.resolved_count, 1);
+    }
+
+    #[test]
+    fn remote_wins_refuses_a_raw_resolution_class_in_the_reserved_namespace() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let conflicted = conflict(&mut store, "obj-rw-reserved", "evt-rw-reserved");
+
+        let error = store
+            .resolve_outbox_conflict(
+                "evt-rw-reserved",
+                &OutboxConflictResolution::RemoteWins {
+                    error_class: "conflict_resolved_operator_hold".to_string(),
+                },
+            )
+            .expect_err("the caller's raw RemoteWins class must not use the reserved namespace");
+        assert_reserved_resolved_class_refusal(error);
+        assert_eq!(
+            store
+                .outbox_event("evt-rw-reserved")
+                .expect("read")
+                .unwrap(),
+            conflicted,
+            "the reserved-prefix refusal must leave the conflict untouched"
+        );
     }
 
     #[test]

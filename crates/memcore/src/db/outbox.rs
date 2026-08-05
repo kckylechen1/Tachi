@@ -313,11 +313,20 @@ fn is_outbox_class_token_byte(byte: u8) -> bool {
 /// so this mirrors
 /// [`crate::store::outbox_protocol::OUTBOX_LOCAL_WINS_SUCCESSOR_SUFFIX`]
 /// rather than referencing it, the same way
-/// [`OUTBOX_RESOLVED_CONFLICT_CLASS_LIKE_PATTERN`] mirrors that module's
+/// [`OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX`] mirrors that module's
 /// resolved-conflict class constants.
 ///
 /// [`OutboxConflictResolution::LocalWins`]: crate::store::outbox_protocol::OutboxConflictResolution::LocalWins
 const OUTBOX_RESERVED_SUCCESSOR_SUFFIX: &str = "::local-wins";
+
+/// The `last_error_class` prefix reserved for conflict-resolution stamps
+/// minted by `crate::store::outbox_protocol::MemoryStore::resolve_outbox_conflict`.
+///
+/// Pinned here for the same reason as [`OUTBOX_RESERVED_SUCCESSOR_SUFFIX`]:
+/// `db` is the lower layer, so it cannot import the store-level
+/// `OUTBOX_LOCAL_WINS_RESOLVED_CLASS` and
+/// `OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX` constants it protects.
+const OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX: &str = "conflict_resolved_";
 
 /// Refuse an `event_id` a caller supplied that ends with the reserved
 /// successor suffix (tachi#1644 review fix).
@@ -337,6 +346,25 @@ fn refuse_reserved_successor_suffix(field: &str, value: &str) -> Result<(), Memo
             "outbox event {field} '{value}' ends with the reserved successor suffix \
              '{OUTBOX_RESERVED_SUCCESSOR_SUFFIX}', which only a LocalWins conflict resolution's \
              own minted successor id may carry"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse a caller-supplied class that starts with the reserved
+/// resolved-conflict prefix (tachi#1644 review fix).
+///
+/// Without this, a caller could park an ordinary quarantine under a class like
+/// `"conflict_resolved_operator_hold"`, making the health read model count it
+/// as a completed conflict resolution instead of live local degradation. Only
+/// the resolution-specific transition seam is exempt: those stamps are minted
+/// by the kernel, not chosen by the caller.
+pub(crate) fn refuse_reserved_resolved_class(field: &str, value: &str) -> Result<(), MemoryError> {
+    if value.starts_with(OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX) {
+        return Err(MemoryError::InvalidArg(format!(
+            "outbox event {field} '{value}' starts with the reserved resolved-conflict class \
+             prefix '{OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX}', which only a conflict resolution's \
+             own kernel-stamped class may carry"
         )));
     }
     Ok(())
@@ -402,12 +430,13 @@ pub(crate) fn outbox_event_exists(conn: &Connection, event_id: &str) -> Result<b
 /// Insert one `pending` event inside a caller-owned transaction and return the
 /// row **as stored**.
 ///
-/// Refusals, in order: blank/oversized/non-canonical caller fields, an
-/// `event_id` carrying the suffix reserved for a `LocalWins` successor
-/// (tachi#1644 review fix — see [`refuse_reserved_successor_suffix`]), an
-/// `event_id` that already exists ([`MemoryError::Duplicate`]), and an
-/// `object_id` with no `memories` row in this transaction
-/// ([`MemoryError::NotFound`]).
+/// Refusals: blank/oversized/non-canonical caller fields, an `event_id`
+/// carrying the suffix reserved for a `LocalWins` successor (tachi#1644 review
+/// fix — see [`refuse_reserved_successor_suffix`]), caller event classes
+/// carrying the resolved-conflict prefix reserved for kernel stamps
+/// ([`refuse_reserved_resolved_class`]), an `event_id` that already exists
+/// ([`MemoryError::Duplicate`]), and an `object_id` with no `memories` row in
+/// this transaction ([`MemoryError::NotFound`]).
 ///
 /// The `event_id` uniqueness check is a read followed by an insert, which is
 /// safe because the caller holds this transaction's `BEGIN IMMEDIATE` writer
@@ -429,6 +458,8 @@ pub(crate) fn insert_outbox_event_within_tx(
     event: &NewOutboxEvent,
 ) -> Result<OutboxEventRow, MemoryError> {
     refuse_reserved_successor_suffix("event_id", &event.event_id)?;
+    refuse_reserved_resolved_class("object_class", &event.object_class)?;
+    refuse_reserved_resolved_class("authority_class", &event.authority_class)?;
     insert_outbox_event_within_tx_impl(tx, event)
 }
 
@@ -515,7 +546,9 @@ fn insert_outbox_event_within_tx_impl(
 ///   a non-failure state refuses one. This is what keeps
 ///   `last_error_class` meaningful: it is set exactly when the current state
 ///   is a failure, and cleared otherwise, so it can never report a class the
-///   event has already moved past.
+///   event has already moved past. Caller-supplied failure classes also cannot
+///   carry the resolved-conflict prefix reserved for `resolve_outbox_conflict`'s
+///   own kernel stamps.
 ///
 /// The UPDATE carries `AND state = <observed>`: inside one transaction the
 /// state cannot change under us, so this is not the load-bearing guard — it is
@@ -527,6 +560,46 @@ pub(crate) fn transition_outbox_event_within_tx(
     event_id: &str,
     next: OutboxState,
     error_class: Option<&str>,
+) -> Result<OutboxEventRow, MemoryError> {
+    transition_outbox_event_within_tx_impl(tx, event_id, next, error_class, false)
+}
+
+/// Mark a conflicted event as consumed by a kernel-stamped resolution class.
+///
+/// This mirrors [`insert_resolution_successor_event_within_tx`]: it bypasses
+/// only the caller-facing reserved-prefix refusal, and exists for
+/// `resolve_outbox_conflict`'s `LocalWins` and `RemoteWins` arms. It is not a
+/// general transition helper: the target state is always `quarantined`, and
+/// the supplied class must itself carry the reserved resolved-conflict prefix.
+/// The state matrix, class-token validation, required/forbidden error-class
+/// checks, and compare-and-swap update remain identical to
+/// [`transition_outbox_event_within_tx`].
+pub(crate) fn transition_outbox_resolved_conflict_within_tx(
+    tx: &Transaction<'_>,
+    event_id: &str,
+    resolved_class: &str,
+) -> Result<OutboxEventRow, MemoryError> {
+    if !resolved_class.starts_with(OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX) {
+        return Err(MemoryError::InvalidArg(format!(
+            "outbox resolved conflict class '{resolved_class}' must start with the reserved \
+             prefix '{OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX}'"
+        )));
+    }
+    transition_outbox_event_within_tx_impl(
+        tx,
+        event_id,
+        OutboxState::Quarantined,
+        Some(resolved_class),
+        true,
+    )
+}
+
+fn transition_outbox_event_within_tx_impl(
+    tx: &Transaction<'_>,
+    event_id: &str,
+    next: OutboxState,
+    error_class: Option<&str>,
+    allow_reserved_resolved_class: bool,
 ) -> Result<OutboxEventRow, MemoryError> {
     let current = read_outbox_event(tx, event_id)?.ok_or_else(|| {
         MemoryError::NotFound(format!("outbox event '{event_id}' does not exist"))
@@ -543,6 +616,9 @@ pub(crate) fn transition_outbox_event_within_tx(
     let stored_error_class = match (next.is_failure(), error_class) {
         (true, Some(class)) => {
             refuse_invalid_class("last_error_class", class)?;
+            if !allow_reserved_resolved_class {
+                refuse_reserved_resolved_class("last_error_class", class)?;
+            }
             Some(class)
         }
         (true, None) => {
@@ -909,22 +985,22 @@ type OutboxRowColumns = (
     Option<String>,
 );
 
-/// The `LIKE` pattern that marks a `quarantined` row as a resolved conflict
+/// The exact prefix that marks a `quarantined` row as a resolved conflict
 /// rather than a live durability problem (tachi#1644 review fix).
 ///
-/// Every class this pattern is meant to match starts with a Rust constant,
+/// Every class this prefix is meant to match starts with a Rust constant,
 /// not a caller-chosen value:
 /// [`crate::store::outbox_protocol::OUTBOX_LOCAL_WINS_RESOLVED_CLASS`]
 /// (`"conflict_resolved_local_wins"`, the entire stored value) and
 /// [`crate::store::outbox_protocol::OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX`]
 /// (`"conflict_resolved_remote_wins"`, a prefix — the caller's own class
 /// follows it). Both prefixes are kernel-fixed strings a caller cannot
-/// choose, so this pattern identifies exactly "a conflict this store
+/// choose, so this prefix identifies exactly "a conflict this store
 /// resolved through `resolve_outbox_conflict`" and nothing a caller could
 /// spoof by naming their own quarantine reason similarly — an ordinary
 /// operator hold uses a caller-chosen class like `"operator_hold"`, which
-/// this pattern does not match.
-const OUTBOX_RESOLVED_CONFLICT_CLASS_LIKE_PATTERN: &str = "conflict_resolved_%";
+/// this prefix does not match. The health query uses `substr(...) = ?` rather
+/// than `LIKE` so SQLite wildcard handling cannot widen the namespace.
 
 /// Compute all seven health fields in one statement.
 ///
@@ -956,16 +1032,16 @@ pub(crate) fn read_outbox_health(conn: &Connection) -> Result<OutboxHealth, Memo
              COALESCE(SUM(state = 'rejected'), 0),
              COALESCE(SUM(state = 'conflicted'), 0),
              COALESCE(SUM(state = 'quarantined'
-                           AND last_error_class NOT LIKE ?1), 0),
+                           AND NOT (substr(last_error_class, 1, length(?1)) = ?1)), 0),
              COALESCE(SUM(state = 'quarantined'
-                           AND last_error_class LIKE ?1), 0),
+                           AND substr(last_error_class, 1, length(?1)) = ?1), 0),
              MIN(CASE WHEN state = 'pending' THEN created_at END),
              MAX(CASE WHEN state = 'acknowledged' THEN state_changed_at END),
              (SELECT last_error_class FROM memory_outbox_events
                WHERE last_error_class IS NOT NULL
                ORDER BY state_changed_at DESC, event_id DESC LIMIT 1)
          FROM memory_outbox_events",
-        params![OUTBOX_RESOLVED_CONFLICT_CLASS_LIKE_PATTERN],
+        params![OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX],
         |row| {
             Ok((
                 row.get(0)?,
@@ -1124,6 +1200,31 @@ mod tests {
             tx.commit().unwrap();
         }
         result
+    }
+
+    fn transition_with_reserved_resolved_class(
+        conn: &mut Connection,
+        event_id: &str,
+        resolved_class: &str,
+    ) -> Result<OutboxEventRow, MemoryError> {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let result = transition_outbox_resolved_conflict_within_tx(&tx, event_id, resolved_class);
+        if result.is_ok() {
+            tx.commit().unwrap();
+        }
+        result
+    }
+
+    fn assert_reserved_resolved_class_refusal(error: MemoryError) {
+        match error {
+            MemoryError::InvalidArg(message) => assert!(
+                message.contains("reserved resolved-conflict class prefix"),
+                "unexpected refusal text: {message}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     fn claim(
@@ -1316,6 +1417,50 @@ mod tests {
         );
     }
 
+    /// tachi#1644 review fix: callers cannot store ordinary event classes
+    /// under the `conflict_resolved_` namespace the health read model reserves
+    /// for conflict-resolution stamps.
+    #[test]
+    fn caller_event_classes_carrying_the_reserved_resolved_prefix_are_refused() {
+        let mut conn = open_conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        crate::db::upsert_within_tx(&tx, &memory_entry("obj-reserved-class"), false, None).unwrap();
+
+        let object_class_error = insert_outbox_event_within_tx(
+            &tx,
+            &NewOutboxEvent {
+                event_id: "evt-reserved-object-class".to_string(),
+                object_id: "obj-reserved-class".to_string(),
+                object_class: "conflict_resolved_memory".to_string(),
+                ..new_event("unused-object-class", "obj-reserved-class")
+            },
+        )
+        .expect_err("a caller-supplied object_class in the reserved namespace must be refused");
+        assert_reserved_resolved_class_refusal(object_class_error);
+
+        let authority_class_error = insert_outbox_event_within_tx(
+            &tx,
+            &NewOutboxEvent {
+                event_id: "evt-reserved-authority-class".to_string(),
+                object_id: "obj-reserved-class".to_string(),
+                authority_class: "conflict_resolved_host".to_string(),
+                ..new_event("unused-authority-class", "obj-reserved-class")
+            },
+        )
+        .expect_err("a caller-supplied authority_class in the reserved namespace must be refused");
+        assert_reserved_resolved_class_refusal(authority_class_error);
+        drop(tx);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_outbox_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     /// The other half of the same fix: the seam a real `LocalWins` resolution
     /// uses to mint its successor is exempt from the refusal above, because
     /// its id legitimately carries the suffix.
@@ -1453,6 +1598,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rejected.last_error_class.as_deref(), Some("remote_refused"));
+    }
+
+    #[test]
+    fn caller_transition_error_class_carrying_the_reserved_resolved_prefix_is_refused() {
+        let mut conn = open_conn();
+        let inserted = seed_event(
+            &mut conn,
+            "evt-reserved-error-class",
+            "obj-reserved-error-class",
+        );
+
+        let error = transition(
+            &mut conn,
+            "evt-reserved-error-class",
+            OutboxState::Quarantined,
+            Some("conflict_resolved_operator_hold"),
+        )
+        .expect_err("a caller-supplied error class in the reserved namespace must be refused");
+        assert_reserved_resolved_class_refusal(error);
+
+        let stored = read_outbox_event(&conn, "evt-reserved-error-class")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored, inserted,
+            "the reserved-prefix refusal must leave the event untouched"
+        );
     }
 
     /// Re-quarantine is the one permitted self-transition: it restamps and
@@ -1644,6 +1816,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn health_counts_like_wildcard_probe_as_degradation_not_resolved() {
+        let mut conn = open_conn();
+        seed_event(&mut conn, "evt-wildcard", "obj-wildcard");
+        transition(
+            &mut conn,
+            "evt-wildcard",
+            OutboxState::Quarantined,
+            Some("conflictxresolvedxprobe"),
+        )
+        .unwrap();
+
+        let health = read_outbox_health(&conn).unwrap();
+        assert_eq!(
+            health.local_store_status,
+            LocalStoreStatus::Quarantined {
+                quarantined_count: 1
+            },
+            "SQLite LIKE would treat '_' as a wildcard and misclassify this probe as resolved"
+        );
+        assert_eq!(health.resolved_count, 0);
+    }
+
     /// tachi#1644 review fix: a conflict a caller resolved through
     /// `resolve_outbox_conflict` lands in `quarantined` exactly like an
     /// operator hold does, but it is not a live durability problem — it is
@@ -1653,7 +1848,8 @@ mod tests {
     #[test]
     fn health_excludes_resolved_conflicts_from_local_degradation_but_counts_them() {
         let mut conn = open_conn();
-        seed_event(&mut conn, "evt-resolved", "obj-resolved");
+        seed_event(&mut conn, "evt-resolved-local", "obj-resolved-local");
+        seed_event(&mut conn, "evt-resolved-remote", "obj-resolved-remote");
         seed_event(&mut conn, "evt-held", "obj-held");
 
         // A resolved conflict: same terminal state as an operator hold, but
@@ -1661,11 +1857,16 @@ mod tests {
         // writes (mirrors OUTBOX_LOCAL_WINS_RESOLVED_CLASS in
         // `store::outbox_protocol` — this layer does not depend on that
         // constant, so the literal is pinned here too).
-        transition(
+        transition_with_reserved_resolved_class(
             &mut conn,
-            "evt-resolved",
-            OutboxState::Quarantined,
-            Some("conflict_resolved_local_wins"),
+            "evt-resolved-local",
+            "conflict_resolved_local_wins",
+        )
+        .unwrap();
+        transition_with_reserved_resolved_class(
+            &mut conn,
+            "evt-resolved-remote",
+            "conflict_resolved_remote_wins.peer_authority_wins",
         )
         .unwrap();
         // A genuine, still-unresolved quarantine.
@@ -1686,8 +1887,8 @@ mod tests {
             "the resolved conflict must not count toward the degradation flag"
         );
         assert_eq!(
-            health.resolved_count, 1,
-            "the resolved conflict is reported additively, not silently dropped"
+            health.resolved_count, 2,
+            "LocalWins and RemoteWins resolutions are reported additively, not silently dropped"
         );
     }
 
@@ -1697,11 +1898,10 @@ mod tests {
     fn health_of_an_outbox_with_only_resolved_conflicts_is_healthy() {
         let mut conn = open_conn();
         seed_event(&mut conn, "evt-lw", "obj-lw");
-        transition(
+        transition_with_reserved_resolved_class(
             &mut conn,
             "evt-lw",
-            OutboxState::Quarantined,
-            Some("conflict_resolved_local_wins"),
+            "conflict_resolved_local_wins",
         )
         .unwrap();
 
