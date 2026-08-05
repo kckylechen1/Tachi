@@ -109,6 +109,10 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     // also admin-only) — absent from every profile bundle.
     "tachi_sandbox",
     "tachi_task_brief",
+    // #1426: the route/recall tuning facade is deliberately in no bundle —
+    // `tool_visible` grants it to admin/full profiles only, by omission from
+    // the standard, delegate, and bundle pattern arrays.
+    "tachi_tune",
     "tachi_wiki_organize",
     "vault_get",
     "vault_init",

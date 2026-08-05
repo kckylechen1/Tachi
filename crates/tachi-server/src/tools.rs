@@ -5,8 +5,6 @@
 //! Every method in this file is a thin shim that delegates to a `handle_*`
 //! function in one of the `*_ops` siblings — no business logic lives here.
 
-#[cfg(test)]
-use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde_json::{json, Value};
@@ -54,7 +52,7 @@ mod component_facade;
 mod continuity_facade;
 mod dispatch_complete_defaults;
 mod dispatch_facade;
-mod formatting;
+pub(crate) mod formatting;
 mod handoff_facade;
 mod hub_facade;
 mod memory_facade;
@@ -66,6 +64,7 @@ mod skill_discovery;
 mod skill_facade;
 mod task_facade;
 mod task_router;
+mod tune_facade;
 mod vault_facade;
 mod wiki_facade;
 mod workflow_facade;

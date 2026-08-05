@@ -45,10 +45,9 @@ async fn mint_loadout_v3_fixture(server: &MemoryServer, fixture: &str) -> String
             .expect("seed loadout identity fixture");
     }
 
-    let mut proposal_params = task_params("proposals");
+    let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposal_params))
+    let raw = run_tune(server, proposal_params)
         .await
         .expect("proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -66,11 +65,10 @@ async fn mint_loadout_v3_fixture(server: &MemoryServer, fixture: &str) -> String
 }
 
 async fn approve_loadout_v3_fixture(server: &MemoryServer, proposal_id: &str) {
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.to_string());
     review.review_status = Some("approved".to_string());
-    server
-        .tachi_task(Parameters(review))
+    run_tune(server, review)
         .await
         .expect("loadout proposal approval should succeed");
 }
@@ -89,10 +87,9 @@ async fn remint_loadout_proposal_id(
     key_field: &str,
     key_value: &str,
 ) -> String {
-    let mut params = task_params("proposals");
+    let mut params = tune_params("route_proposals");
     params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(params))
+    let raw = run_tune(server, params)
         .await
         .expect("re-mint proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("re-mint proposals JSON");
@@ -173,10 +170,9 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             .expect("seed loadout eval row");
     }
 
-    let mut proposal_params = task_params("proposals");
+    let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposal_params))
+    let raw = run_tune(&server, proposal_params)
         .await
         .expect("proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -319,23 +315,21 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .expect("evidence proposal id")
         .to_string();
 
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
     review.notes = Some("Human approved loadout evolution candidate.".to_string());
-    let reviewed_raw = server
-        .tachi_task(Parameters(review))
+    let reviewed_raw = run_tune(&server, review)
         .await
         .expect("review should succeed");
     let reviewed: serde_json::Value = serde_json::from_str(&reviewed_raw).expect("review JSON");
     assert_eq!(reviewed["proposal"]["status"], json!("approved"));
     assert_eq!(reviewed["proposal"]["kind"], json!("loadout_evolution"));
 
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let applied_raw = server
-        .tachi_task(Parameters(apply))
+    let applied_raw = run_tune(&server, apply)
         .await
         .expect("approved loadout evolution should project");
     let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply JSON");
@@ -358,11 +352,10 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
                 .map_err(|e| e.to_string())
         })
         .expect("read overlay before second apply");
-    let mut second_apply = task_params("apply_proposals");
+    let mut second_apply = tune_params("route_apply");
     second_apply.proposal_id = Some(proposal_id.clone());
     second_apply.confirm = true;
-    let err = server
-        .tachi_task(Parameters(second_apply))
+    let err = run_tune(&server, second_apply)
         .await
         .expect_err("applied proposal should require a fresh approved proposal");
     assert!(err.contains("must be approved before apply"), "{err}");
@@ -383,12 +376,11 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
     // source revision and is refused by design (#1431). Pin that refusal
     // before re-minting — it is the property the source-revision binding
     // exists for, and without this assertion the re-mint below would hide it.
-    let mut stale_passive_review = task_params("review_proposal");
+    let mut stale_passive_review = tune_params("route_review");
     stale_passive_review.proposal_id = Some(stale_passive_proposal_id.clone());
     stale_passive_review.review_status = Some("approved".to_string());
     stale_passive_review.notes = Some("Stale baseline must be refused.".to_string());
-    let stale_err = server
-        .tachi_task(Parameters(stale_passive_review))
+    let stale_err = run_tune(&server, stale_passive_review)
         .await
         .expect_err("a proposal bound to the pre-apply overlay revision must be refused");
     assert!(
@@ -404,12 +396,11 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         "evidence_backed_planning",
     )
     .await;
-    let mut passive_review = task_params("review_proposal");
+    let mut passive_review = tune_params("route_review");
     passive_review.proposal_id = Some(passive_proposal_id.clone());
     passive_review.review_status = Some("approved".to_string());
     passive_review.notes = Some("Human approved passive trait projection.".to_string());
-    let passive_reviewed_raw = server
-        .tachi_task(Parameters(passive_review))
+    let passive_reviewed_raw = run_tune(&server, passive_review)
         .await
         .expect("passive review should succeed");
     let passive_reviewed: serde_json::Value =
@@ -419,11 +410,10 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         json!("add_evidence_backed_passive_trait")
     );
 
-    let mut passive_apply = task_params("apply_proposals");
+    let mut passive_apply = tune_params("route_apply");
     passive_apply.proposal_id = Some(passive_proposal_id);
     passive_apply.confirm = true;
-    let passive_applied_raw = server
-        .tachi_task(Parameters(passive_apply))
+    let passive_applied_raw = run_tune(&server, passive_apply)
         .await
         .expect("approved passive trait should project");
     let passive_applied: serde_json::Value =
@@ -435,12 +425,11 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
 
     // Same for the evidence-contract proposal: the passive-trait apply moved the
     // overlay again, so its pre-apply binding is stale.
-    let mut stale_evidence_review = task_params("review_proposal");
+    let mut stale_evidence_review = tune_params("route_review");
     stale_evidence_review.proposal_id = Some(stale_evidence_proposal_id.clone());
     stale_evidence_review.review_status = Some("approved".to_string());
     stale_evidence_review.notes = Some("Stale baseline must be refused.".to_string());
-    let stale_evidence_err = server
-        .tachi_task(Parameters(stale_evidence_review))
+    let stale_evidence_err = run_tune(&server, stale_evidence_review)
         .await
         .expect_err("a proposal bound to a superseded overlay revision must be refused");
     assert!(
@@ -455,12 +444,11 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         "acceptance_criteria",
     )
     .await;
-    let mut evidence_review = task_params("review_proposal");
+    let mut evidence_review = tune_params("route_review");
     evidence_review.proposal_id = Some(evidence_proposal_id.clone());
     evidence_review.review_status = Some("approved".to_string());
     evidence_review.notes = Some("Human approved evidence contract projection.".to_string());
-    let evidence_reviewed_raw = server
-        .tachi_task(Parameters(evidence_review))
+    let evidence_reviewed_raw = run_tune(&server, evidence_review)
         .await
         .expect("evidence review should succeed");
     let evidence_reviewed: serde_json::Value =
@@ -470,11 +458,10 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         json!("add_evidence_contract_required")
     );
 
-    let mut evidence_apply = task_params("apply_proposals");
+    let mut evidence_apply = tune_params("route_apply");
     evidence_apply.proposal_id = Some(evidence_proposal_id);
     evidence_apply.confirm = true;
-    let evidence_applied_raw = server
-        .tachi_task(Parameters(evidence_apply))
+    let evidence_applied_raw = run_tune(&server, evidence_apply)
         .await
         .expect("approved evidence contract should project");
     let evidence_applied: serde_json::Value =
@@ -706,10 +693,9 @@ async fn loadout_apply_refuses_tampered_payload_without_overlay_mutation() {
             .expect("seed loadout eval row");
     }
 
-    let mut proposal_params = task_params("proposals");
+    let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposal_params))
+    let raw = run_tune(&server, proposal_params)
         .await
         .expect("proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -725,11 +711,10 @@ async fn loadout_apply_refuses_tampered_payload_without_overlay_mutation() {
         .expect("minted loadout proposal id")
         .to_string();
 
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    server
-        .tachi_task(Parameters(review))
+    run_tune(&server, review)
         .await
         .expect("approve loadout proposal");
 
@@ -766,11 +751,10 @@ async fn loadout_apply_refuses_tampered_payload_without_overlay_mutation() {
         })
         .expect("read overlay before refused apply");
 
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let err = server
-        .tachi_task(Parameters(apply))
+    let err = run_tune(&server, apply)
         .await
         .expect_err("a payload changed after approval must refuse");
     assert!(
@@ -832,10 +816,9 @@ async fn legacy_loadout_rows_stay_listable_but_refuse_review_and_apply() {
         })
         .expect("seed legacy loadout rows");
 
-    let mut list = task_params("proposals");
+    let mut list = tune_params("route_proposals");
     list.limit = Some(50);
-    let listed_raw = server
-        .tachi_task(Parameters(list))
+    let listed_raw = run_tune(&server, list)
         .await
         .expect("legacy rows remain listable");
     let listed: serde_json::Value = serde_json::from_str(&listed_raw).expect("proposal list JSON");
@@ -858,11 +841,10 @@ async fn legacy_loadout_rows_stay_listable_but_refuse_review_and_apply() {
                 .map_err(|e| e.to_string())
         })
         .expect("read legacy review row");
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(pending_id.to_string());
     review.review_status = Some("approved".to_string());
-    let review_err = server
-        .tachi_task(Parameters(review))
+    let review_err = run_tune(&server, review)
         .await
         .expect_err("legacy loadout row must not be reviewable");
     assert!(
@@ -895,11 +877,10 @@ async fn legacy_loadout_rows_stay_listable_but_refuse_review_and_apply() {
                 .map_err(|e| e.to_string())
         })
         .expect("read overlay before legacy apply");
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(approved_id.to_string());
     apply.confirm = true;
-    let apply_err = server
-        .tachi_task(Parameters(apply))
+    let apply_err = run_tune(&server, apply)
         .await
         .expect_err("legacy loadout row must not be applicable");
     assert!(
@@ -976,10 +957,9 @@ async fn loadout_review_refuses_evidence_drift_without_partial_mutation() {
             .expect("seed loadout eval row");
     }
 
-    let mut proposal_params = task_params("proposals");
+    let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposal_params))
+    let raw = run_tune(&server, proposal_params)
         .await
         .expect("proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -1028,11 +1008,10 @@ async fn loadout_review_refuses_evidence_drift_without_partial_mutation() {
         })
         .expect("read overlay before refused review");
 
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    let err = server
-        .tachi_task(Parameters(review))
+    let err = run_tune(&server, review)
         .await
         .expect_err("evidence drift before review must refuse");
     assert!(
@@ -1098,11 +1077,10 @@ async fn loadout_v3_review_refuses_baseline_display_tamper_without_mutation() {
         tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
         "claude_plan",
     );
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    let err = server
-        .tachi_task(Parameters(review))
+    let err = run_tune(&server, review)
         .await
         .expect_err("baseline display tamper must refuse review");
     assert!(
@@ -1156,11 +1134,10 @@ async fn loadout_v3_review_refuses_live_overlay_drift_without_mutation() {
         tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
         "claude_plan",
     );
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    let err = server
-        .tachi_task(Parameters(review))
+    let err = run_tune(&server, review)
         .await
         .expect_err("overlay drift before review must refuse");
     assert!(
@@ -1215,11 +1192,10 @@ async fn loadout_v3_apply_refuses_live_overlay_drift_without_mutation() {
         tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
         "claude_plan",
     );
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let err = server
-        .tachi_task(Parameters(apply))
+    let err = run_tune(&server, apply)
         .await
         .expect_err("overlay drift before apply must refuse");
     assert!(

@@ -24,7 +24,7 @@ fn tachi_task_action_schema(
     // #1319-C2: worker launch/wait/cancel left Task; use tachi_staff instead.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. action='recommend' is advisory and does not authorize launch. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'board' read existing worker state (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. action='recommend' is advisory and does not authorize launch. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. Route tuning lives on tachi_tune. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'board' read existing worker state (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend' manages routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
         generator,
     )
 }
@@ -35,8 +35,7 @@ fn tachi_task_action_schema(
 pub struct TachiTaskParams {
     /// Primary actions (F4 enum): plan, briefing,
     /// doc_index, recommend, complete, adjudicate, profiles, profile, card,
-    /// route_simulate, proposals, review_proposal, apply_proposals, status,
-    /// board, merge, intake, cycle_status, cycle_plan, ux_matrix,
+    /// status, board, merge, intake, cycle_status, cycle_plan, ux_matrix,
     /// build_references, close_loop, claim, release, heartbeat, handoff.
     /// Worker launch/wait/cancel left Task in #1319-C2 — use
     /// tachi_staff(action='start'|'status') for worker lifecycle.
@@ -85,16 +84,16 @@ pub struct TachiTaskParams {
     // plan fields
     #[serde(default)]
     #[schemars(
-        description = "[action=plan|recommend|route_simulate|complete|intake|ux_matrix] Task description / prompt text."
+        description = "[action=plan|recommend|complete|intake|ux_matrix] Task description / prompt text."
     )]
     pub task: Option<String>,
-    /// [action=recommend|route_simulate] Declared side-effect level:
+    /// [action=recommend] Declared side-effect level:
     /// L0 source/metadata read, L1 temporary local state, L2 product-data
     /// diagnostics, or L3 product data/resident runtime side effects. Omitted
     /// values resolve to L1 for host-profile admission without task-text inference.
     #[serde(default)]
     #[schemars(
-        description = "[action=recommend|route_simulate] Declared side-effect level L0–L3. Omitted → L1 for host admission."
+        description = "[action=recommend] Declared side-effect level L0–L3. Omitted → L1 for host admission."
     )]
     pub execution_level: Option<super::ExecutionLevel>,
     #[serde(default)]
@@ -378,7 +377,7 @@ pub struct TachiTaskParams {
     pub include_result: bool,
     #[serde(default)]
     #[schemars(
-        description = "Risk override for recommendation/routing: low | medium | high | critical."
+        description = "Risk override for recommendation/intake: low | medium | high | critical."
     )]
     pub risk: Option<String>,
     #[serde(default)]
@@ -400,15 +399,19 @@ pub struct TachiTaskParams {
     #[schemars(description = "[action=board] Filter dispatch ledger rows by state.")]
     pub state_filter: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=board|proposals] Maximum ledger/proposal rows to return.")]
-    pub limit: Option<usize>,
-    #[serde(default)]
     #[schemars(
-        description = "Proposal id for action='review_proposal' or action='apply_proposals'. Route-policy proposals persist rules; loadout-evolution proposals project reviewed profile/card overlays."
+        description = "[action=board|recommend] Maximum ledger/recommendation rows to return."
     )]
+    pub limit: Option<usize>,
+    // #1426: proposal review/apply left Task for the admin-only `tachi_tune`
+    // surface, so no surviving `tachi_task` action reads these two. They stay
+    // on the struct for stored-JSON back-compat but are hidden from the public
+    // schema — the same treatment [1319-C2] gave its orphaned dispatch knobs.
+    #[serde(default)]
+    #[schemars(skip)]
     pub proposal_id: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Review status for action='review_proposal': approved or rejected.")]
+    #[schemars(skip)]
     pub review_status: Option<String>,
     // merge fields. These apply only to local dispatch worktree merge via
     // approve_merge; GitHub PR gates/merges go through tachi_gh safe_merge.
@@ -444,7 +447,7 @@ pub struct TachiTaskParams {
     pub delete_worktree: bool,
     #[serde(default)]
     #[schemars(
-        description = "[action=merge|apply_proposals] Leader confirmation gate for the local worktree merge or for route-policy proposal application."
+        description = "[action=merge] Leader confirmation gate for the local worktree merge."
     )]
     pub confirm: bool,
     // close_loop fields

@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn tachi_memory_recall_simulate_reports_hit_metrics_without_access_mutation() {
+async fn tachi_tune_recall_simulate_reports_hit_metrics_without_access_mutation() {
     let server = make_server();
     server
         .with_global_store(|store| {
@@ -22,7 +22,7 @@ async fn tachi_memory_recall_simulate_reports_hit_metrics_without_access_mutatio
         })
         .expect("seed recall simulation entries");
 
-    let mut params = tachi_memory_params("recall_simulate");
+    let mut params = tachi_tune_params("recall_simulate");
     params.format = Some("json".to_string());
     params.scope = Some("memory".to_string());
     params.top_k = 1;
@@ -41,7 +41,7 @@ async fn tachi_memory_recall_simulate_reports_hit_metrics_without_access_mutatio
         ]
     }));
 
-    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+    let body = handle_tachi_tune_for_test(&server, params)
         .await
         .expect("recall_simulate should succeed");
     let parsed: Value = serde_json::from_str(&body).expect("recall_simulate JSON");

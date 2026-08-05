@@ -332,6 +332,14 @@ impl MemoryServer {
                 + Self::memory_tool_router()
                 + Self::vault_tool_router()
                 + Self::workflow_tool_router()
+                // #1426: tachi_tune carries the route/recall tuning actions
+                // split out of tachi_task/tachi_memory. It must be summed in
+                // here or `call_tool`'s `self.tool_router.has_route(name)`
+                // check (server_handler.rs) never matches and every
+                // tachi_tune call returns tool-not-found. Admin-only exposure
+                // is enforced by `tool_visible` in `call_tool`, not by
+                // omission from this router.
+                + Self::tune_tool_router()
                 + Self::wiki_tool_router()
                 + Self::sandbox_tool_router()
                 + Self::peer_tool_router(),

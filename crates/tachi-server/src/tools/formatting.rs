@@ -89,7 +89,7 @@ fn normalize_recommend_json_response(
     serde_json::to_string(&value).map_err(|e| format!("serialize normalized recommend JSON: {e}"))
 }
 
-pub(super) fn format_facade_response(
+pub(crate) fn format_facade_response(
     title: &str,
     action: &str,
     raw: &str,

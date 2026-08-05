@@ -249,19 +249,16 @@ pub(crate) fn facade_action_effect(
                 "briefing",
                 "alerts",
                 "ask",
-                "recall_simulate",
                 "readiness",
                 "doctor_scan",
             ],
-            &["recall_proposals", "progress"],
+            &["progress"],
             &[
                 "search",
                 "save",
                 "extract_facts",
                 "checkpoint",
                 "consolidate",
-                "review_recall_proposal",
-                "apply_recall_proposals",
                 "pattern_feedback",
                 "delete",
                 "gc",
@@ -290,15 +287,12 @@ pub(crate) fn facade_action_effect(
                 "refine_issues",
                 "profiles",
                 "profile",
-                "route_simulate",
             ],
-            &["recommend", "proposals"],
+            &["recommend"],
             &[
                 "plan",
                 "complete",
                 "card",
-                "review_proposal",
-                "apply_proposals",
                 "merge",
                 "intake",
                 "ux_matrix",
@@ -309,6 +303,16 @@ pub(crate) fn facade_action_effect(
                 "release",
                 "heartbeat",
                 "handoff",
+            ],
+        ),
+        "tachi_tune" => (
+            &["route_simulate", "recall_simulate"],
+            &["route_proposals", "recall_proposals"],
+            &[
+                "route_review",
+                "route_apply",
+                "recall_review",
+                "recall_apply",
             ],
         ),
         "tachi_gh" => (
@@ -617,6 +621,7 @@ mod tests {
     #[test]
     fn f1098_every_typed_facade_action_has_effect_metadata() {
         assert_all_classified("tachi_memory", tachi_params::TACHI_MEMORY_ACTIONS);
+        assert_all_classified("tachi_tune", tachi_params::TACHI_TUNE_ACTIONS);
         assert_all_classified("tachi_gh", tachi_params::TACHI_GH_ACTIONS);
         let task_actions = tachi_params::TachiTaskAction::primary_wire_strings();
         assert_all_classified("tachi_task", &task_actions);

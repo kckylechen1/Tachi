@@ -10,7 +10,6 @@ use crate::agent_eval::{
 };
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
-use chrono::Utc;
 use serde_json::{json, Value};
 pub(crate) use tachi_dispatch::DispatchProfileDef;
 pub(crate) use tachi_dispatch::{
@@ -72,24 +71,21 @@ mod routing;
 #[cfg(test)]
 mod tests;
 
-use self::cards::*;
 use self::policy::*;
 use self::routing::*;
 
 #[cfg(test)]
 pub(crate) use self::cards::profile_evidence_required;
 pub(crate) use self::cards::{
-    profile_eval_feedback_json, profile_evidence_contract_json_for_server,
-    profile_evidence_required_for_server, profile_json, profile_json_for_server,
-    profile_required_skill_ids, profile_required_skill_ids_for_server,
+    profile_demotion_targets, profile_eval_feedback_json,
+    profile_evidence_contract_json_for_server, profile_evidence_required_for_server, profile_json,
+    profile_json_for_server, profile_required_skill_ids, profile_required_skill_ids_for_server,
     profile_skill_loadout_json_for_server, profile_weak_against_for_server,
 };
-pub(crate) use self::policy::{
-    handle_route_policy_apply, handle_route_policy_proposals, handle_route_policy_review,
-    handle_route_simulation,
-};
+pub(crate) use self::policy::{route_simulation_caveats, simulate_route_policy};
 #[cfg(test)]
 pub(crate) use self::routing::resolve_and_apply_dispatch_profile;
 pub(crate) use self::routing::{
-    handle_dispatch_recommendation, resolve_and_apply_dispatch_profile_for_server,
+    classify_dispatch_risk, handle_dispatch_recommendation,
+    resolve_and_apply_dispatch_profile_for_server,
 };

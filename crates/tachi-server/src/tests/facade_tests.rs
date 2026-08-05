@@ -3,7 +3,7 @@ use super::{
 };
 use crate::tool_params::{
     InitProjectDbParams, TachiDomainAdapterParams, TachiEventParams, TachiMemoryParams,
-    TachiSearchParams, TachiTaskParams,
+    TachiSearchParams, TachiTaskParams, TachiTuneParams,
 };
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
@@ -81,6 +81,46 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         include_read: false,
         agent_id: None,
     }
+}
+
+fn tachi_tune_params(action: &str) -> TachiTuneParams {
+    TachiTuneParams {
+        action: action.parse().expect("valid tachi_tune action"),
+        format: Some("markdown".to_string()),
+        task: None,
+        execution_level: None,
+        doc_paths: Vec::new(),
+        spec_paths: Vec::new(),
+        risk: None,
+        limit: None,
+        state_filter: None,
+        proposal_id: None,
+        review_status: None,
+        notes: None,
+        confirm: false,
+        top_k: 6,
+        metadata: None,
+        text: None,
+        enable_rerank: false,
+        scope: None,
+        path_prefix: None,
+        project: None,
+        domain: None,
+        file_context: None,
+        error_context: None,
+        include_archived: false,
+        include_training: false,
+        force: false,
+        as_of: None,
+    }
+}
+
+async fn handle_tachi_tune_for_test(
+    server: &crate::MemoryServer,
+    params: TachiTuneParams,
+) -> Result<String, String> {
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
+    crate::tune_ops::handle_tachi_tune(server, params).await
 }
 
 mod briefing;

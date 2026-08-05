@@ -337,12 +337,11 @@ async fn tachi_task_recommend_host_profile_invalid_declines_without_route() {
 async fn tachi_task_route_simulate_host_profile_allows_and_emits_receipt() {
     let _env = crate::host_profile::HostProfileTestOverride::set(Some("development"));
     let server = make_server();
-    let mut params = task_params("route_simulate");
+    let mut params = tune_params("route_simulate");
     params.execution_level = Some(ExecutionLevel::L1);
     params.limit = Some(10);
 
-    let raw = server
-        .tachi_task(Parameters(params))
+    let raw = run_tune(&server, params)
         .await
         .expect("route_simulate allowed");
     let sim: serde_json::Value = serde_json::from_str(&raw).expect("route_simulate JSON");
@@ -368,14 +367,13 @@ async fn tachi_task_route_simulate_host_profile_allows_and_emits_receipt() {
 async fn tachi_task_route_simulate_host_profile_without_task_and_mismatch() {
     let _env = crate::host_profile::HostProfileTestOverride::set(Some("development"));
     let server = make_server();
-    let mut params = task_params("route_simulate");
+    let mut params = tune_params("route_simulate");
     params.task = None;
     params.execution_level = Some(ExecutionLevel::L2);
     params.limit = Some(10);
     params.format = None;
 
-    let raw = server
-        .tachi_task(Parameters(params))
+    let raw = run_tune(&server, params)
         .await
         .expect("route_simulate without task still admits");
     let sim: serde_json::Value = serde_json::from_str(&raw).expect("route_simulate JSON");
@@ -396,17 +394,16 @@ async fn tachi_task_route_simulate_host_profile_without_task_and_mismatch() {
         "declined route_simulate must not emit policies: {sim:#}"
     );
 
-    let mut markdown_params = task_params("route_simulate");
+    let mut markdown_params = tune_params("route_simulate");
     markdown_params.task = None;
     markdown_params.execution_level = Some(ExecutionLevel::L2);
     markdown_params.limit = Some(10);
     markdown_params.format = Some("markdown".to_string());
-    let markdown = server
-        .tachi_task(Parameters(markdown_params))
+    let markdown = run_tune(&server, markdown_params)
         .await
         .expect("structured decline should format as markdown");
     assert!(
-        markdown.starts_with("## Tachi task route_simulate"),
+        markdown.starts_with("## Tachi tune route_simulate"),
         "{markdown}"
     );
     assert!(markdown.contains("action: `route_simulate`"), "{markdown}");

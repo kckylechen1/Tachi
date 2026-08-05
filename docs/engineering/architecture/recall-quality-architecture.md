@@ -31,8 +31,9 @@ engine, is the biggest single lever — and SQLite FTS5 provides it natively.
 1. **Don't replace the hybrid engine; give it a precision floor.** When all of
    a query's tokens are present in one entry, that entry belongs in top-k.
 2. **The harness gates everything.** No recall config default or scoring change
-   ships without golden-corpus evidence via `recall_simulate` → `recall_proposals`
-   → `apply_recall_proposals` (the loop already exists; this spec makes it law).
+   ships without golden-corpus evidence via `tachi_tune(action='recall_simulate')` →
+   `recall_proposals` → `recall_apply` (the loop already exists — it moved from
+   `tachi_memory` to the admin-only `tachi_tune` in #1426; this spec makes it law).
 3. **Every new threshold is a provisional config knob** (flat-magic-number
    clause): `recall_config` + `TACHI_RECALL_*` env, calibrated by eval.
 4. **Attribution numbers, not mechanism intuition, order the fixes.** Phase A's
@@ -75,8 +76,8 @@ Re-examined and **promoted** (previously under-weighted on stale memory):
    recall@10 / MRR floor assertions. **Discriminating**: current main must fail
    the known-8/20-class slices (red baseline recorded, floors ratchet upward
    with each landed phase).
-2. **Personal corpus**: real-DB labeled cases encoded as `recall_simulate`
-   cases stored under the `/eval` namespace (already excluded from normal
+2. **Personal corpus**: real-DB labeled cases encoded as
+   `tachi_tune(action='recall_simulate')` cases stored under the `/eval` namespace (already excluded from normal
    recall); runs in the daily pipeline; regressions surface as `tachi_status`
    health deductions. Privacy line: personal cases never leave the machine
    (PR #700 precedent).

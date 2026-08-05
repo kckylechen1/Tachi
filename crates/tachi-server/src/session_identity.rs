@@ -324,6 +324,15 @@ pub(crate) fn explicit_project_can_cross_binding(tool_name: &str, args: &JsonObj
             .get("action")
             .and_then(|value| value.as_str())
             .is_some_and(tachi_event_action_allows_cross_project_read),
+        // #1426: `recall_simulate` kept its read-only cross-project standing
+        // when it moved off `tachi_memory`. Nothing else on `tachi_tune` may
+        // cross a session binding: the route/recall review and apply arms
+        // write proposal rows and config.env, and `tachi_task` (route
+        // tuning's old home) never allowed cross-binding at all.
+        "tachi_tune" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(tachi_tune_action_allows_cross_project_read),
         _ => false,
     }
 }
@@ -351,6 +360,12 @@ pub(crate) fn project_defaults_to_bound_project(tool_name: &str, args: &JsonObje
             | "tachi_event"
             | "tachi_domain_adapter"
             | "tachi_task"
+            // #1426: route tuning defaulted to the bound project as part of
+            // `tachi_task`, and all four recall-tuning actions defaulted to it
+            // under `tachi_memory`. Every `tachi_tune` action therefore
+            // defaults, exactly as both halves did before the move — a new
+            // facade gets NO project defaulting without this entry.
+            | "tachi_tune"
             | "tachi_verify"
             | "tachi_gh"
             | "tachi_wiki"
@@ -392,13 +407,9 @@ fn tachi_memory_action_defaults_to_project(action: &str) -> bool {
             | "get"
             | "ingest"
             | "ingest_source"
-            | "apply_recall_proposals"
             | "pattern_feedback"
             | "progress"
             | "readiness"
-            | "recall_proposals"
-            | "recall_simulate"
-            | "review_recall_proposal"
             | "save"
             | "search"
     )
@@ -407,15 +418,15 @@ fn tachi_memory_action_defaults_to_project(action: &str) -> bool {
 fn tachi_memory_action_allows_cross_project_read(action: &str) -> bool {
     matches!(
         action.to_ascii_lowercase().as_str(),
-        "alerts"
-            | "ask"
-            | "briefing"
-            | "consolidate"
-            | "get"
-            | "readiness"
-            | "recall_simulate"
-            | "search"
+        "alerts" | "ask" | "briefing" | "consolidate" | "get" | "readiness" | "search"
     )
+}
+
+/// #1426: the `tachi_memory` half of the tuning surface — only
+/// `recall_simulate` was a read-only cross-project case there, and it replays
+/// searches without mutating access counters, so it keeps that standing.
+fn tachi_tune_action_allows_cross_project_read(action: &str) -> bool {
+    matches!(action.to_ascii_lowercase().as_str(), "recall_simulate")
 }
 
 fn tachi_event_action_allows_cross_project_read(action: &str) -> bool {

@@ -66,10 +66,9 @@ async fn tachi_task_recommend_consumes_approved_route_policy_rules() {
             .expect("seed eval row");
     }
 
-    let mut proposal_params = task_params("proposals");
+    let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
-    let proposals_raw = server
-        .tachi_task(Parameters(proposal_params))
+    let proposals_raw = run_tune(&server, proposal_params)
         .await
         .expect("proposals should succeed");
     let proposals: serde_json::Value =
@@ -87,19 +86,17 @@ async fn tachi_task_recommend_consumes_approved_route_policy_rules() {
         .expect("cost-sensitive opencode proposal")
         .to_string();
 
-    let mut review = task_params("review_proposal");
+    let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    server
-        .tachi_task(Parameters(review))
+    run_tune(&server, review)
         .await
         .expect("review should succeed");
 
-    let mut apply = task_params("apply_proposals");
+    let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let applied_raw = server
-        .tachi_task(Parameters(apply))
+    let applied_raw = run_tune(&server, apply)
         .await
         .expect("apply should succeed");
     let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply JSON");

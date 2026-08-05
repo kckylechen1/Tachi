@@ -1,4 +1,15 @@
-use super::super::*;
+use crate::dispatch_profile::{
+    profile_required_skill_ids, resolve_dispatch_profile, DISPATCH_POLICY_PROPOSAL_NS,
+    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
+};
+use crate::MemoryServer;
+use chrono::Utc;
+use serde_json::{json, Value};
+use tachi_dispatch::{
+    profile_demotion_targets_from_overlay, profile_projected_evidence_required_from_overlay,
+    profile_projected_passive_traits_from_overlay, profile_projected_signature_skills_from_overlay,
+    profile_projected_weak_against_from_overlay,
+};
 
 pub(crate) fn handle_route_policy_apply(
     server: &MemoryServer,
@@ -7,11 +18,11 @@ pub(crate) fn handle_route_policy_apply(
 ) -> Result<String, String> {
     let proposal_id = proposal_id.trim();
     if proposal_id.is_empty() {
-        return Err("proposal_id is required when action='apply_proposals'".to_string());
+        return Err("proposal_id is required when action='route_apply'".to_string());
     }
     if !confirm {
         return Err(
-            "apply_proposals requires confirm=true after human approval; no routing changes applied"
+            "route_apply requires confirm=true after human approval; no routing changes applied"
                 .to_string(),
         );
     }
@@ -47,7 +58,7 @@ pub(crate) fn handle_route_policy_apply(
                     != Some(tachi_dispatch::policy::ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION)
                 {
                     return Err(format!(
-                        "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be applied; regenerate with action='proposals' to mint a fresh pending v3 proposal"
+                        "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be applied; regenerate with tachi_tune(action='route_proposals') to mint a fresh pending v3 proposal"
                     ));
                 }
                 // Overwrite the top-level `policy_rule` / `evidence` fields
@@ -497,7 +508,7 @@ pub(crate) fn handle_route_policy_apply(
             }
             other => {
                 return Err(format!(
-                    "apply_proposals does not support proposal kind {other} for {proposal_id}"
+                    "route_apply does not support proposal kind {other} for {proposal_id}"
                 ));
             }
         }
@@ -509,7 +520,7 @@ pub(crate) fn handle_route_policy_apply(
         .unwrap_or("route_policy");
 
     serde_json::to_string(&json!({
-        "action": "apply_proposals",
+        "action": "route_apply",
         "proposal_id": proposal_id,
         "applied": true,
         "routing_mutated": applied_kind == "route_policy",

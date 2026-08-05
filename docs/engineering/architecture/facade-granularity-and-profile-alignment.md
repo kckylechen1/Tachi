@@ -35,10 +35,10 @@ It answers three questions raised during a facade review:
 
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
-| `tachi_task` | 24 | Overloaded — lifecycle + self-tuning still bundled (PR duplication resolved, #757) |
-| `tachi_memory` | 16 | Overloaded — `recall_*` tuning mixed with daily ops |
+| `tachi_task` | 23 | Lifecycle still bundled; PR duplication resolved (#757) and route tuning extracted (#1426) |
+| `tachi_memory` | 21 | Overloaded — `recall_*` tuning extracted (#1426); the #757 fold added delete/gc/doctor_scan/ingest/ingest_source |
 | `tachi_gh` | 16 | Duplicates task's PR lifecycle |
-| `tachi_arena` | 7 | Retired in #1319-D2 |
+| `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
 | `tachi_skill` | 5 | Healthy |
 | `tachi_wiki` / `tachi_verify` | 4 / 4 | Healthy |
 
@@ -54,10 +54,11 @@ It answers three questions raised during a facade review:
    `tachi_gh(safe_merge)` = GitHub PR merge. Same word, different machine.
 3. **`briefing` appears in three places** — `tachi_briefing` (standalone), `tachi_memory(briefing)`,
    `tachi_task(briefing)`. `save` is duplicated across `tachi_save` and `tachi_memory(save)`.
-4. **Self-tuning actions are interleaved with execution.** `route_simulate` / `proposals` /
-   `review_proposal` / `apply_proposals` (task side) plus `recall_simulate` / `recall_proposals` /
-   `review_recall_proposal` / `apply_recall_proposals` / `pattern_feedback` (memory side) — **9 actions**
-   that ordinary task-executing agents almost never use, occupying prime real estate in the default surface.
+4. **Self-tuning actions were interleaved with execution (resolved #1426).** Eight of the nine —
+   `route_simulate` / `proposals` / `review_proposal` / `apply_proposals` (task side) and
+   `recall_simulate` / `recall_proposals` / `review_recall_proposal` / `apply_recall_proposals`
+   (memory side) — left the daily surfaces for `tachi_tune`. `pattern_feedback` stayed on
+   `tachi_memory`: it is a daily hit/miss signal from ordinary agents, not an operator tuning action.
 
 ## 2. Flatten vs. facade — pick the middle
 
@@ -79,14 +80,16 @@ Now                            Proposed
 tachi_task (24) ─────┬──▶ tachi_task    execution core: plan/dispatch/complete/status/board/wait (6)
                      ├──▶ tachi_flow    lifecycle: intake/cycle_status/cycle_plan/close_loop/ux_matrix (5)
                      ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
-                     └──▶ tachi_tune    self-tuning: route_simulate/proposals/review/apply (isolated)
+                     └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
 
 tachi_memory (16) ───┬──▶ tachi_memory  daily: search/get/save/ask/checkpoint/alerts (~7)
-                     └──▶ tachi_tune    recall_*/pattern_feedback (isolated)
+                     └──▶ tachi_tune    recall_simulate/recall_proposals/recall_review/recall_apply (DONE #1426)
 ```
 
 `tachi_tune` (self-optimization) stays out of the `standard` surface and is reached only via `admin`
-profile or explicit `tachi_tools` discovery.
+profile or explicit `tachi_tools` discovery. As shipped in #1426 that is enforced by omission: the
+name appears in none of the OBSERVE/REMEMBER/COORDINATE/OPERATE pattern arrays, and `tool_visible`
+short-circuits to true only for admin/full profiles.
 
 ## 3. ToolProfile status — mostly hollowed out
 
@@ -190,8 +193,8 @@ and actively used. **No change proposed.**
 ╭─────────────────────────────────────────────────────────────────────╮
 │ 1. Re-slice facades by cognitive domain; each action ≤ ~7;           │
 │    eliminate cross-facade duplicate entry points (PR lifecycle).     │
-│ 2. Extract self-tuning (~9 actions) into a dedicated tachi_tune,     │
-│    kept out of the standard surface.                                 │
+│ 2. Extract self-tuning into a dedicated tachi_tune, kept out of the  │
+│    standard surface. DONE — 8 actions, #1426.                        │
 │ 3. Collapse ToolProfile to 3 tiers: standard / delegate / admin;    │
 │    mark observe/remember/coordinate/operate deprecated.             │
 │ 4. Upgrade profile filtering to the ACTION level → let delegate      │
@@ -209,6 +212,6 @@ the `delegate` legacy-tool pile persist.
 
 1. Stress-test this design (oracle / review).
 2. Land this document as the agreed direction.
-3. Ship the low-risk wins first: delete the duplicate PR actions from `tachi_task`, then extract
-   `tachi_tune`.
+3. Ship the low-risk wins first: delete the duplicate PR actions from `tachi_task` (done, #757),
+   then extract `tachi_tune` (done, #1426).
 4. Design and implement action-level profile filtering (larger change; needs its own spec).

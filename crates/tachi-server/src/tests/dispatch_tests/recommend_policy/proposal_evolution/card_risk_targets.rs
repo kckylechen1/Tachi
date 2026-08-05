@@ -46,10 +46,9 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
             .expect("seed card risk eval row");
     }
 
-    let mut proposal_params = task_params("proposals");
+    let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposal_params))
+    let raw = run_tune(&server, proposal_params)
         .await
         .expect("proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
@@ -95,10 +94,9 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
             "skill:superpowers-writing-plans",
         ),
     ] {
-        let mut remint = task_params("proposals");
+        let mut remint = tune_params("route_proposals");
         remint.limit = Some(50);
-        let remint_raw = server
-            .tachi_task(Parameters(remint))
+        let remint_raw = run_tune(&server, remint)
             .await
             .expect("re-mint proposals should succeed");
         let reminted: serde_json::Value =
@@ -117,20 +115,18 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
             .unwrap_or_else(|| panic!("re-minted {operation} proposal must exist"))
             .to_string();
         let proposal_id = proposal_id.as_str();
-        let mut review = task_params("review_proposal");
+        let mut review = tune_params("route_review");
         review.proposal_id = Some(proposal_id.to_string());
         review.review_status = Some("approved".to_string());
         review.notes = Some("Human approved card risk projection.".to_string());
-        server
-            .tachi_task(Parameters(review))
+        run_tune(&server, review)
             .await
             .expect("review should succeed");
 
-        let mut apply = task_params("apply_proposals");
+        let mut apply = tune_params("route_apply");
         apply.proposal_id = Some(proposal_id.to_string());
         apply.confirm = true;
-        server
-            .tachi_task(Parameters(apply))
+        run_tune(&server, apply)
             .await
             .expect("card risk projection should apply");
     }

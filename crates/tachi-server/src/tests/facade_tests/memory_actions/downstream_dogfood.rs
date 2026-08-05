@@ -152,7 +152,7 @@ async fn recall_fixture(
     server: &crate::MemoryServer,
     fixture: &DownstreamFixture,
 ) -> Result<Value, String> {
-    let mut recall = tachi_memory_params("recall_simulate");
+    let mut recall = tachi_tune_params("recall_simulate");
     recall.format = Some("json".to_string());
     recall.scope = Some("memory".to_string());
     recall.top_k = 3;
@@ -166,7 +166,7 @@ async fn recall_fixture(
         ]
     }));
 
-    let body = crate::facade_memory_ops::handle_tachi_memory(server, recall).await?;
+    let body = handle_tachi_tune_for_test(server, recall).await?;
     serde_json::from_str(&body).map_err(|e| format!("parse recall JSON: {e}"))
 }
 

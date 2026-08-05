@@ -613,6 +613,9 @@ pub struct TachiSkillParams {
 mod task;
 pub use task::{TachiDispatchReason, TachiTaskParams};
 
+mod tune;
+pub use tune::{TachiTuneAction, TachiTuneParams};
+
 mod action_enums;
 mod action_inventory;
 pub use action_enums::{TachiTaskAction, TachiVerifyAction};
@@ -620,7 +623,7 @@ pub use action_inventory::{
     TACHI_EVENT_ACTIONS, TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX, TACHI_MEMORY_ACTIONS,
     TACHI_MEMORY_ACTION_SOFT_MAX, TACHI_ORCHESTRATOR_ACTIONS, TACHI_SKILL_ACTIONS,
     TACHI_STAFF_ACTIONS, TACHI_TASK_PRIMARY_ACTION_SOFT_MAX,
-    TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_WIKI_ACTIONS,
+    TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_TUNE_ACTIONS, TACHI_WIKI_ACTIONS,
 };
 
 mod orchestration;

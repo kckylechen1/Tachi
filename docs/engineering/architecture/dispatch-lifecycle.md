@@ -154,7 +154,7 @@ The card store is consumed through the existing domain facades — no new `tachi
 
 - `tachi_task(action="profiles" | "profile" | "card")` — list/read the profile cards.
 - `tachi_task(action="recommend")` — profile choice from risk + eval matrix.
-- `tachi_task(action="proposals" | "review_proposal" | "apply_proposals")` — human-gated route-policy and loadout-evolution proposals.
+- `tachi_tune(action="route_proposals" | "route_review" | "route_apply")` — human-gated route-policy and loadout-evolution proposals (admin/operator only since #1426).
 - `tachi_skill(action="loadout" | "bundle")` — sparse skill loadout + capability bundle for a profile/task.
 - `tachi_task(action="complete")` — writes the eval evidence row that feeds card evolution.
 
@@ -201,7 +201,7 @@ Rows changed by the 2026-08-02 amendment were verified at base `274b930a`; untou
 | Profile / card definition | §4.1 | `crates/tachi-dispatch/src/profiles.rs:37-60` `DispatchProfileDef` (role-keyed; per-backend profiles from `:62`) | — |
 | Card overlay projection (skills/traits/weak-against) | §4.4 | `crates/tachi-server/src/dispatch_profile/cards.rs:9-127` (overlay keyed by `profile.name`, `PROFILE_CARD_OVERLAY_NS`); `crates/tachi-server/src/dispatch_ops/prompt/overlays.rs:49-66` (`projected_signature_skills`) | — |
 | Eval row on complete | §3 | `crates/tachi-server/src/complete_ops/eval_record.rs:39` (path `/eval/{date}/{task_id}`), `:283` (`category="eval"`), `:206-223` (subagents); handler `crates/tachi-server/src/complete_ops/handler.rs:14` | — |
-| Route-policy proposals / apply | §4.3 | `tachi_task(action="proposals"|"review_proposal"|"apply_proposals")` per `crates/tachi-params/src/facade/task.rs:48`; rules persisted to `dispatch_route_policy_rules` (dispatch-policy-learning-spec.md:266-274) | — |
+| Route-policy proposals / apply | §4.3 | `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` per `crates/tachi-params/src/facade/tune.rs`; rules persisted to `dispatch_route_policy_rules` (dispatch-policy-learning-spec.md:266-274) | — |
 | Facade surface (no new router facade) | §4.3 | `crates/tachi-params/src/facade/task.rs:13-48`; `merge`=local worktree only (`:49-50`), PR merges via `tachi_gh(safe_merge)` | — |
 | `(role, vendor)` signature key | §4.2, §4.4 | `crates/tachi-server/src/signature_evidence.rs:93` records typed evidence; `crates/tachi-dispatch/src/signatures.rs:277` projects per-role/vendor counter-clauses | — |
 | Error-signature extraction from adjudication | §3, §5 | `crates/tachi-server/src/complete_ops/handler.rs:909` records completion signatures through `signature_evidence` | — |

@@ -176,6 +176,7 @@ mod task_lifecycle;
 mod test_support;
 mod tool_params;
 mod tools;
+mod tune_ops;
 mod utils;
 mod vault_crypto;
 mod vault_ops;

@@ -395,7 +395,7 @@ pub fn build_route_policy_proposals(
                 "limit": limit,
                 "current": current_choice,
                 "proposed": choice,
-                "route_simulate_call": "tachi_task(action='route_simulate', limit=...)",
+                "route_simulate_call": "tachi_tune(action='route_simulate', limit=...)",
             });
             let identity_payload = route_policy_v3_identity_payload(
                 &apply_payload,

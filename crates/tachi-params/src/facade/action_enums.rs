@@ -71,6 +71,7 @@ impl FromStr for TachiVerifyAction {
 /// GitHub PR lifecycle (`link_pr` / `pr_status` / `pr_handoff` / `release_note`)
 /// is **not** accepted here — use `tachi_gh` (#757). Worker launch/wait/cancel
 /// left Task in #1319-C2; use `tachi_staff(action='start'|'status')` instead.
+/// Route tuning left Task in #1426; use `tachi_tune` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TachiTaskAction {
@@ -82,10 +83,6 @@ pub enum TachiTaskAction {
     Profiles,
     Profile,
     Card,
-    RouteSimulate,
-    Proposals,
-    ReviewProposal,
-    ApplyProposals,
     Status,
     Board,
     Merge,
@@ -114,10 +111,6 @@ impl TachiTaskAction {
         Self::Profiles,
         Self::Profile,
         Self::Card,
-        Self::RouteSimulate,
-        Self::Proposals,
-        Self::ReviewProposal,
-        Self::ApplyProposals,
         Self::Status,
         Self::Board,
         Self::Merge,
@@ -145,10 +138,6 @@ impl TachiTaskAction {
             Self::Profiles => "profiles",
             Self::Profile => "profile",
             Self::Card => "card",
-            Self::RouteSimulate => "route_simulate",
-            Self::Proposals => "proposals",
-            Self::ReviewProposal => "review_proposal",
-            Self::ApplyProposals => "apply_proposals",
             Self::Status => "status",
             Self::Board => "board",
             Self::Merge => "merge",
@@ -193,10 +182,6 @@ impl FromStr for TachiTaskAction {
             "profiles" => Ok(Self::Profiles),
             "profile" => Ok(Self::Profile),
             "card" => Ok(Self::Card),
-            "route_simulate" => Ok(Self::RouteSimulate),
-            "proposals" => Ok(Self::Proposals),
-            "review_proposal" => Ok(Self::ReviewProposal),
-            "apply_proposals" => Ok(Self::ApplyProposals),
             "status" => Ok(Self::Status),
             "board" => Ok(Self::Board),
             "merge" => Ok(Self::Merge),
@@ -216,6 +201,21 @@ impl FromStr for TachiTaskAction {
             // tachi_staff). Point callers at the canonical worker surface.
             "dispatch" | "wait" | "cancel" => Err(format!(
                 "Invalid tachi_task action '{s}'. Worker launch/wait/cancel left Task in #1319-C2; use tachi_staff(action='start') to launch a worker and tachi_task(action='status') to read its state."
+            )),
+            // #1426: route tuning moved behind the admin/operator tachi_tune
+            // surface. Keep typed rejects explicit so old callers get the new
+            // destination instead of a generic unknown-action error.
+            "route_simulate" => Err(format!(
+                "Invalid tachi_task action '{s}'. Route tuning left Task in #1426; use tachi_tune(action='route_simulate')."
+            )),
+            "proposals" => Err(format!(
+                "Invalid tachi_task action '{s}'. Route tuning left Task in #1426; use tachi_tune(action='route_proposals')."
+            )),
+            "review_proposal" => Err(format!(
+                "Invalid tachi_task action '{s}'. Route tuning left Task in #1426; use tachi_tune(action='route_review')."
+            )),
+            "apply_proposals" => Err(format!(
+                "Invalid tachi_task action '{s}'. Route tuning left Task in #1426; use tachi_tune(action='route_apply')."
             )),
             // #757: these were removed from tachi_task; point callers at tachi_gh.
             "link_pr" | "pr_status" | "pr_handoff" | "release_note" => Err(format!(
@@ -268,6 +268,24 @@ mod tests {
             assert!(
                 err.contains("tachi_gh"),
                 "error for {s} should point at tachi_gh, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn f1426_task_rejects_removed_route_tuning_actions() {
+        for (retired, target) in [
+            ("route_simulate", "route_simulate"),
+            ("proposals", "route_proposals"),
+            ("review_proposal", "route_review"),
+            ("apply_proposals", "route_apply"),
+        ] {
+            let err = retired
+                .parse::<TachiTaskAction>()
+                .expect_err("removed route tuning action must not parse as tachi_task action");
+            assert!(
+                err.contains(&format!("tachi_tune(action='{target}')")),
+                "error for {retired} should point at tachi_tune {target}, got: {err}"
             );
         }
     }

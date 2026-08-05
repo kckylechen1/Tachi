@@ -1,6 +1,6 @@
 use super::*;
 
-pub(in crate::dispatch_profile) fn classify_dispatch_risk(
+pub(crate) fn classify_dispatch_risk(
     task: &str,
     risk_override: Option<&str>,
     file_paths: &[String],

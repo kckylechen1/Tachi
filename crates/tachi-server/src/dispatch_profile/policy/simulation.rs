@@ -1,6 +1,6 @@
 use super::super::*;
 
-pub(in crate::dispatch_profile) fn simulate_route_policy(
+pub(crate) fn simulate_route_policy(
     policy: &str,
     performance_matrix: &[AgentPerformanceMatrixRow],
     focus: Option<&DispatchRisk>,
@@ -12,7 +12,7 @@ pub(in crate::dispatch_profile) fn simulate_route_policy(
     )
 }
 
-pub(super) fn route_simulation_caveats(
+pub(crate) fn route_simulation_caveats(
     rows: &[EvalRow],
     performance_matrix: &[AgentPerformanceMatrixRow],
 ) -> Vec<String> {

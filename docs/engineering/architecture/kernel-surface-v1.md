@@ -86,7 +86,7 @@ The portable boundary intentionally mirrors the small shape seen in OMP's
 | Operation family | Required | Implementation status | Tachi-owned meaning |
 |---|---|---|---|
 | `status` / `readiness` | yes | current | Report kernel availability, DB identity, vector/backfill coverage, and degraded modes. |
-| `search` / `recall` | yes | current via `tachi_memory search` and `recall_simulate`; richer recall diagnostics are target contract | Return ranked memories plus provenance, score components where available, and stable row shape. |
+| `search` / `recall` | yes | current via `tachi_memory search` and `tachi_tune recall_simulate` (#1426); richer recall diagnostics are target contract | Return ranked memories plus provenance, score components where available, and stable row shape. |
 | `save` / `retain` | yes | current via `tachi_memory save`; `retain` is adapter vocabulary | Store durable facts, experiences, observations, and policy-labeled adapter memory with provenance. |
 | developer/briefing context | yes | current via briefing/readiness facades, target for generic adapters | Produce compact memory context for a host before a prompt/session without exposing product workflow tools. |
 | readiness/diagnostics | yes | partially current; portable diagnostic API is target contract | Report recall lanes, fallback behavior, true-empty recall, vector health, and adapter-visible failures. |

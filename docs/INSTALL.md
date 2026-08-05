@@ -310,7 +310,9 @@ For namespace weight groups, replace `*` with `SEMANTIC`, `FTS`,
 `SYMBOLIC`, `DECAY`, or `USE_RRF`; grouped defaults above are listed in that
 same order.
 
-To replay labeled recall probes before changing those knobs, use:
+To replay labeled recall probes before changing those knobs, call `tachi_tune`
+(the admin/operator tuning surface — it is not visible to standard or worker
+tool profiles):
 
 ```json
 {
@@ -346,7 +348,7 @@ exact-token skip policy. It bypasses the recall-cache short circuit and does not
 mutate memory access counters.
 
 To turn an improved variant into a reviewed config change, run the same labeled
-set through the proposal loop:
+set through `tachi_tune`'s proposal loop:
 
 ```json
 {
@@ -377,8 +379,8 @@ recall@k flat while improving MRR, and includes the exact `TACHI_RECALL_*`
 `config_env` patch. Apply is two-step:
 
 ```json
-{ "action": "review_recall_proposal", "proposal_id": "...", "review_status": "approved" }
-{ "action": "apply_recall_proposals", "proposal_id": "...", "confirm": true }
+{ "action": "recall_review", "proposal_id": "...", "review_status": "approved" }
+{ "action": "recall_apply", "proposal_id": "...", "confirm": true }
 ```
 
 Apply only upserts `TACHI_RECALL_*` keys in `~/.tachi/config.env` (or

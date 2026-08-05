@@ -1,9 +1,9 @@
-use crate::tool_params::TachiMemoryParams;
+use crate::tool_params::TachiTuneParams;
 use serde_json::Value;
 
 use super::types::{RecallSimCase, RecallSimVariant};
 
-pub(super) fn parse_cases(params: &TachiMemoryParams) -> Result<Vec<RecallSimCase>, String> {
+pub(super) fn parse_cases(params: &TachiTuneParams) -> Result<Vec<RecallSimCase>, String> {
     let cases_value = if let Some(value) = params.metadata.as_ref().and_then(extract_cases_value) {
         value
     } else if let Some(text) = params.text.as_deref() {
@@ -34,7 +34,7 @@ pub(super) fn parse_cases(params: &TachiMemoryParams) -> Result<Vec<RecallSimCas
     Ok(cases)
 }
 
-pub(super) fn parse_variants(params: &TachiMemoryParams) -> Result<Vec<RecallSimVariant>, String> {
+pub(super) fn parse_variants(params: &TachiTuneParams) -> Result<Vec<RecallSimVariant>, String> {
     let variants_value =
         if let Some(value) = params.metadata.as_ref().and_then(extract_variants_value) {
             Some(value)

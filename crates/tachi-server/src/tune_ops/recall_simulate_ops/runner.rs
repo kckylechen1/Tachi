@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use memcore::RecallConfig;
 use serde_json::{json, Value};
 
-use super::super::evidence_format::{json_string, wants_json};
 use super::config::{recall_config_env_diff, recall_config_summary};
 use super::input::{parse_cases, parse_variants};
 use super::markdown::format_recall_simulate_markdown;
 use super::types::RecallSimCase;
+use crate::facade_memory_ops::{json_string, wants_json};
 use crate::memory_search_ops::{
     apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
     search_memory_rows_with_recall_config, SearchRerankPolicy,
@@ -15,9 +15,9 @@ use crate::memory_search_ops::{
 use crate::tool_params::*;
 use crate::MemoryServer;
 
-pub(crate) async fn handle_memory_recall_simulate(
+pub(crate) async fn handle_tune_recall_simulate(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<String, String> {
     let report = build_recall_simulation_report(server, params).await?;
     if wants_json(params.format.as_deref()) {
@@ -28,7 +28,7 @@ pub(crate) async fn handle_memory_recall_simulate(
 
 pub(crate) async fn build_recall_simulation_report(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<Value, String> {
     let cases = parse_cases(params)?;
     let default_top_k = crate::clamp_facade_top_k(params.top_k);
@@ -75,7 +75,7 @@ pub(crate) async fn build_recall_simulation_report(
 
 async fn run_variant(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     cases: &[RecallSimCase],
     default_top_k: usize,
     name: &str,
@@ -271,7 +271,7 @@ impl CaseBaseline {
 
 async fn baseline_replay(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     case: &RecallSimCase,
     top_k: usize,
     expected_ids: &[String],
@@ -317,7 +317,7 @@ async fn baseline_replay(
 }
 
 fn build_search_params(
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     case: &RecallSimCase,
     top_k: usize,
 ) -> Result<SearchMemoryParams, String> {
@@ -390,8 +390,8 @@ fn returned_ids(rows: &[Value]) -> Vec<String> {
 /// miss even when its active successor is returned. Canonical/lineage
 /// semantics (stored `superseded_by` resolution, reviewed equivalence) live
 /// in `memcore::recall_coverage` (#1504), not here. The staleness this
-/// implies for simulate-ops expected-id fixtures rides the #1426
-/// `tachi_tune` migration, not this issue.
+/// implies for simulate-ops expected-id fixtures now rides in `tune_ops` as
+/// part of the #1426 `tachi_tune` migration, not this issue.
 fn first_expected_rank(returned_ids: &[String], expected_ids: &[String]) -> Option<usize> {
     returned_ids
         .iter()

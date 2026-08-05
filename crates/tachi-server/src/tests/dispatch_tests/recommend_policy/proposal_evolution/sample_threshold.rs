@@ -49,10 +49,9 @@ async fn tachi_task_proposals_requires_loadout_evolution_sample_threshold() {
             .expect("seed below-threshold loadout eval row");
     }
 
-    let mut proposal_params = task_params("proposals");
+    let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
-    let raw = server
-        .tachi_task(Parameters(proposal_params))
+    let raw = run_tune(&server, proposal_params)
         .await
         .expect("proposals should succeed");
     let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");

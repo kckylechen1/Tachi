@@ -254,3 +254,69 @@ async fn delegate_tachi_task_handoff_is_denied_end_to_end() {
     );
     assert!(!message.contains("tool not found"));
 }
+
+#[tokio::test]
+async fn tachi_tune_routes_through_composed_router_for_admin() {
+    // #1426 dead-facade regression discriminator: tachi_tune was once
+    // registered but never summed into the composed tool router, so a real
+    // routed CallToolRequest fell through to tool-not-found while direct
+    // handler tests stayed green. This is the only tune happy path that
+    // exercises the server_handler router; keep it routed, not direct.
+    let server = make_server();
+    server.set_tool_profile(Some(
+        tachi_hub::parse_tool_profile("admin").expect("admin profile should parse"),
+    ));
+
+    let mut args = serde_json::Map::new();
+    args.insert("action".to_string(), serde_json::json!("route_proposals"));
+
+    let result = call_tool_via_server(server, "tachi_tune", Some(args))
+        .await
+        .expect("routed tachi_tune should return a tool result, not a transport error");
+
+    let message = result
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .unwrap_or("");
+    assert!(
+        !message.contains("tool not found"),
+        "tachi_tune fell out of the composed router again (#1426): {message}"
+    );
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "routed route_proposals on a fresh store should succeed, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn tachi_tune_is_invisible_to_standard_profile() {
+    // Admin-by-omission: tachi_tune joins no bundle, so every non-admin
+    // profile must refuse the routed call outright (tool_visible gate),
+    // indistinguishable from an unregistered tool.
+    let server = make_server();
+    server.set_tool_profile(Some(
+        tachi_hub::parse_tool_profile("standard").expect("standard profile should parse"),
+    ));
+
+    let mut args = serde_json::Map::new();
+    args.insert("action".to_string(), serde_json::json!("route_proposals"));
+
+    let result = call_tool_via_server(server, "tachi_tune", Some(args))
+        .await
+        .expect("invisible tool should return a tool-level error, not a transport error");
+
+    assert_eq!(result.is_error, Some(true));
+    let message = result
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .unwrap_or("");
+    assert!(
+        message.contains("tool not found"),
+        "expected visibility refusal for standard-profile tachi_tune, got: {message}"
+    );
+}

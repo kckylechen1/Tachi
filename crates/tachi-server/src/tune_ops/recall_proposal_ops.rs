@@ -1,7 +1,7 @@
 //! Evidence-backed RecallConfig proposal review/apply loop.
 
-use super::evidence_format::{json_string, wants_json};
 use super::recall_simulate_ops::build_recall_simulation_report;
+use crate::facade_memory_ops::{json_string, wants_json};
 use crate::tool_params::*;
 use crate::MemoryServer;
 use chrono::{Duration, Utc};
@@ -62,7 +62,7 @@ fn recall_config_display_drifted(value: &Value, identity_payload: &Value) -> boo
 /// before the post-CAS source digest is read.
 #[cfg(test)]
 fn run_recall_review_post_cas_test_hook(
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     config_env_path: &Path,
 ) -> Result<(), String> {
     let Some(body) = params
@@ -83,7 +83,7 @@ fn run_recall_review_post_cas_test_hook(
 
 #[cfg(not(test))]
 fn run_recall_review_post_cas_test_hook(
-    _params: &TachiMemoryParams,
+    _params: &TachiTuneParams,
     _config_env_path: &Path,
 ) -> Result<(), String> {
     Ok(())
@@ -94,7 +94,7 @@ fn run_recall_review_post_cas_test_hook(
 /// the already-open descriptor's source immediately before final validation.
 #[cfg(test)]
 fn run_recall_apply_pre_append_test_hook(
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     config_env_path: &Path,
 ) -> Result<(), String> {
     #[cfg(unix)]
@@ -150,7 +150,7 @@ fn run_recall_apply_pre_append_test_hook(
 
 #[cfg(all(test, unix))]
 fn run_recall_apply_missing_create_test_hook(
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     config_env_path: &Path,
 ) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -182,16 +182,14 @@ fn run_recall_apply_missing_create_test_hook(
 
 #[cfg(any(not(test), not(unix)))]
 fn run_recall_apply_missing_create_test_hook(
-    _params: &TachiMemoryParams,
+    _params: &TachiTuneParams,
     _config_env_path: &Path,
 ) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(test)]
-fn run_recall_apply_post_write_pre_sync_test_hook(
-    params: &TachiMemoryParams,
-) -> Result<(), String> {
+fn run_recall_apply_post_write_pre_sync_test_hook(params: &TachiTuneParams) -> Result<(), String> {
     if params
         .metadata
         .as_ref()
@@ -205,9 +203,7 @@ fn run_recall_apply_post_write_pre_sync_test_hook(
 }
 
 #[cfg(not(test))]
-fn run_recall_apply_post_write_pre_sync_test_hook(
-    _params: &TachiMemoryParams,
-) -> Result<(), String> {
+fn run_recall_apply_post_write_pre_sync_test_hook(_params: &TachiTuneParams) -> Result<(), String> {
     Ok(())
 }
 
@@ -216,7 +212,7 @@ fn run_recall_apply_post_write_pre_sync_test_hook(
 /// been synced through the descriptor that performed the approved append.
 #[cfg(all(test, unix))]
 fn run_recall_apply_post_descriptor_sync_test_hook(
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     config_env_path: &Path,
 ) -> Result<(), String> {
     if !params
@@ -260,14 +256,14 @@ fn run_recall_apply_post_descriptor_sync_test_hook(
 
 #[cfg(any(not(test), not(unix)))]
 fn run_recall_apply_post_descriptor_sync_test_hook(
-    _params: &TachiMemoryParams,
+    _params: &TachiTuneParams,
     _config_env_path: &Path,
 ) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(test)]
-fn run_completed_recovery_pre_sync_test_hook(params: &TachiMemoryParams) -> Result<(), String> {
+fn run_completed_recovery_pre_sync_test_hook(params: &TachiTuneParams) -> Result<(), String> {
     if params
         .metadata
         .as_ref()
@@ -281,13 +277,13 @@ fn run_completed_recovery_pre_sync_test_hook(params: &TachiMemoryParams) -> Resu
 }
 
 #[cfg(not(test))]
-fn run_completed_recovery_pre_sync_test_hook(_params: &TachiMemoryParams) -> Result<(), String> {
+fn run_completed_recovery_pre_sync_test_hook(_params: &TachiTuneParams) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(not(test))]
 fn run_recall_apply_pre_append_test_hook(
-    _params: &TachiMemoryParams,
+    _params: &TachiTuneParams,
     _config_env_path: &Path,
 ) -> Result<(), String> {
     Ok(())
@@ -295,7 +291,7 @@ fn run_recall_apply_pre_append_test_hook(
 
 pub(crate) async fn handle_recall_config_proposals(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<String, String> {
     let generated = if has_eval_input(params) {
         let app_home = crate::cli_client::app_home_from_global_db(&server.global_db_path_buf());
@@ -332,8 +328,8 @@ pub(crate) async fn handle_recall_config_proposals(
         "count": proposals.len(),
         "proposals": proposals,
         "next_actions": [
-            "tachi_memory(action='review_recall_proposal', proposal_id=..., review_status='approved')",
-            "tachi_memory(action='apply_recall_proposals', proposal_id=..., confirm=true) after approval; restart daemon to load new RecallConfig"
+            "tachi_tune(action='recall_review', proposal_id=..., review_status='approved')",
+            "tachi_tune(action='recall_apply', proposal_id=..., confirm=true) after approval; restart daemon to load new RecallConfig"
         ],
     });
 
@@ -345,7 +341,7 @@ pub(crate) async fn handle_recall_config_proposals(
 
 pub(crate) fn handle_recall_config_review(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<String, String> {
     let proposal_id = required_proposal_id(params)?;
     let status = match params
@@ -498,7 +494,7 @@ pub(crate) fn handle_recall_config_review(
 
     let response = json!({
         "status": "completed",
-        "action": "review_recall_proposal",
+        "action": "recall_review",
         "proposal_id": proposal_id,
         "proposal": updated,
     });
@@ -512,12 +508,12 @@ pub(crate) fn handle_recall_config_review(
 
 pub(crate) fn handle_recall_config_apply(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<String, String> {
     let proposal_id = required_proposal_id(params)?;
     if !params.confirm {
         return Err(
-            "apply_recall_proposals requires confirm=true after human approval; no config.env changes applied"
+            "recall_apply requires confirm=true after human approval; no config.env changes applied"
                 .to_string(),
         );
     }
@@ -538,7 +534,7 @@ pub(crate) fn handle_recall_config_apply(
 
     let response = json!({
         "status": "completed",
-        "action": "apply_recall_proposals",
+        "action": "recall_apply",
         "proposal_id": proposal_id,
         "config_env_path": config_env_path.display().to_string(),
         "updated_keys": apply_result.updated_keys.clone(),
@@ -662,7 +658,7 @@ struct ValidatedRecallReceipt<'a> {
 ///                 +-- anything else -> REFUSE (legacy / pending / etc.)
 fn drive_recall_apply_state_machine(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
     proposal_id: &str,
     config_env_path: &Path,
 ) -> Result<(Value, RecallApplyResult, RecallApplyOutcome), String> {
@@ -964,7 +960,7 @@ fn finalize_recall_apply(
     patch: &BTreeMap<String, String>,
     durable_config: &mut DurableRecallConfig,
     config_env_path: &Path,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<(Value, RecallApplyResult, RecallApplyOutcome), String> {
     run_recall_apply_post_descriptor_sync_test_hook(params, config_env_path)?;
     finalize_recall_apply_state(
@@ -1039,7 +1035,7 @@ fn finalize_recall_apply_state(
     Ok((terminal, result, outcome.clone()))
 }
 
-fn has_eval_input(params: &TachiMemoryParams) -> bool {
+fn has_eval_input(params: &TachiTuneParams) -> bool {
     params
         .text
         .as_deref()
@@ -1313,7 +1309,7 @@ fn list_proposals(
 }
 
 /// SHA-256 hex of a canonical identity payload. Mirrors the helper in
-/// `dispatch_profile/policy/handlers.rs`; kept local because the two modules
+/// `tune_ops/route_policy/handlers.rs`; kept local because the two modules
 /// are in different crate sub-trees and a shared util would expand this PR's
 /// scope. Both must serialize through the same `recall_config_v3_identity_payload`
 /// canonical form first.
@@ -1988,7 +1984,7 @@ fn sync_completed_recall_recovery(
     approved_before_digest: &str,
     patch: &BTreeMap<String, String>,
     receipt: &ValidatedRecallReceipt<'_>,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<DurableRecallConfig, String> {
     let anchored = open_anchored_recall_config_parent(path, false)?.ok_or_else(|| {
         format!(
@@ -2051,7 +2047,7 @@ fn sync_completed_recall_recovery(
     _approved_before_digest: &str,
     _patch: &BTreeMap<String, String>,
     _receipt: &ValidatedRecallReceipt<'_>,
-    _params: &TachiMemoryParams,
+    _params: &TachiTuneParams,
 ) -> Result<DurableRecallConfig, String> {
     Err(format!(
         "unsupported_platform: completed recall recovery for {} requires descriptor identity and fsync guarantees",
@@ -2101,7 +2097,7 @@ fn append_recall_config_env(
     expected_after_revision: &str,
     expected_before_len: usize,
     expected_append_payload: &str,
-    params: &TachiMemoryParams,
+    params: &TachiTuneParams,
 ) -> Result<DurableRecallConfig, String> {
     let anchored = open_anchored_recall_config_parent(path, true)?.ok_or_else(|| {
         format!(
@@ -2273,7 +2269,7 @@ fn append_recall_config_env(
     _expected_after_revision: &str,
     _expected_before_len: usize,
     _expected_append_payload: &str,
-    _params: &TachiMemoryParams,
+    _params: &TachiTuneParams,
 ) -> Result<DurableRecallConfig, String> {
     Err(format!(
         "unsupported_platform: recall config apply for {} requires descriptor identity and no-follow guarantees",
@@ -2336,7 +2332,7 @@ fn assert_durable_recall_config_for_terminal(
     ))
 }
 
-fn required_proposal_id(params: &TachiMemoryParams) -> Result<&str, String> {
+fn required_proposal_id(params: &TachiTuneParams) -> Result<&str, String> {
     params
         .proposal_id
         .as_deref()

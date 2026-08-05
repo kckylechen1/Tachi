@@ -19,7 +19,9 @@ fn hypermem_compatibility_gate_fixture_covers_issue_793_contract() {
     for binding in [
         "tachi_memory.get",
         "tachi_memory.search",
-        "tachi_memory.recall_simulate",
+        // #1426: recall_simulate moved to the admin-only tachi_tune surface.
+        // The kernel binding is the same replay pathway under a new tool name.
+        "tachi_tune.recall_simulate",
     ] {
         assert!(
             current_bindings.contains(binding),

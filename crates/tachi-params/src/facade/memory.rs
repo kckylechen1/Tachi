@@ -55,10 +55,6 @@ fn tachi_memory_action_schema(
             "alerts",
             "ask",
             "consolidate",
-            "recall_simulate",
-            "recall_proposals",
-            "review_recall_proposal",
-            "apply_recall_proposals",
             "pattern_feedback",
             "progress",
             "readiness",
@@ -315,7 +311,7 @@ fn default_memory_top_k() -> usize {
 pub struct TachiMemoryParams {
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility), claim (register/heartbeat a manual presence claim on an issue_ref/flow_id; advisory only, never a lock), release (release a claim by claim_id or dispatch_id), delete (permanently remove a memory entry by id; folded from delete_memory), gc (run garbage collection on growing tables; folded from memory_gc), doctor_scan (read-only scan of memory.db roots; folded from tachi_doctor_scan), ingest (unified event/source ingest; folded from ingest), ingest_source (batch source ingest with chunking/enrichment; folded from ingest_source), sticky_leave (leave a read-once ephemeral note for the leader or a named seat), sticky_check (claim/list unread stickies addressed to the caller; include_read=true shows the read/expired archive)."
+        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility), claim (register/heartbeat a manual presence claim on an issue_ref/flow_id; advisory only, never a lock), release (release a claim by claim_id or dispatch_id), delete (permanently remove a memory entry by id; folded from delete_memory), gc (run garbage collection on growing tables; folded from memory_gc), doctor_scan (read-only scan of memory.db roots; folded from tachi_doctor_scan), ingest (unified event/source ingest; folded from ingest), ingest_source (batch source ingest with chunking/enrichment; folded from ingest_source), sticky_leave (leave a read-once ephemeral note for the leader or a named seat), sticky_check (claim/list unread stickies addressed to the caller; include_read=true shows the read/expired archive). Recall tuning lives on tachi_tune."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -368,7 +364,7 @@ pub struct TachiMemoryParams {
     pub include_training: bool,
     #[serde(default)]
     #[schemars(
-        description = "[action=search|ask|recall_simulate] Enable adaptive Voyage reranking when top hybrid scores are close; recall_simulate replays the same rerank gate without cache/access mutation."
+        description = "[action=search|ask] Enable adaptive Voyage reranking when top hybrid scores are close."
     )]
     pub enable_rerank: bool,
     #[serde(default)]
@@ -462,7 +458,7 @@ pub struct TachiMemoryParams {
     pub valid_until: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=save] Arbitrary JSON metadata merged into the stored entry. [action=recall_simulate|recall_proposals] Supply cases/eval_cases: [{query, expected_ids|expected_id, top_k?, project?, path_prefix?}] and optional variants: [{name, recall_config:{or_fallback_fts_score_factor?, default_fts?, ...}}]."
+        description = "[action=save] Arbitrary JSON metadata merged into the stored entry."
     )]
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
@@ -527,27 +523,21 @@ pub struct TachiMemoryParams {
     )]
     pub compact: bool,
 
-    // --- recall config proposals ---
+    // --- consolidate review/apply fields ---
     #[serde(default)]
-    #[schemars(
-        description = "[action=review_recall_proposal|apply_recall_proposals] Recall proposal id."
-    )]
+    #[schemars(description = "[action=consolidate] Proposal id for review/apply workflows.")]
     pub proposal_id: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=review_recall_proposal] Review status: approved or rejected."
-    )]
+    #[schemars(description = "[action=consolidate] Review status: approved or rejected.")]
     pub review_status: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=review_recall_proposal] Optional review note.")]
+    #[schemars(description = "[action=consolidate] Optional review note.")]
     pub notes: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=apply_recall_proposals] Required true to write approved TACHI_RECALL_* values to config.env."
-    )]
+    #[schemars(description = "[action=consolidate] Required true to apply reviewed proposals.")]
     pub confirm: bool,
     #[serde(default)]
-    #[schemars(description = "[action=recall_proposals] Optional proposal status filter.")]
+    #[schemars(description = "[action=consolidate] Optional proposal status filter.")]
     pub state_filter: Option<String>,
 
     // --- ingest / ingest_source fields (#757 fold from standalone pipeline tools) ---
