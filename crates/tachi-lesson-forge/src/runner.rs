@@ -1013,7 +1013,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::lesson_forge_ops::pilot::{
+    use crate::pilot::{
         freeze_pilot_manifest, PilotRowKindV1, PilotSourceRouteV1, PilotStratumV1,
     };
     use tachi_params::LessonCandidateKindV1;

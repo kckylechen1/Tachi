@@ -222,7 +222,7 @@ pub fn forge_lesson_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lesson_forge_ops::pilot::{
+    use crate::pilot::{
         freeze_pilot_manifest, PilotRowKindV1, PilotRowV1, PilotSourceRouteV1, PilotStratumV1,
     };
     use tachi_params::{EvidenceRelationV1, ImmutableRevisionV1, SourceKindV1};
