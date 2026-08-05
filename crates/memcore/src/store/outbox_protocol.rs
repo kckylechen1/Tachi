@@ -310,8 +310,11 @@ pub enum OutboxConflictResolution {
     /// happened.
     LocalWins,
     /// The peer's version stands. The local event is withdrawn for operator
-    /// attention under the caller's class; nothing is re-enqueued, and local
-    /// memory is untouched.
+    /// attention under a class carrying the caller's reason; nothing is
+    /// re-enqueued, and local memory is untouched. The stored class is
+    /// prefixed with [`OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX`] — see that
+    /// constant's doc comment for why this is a resolved conflict, not an
+    /// open one, for health-reporting purposes.
     RemoteWins { error_class: String },
     /// Deliberately not decided now. Writes nothing at all — not even a
     /// restamp — so the event's history still shows when the conflict was
@@ -339,10 +342,34 @@ pub const OUTBOX_LOCAL_WINS_SUCCESSOR_SUFFIX: &str = "::local-wins";
 ///
 /// Kernel-fixed rather than caller-supplied: this token is the durable record
 /// of *which* resolution consumed the event, and a caller-chosen string could
-/// describe it as anything. `RemoteWins` takes the caller's class because
-/// there the interesting fact is why the peer's version won, which the kernel
-/// does not know.
+/// describe it as anything.
 pub const OUTBOX_LOCAL_WINS_RESOLVED_CLASS: &str = "conflict_resolved_local_wins";
+
+/// The class *prefix* stamped on a conflicted event that a `RemoteWins`
+/// decision withdrew (tachi#1644 review fix).
+///
+/// `RemoteWins` still takes the caller's class, because there the interesting
+/// fact is why the peer's version won, which the kernel does not know — but
+/// the stored value is `"{OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX}.{caller
+/// class}"`, not the caller's class alone. Before this prefix existed, a
+/// `RemoteWins` resolution and an ad-hoc operator quarantine were both plain
+/// caller-chosen tokens sitting in `last_error_class`, and
+/// [`db::read_outbox_health`](crate::db::read_outbox_health) had no way to
+/// tell "this conflict was decided" from "this store is holding an
+/// unresolved problem" — every `RemoteWins` resolution read as permanent
+/// local degradation forever. The prefix is what
+/// `read_outbox_health`'s `conflict_resolved_%` match recognizes; the
+/// caller's own reason survives as the suffix rather than being discarded, so
+/// the fix does not cost an operator the original diagnosis to get a correct
+/// health signal.
+pub const OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX: &str = "conflict_resolved_remote_wins";
+
+/// Compose the class stamped on a `RemoteWins` withdrawal from the caller's
+/// own class. See [`OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX`] for why this
+/// is a prefix-plus-suffix rather than either alone.
+fn outbox_remote_wins_resolved_class(caller_class: &str) -> String {
+    format!("{OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX}.{caller_class}")
+}
 
 /// The id [`OutboxConflictResolution::LocalWins`] mints for the successor of
 /// `conflicted_event_id`. Public so a caller can find the successor without
@@ -650,8 +677,8 @@ impl MemoryStore {
     ///   neither does, so there is no state in which the old event was
     ///   consumed without a successor to carry the mutation.
     /// * [`OutboxConflictResolution::RemoteWins`] — withdraws the local event
-    ///   under the caller's class. Nothing is re-enqueued and the object is
-    ///   untouched.
+    ///   under [`OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX`] plus the caller's
+    ///   class. Nothing is re-enqueued and the object is untouched.
     /// * [`OutboxConflictResolution::Deferred`] — writes nothing.
     ///
     /// # Refusals
@@ -700,11 +727,12 @@ impl MemoryStore {
                     unresolved: current,
                 },
                 OutboxConflictResolution::RemoteWins { error_class } => {
+                    let stamped_class = outbox_remote_wins_resolved_class(error_class);
                     let quarantined = db::transition_outbox_event_within_tx(
                         &tx,
                         event_id,
                         OutboxState::Quarantined,
-                        Some(error_class.as_str()),
+                        Some(stamped_class.as_str()),
                     )?;
                     OutboxConflictResolutionReceipt::RemoteWins { quarantined }
                 }
@@ -1342,7 +1370,8 @@ mod tests {
         assert_eq!(quarantined.state, OutboxState::Quarantined);
         assert_eq!(
             quarantined.last_error_class.as_deref(),
-            Some("peer_authority_wins")
+            Some("conflict_resolved_remote_wins.peer_authority_wins"),
+            "the stored class carries the resolved-conflict prefix plus the caller's own reason"
         );
 
         let after = store.get("obj-rw").expect("get").expect("present");
@@ -1359,12 +1388,13 @@ mod tests {
                 .is_none(),
             "RemoteWins re-enqueues nothing"
         );
+        let health = store.outbox_health().expect("health");
         assert_eq!(
-            store.outbox_health().expect("health").local_store_status,
-            db::LocalStoreStatus::Quarantined {
-                quarantined_count: 1
-            }
+            health.local_store_status,
+            db::LocalStoreStatus::Healthy,
+            "a RemoteWins resolution is a decided conflict, not a live local degradation"
         );
+        assert_eq!(health.resolved_count, 1);
     }
 
     #[test]
@@ -1673,9 +1703,12 @@ mod tests {
         );
         assert_eq!(
             resolved.local_store_status,
-            db::LocalStoreStatus::Quarantined {
-                quarantined_count: 1
-            }
+            db::LocalStoreStatus::Healthy,
+            "tachi#1644 review fix: a decided conflict is not a live local degradation"
+        );
+        assert_eq!(
+            resolved.resolved_count, 1,
+            "the decision is still durably counted, just not flagged as degradation"
         );
         assert_eq!(
             resolved.last_error_class.as_deref(),

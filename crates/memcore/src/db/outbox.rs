@@ -697,12 +697,18 @@ pub(crate) fn claim_outbox_events_within_tx(
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalStoreStatus {
-    /// The outbox is readable and no event is quarantined.
+    /// The outbox is readable and no event is quarantined for a reason other
+    /// than a resolved conflict (see [`OutboxHealth::resolved_count`]).
     Healthy,
-    /// At least one event has been withdrawn for operator attention.
-    /// Quarantine is a *local* condition: it says this store is holding
-    /// mutations it will not hand to anyone, which is a durability problem
-    /// here regardless of what any remote is doing.
+    /// At least one event has been withdrawn for operator attention **and is
+    /// still unresolved** (tachi#1644: a conflict a caller already resolved
+    /// via [`crate::store::outbox_protocol::OutboxConflictResolution`] does
+    /// not count here — it is durably stamped with a
+    /// `conflict_resolved_*` class and surfaces in
+    /// [`OutboxHealth::resolved_count`] instead). Quarantine is a *local*
+    /// condition: it says this store is holding mutations it will not hand
+    /// to anyone, which is a durability problem here regardless of what any
+    /// remote is doing.
     Quarantined { quarantined_count: u64 },
 }
 
@@ -779,10 +785,23 @@ pub struct OutboxHealth {
     /// non-failure transitions, so this never reports a class the outbox has
     /// moved past.
     pub last_error_class: Option<String>,
+    /// Quarantined events whose `last_error_class` starts with
+    /// `conflict_resolved_` — a conflict a caller already decided through
+    /// [`crate::store::outbox_protocol::MemoryStore::resolve_outbox_conflict`],
+    /// not an unresolved operator hold (tachi#1644 review fix: before this
+    /// field existed, every resolved conflict was indistinguishable from a
+    /// live durability problem because both land in `quarantined`). Additive:
+    /// `resolved_count` plus the genuinely-quarantined count reported by
+    /// [`LocalStoreStatus::Quarantined`] equals the total row count in state
+    /// `quarantined`. Never negative, never a subtraction from
+    /// `quarantined_count` — a resolved conflict is not excluded from the
+    /// table, only from the *degradation* signal.
+    pub resolved_count: u64,
 }
 
 /// Raw column tuple read back for an outbox row (id, event fields, timestamps, error class).
 type OutboxRowColumns = (
+    i64,
     i64,
     i64,
     i64,
@@ -794,7 +813,24 @@ type OutboxRowColumns = (
     Option<String>,
 );
 
-/// Compute all six health fields in one statement.
+/// The `LIKE` pattern that marks a `quarantined` row as a resolved conflict
+/// rather than a live durability problem (tachi#1644 review fix).
+///
+/// Every class this pattern is meant to match starts with a Rust constant,
+/// not a caller-chosen value:
+/// [`crate::store::outbox_protocol::OUTBOX_LOCAL_WINS_RESOLVED_CLASS`]
+/// (`"conflict_resolved_local_wins"`, the entire stored value) and
+/// [`crate::store::outbox_protocol::OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX`]
+/// (`"conflict_resolved_remote_wins"`, a prefix — the caller's own class
+/// follows it). Both prefixes are kernel-fixed strings a caller cannot
+/// choose, so this pattern identifies exactly "a conflict this store
+/// resolved through `resolve_outbox_conflict`" and nothing a caller could
+/// spoof by naming their own quarantine reason similarly — an ordinary
+/// operator hold uses a caller-chosen class like `"operator_hold"`, which
+/// this pattern does not match.
+const OUTBOX_RESOLVED_CONFLICT_CLASS_LIKE_PATTERN: &str = "conflict_resolved_%";
+
+/// Compute all seven health fields in one statement.
 ///
 /// One statement, not several, because the fields are read together and must
 /// describe the same instant: two statements on a connection outside a
@@ -812,6 +848,7 @@ pub(crate) fn read_outbox_health(conn: &Connection) -> Result<OutboxHealth, Memo
         rejected_count,
         conflicted_count,
         quarantined_count,
+        resolved_count,
         oldest_pending_at,
         last_successful_sync,
         last_error_class,
@@ -822,14 +859,17 @@ pub(crate) fn read_outbox_health(conn: &Connection) -> Result<OutboxHealth, Memo
              COALESCE(SUM(state = 'acknowledged'), 0),
              COALESCE(SUM(state = 'rejected'), 0),
              COALESCE(SUM(state = 'conflicted'), 0),
-             COALESCE(SUM(state = 'quarantined'), 0),
+             COALESCE(SUM(state = 'quarantined'
+                           AND last_error_class NOT LIKE ?1), 0),
+             COALESCE(SUM(state = 'quarantined'
+                           AND last_error_class LIKE ?1), 0),
              MIN(CASE WHEN state = 'pending' THEN created_at END),
              MAX(CASE WHEN state = 'acknowledged' THEN state_changed_at END),
              (SELECT last_error_class FROM memory_outbox_events
                WHERE last_error_class IS NOT NULL
                ORDER BY state_changed_at DESC, event_id DESC LIMIT 1)
          FROM memory_outbox_events",
-        [],
+        params![OUTBOX_RESOLVED_CONFLICT_CLASS_LIKE_PATTERN],
         |row| {
             Ok((
                 row.get(0)?,
@@ -841,6 +881,7 @@ pub(crate) fn read_outbox_health(conn: &Connection) -> Result<OutboxHealth, Memo
                 row.get(6)?,
                 row.get(7)?,
                 row.get(8)?,
+                row.get(9)?,
             ))
         },
     )?;
@@ -852,12 +893,14 @@ pub(crate) fn read_outbox_health(conn: &Connection) -> Result<OutboxHealth, Memo
     let rejected_count = count(rejected_count);
     let conflicted_count = count(conflicted_count);
     let quarantined_count = count(quarantined_count);
+    let resolved_count = count(resolved_count);
     let total = pending_count
         + in_flight_count
         + acknowledged_count
         + rejected_count
         + conflicted_count
-        + quarantined_count;
+        + quarantined_count
+        + resolved_count;
 
     let local_store_status = if quarantined_count == 0 {
         LocalStoreStatus::Healthy
@@ -887,6 +930,7 @@ pub(crate) fn read_outbox_health(conn: &Connection) -> Result<OutboxHealth, Memo
         oldest_pending_at,
         last_successful_sync,
         last_error_class,
+        resolved_count,
     })
 }
 
@@ -1326,6 +1370,7 @@ mod tests {
         assert_eq!(health.oldest_pending_at, None);
         assert_eq!(health.last_successful_sync, None);
         assert_eq!(health.last_error_class, None);
+        assert_eq!(health.resolved_count, 0);
     }
 
     #[test]
@@ -1360,6 +1405,7 @@ mod tests {
             Some("divergent_revision")
         );
         assert_eq!(health.last_successful_sync, None);
+        assert_eq!(health.resolved_count, 0);
     }
 
     #[test]
@@ -1389,6 +1435,7 @@ mod tests {
             .max(acknowledged_p.state_changed_at);
         assert_eq!(health.last_successful_sync.as_deref(), Some(&*newest));
         assert_eq!(health.last_error_class, None);
+        assert_eq!(health.resolved_count, 0);
     }
 
     #[test]
@@ -1428,6 +1475,76 @@ mod tests {
         );
         assert_eq!(health.pending_count, 0);
         assert_eq!(health.oldest_pending_at, None);
+        assert_eq!(
+            health.resolved_count, 0,
+            "an operator hold is not a resolved conflict"
+        );
+    }
+
+    /// tachi#1644 review fix: a conflict a caller resolved through
+    /// `resolve_outbox_conflict` lands in `quarantined` exactly like an
+    /// operator hold does, but it is not a live durability problem — it is
+    /// the durable record of a decision that already landed. The health read
+    /// model must tell the two apart by the `conflict_resolved_*` class
+    /// prefix, not treat every quarantined row as degradation.
+    #[test]
+    fn health_excludes_resolved_conflicts_from_local_degradation_but_counts_them() {
+        let mut conn = open_conn();
+        seed_event(&mut conn, "evt-resolved", "obj-resolved");
+        seed_event(&mut conn, "evt-held", "obj-held");
+
+        // A resolved conflict: same terminal state as an operator hold, but
+        // stamped with the kernel-fixed class `resolve_outbox_conflict`
+        // writes (mirrors OUTBOX_LOCAL_WINS_RESOLVED_CLASS in
+        // `store::outbox_protocol` — this layer does not depend on that
+        // constant, so the literal is pinned here too).
+        transition(
+            &mut conn,
+            "evt-resolved",
+            OutboxState::Quarantined,
+            Some("conflict_resolved_local_wins"),
+        )
+        .unwrap();
+        // A genuine, still-unresolved quarantine.
+        transition(
+            &mut conn,
+            "evt-held",
+            OutboxState::Quarantined,
+            Some("operator_hold"),
+        )
+        .unwrap();
+
+        let health = read_outbox_health(&conn).unwrap();
+        assert_eq!(
+            health.local_store_status,
+            LocalStoreStatus::Quarantined {
+                quarantined_count: 1
+            },
+            "the resolved conflict must not count toward the degradation flag"
+        );
+        assert_eq!(
+            health.resolved_count, 1,
+            "the resolved conflict is reported additively, not silently dropped"
+        );
+    }
+
+    /// The all-resolved case: every quarantined row is a resolved conflict,
+    /// so the store reads back Healthy even though the row count is nonzero.
+    #[test]
+    fn health_of_an_outbox_with_only_resolved_conflicts_is_healthy() {
+        let mut conn = open_conn();
+        seed_event(&mut conn, "evt-lw", "obj-lw");
+        transition(
+            &mut conn,
+            "evt-lw",
+            OutboxState::Quarantined,
+            Some("conflict_resolved_local_wins"),
+        )
+        .unwrap();
+
+        let health = read_outbox_health(&conn).unwrap();
+        assert_eq!(health.local_store_status, LocalStoreStatus::Healthy);
+        assert_eq!(health.resolved_count, 1);
     }
 
     #[test]
