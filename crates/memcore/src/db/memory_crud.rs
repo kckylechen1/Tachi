@@ -452,6 +452,12 @@ pub(crate) fn canonical_entities_json(entry: &MemoryEntry) -> Result<String, Mem
 /// merge behavior, but only as an explicit, typed opt-in reserved for
 /// id-less `save_memory` (`upsert_idless_save_entry`); every other upsert
 /// seam defaults to [`Self::NonSemantic`].
+///
+/// Known intentional `AllowNearDuplicateMerge` consumers (the #1634 census's
+/// "depends on merging" list): production id-less `save_memory`
+/// (`upsert_idless_save_entry`), plus two memcore-level tests of the merge
+/// machinery itself — `search_ops::jaccard_dedup_refreshes_candidate_fts`
+/// and `search_ops::upsert_jaccard_dedup_returns_fts_row_decode_errors`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NearDuplicatePolicy {
     /// Write exactly the row the caller asked for. Never search for or fold

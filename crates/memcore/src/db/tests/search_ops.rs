@@ -1,5 +1,36 @@
 use super::*;
 
+/// tachi#1634: the plain `upsert(&mut conn, ...)` seam now writes with
+/// [`crate::db::NearDuplicatePolicy::NonSemantic`] like every other ordinary
+/// upsert caller, so the write-time Jaccard near-duplicate-merge FTS
+/// machinery this module tests directly (not through `save_memory`'s
+/// id-less opt-in) must opt in explicitly. `upsert`/`upsert_within_tx`
+/// hardcode the policy and take no parameter for it, so this drives the
+/// narrowest already-`pub(crate)`-exported seam that does accept a policy —
+/// `upsert_with_validated_reference_mutations_within_tx_and_metadata_removals`
+/// — with empty reference mutations and metadata patch/removals, which makes
+/// it behaviorally equivalent to a plain upsert except for the opted-in
+/// policy.
+fn upsert_allowing_merge(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+) -> Result<(), crate::MemoryError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    crate::db::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
+        &tx,
+        entry,
+        vec_available,
+        None,
+        &serde_json::Map::new(),
+        &[],
+        &[],
+        crate::db::NearDuplicatePolicy::AllowNearDuplicateMerge,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[test]
 fn upsert_and_fts() {
     let mut conn = make_conn();
@@ -63,7 +94,10 @@ fn upsert_jaccard_dedup_returns_fts_row_decode_errors() {
     .unwrap();
 
     let entry = make_entry("dedup-bad-row", "needle overlap");
-    let err = upsert(&mut conn, &entry, false)
+    // tachi#1634: opt into AllowNearDuplicateMerge so the write-time Jaccard
+    // dedup query (the thing whose row-decode error this test is asserting
+    // on) actually runs; see `upsert_allowing_merge`.
+    let err = upsert_allowing_merge(&mut conn, &entry, false)
         .expect_err("dedup FTS row decode errors must abort the write");
     assert!(
         err.to_string().contains("Invalid column type")
@@ -87,11 +121,13 @@ fn jaccard_dedup_refreshes_candidate_fts() {
     let text = "Rust memory systems need atomic full text search updates";
     let mut canonical = make_entry("canonical", text);
     canonical.keywords = vec!["oldtag".to_string()];
-    upsert(&mut conn, &canonical, false).unwrap();
+    upsert_allowing_merge(&mut conn, &canonical, false).unwrap();
 
     let mut duplicate = make_entry("duplicate", text);
     duplicate.keywords = vec!["mergedtag".to_string()];
-    upsert(&mut conn, &duplicate, false).unwrap();
+    // tachi#1634: opt into AllowNearDuplicateMerge so the Jaccard merge this
+    // test asserts on actually fires; see `upsert_allowing_merge`.
+    upsert_allowing_merge(&mut conn, &duplicate, false).unwrap();
 
     let superseded_by: Option<String> = conn
         .query_row(
