@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 /// 3. `$TACHI_HOME/runs/`
 /// 4. `$HOME/.tachi/runs/`
 /// 5. `<temp>/tachi/runs/`
-pub(crate) fn shell_runs_root() -> PathBuf {
+pub(crate) fn flow_runs_root() -> PathBuf {
     resolve_runs_root_from(
         || std::env::var("TACHI_RUN_ROOT").ok().map(PathBuf::from),
         || crate::path_utils::cached_git_root().cloned(),
@@ -54,7 +54,7 @@ pub(crate) fn validate_flow_id(id: &str) -> Result<(), String> {
 
 pub(crate) fn run_dir_for_flow_id(flow_id: &str) -> Result<PathBuf, String> {
     validate_flow_id(flow_id)?;
-    Ok(shell_runs_root().join(flow_id))
+    Ok(flow_runs_root().join(flow_id))
 }
 
 /// Cross-flow closure-debt scan. Walks every flow run dir and surfaces:
@@ -68,7 +68,7 @@ pub(crate) fn run_dir_for_flow_id(flow_id: &str) -> Result<PathBuf, String> {
 /// exactly when a reminder is NOT needed. Output is capped at `limit`; if more
 /// debt exists, a final summary item reports the overflow (never a silent cap).
 pub(crate) fn scan_open_loops(limit: usize) -> Vec<Value> {
-    let runs_root = shell_runs_root();
+    let runs_root = flow_runs_root();
     let Ok(entries) = std::fs::read_dir(&runs_root) else {
         return Vec::new();
     };
@@ -168,7 +168,7 @@ fn read_status_for_briefing(run_dir: &std::path::Path) -> Value {
             tracing::warn!(
                 path = %status_path.display(),
                 error = %err,
-                "shell status JSON parse failed; continuing with empty status"
+                "flow status JSON parse failed; continuing with empty status"
             );
             json!({})
         }),
@@ -177,7 +177,7 @@ fn read_status_for_briefing(run_dir: &std::path::Path) -> Value {
                 tracing::warn!(
                     path = %status_path.display(),
                     error = %err,
-                    "shell status read failed; continuing with empty status"
+                    "flow status read failed; continuing with empty status"
                 );
             }
             json!({})

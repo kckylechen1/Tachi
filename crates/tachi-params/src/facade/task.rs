@@ -539,9 +539,9 @@ mod tests {
 
     /// #1319-C2: worker launch/wait/cancel left Task. `dispatch_reason` and
     /// `inject_card` were strictly dispatch-only fields and are removed from
-    /// `TachiTaskParams` together with the Dispatch arm. The `dispatch_reason`
-    /// allowlist vocabulary still lives on `TachiArenaParams` /
-    /// `TachiStaffParams` / `TachiDispatchParams`. Pin that `tachi_task` no
+    /// `TachiTaskParams` together with the Dispatch arm. The typed staffing
+    /// vocabulary now lives on `TachiStaffParams` / `TachiDispatchParams`
+    /// (TachiArenaParams was deleted in [1319-D2]). Pin that `tachi_task` no
     /// longer accepts `dispatch`/`wait`/`cancel` and points callers at
     /// `tachi_staff`.
     #[test]

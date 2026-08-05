@@ -70,7 +70,7 @@ The target split is:
 There are also two curated minimal profiles for common hosts:
 
 - `standard` — default for IDE agents. Intersects the bundles with a daily agent-intent surface. `tachi_task(action='dispatch')` is removed from its advertised schema and denied at call time; ordinary delegation uses the host harness's native subagent. `tachi_arena` and `tachi_agent_eval` are no longer standard tools because mission persistence and native lifecycle/eval intake belong to internal/adapter surfaces. `tachi_web_search` remains because some hosts lack native search. The canonical list is `STANDARD_MINIMAL_TOOL_PATTERNS` in `crates/tachi-hub/src/tool_profiles/patterns.rs`.
-- `delegate` — for worker subagents spawned by an explicitly admitted, admin-owned `tachi_task(action='dispatch')`. An 11-tool surface with no recursive dispatch and no handoff.
+- `delegate` — for worker subagents spawned via the explicitly admitted staffing surface `tachi_staff(action='start')`. An 11-tool surface with no recursive dispatch and no handoff.
 
 Selection paths:
 

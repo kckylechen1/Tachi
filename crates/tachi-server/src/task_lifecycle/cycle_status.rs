@@ -193,7 +193,7 @@ fn normalize_optional_pr_ref(raw: Option<&str>) -> Option<String> {
 }
 
 fn find_flow_by_refs(issue_ref: Option<&str>, pr_ref: Option<&str>) -> Result<String, String> {
-    let runs_root = crate::task_lifecycle::shell_runs_root();
+    let runs_root = crate::task_lifecycle::flow_runs_root();
     let read_dir = std::fs::read_dir(&runs_root)
         .map_err(|e| format!("read runs root {}: {e}", runs_root.display()))?;
     let mut matches = Vec::new();

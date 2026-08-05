@@ -79,7 +79,7 @@ fn validate_progress_id(id: &str) -> Result<(), String> {
 
 fn progress_run_dir(flow_id: &str) -> Result<PathBuf, String> {
     validate_progress_id(flow_id)?;
-    let root = crate::task_lifecycle::shell_runs_root();
+    let root = crate::task_lifecycle::flow_runs_root();
     let run_dir = root.join(flow_id);
     std::fs::create_dir_all(&run_dir).map_err(|e| format!("create progress run dir: {e}"))?;
     Ok(run_dir)

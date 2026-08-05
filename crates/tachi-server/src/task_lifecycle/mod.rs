@@ -175,8 +175,8 @@ use self::utils::*;
 pub(crate) use self::cycle_plan::handle_task_cycle_plan;
 pub(crate) use self::cycle_status::handle_task_cycle_status;
 pub(crate) use self::flow_artifacts::{
-    flow_status_doc_refs, mark_task_close_loop, mark_task_dispatch, mark_task_dispatch_completion,
-    resolve_link_pr_issue_ref, run_dir_for_flow_id, scan_open_loops, shell_runs_root,
+    flow_runs_root, flow_status_doc_refs, mark_task_close_loop, mark_task_dispatch,
+    mark_task_dispatch_completion, resolve_link_pr_issue_ref, run_dir_for_flow_id, scan_open_loops,
     validate_flow_id, write_intake_flow_artifacts, write_link_pr_artifacts,
 };
 #[cfg(test)]
