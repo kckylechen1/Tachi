@@ -19,7 +19,7 @@
 //! `wiki-rem:` / Wiki-operation-log refusals are byte-identical, not a copy),
 //! the entity canonicalization ([`super::canonical_entities_json`]), the FTS
 //! + symbolic-FTS projection ([`super::sync_memories_fts`]), and the vector
-//! blob encoding ([`crate::db::sqlite_vec::serialize_f32`]).
+//!   blob encoding ([`crate::db::sqlite_vec::serialize_f32`]).
 
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
