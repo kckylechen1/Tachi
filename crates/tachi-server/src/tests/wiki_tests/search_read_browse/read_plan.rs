@@ -204,6 +204,58 @@ async fn omitted_project_federates_bound_and_shared_but_not_legacy_global() {
     );
 }
 
+/// tachi#1624: a `--no-project-db` daemon with no `~/.tachi/projects/wiki/`
+/// resolves the default (omitted-project) Federated plan to zero stores.
+/// That must surface as a loud, typed refusal — not `status:"completed",
+/// count:0`, which is indistinguishable from "searched everywhere, found
+/// nothing" and hides the misconfiguration from the caller.
+#[tokio::test]
+async fn omitted_project_wiki_search_refuses_loudly_when_zero_stores_resolve() {
+    let (server, _home) = crate::tests::make_server_with_temp_home();
+
+    let error = collect_wiki_search_value(&server, planned_wiki_search("anything", None, 10))
+        .await
+        .expect_err("zero-store Federated search must refuse, not report completed/0");
+
+    assert!(
+        error.contains("resolved zero stores"),
+        "refusal must name the failure shape: {error}"
+    );
+    assert!(
+        error.contains("no bound project DB") && error.contains("--no-project-db"),
+        "refusal must name the bound-project leg it checked: {error}"
+    );
+    assert!(
+        error.contains("named project 'wiki' not found"),
+        "refusal must name the named-project leg it checked: {error}"
+    );
+    assert!(
+        error.contains("legacy global is excluded from Federated by design"),
+        "refusal must explain why legacy global was not consulted: {error}"
+    );
+}
+
+/// A named-project search over a project that genuinely does not exist must
+/// keep raising its own "not found" error and must never be shadowed by the
+/// more general zero-store refusal (NamedOnly always resolves to exactly one
+/// planned store, so the zero-store check never fires for it).
+#[tokio::test]
+async fn omitted_vs_named_zero_store_refusal_does_not_shadow_named_not_found() {
+    let (server, _home) = crate::tests::make_server_with_temp_home();
+
+    let error = collect_wiki_search_value(
+        &server,
+        planned_wiki_search("anything", Some("no-such-project"), 10),
+    )
+    .await
+    .expect_err("named lookup against a missing project must still error");
+
+    assert_eq!(
+        error, "Wiki project 'no-such-project' not found",
+        "named-project lookup must keep its own not-found error, not the generic zero-store refusal"
+    );
+}
+
 #[tokio::test]
 async fn wiki_search_does_not_apply_generic_noise_skip_to_explicit_lookup() {
     let entry = wiki_entry(
