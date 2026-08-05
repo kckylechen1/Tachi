@@ -153,6 +153,9 @@ fn is_terminal_task(task: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Sole consumer of `chrono::Utc` under `crate::tools`; imported here
+    // instead of riding a `#[cfg(test)]` import in the parent `tools.rs`.
+    use chrono::Utc;
     use tachi_params::TachiTaskParams;
 
     fn make_server_with_runs_dir() -> (tempfile::TempDir, MemoryServer) {

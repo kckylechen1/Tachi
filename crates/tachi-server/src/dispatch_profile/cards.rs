@@ -1,11 +1,5 @@
 use super::*;
 
-pub(in crate::dispatch_profile) use tachi_dispatch::{
-    profile_demotion_targets_from_overlay, profile_projected_evidence_required_from_overlay,
-    profile_projected_passive_traits_from_overlay, profile_projected_signature_skills_from_overlay,
-    profile_projected_weak_against_from_overlay,
-};
-
 pub(crate) fn profile_required_skill_ids(profile: &DispatchProfileDef) -> Vec<String> {
     tachi_dispatch::profile_required_skill_ids(profile)
 }

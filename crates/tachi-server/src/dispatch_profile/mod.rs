@@ -72,7 +72,6 @@ mod routing;
 #[cfg(test)]
 mod tests;
 
-use self::cards::*;
 use self::policy::*;
 use self::routing::*;
 
