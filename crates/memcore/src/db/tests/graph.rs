@@ -271,6 +271,78 @@ fn confirmed_contradiction_transaction_rejects_non_allowlisted_receipt_fields() 
     assert_no_contradiction_mutation(&conn, "unsafe-old");
 }
 
+/// #1558: a receipt carrying the new `content_hash`/`memory_id`/`revision`
+/// binding fields is not "unknown field" garbage to the shadow validator --
+/// the contract is unified, not merely tolerated as noise.
+#[test]
+fn confirmed_contradiction_transaction_accepts_receipt_with_content_binding() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("bound-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("bound-old", "old fact"), false).unwrap();
+    let (mut contradicts, mut supersedes, at) =
+        confirmed_contradiction_edges("bound-new", "bound-old", "complete");
+    for edge in [&mut contradicts, &mut supersedes] {
+        edge.metadata
+            .pointer_mut("/provenance/model_invocation")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("receipt object")
+            .insert(
+                "content_hash".to_string(),
+                json!("deadbeefcafefeed0011223344556677"),
+            );
+    }
+
+    let expected_entry = expected_state(&conn, "bound-new");
+    let expected = expected_state(&conn, "bound-old");
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let outcome = persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .expect("a content-hash-bound receipt is still an allowlisted model-invocation-v1 receipt");
+    tx.commit().unwrap();
+    assert_eq!(outcome, ConfirmedContradictionOutcome::Committed);
+}
+
+#[test]
+fn confirmed_contradiction_transaction_rejects_blank_content_binding() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("blank-bound-new", "new fact"), false).unwrap();
+    upsert(&mut conn, &make_entry("blank-bound-old", "old fact"), false).unwrap();
+    let (mut contradicts, mut supersedes, at) =
+        confirmed_contradiction_edges("blank-bound-new", "blank-bound-old", "complete");
+    for edge in [&mut contradicts, &mut supersedes] {
+        edge.metadata
+            .pointer_mut("/provenance/model_invocation")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("receipt object")
+            .insert("content_hash".to_string(), json!("   "));
+    }
+
+    let expected_entry = expected_state(&conn, "blank-bound-new");
+    let expected = expected_state(&conn, "blank-bound-old");
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    persist_confirmed_contradiction_within_tx(
+        &tx,
+        &contradicts,
+        &supersedes,
+        &at,
+        &expected_entry,
+        &expected,
+    )
+    .expect_err("a present-but-blank content_hash must fail closed, not silently pass through");
+    drop(tx);
+    assert_no_contradiction_mutation(&conn, "blank-bound-old");
+}
+
 #[test]
 fn confirmed_contradiction_transaction_rolls_back_when_lifecycle_cas_loses() {
     let mut conn = make_conn();

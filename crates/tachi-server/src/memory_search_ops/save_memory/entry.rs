@@ -14,6 +14,13 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
     target_db: DbScope,
     existing: Option<&MemoryEntry>,
     model_invocation: Option<&PersistedModelInvocationReceiptV1>,
+    // #1558: the revision this write is expected to land on -- the same
+    // value the caller (handler.rs) already computes as `enrichment_revision`
+    // for the background-enrichment CAS. Threading the caller's value here
+    // instead of re-deriving `existing.revision + 1` locally keeps exactly
+    // one place answering "what revision will this write produce", so the
+    // two never drift into disagreeing about it.
+    next_revision: i64,
 ) -> Result<MemoryEntry, String> {
     let is_patch = params.id.is_some() && existing.is_some();
     let requested_scope = params.scope;
@@ -114,7 +121,15 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
     if let Some(existing_invocation) = trusted_existing_model_invocation(existing) {
         attach_trusted_existing_model_invocation(&mut metadata, existing_invocation)?;
     } else if let Some(invocation) = model_invocation {
-        metadata = crate::provenance::attach_model_invocation(metadata, invocation)?;
+        // #1558: bind the receipt to the exact bytes landing in the `text`
+        // column, not `safe_text` as constructed here -- `scrub_think_tags`
+        // still runs once more downstream (memcore's upsert), so hashing
+        // pre-scrub content would silently mismatch post-scrub rows
+        // whenever a model's raw output carries think-tags.
+        let bound_content = memcore::noise::scrub_think_tags(&safe_text);
+        let bound_invocation =
+            invocation.bound_to_content(&bound_content, id.as_str(), next_revision);
+        metadata = crate::provenance::attach_model_invocation(metadata, &bound_invocation)?;
     }
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("force".to_string(), serde_json::Value::Bool(params.force));

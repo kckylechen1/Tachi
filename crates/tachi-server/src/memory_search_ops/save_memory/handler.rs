@@ -734,6 +734,7 @@ async fn handle_save_memory_impl(
         target_db,
         existing_entry.as_ref(),
         model_invocation.as_ref(),
+        enrichment_revision,
     )?;
 
     // #1041 F3/C5: `build_save_entry` -> `inject_provenance` resolves
@@ -792,6 +793,20 @@ async fn handle_save_memory_impl(
     let mut wiki_duplicates_superseded = None;
     let mut wiki_previous_revision = None;
     if wiki_projection {
+        // #1558 fix round: a new receipt only attaches when `existing_entry`
+        // carries none yet (see `entry.rs`'s `build_save_entry` -- a row with
+        // a trusted existing receipt always takes the preserve branch, never
+        // the attach-new one). Only that exact case is the race described in
+        // #1558's review: two concurrent model-derived writers can both read
+        // the same receipt-less row and both compute a binding for the same
+        // next revision. Scope the guard to it so an ordinary (non-model) or
+        // preserve-branch wiki update keeps today's semantics unchanged.
+        let wiki_receipt_attach_expected_revision = existing_entry.as_ref().and_then(|existing| {
+            let attaches_new_receipt = model_invocation.is_some()
+                && crate::provenance::trusted_existing_model_invocation(&existing.metadata)
+                    .is_none();
+            attaches_new_receipt.then_some(existing.revision)
+        });
         let result = upsert_wiki_projection_entry(
             server,
             &mut entry,
@@ -799,6 +814,7 @@ async fn handle_save_memory_impl(
             target_db,
             named_project.as_deref(),
             &evidence_write,
+            wiki_receipt_attach_expected_revision,
         )?;
         wiki_duplicates_superseded = Some(result.duplicates_superseded);
         wiki_previous_revision = result.previous_revision;
