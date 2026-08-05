@@ -10,7 +10,7 @@
 //! Do NOT migrate these writers to `now_utc_iso` piecemeal. The migration needs a
 //! reader/backfill strategy for pre-existing rows (this family has a 30-day GC
 //! window, so old bare-form rows persist for weeks) and must land as its own leaf,
-//! not folded into an unrelated change. Tracked as a `tachi#1432` follow-up.
+//! not folded into an unrelated change. Tracked as `tachi#1638`.
 
 use rusqlite::{params, Connection};
 use serde_json;
