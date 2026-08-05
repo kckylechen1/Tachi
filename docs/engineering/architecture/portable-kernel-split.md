@@ -123,9 +123,18 @@ ownership adapter. HyperTachi tracks the portable core in downstream
 [HyperTachi#61](https://github.com/kckylechen1/Hyperion-HyperTachi/issues/61),
 with reference commit
 [`74c66dec`](https://github.com/kckylechen1/Hyperion-HyperTachi/commit/74c66dec).
-Until HyperTachi consumes the shared crate directly, changes to the portable
-source must be synced there and its exact-dedupe compatibility tests must pass
-against the same plan/apply fixtures.
+
+As of tachi#1348-A, the plan/apply/restore goldens (happy path, revision-drift
+refusal with batch rollback, edge transfer/dedup/self-loop drop, receipt
+round-trip via `restore_exact_dedupe`, `memories_vec` conservation across
+apply) live in-repo at
+`crates/portable-kernel/tests/exact_dedupe_contract.rs`, run with
+`cargo test -p portable-kernel --features portable-contract-test` the same
+way `portable_contract.rs` does. That goldens file is the mechanism a
+portable consumer (including a CI job outside this monorepo) can point at
+directly; the HyperTachi manual sync above remains the cross-repo check for
+as long as HyperTachi has not switched to consuming the shared crate, but it
+is no longer the only mechanism proving this contract.
 
 ## Targeted issue lanes (after this split)
 
