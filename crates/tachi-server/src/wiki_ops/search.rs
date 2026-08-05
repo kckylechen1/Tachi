@@ -124,6 +124,13 @@ pub(crate) async fn collect_wiki_search_value(
             return Err(format!("Wiki project '{project}' not found"));
         }
     }
+    // #1624: a resolved-empty store list (e.g. `--no-project-db` with no
+    // named "wiki" project) must refuse loudly, not report a clean
+    // `status:"completed", count:0` — that shape is indistinguishable from
+    // "searched everywhere, found nothing" and hides the misconfiguration.
+    if let Some(refusal) = zero_store_refusal(server, &plan) {
+        return Err(refusal);
+    }
     let path_prefix = params
         .category
         .as_deref()
