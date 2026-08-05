@@ -50,6 +50,7 @@ pub mod llm_usage;
 pub mod maintenance;
 pub mod memory_lifecycle;
 pub mod open;
+pub mod outbox;
 pub mod policy;
 #[cfg(test)]
 mod profile_identity_tests;
