@@ -1232,6 +1232,73 @@ pub(super) const WIKI_RECOVERY_LEDGERS_V28_SQL: &str = r#"
         );
 "#;
 
+/// v29 durable outbox for outbound memory mutations (tachi#1643, #1630 A1).
+///
+/// Installed only by the sentinel-gated migration runner, for the same reason
+/// v28 is: a stamped-older database must not acquire a new write surface
+/// through idempotent init DDL without migration authority and a matching
+/// `user_version` stamp.
+///
+/// **Portable, not product** ([`SchemaScope::Portable`] semantics): the
+/// migration that installs it takes no `StoreProfile` argument, so every
+/// profile gets the table — #1630's whole premise is a host-owned sync loop
+/// with no Tachi daemon dependency, so a `StoreProfile::PortableKernel`
+/// database must carry it.
+///
+/// Column notes:
+///
+/// * `event_id` is caller-supplied and immutable. The PRIMARY KEY is the
+///   uniqueness enforcement; immutability is enforced in Rust, because this
+///   repo's persistent-trigger inventory
+///   (`db::open::validate_persistent_trigger_inventory`) is a byte-exact
+///   allowlist of two `memories` guards plus the search-generation triggers —
+///   any additional persistent trigger makes the whole database refuse to
+///   open. The only UPDATE seam in `db::outbox` touches
+///   `state`/`last_error_class`/`state_changed_at` and nothing else.
+/// * `source_revision` is never caller-supplied: `db::outbox` reads it from
+///   the destination `memories` row inside the same transaction.
+/// * `state` carries a CHECK against the six #1630 states, so a raw-SQL writer
+///   (or a future migration that recreates the table) cannot introduce a state
+///   the Rust enum cannot name. The typed enum
+///   (`db::outbox::OutboxState`) is the transition authority; the CHECK is the
+///   storage-level backstop, and `schema::validate_memory_outbox_schema`
+///   refuses a table whose CHECK clause has drifted.
+/// * `created_at` and `state_changed_at` are canonical UTC-ISO
+///   (millisecond precision + `Z`, tachi#1432). The health read model takes
+///   `MIN`/`MAX` over them **lexically**, which is only chronologically
+///   correct because of that canonical shape.
+pub(super) const MEMORY_OUTBOX_V29_SQL: &str = r#"
+        CREATE TABLE IF NOT EXISTS memory_outbox_events (
+            event_id         TEXT PRIMARY KEY NOT NULL,
+            object_id        TEXT NOT NULL,
+            object_class     TEXT NOT NULL,
+            authority_class  TEXT NOT NULL,
+            source_store     TEXT NOT NULL,
+            source_partition TEXT NOT NULL,
+            source_revision  INTEGER NOT NULL,
+            payload_digest   TEXT NOT NULL,
+            state            TEXT NOT NULL CHECK (state IN ('pending', 'in_flight', 'acknowledged', 'rejected', 'conflicted', 'quarantined')),
+            last_error_class TEXT,
+            created_at       TEXT NOT NULL,
+            state_changed_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_outbox_events_state_created
+            ON memory_outbox_events(state, created_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_outbox_events_state_changed
+            ON memory_outbox_events(state, state_changed_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_outbox_events_object
+            ON memory_outbox_events(object_id, created_at);
+"#;
+
+/// The exact CHECK clause `MEMORY_OUTBOX_V29_SQL` installs on
+/// `memory_outbox_events.state`, in whitespace-normalized form. Schema
+/// validation compares against this so a table recreated without the
+/// constraint — or with a different state vocabulary — is refused rather than
+/// silently accepted (`pragma_table_info` cannot see CHECK constraints).
+pub(super) const MEMORY_OUTBOX_STATE_CHECK_CLAUSE: &str =
+    "CHECK (state IN ('pending', 'in_flight', 'acknowledged', 'rejected', 'conflicted', \
+     'quarantined'))";
+
 /// Historical v25 DDL for the sampled, content-free recall impression ledger
 /// (tachi#1447). It exists only so the versioned migration sequence can build
 /// the same v25 shape before v26 upgrades it; new databases end at

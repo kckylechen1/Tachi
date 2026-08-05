@@ -51,6 +51,11 @@
 //!   recall impressions; v25 groups remain honestly unversioned (#1447).
 //! - v27: content-free typo-fallback attribution columns on the v26 ledger (#1506).
 //! - v28: Wiki REM source-claim and exact-dedupe apply-lineage recovery ledgers (#1542).
+//! - v29: `memory_outbox_events` durable outbox for outbound memory mutations
+//!   (#1643 / #1630 A1). A NEW TABLE, so a bump is unavoidable: the v22 and
+//!   v28 precedents both state why a table may not arrive through idempotent
+//!   init DDL — a stamped-older database would silently acquire a new write
+//!   surface without migration authority or a matching stamp.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -94,7 +99,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 28;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 29;
 
 mod basic;
 mod cross_db;
@@ -173,6 +178,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v26_recall_impression_replay_identity",
     "v27_typo_fallback_attribution",
     "v28_wiki_recovery_ledgers",
+    "v29_memory_outbox",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -207,6 +213,7 @@ pub struct MigrationReport {
     pub recall_impression_replay_identity_columns_added: usize,
     pub typo_fallback_attribution_columns_added: usize,
     pub wiki_recovery_schema_objects_created: usize,
+    pub memory_outbox_schema_objects_created: usize,
 }
 
 #[cfg(test)]
@@ -680,6 +687,11 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v28_wiki_recovery_ledgers,
     )?
     .unwrap_or(0);
+    // No `profile` argument on purpose (#1643): the outbox is portable
+    // surface, so a PortableKernel database gets it too.
+    report.memory_outbox_schema_objects_created =
+        apply_versioned_migration(conn, "v29_memory_outbox", migrate_v29_memory_outbox)?
+            .unwrap_or(0);
 
     Ok(report)
 }
@@ -717,6 +729,13 @@ fn migrate_v28_wiki_recovery_ledgers(conn: &Connection) -> Result<usize, MemoryE
     crate::db::schema::install_wiki_recovery_ledgers_schema(conn)?;
     crate::db::schema::validate_wiki_recovery_ledgers_schema(conn)?;
     Ok(3)
+}
+
+/// One table plus its three indexes (#1643).
+fn migrate_v29_memory_outbox(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::install_memory_outbox_schema(conn)?;
+    crate::db::schema::validate_memory_outbox_schema(conn)?;
+    Ok(4)
 }
 
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
@@ -1457,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn private_fresh_init_installs_v25_through_v28_migrations_once() {
+    fn private_fresh_init_installs_v25_through_v29_migrations_once() {
         let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open in-memory");
@@ -1477,9 +1496,11 @@ mod tests {
         assert_eq!(sentinel_version("v26_recall_impression_replay_identity"), 1);
         assert_eq!(sentinel_version("v27_typo_fallback_attribution"), 1);
         assert_eq!(sentinel_version("v28_wiki_recovery_ledgers"), 1);
+        assert_eq!(sentinel_version("v29_memory_outbox"), 1);
         crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
         crate::db::schema::validate_typo_fallback_attribution_schema(&conn).unwrap();
         crate::db::schema::validate_wiki_recovery_ledgers_schema(&conn).unwrap();
+        crate::db::schema::validate_memory_outbox_schema(&conn).unwrap();
 
         init_schema(&conn).expect("valid current private schema reopens idempotently");
         assert_eq!(
@@ -1501,6 +1522,11 @@ mod tests {
             sentinel_version("v28_wiki_recovery_ledgers"),
             1,
             "v28 migration must run once"
+        );
+        assert_eq!(
+            sentinel_version("v29_memory_outbox"),
+            1,
+            "v29 migration must run once"
         );
     }
 
@@ -2760,11 +2786,18 @@ mod tests {
             "global",
             &DbOpenContext::open_existing_allow("test:1542-v28"),
         )
-        .expect("Allow must migrate v27 -> v28");
+        .expect("Allow must migrate v27 -> current");
         drop(store);
 
-        let verify = Connection::open(&path).expect("verify migrated v28 database");
-        assert_eq!(read_schema_version(&verify).unwrap(), 28);
+        let verify = Connection::open(&path).expect("verify migrated current database");
+        // The stamp lands at the CURRENT expected version, not at 28: an
+        // authorized open runs every pending migration, so pinning the literal
+        // would make this test fail on the next legitimate bump (the v26 -> v27
+        // test above already uses the constant for exactly this reason).
+        assert_eq!(
+            read_schema_version(&verify).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
         assert!(was_run(&verify, V28_SENTINEL).unwrap());
         assert!(object_exists(&verify, "table", "rem_source_claims"));
         assert!(object_exists(
