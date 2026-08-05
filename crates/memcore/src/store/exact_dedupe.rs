@@ -1,6 +1,7 @@
 //! Portable, strict same-path byte-exact duplicate maintenance.
 
 use super::super::{MemoryError, MemoryStore};
+use crate::db;
 use crate::path_router::normalize_path;
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -797,7 +798,7 @@ impl MemoryStore {
                 }
             }
         }
-        let now = Utc::now().to_rfc3339();
+        let now = db::now_utc_iso();
         let apply_id = uuid::Uuid::new_v4().to_string();
         // The complete text-digest revalidation above runs after BEGIN IMMEDIATE,
         // which excludes intervening writers until commit. The UPDATE therefore
@@ -1135,6 +1136,22 @@ fn transfer_edges_to_winner(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// tachi#1432: same canonical-shape idiom pinned in `db/common.rs`'s
+    /// `canonical_shape()`/`assert_canonical` — millisecond precision, `Z`
+    /// suffix, no numeric offset. Reused here (not imported: that helper is
+    /// private to `db::common::tests`) as a writer-output discriminator so
+    /// reintroducing a bare `Utc::now().to_rfc3339()` at this crate's
+    /// migrated call sites REDs the test that reads the row back, not just
+    /// the renderer unit test.
+    fn assert_canonical_timestamp_shape(ts: &str) {
+        let canonical =
+            regex::Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$").unwrap();
+        assert!(
+            canonical.is_match(ts),
+            "not canonical Millis+Z shape: {ts:?}"
+        );
+    }
 
     fn fixture_sql<T>(store: &MemoryStore, operation: impl FnOnce() -> T) -> T {
         let _authorization =
@@ -1941,12 +1958,12 @@ mod tests {
             .unwrap();
         assert_eq!(plan.groups[0].winner.path, "/Wiki//child/");
         store.apply_exact_dedupe(&plan).unwrap();
-        let state: (i64, Option<String>, Option<String>, i64) = store
+        let state: (i64, Option<String>, Option<String>, i64, String) = store
             .conn
             .query_row(
-                "SELECT archived,superseded_by,valid_until,revision FROM memories WHERE id='loser'",
+                "SELECT archived,superseded_by,valid_until,revision,updated_at FROM memories WHERE id='loser'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
         assert_eq!(state.0, 1);
@@ -1957,6 +1974,14 @@ mod tests {
         );
         assert!(state.2.is_some());
         assert_eq!(state.3, 2);
+        // tachi#1432 CONCERN 3: `apply_exact_dedupe`'s stamp (exact_dedupe.rs
+        // `let now = db::now_utc_iso();`) must land in `updated_at`/`valid_until`
+        // as canonical millis+Z shape, not a bare `Utc::now().to_rfc3339()`
+        // (numeric offset, auto-precision fraction) — see the renderer contract
+        // pinned in `db/common.rs`'s `now_utc_iso_matches_canonical_shape`.
+        // Reintroducing the bare form at this call site must RED here.
+        assert_canonical_timestamp_shape(state.2.as_deref().unwrap());
+        assert_canonical_timestamp_shape(&state.4);
         assert_eq!(
             store
                 .conn

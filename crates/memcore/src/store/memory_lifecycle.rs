@@ -270,14 +270,13 @@ pub fn lifecycle_text_digest(text: &str) -> String {
 /// writer.
 ///
 /// Declared in this module because lifecycle transitions also format
-/// caller-supplied times; `db::now_utc_iso` only renders the current time.
+/// caller-supplied times (an arbitrary `expires_at`, not "now"); the
+/// promoted `db::now_utc_iso()` is parameterless and only renders the
+/// current instant, so it cannot replace this one. For "now" specifically,
+/// callers use `db::now_utc_iso()` directly (tachi#1432) — this module no
+/// longer carries its own `lifecycle_now_iso` duplicate of that renderer.
 fn lifecycle_iso(at: chrono::DateTime<chrono::Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-/// [`lifecycle_iso`] of now.
-fn lifecycle_now_iso() -> String {
-    lifecycle_iso(chrono::Utc::now())
 }
 
 /// Single source of truth for lifecycle-source protection. The facade maps
@@ -742,7 +741,7 @@ pub fn review_lifecycle_proposal(
         )));
     }
 
-    let now = lifecycle_now_iso();
+    let now = db::now_utc_iso();
     let decision_str = decision.as_str();
     value["status"] = serde_json::json!(decision_str);
     value["review"] = serde_json::json!({
@@ -1003,7 +1002,7 @@ fn apply_lifecycle_proposal_once(
     // ── Mutate memory INSIDE the same tx ──────────────────────────────────
     let apply_result = match action {
         ACTION_ARCHIVE => {
-            let now = lifecycle_now_iso();
+            let now = db::now_utc_iso();
             let changed = tx.execute(
                 "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1
                  WHERE id = ?2 AND revision = ?3 AND archived = 0",
@@ -1027,7 +1026,7 @@ fn apply_lifecycle_proposal_once(
                     "supersede proposal {proposal_id} requires target_id"
                 ))
             })?;
-            let now = lifecycle_now_iso();
+            let now = db::now_utc_iso();
             // An existing supersession edge is immutable: install A -> B only
             // from NULL, never replace a concurrent or pre-existing A -> C.
             // The edge guard is part of the same revision/archive CAS.
@@ -1101,7 +1100,7 @@ fn apply_lifecycle_proposal_once(
             // pre-existing A -> C. Keep that edge guard inside the same
             // revision/archive CAS and transaction as the merge fold, so a
             // failed source mutation rolls the target fold back too.
-            let now = lifecycle_now_iso();
+            let now = db::now_utc_iso();
             let changed = tx.execute(
                 "UPDATE memories SET archived = 1, superseded_by = ?1,
                  valid_until = COALESCE(valid_until, ?2), updated_at = ?2, revision = revision + 1
@@ -1149,7 +1148,7 @@ fn apply_lifecycle_proposal_once(
     };
 
     // ── Stamp proposal applied (CAS inside the same tx) ───────────────────
-    let now = lifecycle_now_iso();
+    let now = db::now_utc_iso();
     let expires =
         lifecycle_iso(chrono::Utc::now() + chrono::Duration::days(LIFECYCLE_TERMINAL_TTL_DAYS));
     proposal["status"] = serde_json::json!("applied");
@@ -2146,7 +2145,7 @@ mod tests {
                 "UPDATE memories SET keywords = ?1, updated_at = ?2 WHERE id = ?3",
                 params![
                     r#"["alpha","injected-after-approval"]"#,
-                    lifecycle_now_iso(),
+                    db::now_utc_iso(),
                     source.id
                 ],
             )

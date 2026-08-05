@@ -534,3 +534,91 @@ fn the_vector_leg_is_gated_on_store_identity_too() {
         "an explicit /recall-cache prefix opts back in on the vector leg too: {opted_in:?}"
     );
 }
+
+/// tachi#1432 (final leaf): the residual risk the writer migration leaves
+/// behind. Every writer now routes through `now_utc_iso` /
+/// `normalize_utc_iso` (db/common.rs), so a fixed write path can no longer
+/// *produce* a bare (`+00:00`, non-millisecond) `valid_until`. Rows written
+/// before that migration can still carry the bare shape, so this seeds one
+/// via a raw SQL `UPDATE` the fixed paths can no longer reach, and runs the
+/// real as-of search path (`search_fts`'s `valid_until > ?` predicate, the
+/// narrowest seam into `db/memory_crud/search.rs`) to prove it still
+/// resolves correctly for a well-separated legacy row.
+///
+/// This is a positive-control pin, not proof the lexical hazard is closed:
+/// `db/common.rs`'s
+/// `same_instant_bare_offset_and_canonical_forms_are_lexically_unordered`
+/// shows the hazard bites only when the bare row's instant sits close enough
+/// to the query instant that the `.`/`+` divergence point falls inside a
+/// shared digit prefix (a near-boundary legacy row). A well-separated legacy
+/// row (this test, April vs. a March query) and a near-boundary one are two
+/// different cases; only the first exists as real, exercisable data in this
+/// fixture, so only the first is pinned here. The near-boundary case is the
+/// known, documented residual risk of pre-#1432 legacy rows.
+#[test]
+fn as_of_search_returns_a_legacy_bare_shape_row_when_well_separated_from_the_query_instant() {
+    let mut conn = make_conn();
+
+    // Row A: canonical shape, expires BEFORE the query instant. Negative
+    // control -- proves the as-of filter is doing real work, not passing
+    // everything through.
+    let mut canonical_expired = make_entry(
+        "temporal-1432-canonical",
+        "TemporalHazardNeedle canonical row",
+    );
+    canonical_expired.valid_from = "2026-01-01T00:00:00.000Z".to_string();
+    canonical_expired.valid_until = Some("2026-02-01T00:00:00.000Z".to_string());
+    upsert(&mut conn, &canonical_expired, false).unwrap();
+
+    // Row B: written through the normal path first (so it lands correctly in
+    // both `memories` and `memories_fts`), then its `valid_until` is
+    // overwritten with a bare `+00:00`, non-millisecond rendering via raw
+    // SQL -- standing in for a pre-#1432 legacy row, a shape the fixed
+    // writers can no longer produce. Its instant (April) is LATER than the
+    // query instant (March), so it must still be returned.
+    let mut bare_active = make_entry("temporal-1432-bare", "TemporalHazardNeedle bare row");
+    bare_active.valid_from = "2026-01-01T00:00:00.000Z".to_string();
+    upsert(&mut conn, &bare_active, false).unwrap();
+    conn.execute(
+        "UPDATE memories SET valid_until = ?1 WHERE id = 'temporal-1432-bare'",
+        params!["2026-04-01T00:00:00+00:00"],
+    )
+    .unwrap();
+
+    // The bare and canonical renderings of the SAME instant round-trip to
+    // identical bytes through the normalizer. The search predicate itself
+    // never normalizes the *stored* `valid_until` -- only the incoming
+    // `as_of` parameter goes through `normalize_utc_iso` -- so this
+    // equivalence is a property of the renderer, not something the SQL
+    // exercises.
+    assert_eq!(
+        normalize_utc_iso("2026-04-01T00:00:00+00:00").unwrap(),
+        normalize_utc_iso("2026-04-01T00:00:00.000Z").unwrap(),
+        "normalize_utc_iso must round-trip both shapes to identical bytes"
+    );
+
+    let as_of_query = "2026-03-01T00:00:00.000Z";
+    let results = search_fts(
+        &conn,
+        "TemporalHazardNeedle",
+        10,
+        false,
+        false,
+        None,
+        Some(as_of_query),
+        None,
+        false,
+    )
+    .unwrap();
+
+    assert!(
+        !results.contains_key("temporal-1432-canonical"),
+        "row expired before the as-of instant must not be returned: {results:?}"
+    );
+    assert!(
+        results.contains_key("temporal-1432-bare"),
+        "a legacy bare-shape row whose instant is LATER than the as-of query \
+         must still be returned even though its valid_until never went \
+         through the post-#1432 canonical renderer: {results:?}"
+    );
+}
