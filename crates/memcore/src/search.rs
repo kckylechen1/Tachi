@@ -5,7 +5,7 @@
 // This is the hottest path: all computation stays in Rust, zero JS/Python overhead.
 
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -436,6 +436,12 @@ pub struct GraphPhaseReceipt {
     pub failed: bool,
     pub elapsed: Duration,
     pub expanded_count: usize,
+    /// `expanded_count`'s breakdown by relation class — tachi#1647 2b. Keyed
+    /// by each injected result's [`crate::types::GraphInjectionProvenance::via_edge`],
+    /// counted post-truncation so the sum of values always equals
+    /// `expanded_count`. Empty (not absent) when the phase did not inject
+    /// anything (disabled, failed, or zero neighbors found).
+    pub relation_counts: BTreeMap<String, usize>,
 }
 
 /// Access-recording write transaction receipt. Populated iff
