@@ -152,12 +152,20 @@ fn distill_edges_include_causal_guide_relations() {
         .map(|edge| edge.relation)
         .collect::<std::collections::HashSet<_>>();
     assert!(relations.contains("distilled_from"));
-    assert!(relations.contains("fixed_by"));
+    assert!(
+        relations.contains("references"),
+        "tachi#1646 round-2: keyword-derived fix_pattern relation demotes to references: {relations:?}"
+    );
     assert!(relations.contains("rejected_because"));
+    assert!(!relations.contains("fixed_by"));
 
     let constraint_relations = plan_distill_edges(&guide, &sources, "constraint", &guide.timestamp)
         .into_iter()
         .map(|edge| edge.relation)
         .collect::<std::collections::HashSet<_>>();
-    assert!(constraint_relations.contains("causes"));
+    assert!(
+        constraint_relations.contains("follows"),
+        "tachi#1646 round-2: keyword-derived non-fix_pattern relation demotes to follows: {constraint_relations:?}"
+    );
+    assert!(!constraint_relations.contains("causes"));
 }

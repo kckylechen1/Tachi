@@ -8,8 +8,8 @@ use memcore::{
     MemoryEdge, MemoryEntry, MemoryError, MemoryStore,
 };
 use tachi_foundry::{
-    plan_daily_distill_memory, plan_distill_edges, should_archive_daily_distill_source,
-    DailyDistillMemoryInput,
+    distill_edge_relation_is_structural, plan_daily_distill_memory, plan_distill_edges,
+    should_archive_daily_distill_source, DailyDistillMemoryInput,
 };
 use tachi_llm::PersistedModelInvocationReceiptV1;
 
@@ -245,13 +245,23 @@ fn write_distill_entry(
                 return Ok(inserted);
             }
             let claimed_sources = claim_distilled_sources(replacement, entry, source_entries)?;
-            // tachi#1646: `follows` distill-trajectory edges are
-            // deterministic bookkeeping over this batch's own sources.
+            // tachi#1646 round-2 MUST-FIX 2: only the `distilled_from` edge
+            // here is deterministic bookkeeping over this batch's own
+            // sources; the `follows`/`rejected_because` siblings were
+            // relation-selected by a keyword-substring match
+            // (`mentions_rejection`, and the `guide_type` default branch)
+            // and must be stamped `DerivedHeuristic`, not borrow the
+            // structural class's trust.
             for edge in plan_distill_edges(entry, source_entries, "daily_batch", &entry.timestamp) {
+                let authority = if distill_edge_relation_is_structural(&edge.relation) {
+                    memcore::db::EdgeAuthority::StructuralBookkeeping
+                } else {
+                    memcore::db::EdgeAuthority::DerivedHeuristic
+                };
                 replacement.add_edge_with_provenance(
                     &edge,
                     &memcore::db::EdgeProvenance {
-                        authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                        authority: Some(authority),
                         ..Default::default()
                     },
                 )?;
