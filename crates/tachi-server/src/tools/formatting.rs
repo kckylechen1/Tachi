@@ -4,11 +4,11 @@ pub(super) fn wants_json_format(format: Option<&str>) -> bool {
     crate::facade_memory_ops::wants_json(format)
 }
 
-/// tachi#1201: `recommend`/`profiles`/`profile`/`card` are read-heavy
+/// tachi#1201: `profiles`/`profile`/`card` are read-heavy
 /// discovery endpoints. Historically an omitted `format` meant JSON
 /// everywhere (`wants_json`'s global `None => true` default, shared by every
 /// OTHER facade action — save/checkpoint/briefing/wiki/... ). Scope the
-/// default-format flip to just these four actions instead of touching that
+/// default-format flip to just these three actions instead of touching that
 /// global default: when the caller hasn't set `format` at all (or set it to
 /// an empty string), resolve it to `"markdown"` for these actions only.
 fn resolved_action_format(action: &str, format: Option<&str>) -> Option<String> {
@@ -16,77 +16,11 @@ fn resolved_action_format(action: &str, format: Option<&str>) -> Option<String> 
     if explicit.is_some() {
         return explicit.map(str::to_string);
     }
-    if matches!(action, "recommend" | "profiles" | "profile" | "card") {
+    if matches!(action, "profiles" | "profile" | "card") {
         Some("markdown".to_string())
     } else {
         None
     }
-}
-
-/// Per-row keys kept in the `recommend` JSON candidate shape (tachi#1201 item
-/// 2). The dropped fields (agent/model/live_samples/useful_rate/
-/// failure_count/performance_samples/human_override_rate/avg_retry_count/
-/// avg_latency_ms/avg_cost_usd) duplicate what the top-level `mbit_card` (or
-/// the live-eval evidence a caller can fetch with format='full') already
-/// carries — the per-row fat is what item 2 asks to de-duplicate. `reasons`
-/// is kept whole (not truncated): it is typically a handful of short
-/// strings, and several existing callers key routing assertions off finding
-/// a specific reason string anywhere in that list.
-const RECOMMEND_CANDIDATE_ROW_KEYS: &[&str] = &["profile", "role", "score"];
-
-fn slim_recommend_candidate(candidate: &Value) -> Value {
-    let mut row = serde_json::Map::new();
-    for key in RECOMMEND_CANDIDATE_ROW_KEYS {
-        if let Some(field) = candidate.get(*key) {
-            row.insert((*key).to_string(), field.clone());
-        }
-    }
-    row.insert(
-        "reasons".to_string(),
-        candidate
-            .get("reasons")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-    );
-    Value::Object(row)
-}
-
-/// JSON-mode shaping for `action='recommend'` (tachi#1201 item 2): slims
-/// every `candidates` row unconditionally, and gates the two large
-/// unconditionally-embedded fields the pre-#1201 shape always carried:
-/// `identity_receipt` (kept only when `verbose=true`) and the single
-/// top-level `mbit_card` (kept only when `include_card=true`). Response
-/// shapes that don't carry these keys at all (e.g. the host-admission
-/// decline receipt, which returns before `candidates`/`mbit_card` are ever
-/// built) pass through unchanged aside from the usual status/action fill.
-fn normalize_recommend_json_response(
-    raw: &str,
-    verbose: bool,
-    include_card: bool,
-) -> Result<String, String> {
-    let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
-        return Ok(raw.to_string());
-    };
-    if let Some(obj) = value.as_object_mut() {
-        obj.entry("status".to_string())
-            .or_insert_with(|| Value::String("completed".to_string()));
-        obj.entry("action".to_string())
-            .or_insert_with(|| Value::String("recommend".to_string()));
-        if !verbose {
-            obj.remove("identity_receipt");
-        }
-        if !include_card {
-            obj.remove("mbit_card");
-        }
-        if let Some(candidates) = obj.get("candidates").and_then(Value::as_array) {
-            let slim = candidates
-                .iter()
-                .map(slim_recommend_candidate)
-                .collect::<Vec<_>>();
-            obj.insert("candidates".to_string(), Value::Array(slim));
-        }
-    }
-    serde_json::to_string(&value).map_err(|e| format!("serialize normalized recommend JSON: {e}"))
 }
 
 pub(crate) fn format_facade_response(
@@ -94,28 +28,19 @@ pub(crate) fn format_facade_response(
     action: &str,
     raw: &str,
     format: Option<&str>,
-    verbose: bool,
-    include_card: bool,
+    _verbose: bool,
 ) -> Result<String, String> {
     let resolved = resolved_action_format(action, format);
     let format = resolved.as_deref();
     // format=full is the agent-facing verbose JSON receipt (#527), not human
-    // markdown, and (tachi#1201) always bypasses recommend's JSON slimming —
-    // "full" already means "give me everything", the same intent as
-    // verbose=true + include_card=true together.
+    // markdown.
     let wants_full = crate::facade_memory_ops::wants_full_format(format);
     if wants_json_format(format) || wants_full {
-        if action == "recommend" && !wants_full {
-            return normalize_recommend_json_response(raw, verbose, include_card);
-        }
         return normalize_json_facade_response(action, raw);
     }
     let value = serde_json::from_str::<Value>(raw).map_err(|e| {
         format!("format {title} markdown response: expected JSON from action '{action}': {e}")
     })?;
-    if action == "recommend" {
-        return Ok(render_recommend_markdown(title, action, &value));
-    }
     // tachi#1201: `profile`/`card` are pre-existing on-demand-full-card
     // aliases of the same `dispatch_profiles_json_for_server` listing
     // `profiles` renders — same response shape (`dispatch_profiles` +
@@ -345,61 +270,6 @@ fn append_host_admission_markdown(lines: &mut Vec<String>, value: &Value) {
         receipt_value("allowed"),
         receipt_value("reason_code"),
     ));
-}
-
-/// Render the `recommend` action as a candidates table plus the resolved routing summary.
-pub(super) fn render_recommend_markdown(title: &str, action: &str, value: &Value) -> String {
-    let mut lines = vec![format!("## {title}"), format!("action: `{action}`")];
-
-    if let Some(task) = value
-        .get("task")
-        .and_then(Value::as_str)
-        .filter(|t| !t.is_empty())
-    {
-        lines.push(format!("task: {}", md_table_cell(task)));
-    }
-    append_host_admission_markdown(&mut lines, value);
-    if let Some(profile) = value.get("recommended_profile").and_then(Value::as_str) {
-        lines.push(format!("recommended_profile: `{profile}`"));
-    }
-    if let Some(transport) = value.get("recommended_transport").and_then(Value::as_str) {
-        lines.push(format!("recommended_transport: `{transport}`"));
-    }
-    if let Some(chain) = value.get("fallback_chain").and_then(Value::as_array) {
-        let chain = chain
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(" -> ");
-        if !chain.is_empty() {
-            lines.push(format!("fallback_chain: {chain}"));
-        }
-    }
-
-    if let Some(candidates) = value.get("candidates").and_then(Value::as_array) {
-        lines.push(String::new());
-        lines.push("| profile | role | score | useful_rate | top reason |".to_string());
-        lines.push("| --- | --- | --- | --- | --- |".to_string());
-        for candidate in candidates {
-            let profile = md_opt_str(candidate, "profile");
-            let role = md_opt_str(candidate, "role");
-            let score = md_opt_num(candidate, "score");
-            let useful_rate = md_opt_num(candidate, "useful_rate");
-            let top_reason = candidate
-                .get("reasons")
-                .and_then(Value::as_array)
-                .and_then(|reasons| reasons.first())
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .map(md_table_cell)
-                .unwrap_or_else(|| "-".to_string());
-            lines.push(format!(
-                "| {profile} | {role} | {score} | {useful_rate} | {top_reason} |"
-            ));
-        }
-    }
-
-    lines.join("\n")
 }
 
 /// Render the `profiles` action as a table of configured dispatch profiles.

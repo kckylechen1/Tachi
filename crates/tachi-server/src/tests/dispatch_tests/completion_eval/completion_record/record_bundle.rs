@@ -74,9 +74,9 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     assert!(
         next_steps.iter().any(|step| step.as_str().is_some_and(|s| {
             let lower = s.to_ascii_lowercase();
-            lower.contains("no worktree") || lower.contains("no approve_merge")
+            lower.contains("no worktree") || lower.contains("no local worktree ship step")
         })),
-        "no-worktree completion should not imply approve_merge: {bundle:#}"
+        "no-worktree completion should not imply a local ship step: {bundle:#}"
     );
     let path = bundle["eval_entry"]["path"]
         .as_str()

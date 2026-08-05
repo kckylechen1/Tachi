@@ -85,10 +85,9 @@ Agent / IDE / CLI
   - 用 `merge_attempted` / `merge_executed` 判断是否真的调用或完成 merge，不要只看请求模式。
   - 默认 `merge_policy="standard"`，缺失 checks 或 review decision 会等待，不会静默当作绿色。
   - 传入 `flow_id` 时，会把 `pending|blocked|ready|merged` 写入 `.tachi/runs/<flow_id>/status.json`，并追加 GitHub 事件到 `events.jsonl`。
-- **`approve_merge` / `tachi_task merge`**：针对 **Tachi dispatch 产生的本地 git worktree** 的 `git merge` 预览/执行与可选 `worktree remove`；不含 `git push` / `gh pr merge`。
 - **`tachi_dispatch`**：拉起 Claude/Codex 等子进程；若子进程配置里自带 MCP/shell，那是外围 harness 配置，不代表 Tachi 自动查 PR 或自动 merge。
 - **Hub proxy**：已注册 MCP 可通过 **`hub_call` / `server__tool`** 暴露；可对子能力配 **sandbox policy**（目录、env 白名单、超时等）。
-- **规则**：PR 生命周期用 `tachi_gh`；本地 subagent worktree 回收用 `approve_merge` / `tachi_task`。不要把这两条 merge 路径混用。
+- **规则**：PR 生命周期与 PR 合并用 `tachi_gh`；不要把本地 worktree 清理路径当成 GitHub merge 路径。
 
 ---
 
@@ -156,7 +155,7 @@ Agent / IDE / CLI
 
 1. **GitHub/`gh` 后续增强**：CLI parity、branch-protection metadata、unresolved review threads、独立 checks/review head SHA 证明。
 2. **Vault → 子进程 env** 的通用封装（减少依赖用户 `eval "$(tachi env)"`）。
-3. **`approve_merge` 之后**：可选 **受控 push**；GitHub PR 合并使用 `tachi_gh(action="safe_merge", confirm=true)`（强审计、确认参数）。
+3. **GitHub PR 合并**：使用 `tachi_gh(action="safe_merge", confirm=true)`（强审计、确认参数）。
 4. **通用受控 shell**：外部 MCP + policy **或** 内置 `sandbox_exec` 设计评审。
 5. **setup 向导**：可选增加 `GH_TOKEN` 说明位（`SETUP_API_KEYS` 扩展）。
 6. **发版**：私有仓与 Homebrew/制品发布的流程文档化。

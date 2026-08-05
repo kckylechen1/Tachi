@@ -103,7 +103,7 @@ fn issue_ref_from_kanban(server: &MemoryServer, dispatch_id: &str) -> Option<Str
 
 /// tachi#1200 item 1: eval/subagent rows written by `tachi_complete` without a
 /// leader `profile` id can never be matched by policy replay
-/// (`tachi_tune(action='route_simulate')`/`tachi_task(action='recommend')`) — both filter live
+/// (`tachi_tune(action='route_simulate')`) — it filters live
 /// `/eval` rows on an exact `EvalRow.profile` match against a known dispatch
 /// profile name (see `tachi_dispatch::routing::simulate_route_policy` and
 /// `build_profile_candidate`'s `live_samples` count), so a `None` profile

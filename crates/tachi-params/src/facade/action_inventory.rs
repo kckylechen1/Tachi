@@ -12,6 +12,18 @@
 pub const TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS: &[&str] =
     &["link_pr", "pr_status", "pr_handoff", "release_note"];
 
+/// C1a of #1611/#1683 retired these primary `tachi_task` actions without
+/// folding them into Task replacements. Keep a machine-checkable deny-list so
+/// schemas, docs, and active profile discriminators cannot keep teaching them.
+pub const TACHI_TASK_RETIRED_C1A_ACTIONS: &[&str] = &[
+    "plan",
+    "cycle_plan",
+    "recommend",
+    "refine_issues",
+    "merge",
+    "ux_matrix",
+];
+
 /// Canonical WorkClaim lifecycle actions exposed on `tachi_task` by #1253.
 #[cfg(test)]
 const TACHI_TASK_WORKCLAIM_ACTIONS: &[&str] = &["claim", "release", "heartbeat", "handoff"];
@@ -147,14 +159,37 @@ mod tests {
                 "#1253 WorkClaim action {action} must be advertised on tachi_task"
             );
         }
-        // #1002 Issue Refinery plus append-only adjudication bumped this from
-        // 24 -> 26. #1253 WorkClaim lifecycle then intentionally adds four
-        // canonical task actions: claim, release, heartbeat, and handoff.
-        // #1319-C2 removes three (dispatch/wait/cancel) as worker launch
-        // moves to tachi_staff: 30 -> 27. #1426 then moves four route-tuning
-        // actions to tachi_tune: 27 -> 23.
+        for action in TACHI_TASK_RETIRED_C1A_ACTIONS {
+            assert!(
+                !primary.contains(action),
+                "#1683 C1a retired task action {action} must not be advertised"
+            );
+        }
+        assert_eq!(
+            primary,
+            [
+                "intake",
+                "claim",
+                "heartbeat",
+                "handoff",
+                "release",
+                "board",
+                "status",
+                "complete",
+                "adjudicate",
+                "briefing",
+                "doc_index",
+                "cycle_status",
+                "profiles",
+                "profile",
+                "card",
+                "build_references",
+                "close_loop"
+            ]
+        );
+        // #1683 C1a removes six task actions from the 23-action surface.
         // Keep this exact so the next inventory addition gets explicit review.
-        assert_eq!(primary.len(), 23);
+        assert_eq!(primary.len(), 17);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 

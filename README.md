@@ -190,12 +190,12 @@ These examples show the JSON arguments you would pass to the MCP tools. Facade t
   }
 }
 
-// Ask Tachi for context-aware planning, then delegate ordinary bounded work
+// Ask Tachi for a feature-scoped briefing, then delegate ordinary bounded work
 // with your host's native subagent:
 {
   "tool": "tachi_task",
   "arguments": {
-    "action": "plan",
+    "action": "briefing",
     "task": "Review the API boundary and identify compatibility risks."
   }
 }

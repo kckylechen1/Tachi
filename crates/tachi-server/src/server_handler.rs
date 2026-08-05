@@ -1156,7 +1156,7 @@ mod tests {
             .as_array()
             .expect("standard action enum");
         assert!(!standard_actions.contains(&json!("dispatch")));
-        assert!(standard_actions.contains(&json!("recommend")));
+        assert!(!standard_actions.contains(&json!("recommend")));
         assert!(standard_actions.contains(&json!("complete")));
         let standard_properties = standard[0].input_schema["properties"]
             .as_object()

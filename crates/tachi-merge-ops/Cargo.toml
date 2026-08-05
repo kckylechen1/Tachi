@@ -3,13 +3,9 @@ name = "tachi-merge-ops"
 version = "1.9.2"
 edition = "2021"
 license = "AGPL-3.0-only"
-description = "Local worktree merge toolkit (approve_merge, safety gates, cleaner integration). Extracted from tachi-server (#833)."
+description = "Local worktree cleanup bridge used by GitHub safe-merge flows."
 
 [dependencies]
-tachi-params = { path = "../tachi-params" }
 tokio = { version = "1", features = ["process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-[dev-dependencies]
-tempfile = "3"

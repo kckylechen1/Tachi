@@ -197,7 +197,6 @@ pub(super) async fn handle_tachi_wiki_facade(
                 &raw,
                 format.as_deref(),
                 false,
-                false,
             )
         }
         _ => Err(format!(

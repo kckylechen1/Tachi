@@ -2,33 +2,27 @@
   "schema_version": "task_field_disposition.v1",
   "issue": 1319,
   "generated_from": "crates/tachi-params/src/facade/task.rs::TachiTaskParams + crates/tachi-server/src/tools/task_router.rs",
-  "total_fields": 105,
+  "total_fields": 100,
   "fields": {
     "action": {
       "used_by_actions": [
-        "plan",
+        "intake",
+        "claim",
+        "heartbeat",
+        "handoff",
+        "release",
+        "board",
+        "status",
+        "complete",
+        "adjudicate",
         "briefing",
         "doc_index",
-        "recommend",
-        "complete",
+        "cycle_status",
         "profiles",
         "profile",
         "card",
-        "status",
-        "board",
-        "merge",
-        "intake",
-        "cycle_status",
-        "cycle_plan",
-        "ux_matrix",
         "build_references",
-        "close_loop",
-        "refine_issues",
-        "adjudicate",
-        "claim",
-        "release",
-        "heartbeat",
-        "handoff"
+        "close_loop"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
@@ -36,13 +30,23 @@
     },
     "format": {
       "used_by_actions": [
-        "plan",
+        "intake",
+        "claim",
+        "heartbeat",
+        "handoff",
+        "release",
+        "board",
+        "status",
+        "complete",
+        "adjudicate",
         "briefing",
         "doc_index",
-        "recommend",
-        "complete",
-        "board",
-        "intake"
+        "cycle_status",
+        "profiles",
+        "profile",
+        "card",
+        "build_references",
+        "close_loop"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
@@ -60,38 +64,17 @@
       "disposition": "keep_task_shared",
       "rationale": "Drives the slim-vs-full payload shape on multiple surviving actions (board/profiles); spec names it shared."
     },
-    "include_card": {
-      "used_by_actions": [
-        "complete",
-        "recommend"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "defer_1467",
-      "rationale": "Recommend/card top-level mbit_card toggle (#1201) — tuning/profile/card surface, defer to #1467."
-    },
     "task": {
       "used_by_actions": [
-        "plan",
-        "recommend",
         "complete",
-        "briefing",
         "intake"
       ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
       "rationale": "Prompt text; duplicates StaffStartFields.task semantically."
     },
-    "execution_level": {
-      "used_by_actions": [
-        "recommend"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Read by the Recommend arm for host admission (task_router.rs); the RouteSimulate reader left Task with route tuning in #1426. Stays in the public schema."
-    },
     "agent_id": {
       "used_by_actions": [
-        "plan",
         "briefing"
       ],
       "canonical_future_owner": "Task",
@@ -100,16 +83,14 @@
     },
     "domain": {
       "used_by_actions": [
-        "plan",
         "briefing"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Area tag for plan/briefing context scoping; survives Dispatch removal."
+      "rationale": "Area tag for briefing context scoping; survives Dispatch removal."
     },
     "path_prefix": {
       "used_by_actions": [
-        "plan",
         "briefing"
       ],
       "canonical_future_owner": "Task",
@@ -118,7 +99,6 @@
     },
     "top_k": {
       "used_by_actions": [
-        "plan",
         "briefing"
       ],
       "canonical_future_owner": "Task",
@@ -128,9 +108,7 @@
     "doc_paths": {
       "used_by_actions": [
         "briefing",
-        "recommend",
         "cycle_status",
-        "ux_matrix",
         "build_references",
         "close_loop"
       ],
@@ -150,9 +128,7 @@
     "spec_paths": {
       "used_by_actions": [
         "briefing",
-        "recommend",
         "cycle_status",
-        "ux_matrix",
         "build_references",
         "close_loop"
       ],
@@ -467,7 +443,6 @@
     },
     "project": {
       "used_by_actions": [
-        "plan",
         "briefing",
         "doc_index",
         "complete",
@@ -499,8 +474,7 @@
     "profile": {
       "used_by_actions": [
         "complete",
-        "briefing",
-        "recommend"
+        "briefing"
       ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
@@ -514,21 +488,19 @@
     },
     "repo": {
       "used_by_actions": [
-        "intake",
-        "refine_issues"
+        "intake"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "owner/repo target for intake/refine; survives as a workflow-shared field."
+      "rationale": "owner/repo target for intake; survives as a workflow-shared field."
     },
     "number": {
       "used_by_actions": [
-        "intake",
-        "refine_issues"
+        "intake"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Issue number target for intake/refine; survives as a workflow-shared field."
+      "rationale": "Issue number target for intake; survives as a workflow-shared field."
     },
     "issue_ref": {
       "used_by_actions": [
@@ -538,7 +510,6 @@
         "cycle_status",
         "build_references",
         "close_loop",
-        "refine_issues",
         "claim"
       ],
       "canonical_future_owner": "Staff",
@@ -551,8 +522,7 @@
         "briefing",
         "cycle_status",
         "build_references",
-        "close_loop",
-        "merge"
+        "close_loop"
       ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
@@ -600,12 +570,11 @@
     },
     "risk": {
       "used_by_actions": [
-        "recommend",
         "intake"
       ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
-      "rationale": "Risk override for recommendation/intake automation plan; tuning/profile surface, defer to #1467."
+      "rationale": "Risk override for intake automation plan; tuning/profile surface, defer to #1467."
     },
     "tool_profile": {
       "used_by_actions": [],
@@ -643,12 +612,11 @@
     },
     "limit": {
       "used_by_actions": [
-        "board",
-        "recommend"
+        "board"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Maximum ledger/recommendation rows to return; survives on board/recommend surfaces."
+      "rationale": "Maximum ledger rows to return; survives on board surface."
     },
     "proposal_id": {
       "used_by_actions": [],
@@ -664,29 +632,19 @@
     },
     "worktree": {
       "used_by_actions": [
-        "complete",
-        "merge"
+        "complete"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Local dispatched worktree path used by Merge and recorded by Complete; survives."
+      "rationale": "Local dispatched worktree path recorded by Complete; survives."
     },
     "branch": {
       "used_by_actions": [
-        "merge",
         "claim"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Local worktree merge branch / claim branch hint; survives."
-    },
-    "strategy": {
-      "used_by_actions": [
-        "merge"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Local worktree merge strategy; survives on merge surface."
+      "rationale": "Claim branch hint; survives on the WorkClaim surface."
     },
     "merge_policy": {
       "used_by_actions": [],
@@ -699,22 +657,6 @@
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Umbrella/no-close override for tachi_gh helpers, not read by any tachi_task arm; conservative keep."
-    },
-    "delete_worktree": {
-      "used_by_actions": [
-        "merge"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Remove-worktree-after-merge toggle; survives on merge surface."
-    },
-    "confirm": {
-      "used_by_actions": [
-        "merge"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Leader confirmation gate for the local worktree merge; survives."
     },
     "wiki_title": {
       "used_by_actions": [
@@ -922,8 +864,8 @@
   },
   "disposition_summary": {
     "keep_task_ledger": 3,
-    "keep_task_shared": 64,
-    "defer_1467": 9,
+    "keep_task_shared": 60,
+    "defer_1467": 8,
     "move_to_staff": 8,
     "operator_only_internal": 21
   }

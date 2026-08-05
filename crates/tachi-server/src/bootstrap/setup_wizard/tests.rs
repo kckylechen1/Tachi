@@ -92,7 +92,7 @@ fn looks_like_api_key_basic_rules() {
 fn mcp_server_instructions_requires_end_of_task_save() {
     let text = crate::server_instructions::mcp_server_instructions();
     assert!(text.contains("action='save'"));
-    assert!(text.contains("action='cycle_plan'"));
+    assert!(text.contains("action='cycle_status'"));
     assert!(text.contains("agent_end"));
     assert!(
         text.contains("HTTP direct-connect"),
@@ -208,12 +208,12 @@ fn merge_managed_block_appends_and_replaces() {
     assert!(first.contains("# Existing"));
     assert!(first.contains(AGENT_RULES_START));
     assert!(first.contains("action=\"briefing\""));
-    assert!(first.contains("action=\"cycle_plan\""));
+    assert!(first.contains("action=\"cycle_status\""));
 
     let replacement = format!("{AGENT_RULES_START}\nold rules\n{AGENT_RULES_END}\n");
     let second = merge_managed_block(&first, &replacement);
     assert!(second.contains("old rules"));
     assert!(!second.contains("action=\"briefing\""));
-    assert!(!second.contains("action=\"cycle_plan\""));
+    assert!(!second.contains("action=\"cycle_status\""));
     assert_eq!(second.matches(AGENT_RULES_START).count(), 1);
 }

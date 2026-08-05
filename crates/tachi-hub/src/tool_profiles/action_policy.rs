@@ -47,6 +47,13 @@ fn task_action_requires_admin(action: &str) -> bool {
     action == "dispatch"
 }
 
+fn task_action_retired_c1a(action: &str) -> bool {
+    matches!(
+        action,
+        "plan" | "cycle_plan" | "recommend" | "refine_issues" | "merge" | "ux_matrix"
+    )
+}
+
 // Note: sticky_leave/sticky_check (#964) are deliberately NOT admin-only —
 // worker/delegate seats must be able to leave/check stickies addressed to
 // their own seat name, which is the feature's core worker↔leader use case.
@@ -85,11 +92,18 @@ pub fn facade_action_allowed(
     profile: Option<ToolProfile>,
 ) -> bool {
     let profile = profile.unwrap_or_else(default_tool_profile);
+    let action = action.map(str::trim).filter(|a| !a.is_empty());
+    if tool_name == "tachi_task"
+        && action
+            .map(|a| task_action_retired_c1a(&a.to_ascii_lowercase()))
+            .unwrap_or(false)
+    {
+        return false;
+    }
+
     if profile.is_admin() {
         return true;
     }
-
-    let action = action.map(str::trim).filter(|a| !a.is_empty());
 
     // #757-fold fail-safe fix (gpt-5.6-terra review): `delete`/`gc`/`ingest`/
     // `ingest_source` were standalone tools with NO bundle-pattern match at
@@ -151,7 +165,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
     match tool_name {
         "tachi_task" => matches!(
             action,
-            "plan" | "complete" | "status" | "board" | "wait" | "briefing" | "doc_index"
+            "complete" | "status" | "board" | "briefing" | "doc_index"
         ),
         "tachi_memory" => matches!(
             action,
@@ -193,15 +207,12 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
     let action = action.trim().to_ascii_lowercase();
     match tool_name {
         "tachi_task" => match action.as_str() {
-            "plan" | "briefing" | "doc_index" | "status" | "board" | "wait" | "profiles"
-            | "profile" | "card" | "cycle_status" | "cycle_plan" | "ux_matrix"
-            | "build_references" | "refine_issues" => Some(ToolBundle::Observe),
+            "briefing" | "doc_index" | "status" | "board" | "profiles" | "profile"
+            | "card" | "cycle_status" | "build_references" => Some(ToolBundle::Observe),
             "complete" | "adjudicate" | "claim" | "release" | "heartbeat" => {
                 Some(ToolBundle::Remember)
             }
-            "dispatch" | "recommend" | "cancel" | "merge" | "intake" | "close_loop" => {
-                Some(ToolBundle::Coordinate)
-            }
+            "dispatch" | "cancel" | "intake" | "close_loop" => Some(ToolBundle::Coordinate),
             "handoff" => Some(ToolBundle::Coordinate),
             _ => None,
         },
@@ -290,17 +301,21 @@ mod tests {
         );
         assert!(
             !facade_action_allowed("tachi_task", Some("recommend"), profile),
-            "delegate must not recommend/dispatch"
+            "delegate must not call retired recommend action"
         );
+        for retired in ["plan", "cycle_plan", "refine_issues", "merge", "ux_matrix"] {
+            assert!(
+                !facade_action_allowed("tachi_task", Some(retired), profile),
+                "delegate must not call retired task action {retired}"
+            );
+        }
         assert!(facade_action_allowed(
             "tachi_task",
             Some("complete"),
             profile
         ));
         assert!(facade_action_allowed("tachi_task", Some("status"), profile));
-        assert!(facade_action_allowed("tachi_task", Some("plan"), profile));
         assert!(facade_action_allowed("tachi_task", Some("board"), profile));
-        assert!(facade_action_allowed("tachi_task", Some("wait"), profile));
     }
 
     #[test]
@@ -360,7 +375,7 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_task", Some("status"), profile));
-        assert!(facade_action_allowed("tachi_task", Some("plan"), profile));
+        assert!(!facade_action_allowed("tachi_task", Some("plan"), profile));
         assert!(!facade_action_allowed(
             "tachi_memory",
             Some("save"),
@@ -390,11 +405,37 @@ mod tests {
             Some("dispatch"),
             Some(ToolProfile::coordinate())
         ));
-        assert!(facade_action_allowed(
+        assert!(!facade_action_allowed(
             "tachi_task",
             Some("recommend"),
             Some(ToolProfile::standard())
         ));
+    }
+
+    #[test]
+    fn f1683_c1a_retired_task_actions_are_denied_by_active_contract() {
+        for action in ["plan", "cycle_plan", "recommend", "refine_issues", "merge", "ux_matrix"] {
+            assert_eq!(
+                facade_action_required_bundle("tachi_task", action),
+                None,
+                "retired task action {action} must not have a bundle classification"
+            );
+            for profile in [
+                ToolProfile::delegate(),
+                ToolProfile::observe(),
+                ToolProfile::remember(),
+                ToolProfile::coordinate(),
+                ToolProfile::operate(),
+                ToolProfile::standard(),
+                ToolProfile::admin(),
+            ] {
+                assert!(
+                    !facade_action_allowed("tachi_task", Some(action), Some(profile)),
+                    "retired task action {action} must be denied for {}",
+                    profile.as_str()
+                );
+            }
+        }
     }
 
     #[test]

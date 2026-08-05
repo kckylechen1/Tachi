@@ -283,19 +283,14 @@ pub(crate) fn facade_action_effect(
                 "briefing",
                 "doc_index",
                 "cycle_status",
-                "cycle_plan",
-                "refine_issues",
                 "profiles",
                 "profile",
             ],
-            &["recommend"],
+            &[],
             &[
-                "plan",
                 "complete",
                 "card",
-                "merge",
                 "intake",
-                "ux_matrix",
                 "build_references",
                 "close_loop",
                 "adjudicate",
@@ -577,12 +572,26 @@ mod tests {
             ("tachi_event", "emit"),
             ("tachi_wiki", "write"),
             ("tachi_task", "complete"),
-            ("tachi_task", "merge"),
             ("tachi_staff", "start"),
         ] {
             assert!(
                 dlq_unsafe(tool, Some(action)),
                 "{tool}(action='{action}') must remain unsafe to replay"
+            );
+        }
+    }
+
+    #[test]
+    fn f1683_c1a_retired_task_actions_are_unclassified() {
+        for action in ["plan", "cycle_plan", "recommend", "refine_issues", "merge", "ux_matrix"] {
+            assert_eq!(
+                facade_action_effect("tachi_task", Some(action)),
+                None,
+                "retired task action {action} must not have effect metadata"
+            );
+            assert!(
+                dlq_unsafe("tachi_task", Some(action)),
+                "retired task action {action} must fail closed for replay"
             );
         }
     }

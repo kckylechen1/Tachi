@@ -9,5 +9,4 @@ use rmcp::handler::server::wrapper::Parameters;
 use serde_json::json;
 
 mod proposal_evolution;
-mod recommendation;
 mod route_policy;

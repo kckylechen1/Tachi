@@ -385,7 +385,7 @@ mod dispatch;
 pub use dispatch::{
     AdjudicationParams, CompletionPredicate, DispatchMcpAccessParams, ExecutionLevel,
     RulingEngineReceiptParams, RulingRecordParams, RulingSourceRefParams, SignatureRecordParams,
-    TachiApproveMergeParams, TachiCompleteParams, TachiDispatchParams, TachiSubagentEvalParams,
+    TachiCompleteParams, TachiDispatchParams, TachiSubagentEvalParams,
 };
 
 // ─── Facade: wiki (search / browse / write) ──────────────────────────────────

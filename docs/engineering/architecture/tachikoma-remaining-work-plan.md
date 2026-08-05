@@ -16,7 +16,7 @@ skill-source, and acpx starter architecture.
 | Skill-source manifest status | Implemented | `crates/tachi-server/src/bootstrap/skill_surface_cli/sources.rs` |
 | Skill-source sync planning | Implemented starter | `crates/tachi-server/src/bootstrap/skill_surface_cli/sync_plan.rs` |
 | acpx execution backend | Implemented starter | `crates/tachi-server/src/dispatch_ops/acpx/` |
-| cycle status/plan read model | Implemented | `crates/tachi-server/src/task_lifecycle/cycle_status.rs`, `crates/tachi-server/src/task_lifecycle/cycle_plan.rs` |
+| cycle status read model | Implemented | `crates/tachi-server/src/task_lifecycle/cycle_status.rs` |
 
 ## Closure Evidence
 

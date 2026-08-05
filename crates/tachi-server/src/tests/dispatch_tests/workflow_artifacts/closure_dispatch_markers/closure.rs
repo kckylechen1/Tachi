@@ -115,7 +115,7 @@ async fn tachi_task_close_loop_writes_wiki_with_references() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn tachi_task_close_loop_marks_flow_complete_for_ux_matrix() {
+async fn tachi_task_close_loop_marks_flow_complete() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -169,17 +169,4 @@ async fn tachi_task_close_loop_marks_flow_complete_for_ux_matrix() {
     assert!(status["artifacts"]["close_loop"]
         .as_str()
         .is_some_and(|path| path.ends_with("close_loop.json")));
-
-    let mut ux_params = task_params("ux_matrix");
-    ux_params.flow_id = Some(flow_id.to_string());
-    let raw = server
-        .tachi_task(Parameters(ux_params))
-        .await
-        .expect("ux_matrix should succeed");
-    let parsed: Value = serde_json::from_str(&raw).expect("ux_matrix response JSON");
-    assert_eq!(parsed["overall"], json!("complete"));
-    let matrix = parsed["matrix"].as_array().expect("matrix array");
-    assert!(matrix
-        .iter()
-        .any(|step| { step["id"] == json!("close_loop") && step["status"] == json!("passed") }));
 }

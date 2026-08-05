@@ -193,23 +193,4 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
         .expect("loadout weak_against")
         .contains(&json!("plan_request")));
 
-    let mut recommend_params = task_params("recommend");
-    recommend_params.task = Some("Plan a dispatch card risk slice".to_string());
-    recommend_params.limit = Some(50);
-    let recommend_raw = server
-        .tachi_task(Parameters(recommend_params))
-        .await
-        .expect("recommend should include weak_against penalty");
-    let recommend: serde_json::Value =
-        serde_json::from_str(&recommend_raw).expect("recommend JSON");
-    let claude_candidate = recommend["candidates"]
-        .as_array()
-        .expect("candidate list")
-        .iter()
-        .find(|candidate| candidate["profile"] == json!("claude_plan"))
-        .expect("claude_plan candidate");
-    assert!(claude_candidate["reasons"]
-        .as_array()
-        .expect("candidate reasons")
-        .contains(&json!("weak_against_signal:plan_request")));
 }

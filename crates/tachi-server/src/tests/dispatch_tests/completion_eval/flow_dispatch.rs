@@ -2,7 +2,7 @@ use super::*;
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
+async fn tachi_complete_links_eval_to_flow_dispatch_card() {
     let (server, _temp_home) = make_server_with_temp_home();
     let flow_id = "flow_20260609T000002Z_complete_link_test";
     let dispatch_id = "20260609T000002Z-custom-complete-link";
@@ -71,25 +71,6 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
         "{card:#}"
     );
 
-    let mut ux_params = task_params("ux_matrix");
-    ux_params.flow_id = Some(flow_id.to_string());
-    ux_params.issue_ref = Some("kckylechen1/tachi#194".to_string());
-    let ux_raw = server
-        .tachi_task(Parameters(ux_params))
-        .await
-        .expect("ux_matrix should succeed");
-    let ux: Value = serde_json::from_str(&ux_raw).expect("ux JSON");
-    assert!(
-        ux["matrix"].as_array().is_some_and(|steps| {
-            steps.iter().any(|step| {
-                step["id"] == json!("complete_eval")
-                    && step["status"] == json!("passed")
-                    && step["tool"]
-                        == json!("tachi_task(action='complete', dispatch_id=..., flow_id=...)")
-            })
-        }),
-        "{ux:#}"
-    );
 }
 
 /// A successful replay must resume missing completion derives without
