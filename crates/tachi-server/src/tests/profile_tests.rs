@@ -4,7 +4,6 @@ use chrono::Utc;
 use memory_server_runtime::AgentProfile;
 use serde_json::json;
 
-mod action_policy_consistency;
 mod execution_surface_census;
 mod rate_limit;
 mod runtime;

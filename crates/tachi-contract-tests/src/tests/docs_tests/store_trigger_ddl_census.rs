@@ -150,7 +150,7 @@ use std::path::{Path, PathBuf};
 /// Path of this file, skipped so the scanner does not flag its own fixtures.
 /// See the "Honest limits" note in the module header — this is the one skip.
 const CENSUS_RELATIVE_PATH: &str =
-    "crates/tachi-server/src/tests/docs_tests/store_trigger_ddl_census.rs";
+    "crates/tachi-contract-tests/src/tests/docs_tests/store_trigger_ddl_census.rs";
 
 /// Matched against whitespace-collapsed, uppercased, backslash-stripped code.
 /// No needle may be a prefix of another (pinned by

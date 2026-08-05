@@ -862,7 +862,6 @@ mod kanban_tests;
 mod memory_tests;
 mod merge_tests;
 mod orchestrator_tests;
-mod portable_mirror_tests;
 mod profile_tests;
 mod proxy_tests;
 mod sandbox_fold;

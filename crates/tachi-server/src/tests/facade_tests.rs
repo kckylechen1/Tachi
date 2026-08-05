@@ -3,7 +3,7 @@ use super::{
 };
 use crate::tool_params::{
     InitProjectDbParams, TachiDomainAdapterParams, TachiEventParams, TachiMemoryParams,
-    TachiSearchParams, TachiSkillParams, TachiTaskParams,
+    TachiSearchParams, TachiTaskParams,
 };
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
@@ -91,5 +91,4 @@ mod fold_757;
 mod memory_actions;
 mod memory_search;
 mod receipt_golden;
-mod schema;
 mod status;
