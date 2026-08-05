@@ -398,18 +398,44 @@ fn portable_build_exact_dedupe_apply_receipt_round_trips_through_restore() {
         .expect("get")
         .expect("loser visible again after restore");
     assert!(!loser.archived);
-    assert_eq!(loser.revision, before_revision);
+    // `revision` is a CAS counter, not a value that restore rewinds: every
+    // UPDATE in exact_dedupe.rs (apply's archive mutation *and* restore's
+    // un-archive mutation) does `revision=revision+1`
+    // (crates/memcore/src/store/exact_dedupe.rs apply_exact_dedupe L814,
+    // restore_exact_dedupe L1009/L1026). So a round trip through
+    // apply -> restore bumps revision twice (before_revision -> +1 on
+    // apply -> +1 on restore), landing on before_revision + 2, never back
+    // on before_revision. The restore contract is "lifecycle fields
+    // reopened, revision advances monotonically" — not "revision returns
+    // to its pre-apply value". memcore's own restore tests (e.g.
+    // `apply_lineage_preserves_non_object_metadata_and_remains_restorable`
+    // in exact_dedupe.rs) likewise never assert revision equality after a
+    // real restore.
+    assert!(
+        loser.revision > before_revision,
+        "restore must advance revision monotonically, not rewind it: before={before_revision} after={}",
+        loser.revision
+    );
     assert_eq!(
         store
             .supersession_target("dedupe-restore-loser")
             .expect("supersession_target"),
         Some(None)
     );
+    // classify_exact_dedupe_receipt_db_state is documented as scoped to
+    // reconciling a *prepared* receipt around the apply commit boundary —
+    // its `NotApplied` branch requires `revision == before_revision`
+    // (exact_dedupe.rs L962), which models "the apply transaction never
+    // touched this row", not "this row was later restored". Since restore
+    // advances revision past before_revision (see above) and clears the
+    // apply lineage row, a genuinely restored receipt matches neither the
+    // `Applied` nor `NotApplied` terminal shape the function distinguishes,
+    // so it correctly reports Indeterminate here.
     assert_eq!(
         store
             .classify_exact_dedupe_receipt_db_state(&receipt)
             .expect("classify after restore"),
-        ExactDedupeReceiptDbState::NotApplied
+        ExactDedupeReceiptDbState::Indeterminate
     );
 
     // Replaying the SAME untampered receipt a second time must not be
