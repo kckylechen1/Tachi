@@ -392,9 +392,16 @@ fn infer_vector_dimension(conn: &rusqlite::Connection) -> Result<Option<usize>, 
 
 fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlite::Error> {
     let cutoff: DateTime<Utc> = Utc::now() - chrono::Duration::seconds(STUCK_THRESHOLD_SECS);
-    let cutoff_s = cutoff.to_rfc3339();
+    let cutoff_s = cutoff.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    count_stuck_in_progress_before(conn, &cutoff_s)
+}
+
+fn count_stuck_in_progress_before(
+    conn: &rusqlite::Connection,
+    cutoff_s: &str,
+) -> Result<usize, rusqlite::Error> {
     conn.query_row(
-        "SELECT COUNT(*) FROM foundry_jobs WHERE status = 'running' AND updated_at < ?1",
+        "SELECT COUNT(*) FROM foundry_jobs WHERE status = 'running' AND datetime(updated_at) < datetime(?1)",
         rusqlite::params![cutoff_s],
         |row| row.get::<_, i64>(0).map(|n| n as usize),
     )
@@ -447,5 +454,38 @@ mod tests {
         .expect("create vector table");
 
         assert_eq!(infer_vector_dimension(&conn).expect("infer"), Some(1024));
+    }
+
+    #[test]
+    fn stuck_foundry_counter_uses_datetime_for_mixed_updated_cutoff() {
+        // tachi#1638: this is the status-probe copy of the `updated_at < ?`
+        // boundary. A writer-only migration leaves the raw lexical predicate,
+        // where the same-second bare row sorts before the canonical cutoff and
+        // is falsely counted as stuck. The datetime() reader wrap is what makes
+        // mixed bare/canonical rows safe during the GC coexistence window.
+        let conn = rusqlite::Connection::open_in_memory().expect("memory db");
+        conn.execute(
+            "CREATE TABLE foundry_jobs (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("create foundry jobs table");
+        conn.execute(
+            "INSERT INTO foundry_jobs (id, status, updated_at)
+             VALUES
+             ('same-second-running', 'running', '2026-07-20T12:00:00.100999+00:00'),
+             ('actually-stuck-running', 'running', '2026-07-19T12:00:00.999999+00:00'),
+             ('old-completed', 'completed', '2026-07-19T12:00:00.999999+00:00')",
+            [],
+        )
+        .expect("seed foundry jobs");
+
+        assert_eq!(
+            count_stuck_in_progress_before(&conn, "2026-07-20T12:00:00.100Z").unwrap(),
+            1
+        );
     }
 }

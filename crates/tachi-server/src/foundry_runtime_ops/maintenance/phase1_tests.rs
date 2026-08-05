@@ -47,7 +47,7 @@ async fn unsupported_foundry_job_kinds_skip_with_explicit_reason() {
     let db_path = tmp.path().join("global.db");
     let server = crate::MemoryServer::new(db_path, None).expect("server");
     let job_id = "foundry-job:unsupported-session-ingest";
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::now_utc_iso();
     let job = memcore::FoundryJobSpec {
         id: job_id.to_string(),
         kind: memcore::FoundryJobKind::SessionIngest,

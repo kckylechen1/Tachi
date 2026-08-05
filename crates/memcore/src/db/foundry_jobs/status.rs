@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection};
 
+use crate::db::now_utc_iso;
 use crate::error::MemoryError;
 
 /// Branch #5: update job status AND record a structured reason for the
@@ -12,7 +13,7 @@ pub fn update_foundry_job_status_with_reason(
     status: &str,
     reason: Option<&str>,
 ) -> Result<(), MemoryError> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = now_utc_iso();
     if let Some(reason) = reason {
         let terminal_reason = serde_json::json!({
             "status": status,
@@ -69,15 +70,9 @@ pub fn job_status_histogram(
         hist.total += r.1;
     }
 
-    let cutoff = (chrono::Utc::now() - chrono::Duration::days(gc_threshold_days)).to_rfc3339();
-    hist.gc_eligible = conn
-        .query_row(
-            "SELECT COUNT(*) FROM foundry_jobs
-             WHERE status IN ('completed','failed','skipped') AND created_at < ?1",
-            params![cutoff],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0) as usize;
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(gc_threshold_days))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    hist.gc_eligible = count_gc_eligible_foundry_jobs(conn, &cutoff).unwrap_or(0) as usize;
 
     hist.dead_lettered = conn
         .query_row(
@@ -90,6 +85,15 @@ pub fn job_status_histogram(
         .unwrap_or(0) as usize;
 
     Ok(hist)
+}
+
+fn count_gc_eligible_foundry_jobs(conn: &Connection, cutoff: &str) -> Result<i64, rusqlite::Error> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM foundry_jobs
+         WHERE status IN ('completed','failed','skipped') AND datetime(created_at) < datetime(?1)",
+        params![cutoff],
+        |row| row.get::<_, i64>(0),
+    )
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -141,7 +145,8 @@ pub fn find_foundry_jobs_for_memory(
                     WHEN 'skipped'   THEN 5
                     ELSE 6
                   END,
-                  created_at DESC",
+                  datetime(created_at) DESC,
+                  id DESC",
     )?;
     let rows = stmt.query_map(params![needle], |row| {
         Ok(FoundryJobSummary {
@@ -160,10 +165,122 @@ pub fn find_foundry_jobs_for_memory(
 
 /// Delete completed/failed/skipped jobs older than `days` days.
 pub fn gc_foundry_jobs(conn: &Connection, days: i64) -> Result<usize, MemoryError> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(days))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    delete_gc_eligible_foundry_jobs(conn, &cutoff)
+}
+
+fn delete_gc_eligible_foundry_jobs(conn: &Connection, cutoff: &str) -> Result<usize, MemoryError> {
     let deleted = conn.execute(
-        "DELETE FROM foundry_jobs WHERE status IN ('completed', 'failed', 'skipped') AND created_at < ?1",
+        "DELETE FROM foundry_jobs WHERE status IN ('completed', 'failed', 'skipped') AND datetime(created_at) < datetime(?1)",
         params![cutoff],
     )?;
     Ok(deleted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE foundry_jobs (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL DEFAULT 'thesis_compaction',
+                status TEXT NOT NULL,
+                memory_ids TEXT NOT NULL DEFAULT '[]',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_job(conn: &Connection, id: &str, status: &str, memory_ids: &str, created_at: &str) {
+        conn.execute(
+            "INSERT INTO foundry_jobs (id, status, memory_ids, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, status, memory_ids, created_at],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn gc_readers_use_datetime_for_mixed_created_cutoff() {
+        // tachi#1638: this pins the `created_at < ?` readers with both
+        // timestamp forms. A writer-only migration would keep the raw lexical
+        // predicate and treat `...100999+00:00` as older than `...100Z`;
+        // reader-side datetime() canonicalization keeps that row while still
+        // deleting the genuinely older terminal row. No backfill is involved.
+        let conn = open_test_db();
+        insert_job(
+            &conn,
+            "same-second-terminal",
+            "completed",
+            "[]",
+            "2026-07-20T12:00:00.100999+00:00",
+        );
+        insert_job(
+            &conn,
+            "actually-old-terminal",
+            "failed",
+            "[]",
+            "2026-07-19T12:00:00.999999+00:00",
+        );
+        insert_job(
+            &conn,
+            "old-running-excluded",
+            "running",
+            "[]",
+            "2026-07-19T12:00:00.999999+00:00",
+        );
+
+        let cutoff = "2026-07-20T12:00:00.100Z";
+        assert_eq!(count_gc_eligible_foundry_jobs(&conn, cutoff).unwrap(), 1);
+        assert_eq!(delete_gc_eligible_foundry_jobs(&conn, cutoff).unwrap(), 1);
+
+        let remaining = conn
+            .prepare("SELECT id FROM foundry_jobs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            remaining,
+            vec!["old-running-excluded", "same-second-terminal"]
+        );
+    }
+
+    #[test]
+    fn find_jobs_for_memory_orders_mixed_created_at_by_datetime_then_id() {
+        // tachi#1638: both rows represent the same instant. A writer-only
+        // migration would leave `ORDER BY created_at DESC`, which sorts the
+        // canonical row first by rendering bytes. The datetime() ordering
+        // treats them as equal instants and the deterministic id tie-breaker
+        // pins the reader-side fix.
+        let conn = open_test_db();
+        insert_job(
+            &conn,
+            "a-canonical",
+            "queued",
+            r#"["m1"]"#,
+            "2026-07-20T12:00:00.000Z",
+        );
+        insert_job(
+            &conn,
+            "z-bare",
+            "queued",
+            r#"["m1"]"#,
+            "2026-07-20T12:00:00+00:00",
+        );
+
+        let jobs = find_foundry_jobs_for_memory(&conn, "m1").unwrap();
+        let ids = jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["z-bare", "a-canonical"]);
+    }
 }

@@ -1,20 +1,7 @@
-//! This table family intentionally still writes the bare `to_rfc3339()` form for
-//! `created_at`/`updated_at` (see `insert_foundry_job` below, and the queue/status
-//! submodules' cutoff comparisons and `gc_foundry_jobs`). All of this family's
-//! writers AND lexical readers are internally consistent on that bare form — the
-//! `queued`/`running`/GC cutoff queries in `queue.rs` and `status.rs` compare
-//! `created_at`/`updated_at` lexically against a bare `to_rfc3339()` cutoff, so
-//! canonicalizing one side without the other would create a mixed bare/canonical
-//! boundary that breaks those comparisons.
-//!
-//! Do NOT migrate these writers to `now_utc_iso` piecemeal. The migration needs a
-//! reader/backfill strategy for pre-existing rows (this family has a 30-day GC
-//! window, so old bare-form rows persist for weeks) and must land as its own leaf,
-//! not folded into an unrelated change. Tracked as `tachi#1638`.
-
 use rusqlite::{params, Connection};
 use serde_json;
 
+use super::common::{normalize_utc_iso_or_now, now_utc_iso};
 use crate::error::MemoryError;
 use crate::foundry::FoundryJobSpec;
 
@@ -54,7 +41,12 @@ pub fn insert_foundry_job(
     conn: &Connection,
     job: &PersistedFoundryJob,
 ) -> Result<InsertFoundryJobResult, MemoryError> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = now_utc_iso();
+    let created_at = if job.spec.created_at.is_empty() {
+        now.clone()
+    } else {
+        normalize_utc_iso_or_now(&job.spec.created_at)
+    };
     let kind_str = serde_json::to_string(&job.spec.kind)
         .unwrap_or_default()
         .trim_matches('"')
@@ -88,11 +80,7 @@ pub fn insert_foundry_job(
             job.spec.evidence_count as i64,
             job.spec.goal_count as i64,
             job.spec.metadata.to_string(),
-            if job.spec.created_at.is_empty() {
-                &now
-            } else {
-                &job.spec.created_at
-            },
+            created_at,
             now,
         ],
     )?;
@@ -121,18 +109,32 @@ mod tests {
         conn
     }
 
-    fn insert_minimal_job(conn: &Connection, id: &str, status: &str) {
-        let now = chrono::Utc::now().to_rfc3339();
+    fn canonical_ts(dt: chrono::DateTime<chrono::Utc>) -> String {
+        dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    fn insert_job_at(
+        conn: &Connection,
+        id: &str,
+        status: &str,
+        created_at: &str,
+        updated_at: &str,
+    ) {
         conn.execute(
             "INSERT INTO foundry_jobs (id, kind, lane, status, created_at, updated_at, metadata)
-             VALUES (?1, 'thesis_compaction', 'fast', ?2, ?3, ?3, '{}')",
-            params![id, status, now],
+             VALUES (?1, 'thesis_compaction', 'fast', ?2, ?3, ?4, '{}')",
+            params![id, status, created_at, updated_at],
         )
         .unwrap();
     }
 
+    fn insert_minimal_job(conn: &Connection, id: &str, status: &str) {
+        let now = now_utc_iso();
+        insert_job_at(conn, id, status, &now, &now);
+    }
+
     fn insert_job_with_metadata(conn: &Connection, id: &str, status: &str, metadata: &str) {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = now_utc_iso();
         conn.execute(
             "INSERT INTO foundry_jobs (id, kind, lane, status, created_at, updated_at, metadata)
              VALUES (?1, 'thesis_compaction', 'fast', ?2, ?3, ?3, ?4)",
@@ -142,7 +144,7 @@ mod tests {
     }
 
     fn backdate_updated_at(conn: &Connection, id: &str, secs_ago: i64) {
-        let ts = (chrono::Utc::now() - chrono::Duration::seconds(secs_ago)).to_rfc3339();
+        let ts = canonical_ts(chrono::Utc::now() - chrono::Duration::seconds(secs_ago));
         conn.execute(
             "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = ?2",
             params![ts, id],
@@ -221,7 +223,7 @@ mod tests {
         insert_minimal_job(&conn, "e", "queued");
 
         // Backdate one terminal job so it falls in the GC window (>= 30d).
-        let old = (chrono::Utc::now() - chrono::Duration::days(45)).to_rfc3339();
+        let old = canonical_ts(chrono::Utc::now() - chrono::Duration::days(45));
         conn.execute(
             "UPDATE foundry_jobs SET created_at = ?1 WHERE id = 'b'",
             params![old],
@@ -310,12 +312,51 @@ mod tests {
         insert_minimal_job(&conn, "f4", "failed");
         backdate_updated_at(&conn, "f4", 3600);
 
-        let running_cutoff = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        let running_cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
         let jobs = load_pending_foundry_jobs(&conn, &running_cutoff).unwrap();
         assert!(
             jobs.iter().any(|j| j.spec.id == "f4"),
             "a backed-off failed job should be recovered to queued and replayed"
         );
+    }
+
+    #[test]
+    fn pending_loader_uses_datetime_for_mixed_updated_cutoff_and_created_order() {
+        // tachi#1638: this seeds both legacy bare `+00:00` and canonical `Z`
+        // forms. A writer-only migration leaves the raw `updated_at < ?` and
+        // `ORDER BY created_at` readers in place, so it would wrongly replay
+        // the same-second running row and sort the bare row ahead of the
+        // canonical row by bytes (`+` before `.`). The datetime() reader wrap
+        // is the discriminating fix; there is intentionally no backfill.
+        let conn = open_test_db();
+        insert_job_at(
+            &conn,
+            "a-canonical",
+            "queued",
+            "2026-07-20T12:00:00.000Z",
+            "2026-07-20T12:00:00.000Z",
+        );
+        insert_job_at(
+            &conn,
+            "z-bare",
+            "queued",
+            "2026-07-20T12:00:00+00:00",
+            "2026-07-20T12:00:00+00:00",
+        );
+        insert_job_at(
+            &conn,
+            "same-second-running",
+            "running",
+            "2026-07-20T11:00:00.000Z",
+            "2026-07-20T12:00:00.100999+00:00",
+        );
+
+        let jobs = load_pending_foundry_jobs(&conn, "2026-07-20T12:00:00.100Z").unwrap();
+        let ids = jobs
+            .iter()
+            .map(|job| job.spec.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["a-canonical", "z-bare"]);
     }
 
     #[test]
@@ -325,7 +366,7 @@ mod tests {
         insert_minimal_job(&conn, "old-done", "completed");
         insert_minimal_job(&conn, "old-running", "running");
 
-        let old = (chrono::Utc::now() - chrono::Duration::days(45)).to_rfc3339();
+        let old = canonical_ts(chrono::Utc::now() - chrono::Duration::days(45));
         conn.execute(
             "UPDATE foundry_jobs SET created_at = ?1 WHERE id IN ('old-done', 'old-running')",
             params![old],
@@ -349,13 +390,13 @@ mod tests {
         insert_minimal_job(&conn, "old-running", "running");
         insert_minimal_job(&conn, "completed", "completed");
 
-        let old = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
+        let old = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(20));
         conn.execute(
             "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = 'old-running'",
             params![old],
         )
         .unwrap();
-        let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
 
         let jobs = load_pending_foundry_jobs(&conn, &cutoff).unwrap();
         let ids = jobs
@@ -366,6 +407,30 @@ mod tests {
     }
 
     #[test]
+    fn claim_foundry_job_for_run_uses_datetime_for_mixed_updated_cutoff() {
+        // tachi#1638: writer-only canonicalization would still leave this
+        // legacy bare row vulnerable to the raw string predicate
+        // `updated_at < ?`, where `...100999+00:00` sorts before
+        // `...100Z` even though it is not older at SQLite datetime()
+        // precision. The stale-running lease must therefore remain blocked.
+        let conn = open_test_db();
+        insert_job_at(
+            &conn,
+            "same-second-running",
+            "running",
+            "2026-07-20T11:00:00.000Z",
+            "2026-07-20T12:00:00.100999+00:00",
+        );
+
+        assert_eq!(
+            claim_foundry_job_for_run(&conn, "same-second-running", "2026-07-20T12:00:00.100Z")
+                .unwrap(),
+            None
+        );
+        assert_eq!(status_of(&conn, "same-second-running"), "running");
+    }
+
+    #[test]
     fn claim_foundry_job_for_run_leases_only_queued_or_stale_running_jobs() {
         let conn = open_test_db();
         insert_minimal_job(&conn, "queued", "queued");
@@ -373,13 +438,13 @@ mod tests {
         insert_minimal_job(&conn, "old-running", "running");
         insert_minimal_job(&conn, "completed", "completed");
 
-        let old = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
+        let old = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(20));
         conn.execute(
             "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = 'old-running'",
             params![old],
         )
         .unwrap();
-        let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
 
         assert_eq!(
             claim_foundry_job_for_run(&conn, "queued", &cutoff).unwrap(),
@@ -429,7 +494,7 @@ mod tests {
                 status: FoundryJobStatus::Queued,
                 target_agent_id: Some("agent".to_string()),
                 requested_by: Some("test".to_string()),
-                created_at: chrono::Utc::now().to_rfc3339(),
+                created_at: now_utc_iso(),
                 evidence_count: 1,
                 goal_count: 1,
                 metadata: serde_json::json!({"new": true}),

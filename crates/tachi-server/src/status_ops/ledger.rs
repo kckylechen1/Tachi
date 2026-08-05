@@ -21,7 +21,7 @@ pub(crate) fn latest_failed_job(
         "SELECT id, kind, lane, updated_at, metadata
          FROM foundry_jobs
          WHERE status = 'failed'
-         ORDER BY updated_at DESC, created_at DESC
+         ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, id DESC
          LIMIT 1",
         [],
         |row| {
@@ -50,7 +50,7 @@ pub(crate) fn latest_foundry_job(
     conn.query_row(
         "SELECT id, kind, status, updated_at
          FROM foundry_jobs
-         ORDER BY updated_at DESC, created_at DESC
+         ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, id DESC
          LIMIT 1",
         [],
         |row| {
@@ -74,7 +74,7 @@ pub(crate) fn latest_foundry_job_with_statuses(
         "SELECT id, kind, status, updated_at
          FROM foundry_jobs
          WHERE status IN ({placeholders})
-         ORDER BY updated_at DESC, created_at DESC
+         ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, id DESC
          LIMIT 1"
     );
     let params = rusqlite::params_from_iter(statuses.iter().copied());
@@ -364,4 +364,57 @@ pub(crate) fn read_distill_marker(app_home: &Path) -> Option<DistillMarkerStatus
         errors,
         error_reason,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_foundry_jobs_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("memory db");
+        conn.execute(
+            "CREATE TABLE foundry_jobs (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                lane TEXT,
+                status TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("create foundry jobs table");
+        conn
+    }
+
+    #[test]
+    fn latest_foundry_job_readers_order_mixed_updated_at_by_datetime_then_id() {
+        // tachi#1638: these status readers order by `updated_at`/`created_at`.
+        // A writer-only migration leaves raw DESC ordering, which picks the
+        // canonical row first by bytes. Wrapping both ORDER BY keys in
+        // datetime() treats the mixed renderings as the same instant, and the
+        // id tie-breaker pins deterministic reader behavior with no backfill.
+        let conn = open_foundry_jobs_db();
+        conn.execute(
+            "INSERT INTO foundry_jobs (id, kind, lane, status, metadata, created_at, updated_at)
+             VALUES
+             ('a-canonical', 'memory_distill', 'distill', 'failed', '{}',
+              '2026-07-20T12:00:00.000Z', '2026-07-20T12:00:00.000Z'),
+             ('z-bare', 'memory_distill', 'distill', 'failed', '{}',
+              '2026-07-20T12:00:00+00:00', '2026-07-20T12:00:00+00:00')",
+            [],
+        )
+        .expect("seed foundry jobs");
+
+        assert_eq!(latest_failed_job(&conn).unwrap().unwrap().id, "z-bare");
+        assert_eq!(latest_foundry_job(&conn).unwrap().unwrap().id, "z-bare");
+        assert_eq!(
+            latest_foundry_job_with_statuses(&conn, &["failed"])
+                .unwrap()
+                .unwrap()
+                .id,
+            "z-bare"
+        );
+    }
 }
