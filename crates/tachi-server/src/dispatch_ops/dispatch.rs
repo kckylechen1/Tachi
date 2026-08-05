@@ -17,7 +17,7 @@ use crate::agent_registry::{
     dispatch_agent_help_list, mcp_inject_supported, normalize_dispatch_agent_name,
     resolve_dispatch_agent,
 };
-use crate::credential_profile::{
+use tachi_credential_profile::{
     apply_credential_materialization, credential_materialize_report_json, default_credentials_dir,
     find_credential_profile, plan_credential_materialization_with_run_dir, profile_secret_names,
     CredentialApplyOptions, CredentialMaterializeReport,

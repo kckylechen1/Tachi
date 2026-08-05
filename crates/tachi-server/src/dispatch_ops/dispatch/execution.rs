@@ -7,7 +7,7 @@ use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_
 use super::super::subprocess::{run_agent_subprocess, run_opencode_sop_subprocess, tail_chars};
 use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
-use crate::credential_profile::cleanup_ephemeral_credential_materializations;
+use tachi_credential_profile::cleanup_ephemeral_credential_materializations;
 use crate::{MemoryServer, SaveMemoryParams};
 use chrono::Utc;
 use serde_json::{json, Value};

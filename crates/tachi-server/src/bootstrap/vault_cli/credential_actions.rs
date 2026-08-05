@@ -38,11 +38,11 @@ pub(super) fn run_credential_action(
         } => {
             let (config_path, profile_def) = if let Some(path) = config {
                 let profile_def =
-                    crate::credential_profile::load_credential_profile_from_path(&path, &profile)?;
+                    tachi_credential_profile::load_credential_profile_from_path(&path, &profile)?;
                 (path, profile_def)
             } else {
-                crate::credential_profile::find_credential_profile(
-                    &crate::credential_profile::default_credentials_dir(),
+                tachi_credential_profile::find_credential_profile(
+                    &tachi_credential_profile::default_credentials_dir(),
                     &profile,
                 )?
             };
@@ -52,7 +52,7 @@ pub(super) fn run_credential_action(
             } else {
                 open_cli_store_read_only(global_db_path)?
             };
-            let report = crate::credential_profile::plan_credential_materialization(
+            let report = tachi_credential_profile::plan_credential_materialization(
                 &profile,
                 &profile_def,
                 &consumer,
@@ -67,13 +67,13 @@ pub(super) fn run_credential_action(
                     password_file.as_deref(),
                     insecure_password_file,
                 )?;
-                let result = crate::credential_profile::apply_credential_materialization(
+                let result = tachi_credential_profile::apply_credential_materialization(
                     &profile,
                     &profile_def,
                     &consumer,
                     &store,
                     &secret_values,
-                    &crate::credential_profile::CredentialApplyOptions {
+                    &tachi_credential_profile::CredentialApplyOptions {
                         allow_existing,
                         run_dir: None,
                     },
@@ -83,7 +83,7 @@ pub(super) fn run_credential_action(
                 }
                 let result = result?;
                 let mut value =
-                    crate::credential_profile::credential_materialize_report_json(&result.report);
+                    tachi_credential_profile::credential_materialize_report_json(&result.report);
                 value["env_outputs"] = serde_json::json!(result
                     .env
                     .keys()
@@ -91,7 +91,7 @@ pub(super) fn run_credential_action(
                     .collect::<Vec<_>>());
                 value
             } else {
-                crate::credential_profile::credential_materialize_report_json(&report)
+                tachi_credential_profile::credential_materialize_report_json(&report)
             };
             body["config_path"] = serde_json::json!(config_path.to_string_lossy());
             println!("{}", serde_json::to_string_pretty(&body)?);
@@ -110,9 +110,9 @@ pub(super) fn run_credential_action(
             } else {
                 open_cli_store_read_only(global_db_path)?
             };
-            let report = crate::credential_profile::cleanup_managed_credential_materializations(
+            let report = tachi_credential_profile::cleanup_managed_credential_materializations(
                 &store,
-                &crate::credential_profile::CredentialCleanupOptions {
+                &tachi_credential_profile::CredentialCleanupOptions {
                     run_dir,
                     profile,
                     consumer,
@@ -171,16 +171,16 @@ pub(super) fn run_credential_action(
             })?;
             let (config_path, profile_def) = if let Some(path) = config {
                 let profile_def =
-                    crate::credential_profile::load_credential_profile_from_path(&path, &profile)?;
+                    tachi_credential_profile::load_credential_profile_from_path(&path, &profile)?;
                 (path, profile_def)
             } else {
-                crate::credential_profile::find_credential_profile(
-                    &crate::credential_profile::default_credentials_dir(),
+                tachi_credential_profile::find_credential_profile(
+                    &tachi_credential_profile::default_credentials_dir(),
                     &profile,
                 )?
             };
             let store = open_cli_store_read_only(global_db_path)?;
-            let mut body = serde_json::json!(crate::credential_profile::doctor_credential_profile(
+            let mut body = serde_json::json!(tachi_credential_profile::doctor_credential_profile(
                 &profile,
                 &profile_def,
                 &consumer,
