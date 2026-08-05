@@ -2383,7 +2383,6 @@ name = "tachi-server"
 version = "1.9.1"
 dependencies = [
  "aes-gcm",
- "argon2",
  "async-trait",
  "axum",
  "base64",

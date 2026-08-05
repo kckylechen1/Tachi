@@ -69,19 +69,6 @@ pub(crate) async fn execute_registered_skill_prompt_with_receipt(
     execute_loaded_skill_prompt_with_receipt(server, &cap, args).await
 }
 
-// Kept as the text-only compatibility seam for internal callers that already
-// loaded a capability. Durable producers must use the receipt-bearing sibling.
-#[allow(dead_code)]
-pub(crate) async fn execute_loaded_skill_prompt(
-    server: &MemoryServer,
-    cap: &HubCapability,
-    args: &Value,
-) -> Result<SkillExecution, String> {
-    execute_loaded_skill_prompt_with_receipt(server, cap, args)
-        .await
-        .map(|result| result.execution)
-}
-
 async fn execute_loaded_skill_prompt_with_receipt(
     server: &MemoryServer,
     cap: &HubCapability,
@@ -112,20 +99,6 @@ async fn execute_loaded_skill_prompt_with_receipt(
     let _ = server.record_capability_call_outcome(&cap.id, success, error_msg.as_deref());
 
     result.map_err(|e| format!("skill execution failed: {e}"))
-}
-
-// Kept as the text-only compatibility seam for callers that already parsed a
-// skill definition. Durable producers must use the receipt-bearing sibling.
-#[allow(dead_code)]
-pub(crate) async fn execute_skill_prompt(
-    server: &MemoryServer,
-    cap: &HubCapability,
-    def: &Value,
-    args: &serde_json::Map<String, Value>,
-) -> Result<SkillExecution, String> {
-    execute_skill_prompt_with_receipt(server, cap, def, args)
-        .await
-        .map(|result| result.execution)
 }
 
 async fn execute_skill_prompt_with_receipt(

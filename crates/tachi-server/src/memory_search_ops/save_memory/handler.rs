@@ -509,27 +509,6 @@ pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
     .await
 }
 
-/// Server-internal first-write seam for durable model-derived artifacts.
-/// The receipt is typed and never passes through public JSON metadata.
-#[allow(dead_code)] // retained as the text-save sibling promised by the receipt API contract
-pub(crate) async fn handle_save_memory_with_authorized_reference_mutations_and_invocation(
-    server: &MemoryServer,
-    params: SaveMemoryParams,
-    mutations: Vec<memcore::db::ValidatedReferenceMutation>,
-    invocation: tachi_llm::PersistedModelInvocationReceiptV1,
-) -> Result<String, String> {
-    handle_save_memory_impl(
-        server,
-        params,
-        AuthorizedReferenceMutations::from_authorized(mutations),
-        SaveMetadataAuthority::ServerVerified,
-        SaveInitiator::System,
-        Some(invocation),
-        false,
-    )
-    .await
-}
-
 /// Server-internal Wiki/Guide projection save. The canonical row, duplicate
 /// supersession claims, and supersedes edges share one transaction.
 pub(crate) async fn handle_save_memory_with_wiki_projection(
