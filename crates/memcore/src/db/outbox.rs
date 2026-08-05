@@ -1001,7 +1001,7 @@ type OutboxRowColumns = (
 /// operator hold uses a caller-chosen class like `"operator_hold"`, which
 /// this prefix does not match. The health query uses `substr(...) = ?` rather
 /// than `LIKE` so SQLite wildcard handling cannot widen the namespace.
-
+///
 /// Compute all seven health fields in one statement.
 ///
 /// One statement, not several, because the fields are read together and must
