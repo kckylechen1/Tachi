@@ -1,6 +1,6 @@
 [package]
 name = "memory-node"
-version = "1.9.1"
+version = "1.9.2"
 edition = "2021"
 description = "NAPI-RS Node.js binding for memcore"
 license = "AGPL-3.0-only"

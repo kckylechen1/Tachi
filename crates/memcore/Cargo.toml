@@ -1,6 +1,6 @@
 [package]
 name = "memcore"
-version = "1.9.1"
+version = "1.9.2"
 edition = "2021"
 description = "MemCore — portable memory kernel (store, schema, hybrid search/scorer, graph, events)"
 license = "AGPL-3.0-only"
