@@ -709,6 +709,29 @@ impl MemoryStore {
     ) -> Result<OutboxConflictResolutionReceipt, MemoryError> {
         if let OutboxConflictResolution::RemoteWins { error_class } = resolution {
             db::refuse_invalid_class("resolution error_class", error_class)?;
+            // tachi#1644 review fix: the stamped class is
+            // `"{OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX}.{error_class}"`, not
+            // `error_class` alone — validating only the caller's raw token here
+            // let a class that passed this check still blow the shared
+            // `MAX_OUTBOX_CLASS_BYTES` budget once composed, surfacing as an
+            // opaque `last_error_class` refusal deep inside
+            // `transition_outbox_event_within_tx`. Check the actual composed
+            // length up front so the caller gets a typed refusal that names the
+            // effective budget, before a transaction is even opened.
+            let composed_len = outbox_remote_wins_resolved_class(error_class).len();
+            if composed_len > db::MAX_OUTBOX_CLASS_BYTES {
+                let effective_budget = db::MAX_OUTBOX_CLASS_BYTES
+                    .saturating_sub(OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX.len() + 1);
+                return Err(MemoryError::InvalidArg(format!(
+                    "resolution error_class is {} bytes; composed with the \
+                     '{OUTBOX_REMOTE_WINS_RESOLVED_CLASS_PREFIX}.' prefix a RemoteWins \
+                     classification token would be {composed_len} bytes, over the \
+                     {}-byte limit — the effective budget for a RemoteWins error_class is \
+                     {effective_budget} bytes",
+                    error_class.len(),
+                    db::MAX_OUTBOX_CLASS_BYTES,
+                )));
+            }
         }
         let db_label = self.db_label.clone();
         db::retry_memory_locked("resolve_outbox_conflict", &db_label, || {
