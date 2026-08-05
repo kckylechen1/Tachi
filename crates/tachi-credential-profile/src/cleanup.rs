@@ -7,7 +7,7 @@ use memcore::MemoryStore;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub(crate) fn cleanup_ephemeral_credential_materializations(
+pub fn cleanup_ephemeral_credential_materializations(
     store: &MemoryStore,
     run_dir: &Path,
     dry_run: bool,
@@ -53,7 +53,7 @@ fn metadata_matches_cleanup_scope(
     true
 }
 
-pub(crate) fn cleanup_managed_credential_materializations(
+pub fn cleanup_managed_credential_materializations(
     store: &MemoryStore,
     options: &CredentialCleanupOptions,
 ) -> Result<CredentialCleanupReport, String> {

@@ -65,7 +65,7 @@ fn target_json_contains_plaintext_secret(target: &Path) -> Result<bool, String> 
     Ok(config_contains_plaintext_secret(&parsed))
 }
 
-pub(crate) fn doctor_credential_profile(
+pub fn doctor_credential_profile(
     profile_name: &str,
     profile: &CredentialProfile,
     consumer: &str,

@@ -114,7 +114,7 @@ fn is_opencode_env_reference(value: &str) -> bool {
         .is_some_and(tachi_params::util::is_shell_env_name)
 }
 
-pub(crate) fn apply_credential_materialization(
+pub fn apply_credential_materialization(
     profile_name: &str,
     profile: &CredentialProfile,
     consumer: &str,

@@ -78,7 +78,7 @@ fn expand_target(target: &str, run_dir: Option<&Path>) -> String {
     expanded
 }
 
-pub(crate) fn profile_secret_names(profile: &CredentialProfile) -> Vec<String> {
+pub fn profile_secret_names(profile: &CredentialProfile) -> Vec<String> {
     let mut names = profile
         .materializers
         .iter()
@@ -89,7 +89,7 @@ pub(crate) fn profile_secret_names(profile: &CredentialProfile) -> Vec<String> {
     names
 }
 
-pub(crate) fn plan_credential_materialization(
+pub fn plan_credential_materialization(
     profile_name: &str,
     profile: &CredentialProfile,
     consumer: &str,
@@ -98,7 +98,7 @@ pub(crate) fn plan_credential_materialization(
     plan_credential_materialization_with_run_dir(profile_name, profile, consumer, store, None)
 }
 
-pub(crate) fn plan_credential_materialization_with_run_dir(
+pub fn plan_credential_materialization_with_run_dir(
     profile_name: &str,
     profile: &CredentialProfile,
     consumer: &str,
@@ -183,7 +183,7 @@ pub(crate) fn plan_credential_materialization_with_run_dir(
     })
 }
 
-pub(crate) fn credential_materialize_report_json(
+pub fn credential_materialize_report_json(
     report: &CredentialMaterializeReport,
 ) -> serde_json::Value {
     json!(report)

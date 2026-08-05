@@ -1,11 +1,11 @@
 use super::types::{CredentialProfile, CredentialProfileDocument};
 use std::path::{Path, PathBuf};
 
-pub(crate) fn default_credentials_dir() -> PathBuf {
+pub fn default_credentials_dir() -> PathBuf {
     PathBuf::from(".tachi").join("credentials")
 }
 
-pub(crate) fn load_credential_profile_from_path(
+pub fn load_credential_profile_from_path(
     path: &Path,
     profile_name: &str,
 ) -> Result<CredentialProfile, String> {
@@ -24,7 +24,7 @@ pub(crate) fn load_credential_profile_from_path(
         })
 }
 
-pub(crate) fn find_credential_profile(
+pub fn find_credential_profile(
     credentials_dir: &Path,
     profile_name: &str,
 ) -> Result<(PathBuf, CredentialProfile), String> {

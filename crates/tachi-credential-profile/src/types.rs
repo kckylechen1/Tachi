@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CredentialProfileDocument {
+pub struct CredentialProfileDocument {
     pub credential_profiles: HashMap<String, CredentialProfile>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CredentialProfile {
+pub struct CredentialProfile {
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
@@ -25,7 +25,7 @@ pub(crate) struct CredentialProfile {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AllowedConsumers {
+pub struct AllowedConsumers {
     #[serde(default)]
     pub agents: Vec<String>,
     #[serde(default)]
@@ -34,7 +34,7 @@ pub(crate) struct AllowedConsumers {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CredentialMaterializer {
+pub struct CredentialMaterializer {
     #[serde(rename = "type")]
     pub kind: String,
     pub source: String,
@@ -46,7 +46,7 @@ pub(crate) struct CredentialMaterializer {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct CredentialMaterializeReport {
+pub struct CredentialMaterializeReport {
     pub profile: String,
     pub consumer: String,
     pub dry_run: bool,
@@ -59,7 +59,7 @@ pub(crate) struct CredentialMaterializeReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct CredentialMaterializeStepReport {
+pub struct CredentialMaterializeStepReport {
     pub materializer_type: String,
     pub source: String,
     pub resolved_secret: String,
@@ -74,7 +74,7 @@ pub(crate) struct CredentialMaterializeStepReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct CredentialDoctorReport {
+pub struct CredentialDoctorReport {
     pub profile: String,
     pub consumer: String,
     pub issues: Vec<CredentialDoctorIssue>,
@@ -82,7 +82,7 @@ pub(crate) struct CredentialDoctorReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct CredentialDoctorIssue {
+pub struct CredentialDoctorIssue {
     pub severity: String,
     pub code: String,
     pub message: String,
@@ -93,26 +93,26 @@ pub(crate) struct CredentialDoctorIssue {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct CredentialDoctorSummary {
+pub struct CredentialDoctorSummary {
     pub issue_count: usize,
     pub high_count: usize,
     pub medium_count: usize,
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CredentialApplyOptions {
+pub struct CredentialApplyOptions {
     pub allow_existing: bool,
     pub run_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CredentialApplyResult {
+pub struct CredentialApplyResult {
     pub report: CredentialMaterializeReport,
     pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct CredentialCleanupReport {
+pub struct CredentialCleanupReport {
     pub run_dir: String,
     pub credentials_dir: String,
     pub dry_run: bool,
@@ -129,7 +129,7 @@ pub(crate) struct CredentialCleanupReport {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CredentialCleanupOptions {
+pub struct CredentialCleanupOptions {
     pub run_dir: Option<PathBuf>,
     pub profile: Option<String>,
     pub consumer: Option<String>,

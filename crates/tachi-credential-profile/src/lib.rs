@@ -33,9 +33,8 @@ pub use plan::{
 };
 // Production callers use these types on the crate::credential_profile::* surface.
 pub use types::{
-    CredentialApplyOptions, CredentialCleanupOptions, CredentialMaterializeReport,
-    CredentialProfile,
+    AllowedConsumers, CredentialApplyOptions, CredentialApplyResult, CredentialCleanupOptions,
+    CredentialCleanupReport, CredentialDoctorIssue, CredentialDoctorReport,
+    CredentialDoctorSummary, CredentialMaterializeReport, CredentialMaterializeStepReport,
+    CredentialMaterializer, CredentialProfile, CredentialProfileDocument,
 };
-// Test constructors used via `crate::credential_profile::*` in credential_tests.
-#[cfg(test)]
-pub use types::{AllowedConsumers, CredentialMaterializer, CredentialProfileDocument};
