@@ -41,13 +41,13 @@ impl MemoryStore {
             rows_json,
             result_count,
             reranked,
-            &chrono::Utc::now().to_rfc3339(),
+            &db::now_utc_iso(),
         )
     }
 
     /// Best-effort hit telemetry bump for a cache id.
     pub fn recall_cache_record_hit(&self, cache_id: &str) -> Result<(), MemoryError> {
-        db::recall_cache_record_hit(&self.conn, cache_id, &chrono::Utc::now().to_rfc3339())
+        db::recall_cache_record_hit(&self.conn, cache_id, &db::now_utc_iso())
     }
 
     /// Aggregate recall-cache stats for diagnostics.
