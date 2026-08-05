@@ -38,6 +38,11 @@ members = [
     # default-members: it is a dependency of tachi-server, which is a default
     # member, so it is already built transitively.
     "crates/tachi-github-runtime",
+    # Lesson-forge domain runtime (#1611 Track T3, carve 3). Membership is
+    # load-bearing, not bookkeeping — the DDL/test census roots come from
+    # workspace membership, and the nextest known-red gate is widened with this
+    # crate when the tests move out of tachi-server.
+    "crates/tachi-lesson-forge",
     "crates/tachi-hub",
     "crates/tachi-llm",
     "crates/tachi-merge-ops",

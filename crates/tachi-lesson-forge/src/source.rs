@@ -248,7 +248,7 @@ impl PilotSourceResolverV1 for SqlitePilotSourceResolverV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lesson_forge_ops::pilot::{PilotRowKindV1, PilotSourceRouteV1, PilotStratumV1};
+    use crate::pilot::{PilotRowKindV1, PilotSourceRouteV1, PilotStratumV1};
     use tachi_params::LessonCandidateKindV1;
 
     fn binding(text: &str) -> PilotRowV1 {

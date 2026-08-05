@@ -12,6 +12,7 @@
 //!
 //! [`LESSON_CANDIDATE_DOMAIN`] stays because it is live regardless of who
 //! writes: `memory_search_ops::search_memory::filters::is_lesson_candidate_entry`
-//! reads it as a containment-gate value on every generic recall.
+//! reads it through the `tachi-server` shim as a containment-gate value on
+//! every generic recall.
 
-pub(crate) const LESSON_CANDIDATE_DOMAIN: &str = "lesson_candidate";
+pub const LESSON_CANDIDATE_DOMAIN: &str = "lesson_candidate";

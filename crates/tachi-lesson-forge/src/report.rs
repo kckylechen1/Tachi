@@ -325,7 +325,7 @@ impl PilotReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lesson_forge_ops::discrimination::FailReason;
+    use crate::discrimination::FailReason;
 
     fn known_receipt() -> LessonEngineReceiptV1 {
         LessonEngineReceiptV1 {
@@ -335,7 +335,6 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
-            ..Default::default()
         }
     }
 
@@ -367,7 +366,7 @@ mod tests {
     /// A 50-row frozen manifest whose row ids are `row-0..row-49`, for the
     /// `PilotReport::from_manifest` binding tests below.
     fn fifty_row_manifest() -> PilotManifestV1 {
-        use crate::lesson_forge_ops::pilot::{
+        use crate::pilot::{
             freeze_pilot_manifest, PilotRowKindV1, PilotRowV1, PilotSourceRouteV1, PilotStratumV1,
         };
         use tachi_params::LessonCandidateKindV1;
@@ -478,8 +477,8 @@ mod tests {
         let mut rows = fifty_row_manifest().rows().to_vec();
         rows[0].source_id = "shared-id".to_string();
         rows[25].source_id = "shared-id".to_string();
-        let manifest = crate::lesson_forge_ops::pilot::freeze_pilot_manifest(rows)
-            .expect("cross-route ids may overlap");
+        let manifest =
+            crate::pilot::freeze_pilot_manifest(rows).expect("cross-route ids may overlap");
         let cases: Vec<CaseReport> = manifest
             .rows()
             .iter()
@@ -509,8 +508,8 @@ mod tests {
         let mut rows = fifty_row_manifest().rows().to_vec();
         rows[0].source_id = "shared-id".to_string();
         rows[25].source_id = "shared-id".to_string();
-        let manifest = crate::lesson_forge_ops::pilot::freeze_pilot_manifest(rows)
-            .expect("cross-route ids may overlap");
+        let manifest =
+            crate::pilot::freeze_pilot_manifest(rows).expect("cross-route ids may overlap");
         let mut cases: Vec<CaseReport> = manifest
             .rows()
             .iter()
@@ -589,7 +588,7 @@ mod tests {
         // "Fixtures must demonstrate that old summary output fails the
         // target-decision discrimination where the accepted candidate
         // passes."
-        use crate::lesson_forge_ops::discrimination::{ArmRunSet, CaseInput, ColdRunScore};
+        use crate::discrimination::{ArmRunSet, CaseInput, ColdRunScore};
 
         fn hit(matches: bool) -> ColdRunScore {
             ColdRunScore {
@@ -652,9 +651,7 @@ mod tests {
         // "candidate as treated" (passes) is the reference-hit count itself
         // — a break in criterion-1's own logic cannot hide behind a
         // different criterion's failure here.
-        use crate::lesson_forge_ops::discrimination::{
-            ArmRunSet, CaseInput, ColdRunScore, FailReason,
-        };
+        use crate::discrimination::{ArmRunSet, CaseInput, ColdRunScore, FailReason};
 
         fn hit(matches: bool) -> ColdRunScore {
             ColdRunScore {

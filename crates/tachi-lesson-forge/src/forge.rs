@@ -222,7 +222,7 @@ pub fn forge_lesson_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lesson_forge_ops::pilot::{
+    use crate::pilot::{
         freeze_pilot_manifest, PilotRowKindV1, PilotRowV1, PilotSourceRouteV1, PilotStratumV1,
     };
     use tachi_params::{EvidenceRelationV1, ImmutableRevisionV1, SourceKindV1};
@@ -611,7 +611,6 @@ mod tests {
             effective_version: Some("v1".to_string()),
             fallback_chain: Vec::new(),
             degraded: false,
-            ..Default::default()
         };
         let candidate = forge_lesson_candidate(
             "proj",

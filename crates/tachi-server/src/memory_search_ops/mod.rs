@@ -66,4 +66,7 @@ pub(crate) use search_memory::{
 pub(crate) use search_memory::{
     RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
 };
-pub(crate) use text_scrub::{contains_secret_like, scrub_secrets, scrub_think_tags};
+// Compatibility shim for old memory_search_ops::contains_secret_like path.
+#[allow(unused_imports)]
+pub(crate) use tachi_lesson_forge::contains_secret_like;
+pub(crate) use text_scrub::{scrub_secrets, scrub_think_tags};
