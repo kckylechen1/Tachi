@@ -145,9 +145,9 @@ pub(in crate::memory_search_ops::save_memory) fn mark_save_target_used(
 /// `NearDuplicatePolicy::NonSemantic` — an explicit-id save must land as the
 /// exact row the caller asked for, never silently fold into an unrelated
 /// >0.9-Jaccard-similar row. The census for #1634 found no test locking the
-/// old AllowNearDuplicateMerge behavior on this branch; matching the id-less
-/// path's merge behavior here was design-history inertia, not a requirement,
-/// and the owner ruling names only the id-less path as the merge opt-in.
+/// > old AllowNearDuplicateMerge behavior on this branch; matching the id-less
+/// > path's merge behavior here was design-history inertia, not a requirement,
+/// > and the owner ruling names only the id-less path as the merge opt-in.
 pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
     server: &MemoryServer,
     entry: &mut MemoryEntry,
