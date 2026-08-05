@@ -37,6 +37,46 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     ///
     /// A same-edge replay and a conflicting edge both fail loudly, so callers
     /// cannot accidentally run side effects as though their requested edge won.
+    ///
+    /// tachi#1645 (#1635 findings 1+2) caller audit: every non-test caller of
+    /// this method as of this change points `target_id` at either (a) a row
+    /// that does not exist yet and gets materialized later in the SAME
+    /// `BEGIN IMMEDIATE` transaction, or (b) a row just freshly
+    /// inserted/verified active earlier in the same transaction — never at
+    /// an already-retired row a caller *intends* to keep superseding onto.
+    /// `refuse_ineligible_supersession_target`/`refuse_supersession_cycle`
+    /// were therefore safe to make load-bearing here with no caller-side
+    /// STOP:
+    /// - `wiki_ops/ingest.rs:729` (`persist_wiki_ingest_entry`) — target is
+    ///   `replacement_entry.id`, upserted AFTER the claim loop, in-flight (b
+    ///   above, materialize-later case).
+    /// - `facade_memory_ops/consolidate_ops.rs:486,548`
+    ///   (`apply_lifecycle_action`'s "supersede"/"merge_into"/
+    ///   "near_dup_merge" arms) — target is caller-supplied and, pre-#1645,
+    ///   was NEVER eligibility-checked; this IS the gap findings 1/2 close,
+    ///   not a caller that needs special-casing.
+    /// - `memory_search_ops/save_memory/persist.rs:351`
+    ///   (wiki-projection dedup) — target is `winner_id`, either the entry
+    ///   just upserted in this same transaction or the pre-existing active
+    ///   winner `list_all_wiki_duplicate_candidates` resolved; `candidate`s
+    ///   being folded in are filtered `candidate.id != winner_id`.
+    /// - `foundry_runtime_ops/daily_distill/persist.rs:174`
+    ///   (`claim_distilled_sources`) — target is `distill_entry.id`, only
+    ///   reached after `replacement.insert_if_absent(entry)` already
+    ///   returned `InsertMemoryResult::default` (fresh row) earlier in the
+    ///   same transaction; the `Existing` branch returns before ever
+    ///   calling this method.
+    ///
+    /// Two adjacent modules do NOT call this method at all, so findings 1/2
+    /// do not reach them: `foundry_runtime_ops/wiki_evolver.rs` (REM draft
+    /// occupancy) enforces its own `memory_is_active_unsuperseded` checks
+    /// without ever installing a `superseded_by` edge here, and
+    /// `store/rem.rs` uses raw SQL state checks plus the unguarded
+    /// `MemoryStore::supersede_memory` — same path the read-side
+    /// `stored_supersession_cycle_still_fails_content_free_end_to_end` test
+    /// (memcore `recall_coverage_tests.rs`) seeds its cycle through, which is
+    /// why that test is untouched and unaffected by the cycle guard added
+    /// here.
     pub fn claim_immutable_supersession(
         &mut self,
         source_id: &str,
