@@ -13,7 +13,6 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
-use crate::arena_ops::handle_tachi_arena;
 use crate::capability_ops::handle_prepare_capability_bundle;
 use crate::copilot_ops::{
     handle_tachi_feature_briefing, handle_tachi_wiki_search, handle_tachi_wiki_write,

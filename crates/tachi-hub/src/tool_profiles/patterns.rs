@@ -79,8 +79,6 @@ pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Tachi Staff — external staffing facade (coordination/orchestration)
     "tachi_staff",
-    // Tachi Arena - tracked worker mission ledger
-    "tachi_arena",
     // Tachi Verify - background verification evidence ledger
     "tachi_verify",
 ];

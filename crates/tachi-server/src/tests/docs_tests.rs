@@ -48,6 +48,7 @@ mod conflicts;
 mod contract;
 mod downstream_sync_surface;
 mod external_staffing_contract;
+mod generated_staff_guidance;
 mod http_direct_connect;
 mod hypermem_gate;
 mod kernel_surface;

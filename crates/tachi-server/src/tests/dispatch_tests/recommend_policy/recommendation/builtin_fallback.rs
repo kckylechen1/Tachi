@@ -39,7 +39,7 @@ async fn tachi_task_recommend_surfaces_kimi_ux_for_agent_experience_tasks() {
     let server = make_server();
     let mut params = task_params("recommend");
     params.task = Some(
-        "Run an agent-facing UX 大满贯 test for tachi_arena and summarize tool surface friction"
+        "Run an agent-facing UX 大满贯 test for tachi_staff and summarize tool surface friction"
             .to_string(),
     );
     params.limit = Some(20);

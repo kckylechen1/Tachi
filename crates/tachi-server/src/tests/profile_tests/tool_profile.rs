@@ -61,7 +61,6 @@ async fn standard_profile_exposes_agent_intents_not_execution_internals() {
 
     assert!(tools.contains("`tachi_memory`"));
     assert!(tools.contains("`tachi_task`"));
-    assert!(!tools.contains("`tachi_arena`"));
     assert!(tools.contains("`tachi_verify`"));
     assert!(tools.contains("`tachi_gh`"));
     assert!(!tools.contains("`tachi_event`"));
@@ -85,7 +84,6 @@ async fn coordinate_profile_exposes_advanced_coordination_facades() {
         .await
         .expect("tool discovery should work");
 
-    assert!(tools.contains("`tachi_arena`"));
     assert!(tools.contains("`tachi_staff`"));
     assert!(tools.contains("`tachi_orchestrator`"));
 }

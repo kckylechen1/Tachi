@@ -159,8 +159,8 @@ mod flow_artifacts;
 mod github_flow_state;
 mod github_io;
 mod issue_flow;
-mod release_ux;
-mod utils;
+pub(crate) mod release_ux;
+pub(crate) mod utils;
 
 #[cfg(test)]
 mod tests;

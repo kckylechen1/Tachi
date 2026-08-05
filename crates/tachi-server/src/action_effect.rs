@@ -167,7 +167,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_task",
     "tachi_wiki",
     "tachi_skill",
-    "tachi_arena",
     "tachi_verify",
     "tachi_staff",
     // #757 Cut3-S1: folded sandbox verb is mixed read/write (set_rule/
@@ -356,7 +355,6 @@ pub(crate) fn facade_action_effect(
                 "recovery_briefing",
             ],
         ),
-        "tachi_arena" => (&["board"], &[], &["spawn", "collect"]),
         _ => return None,
     };
 
@@ -521,7 +519,6 @@ mod tests {
             "tachi_domain_adapter",
             "tachi_handoff",
             "tachi_orchestrator",
-            "tachi_arena",
             "tachi_sandbox",
             "tachi_complete",
         ] {
@@ -613,7 +610,7 @@ mod tests {
     /// / `orchestration::tachi_staff_action_schema` string literals, with no
     /// shared source to catch drift between the schema and this test. Those
     /// three schema functions — plus `tachi_skill_action_schema`,
-    /// `tachi_arena_action_schema`, `tachi_orchestrator_action_schema` — now
+    /// `tachi_orchestrator_action_schema` — now
     /// read from `tachi_params::facade::action_inventory` pub consts that this
     /// test also imports (`tachi_params::TACHI_EVENT_ACTIONS` etc.): one
     /// source, not a fourth independently-authored list.
@@ -633,7 +630,6 @@ mod tests {
         // it proves the enumeration walks the REAL typed action universe for
         // them too, instead of never touching real inventories that exist.
         assert_all_classified("tachi_skill", tachi_params::TACHI_SKILL_ACTIONS);
-        assert_all_classified("tachi_arena", tachi_params::TACHI_ARENA_ACTIONS);
         assert_all_classified(
             "tachi_orchestrator",
             tachi_params::TACHI_ORCHESTRATOR_ACTIONS,

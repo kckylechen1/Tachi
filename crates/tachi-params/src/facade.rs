@@ -617,18 +617,17 @@ mod action_enums;
 mod action_inventory;
 pub use action_enums::{TachiTaskAction, TachiVerifyAction};
 pub use action_inventory::{
-    TACHI_ARENA_ACTIONS, TACHI_EVENT_ACTIONS, TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX,
-    TACHI_MEMORY_ACTIONS, TACHI_MEMORY_ACTION_SOFT_MAX, TACHI_ORCHESTRATOR_ACTIONS,
-    TACHI_SKILL_ACTIONS, TACHI_STAFF_ACTIONS, TACHI_TASK_PRIMARY_ACTION_SOFT_MAX,
+    TACHI_EVENT_ACTIONS, TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX, TACHI_MEMORY_ACTIONS,
+    TACHI_MEMORY_ACTION_SOFT_MAX, TACHI_ORCHESTRATOR_ACTIONS, TACHI_SKILL_ACTIONS,
+    TACHI_STAFF_ACTIONS, TACHI_TASK_PRIMARY_ACTION_SOFT_MAX,
     TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_WIKI_ACTIONS,
 };
 
 mod orchestration;
 pub use orchestration::{
     MirrorEvalAdjudicateParams, MirrorEvalGetParams, MirrorEvalObserveParams,
-    MirrorEvalRegisterParams, TachiAgentEvalParams, TachiAgentsParams, TachiArenaParams,
-    TachiBoardParams, TachiOrchestratorParams, TachiStaffParams, TachiVerifyCheckItem,
-    TachiVerifyParams,
+    MirrorEvalRegisterParams, TachiAgentEvalParams, TachiAgentsParams, TachiBoardParams,
+    TachiOrchestratorParams, TachiStaffParams, TachiVerifyCheckItem, TachiVerifyParams,
 };
 
 #[cfg(test)]
