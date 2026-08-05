@@ -692,6 +692,15 @@ pub enum WikiAction {
         /// signature it found. It cannot be combined with `--apply`/`--plan`.
         #[arg(long)]
         repair_sibling_damage: bool,
+        /// Bootstrap the shared `wiki` store and adopt eligible legacy-global
+        /// rows into it verbatim.
+        ///
+        /// Its own mode with its own confirmation token: without `--confirm`
+        /// it is a read-only preview that creates nothing. It cannot be
+        /// combined with `--apply`, `--plan`, `--backup-dir`, or
+        /// `--repair-sibling-damage`.
+        #[arg(long)]
+        adopt_legacy: bool,
     },
 }
 

@@ -46,6 +46,20 @@ const RECEIPT_VERSION: u32 = 2;
 const REPAIR_RECEIPT_KEY: &str = "wiki_corpus_sibling_repair";
 const REPAIR_RECEIPT_VERSION: u32 = 1;
 const REPAIR_PHASE: &str = "sibling_damage_repaired";
+/// Third token, distinct from both of the above for the same reason they are
+/// distinct from each other: a copy-pasted apply or repair command must not be
+/// able to bootstrap a new store.
+pub(crate) const WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN: &str = "ADOPT_WIKI_LEGACY_V1";
+/// Additive, nested provenance key stamped on every adopted row.
+///
+/// Deliberately **not** `RECEIPT_KEY`: attaching a `wiki_corpus_migration`
+/// receipt to a row the classifier does not call a `SharedCandidate` is an
+/// explicit error in the reconciler, so reusing that key here would poison a
+/// later `--apply`. Equally deliberately, `review_status` lives *inside* this
+/// key and never at metadata top level, where a `"pending"` value would demote
+/// the row's derived lifecycle.
+const WIKI_LEGACY_ADOPTION_MARKER_KEY: &str = "wiki_legacy_adoption_v1";
+const WIKI_LEGACY_ADOPTION_REPORT_VERSION: &str = "wiki-legacy-adoption/v1";
 static PREVIEW_SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A read-only SQLite handle backed by a private filesystem snapshot.
@@ -635,6 +649,24 @@ pub(crate) struct WikiCorpusReport {
     /// preview and apply is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     sibling_repair: Option<SiblingRepairReport>,
+    /// Present only in the legacy-adoption modes, so the JSON shape of
+    /// preview, apply, and sibling repair is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_adoption: Option<LegacyAdoptionReport>,
+}
+
+impl WikiCorpusReport {
+    /// True when a legacy-adoption run reached a failure it recorded in the
+    /// receipt instead of throwing the receipt away with an `Err`.
+    ///
+    /// The CLI layer uses this to fail the process **after** printing the
+    /// report: an adoption that created a store and then could not finish must
+    /// not exit 0, and it must not lose the only evidence of what it did.
+    pub(crate) fn legacy_adoption_had_failures(&self) -> bool {
+        self.legacy_adoption
+            .as_ref()
+            .is_some_and(|report| report.had_failures)
+    }
 }
 
 /// One inspected row that could carry the sibling-race damage signature.
@@ -707,6 +739,19 @@ struct RawRow {
     scope: String,
     archived: bool,
     revision: i64,
+    // Round-2 bug C: usage counters, loaded verbatim so adoption can carry
+    // them through. `import_snapshot_batch` writes these four fields from
+    // `MemoryEntry` (memcore's `snapshot_import.rs`), but they are outside
+    // the lifecycle checksum's coverage (archived/created_at/id/revision/
+    // superseded_by/updated_at/valid_until, per #1607's scope) -- same
+    // category as `path`, which gets its own `verify_adopted_paths` readback
+    // for the same reason. Preservation here is asserted by
+    // `adopt_legacy_preserves_usage_counters_verbatim`, not by the checksum;
+    // deliberately not widening the checksum's scope to cover them.
+    access_count: i64,
+    scored_count: i64,
+    last_access: Option<String>,
+    last_use_at: Option<String>,
     retention_policy: Option<String>,
     domain: Option<String>,
     metadata: Value,
@@ -898,6 +943,12 @@ fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize, bool), String> {
         expression("query_diversity", "0"),
         expression("tier", "'raw'"),
         expression("superseded_by", "NULL"),
+        // Round-2 bug C: appended rather than interleaved so every existing
+        // positional `row.get(N)` above keeps its index unchanged.
+        expression("access_count", "0"),
+        expression("scored_count", "0"),
+        expression("last_access", "NULL"),
+        expression("last_use_at", "NULL"),
     ]
     .join(", ");
     let sql = format!("SELECT {select} FROM memories ORDER BY id ASC");
@@ -941,6 +992,10 @@ fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize, bool), String> {
                 query_diversity: row.get(20)?,
                 tier: row.get(21)?,
                 superseded_by: row.get(22)?,
+                access_count: row.get(23)?,
+                scored_count: row.get(24)?,
+                last_access: row.get(25)?,
+                last_use_at: row.get(26)?,
                 metadata_parse_error,
                 classification: None,
                 reasons: Vec::new(),
@@ -1075,10 +1130,14 @@ fn memory_entry_from_raw(row: &RawRow) -> MemoryEntry {
         source: row.source.clone(),
         scope: row.scope.clone(),
         archived: row.archived,
-        access_count: 0,
-        scored_count: 0,
-        last_access: None,
-        last_use_at: None,
+        // Round-2 bug C: loaded verbatim from the legacy row instead of
+        // hardcoded to zero/None -- `import_snapshot_batch` writes these
+        // straight from this `MemoryEntry`, so hardcoding them here silently
+        // dropped every adopted row's usage history.
+        access_count: row.access_count,
+        scored_count: row.scored_count,
+        last_access: row.last_access.clone(),
+        last_use_at: row.last_use_at.clone(),
         revision: row.revision,
         vector: row.vector.clone(),
         retention_policy: row.retention_policy.clone(),
@@ -4171,6 +4230,10 @@ fn raw_from_entry(entry: &MemoryEntry) -> RawRow {
         scope: entry.scope.clone(),
         archived: entry.archived,
         revision: entry.revision,
+        access_count: entry.access_count,
+        scored_count: entry.scored_count,
+        last_access: entry.last_access.clone(),
+        last_use_at: entry.last_use_at.clone(),
         retention_policy: entry.retention_policy.clone(),
         domain: entry.domain.clone(),
         metadata: entry.metadata.clone(),
@@ -5445,6 +5508,7 @@ fn run_wiki_corpus_command_internal(
             migration_outcomes: Vec::new(),
             warnings,
             sibling_repair: None,
+            legacy_adoption: None,
         });
     }
     let plan = match plan_path {
@@ -5465,6 +5529,7 @@ fn run_wiki_corpus_command_internal(
         migration_outcomes,
         warnings,
         sibling_repair: None,
+        legacy_adoption: None,
     })
 }
 
@@ -5590,7 +5655,973 @@ pub(crate) fn run_wiki_corpus_sibling_repair_command(
         migration_outcomes: Vec::new(),
         warnings,
         sibling_repair: Some(repair),
+        legacy_adoption: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// `tachi wiki corpus --adopt-legacy` (tachi#1624)
+// ---------------------------------------------------------------------------
+//
+// Bootstrap `<home>/projects/wiki/tachi-memory.db` and adopt the eligible
+// legacy-global rows into it verbatim.
+//
+// # Why this is a separate mode from `--apply`
+//
+// `--apply` reconciles two stores that already exist. It refuses any absent
+// involved store (`validate_apply_inventory`), `store_specs` has no create
+// branch, and `build_plan` only emits items for `SharedCandidate` rows — of
+// which a host whose corpus is entirely `manual_review` has none. It
+// reconciles; it cannot bootstrap and it cannot move this corpus. That gap,
+// not a policy disagreement, is why this verb exists.
+//
+// # What it asserts about the adopted rows: nothing
+//
+// No `knowledge_scope`, no `applies_to`, no `origin_projects`, no review
+// receipt. Stamping `knowledge_scope=shared` on an unreviewed row would make
+// the row *less* retrievable, not more (`shared_active_without_review` forces
+// `PendingReview`), so the only honest stamp is no stamp. The single metadata
+// delta is the additive, nested `wiki_legacy_adoption_v1` key, which every
+// derive path ignores.
+//
+// # Known limitation this mode ships with, deliberately (tachi#1611 phase 5)
+//
+// Adoption copies rows without touching the legacy source, so after it runs
+// every adopted normalized path exists in **two** logical stores.
+// `finalize_classifications` forces both copies of any cross-store duplicate
+// path to `ManualReview`, and `build_plan` only emits `SharedCandidate` items.
+// The reconciler is therefore inert for every adopted path until one side is
+// deleted: phase 5's *first* step must be choosing and removing a side. This
+// is reported in `legacy_adoption.reconciler_impact` and measured in
+// `legacy_adoption.legacy_rows_forced_to_manual_review_by_duplicate_path`
+// rather than left for a later reader to rediscover.
+
+/// One legacy row that was not adopted, with the exact rule that excluded it.
+#[derive(Debug, Clone, Serialize)]
+struct AdoptionSkip {
+    id: String,
+    path: String,
+    reason: String,
+}
+
+/// A preserved supersession edge whose target is absent from the new store.
+/// Reported, never fatal: repair is tachi#1350's operation.
+#[derive(Debug, Clone, Serialize)]
+struct AdoptionDanglingEdge {
+    id: String,
+    superseded_by: String,
+}
+
+/// A row whose stored path will differ from its source path because the
+/// shared write path normalizes it.
+///
+/// The lifecycle checksum does **not** cover `path`, so a silent rewrite would
+/// otherwise pass verification unnoticed. Every rewrite is disclosed here
+/// before the run is confirmed, and the confirmed run reads the destination's
+/// `path` column back and refuses to call itself clean if any stored path
+/// differs from the value predicted here.
+#[derive(Debug, Clone, Serialize)]
+struct AdoptionPathRewrite {
+    id: String,
+    source_path: String,
+    stored_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LegacyAdoptionReport {
+    version: String,
+    confirmed: bool,
+    confirm_token_required: String,
+    target_path: String,
+    target_existed_before: bool,
+    /// True once this run has created the store's directory, i.e. from the
+    /// first side effect onward — not only after a successful import. Read it
+    /// together with `target_removed_after_failure`: `true`/`Some(true)` means
+    /// the run created something and then cleaned it up again.
+    target_created: bool,
+    /// `Some(false)` is a hard failure, not a warning: an unstamped store is
+    /// not the wiki corpus and must not be left holding adopted rows.
+    target_store_role_stamped: Option<bool>,
+    /// Set when a post-creation failure was compensated by removing what this
+    /// run wrote: the whole `target_dir` if this run created it, or just the
+    /// db file (and its WAL/SHM sidecars) if `target_dir` preexisted this
+    /// run. `Some(false)` means the removal itself failed and the operator
+    /// must clean up by hand; `remediation` states exactly what to remove.
+    target_removed_after_failure: Option<bool>,
+    legacy_open_path: Option<String>,
+    legacy_physical_id: Option<String>,
+    legacy_row_digest_before: String,
+    legacy_row_digest_after: Option<String>,
+    /// Rows the classifier calls wiki-related, i.e. rows carrying a
+    /// classification. Rows the legacy store holds that are not wiki-related
+    /// are neither counted here nor listed in `skipped`: they are not part of
+    /// this corpus and a `classification_missing` entry per non-wiki row would
+    /// bury the skip histogram an operator has to read.
+    wiki_related_rows: usize,
+    eligible_rows: usize,
+    skipped: Vec<AdoptionSkip>,
+    adopted_ids: Vec<String>,
+    adoption_run_id: String,
+    provenance_marker_key: String,
+    /// Derived lifecycle of every adopted row, keyed by lifecycle name. A run
+    /// can import every row, match every checksum, and still leave search
+    /// empty if nothing derives a default-retrievable lifecycle — so the
+    /// receipt states this rather than leaving it to be inferred.
+    derived_lifecycle_counts: BTreeMap<String, usize>,
+    default_retrievable_rows: usize,
+    path_rewrites: Vec<AdoptionPathRewrite>,
+    rows_imported: usize,
+    vectors_imported: usize,
+    vectors_absent: usize,
+    dangling_supersessions: Vec<AdoptionDanglingEdge>,
+    expected_lifecycle_checksum: String,
+    expected_vector_checksum: String,
+    observed_lifecycle_checksum: Option<String>,
+    observed_vector_checksum: Option<String>,
+    checksums_match: Option<bool>,
+    /// The standing consequence of copy-without-supersede; see the module
+    /// section above.
+    reconciler_impact: String,
+    legacy_rows_forced_to_manual_review_by_duplicate_path: Option<usize>,
+    /// True when the run recorded a failure instead of returning `Err`. The
+    /// CLI turns this into a non-zero exit after printing the receipt.
+    had_failures: bool,
+    /// Populated only when the operator still has cleanup to do.
+    remediation: Option<String>,
+    errors: Vec<String>,
+}
+
+const WIKI_LEGACY_ADOPTION_RECONCILER_IMPACT: &str =
+    "adoption copies rows without superseding the legacy source, so every adopted normalized \
+     path now exists in two logical stores; finalize_classifications forces both copies to \
+     manual_review and build_plan only emits shared_candidate items, so `tachi wiki corpus \
+     --apply` is inert for these paths until one side is deleted (tachi#1611 phase 5 must \
+     delete a side first)";
+
+fn legacy_adoption_target_path(app_home: &Path) -> PathBuf {
+    app_home
+        .join("projects")
+        .join("wiki")
+        .join(memcore::MEMORY_DB_FILENAME)
+}
+
+/// Removes exactly the files a bootstrap-and-import of `target` could have
+/// written -- the main db file plus its `-wal`/`-shm` sidecars -- and nothing
+/// else in `target`'s directory. Used by the round-2 bug B failure path,
+/// where `target_dir` preexisted this run and so is not this run's to
+/// remove wholesale. Missing files are not an error: a failure early in
+/// `adopt_into_bootstrapped_store` may have written none of the three.
+fn remove_adopted_store_files(target: &Path) -> std::io::Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        match fs::remove_file(preview_sidecar_path(target, suffix)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// `Ok(())` when the row is adopted; `Err(reason)` is the exact reported
+/// string. Rules run in declaration order so the reported reason is stable.
+fn adoption_eligibility(row: &RawRow) -> Result<(), String> {
+    // E1 -- only the class the classifier could not place. Every other class
+    // carries positive typed evidence about where it belongs, and adoption
+    // never overrides that evidence.
+    match row.classification {
+        Some(CorpusClassification::ManualReview) => {}
+        Some(other) => {
+            return Err(format!(
+                "classification={}",
+                serde_json::to_value(other)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string())
+            ))
+        }
+        None => return Err("classification_missing".to_string()),
+    }
+
+    // E2 -- the same two knowledge-artifact roots `wiki_ops::search` is
+    // willing to project. Spelled out rather than imported: that predicate is
+    // `pub(super)` to `wiki_ops`, and a bootstrap verb must not widen it.
+    let path = row.path.as_str();
+    let public_knowledge_artifact = path == "/wiki"
+        || path.starts_with("/wiki/")
+        || path == "/guide"
+        || path.starts_with("/guide/");
+    if !public_knowledge_artifact {
+        return Err("path_not_public_knowledge_artifact".to_string());
+    }
+
+    // E3 -- every identity the shared write path refuses. Checked here so the
+    // refusal is a reported skip in the preview rather than a mid-import
+    // failure against a store that has already been created.
+    if adoption_reserved_identity(row) {
+        return Err("reserved_identity".to_string());
+    }
+
+    // E4 -- the marker is inserted into a JSON object; a row whose metadata is
+    // not an object has nowhere to carry provenance.
+    if row.metadata_parse_error.is_some() || !row.metadata.is_object() {
+        return Err("metadata_json_invalid".to_string());
+    }
+
+    Ok(())
+}
+
+/// Mirror of the identities `memcore`'s shared
+/// `refuse_reserved_write_identity` rejects, evaluated against the same values
+/// the import will pass it (the id, the *normalized* path, and the topic).
+fn adoption_reserved_identity(row: &RawRow) -> bool {
+    let entry = memory_entry_from_raw(row);
+    let normalized = memcore::path_router::normalize_path(&row.path);
+    row.id.trim().is_empty()
+        || row.id.starts_with("anchor:")
+        || memcore::is_reserved_wiki_rem_id(&row.id)
+        || row.id == "wiki-operation-log"
+        || normalized == "/wiki/_log"
+        || normalized.starts_with("/wiki/_log/")
+        || memcore::namespace::is_wiki_log_entry(&entry)
+}
+
+fn adoption_run_id(legacy_physical_id: &str, ids: &[String]) -> String {
+    digest_string(
+        &json!({
+            "version": WIKI_LEGACY_ADOPTION_REPORT_VERSION,
+            "legacy_physical_id": legacy_physical_id,
+            "ids": ids,
+        })
+        .to_string(),
+    )
+}
+
+/// The two lifecycle columns `RawRow` does not carry.
+///
+/// `load_rows`' SELECT deliberately omits `created_at`/`updated_at`, and
+/// extending `RawRow` would change `row_digest` and therefore every existing
+/// plan fingerprint. Adoption reads them separately instead.
+struct LegacyLifecycleColumns {
+    created_at: String,
+    updated_at: String,
+}
+
+fn load_legacy_lifecycle_columns(
+    open_path: &Path,
+) -> Result<BTreeMap<String, LegacyLifecycleColumns>, String> {
+    let conn = open_preview_connection(open_path)?;
+    let mut statement = conn
+        .prepare("PRAGMA table_info(memories)")
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    for required in ["created_at", "updated_at"] {
+        if !columns.contains(required) {
+            return Err(format!(
+                "legacy store lacks column '{required}'; snapshot adoption cannot fabricate it"
+            ));
+        }
+    }
+
+    // One deferred transaction so both columns come from a single WAL
+    // snapshot rather than two independent reads.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let mut statement = tx
+        .prepare("SELECT id, created_at, updated_at FROM memories ORDER BY id ASC")
+        .map_err(|error| error.to_string())?;
+    let mut lifecycle = BTreeMap::new();
+    let mapped = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                LegacyLifecycleColumns {
+                    created_at: row.get(1)?,
+                    updated_at: row.get(2)?,
+                },
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    for row in mapped {
+        let (id, columns) = row.map_err(|error| error.to_string())?;
+        lifecycle.insert(id, columns);
+    }
+    drop(statement);
+    drop(tx);
+    Ok(lifecycle)
+}
+
+/// Build one import entry: the source row verbatim, plus exactly one additive
+/// nested metadata key.
+fn adoption_entry(
+    row: &RawRow,
+    lifecycle: &LegacyLifecycleColumns,
+    legacy_physical_id: &str,
+    adoption_run_id: &str,
+    adopted_at: &str,
+) -> Result<memcore::PortableImportEntry, String> {
+    // The id is preserved verbatim. The destination is created empty by this
+    // same run, so the import's duplicate-id refusal cannot fire and every
+    // intra-set `superseded_by` edge still resolves to the row it named.
+    let mut entry = memory_entry_from_raw(row);
+    let Some(metadata) = entry.metadata.as_object_mut() else {
+        // Unreachable: E4 already refused non-object metadata. Kept as a hard
+        // refusal rather than a silent default so a future eligibility edit
+        // cannot quietly start dropping provenance.
+        return Err(format!(
+            "legacy row '{}' metadata is not a JSON object; adoption cannot attach provenance",
+            row.id
+        ));
+    };
+    metadata.insert(
+        WIKI_LEGACY_ADOPTION_MARKER_KEY.to_string(),
+        json!({
+            "source_store": "legacy_global",
+            "source_physical_id": legacy_physical_id,
+            "source_id": row.id,
+            "adopted_at": adopted_at,
+            "confirm_token": WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN,
+            "adoption_run_id": adoption_run_id,
+            "review_status": "review_pending",
+            "reviewed": false,
+        }),
+    );
+    Ok(memcore::PortableImportEntry {
+        entry,
+        created_at: lifecycle.created_at.clone(),
+        updated_at: lifecycle.updated_at.clone(),
+        superseded_by: row.superseded_by.clone(),
+    })
+}
+
+/// Every refusal the import can raise that is a pure function of the entries,
+/// evaluated **before** anything is created on disk.
+///
+/// `import_snapshot_batch` runs its own pre-walk before opening a
+/// transaction, so these failures never write a row — but by then the store
+/// file already exists, and an empty store is worse than no store: it flips
+/// the named-store existence gate, which silences the zero-store search
+/// refusal without making search work.
+///
+/// Not pre-flightable: vector availability, which is a property of the
+/// destination and unknowable until it is open. That one is handled by the
+/// post-creation compensation path.
+fn adoption_preflight(entries: &[memcore::PortableImportEntry]) -> Result<(), String> {
+    // The destination carries the `wiki` label, so `validate_write_path`'s only
+    // rejection clause -- a `/wiki/...` path in a non-wiki store -- cannot fire
+    // for any entry. Asserted once rather than assumed.
+    if !memcore::path_router::db_label_is_wiki_corpus(memcore::path_router::WIKI_CORPUS_DB_LABEL) {
+        return Err("wiki corpus label no longer identifies the wiki corpus".to_string());
+    }
+    let mut seen = BTreeSet::new();
+    for import in entries {
+        let entry = &import.entry;
+        if !seen.insert(entry.id.as_str()) {
+            return Err(format!(
+                "legacy adoption pre-flight: duplicate id '{}' in the adoption set",
+                entry.id
+            ));
+        }
+        let normalized = memcore::path_router::normalize_path(&entry.path);
+        if entry.id.trim().is_empty()
+            || entry.id.starts_with("anchor:")
+            || memcore::is_reserved_wiki_rem_id(&entry.id)
+            || entry.id == "wiki-operation-log"
+            || normalized == "/wiki/_log"
+            || normalized.starts_with("/wiki/_log/")
+            || entry.topic.eq_ignore_ascii_case("wiki_log")
+        {
+            return Err(format!(
+                "legacy adoption pre-flight: id '{}' is a reserved write identity and cannot be \
+                 imported",
+                entry.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Read back every adopted row's stored `path` and compare it against the
+/// value adoption predicted, closing the gap the lifecycle checksum leaves
+/// open (it covers `archived`/`created_at`/`id`/`revision`/`superseded_by`/
+/// `updated_at`/`valid_until` -- not `path`).
+fn verify_adopted_paths(
+    target: &Path,
+    entries: &[memcore::PortableImportEntry],
+) -> Result<(), String> {
+    // Opened read-write, not read-only: a read-only open of a WAL database
+    // whose `-shm` sidecar is absent has to create one, which is exactly the
+    // failure `open_preview_connection` exists to work around. This is a file
+    // this run created and owns, so there is nothing to protect it from.
+    let conn = Connection::open(target)
+        .map_err(|error| format!("cannot reopen adopted store for path readback: {error}"))?;
+    for import in entries {
+        let expected = memcore::path_router::normalize_path(&import.entry.path);
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT path FROM memories WHERE id = ?1",
+                [import.entry.id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                format!(
+                    "cannot read adopted path for '{}': {error}",
+                    import.entry.id
+                )
+            })?;
+        match stored {
+            Some(stored) if stored == expected => {}
+            Some(stored) => {
+                return Err(format!(
+                "adopted row '{}' stored path '{stored}' does not match the predicted '{expected}'",
+                import.entry.id
+            ))
+            }
+            None => {
+                return Err(format!(
+                    "adopted row '{}' is absent from the destination after a successful import",
+                    import.entry.id
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `tachi wiki corpus --adopt-legacy`.
+///
+/// Bootstrap-only by construction: it refuses to run against a `wiki` store
+/// that already exists, and it is read-only on the legacy global — no
+/// supersede, no archive, no metadata write. Rollback is therefore complete
+/// removal of the store it created; there is no partial state to reconcile.
+pub(crate) fn run_wiki_corpus_legacy_adoption_command(
+    apply: bool,
+    confirm: Option<String>,
+    backup_dir: Option<PathBuf>,
+    plan_path: Option<PathBuf>,
+    global_db: &Path,
+    project_db: Option<&Path>,
+    app_home: &Path,
+) -> Result<WikiCorpusReport, String> {
+    if apply {
+        return Err(
+            "--adopt-legacy is its own confirmed mode and cannot be combined with --apply"
+                .to_string(),
+        );
+    }
+    if plan_path.is_some() {
+        return Err(
+            "--adopt-legacy does not take --plan; the adoption set is derived from the legacy \
+             store's own classification"
+                .to_string(),
+        );
+    }
+    if backup_dir.is_some() {
+        return Err(
+            "--adopt-legacy does not take --backup-dir; it never writes to an existing store — \
+             back up the legacy global out-of-band before running"
+                .to_string(),
+        );
+    }
+    let confirmed = match confirm.as_deref() {
+        None => false,
+        Some(token) if token == WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN => true,
+        Some(_) => {
+            return Err(format!(
+                "legacy adoption requires exact --confirm {WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN}"
+            ))
+        }
+    };
+
+    // Round-2 bug A: this existing-target gate must run before the legacy
+    // store is opened at all, not merely before the destination is written.
+    // `target_existed_before` is a pure function of `app_home` and the wiki
+    // store path -- it touches nothing legacy -- so hoisting it ahead of
+    // `store_specs`/`inventory_store` (which does open and read the legacy
+    // global) costs nothing and closes the window where a second confirmed
+    // run against an occupied target would still read the legacy source
+    // before refusing.
+    let target = legacy_adoption_target_path(app_home);
+    let target_dir = target
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "wiki store path has no parent directory".to_string())?;
+    let target_existed_before =
+        MemoryServer::resolve_existing_named_project_db_path_in_home("wiki", app_home)
+            .map_err(|error| format!("cannot resolve the named wiki store: {error}"))?
+            .is_some()
+            || fs::symlink_metadata(&target).is_ok();
+    if target_existed_before && confirmed {
+        // B1: the remedy is removal and re-run, not `--apply`. `--apply`
+        // refuses any absent involved store, and on a host with no bound
+        // project DB the `bound_project` store is always absent -- so naming
+        // it here would send the operator to a command that cannot run.
+        return Err(format!(
+            "wiki store already exists at {}; --adopt-legacy is a bootstrap-only mode — remove {} \
+             and re-run if you intend to rebuild it",
+            target.display(),
+            target_dir.display()
+        ));
+    }
+
+    let mut scans = store_specs(global_db, project_db, app_home)
+        .into_iter()
+        .map(inventory_store)
+        .collect::<Vec<_>>();
+    finalize_classifications(&mut scans);
+    for scan in scans.iter_mut() {
+        refresh_report(scan);
+    }
+    let warnings = scans
+        .iter()
+        .filter_map(|scan| {
+            scan.report
+                .read_failure
+                .as_ref()
+                .map(|failure| format!("{}: {}", scan.report.logical_store_ref, failure.message))
+        })
+        .collect::<Vec<_>>();
+
+    let legacy = find_scan(&scans, LogicalStore::LegacyGlobal.reference())?;
+    if let Some(failure) = legacy.report.read_failure.as_ref() {
+        return Err(format!(
+            "legacy global store is unreadable: {}",
+            failure.message
+        ));
+    }
+    if legacy.report.stored_schema != Some(EXPECTED_SCHEMA_VERSION) {
+        return Err(format!(
+            "legacy global store is at schema {:?}, expected {EXPECTED_SCHEMA_VERSION}",
+            legacy.report.stored_schema
+        ));
+    }
+    let physical = legacy
+        .physical
+        .clone()
+        .ok_or_else(|| "legacy global store has no physical identity".to_string())?;
+    let legacy_row_digest_before = legacy.row_digest.clone();
+    let legacy_spec = legacy.spec.clone();
+
+    // B3: the corpus is the classified rows, not every row the legacy store
+    // holds. `load_rows` selects the whole `memories` table; only wiki-related
+    // rows carry a classification.
+    let mut skipped = Vec::new();
+    // Owned clones, not borrows: the report below consumes `scans`, and the
+    // adoption set must outlive the inventory it was derived from.
+    let mut eligible: Vec<RawRow> = Vec::new();
+    let mut wiki_related_rows = 0usize;
+    for row in legacy.rows.iter() {
+        if row.classification.is_none() {
+            continue;
+        }
+        wiki_related_rows += 1;
+        match adoption_eligibility(row) {
+            Ok(()) => eligible.push(row.clone()),
+            Err(reason) => skipped.push(AdoptionSkip {
+                id: row.id.clone(),
+                path: row.path.clone(),
+                reason,
+            }),
+        }
+    }
+    skipped.sort_by(|left, right| left.id.cmp(&right.id));
+    eligible.sort_by(|left, right| left.id.cmp(&right.id));
+    let eligible_rows = eligible.len();
+    if eligible.is_empty() && confirmed {
+        return Err(
+            "no eligible legacy rows to adopt; refusing to create an empty wiki store".to_string(),
+        );
+    }
+
+    let lifecycle_columns = load_legacy_lifecycle_columns(&PathBuf::from(&physical.open_path))?;
+    let adopted_ids = eligible
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    let adoption_run_id = adoption_run_id(&physical.physical_id, &adopted_ids);
+    let adopted_at = chrono::Utc::now().to_rfc3339();
+    let mut entries = Vec::with_capacity(eligible.len());
+    for row in eligible.iter() {
+        let lifecycle = lifecycle_columns.get(&row.id).ok_or_else(|| {
+            format!(
+                "legacy row '{}' vanished between inventory and lifecycle read; re-run",
+                row.id
+            )
+        })?;
+        entries.push(adoption_entry(
+            row,
+            lifecycle,
+            &physical.physical_id,
+            &adoption_run_id,
+            &adopted_at,
+        )?);
+    }
+
+    let path_rewrites = entries
+        .iter()
+        .filter_map(|import| {
+            let stored = memcore::path_router::normalize_path(&import.entry.path);
+            (stored != import.entry.path).then(|| AdoptionPathRewrite {
+                id: import.entry.id.clone(),
+                source_path: import.entry.path.clone(),
+                stored_path: stored,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // The lifecycle every adopted row will derive once stored. A run can
+    // import every row and match every checksum while leaving search empty, so
+    // this is measured, not assumed.
+    let mut derived_lifecycle_counts = BTreeMap::<String, usize>::new();
+    let mut default_retrievable_rows = 0usize;
+    for import in entries.iter() {
+        let effective = derive_effective_knowledge_artifact(
+            &import.entry.metadata,
+            &import.entry.path,
+            &import.entry.scope,
+        );
+        *derived_lifecycle_counts
+            .entry(effective.lifecycle.as_str().to_string())
+            .or_default() += 1;
+        if effective.lifecycle.is_default_retrievable() {
+            default_retrievable_rows += 1;
+        }
+    }
+    if confirmed && default_retrievable_rows == 0 {
+        return Err(format!(
+            "no adopted row would be default-retrievable (0 of {eligible_rows} derive a \
+             default-retrievable lifecycle); creating the wiki store would silence the zero-store \
+             search refusal without making search work"
+        ));
+    }
+
+    let expected_lifecycle_checksum =
+        memcore::PortableImportReceipt::expected_lifecycle_checksum(&entries)
+            .map_err(|error| format!("cannot compute the expected lifecycle checksum: {error}"))?;
+    let expected_vector_checksum =
+        memcore::PortableImportReceipt::expected_vector_checksum(&entries)
+            .map_err(|error| format!("cannot compute the expected vector checksum: {error}"))?;
+
+    let mut report = LegacyAdoptionReport {
+        version: WIKI_LEGACY_ADOPTION_REPORT_VERSION.to_string(),
+        confirmed,
+        confirm_token_required: WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN.to_string(),
+        target_path: target.display().to_string(),
+        target_existed_before,
+        target_created: false,
+        target_store_role_stamped: None,
+        target_removed_after_failure: None,
+        legacy_open_path: Some(physical.open_path.clone()),
+        legacy_physical_id: Some(physical.physical_id.clone()),
+        legacy_row_digest_before: legacy_row_digest_before.clone(),
+        legacy_row_digest_after: None,
+        wiki_related_rows,
+        eligible_rows,
+        skipped,
+        adopted_ids,
+        adoption_run_id,
+        provenance_marker_key: WIKI_LEGACY_ADOPTION_MARKER_KEY.to_string(),
+        derived_lifecycle_counts,
+        default_retrievable_rows,
+        path_rewrites,
+        rows_imported: 0,
+        vectors_imported: 0,
+        vectors_absent: 0,
+        dangling_supersessions: Vec::new(),
+        expected_lifecycle_checksum: expected_lifecycle_checksum.clone(),
+        expected_vector_checksum: expected_vector_checksum.clone(),
+        observed_lifecycle_checksum: None,
+        observed_vector_checksum: None,
+        checksums_match: None,
+        reconciler_impact: WIKI_LEGACY_ADOPTION_RECONCILER_IMPACT.to_string(),
+        legacy_rows_forced_to_manual_review_by_duplicate_path: None,
+        had_failures: false,
+        remediation: None,
+        errors: Vec::new(),
+    };
+
+    if !confirmed {
+        return Ok(WikiCorpusReport {
+            version: REPORT_VERSION.to_string(),
+            mode: "legacy_adoption_preview".to_string(),
+            apply: false,
+            stores: scans.into_iter().map(|scan| scan.report).collect(),
+            plan: None,
+            backup_manifest: None,
+            migration_outcomes: Vec::new(),
+            warnings,
+            sibling_repair: None,
+            legacy_adoption: Some(report),
+        });
+    }
+
+    // Everything that can be refused from the entries alone is refused here,
+    // while nothing exists on disk.
+    adoption_preflight(&entries)?;
+
+    // Round-2 bug B: `target_existed_before` is a statement about the target
+    // *file* (or a named resolution), not about `target_dir`. A preexisting,
+    // empty `target_dir` -- no db, possibly holding unrelated content --
+    // passes that gate and lands here with `target_existed_before == false`.
+    // Failure cleanup must not conflate "this run's writes" with "the whole
+    // directory": record, before creating anything, whether this run is the
+    // one bringing the directory into existence.
+    let target_dir_created_by_this_run = !target_dir.exists();
+    fs::create_dir_all(&target_dir).map_err(|error| {
+        format!(
+            "cannot create wiki store directory {}: {error}",
+            target_dir.display()
+        )
+    })?;
+    let target_str = target
+        .to_str()
+        .ok_or_else(|| "wiki store path is not valid UTF-8".to_string())?
+        .to_string();
+
+    // From here on every failure is compensated and *recorded* rather than
+    // thrown away with the receipt: the run has created a store, and an
+    // operator who is handed a bare error string has no evidence of what state
+    // the host is in.
+    report.target_created = true;
+    let outcome = adopt_into_bootstrapped_store(
+        &target,
+        &target_str,
+        &entries,
+        &expected_lifecycle_checksum,
+        &expected_vector_checksum,
+        &legacy_spec,
+        &legacy_row_digest_before,
+        &mut report,
+    );
+
+    if let Err(error) = outcome {
+        report.errors.push(error);
+        report.had_failures = true;
+        // An empty or half-built store is worse than no store: its mere
+        // existence flips the named-store gate and silences the zero-store
+        // search refusal. Remove what *this run* wrote, and say whether the
+        // removal worked. If this run also created `target_dir`, the whole
+        // directory is this run's to remove; if the directory preexisted,
+        // only the db file (and its WAL/SHM sidecars) this run wrote belong
+        // to it -- the directory and anything else inside it is left alone.
+        let removal = if target_dir_created_by_this_run {
+            fs::remove_dir_all(&target_dir)
+        } else {
+            remove_adopted_store_files(&target)
+        };
+        match removal {
+            Ok(()) => {
+                report.target_removed_after_failure = Some(true);
+                report.remediation = Some(if target_dir_created_by_this_run {
+                    format!(
+                        "the store this run created at {} was removed; the legacy global is \
+                         untouched, so re-running `tachi wiki corpus --adopt-legacy --confirm {}` \
+                         after fixing the reported error is safe",
+                        target_dir.display(),
+                        WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
+                    )
+                } else {
+                    format!(
+                        "the wiki store file this run wrote at {} was removed; {} preexisted this \
+                         run and was left untouched. The legacy global is untouched, so \
+                         re-running `tachi wiki corpus --adopt-legacy --confirm {}` after fixing \
+                         the reported error is safe",
+                        target.display(),
+                        target_dir.display(),
+                        WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
+                    )
+                });
+            }
+            Err(remove_error) => {
+                report.target_removed_after_failure = Some(false);
+                report.errors.push(if target_dir_created_by_this_run {
+                    format!(
+                        "cannot remove the wiki store this run created at {}: {remove_error}",
+                        target_dir.display()
+                    )
+                } else {
+                    format!(
+                        "cannot remove the wiki store file this run wrote at {}: {remove_error}",
+                        target.display()
+                    )
+                });
+                report.remediation = Some(if target_dir_created_by_this_run {
+                    format!(
+                        "remove {} by hand and re-run `tachi wiki corpus --adopt-legacy --confirm {}`",
+                        target_dir.display(),
+                        WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
+                    )
+                } else {
+                    format!(
+                        "remove {} by hand (leave {} in place unless you intend to rebuild it) \
+                         and re-run `tachi wiki corpus --adopt-legacy --confirm {}`",
+                        target.display(),
+                        target_dir.display(),
+                        WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN
+                    )
+                });
+            }
+        }
+    }
+
+    // Re-derive the specs rather than reusing the pre-run ones: the shared
+    // `wiki` spec was resolved before this run created the store, so a reused
+    // spec would still carry `addressed_path: None` and the report would deny
+    // the existence of the store it had just built.
+    let mut scans = store_specs(global_db, project_db, app_home)
+        .into_iter()
+        .map(inventory_store)
+        .collect::<Vec<_>>();
+    finalize_classifications(&mut scans);
+    for scan in scans.iter_mut() {
+        refresh_report(scan);
+    }
+    if !report.had_failures {
+        // B4, measured rather than asserted: how many legacy rows the
+        // duplicate-path pass has just pinned to manual_review.
+        report.legacy_rows_forced_to_manual_review_by_duplicate_path = Some(
+            find_scan(&scans, LogicalStore::LegacyGlobal.reference())
+                .map(|scan| {
+                    scan.rows
+                        .iter()
+                        .filter(|row| {
+                            row.reasons.iter().any(|reason| {
+                                reason == "duplicate_normalized_path_across_logical_stores"
+                            })
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+        );
+    }
+    let warnings = scans
+        .iter()
+        .filter_map(|scan| {
+            scan.report
+                .read_failure
+                .as_ref()
+                .map(|failure| format!("{}: {}", scan.report.logical_store_ref, failure.message))
+        })
+        .collect::<Vec<_>>();
+
+    Ok(WikiCorpusReport {
+        version: REPORT_VERSION.to_string(),
+        mode: "legacy_adoption".to_string(),
+        apply: true,
+        stores: scans.into_iter().map(|scan| scan.report).collect(),
+        plan: None,
+        backup_manifest: None,
+        migration_outcomes: Vec::new(),
+        warnings,
+        sibling_repair: None,
+        legacy_adoption: Some(report),
+    })
+}
+
+/// The confirmed run's write half, factored out so its caller can compensate
+/// uniformly for every failure after the store file exists.
+#[allow(clippy::too_many_arguments)]
+fn adopt_into_bootstrapped_store(
+    target: &Path,
+    target_str: &str,
+    entries: &[memcore::PortableImportEntry],
+    expected_lifecycle_checksum: &str,
+    expected_vector_checksum: &str,
+    legacy_spec: &StoreSpec,
+    legacy_row_digest_before: &str,
+    report: &mut LegacyAdoptionReport,
+) -> Result<(), String> {
+    // The only construction that stamps role = "wiki" *and* the full store
+    // profile at birth. `stored == 0` on a brand-new file makes this a build,
+    // not a migration, so no `MigrationAuthority` is involved.
+    let mut store = MemoryStore::open_with_label_and_context(
+        target_str,
+        memcore::path_router::WIKI_CORPUS_DB_LABEL,
+        &memcore::DbOpenContext::create_fresh(),
+    )
+    .map_err(|error| {
+        format!(
+            "cannot bootstrap wiki store at {}: {error}",
+            target.display()
+        )
+    })?;
+    let stamped = store.is_wiki_corpus_store();
+    report.target_store_role_stamped = Some(stamped);
+    if !stamped {
+        return Err(
+            "bootstrapped store is not stamped as the wiki corpus; refusing to import".to_string(),
+        );
+    }
+
+    let receipt = store
+        .import_snapshot_batch(entries)
+        .map_err(|error| format!("legacy adoption import failed: {error}"))?;
+    drop(store);
+
+    report.rows_imported = receipt.rows_imported;
+    report.vectors_imported = receipt.vectors_imported;
+    report.vectors_absent = receipt.vectors_absent;
+    report.dangling_supersessions = receipt
+        .dangling_supersessions
+        .iter()
+        .map(|edge| AdoptionDanglingEdge {
+            id: edge.id.clone(),
+            superseded_by: edge.superseded_by.clone(),
+        })
+        .collect();
+    report.observed_lifecycle_checksum = Some(receipt.lifecycle_checksum.clone());
+    report.observed_vector_checksum = Some(receipt.vector_checksum.clone());
+    let checksums_match = receipt.lifecycle_checksum == expected_lifecycle_checksum
+        && receipt.vector_checksum == expected_vector_checksum;
+    report.checksums_match = Some(checksums_match);
+    if receipt.rows_imported != entries.len() || !checksums_match {
+        return Err(format!(
+            "legacy adoption receipt mismatch: rows {}/{}, lifecycle {} vs {}, vector {} vs {}",
+            receipt.rows_imported,
+            entries.len(),
+            receipt.lifecycle_checksum,
+            expected_lifecycle_checksum,
+            receipt.vector_checksum,
+            expected_vector_checksum,
+        ));
+    }
+
+    // `path` is outside the lifecycle checksum, so it gets its own readback.
+    verify_adopted_paths(target, entries)?;
+
+    // Independent read of what was written: `open_existing_read_write` opens
+    // unlabelled and derives its label from the stamp alone, so this is not a
+    // replay of the label the bootstrap claimed.
+    let check = MemoryStore::open_existing_read_write(target_str)
+        .map_err(|error| format!("cannot reopen the adopted wiki store: {error}"))?;
+    let retained = check.is_wiki_corpus_store();
+    drop(check);
+    report.target_store_role_stamped = Some(retained);
+    if !retained {
+        return Err("adopted wiki store did not retain its role stamp".to_string());
+    }
+
+    // Source-immutability proof: adoption is read-only on the legacy global,
+    // so its row digest must be byte-identical to the pre-run value. The
+    // legacy spec alone is re-inventoried on purpose -- `row_digest` is
+    // computed from the raw rows, before `finalize_classifications`, so it
+    // does not depend on which other stores are in the scan set.
+    let legacy_after = inventory_store(legacy_spec.clone());
+    report.legacy_row_digest_after = Some(legacy_after.row_digest.clone());
+    if legacy_after.row_digest != legacy_row_digest_before {
+        return Err(format!(
+            "legacy global changed during adoption (digest {legacy_row_digest_before} -> {}); the \
+             adopted store cannot be qualified against it",
+            legacy_after.row_digest
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5835,6 +6866,10 @@ mod tests {
             .to_string(),
             archived: false,
             revision: 1,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
             retention_policy: Some("permanent".to_string()),
             domain: Some("wiki".to_string()),
             metadata,
@@ -8500,5 +9535,1078 @@ mod tests {
         let again = again.sibling_repair.clone().unwrap();
         assert_eq!(again.inspected_rows, 0);
         assert_eq!(again.repaired, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // `--adopt-legacy` (tachi#1624)
+    // -----------------------------------------------------------------
+
+    /// The shape the host runs: a legacy global, no bound project DB, and a
+    /// Tachi home with no `wiki` store yet.
+    struct AdoptionFixture {
+        _directory: tempfile::TempDir,
+        global_path: PathBuf,
+        app_home: PathBuf,
+    }
+
+    impl AdoptionFixture {
+        fn new(entries: &[MemoryEntry]) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let global_path = directory.path().join("global.db");
+            let app_home = directory.path().join("home");
+            fs::create_dir_all(&app_home).unwrap();
+            create_current_fixture(&global_path, entries);
+            Self {
+                _directory: directory,
+                global_path,
+                app_home,
+            }
+        }
+
+        fn target(&self) -> PathBuf {
+            legacy_adoption_target_path(&self.app_home)
+        }
+
+        fn target_dir(&self) -> PathBuf {
+            self.target().parent().unwrap().to_path_buf()
+        }
+
+        fn run(&self, confirm: Option<&str>) -> Result<WikiCorpusReport, String> {
+            run_wiki_corpus_legacy_adoption_command(
+                false,
+                confirm.map(str::to_string),
+                None,
+                None,
+                &self.global_path,
+                None,
+                &self.app_home,
+            )
+        }
+
+        fn adopt(&self) -> LegacyAdoptionReport {
+            self.run(Some(WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN))
+                .expect("confirmed adoption")
+                .legacy_adoption
+                .expect("legacy adoption report")
+        }
+    }
+
+    fn adoption_entry_fixture(id: &str, path: &str, metadata: Value) -> MemoryEntry {
+        let mut entry = fixture_entry(id, path, metadata);
+        // Distinct bodies: memcore's write path consolidates near-duplicates
+        // above a token-Jaccard of 0.9, and every `fixture_entry` shares one
+        // literal body.
+        entry.text = format!("adoption fixture body for {id} at {path}");
+        entry.summary = format!("adoption fixture summary {id}");
+        entry
+    }
+
+    /// Overwrite the lifecycle columns `upsert` stamps with wall clock, so a
+    /// test can assert verbatim preservation of values a write path would
+    /// never produce.
+    #[allow(clippy::too_many_arguments)]
+    fn force_legacy_lifecycle(
+        path: &Path,
+        id: &str,
+        created_at: &str,
+        updated_at: &str,
+        revision: i64,
+        archived: bool,
+        valid_until: Option<&str>,
+        superseded_by: Option<&str>,
+    ) {
+        let conn = Connection::open(path).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE memories
+                 SET created_at = ?2, updated_at = ?3, revision = ?4, archived = ?5,
+                     valid_until = ?6, superseded_by = ?7
+                 WHERE id = ?1",
+                rusqlite::params![
+                    id,
+                    created_at,
+                    updated_at,
+                    revision,
+                    archived,
+                    valid_until,
+                    superseded_by
+                ],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "fixture row {id} must exist");
+    }
+
+    /// Round-2 bug C. Overwrite the usage-counter columns directly, bypassing
+    /// `upsert` the same way `force_legacy_lifecycle` does: the ordinary
+    /// write path does not accept caller-supplied `access_count`/
+    /// `scored_count`/`last_access`/`last_use_at` (they are bumped by the
+    /// search/recall path, never set by a write), so this is the only way to
+    /// build a fixture carrying values a legacy row genuinely accumulated
+    /// before adoption.
+    fn force_legacy_usage_counters(
+        path: &Path,
+        id: &str,
+        access_count: i64,
+        scored_count: i64,
+        last_access: Option<&str>,
+        last_use_at: Option<&str>,
+    ) {
+        let conn = Connection::open(path).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE memories
+                 SET access_count = ?2, scored_count = ?3, last_access = ?4, last_use_at = ?5
+                 WHERE id = ?1",
+                rusqlite::params![id, access_count, scored_count, last_access, last_use_at],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "fixture row {id} must exist");
+    }
+
+    /// Overwrite the `path` column directly, bypassing `upsert`'s
+    /// `normalize_path` call so the fixture can hold a raw legacy path the
+    /// current write path would never itself persist -- the shape genuinely
+    /// legacy data (written before normalization existed, or by a path
+    /// outside this write seam) can carry.
+    fn force_legacy_path(path: &Path, id: &str, raw_path: &str) {
+        let conn = Connection::open(path).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE memories SET path = ?2 WHERE id = ?1",
+                rusqlite::params![id, raw_path],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "fixture row {id} must exist");
+    }
+
+    struct DestinationRow {
+        created_at: String,
+        updated_at: String,
+        revision: i64,
+        archived: bool,
+        valid_until: Option<String>,
+        superseded_by: Option<String>,
+        metadata: Value,
+        path: String,
+        // Round-2 bug C.
+        access_count: i64,
+        scored_count: i64,
+        last_access: Option<String>,
+        last_use_at: Option<String>,
+    }
+
+    fn destination_row(target: &Path, id: &str) -> DestinationRow {
+        let conn = Connection::open(target).unwrap();
+        conn.query_row(
+            "SELECT created_at, updated_at, revision, archived, valid_until, superseded_by,
+                    metadata, path, access_count, scored_count, last_access, last_use_at
+             FROM memories WHERE id = ?1",
+            [id],
+            |row| {
+                let metadata: String = row.get(6)?;
+                Ok(DestinationRow {
+                    created_at: row.get(0)?,
+                    updated_at: row.get(1)?,
+                    revision: row.get(2)?,
+                    archived: row.get::<_, i64>(3)? != 0,
+                    valid_until: row.get(4)?,
+                    superseded_by: row.get(5)?,
+                    metadata: serde_json::from_str(&metadata).unwrap(),
+                    path: row.get(7)?,
+                    access_count: row.get(8)?,
+                    scored_count: row.get(9)?,
+                    last_access: row.get(10)?,
+                    last_use_at: row.get(11)?,
+                })
+            },
+        )
+        .unwrap_or_else(|error| panic!("adopted row {id} must exist: {error}"))
+    }
+
+    /// Give an already-seeded row an id the ordinary write path would refuse,
+    /// which is the only way to build a fixture for E3. Renaming beats a raw
+    /// `INSERT`: the reserved-reference insert guard is a trigger over
+    /// `memories`, and preparing an `INSERT` on a connection that has not
+    /// registered memcore's guard function would fail for reasons unrelated to
+    /// what is being tested.
+    fn rename_legacy_row_id(path: &Path, from: &str, to: &str) {
+        let conn = Connection::open(path).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE memories SET id = ?2 WHERE id = ?1",
+                rusqlite::params![from, to],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "fixture row {from} must exist");
+    }
+
+    /// T1
+    #[test]
+    fn adopt_legacy_refuses_wrong_confirm_token() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "adopt-token",
+            "/wiki/adopt/token",
+            json!({"lifecycle": "active"}),
+        )]);
+
+        let error = fixture
+            .run(Some(WIKI_CORPUS_CONFIRMATION_TOKEN))
+            .expect_err("the migration token must not confirm an adoption");
+        assert!(
+            error.contains(WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN),
+            "{error}"
+        );
+        assert!(
+            fs::symlink_metadata(fixture.target()).is_err(),
+            "a refused adoption must not create the store"
+        );
+    }
+
+    /// T2
+    #[test]
+    fn adopt_legacy_refuses_apply_plan_and_backup_dir() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "adopt-flags",
+            "/wiki/adopt/flags",
+            json!({"lifecycle": "active"}),
+        )]);
+        let token = Some(WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN.to_string());
+
+        let error = run_wiki_corpus_legacy_adoption_command(
+            true,
+            token.clone(),
+            None,
+            None,
+            &fixture.global_path,
+            None,
+            &fixture.app_home,
+        )
+        .expect_err("--adopt-legacy must refuse to ride along with --apply");
+        assert_eq!(
+            error,
+            "--adopt-legacy is its own confirmed mode and cannot be combined with --apply"
+        );
+        assert!(fs::symlink_metadata(fixture.target()).is_err());
+
+        let error = run_wiki_corpus_legacy_adoption_command(
+            false,
+            token.clone(),
+            None,
+            Some(fixture.app_home.join("plan.json")),
+            &fixture.global_path,
+            None,
+            &fixture.app_home,
+        )
+        .expect_err("--adopt-legacy takes no plan");
+        assert_eq!(
+            error,
+            "--adopt-legacy does not take --plan; the adoption set is derived from the legacy \
+             store's own classification"
+        );
+        assert!(fs::symlink_metadata(fixture.target()).is_err());
+
+        let error = run_wiki_corpus_legacy_adoption_command(
+            false,
+            token,
+            Some(fixture.app_home.join("backups")),
+            None,
+            &fixture.global_path,
+            None,
+            &fixture.app_home,
+        )
+        .expect_err("--adopt-legacy takes no backup directory");
+        assert_eq!(
+            error,
+            "--adopt-legacy does not take --backup-dir; it never writes to an existing store — \
+             back up the legacy global out-of-band before running"
+        );
+        assert!(fs::symlink_metadata(fixture.target()).is_err());
+    }
+
+    /// T3
+    #[test]
+    fn adopt_legacy_preview_creates_nothing() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "adopt-preview",
+            "/wiki/adopt/preview",
+            json!({"lifecycle": "active"}),
+        )]);
+        let before = directory_snapshot(&fixture.app_home);
+
+        let report = fixture.run(None).expect("preview must succeed");
+        assert_eq!(report.mode, "legacy_adoption_preview");
+        assert!(!report.apply);
+        let adoption = report.legacy_adoption.expect("legacy adoption report");
+
+        assert!(!adoption.confirmed);
+        assert!(!adoption.target_created);
+        assert!(!adoption.target_existed_before);
+        assert_eq!(adoption.rows_imported, 0);
+        assert_eq!(adoption.observed_lifecycle_checksum, None);
+        assert_eq!(adoption.checksums_match, None);
+        assert!(adoption.eligible_rows > 0);
+        assert!(!adoption.expected_lifecycle_checksum.is_empty());
+        assert_eq!(adoption.default_retrievable_rows, adoption.eligible_rows);
+        assert_eq!(
+            adoption.derived_lifecycle_counts.get("active").copied(),
+            Some(adoption.eligible_rows)
+        );
+        assert!(
+            fs::symlink_metadata(fixture.target()).is_err(),
+            "preview must create nothing"
+        );
+        assert_eq!(directory_snapshot(&fixture.app_home), before);
+    }
+
+    /// T4
+    #[test]
+    fn adopt_legacy_refuses_when_wiki_store_already_exists() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "adopt-occupied",
+            "/wiki/adopt/occupied",
+            json!({"lifecycle": "active"}),
+        )]);
+        fs::create_dir_all(fixture.target_dir()).unwrap();
+        create_current_fixture(&fixture.target(), &[]);
+        let occupant = db_snapshot_fingerprint(&db_snapshot(&fixture.target()));
+
+        let error = fixture
+            .run(Some(WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN))
+            .expect_err("adoption is bootstrap-only");
+        assert!(error.contains("bootstrap-only mode"), "{error}");
+        assert!(
+            error.contains("remove") && error.contains("re-run"),
+            "the remedy must be removal and re-run, never --apply: {error}"
+        );
+        assert!(
+            !error.contains("--apply"),
+            "--apply refuses any absent involved store on a --no-project-db host: {error}"
+        );
+        assert_eq!(
+            db_snapshot_fingerprint(&db_snapshot(&fixture.target())),
+            occupant,
+            "the refused run must not touch the existing store"
+        );
+
+        // The preview stays a safe probe against an occupied home.
+        let preview = fixture.run(None).expect("preview must still report");
+        let adoption = preview.legacy_adoption.unwrap();
+        assert!(adoption.target_existed_before);
+        assert!(!adoption.target_created);
+    }
+
+    /// T4b, round-2 bug A: the existing-target refusal must fire before the
+    /// legacy store is opened at all, not merely before the destination is
+    /// written. Proven with a discriminator rather than instrumentation: the
+    /// legacy source is corrupted after the fixture is built, so *if* the
+    /// confirmed path ever opened it, `inventory_store` would capture a read
+    /// failure and the command would surface "legacy global store is
+    /// unreadable" instead of the bootstrap-only refusal. Getting the
+    /// bootstrap-only wording proves the legacy open never happened.
+    #[test]
+    fn adopt_legacy_refuses_existing_target_before_touching_legacy_store() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "adopt-order",
+            "/wiki/adopt/order",
+            json!({"lifecycle": "active"}),
+        )]);
+        fs::create_dir_all(fixture.target_dir()).unwrap();
+        create_current_fixture(&fixture.target(), &[]);
+
+        // Corrupt the legacy source only after the fixture (and the
+        // preexisting target) are built. A second confirmed run against an
+        // occupied target with a legacy source that would error if opened is
+        // exactly the shape a refusal-ordering regression would mishandle.
+        fs::write(&fixture.global_path, b"not a sqlite database").unwrap();
+
+        let error = fixture
+            .run(Some(WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN))
+            .expect_err("adoption is bootstrap-only");
+        assert!(
+            error.contains("bootstrap-only mode"),
+            "the existing-target refusal must fire before the corrupt legacy store is ever \
+             opened: {error}"
+        );
+        assert!(
+            !error.contains("legacy global store is unreadable"),
+            "a legacy-read error here would mean the legacy store was opened before the \
+             existing-target check: {error}"
+        );
+    }
+
+    /// T5
+    #[test]
+    fn adopt_legacy_eligibility_partition() {
+        let fixture = AdoptionFixture::new(&[
+            adoption_entry_fixture("row-a", "/wiki/a", json!({"lifecycle": "active"})),
+            adoption_entry_fixture(
+                "row-b",
+                "/wiki/b",
+                json!({"knowledge_scope": "project", "lifecycle": "active"}),
+            ),
+            // `rem` would be the more natural operational marker, but the
+            // ordinary write path strips it from caller-supplied metadata, so
+            // a fixture seeded through `upsert` cannot carry it.
+            adoption_entry_fixture(
+                "row-c",
+                "/wiki/c",
+                json!({"operational_snapshot": true, "lifecycle": "active"}),
+            ),
+            adoption_entry_fixture(
+                "row-d",
+                "/wiki/d",
+                json!({"authority_record": true, "lifecycle": "active"}),
+            ),
+            adoption_entry_fixture(
+                "row-e",
+                "/kanban/e",
+                json!({"artifact_kind": "wiki", "lifecycle": "active"}),
+            ),
+            adoption_entry_fixture("row-f", "/wiki/f", json!({"lifecycle": "active"})),
+        ]);
+        // E3's only case E1 does not already shadow. A `wiki-rem:` id or a
+        // `/wiki/_log` row carries an operational marker and is excluded by E1
+        // first; an `anchor:`-prefixed row on a wiki path is not, so it is the
+        // one that proves the reserved-identity rule is load-bearing.
+        rename_legacy_row_id(&fixture.global_path, "row-f", "anchor:f");
+
+        let report = fixture.run(None).expect("preview");
+        let adoption = report.legacy_adoption.unwrap();
+
+        assert_eq!(adoption.adopted_ids, vec!["row-a".to_string()]);
+        assert_eq!(adoption.eligible_rows, 1);
+        let reasons = adoption
+            .skipped
+            .iter()
+            .map(|skip| (skip.id.as_str(), skip.reason.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            reasons,
+            BTreeMap::from([
+                ("anchor:f", "reserved_identity"),
+                ("row-b", "classification=project_bound"),
+                ("row-c", "classification=operational_snapshot"),
+                ("row-d", "classification=authority_record"),
+                ("row-e", "path_not_public_knowledge_artifact"),
+            ])
+        );
+        // B3: the six seeded rows are all wiki-related; no `classification_missing`
+        // entry may appear, and the count is the classified rows, not the table.
+        assert_eq!(adoption.wiki_related_rows, 6);
+        assert!(adoption
+            .skipped
+            .iter()
+            .all(|skip| skip.reason != "classification_missing"));
+    }
+
+    /// B3 directly: a legacy store holding non-wiki rows must not inflate
+    /// `wiki_related_rows` or bury the skip histogram, because `load_rows`
+    /// selects the whole `memories` table with no wiki predicate.
+    #[test]
+    fn adopt_legacy_ignores_rows_the_classifier_calls_non_wiki() {
+        let mut kanban = adoption_entry_fixture("kanban-row", "/kanban/card", json!({}));
+        kanban.category = "kanban".to_string();
+        kanban.source = "kanban".to_string();
+        kanban.domain = None;
+        let fixture = AdoptionFixture::new(&[
+            adoption_entry_fixture("wiki-row", "/wiki/kept", json!({"lifecycle": "active"})),
+            kanban,
+        ]);
+
+        let adoption = fixture.run(None).expect("preview").legacy_adoption.unwrap();
+        assert_eq!(
+            adoption.wiki_related_rows, 1,
+            "only classified rows are part of this corpus"
+        );
+        assert!(
+            adoption.skipped.is_empty(),
+            "a non-wiki row is not a skipped adoption candidate: {:?}",
+            adoption.skipped
+        );
+        assert_eq!(adoption.adopted_ids, vec!["wiki-row".to_string()]);
+    }
+
+    /// T6
+    #[test]
+    fn adopt_legacy_preserves_lifecycle_verbatim() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "verbatim",
+            "/wiki/adopt/verbatim",
+            json!({"lifecycle": "active"}),
+        )]);
+        force_legacy_lifecycle(
+            &fixture.global_path,
+            "verbatim",
+            "2019-01-01T00:00:00Z",
+            "2020-02-02T00:00:00Z",
+            7,
+            true,
+            Some(""),
+            None,
+        );
+
+        let adoption = fixture.adopt();
+        assert_eq!(adoption.checksums_match, Some(true));
+        assert_eq!(adoption.rows_imported, 1);
+
+        let stored = destination_row(&fixture.target(), "verbatim");
+        assert_eq!(stored.created_at, "2019-01-01T00:00:00Z");
+        assert_eq!(stored.updated_at, "2020-02-02T00:00:00Z");
+        assert_eq!(stored.revision, 7);
+        assert!(stored.archived);
+        assert_eq!(
+            stored.valid_until,
+            Some(String::new()),
+            "an empty string is a distinct value from NULL and must survive as such"
+        );
+        assert_eq!(stored.superseded_by, None);
+        assert_eq!(stored.path, "/wiki/adopt/verbatim");
+    }
+
+    /// T6b, round-2 bug C: `access_count`/`scored_count`/`last_access`/
+    /// `last_use_at` are usage history, not lifecycle policy, but
+    /// `import_snapshot_batch` writes them straight from the `MemoryEntry`
+    /// it is handed (memcore `snapshot_import.rs`). The loader used to
+    /// hardcode all four to zero/None regardless of what the legacy row
+    /// actually carried, so every adopted row silently lost its usage
+    /// history while `checksums_match` still passed -- the lifecycle
+    /// checksum's coverage is `archived`/`created_at`/`id`/`revision`/
+    /// `superseded_by`/`updated_at`/`valid_until` only (see the field
+    /// comment on `RawRow`), deliberately not widened here to cover these
+    /// four; this test is the thing that would catch a regression, not the
+    /// checksum.
+    #[test]
+    fn adopt_legacy_preserves_usage_counters_verbatim() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "usage-verbatim",
+            "/wiki/adopt/usage-verbatim",
+            json!({"lifecycle": "active"}),
+        )]);
+        force_legacy_usage_counters(
+            &fixture.global_path,
+            "usage-verbatim",
+            42,
+            17,
+            Some("2024-03-01T00:00:00Z"),
+            Some("2024-03-02T00:00:00Z"),
+        );
+
+        let adoption = fixture.adopt();
+        assert_eq!(adoption.rows_imported, 1);
+
+        let stored = destination_row(&fixture.target(), "usage-verbatim");
+        assert_eq!(stored.access_count, 42);
+        assert_eq!(stored.scored_count, 17);
+        assert_eq!(stored.last_access, Some("2024-03-01T00:00:00Z".to_string()));
+        assert_eq!(stored.last_use_at, Some("2024-03-02T00:00:00Z".to_string()));
+    }
+
+    /// T7
+    #[test]
+    fn adopt_legacy_reports_dangling_supersession() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "dangling",
+            "/wiki/adopt/dangling",
+            json!({"lifecycle": "active"}),
+        )]);
+        force_legacy_lifecycle(
+            &fixture.global_path,
+            "dangling",
+            "2019-01-01T00:00:00Z",
+            "2019-01-01T00:00:00Z",
+            1,
+            false,
+            None,
+            Some("not-adopted"),
+        );
+
+        let adoption = fixture.adopt();
+        assert_eq!(adoption.rows_imported, 1);
+        assert!(!adoption.had_failures, "a dangling edge is never fatal");
+        assert_eq!(adoption.dangling_supersessions.len(), 1);
+        assert_eq!(adoption.dangling_supersessions[0].id, "dangling");
+        assert_eq!(
+            adoption.dangling_supersessions[0].superseded_by,
+            "not-adopted"
+        );
+
+        assert_eq!(
+            destination_row(&fixture.target(), "dangling").superseded_by,
+            Some("not-adopted".to_string()),
+            "the edge is preserved, never repaired"
+        );
+    }
+
+    /// T8
+    #[test]
+    fn adopt_legacy_marker_is_the_only_metadata_delta() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "marker",
+            "/wiki/adopt/marker",
+            json!({
+                "lifecycle": "active",
+                "artifact_kind": "wiki",
+                "nested": {"b": 1, "a": [true, null, "x"]},
+            }),
+        )]);
+
+        let adoption = fixture.adopt();
+        assert_eq!(
+            adoption.provenance_marker_key,
+            WIKI_LEGACY_ADOPTION_MARKER_KEY
+        );
+
+        // Compared against the source row **as stored**, not against the
+        // literal this test passed in: the ordinary write path that seeded the
+        // fixture has its own metadata sanitization, and the claim under test
+        // is that adoption adds nothing beyond the marker to whatever the
+        // legacy store actually holds.
+        let stored_source = legacy_source_rows(&fixture.global_path)["marker"]["metadata"]
+            .as_str()
+            .map(|raw| serde_json::from_str::<Value>(raw).unwrap())
+            .expect("source metadata");
+        assert!(
+            stored_source
+                .as_object()
+                .is_some_and(|object| object.contains_key("nested")),
+            "the fixture must actually carry the metadata it claims: {stored_source}"
+        );
+
+        let metadata = destination_row(&fixture.target(), "marker").metadata;
+        let mut object = metadata.as_object().expect("object metadata").clone();
+        let marker = object
+            .remove(WIKI_LEGACY_ADOPTION_MARKER_KEY)
+            .expect("adoption marker");
+        assert_eq!(
+            Value::Object(object),
+            stored_source,
+            "the marker must be the only metadata delta"
+        );
+
+        assert_eq!(marker["review_status"], json!("review_pending"));
+        assert_eq!(marker["reviewed"], json!(false));
+        assert_eq!(
+            marker["confirm_token"],
+            json!(WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN)
+        );
+        assert_eq!(marker["source_id"], json!("marker"));
+        assert_eq!(marker["source_store"], json!("legacy_global"));
+        assert_eq!(marker["adoption_run_id"], json!(adoption.adoption_run_id));
+
+        // No assertion is smuggled in at metadata top level. `review_status`
+        // in particular would demote the derived lifecycle if it lived here.
+        for forbidden in [
+            "review_status",
+            "reviewed",
+            "knowledge_scope",
+            "origin_projects",
+            "applies_to",
+            "applicability_status",
+            "review_receipt",
+            "source_bundle_hash",
+            RECEIPT_KEY,
+        ] {
+            assert!(
+                metadata.get(forbidden).is_none(),
+                "adoption must not write a top-level '{forbidden}'"
+            );
+        }
+    }
+
+    /// T9
+    #[test]
+    fn adopt_legacy_never_mutates_the_source() {
+        let fixture = AdoptionFixture::new(&[
+            adoption_entry_fixture(
+                "src-one",
+                "/wiki/adopt/src-one",
+                json!({"lifecycle": "active"}),
+            ),
+            adoption_entry_fixture(
+                "src-two",
+                "/wiki/adopt/src-two",
+                json!({"lifecycle": "active"}),
+            ),
+        ]);
+        let before = legacy_source_rows(&fixture.global_path);
+
+        let adoption = fixture.adopt();
+        assert_eq!(adoption.rows_imported, 2);
+        assert_eq!(
+            adoption.legacy_row_digest_after,
+            Some(adoption.legacy_row_digest_before.clone()),
+            "adoption is read-only on the legacy global"
+        );
+        assert_eq!(legacy_source_rows(&fixture.global_path), before);
+    }
+
+    /// T10
+    #[test]
+    fn adopt_legacy_stamps_store_identity_role_wiki() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "stamped",
+            "/wiki/adopt/stamped",
+            json!({"lifecycle": "active"}),
+        )]);
+
+        let adoption = fixture.adopt();
+        assert!(adoption.target_created);
+        assert_eq!(adoption.target_store_role_stamped, Some(true));
+        assert_eq!(adoption.target_removed_after_failure, None);
+
+        let target = fixture.target();
+        let reopened = MemoryStore::open_existing_read_write(target.to_str().unwrap())
+            .expect("reopen the adopted store");
+        assert!(
+            reopened.is_wiki_corpus_store(),
+            "the role must be derived from the stamp on a plain reopen"
+        );
+        drop(reopened);
+
+        // The stamp itself, read out of `hard_state` rather than inferred from
+        // the label the bootstrap passed in.
+        let conn = Connection::open(&target).unwrap();
+        let stamp: String = conn
+            .query_row(
+                "SELECT value_json FROM hard_state
+                 WHERE namespace = 'store_identity' AND key = 'role'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("store_identity role stamp");
+        let stamp: Value = serde_json::from_str(&stamp).unwrap();
+        assert_eq!(
+            stamp["value"],
+            json!(memcore::path_router::WIKI_CORPUS_DB_LABEL)
+        );
+        assert_eq!(stamp["conferred_by"], json!("open:create-fresh"));
+
+        let profile: String = conn
+            .query_row(
+                "SELECT value_json FROM hard_state
+                 WHERE namespace = 'store_identity' AND key = 'profile'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("store_identity profile stamp");
+        let profile: Value = serde_json::from_str(&profile).unwrap();
+        assert_eq!(profile["conferred_by"], json!("open:create-fresh"));
+    }
+
+    /// T11
+    #[test]
+    fn adopt_legacy_preserves_vectors() {
+        let mut vectored = adoption_entry_fixture(
+            "vectored",
+            "/wiki/adopt/vectored",
+            json!({"lifecycle": "active"}),
+        );
+        vectored.vector = Some(vec![0.25_f32; crate::status_ops::EXPECTED_EMBEDDING_DIM]);
+        let plain =
+            adoption_entry_fixture("plain", "/wiki/adopt/plain", json!({"lifecycle": "active"}));
+        let fixture = AdoptionFixture::new(&[vectored, plain]);
+
+        let adoption = fixture.adopt();
+        assert_eq!(adoption.rows_imported, 2);
+        assert_eq!(adoption.vectors_imported, 1);
+        assert_eq!(adoption.vectors_absent, 1);
+        assert_eq!(
+            adoption.observed_vector_checksum,
+            Some(adoption.expected_vector_checksum.clone())
+        );
+        assert_eq!(adoption.checksums_match, Some(true));
+    }
+
+    /// T12
+    #[test]
+    fn adopt_legacy_refuses_to_create_an_empty_store() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "all-project",
+            "/wiki/adopt/all-project",
+            json!({"knowledge_scope": "project", "lifecycle": "active"}),
+        )]);
+
+        let error = fixture
+            .run(Some(WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN))
+            .expect_err("an empty adoption set must not create a store");
+        assert_eq!(
+            error,
+            "no eligible legacy rows to adopt; refusing to create an empty wiki store"
+        );
+        assert!(
+            fs::symlink_metadata(fixture.target_dir()).is_err(),
+            "the store directory must not exist"
+        );
+    }
+
+    /// T13 (rewritten): the reachable retrievability guard. A store whose
+    /// adopted rows all derive a non-retrievable lifecycle would flip the
+    /// named-store existence gate -- silencing the zero-store search refusal
+    /// -- without making a single row findable.
+    #[test]
+    fn adopt_legacy_refuses_when_no_adopted_row_would_be_retrievable() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "pending-only",
+            "/wiki/adopt/pending-only",
+            json!({"lifecycle": "pending_review"}),
+        )]);
+
+        let preview = fixture.run(None).expect("preview").legacy_adoption.unwrap();
+        assert_eq!(preview.eligible_rows, 1);
+        assert_eq!(preview.default_retrievable_rows, 0);
+        assert_eq!(
+            preview
+                .derived_lifecycle_counts
+                .get("pending_review")
+                .copied(),
+            Some(1)
+        );
+
+        let error = fixture
+            .run(Some(WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN))
+            .expect_err("a store nothing can be read out of must not be created");
+        assert!(
+            error.contains("default-retrievable") && error.contains("zero-store"),
+            "{error}"
+        );
+        assert!(fs::symlink_metadata(fixture.target_dir()).is_err());
+    }
+
+    /// The path column is outside the lifecycle checksum, so a silent rewrite
+    /// would otherwise verify clean. It is disclosed before the run and
+    /// re-read after it.
+    #[test]
+    fn adopt_legacy_discloses_and_verifies_path_normalization() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "rewritten",
+            "/wiki/adopt/rewritten",
+            json!({"lifecycle": "active"}),
+        )]);
+        // `AdoptionFixture::new` seeds the legacy row through `upsert`, which
+        // normalizes `path` on write (memcore's `normalize_path` call in
+        // `upsert_prepared_within_tx`) -- so no fixture path passed through
+        // that constructor can ever land in the legacy DB un-normalized.
+        // Force the raw legacy path in directly, the same idiom
+        // `force_legacy_lifecycle` uses for columns the current write path
+        // would never itself produce.
+        force_legacy_path(&fixture.global_path, "rewritten", "/wiki/adopt/rewritten/");
+
+        let preview = fixture.run(None).expect("preview").legacy_adoption.unwrap();
+        assert_eq!(preview.path_rewrites.len(), 1);
+        assert_eq!(preview.path_rewrites[0].id, "rewritten");
+        assert_eq!(
+            preview.path_rewrites[0].source_path,
+            "/wiki/adopt/rewritten/"
+        );
+        assert_eq!(
+            preview.path_rewrites[0].stored_path,
+            "/wiki/adopt/rewritten"
+        );
+
+        let adoption = fixture.adopt();
+        assert!(!adoption.had_failures);
+        assert_eq!(
+            destination_row(&fixture.target(), "rewritten").path,
+            "/wiki/adopt/rewritten"
+        );
+    }
+
+    /// B4, stated by the receipt rather than left for a later reader: after
+    /// adoption every adopted path lives in two logical stores, and the
+    /// duplicate-path pass pins both copies to `manual_review`.
+    #[test]
+    fn adopt_legacy_reports_that_it_pins_the_reconciler_to_manual_review() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "pinned",
+            "/wiki/adopt/pinned",
+            json!({"lifecycle": "active"}),
+        )]);
+
+        let adoption = fixture.adopt();
+        assert!(adoption
+            .reconciler_impact
+            .contains("build_plan only emits shared_candidate items"));
+        assert_eq!(
+            adoption.legacy_rows_forced_to_manual_review_by_duplicate_path,
+            Some(1),
+            "the duplicate-path pass must be measured, not asserted"
+        );
+
+        // And the mechanism itself: the next preview sees the row as a
+        // cross-store duplicate in both stores.
+        let preview = run_wiki_corpus_command(
+            false,
+            None,
+            None,
+            None,
+            &fixture.global_path,
+            None,
+            &fixture.app_home,
+        )
+        .expect("post-adoption corpus preview");
+        for store_ref in ["legacy_global", "named:wiki"] {
+            let store = preview
+                .stores
+                .iter()
+                .find(|store| store.logical_store_ref == store_ref)
+                .unwrap_or_else(|| panic!("{store_ref} must be inventoried"));
+            let row = store
+                .rows
+                .iter()
+                .find(|row| row.id == "pinned")
+                .unwrap_or_else(|| panic!("{store_ref} must hold the adopted row"));
+            assert_eq!(row.classification, CorpusClassification::ManualReview);
+            assert!(row
+                .reasons
+                .iter()
+                .any(|reason| reason == "duplicate_normalized_path_across_logical_stores"));
+        }
+    }
+
+    /// The three pre-existing modes must keep their exact JSON shape: the new
+    /// field is `skip_serializing_if = "Option::is_none"`, so `legacy_adoption`
+    /// may not appear in a preview, apply, or repair report.
+    #[test]
+    fn adoption_field_is_absent_from_every_other_mode() {
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "shape",
+            "/wiki/adopt/shape",
+            json!({"lifecycle": "active"}),
+        )]);
+
+        for report in [
+            run_wiki_corpus_command(
+                false,
+                None,
+                None,
+                None,
+                &fixture.global_path,
+                None,
+                &fixture.app_home,
+            )
+            .expect("preview"),
+            run_wiki_corpus_sibling_repair_command(
+                false,
+                None,
+                None,
+                None,
+                &fixture.global_path,
+                None,
+                &fixture.app_home,
+            )
+            .expect("repair preview"),
+        ] {
+            assert!(!report.legacy_adoption_had_failures());
+            let value = serde_json::to_value(&report).unwrap();
+            assert!(
+                value.get("legacy_adoption").is_none(),
+                "legacy_adoption must not appear in mode '{}'",
+                report.mode
+            );
+        }
+    }
+
+    /// Round-2 bug B: a preexisting, empty `target_dir` -- no db file inside,
+    /// so `target_existed_before` is `false` and the confirmed run proceeds
+    /// past the Bug A gate -- is not this run's to remove wholesale on
+    /// failure. Only the db file (and its WAL/SHM sidecars) this run itself
+    /// writes belong to it. Forced deterministically: the preexisting
+    /// `target_dir` is made read-only before the confirmed run, so
+    /// `MemoryStore::open_with_label_and_context`'s `create_fresh()` cannot
+    /// write the db file into it and `adopt_into_bootstrapped_store` fails at
+    /// its very first step, before anything is written.
+    #[cfg(unix)]
+    #[test]
+    fn adopt_legacy_failure_cleanup_spares_preexisting_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = AdoptionFixture::new(&[adoption_entry_fixture(
+            "adopt-preexisting-dir",
+            "/wiki/adopt/preexisting-dir",
+            json!({"lifecycle": "active"}),
+        )]);
+        let target_dir = fixture.target_dir();
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+        // Elevated privileges (e.g. root in some CI containers) bypass
+        // directory write-permission checks entirely, which would make this
+        // probe meaningless (the bootstrap write would silently succeed).
+        // Detect that up front and skip rather than assert something
+        // environment-dependent.
+        let probe_path = target_dir.join("permission-probe");
+        let permission_enforced = File::create(&probe_path).is_err();
+        let _ = fs::remove_file(&probe_path);
+        if !permission_enforced {
+            fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            eprintln!(
+                "skipping adopt_legacy_failure_cleanup_spares_preexisting_dir: target_dir \
+                 write permission was not enforced (root?)"
+            );
+            return;
+        }
+
+        let report = fixture.adopt();
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(report.had_failures);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("cannot bootstrap wiki store")),
+            "expected a bootstrap failure: {:?}",
+            report.errors
+        );
+        assert!(
+            target_dir.is_dir(),
+            "the preexisting target_dir must survive the failure cleanup"
+        );
+        assert!(
+            !fixture.target().exists(),
+            "no db file may remain inside the preexisting target_dir"
+        );
+        assert_eq!(
+            report.target_removed_after_failure,
+            Some(true),
+            "nothing was written before the bootstrap failed, so file-only removal is a no-op \
+             success"
+        );
+        let remediation = report.remediation.expect("remediation must be set");
+        assert!(
+            remediation.contains("preexisted this run") && remediation.contains("untouched"),
+            "remediation must state the preexisting-dir semantics: {remediation}"
+        );
+    }
+
+    fn legacy_source_rows(path: &Path) -> BTreeMap<String, Value> {
+        let conn = Connection::open(path).unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT id, path, revision, archived, metadata, superseded_by, created_at,
+                        updated_at, valid_until
+                 FROM memories ORDER BY id ASC",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    json!({
+                        "path": row.get::<_, String>(1)?,
+                        "revision": row.get::<_, i64>(2)?,
+                        "archived": row.get::<_, i64>(3)?,
+                        "metadata": row.get::<_, String>(4)?,
+                        "superseded_by": row.get::<_, Option<String>>(5)?,
+                        "created_at": row.get::<_, String>(6)?,
+                        "updated_at": row.get::<_, String>(7)?,
+                        "valid_until": row.get::<_, Option<String>>(8)?,
+                    }),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .unwrap();
+        rows
     }
 }

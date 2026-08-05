@@ -26,7 +26,12 @@ pub(crate) mod setup_wizard;
 mod skill_surface_cli;
 mod tidy;
 mod vault_sync;
-mod wiki_corpus;
+// Crate-visible so the Wiki search integration tests can drive
+// `--adopt-legacy` end to end (tachi#1624): the discriminator is that a
+// federated Wiki search flips from a zero-store refusal to a real hit, and
+// that can only be observed from a `MemoryServer`, not from inside this
+// module. Every item in it is already `pub(crate)` or private.
+pub(crate) mod wiki_corpus;
 
 mod vault_cli;
 

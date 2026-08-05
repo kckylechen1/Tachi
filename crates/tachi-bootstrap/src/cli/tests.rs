@@ -14,6 +14,7 @@ fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
                 backup_dir: None,
                 plan: None,
                 repair_sibling_damage: false,
+                adopt_legacy: false,
             }
         })
     ));
@@ -40,6 +41,7 @@ fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
                 backup_dir: Some(backup_dir),
                 plan: Some(plan),
                 repair_sibling_damage: false,
+                adopt_legacy: false,
             }
         }) if confirm == "MIGRATE_WIKI_CORPUS_V1"
             && backup_dir == std::path::Path::new("/tmp/wiki-backups")
@@ -66,9 +68,67 @@ fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
                 backup_dir: Some(backup_dir),
                 plan: None,
                 repair_sibling_damage: true,
+                adopt_legacy: false,
             }
         }) if confirm == "REPAIR_WIKI_CORPUS_SIBLING_DAMAGE_V1"
             && backup_dir == std::path::Path::new("/tmp/wiki-backups")
+    ));
+}
+
+/// tachi#1624: `--adopt-legacy` is a third confirmed mode of the same
+/// subcommand, so the flag must parse alongside its own token and must
+/// default to `false` on every pre-existing invocation.
+#[test]
+fn wiki_corpus_cli_parses_adopt_legacy_mode() {
+    let adopt = Cli::try_parse_from([
+        "tachi",
+        "wiki",
+        "corpus",
+        "--adopt-legacy",
+        "--confirm",
+        "ADOPT_WIKI_LEGACY_V1",
+    ])
+    .expect("wiki corpus legacy-adoption flags should parse");
+    assert!(matches!(
+        adopt.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Corpus {
+                apply: false,
+                confirm: Some(confirm),
+                backup_dir: None,
+                plan: None,
+                repair_sibling_damage: false,
+                adopt_legacy: true,
+            }
+        }) if confirm == "ADOPT_WIKI_LEGACY_V1"
+    ));
+
+    let preview = Cli::try_parse_from(["tachi", "wiki", "corpus"])
+        .expect("bare wiki corpus must keep parsing");
+    assert!(matches!(
+        preview.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Corpus {
+                adopt_legacy: false,
+                ..
+            }
+        })
+    ));
+
+    let adopt_preview = Cli::try_parse_from(["tachi", "wiki", "corpus", "--adopt-legacy"])
+        .expect("legacy-adoption preview takes no token");
+    assert!(matches!(
+        adopt_preview.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Corpus {
+                apply: false,
+                confirm: None,
+                backup_dir: None,
+                plan: None,
+                repair_sibling_damage: false,
+                adopt_legacy: true,
+            }
+        })
     ));
 }
 

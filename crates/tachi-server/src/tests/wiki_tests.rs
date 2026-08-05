@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 mod evolver_export;
 mod ingest;
+mod legacy_adoption;
 mod lint;
 mod search_read_browse;
 mod write;
