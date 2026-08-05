@@ -15,6 +15,7 @@ mod recall_evidence;
 mod refinery;
 mod sandbox;
 mod status;
+pub mod util;
 
 pub use agent::*;
 pub use dlq::*;

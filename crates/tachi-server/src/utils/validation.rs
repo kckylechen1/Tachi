@@ -1,14 +1,3 @@
-pub(crate) fn is_shell_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-}
-
 pub(crate) fn normalize_supported_values<'a>(
     raw_values: &[String],
     supported: &'a [&'a str],
