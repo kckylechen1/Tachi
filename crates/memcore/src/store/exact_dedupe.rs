@@ -1945,6 +1945,18 @@ mod tests {
                 )
                 .unwrap();
         });
+        // tachi#1348-A: the loser is soft-archived, not deleted, so a vector
+        // it carried before apply must still carry after — a silent
+        // `memories_vec` row leak or drop on archive would only surface
+        // here, since `memories`/`memories_fts` conservation (asserted
+        // below) says nothing about the vector projection.
+        store
+            .conn
+            .execute(
+                "INSERT INTO memories_vec(id, embedding) VALUES (?1, ?2)",
+                params!["loser", db::serialize_f32(&[0.5_f32; 1024])],
+            )
+            .unwrap();
         let before_total: i64 = store
             .conn
             .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
@@ -1952,6 +1964,10 @@ mod tests {
         let before_fts: i64 = store
             .conn
             .query_row("SELECT count(*) FROM memories_fts", [], |r| r.get(0))
+            .unwrap();
+        let before_vec: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM memories_vec", [], |r| r.get(0))
             .unwrap();
         let plan = store
             .plan_exact_dedupe(identity.clone(), None, None)
@@ -2014,6 +2030,15 @@ mod tests {
                     .get::<_, i64>(0))
                 .unwrap(),
             before_fts
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT count(*) FROM memories_vec", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            before_vec,
+            "memories_vec row count must be unchanged across a soft-archive apply"
         );
         let recalled = store.search("same", None).unwrap();
         assert!(recalled.iter().any(|result| result.entry.id == "winner"));
