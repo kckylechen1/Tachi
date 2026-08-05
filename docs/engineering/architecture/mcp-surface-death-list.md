@@ -93,7 +93,7 @@ otherwise.
 | `tachi_status` | health | Session-start health and readiness signal. |
 | `tachi_memory` | memory facade | Canonical search/get/save/extract/briefing/checkpoint/alerts surface. |
 | `tachi_task` | task lifecycle facade | Canonical plan/dispatch/complete/status/board/wait surface, but currently overloaded. |
-| `tachi_arena` | tracked subagent/advisor ledger | Keep while delegation is core; revisit if dispatch/manual launch fully absorbs arena. |
+| `tachi_tune` | route/recall tuning | Extracted from task/memory in #1426. Admin/operator only — never part of the standard keep-set. |
 | `tachi_verify` | verification ledger | Keep as evidence ledger for dispatch and safe-merge workflows. |
 | `tachi_wiki` | wiki facade | Canonical wiki search/browse/read/write facade. |
 | `tachi_skill` | skill facade | Canonical discover/loadout/run facade. |
@@ -138,17 +138,18 @@ delete wrappers.
 ### Batch B: Retire Direct Kanban Tools
 
 These routes are implementation details of the dispatch/card board. They should
-not be a model-facing collaboration API if `tachi_task` and `tachi_arena` own
-the agent workflow.
+not be a model-facing collaboration API if `tachi_task` owns the agent workflow
+(`tachi_arena` was deleted in #1319-D2, so it is no longer an alternative home
+for any of these).
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `check_inbox` | Direct tool in `crates/tachi-server/src/tools.rs:109`; in coordinate profile at `patterns.rs:61`. | `tachi_task(action="board")` or `tachi_arena(action="collect")` depending final board model. | Profile-retire, then delete public route. | Move kanban tests to handlers or canonical facade; remove MCP route. |
-| `post_card` | Direct tool in `tools.rs:101`; in coordinate profile at `patterns.rs:64`. | `tachi_task(action="dispatch")`, `tachi_arena(action="spawn")`, or internal board write. | Profile-retire, then delete public route. | Same kanban route deletion leaf. |
+| `check_inbox` | Direct tool in `crates/tachi-server/src/tools.rs:109`; in coordinate profile at `patterns.rs:61`. | `tachi_task(action="board")`. | Profile-retire, then delete public route. | Move kanban tests to handlers or canonical facade; remove MCP route. |
+| `post_card` | Direct tool in `tools.rs:101`; in coordinate profile at `patterns.rs:64`. | `tachi_staff(action="start")` or an internal board write (`tachi_task(action="dispatch")` and `tachi_arena(action="spawn")` were both deleted, #1319-C2/D2). | Profile-retire, then delete public route. | Same kanban route deletion leaf. |
 | `update_card` | Direct tool in `tools.rs:117`; in coordinate profile at `patterns.rs:65`. | `tachi_task(action="complete"/"cancel"/"status")` or internal board update. | Profile-retire, then delete public route. | Same kanban route deletion leaf. |
 
 Do not delete the kanban storage/handler code in this batch. Only delete the MCP
-route after canonical task/arena flows cover the same dogfood path.
+route after the canonical task/staff flows cover the same dogfood path.
 
 ### Batch C: Executed — deprecated dispatch facades removed (PR #822; tracked by #757)
 
@@ -168,8 +169,8 @@ to the correct facade, then deleting duplicate action aliases.
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
 | `tachi_task` PR actions | **DONE under open #757 — PR-action slice only:** removed from `tachi_task` enum/router; canonical only on `tachi_gh`. Shared lifecycle handlers remain under `task_lifecycle` for `tachi_gh` / ship. | `tachi_gh` for PR/GitHub work. | Deleted dual entry. | — |
-| `tachi_task` tuning actions | `route_simulate`, `proposals`, `review_proposal`, `apply_proposals` live at `task_router.rs:177-215`. | Future `tachi_tune`, admin-only. | Extract/quarantine. | Leaf: extract route policy tuning from daily task facade. |
-| `tachi_memory` tuning actions | Existing architecture notes identify recall tuning overload; implementation lives under facade memory ops. | Future `tachi_tune`, admin-only. | Extract/quarantine. | Leaf: extract recall tuning from daily memory facade. |
+| `tachi_task` tuning actions | **DONE under #1426:** `route_simulate`/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
+| `tachi_memory` tuning actions | **DONE under #1426:** `recall_simulate`/`recall_proposals`/`review_recall_proposal`/`apply_recall_proposals` are gone from `TACHI_MEMORY_ACTIONS`, the action schema, and the router; the handlers moved to `tune_ops/recall_*`. | `tachi_tune(action='recall_simulate'\|'recall_proposals'\|'recall_review'\|'recall_apply')`, admin-only. | Extracted. | — |
 | `tachi_save` shorthand | Standard allow-list includes it at `patterns.rs:130`. | `tachi_memory(action="save")`. | Fold candidate, keep only if dogfood proves value. | Dogfood decision after Batch A. |
 | `tachi_briefing` shorthand | Standard allow-list includes it at `patterns.rs:128`; separate briefing also exists in `tachi_memory` and `tachi_task`. | `tachi_memory(action="briefing")`. | Fold candidate. | Dogfood decision after action-level profile design. |
 

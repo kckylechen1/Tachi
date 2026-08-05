@@ -1423,9 +1423,6 @@ fn preflight_maps_tachi_memory_project_actions_without_injecting() {
     for action in [
         "consolidate",
         "pattern_feedback",
-        "recall_proposals",
-        "review_recall_proposal",
-        "apply_recall_proposals",
         // #757 fold: delete/ingest/ingest_source now default to bound project
         // (previously standalone delete_memory/ingest/ingest_source did).
         "delete",
@@ -1516,6 +1513,11 @@ fn proxy_rejects_explicit_cross_project_write_override() {
         ("tachi_memory", Some("delete")),
         ("save_memory", None),
         ("tachi_event", Some("emit")),
+        // #1426: the tuning writes kept their cross-project refusal when they
+        // moved to tachi_tune — route_apply writes route-policy rule rows and
+        // recall_apply writes config.env.
+        ("tachi_tune", Some("route_apply")),
+        ("tachi_tune", Some("recall_apply")),
     ] {
         let mut args =
             serde_json::Map::from_iter([("project".to_string(), serde_json::json!("Quant-test"))]);
@@ -1545,8 +1547,10 @@ fn proxy_allows_explicit_cross_project_read_override() {
             ("tachi_memory", Some("get")),
             ("tachi_memory", Some("briefing")),
             ("tachi_memory", Some("consolidate")),
-            ("tachi_memory", Some("recall_simulate")),
             ("tachi_memory", Some("readiness")),
+            // #1426: recall_simulate kept its read-only cross-project
+            // standing when it moved to the admin-only tachi_tune surface.
+            ("tachi_tune", Some("recall_simulate")),
             ("tachi_search", None),
             ("search_memory", None),
             ("find_similar_memory", None),
