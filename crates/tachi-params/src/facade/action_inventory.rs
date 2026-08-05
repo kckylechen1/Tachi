@@ -70,6 +70,19 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     "sticky_check",
 ];
 
+/// `tachi_tune` admin/operator actions. Introduced by #1426 to move route
+/// and recall tuning out of daily `tachi_task` / `tachi_memory` schemas.
+pub const TACHI_TUNE_ACTIONS: &[&str] = &[
+    "route_simulate",
+    "route_proposals",
+    "route_review",
+    "route_apply",
+    "recall_simulate",
+    "recall_proposals",
+    "recall_review",
+    "recall_apply",
+];
+
 /// `tachi_event` facade actions. Single source for `facade::tachi_event_action_schema`
 /// and #1098's `action_effect` completeness test — previously each kept its own
 /// inline copy of this list with no shared source to catch drift.
@@ -120,6 +133,7 @@ pub const TACHI_GH_ACTION_SOFT_MAX: usize = 20;
 #[cfg(test)]
 mod tests {
     use super::super::action_enums::{TachiTaskAction, TachiVerifyAction};
+    use super::super::tune::TachiTuneAction;
     use super::*;
 
     #[test]
@@ -170,5 +184,19 @@ mod tests {
         assert_eq!(TACHI_MEMORY_ACTIONS.len(), 25);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
         assert_eq!(TachiVerifyAction::ALL.len(), 4);
+    }
+
+    #[test]
+    fn f0_tune_inventory_count() {
+        // #1426: route tuning leaves tachi_task (27 -> 23) and recall tuning
+        // leaves tachi_memory (25 -> 21). The eight moved actions live only on
+        // this admin/operator inventory; keep the count exact so the next
+        // tuning action gets explicit review instead of quietly widening the
+        // surface.
+        assert_eq!(TACHI_TUNE_ACTIONS.len(), 8);
+        assert_eq!(
+            TACHI_TUNE_ACTIONS,
+            TachiTuneAction::all_wire_strings().as_slice()
+        );
     }
 }

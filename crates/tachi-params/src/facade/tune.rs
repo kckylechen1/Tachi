@@ -9,7 +9,7 @@ fn tachi_tune_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &TachiTuneAction::all_wire_strings(),
+        super::action_inventory::TACHI_TUNE_ACTIONS,
         "Required Tachi tuning action. Admin/operator-only surface for route and recall tuning lifecycle actions.",
         generator,
     )
