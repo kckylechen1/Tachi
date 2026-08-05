@@ -120,6 +120,7 @@ pub use db::mirror_eval::{
     NewMirrorEvalRun,
 };
 pub use db::row_to_entry;
+pub use db::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
 #[cfg(feature = "admin")]
 pub use db::session_claims::{
     bind_work_claim_exec_env, gc_session_claims, get_claim, handoff_work_claim, heartbeat_claim,

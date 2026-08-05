@@ -6,13 +6,20 @@ use crate::types::MemoryEntry;
 
 // ─── Row mapping ──────────────────────────────────────────────────────────────
 
+/// The one sanctioned renderer for "now" as an RFC3339 UTC timestamp:
+/// millisecond precision, `Z` suffix (`...123Z`). Every writer that stamps
+/// `created_at`/`updated_at`/`valid_until` must go through this (or
+/// [`normalize_utc_iso`]/[`normalize_utc_iso_or_now`]) — several of those
+/// columns are compared **lexically** (no `datetime()` wrapper) by the as-of
+/// search predicates, so a bare `chrono::Utc::now().to_rfc3339()` (numeric
+/// offset, auto-precision fraction) sorts wrong against this format.
 #[inline]
-pub(crate) fn now_utc_iso() -> String {
+pub fn now_utc_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 #[inline]
-pub(crate) fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
+pub fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
     let raw = ts.trim();
     if raw.is_empty() {
         return Err(MemoryError::InvalidArg("empty timestamp".to_string()));
