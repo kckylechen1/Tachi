@@ -54,8 +54,18 @@ fn readable_entry(entry: Option<MemoryEntry>) -> Option<MemoryEntry> {
 /// wider (kanban, handoff and continuity projections are noise on a listing
 /// surface but are not Wiki-corpus bookkeeping), and it is the only line for
 /// stores that are not the Wiki corpus.
+///
+/// tachi#1561 residual: also drops a `/wiki` row whose derived lifecycle is
+/// not default-retrievable (drafts, etc — see
+/// `memcore::is_non_default_retrievable_wiki_row`). Unlike the Wiki search
+/// leg (`memcore::SearchOptions::bypass_wiki_lifecycle_gate`), `list_memories`
+/// has no `requested_lifecycle` escape hatch of its own, so this check is
+/// unconditional here — there is no wiki_ops caller of this function that
+/// needs to see drafts (wiki_ops's own listing goes through
+/// `list_user_facing_wiki_entries`, not this route).
 pub(crate) fn is_listable_row(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
     !memcore::is_namespace_search_noise(entry, path_prefix)
+        && !memcore::is_non_default_retrievable_wiki_row(entry)
 }
 
 pub(crate) async fn handle_get_memory(
