@@ -384,6 +384,14 @@ fn returned_ids(rows: &[Value]) -> Vec<String> {
         .collect()
 }
 
+/// Scope declaration (tachi#1504): this pathway is exact-ID-only and has no
+/// lineage awareness. It matches `returned_ids` against `expected_ids` by
+/// literal identity only, so a superseded `expected_id` reads as a permanent
+/// miss even when its active successor is returned. Canonical/lineage
+/// semantics (stored `superseded_by` resolution, reviewed equivalence) live
+/// in `memcore::recall_coverage` (#1504), not here. The staleness this
+/// implies for simulate-ops expected-id fixtures rides the #1426
+/// `tachi_tune` migration, not this issue.
 fn first_expected_rank(returned_ids: &[String], expected_ids: &[String]) -> Option<usize> {
     returned_ids
         .iter()
