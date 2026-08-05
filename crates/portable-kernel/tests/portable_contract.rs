@@ -1,7 +1,10 @@
 use portable_kernel::{
-    outbox_payload_digest, DanglingSupersession, LocalStoreStatus, MemoryEntry, MemoryError,
-    MemoryStore, OutboxEventMeta, OutboxState, PortableImportEntry, PortableImportReceipt,
-    RemoteSyncStatus, ADMIN_SURFACE_ENABLED, IS_PORTABLE_BUILD,
+    outbox_local_wins_successor_id, outbox_payload_digest, DanglingSupersession, LocalStoreStatus,
+    MemoryEntry, MemoryError, MemoryStore, OutboxClaimKind, OutboxClaimRequest,
+    OutboxConflictResolution, OutboxConflictResolutionReceipt, OutboxEventMeta, OutboxOutcome,
+    OutboxOutcomeApplication, OutboxOutcomeEvidence, OutboxOutcomeRefusal, OutboxState,
+    PortableImportEntry, PortableImportReceipt, RemoteSyncStatus, ADMIN_SURFACE_ENABLED,
+    IS_PORTABLE_BUILD, OUTBOX_LOCAL_WINS_RESOLVED_CLASS,
 };
 
 #[test]
@@ -361,4 +364,117 @@ fn portable_build_outbox_state_machine_and_health() {
         }
     );
     assert_eq!(held.last_error_class.as_deref(), Some("operator_hold"));
+}
+
+/// tachi#1644: the reconciliation protocol is portable surface for the same
+/// reason A1's outbox is — #1630's premise is a host-owned sync loop with no
+/// Tachi daemon, so a portable build must be able to claim, report outcomes and
+/// resolve conflicts on its own.
+#[test]
+fn portable_build_outbox_reconciliation_protocol() {
+    let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+    store
+        .commit_with_outbox_event(
+            &smoke_entry("portable-outbox-a2"),
+            &outbox_meta("portable-evt-a2"),
+        )
+        .expect("commit");
+
+    // Claim: pending -> in_flight, with the digest a push leg would transmit.
+    let claimed = store
+        .claim_outbox_events(&OutboxClaimRequest::first_claims_only(8))
+        .expect("claim");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].event.state, OutboxState::InFlight);
+    assert_eq!(claimed[0].claim, OutboxClaimKind::First);
+    let stored = store
+        .get("portable-outbox-a2")
+        .expect("get")
+        .expect("present");
+    assert_eq!(
+        claimed[0].event.payload_digest,
+        outbox_payload_digest(&stored).expect("digest")
+    );
+
+    // A consumer reports divergence. The kernel does not resolve it.
+    let conflicted = store
+        .apply_outbox_outcome(
+            "portable-evt-a2",
+            &OutboxOutcome::Conflicted {
+                error_class: "divergent_revision".into(),
+            },
+            &OutboxOutcomeEvidence::from_reporter("portable_peer"),
+        )
+        .expect("conflict");
+    assert_eq!(conflicted.application, OutboxOutcomeApplication::Applied);
+    assert_eq!(conflicted.prior_state, OutboxState::InFlight);
+    assert_eq!(conflicted.event.state, OutboxState::Conflicted);
+
+    // An outcome for an event nobody was handed is a typed protocol refusal.
+    store
+        .commit_with_outbox_event(
+            &smoke_entry("portable-outbox-a2-b"),
+            &outbox_meta("portable-evt-a2-b"),
+        )
+        .expect("second commit");
+    let refusal = store
+        .apply_outbox_outcome(
+            "portable-evt-a2-b",
+            &OutboxOutcome::Acknowledged,
+            &OutboxOutcomeEvidence::from_reporter("portable_peer"),
+        )
+        .expect_err("an outcome for a never-claimed event must be refused");
+    match &refusal {
+        MemoryError::OutboxOutcomeRefused { reason, state, .. } => {
+            assert_eq!(*reason, OutboxOutcomeRefusal::NeverClaimed);
+            assert_eq!(state, "pending");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+
+    // The explicit decision: the local mutation stands, carried by a NEW event.
+    let receipt = store
+        .resolve_outbox_conflict("portable-evt-a2", &OutboxConflictResolution::LocalWins)
+        .expect("local wins");
+    let successor = match receipt {
+        OutboxConflictResolutionReceipt::LocalWins {
+            resolved,
+            successor,
+        } => {
+            assert_eq!(resolved.state, OutboxState::Quarantined);
+            assert_eq!(
+                resolved.last_error_class.as_deref(),
+                Some(OUTBOX_LOCAL_WINS_RESOLVED_CLASS)
+            );
+            successor
+        }
+        other => panic!("unexpected receipt shape: {other:?}"),
+    };
+    assert_eq!(
+        successor.event_id,
+        outbox_local_wins_successor_id("portable-evt-a2")
+    );
+    assert_eq!(successor.state, OutboxState::Pending);
+
+    // Duplicate acknowledgement of the successor is an idempotent no-op.
+    store
+        .claim_outbox_events(&OutboxClaimRequest::first_claims_only(8))
+        .expect("claim the successor");
+    let first = store
+        .apply_outbox_outcome(
+            &successor.event_id,
+            &OutboxOutcome::Acknowledged,
+            &OutboxOutcomeEvidence::from_reporter("portable_peer"),
+        )
+        .expect("acknowledge");
+    let second = store
+        .apply_outbox_outcome(
+            &successor.event_id,
+            &OutboxOutcome::Acknowledged,
+            &OutboxOutcomeEvidence::from_reporter("portable_peer"),
+        )
+        .expect("a duplicate acknowledgement is not an error");
+    assert_eq!(first.application, OutboxOutcomeApplication::Applied);
+    assert_eq!(second.application, OutboxOutcomeApplication::AlreadyApplied);
+    assert_eq!(second.event, first.event);
 }

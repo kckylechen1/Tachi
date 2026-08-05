@@ -13,6 +13,52 @@ impl std::fmt::Display for WorkClaimTransitionReason {
     }
 }
 
+/// Why the outbox reconciliation protocol refused a reported outcome or a
+/// conflict resolution (tachi#1644, #1630 workstream A leaf A2).
+///
+/// These are **protocol violations**, not illegal transitions: the caller
+/// reported something about an event that is not in a position to receive it.
+/// They are typed and separate from [`MemoryError::OutboxIllegalTransition`]
+/// because a reconciliation loop must be able to tell "my message arrived out
+/// of order / for the wrong event" (fix the loop) from "this edge does not
+/// exist in the state machine" (fix the code), without parsing prose.
+///
+/// Carrying a reason enum rather than four error variants follows
+/// [`WorkClaimTransitionReason`]: the refusal shape (which event, in which
+/// state) is identical across all four, and only the *why* differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxOutcomeRefusal {
+    /// An outcome was reported for an event no consumer was ever handed
+    /// (`pending`). Nobody could have observed it, so nobody can report on it.
+    NeverClaimed,
+    /// An outcome was reported for an event that was withdrawn from the
+    /// pipeline (`quarantined`). Un-withdrawing is an operator decision, not
+    /// something a late acknowledgement may do implicitly.
+    Withdrawn,
+    /// The event already carries a terminal outcome, and the reported one is
+    /// not the same outcome with the same error class. The recorded outcome
+    /// stands: a second, different report is never allowed to overwrite the
+    /// first — that would be exactly the last-write-wins behaviour #1630
+    /// forbids.
+    OutcomeAlreadyDiffers,
+    /// A conflict resolution was requested for an event that is not
+    /// `conflicted` — including one whose conflict was already resolved, since
+    /// a resolution consumes the event it resolves.
+    NotConflicted,
+}
+
+impl std::fmt::Display for OutboxOutcomeRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::NeverClaimed => "never_claimed",
+            Self::Withdrawn => "withdrawn",
+            Self::OutcomeAlreadyDiffers => "outcome_already_differs",
+            Self::NotConflicted => "not_conflicted",
+        };
+        formatter.write_str(reason)
+    }
+}
+
 /// Why a stored recall-impression group cannot be replayed by this binary.
 ///
 /// This deliberately carries no query, memory, path, or score material: replay
@@ -104,6 +150,23 @@ pub enum MemoryError {
         event_id: String,
         from: String,
         to: String,
+    },
+
+    /// tachi#1644: the reconciliation protocol refused a reported outcome or a
+    /// conflict resolution because the event is not in a position to receive
+    /// it. See [`OutboxOutcomeRefusal`] for the four reasons and why they are
+    /// distinct from [`Self::OutboxIllegalTransition`]. `state` carries the
+    /// canonical state token as a `String` for the same reason the illegal
+    /// transition's endpoints do: this module depends on nothing in
+    /// `crate::db`.
+    ///
+    /// Nothing is written on any of these refusals — the recorded outcome is
+    /// exactly what it was before the call.
+    #[error("outbox outcome for event '{event_id}' refused ({reason}): event is '{state}'")]
+    OutboxOutcomeRefused {
+        reason: OutboxOutcomeRefusal,
+        event_id: String,
+        state: String,
     },
 
     /// An admitted caller attempted a transition that only the persisted

@@ -238,20 +238,52 @@ pub(crate) fn enqueue_outbox_event_within_tx(
     object_id: &str,
     event: &OutboxEventMeta,
 ) -> Result<OutboxEventRow, MemoryError> {
+    let new_event = build_new_outbox_event(tx, object_id, event)?;
+    db::insert_outbox_event_within_tx(tx, &new_event)
+}
+
+/// The [`OutboxConflictResolution::LocalWins`] counterpart to
+/// [`enqueue_outbox_event_within_tx`] (tachi#1644 review fix).
+///
+/// Identical digest/revision derivation, but the insert goes through
+/// [`db::insert_resolution_successor_event_within_tx`] instead of
+/// [`db::insert_outbox_event_within_tx`]: `event.event_id` here is
+/// `crate::store::outbox_protocol::outbox_local_wins_successor_id`'s output,
+/// which legitimately carries the reserved `::local-wins` suffix that the
+/// ordinary caller-facing entry refuses. Reached from exactly one call
+/// site — `resolve_outbox_conflict`'s `LocalWins` arm.
+///
+/// [`OutboxConflictResolution::LocalWins`]: crate::store::outbox_protocol::OutboxConflictResolution::LocalWins
+pub(crate) fn enqueue_outbox_resolution_successor_event_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    object_id: &str,
+    event: &OutboxEventMeta,
+) -> Result<OutboxEventRow, MemoryError> {
+    let new_event = build_new_outbox_event(tx, object_id, event)?;
+    db::insert_resolution_successor_event_within_tx(tx, &new_event)
+}
+
+/// Shared digest/revision derivation for both
+/// [`enqueue_outbox_event_within_tx`] and
+/// [`enqueue_outbox_resolution_successor_event_within_tx`]; the only
+/// difference between the two callers is which `db` insert entry the result
+/// goes to.
+fn build_new_outbox_event(
+    tx: &rusqlite::Transaction<'_>,
+    object_id: &str,
+    event: &OutboxEventMeta,
+) -> Result<db::NewOutboxEvent, MemoryError> {
     let stored = read_object_within_tx(tx, object_id)?;
     let payload_digest = outbox_payload_digest(&stored)?;
-    db::insert_outbox_event_within_tx(
-        tx,
-        &db::NewOutboxEvent {
-            event_id: event.event_id.clone(),
-            object_id: object_id.to_string(),
-            object_class: event.object_class.clone(),
-            authority_class: event.authority_class.clone(),
-            source_store: event.source_store.clone(),
-            source_partition: event.source_partition.clone(),
-            payload_digest,
-        },
-    )
+    Ok(db::NewOutboxEvent {
+        event_id: event.event_id.clone(),
+        object_id: object_id.to_string(),
+        object_class: event.object_class.clone(),
+        authority_class: event.authority_class.clone(),
+        source_store: event.source_store.clone(),
+        source_partition: event.source_partition.clone(),
+        payload_digest,
+    })
 }
 
 /// Build the receipt from the destination's post-write state, still inside the
@@ -486,6 +518,16 @@ mod tests {
         }
     }
 
+    fn assert_reserved_resolved_class_refusal(error: MemoryError) {
+        match error {
+            MemoryError::InvalidArg(message) => assert!(
+                message.contains("reserved resolved-conflict class prefix"),
+                "unexpected refusal text: {message}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
     fn count_memories(store: &MemoryStore, id: &str) -> i64 {
         store
             .connection()
@@ -524,6 +566,44 @@ mod tests {
             receipt.event,
             "the receipt must equal what a later reader sees"
         );
+    }
+
+    #[test]
+    fn commit_with_outbox_event_refuses_reserved_resolved_class_metadata() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+
+        let mut object_class_meta = meta("evt-reserved-object-class");
+        object_class_meta.object_class = "conflict_resolved_memory".to_string();
+        let object_class_error = store
+            .commit_with_outbox_event(
+                &entry("outbox-reserved-object-class", "reserved object class"),
+                &object_class_meta,
+            )
+            .expect_err("a caller object_class in the reserved namespace must be refused");
+        assert_reserved_resolved_class_refusal(object_class_error);
+        assert_eq!(count_memories(&store, "outbox-reserved-object-class"), 0);
+        assert!(store
+            .outbox_event("evt-reserved-object-class")
+            .expect("read")
+            .is_none());
+
+        let mut authority_class_meta = meta("evt-reserved-authority-class");
+        authority_class_meta.authority_class = "conflict_resolved_host".to_string();
+        let authority_class_error = store
+            .commit_with_outbox_event(
+                &entry(
+                    "outbox-reserved-authority-class",
+                    "reserved authority class",
+                ),
+                &authority_class_meta,
+            )
+            .expect_err("a caller authority_class in the reserved namespace must be refused");
+        assert_reserved_resolved_class_refusal(authority_class_error);
+        assert_eq!(count_memories(&store, "outbox-reserved-authority-class"), 0);
+        assert!(store
+            .outbox_event("evt-reserved-authority-class")
+            .expect("read")
+            .is_none());
     }
 
     /// The atomicity clause, exercised through the production seam: the second
@@ -804,6 +884,33 @@ mod tests {
         assert!(store.outbox_event("evt-absent").expect("read").is_none());
     }
 
+    #[test]
+    fn composed_enqueue_refuses_reserved_resolved_class_metadata() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let mut event = meta("evt-composed-reserved-class");
+        event.object_class = "conflict_resolved_memory".to_string();
+
+        let result: Result<db::OutboxEventRow, MemoryError> = store
+            .with_immutable_supersession_transaction(|replacement| {
+                replacement.upsert(&entry("outbox-composed-reserved-class", "composed body"))?;
+                replacement.enqueue_outbox_event("outbox-composed-reserved-class", &event)
+            });
+        let error =
+            result.expect_err("a composed enqueue class in the reserved namespace must be refused");
+        assert_reserved_resolved_class_refusal(error);
+        assert!(
+            store
+                .get("outbox-composed-reserved-class")
+                .expect("get")
+                .is_none(),
+            "the memory write must roll back with its failed event"
+        );
+        assert!(store
+            .outbox_event("evt-composed-reserved-class")
+            .expect("read")
+            .is_none());
+    }
+
     /// The health read model over the public surface, walked across a state
     /// mix. The derivation itself is pinned by `db::outbox`'s tests; this
     /// proves the store wires through to it and that the fields move as a
@@ -878,6 +985,34 @@ mod tests {
         assert_eq!(held.pending_count, 0);
         assert_eq!(held.oldest_pending_at, None);
         assert_eq!(held.last_error_class.as_deref(), Some("operator_hold"));
+    }
+
+    #[test]
+    fn transition_outbox_event_refuses_reserved_resolved_error_class() {
+        let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let receipt = store
+            .commit_with_outbox_event(
+                &entry("outbox-reserved-error-class", "reserved transition class"),
+                &meta("evt-reserved-error-class"),
+            )
+            .expect("commit");
+
+        let error = store
+            .transition_outbox_event(
+                "evt-reserved-error-class",
+                OutboxState::Quarantined,
+                Some("conflict_resolved_operator_hold"),
+            )
+            .expect_err("a caller error_class in the reserved namespace must be refused");
+        assert_reserved_resolved_class_refusal(error);
+        assert_eq!(
+            store
+                .outbox_event("evt-reserved-error-class")
+                .expect("read")
+                .unwrap(),
+            receipt.event,
+            "the reserved-prefix refusal must leave the event untouched"
+        );
     }
 
     #[test]

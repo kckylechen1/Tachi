@@ -150,7 +150,7 @@ pub use db::{
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
 pub use embed_config::embed_raw_tier_enabled;
-pub use error::{MemoryError, WorkClaimTransitionReason};
+pub use error::{MemoryError, OutboxOutcomeRefusal, WorkClaimTransitionReason};
 #[cfg(feature = "admin")]
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,
@@ -203,6 +203,15 @@ pub use search::{
 /// tachi#1643 single-transaction commit boundary. Re-exported at the root for
 /// the same reason as the snapshot-import contract below.
 pub use store::outbox::{outbox_payload_digest, OutboxCommitReceipt, OutboxEventMeta};
+/// tachi#1644 outbox reconciliation protocol (#1630 A2). Ungated for the same
+/// reason A1 is: a host-owned sync loop drives this from a portable build,
+/// with no Tachi daemon in the picture.
+pub use store::outbox_protocol::{
+    outbox_local_wins_successor_id, ClaimedOutboxEvent, OutboxClaimKind, OutboxClaimRequest,
+    OutboxConflictResolution, OutboxConflictResolutionReceipt, OutboxOutcome,
+    OutboxOutcomeApplication, OutboxOutcomeEvidence, OutboxOutcomeReceipt,
+    OUTBOX_LOCAL_WINS_RESOLVED_CLASS, OUTBOX_LOCAL_WINS_SUCCESSOR_SUFFIX,
+};
 /// tachi#1607 portable snapshot-import contract. Re-exported at the root so
 /// an external portable consumer reaches it exactly like [`MemoryEntry`],
 /// without importing the internal `store::` module layout.
