@@ -27,10 +27,9 @@ It is not a new workflow engine. The existing surfaces remain the write paths:
 - `tachi_gh(action="safe_merge")` remains the GitHub PR merge surface.
 - Local worktree merge left `tachi_task` in #1683; GitHub PR merges use `tachi_gh(action="safe_merge")`.
 
-`tachi_task(action="cycle_status")` is the read-only projection across those artifacts.
-`tachi_task(action="cycle_status")` is the read-only agent navigation layer on top of
-that projection: it turns the same evidence into an ordered checklist, current
-blockers, readiness flags, and concrete next command suggestions.
+`tachi_task(action="cycle_status")` is the read-only projection across those artifacts
+and the agent navigation layer on top of it: it surfaces lifecycle evidence
+(`stage`, `spec_drift`, `warnings`) and a concrete `next_action` string.
 
 Host adapters should consume this read model rather than inventing host-specific
 project state. In particular, `before_prompt` should use `cycle_status` to attach
@@ -96,17 +95,9 @@ unclosed result artifacts, stale verification heads, or release notes that were
 written before the PR gate became ready.
 
 The `cycle_status` response is also read-only. It does not dispatch, comment, merge,
-or close anything. It derives:
-
-- `steps`: ordered lifecycle checkpoints from intake through close_loop.
-- `next_step`: the first required checkpoint that is not passed.
-- `current_blockers`: blocking gaps from the next step plus blocking drift items.
-- `readiness`: booleans for dispatch, PR handoff, PR gate, release note, close_loop,
-  and closed state.
-- `status_summary`: the status evidence used to derive the plan.
-
-This gives agents a single "what should I do next?" surface without making
-`cycle_status` another write path.
+or close anything. Agents should follow the string field `next_action` (not a
+retired `next_step` / `cycle_plan` shape). That field is the single
+"what should I do next?" surface without making `cycle_status` another write path.
 
 ## Why This Belongs With Memory
 

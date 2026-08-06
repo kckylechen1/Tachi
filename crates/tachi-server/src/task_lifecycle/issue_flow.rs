@@ -43,7 +43,7 @@ pub(crate) fn build_issue_automation_plan(
         slug_for_branch(&issue.title)
     );
     let recommended_next_action = if dispatch_allowed {
-        "Run tachi_task(action='cycle_status', flow_id=...), then follow its next_step using harness-native workers by default; Tachi dispatch requires an explicit durable/remote exception."
+        "Run tachi_task(action='cycle_status', flow_id=...), then follow its next_action using harness-native workers by default; Tachi dispatch requires an explicit durable/remote exception."
     } else {
         "Ask the leader to clarify acceptance criteria or approve the high-risk boundary, then rerun tachi_task(action='cycle_status', flow_id=...)."
     };

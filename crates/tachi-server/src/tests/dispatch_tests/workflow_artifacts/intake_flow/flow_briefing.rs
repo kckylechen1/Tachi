@@ -61,6 +61,21 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
         instruction.contains("tachi_task(action='cycle_status', flow_id=...)"),
         "intake instruction should route agents through cycle_status: {instruction}"
     );
+    assert!(
+        !instruction.contains("next_step"),
+        "intake instruction must not teach retired next_step for cycle_status: {instruction}"
+    );
+    let recommended = status["automation_plan"]["recommended_next_action"]
+        .as_str()
+        .expect("automation_plan.recommended_next_action");
+    assert!(
+        recommended.contains("follow its next_action"),
+        "intake automation_plan must teach cycle_status.next_action, got: {recommended}"
+    );
+    assert!(
+        !recommended.contains("next_step"),
+        "intake automation_plan must not teach retired next_step, got: {recommended}"
+    );
     let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
     assert!(events.contains("github_issue_linked"), "{events}");
     assert!(events.contains("github_pr_updated"), "{events}");

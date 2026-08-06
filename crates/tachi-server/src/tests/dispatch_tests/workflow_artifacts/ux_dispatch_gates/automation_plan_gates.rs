@@ -17,7 +17,11 @@ fn issue_automation_plan_blocks_missing_acceptance_and_high_risk() {
     assert_eq!(plan["dispatch_allowed"], json!(true));
     assert!(plan["recommended_next_action"]
         .as_str()
-        .is_some_and(|action| action.contains("tachi_task(action='cycle_status'")));
+        .is_some_and(|action| {
+            action.contains("tachi_task(action='cycle_status'")
+                && action.contains("follow its next_action")
+                && !action.contains("next_step")
+        }));
 
     let missing_acceptance = crate::task_lifecycle::IssueSnapshot {
         repo: "kckylechen1/tachi".to_string(),
