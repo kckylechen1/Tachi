@@ -286,12 +286,9 @@ pub(super) fn build_tool_plan(intent: &str) -> Vec<Value> {
     ];
 
     match intent {
-        "plan_request" | "research_request" => plan.push(json!({
-            "step": "plan",
-            "tool": "tachi_task",
-            "action": "plan",
-            "when": "before dispatching implementation work",
-        })),
+        // #1683 C1a retired tachi_task action='plan'; planning itself is the
+        // host model's job (campaign ruling), not a facade step, so
+        // plan_request/research_request add no extra tool-plan step here.
         "review_request" => plan.push(json!({
             "step": "review",
             "tool": "tachi_task",
