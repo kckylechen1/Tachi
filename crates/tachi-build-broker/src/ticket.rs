@@ -288,10 +288,7 @@ pub fn submit_ticket(store: &MemoryStore, ticket: &BuildTicket) -> Result<(), St
 }
 
 /// Load a ticket by id.
-pub fn load_ticket(
-    store: &MemoryStore,
-    ticket_id: &str,
-) -> Result<Option<BuildTicket>, String> {
+pub fn load_ticket(store: &MemoryStore, ticket_id: &str) -> Result<Option<BuildTicket>, String> {
     let row = store
         .get_state_kv(TICKET_NS, ticket_id)
         .map_err(|e| format!("load ticket {ticket_id}: {e}"))?;
@@ -326,10 +323,7 @@ pub fn list_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, String> {
 }
 
 /// Read a ticket's lifecycle record. `None` = never attempted, never cancelled.
-pub fn load_status(
-    store: &MemoryStore,
-    ticket_id: &str,
-) -> Result<Option<TicketStatus>, String> {
+pub fn load_status(store: &MemoryStore, ticket_id: &str) -> Result<Option<TicketStatus>, String> {
     let row = store
         .get_state_kv(STATUS_NS, ticket_id)
         .map_err(|e| format!("load ticket status {ticket_id}: {e}"))?;

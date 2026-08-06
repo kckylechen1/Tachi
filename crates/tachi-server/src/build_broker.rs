@@ -4,7 +4,6 @@
 
 #[allow(unused_imports)]
 pub(crate) use tachi_build_broker::{
-    abandon_stale_slot, cancel_queued_ticket, execute_ticket, load_receipt, pending_tickets,
-    run_next, BuildReceipt, DrainStep, ExecutorSeat, RECEIPT_NS, repo, runner, slot, target,
-    ticket,
+    abandon_stale_slot, cancel_queued_ticket, execute_ticket, load_receipt, pending_tickets, repo,
+    run_next, runner, slot, target, ticket, BuildReceipt, DrainStep, ExecutorSeat, RECEIPT_NS,
 };

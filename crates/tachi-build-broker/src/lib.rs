@@ -73,11 +73,10 @@ use std::path::PathBuf;
 use memcore::{MemoryStore, ResourceKind, ResourceState};
 use serde::{Deserialize, Serialize};
 
-use crate::repo;
 use crate::runner::{BuildOutcome, BuildRunner};
-use crate::slot::{self, SlotOutcome};
-use crate::target::{self, LineageOracle, TargetGeneration, TargetPlan, TargetSlotState};
-use crate::ticket::{self, BuildTicket, CancelOutcome, TicketState, TicketStatus};
+use crate::slot::SlotOutcome;
+use crate::target::{LineageOracle, TargetGeneration, TargetPlan, TargetSlotState};
+use crate::ticket::{BuildTicket, CancelOutcome, TicketState, TicketStatus};
 
 /// `hard_state` namespace for build receipts; key = ticket id.
 pub const RECEIPT_NS: &str = "build_receipt";
@@ -130,10 +129,7 @@ pub struct BuildReceipt {
 }
 
 /// Read a ticket's receipt, if the build has already run.
-pub fn load_receipt(
-    store: &MemoryStore,
-    ticket_id: &str,
-) -> Result<Option<BuildReceipt>, String> {
+pub fn load_receipt(store: &MemoryStore, ticket_id: &str) -> Result<Option<BuildReceipt>, String> {
     let row = store
         .get_state_kv(RECEIPT_NS, ticket_id)
         .map_err(|e| format!("load receipt {ticket_id}: {e}"))?;
@@ -527,10 +523,8 @@ pub fn abandon_stale_slot(store: &mut MemoryStore, reason: &str) -> Result<bool,
     };
 
     if let Some(target_path) = &holder.target_path {
-        let resource_id = crate::ensure_resource_allow_quarantined(
-            store.connection_mut(),
-            target_path,
-        )?;
+        let resource_id =
+            crate::ensure_resource_allow_quarantined(store.connection_mut(), target_path)?;
         memcore::quarantine_resource(
             store.connection_mut(),
             &resource_id,
