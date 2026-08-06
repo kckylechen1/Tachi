@@ -39,7 +39,7 @@ pub const STATUS_NS: &str = "build_ticket_status";
 /// three times too. The point of the retries is to survive a *transient* refusal
 /// (the seat was dirty for a minute, a git lock was held); the point of the
 /// bound is that a permanent one leaves the queue instead of blocking it.
-pub const MAX_TICKET_ATTEMPTS: u32 = 3;
+pub(crate) const MAX_TICKET_ATTEMPTS: u32 = 3;
 
 /// Which source tree a ticket wants built. This is the *identity* the target
 /// generation is checked against — `head_sha` is the exact tree, `base_sha` is
@@ -168,7 +168,7 @@ impl BuildTicket {
     }
 
     /// Same request? (id + repo + source shas + program/args/features.)
-    pub fn same_request_as(&self, other: &BuildTicket) -> bool {
+    pub(crate) fn same_request_as(&self, other: &BuildTicket) -> bool {
         self.identity() == other.identity()
     }
 }
@@ -288,7 +288,10 @@ pub fn submit_ticket(store: &MemoryStore, ticket: &BuildTicket) -> Result<(), St
 }
 
 /// Load a ticket by id.
-pub fn load_ticket(store: &MemoryStore, ticket_id: &str) -> Result<Option<BuildTicket>, String> {
+pub(crate) fn load_ticket(
+    store: &MemoryStore,
+    ticket_id: &str,
+) -> Result<Option<BuildTicket>, String> {
     let row = store
         .get_state_kv(TICKET_NS, ticket_id)
         .map_err(|e| format!("load ticket {ticket_id}: {e}"))?;
@@ -301,7 +304,7 @@ pub fn load_ticket(store: &MemoryStore, ticket_id: &str) -> Result<Option<BuildT
 }
 
 /// Every ticket on this machine, oldest first — the queue order (all repos).
-pub fn list_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, String> {
+pub(crate) fn list_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, String> {
     let mut tickets = store
         .list_state(TICKET_NS)
         .map_err(|e| format!("list tickets: {e}"))?
@@ -323,7 +326,10 @@ pub fn list_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, String> {
 }
 
 /// Read a ticket's lifecycle record. `None` = never attempted, never cancelled.
-pub fn load_status(store: &MemoryStore, ticket_id: &str) -> Result<Option<TicketStatus>, String> {
+pub(crate) fn load_status(
+    store: &MemoryStore,
+    ticket_id: &str,
+) -> Result<Option<TicketStatus>, String> {
     let row = store
         .get_state_kv(STATUS_NS, ticket_id)
         .map_err(|e| format!("load ticket status {ticket_id}: {e}"))?;
@@ -336,7 +342,7 @@ pub fn load_status(store: &MemoryStore, ticket_id: &str) -> Result<Option<Ticket
 }
 
 /// The effective state of a ticket (a missing status row = `Queued`).
-pub fn ticket_state(store: &MemoryStore, ticket_id: &str) -> Result<TicketState, String> {
+pub(crate) fn ticket_state(store: &MemoryStore, ticket_id: &str) -> Result<TicketState, String> {
     Ok(load_status(store, ticket_id)?
         .map(|s| s.state)
         .unwrap_or(TicketState::Queued))
@@ -363,7 +369,7 @@ fn write_status(store: &MemoryStore, status: &TicketStatus) -> Result<(), String
 ///
 /// Returns the status row as it now stands (so the caller can log/report the
 /// dead letter).
-pub fn record_failed_attempt(
+pub(crate) fn record_failed_attempt(
     store: &MemoryStore,
     ticket_id: &str,
     error: &str,
@@ -411,7 +417,7 @@ pub enum CancelOutcome {
 /// lying about it. The *running* case is refused by the caller
 /// ([`super::cancel_queued_ticket`]), which can see the executor slot: killing a
 /// live cargo is `build abandon`'s job, and only after its process is dead.
-pub fn cancel_ticket(
+pub(crate) fn cancel_ticket(
     store: &MemoryStore,
     ticket_id: &str,
     reason: &str,

@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use super::ticket::SourceIdentity;
 
 /// `hard_state` namespace for target generations; key = the target dir path.
-pub const GENERATION_NS: &str = "build_target_generation";
+pub(crate) const GENERATION_NS: &str = "build_target_generation";
 
 /// What last drove a target dir. This is the "generation" the compatibility
 /// check runs against.
@@ -44,7 +44,7 @@ pub struct TargetGeneration {
 
 /// Which of the seat's two targets a plan picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetSlotKind {
+pub(crate) enum TargetSlotKind {
     /// The seat's long-lived main-lineage target.
     Resident,
     /// The seat's one TTL fork target.
@@ -52,7 +52,7 @@ pub enum TargetSlotKind {
 }
 
 impl TargetSlotKind {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             TargetSlotKind::Resident => "resident",
             TargetSlotKind::Scratch => "scratch",
@@ -62,7 +62,7 @@ impl TargetSlotKind {
 
 /// The observed state of one of the seat's target dirs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetSlotState {
+pub(crate) struct TargetSlotState {
     pub path: String,
     /// `None` = never driven by any build (virgin dir): compatible with
     /// anything.
@@ -76,7 +76,7 @@ pub struct TargetSlotState {
 /// The decision: which target dir this ticket may use, and whether it must be
 /// wiped first.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetPlan {
+pub(crate) struct TargetPlan {
     pub slot: TargetSlotKind,
     pub path: String,
     /// The target dir must be wiped (and, if quarantined, released) BEFORE
@@ -105,7 +105,7 @@ pub trait LineageOracle {
 /// `clear_first`. Both are re-asserted defensively at the bottom of this
 /// function: if the logic above ever drifts, this errors out rather than
 /// handing back a poisoned target.
-pub fn plan_target(
+pub(crate) fn plan_target(
     source: &SourceIdentity,
     resident: &TargetSlotState,
     scratch: &TargetSlotState,
@@ -232,7 +232,7 @@ pub fn read_generation(
 /// artifacts and fingerprints into that dir, so it still defines the dir's
 /// generation. It is deliberately NOT called for an interrupted build — that
 /// target is quarantined instead, because we do not know what state it reached.
-pub fn stamp_generation(
+pub(crate) fn stamp_generation(
     store: &MemoryStore,
     target_path: &str,
     generation: &TargetGeneration,
@@ -246,7 +246,7 @@ pub fn stamp_generation(
 }
 
 /// Forget a target dir's generation (it was wiped — it is virgin again).
-pub fn clear_generation(store: &MemoryStore, target_path: &str) -> Result<(), String> {
+pub(crate) fn clear_generation(store: &MemoryStore, target_path: &str) -> Result<(), String> {
     store
         .delete_state(GENERATION_NS, target_path)
         .map_err(|e| format!("clear target generation for {target_path}: {e}"))?;

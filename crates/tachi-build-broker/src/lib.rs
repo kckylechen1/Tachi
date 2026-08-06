@@ -129,7 +129,10 @@ pub struct BuildReceipt {
 }
 
 /// Read a ticket's receipt, if the build has already run.
-pub fn load_receipt(store: &MemoryStore, ticket_id: &str) -> Result<Option<BuildReceipt>, String> {
+pub(crate) fn load_receipt(
+    store: &MemoryStore,
+    ticket_id: &str,
+) -> Result<Option<BuildReceipt>, String> {
     let row = store
         .get_state_kv(RECEIPT_NS, ticket_id)
         .map_err(|e| format!("load receipt {ticket_id}: {e}"))?;
@@ -320,7 +323,7 @@ const SLOT_BUSY: &str = "executor slot busy";
 /// 7. write the receipt, release the slot.
 ///
 /// The slot is released on every exit path after acquisition, including errors.
-pub fn execute_ticket(
+pub(crate) fn execute_ticket(
     store: &mut MemoryStore,
     seat: &ExecutorSeat,
     ticket: &BuildTicket,
