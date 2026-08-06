@@ -25,13 +25,13 @@ use memcore::MemoryStore;
 use serde::{Deserialize, Serialize};
 
 /// `hard_state` namespace for broker singletons.
-pub(crate) const BROKER_NS: &str = "build_broker";
+pub const BROKER_NS: &str = "build_broker";
 /// The one key: this machine's single serialized executor slot.
-pub(crate) const EXECUTOR_SLOT_KEY: &str = "executor_slot";
+pub const EXECUTOR_SLOT_KEY: &str = "executor_slot";
 
 /// Who holds the executor slot right now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SlotHolder {
+pub struct SlotHolder {
     pub ticket_id: String,
     pub pid: u32,
     pub acquired_at: String,
@@ -43,13 +43,13 @@ pub(crate) struct SlotHolder {
 
 /// Result of trying to take the slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SlotOutcome {
+pub enum SlotOutcome {
     Acquired,
     Busy { holder: SlotHolder },
 }
 
 /// Take the machine's executor slot for `ticket_id`, or report who has it.
-pub(crate) fn acquire_slot(store: &MemoryStore, ticket_id: &str) -> Result<SlotOutcome, String> {
+pub fn acquire_slot(store: &MemoryStore, ticket_id: &str) -> Result<SlotOutcome, String> {
     let holder = SlotHolder {
         ticket_id: ticket_id.to_string(),
         pid: std::process::id(),
@@ -81,7 +81,7 @@ pub(crate) fn acquire_slot(store: &MemoryStore, ticket_id: &str) -> Result<SlotO
 }
 
 /// Read the current holder, if any.
-pub(crate) fn current_holder(store: &MemoryStore) -> Result<Option<SlotHolder>, String> {
+pub fn current_holder(store: &MemoryStore) -> Result<Option<SlotHolder>, String> {
     let row = store
         .get_state_kv(BROKER_NS, EXECUTOR_SLOT_KEY)
         .map_err(|e| format!("read executor slot: {e}"))?;
@@ -96,7 +96,7 @@ pub(crate) fn current_holder(store: &MemoryStore) -> Result<Option<SlotHolder>, 
 /// Record which target dir the holder is about to write into. Only the holder
 /// may do this — a non-holder writing here would mislabel the recovery path's
 /// quarantine target.
-pub(crate) fn record_slot_target(
+pub fn record_slot_target(
     store: &MemoryStore,
     ticket_id: &str,
     target_path: &str,
@@ -121,7 +121,7 @@ pub(crate) fn record_slot_target(
 /// Release the slot. Only the holder may release it: releasing someone else's
 /// slot would let a third ticket in while their `cargo` is still running.
 /// Returns `false` when there was nothing to release.
-pub(crate) fn release_slot(store: &MemoryStore, ticket_id: &str) -> Result<bool, String> {
+pub fn release_slot(store: &MemoryStore, ticket_id: &str) -> Result<bool, String> {
     match current_holder(store)? {
         None => Ok(false),
         Some(holder) if holder.ticket_id != ticket_id => Err(format!(
@@ -138,7 +138,7 @@ pub(crate) fn release_slot(store: &MemoryStore, ticket_id: &str) -> Result<bool,
 /// Force the slot open, whoever holds it. The ONLY caller is the explicit
 /// crash-recovery path ([`super::abandon_stale_slot`]), which quarantines the
 /// dead holder's target dir *first*.
-pub(crate) fn force_release_slot(store: &MemoryStore) -> Result<bool, String> {
+pub fn force_release_slot(store: &MemoryStore) -> Result<bool, String> {
     store
         .delete_state(BROKER_NS, EXECUTOR_SLOT_KEY)
         .map_err(|e| format!("force-release executor slot: {e}"))

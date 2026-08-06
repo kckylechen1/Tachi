@@ -15,7 +15,7 @@ use super::ticket::{BuildTicket, SourceIdentity};
 /// How a build ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BuildOutcome {
+pub enum BuildOutcome {
     /// Exit 0.
     Success,
     /// Non-zero exit — a real compile/test failure. The target dir is in a
@@ -29,7 +29,7 @@ pub(crate) enum BuildOutcome {
 
 /// What one build run produced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BuildRun {
+pub struct BuildRun {
     pub outcome: BuildOutcome,
     pub exit_code: Option<i32>,
     pub stdout_tail: String,
@@ -37,7 +37,7 @@ pub(crate) struct BuildRun {
 }
 
 /// The seat's hands.
-pub(crate) trait BuildRunner {
+pub trait BuildRunner {
     /// Put the seat's fixed checkout on the ticket's source commit.
     ///
     /// MUST refuse a dirty checkout: the seat's tree is a shared machine
@@ -59,7 +59,7 @@ pub(crate) trait BuildRunner {
 }
 
 /// The real seat: git + a subprocess + `remove_dir_all`.
-pub(crate) struct ProcessBuildRunner;
+pub struct ProcessBuildRunner;
 
 impl BuildRunner for ProcessBuildRunner {
     fn prepare_checkout(&self, checkout: &Path, source: &SourceIdentity) -> Result<(), String> {

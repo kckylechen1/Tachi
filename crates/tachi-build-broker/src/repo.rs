@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 /// Resolve a user-supplied repo path to this machine's identity for that repo.
 ///
 /// Absolute, canonical, and stable across the repo's linked worktrees.
-pub(crate) fn repo_identity(path: &Path) -> Result<String, String> {
+pub fn repo_identity(path: &Path) -> Result<String, String> {
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("resolve repo {}: {e}", path.display()))?;
@@ -99,7 +99,7 @@ fn normalize(raw: &str) -> String {
 ///
 /// Exact match on the normalized identity — never a prefix test. `/repo` must
 /// not match `/repo-2`, and `/repo` must not "contain" `/repo/sub`.
-pub(crate) fn same_repo(ticket_repo: &str, seat_repo: Option<&str>) -> bool {
+pub fn same_repo(ticket_repo: &str, seat_repo: Option<&str>) -> bool {
     match seat_repo {
         None => true,
         Some(seat) => normalize(ticket_repo) == normalize(seat),
