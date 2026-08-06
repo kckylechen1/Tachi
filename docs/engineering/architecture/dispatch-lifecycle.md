@@ -60,7 +60,7 @@ Examples: “inspect these three modules in parallel” stays inside the harness
 
 Before a T2/T3 packet is frozen, the leader consults the card store (surfaces in §4). The consult produces four things, in order:
 
-1. **recommend** — an advisory profile/card choice derived deterministically from task type, a risk classification, and eval evidence. This is `tachi_task(action="recommend")`; it consumes the live performance matrix and explains its fallback when live samples are thin. The host may apply that advice to a native subagent; the result is not permission or an instruction to call Tachi dispatch.
+1. **profile/card consult** — advisory profile/card evidence derived from configured cards, route policy, and eval evidence. Use `tachi_task(action="profiles" | "profile" | "card")` plus `tachi_tune(action="route_simulate")` where a route-policy simulation is needed. The host may apply that advice to a native subagent; the result is not permission or an instruction to call Tachi dispatch.
 2. **loadout** — the skills, evidence contract, and overlays the profile projects (`tachi_skill(action="loadout")`).
 3. **vaccination projection** — the top-N ACT-R-decayed counter-clauses for this `(role, vendor)`, injected verbatim into the packet's frozen-spec section as *additional mandatory clauses* (the wire is PR #738; see §4 and §6).
 4. **trust-flag consumption** — if the vendor carries an unresolved `falsified_ci_report` signature, its `self_report_trust` is low and the packet mandates independent re-verification of *every* self-report.
@@ -153,7 +153,7 @@ Engineering precedent, user values/goals/habits, Soul disposition, and lane-card
 The card store is consumed through the existing domain facades — no new `tachi_router` / `tachi_policy` facade is invented (dispatch-policy-learning-spec.md §Public-Facade-Rule):
 
 - `tachi_task(action="profiles" | "profile" | "card")` — list/read the profile cards.
-- `tachi_task(action="recommend")` — profile choice from risk + eval matrix.
+- `tachi_tune(action="route_simulate")` — profile choice simulation from risk + eval matrix.
 - `tachi_tune(action="route_proposals" | "route_review" | "route_apply")` — human-gated route-policy and loadout-evolution proposals (admin/operator only since #1426).
 - `tachi_skill(action="loadout" | "bundle")` — sparse skill loadout + capability bundle for a profile/task.
 - `tachi_task(action="complete")` — writes the eval evidence row that feeds card evolution.

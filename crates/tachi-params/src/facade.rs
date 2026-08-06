@@ -333,14 +333,6 @@ pub struct TachiDomainAdapterParams {
 
 // ─── Facade: unified handoff ─────────────────────────────────────────────────
 
-/// Shared serde default for bool fields that default to true. Referenced
-/// cross-module as `super::default_true` by facade/dispatch.rs and
-/// facade/task.rs — do not remove while those consumers exist (#1194's
-/// inert-surface sweep missed the `super::`-qualified callers once).
-fn default_true() -> bool {
-    true
-}
-
 /// #1099: `leave`/`check` were retired (see #1016 — sticky/orchestrator
 /// replace them) along with the briefing projection and GC branch that only
 /// existed to serve them. `promote_issue` is the one capability that never
@@ -385,7 +377,7 @@ mod dispatch;
 pub use dispatch::{
     AdjudicationParams, CompletionPredicate, DispatchMcpAccessParams, ExecutionLevel,
     RulingEngineReceiptParams, RulingRecordParams, RulingSourceRefParams, SignatureRecordParams,
-    TachiApproveMergeParams, TachiCompleteParams, TachiDispatchParams, TachiSubagentEvalParams,
+    TachiCompleteParams, TachiDispatchParams, TachiSubagentEvalParams,
 };
 
 // ─── Facade: wiki (search / browse / write) ──────────────────────────────────
@@ -623,7 +615,8 @@ pub use action_inventory::{
     TACHI_EVENT_ACTIONS, TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX, TACHI_MEMORY_ACTIONS,
     TACHI_MEMORY_ACTION_SOFT_MAX, TACHI_ORCHESTRATOR_ACTIONS, TACHI_SKILL_ACTIONS,
     TACHI_STAFF_ACTIONS, TACHI_TASK_PRIMARY_ACTION_SOFT_MAX,
-    TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_TUNE_ACTIONS, TACHI_WIKI_ACTIONS,
+    TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_TASK_RETIRED_C1A_ACTIONS, TACHI_TUNE_ACTIONS,
+    TACHI_WIKI_ACTIONS,
 };
 
 mod orchestration;

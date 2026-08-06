@@ -74,7 +74,7 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
         json!([
             "tachi_wiki(action='search')",
             "tachi_skill(action='discover')",
-            "tachi_task(action='plan')",
+            "tachi_task(action='briefing')",
             "tachi_task(action='board')"
         ])
     );

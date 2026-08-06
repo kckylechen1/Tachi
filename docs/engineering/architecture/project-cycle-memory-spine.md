@@ -25,15 +25,11 @@ It is not a new workflow engine. The existing surfaces remain the write paths:
 - `tachi_gh(action="release_note")` writes release context.
 - `tachi_task(action="close_loop")` records the final issue/docs/wiki sink.
 - `tachi_gh(action="safe_merge")` remains the GitHub PR merge surface.
-- `tachi_task(action="merge")` remains local dispatched worktree merge only.
 
 `tachi_task(action="cycle_status")` is the read-only projection across those artifacts.
-`tachi_task(action="cycle_plan")` is the read-only agent navigation layer on top of
-that projection: it turns the same evidence into an ordered checklist, current
-blockers, readiness flags, and concrete next command suggestions.
 
 Host adapters should consume this read model rather than inventing host-specific
-project state. In particular, `before_prompt` should use `cycle_plan` to attach
+project state. In particular, `before_prompt` should use `cycle_status` to attach
 the current lifecycle checklist, and `before_stop` should use the same evidence
 to decide whether the host can stop or needs a bounded continuation directive.
 
@@ -95,18 +91,29 @@ evidence, including missing docs/specs, missing verification, mismatched refs,
 unclosed result artifacts, stale verification heads, or release notes that were
 written before the PR gate became ready.
 
-The `cycle_plan` response is also read-only. It does not dispatch, comment, merge,
+The `cycle_status` response is read-only. It does not dispatch, comment, merge,
 or close anything. It derives:
 
-- `steps`: ordered lifecycle checkpoints from intake through close_loop.
-- `next_step`: the first required checkpoint that is not passed.
-- `current_blockers`: blocking gaps from the next step plus blocking drift items.
-- `readiness`: booleans for dispatch, PR handoff, PR gate, release note, close_loop,
-  and closed state.
-- `status_summary`: the status evidence used to derive the plan.
+- `stage`: a single inferred lifecycle stage (`infer_cycle_stage`), computed from
+  local status, verification, release-note presence, and `close_loop` evidence.
+- `spec_drift`: the missing/inconsistent lifecycle evidence list described above.
+- `next_action`: the single next required action, derived from issue/PR refs,
+  linked docs/specs, verification, merge state, release-note presence, and
+  `close_loop`.
+- `warnings`: non-fatal issues hit while reading GitHub issue/PR snapshots.
+- `contract_refs` / `authority_order`: the linked docs/specs plus the authority
+  order above, so callers can resolve conflicting state signals themselves.
 
-This gives agents a single "what should I do next?" surface without making
-`cycle_plan` another write path.
+See `crates/tachi-server/src/task_lifecycle/cycle_status.rs` for the authoritative
+response shape (`ok`, `action`, `cycle_id`, `flow_id`, `stage`, `state`, `issue_ref`,
+`pr_ref`, `linked_docs`, `linked_specs`, `contract_refs`, `authority_order`,
+`github`, `verification`, `artifacts`, `events`, `spec_drift`, `warnings`,
+`next_action`, `source`, `timing_ms`) — it does not emit `steps`, `next_step`,
+`current_blockers`, `readiness`, or `status_summary`; those were the field list of
+the `cycle_plan` action this section was renamed from, and were never carried
+forward into `cycle_status`.
+
+This gives agents one lifecycle state surface without making it another write path.
 
 ## Why This Belongs With Memory
 
@@ -133,8 +140,7 @@ similarity. See
 ## Non-Goals
 
 - Do not create a second GitHub sync database.
-- Do not merge PRs through `tachi_task(action="cycle_status")` or
-  `tachi_task(action="cycle_plan")`.
+- Do not merge PRs through `tachi_task(action="cycle_status")`.
 - Do not treat memory/wiki summaries as higher authority than linked docs/specs or
   verification.
 - Do not require live GitHub reads when a local flow already contains the needed

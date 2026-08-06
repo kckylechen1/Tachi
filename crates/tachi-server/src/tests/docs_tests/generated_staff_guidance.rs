@@ -143,18 +143,6 @@ fn intake_instruction_names_only_the_corrected_staff_contract() {
     assert_guidance_contract("write_intake_instruction", &guidance);
 }
 
-#[test]
-fn ux_matrix_names_only_the_corrected_staff_contract() {
-    let params: crate::tool_params::TachiTaskParams = serde_json::from_value(json!({
-        "action": "ux_matrix",
-        "task": "prove ux guidance uses the corrected staff contract",
-    }))
-    .expect("ux_matrix params");
-    let matrix = crate::task_lifecycle::release_ux::handle_task_ux_matrix(&params)
-        .expect("render ux matrix");
-    assert_guidance_contract("handle_task_ux_matrix", &matrix);
-}
-
 /// #1319 cross-vendor review repro: a `)` inside a quoted `task=` value (a
 /// review comment quoting "review ) edge") must not be mistaken for the
 /// call's closing paren — that would truncate the example before

@@ -1,5 +1,5 @@
 #[test]
-fn approve_merge_uses_explicit_cleaner_binary_override() {
+fn cleaner_bridge_uses_explicit_cleaner_binary_override() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());

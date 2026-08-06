@@ -948,10 +948,13 @@ pub(crate) async fn handle_tachi_complete(
         .as_deref()
         .is_some_and(|worktree| !worktree.trim().is_empty())
     {
-        next_steps.push("For worktree-based dispatch, run approve_merge when ready.".to_string());
+        next_steps.push(
+            "A worktree was recorded; use the repository's current ship path when ready."
+                .to_string(),
+        );
     } else {
         next_steps.push(
-            "No worktree was recorded; no approve_merge step is implied by this completion."
+            "No worktree was recorded; no local worktree ship step is implied by this completion."
                 .to_string(),
         );
     }

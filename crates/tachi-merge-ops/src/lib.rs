@@ -1,5 +1,4 @@
-//! Local worktree merge toolkit — `approve_merge`, safety gates, and cleaner
-//! integration. Extracted from `tachi-server` `dispatch_ops/merge` (#833).
+//! Local worktree cleanup bridge used by GitHub safe-merge flows.
 //!
 //! This is the one slice that also weakens the cyclic SCC: `gh_ops` previously
 //! reached into `dispatch_ops` only via `remove_worktree_with_cleaner`; after
@@ -14,14 +13,5 @@
 )]
 
 mod cleaner;
-mod handler;
-mod preview;
-mod repo;
-mod safety;
 
 pub use cleaner::{remove_worktree_with_cleaner, resolve_tachi_clean_bin, CleanerRemoveReport};
-pub use handler::handle_approve_merge;
-pub use safety::{
-    evaluate_delete_worktree_safety, validate_merge_branch_name, validate_static_merge_safety,
-    worktree_equals_repo_root, DeleteWorktreeSafety,
-};

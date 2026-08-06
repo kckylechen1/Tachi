@@ -35,7 +35,7 @@ It answers three questions raised during a facade review:
 
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
-| `tachi_task` | 23 | Lifecycle still bundled; PR duplication resolved (#757) and route tuning extracted (#1426) |
+| `tachi_task` | 17 | Lifecycle still bundled; PR duplication resolved (#757), route tuning extracted (#1426), and 6 planning-band actions retired (#1683 C1a) |
 | `tachi_memory` | 21 | Overloaded — `recall_*` tuning extracted (#1426); the #757 fold added delete/gc/doctor_scan/ingest/ingest_source |
 | `tachi_gh` | 16 | Duplicates task's PR lifecycle |
 | `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
@@ -50,8 +50,9 @@ It answers three questions raised during a facade review:
 1. **PR lifecycle dual entry (resolved #757).** `link_pr` / `pr_status` / `pr_handoff` / `release_note`
    now live only on `tachi_gh`. The previous `tachi_task` compatibility aliases were deleted so agents
    no longer guess which entry point to call.
-2. **`merge` is semantically split.** `tachi_task(merge)` = local worktree merge;
-   `tachi_gh(safe_merge)` = GitHub PR merge. Same word, different machine.
+2. **`merge` was semantically split, then resolved (#1683 C1a).** `tachi_task(merge)` used to mean
+   local worktree merge, distinct from `tachi_gh(safe_merge)`'s GitHub PR merge — same word, different
+   machine. `tachi_task(merge)` is retired; `tachi_gh(safe_merge)` is now the only `merge` on either facade.
 3. **`briefing` appears in three places** — `tachi_briefing` (standalone), `tachi_memory(briefing)`,
    `tachi_task(briefing)`. `save` is duplicated across `tachi_save` and `tachi_memory(save)`.
 4. **Self-tuning actions were interleaved with execution (resolved #1426).** Eight of the nine —
@@ -77,8 +78,8 @@ by the **agent's mental task**.
 
 ```diagram
 Now                            Proposed
-tachi_task (24) ─────┬──▶ tachi_task    execution core: plan/dispatch/complete/status/board/wait (6)
-                     ├──▶ tachi_flow    lifecycle: intake/cycle_status/cycle_plan/close_loop/ux_matrix (5)
+tachi_task (24) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
+                     ├──▶ tachi_flow    lifecycle: intake/cycle_status/close_loop (3)
                      ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
                      └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
 
@@ -144,7 +145,7 @@ Two important nuances:
 | kimi_arch / deepseek_explore / kimi_ux | `observe` (read-only review/exploration) |
 
 **The `delegate` allow-list deliberately omits `tachi_task`.** Including it would hand `dispatch` to
-the worker (recursive dispatch). The cost: workers cannot use `plan`, `complete`, or `status` from the
+the worker (recursive dispatch). The cost: workers cannot use `complete` or `status` from the
 facade, and must fall back to standalone legacy tools (`tachi_complete`, `tachi_unstick`) that never
 moved into a facade.
 
@@ -198,7 +199,7 @@ and actively used. **No change proposed.**
 │ 3. Collapse ToolProfile to 3 tiers: standard / delegate / admin;    │
 │    mark observe/remember/coordinate/operate deprecated.             │
 │ 4. Upgrade profile filtering to the ACTION level → let delegate      │
-│    expose tachi_task with only plan/complete/status, deny dispatch.  │
+│    expose tachi_task with only complete/status, deny dispatch.       │
 │ 5. Keep DispatchProfile unchanged.                                   │
 ╰─────────────────────────────────────────────────────────────────────╯
 ```

@@ -382,7 +382,19 @@ fn census_used_by_actions_are_live_primary_actions() {
         .iter()
         .map(|action| action.as_str())
         .collect();
-    let removed: BTreeSet<&str> = ["Dispatch", "Wait", "Cancel"].into_iter().collect();
+    let removed: BTreeSet<&str> = [
+        "dispatch",
+        "wait",
+        "cancel",
+        "plan",
+        "cycle_plan",
+        "recommend",
+        "refine_issues",
+        "merge",
+        "ux_matrix",
+    ]
+    .into_iter()
+    .collect();
 
     let fields = fixture["fields"].as_object().expect("census fields");
     let mut stale = Vec::new();
@@ -399,7 +411,7 @@ fn census_used_by_actions_are_live_primary_actions() {
             }
             if removed.contains(name) {
                 stale.push(format!(
-                    "{field}: used_by_actions contains REMOVED action '{name}' (#1319-C2)"
+                    "{field}: used_by_actions contains REMOVED action '{name}' (#1319-C2/#1683-C1a)"
                 ));
             }
         }

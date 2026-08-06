@@ -191,14 +191,7 @@ pub(super) async fn handle_tachi_wiki_facade(
                 };
                 handle_tachi_wiki_write(server, wiki_params).await?
             };
-            format_facade_response(
-                "Tachi wiki write",
-                "write",
-                &raw,
-                format.as_deref(),
-                false,
-                false,
-            )
+            format_facade_response("Tachi wiki write", "write", &raw, format.as_deref(), false)
         }
         _ => Err(format!(
             "Invalid action '{}'. Use 'search', 'browse', 'read', or 'write'.",

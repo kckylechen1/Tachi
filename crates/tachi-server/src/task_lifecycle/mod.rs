@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const UX_CLOSURE_STATES: &[&str] = &["closed_loop", "closed", "shipped"];
 static FLOW_MARKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +152,6 @@ pub(crate) fn resolve_task_pr_target(params: &TachiTaskParams) -> Result<GithubT
     )
 }
 
-mod cycle_plan;
 mod cycle_status;
 mod flow_artifacts;
 mod github_flow_state;
@@ -172,7 +170,6 @@ use self::issue_flow::*;
 use self::release_ux::*;
 use self::utils::*;
 
-pub(crate) use self::cycle_plan::handle_task_cycle_plan;
 pub(crate) use self::cycle_status::handle_task_cycle_status;
 pub(crate) use self::flow_artifacts::{
     flow_runs_root, flow_status_doc_refs, mark_task_close_loop, mark_task_dispatch,
@@ -184,5 +181,5 @@ pub(crate) use self::issue_flow::build_issue_automation_plan;
 pub(crate) use self::issue_flow::{
     handle_task_intake, handle_task_link_pr, handle_task_pr_handoff,
 };
-pub(crate) use self::release_ux::{handle_task_release_note, handle_task_ux_matrix};
+pub(crate) use self::release_ux::handle_task_release_note;
 pub(crate) use self::utils::read_json_file;

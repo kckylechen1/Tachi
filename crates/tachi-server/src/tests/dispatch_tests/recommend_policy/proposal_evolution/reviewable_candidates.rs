@@ -567,49 +567,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             .contains(&json!("acceptance_criteria"))
     );
 
-    let mut recommend_params = task_params("recommend");
-    recommend_params.task = Some("Plan a dispatch loadout evolution slice".to_string());
-    recommend_params.limit = Some(50);
-    // tachi#1201 item 2: mbit_card is no longer embedded by default; this
-    // assertion needs it, so request the explicit escape hatch.
-    recommend_params.include_card = Some(true);
-    let recommend_raw = server
-        .tachi_task(Parameters(recommend_params))
-        .await
-        .expect("recommend should include projected loadout");
-    let recommend: serde_json::Value =
-        serde_json::from_str(&recommend_raw).expect("recommend JSON");
-    assert!(recommend["resolved_skills"]
-        .as_array()
-        .expect("recommend resolved skills")
-        .contains(&json!("skill:planning-ux-review")));
-    assert!(
-        recommend["resolved_skill_loadout"]["projected_passive_traits"]
-            .as_array()
-            .expect("recommend projected passive traits")
-            .contains(&json!("evidence_backed_planning"))
-    );
-    assert!(
-        recommend["mbit_card"]["skill_loadout"]["projected_passive_traits"]
-            .as_array()
-            .expect("recommend mbit projected passive traits")
-            .contains(&json!("evidence_backed_planning"))
-    );
-    assert!(recommend["evidence_required"]
-        .as_array()
-        .expect("recommend evidence required")
-        .contains(&json!("acceptance_criteria")));
-    assert!(recommend["evidence_contract"]["projected_required"]
-        .as_array()
-        .expect("recommend projected evidence")
-        .contains(&json!("acceptance_criteria")));
-    assert!(
-        recommend["mbit_card"]["evidence_contract"]["projected_required"]
-            .as_array()
-            .expect("recommend mbit projected evidence")
-            .contains(&json!("acceptance_criteria"))
-    );
-
     let agents_raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
             action: "profiles".to_string(),

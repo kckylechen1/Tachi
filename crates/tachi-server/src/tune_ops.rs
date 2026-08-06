@@ -88,7 +88,6 @@ fn format_tune_response(action: &str, raw: String, format: Option<&str>) -> Resu
         &raw,
         format,
         false,
-        false,
     )
 }
 

@@ -7,7 +7,7 @@ organize: true
 # MCP Surface Death List
 
 Status: historical evidence ledger for #757, originally under #745; current product-boundary authority is #1467 and bounded leaves route to their native owners.
-Batch C: executed 2026-07-07 — `tachi_dispatch`, `tachi_board`, and `approve_merge` MCP routes deleted; canonical `tachi_task(action='dispatch'/'board'/'merge')` remain.
+Batch C: executed 2026-07-07 — `tachi_dispatch`, `tachi_board`, and `approve_merge` MCP routes deleted; later contraction leaves `tachi_task(action='board')` and retires Task dispatch/merge paths.
 Base reviewed: `2cd7a750` (`main`, 2026-07-07).
 
 This document records the deletion queue as it stood at the named historical
@@ -92,7 +92,7 @@ otherwise.
 | `runtime_info` | routing identity | Cheap route/profile self-check. |
 | `tachi_status` | health | Session-start health and readiness signal. |
 | `tachi_memory` | memory facade | Canonical search/get/save/extract/briefing/checkpoint/alerts surface. |
-| `tachi_task` | task lifecycle facade | Canonical plan/dispatch/complete/status/board/wait surface, but currently overloaded. |
+| `tachi_task` | task lifecycle facade | Historical (2026-07-07 base) plan/dispatch/complete/status/board/wait surface, since narrowed further — `dispatch`/`cancel`/`wait` were removed by #1319-C2 and `plan`/`cycle_plan`/`recommend`/`refine_issues`/`merge`/`ux_matrix` were retired by #1683 C1a. Current action set lives in `TachiTaskAction::PRIMARY`, not in this historical row. |
 | `tachi_tune` | route/recall tuning | Extracted from task/memory in #1426. Admin/operator only — never part of the standard keep-set. |
 | `tachi_verify` | verification ledger | Keep as evidence ledger for dispatch and safe-merge workflows. |
 | `tachi_wiki` | wiki facade | Canonical wiki search/browse/read/write facade. |
@@ -159,7 +159,7 @@ These entries record the completed compatibility-route deletion. They are not a 
 | --- | --- | --- | --- | --- |
 | `tachi_dispatch` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal handler remains reachable through the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_task(action="dispatch")` | Deleted. | — |
 | `tachi_board` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal board handler remains behind the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_task(action="board")` | Deleted. | — |
-| `approve_merge` | **DONE Batch C (PR #822):** the direct route is absent; local task merge still reuses the internal operation and PR merge remains on `tachi_gh(action="safe_merge")`. Open migration tracker #757 remains active for other surfaces. | `tachi_task(action="merge")` for local worktrees; `tachi_gh(action="safe_merge")` for PRs. | Deleted direct route. | — |
+| `approve_merge` | **DONE Batch C (PR #822):** the direct route is absent; PR merge remains on `tachi_gh(action="safe_merge")`. Open migration tracker #757 remains active for other surfaces. | `tachi_gh(action="safe_merge")` for PRs. | Deleted direct route; Task merge retired later. | — |
 
 ### Batch D: Split Overloaded Facades Before Deleting Actions
 
@@ -220,7 +220,7 @@ entrypoints.
    `check_inbox`, `post_card`, and `update_card` from MCP.
 4. **DONE Batch C via PR #822; open #757 tracks later migration work.**
    `tachi_dispatch`, `tachi_board`, and the direct `approve_merge` route are no
-   longer model-facing; canonical task/GitHub paths retain the required behavior.
+   longer model-facing; GitHub merge behavior remains on `tachi_gh`.
 5. **Fold direct wiki aliases.**
    Move docs/tests/callers to `tachi_wiki` actions, then delete direct wiki
    search/write aliases that remain only for compatibility.

@@ -1,5 +1,4 @@
 use super::*;
-use crate::copilot_ops::handle_tachi_task_brief;
 
 pub(super) async fn handle_tachi_task_facade(
     server: &MemoryServer,
@@ -15,21 +14,6 @@ pub(super) async fn handle_tachi_task_facade(
     let action = params.action.as_str().to_string();
     reject_delegate_task_action(server, &action)?;
     let raw = match params.action {
-        TachiTaskAction::Plan => {
-            let task = params
-                .task
-                .clone()
-                .ok_or_else(|| "task is required when action='plan'".to_string())?;
-            let brief_params = TaskBriefParams {
-                task,
-                agent_id: params.agent_id.clone(),
-                project: params.project.clone(),
-                path_prefix: params.path_prefix.clone(),
-                domain: params.domain.clone(),
-                top_k: crate::clamp_facade_top_k(params.top_k.unwrap_or(6)),
-            };
-            return handle_tachi_task_brief(server, brief_params).await;
-        }
         TachiTaskAction::Briefing | TachiTaskAction::DocIndex => {
             return handle_tachi_feature_briefing(server, &params).await
         }
@@ -184,33 +168,6 @@ pub(super) async fn handle_tachi_task_facade(
         TachiTaskAction::CycleStatus => {
             crate::task_lifecycle::handle_task_cycle_status(server, &params).await
         }
-        TachiTaskAction::CyclePlan => {
-            crate::task_lifecycle::handle_task_cycle_plan(server, &params).await
-        }
-        TachiTaskAction::Recommend => {
-            let task = params
-                .task
-                .clone()
-                .ok_or_else(|| "task is required when action='recommend'".to_string())?;
-            let mut file_paths = params.doc_paths.clone();
-            file_paths.extend(params.spec_paths.clone());
-            let admission = crate::host_profile::admit_execution_level(params.execution_level);
-            if !admission.allowed {
-                serde_json::to_string(&serde_json::json!({
-                    "host_admission": admission.to_json(),
-                }))
-                .map_err(|e| format!("serialize host admission decline: {e}"))
-            } else {
-                let raw = crate::dispatch_profile::handle_dispatch_recommendation(
-                    server,
-                    &task,
-                    params.risk.as_deref(),
-                    params.limit.unwrap_or(500),
-                    &file_paths,
-                )?;
-                attach_host_admission(raw, &admission)
-            }
-        }
         TachiTaskAction::Adjudicate => {
             let adjudication = params
                 .adjudication
@@ -227,27 +184,6 @@ pub(super) async fn handle_tachi_task_facade(
             );
             serde_json::to_string(&result).map_err(|e| format!("serialize adjudicate result: {e}"))
         }
-        TachiTaskAction::Merge => {
-            if params.pr_ref.is_some() || params.issue_ref.is_some() {
-                return Err(
-                    "tachi_task(action='merge') only merges local dispatched worktrees. Use tachi_gh(action='safe_merge', repo=..., number=...) for GitHub PR gates or PR merges."
-                        .to_string(),
-                );
-            }
-            let worktree = params
-                .worktree
-                .clone()
-                .ok_or_else(|| "worktree is required when action='merge'".to_string())?;
-            let merge_params = TachiApproveMergeParams {
-                worktree,
-                branch: params.branch.clone(),
-                strategy: params.strategy.clone(),
-                delete_worktree: params.delete_worktree,
-                confirm: params.confirm,
-            };
-            tachi_merge_ops::handle_approve_merge(merge_params).await
-        }
-        TachiTaskAction::UxMatrix => crate::task_lifecycle::handle_task_ux_matrix(&params),
         TachiTaskAction::BuildReferences | TachiTaskAction::CloseLoop => {
             let workflow_params = TachiWorkflowParams {
                 action: action.clone(),
@@ -285,13 +221,10 @@ pub(super) async fn handle_tachi_task_facade(
                 }
             }
             Ok(result)
-        }
-        TachiTaskAction::RefineIssues => {
-            crate::refinery_ops::handle_refine_issues(server, &params).await
-        } // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched
-          // above (#919 concern) — a new variant fails to compile here until
-          // it is explicitly routed, instead of silently returning "Invalid
-          // action" for a value that already deserialized successfully.
+        } // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched above
+          // (#919 concern) — a new variant fails to compile here until it is
+          // explicitly routed, instead of silently returning "Invalid action" for
+          // a value that already deserialized successfully.
     }?;
     if action == "complete" && crate::facade_memory_ops::wants_full_format(params.format.as_deref())
     {
@@ -303,21 +236,7 @@ pub(super) async fn handle_tachi_task_facade(
         &raw,
         params.format.as_deref(),
         params.verbose.unwrap_or(false),
-        params.include_card.unwrap_or(false),
     )
-}
-
-fn attach_host_admission(
-    raw: String,
-    admission: &crate::host_profile::HostAdmission,
-) -> Result<String, String> {
-    let mut value: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("parse recommend/route payload: {e}"))?;
-    let object = value.as_object_mut().ok_or_else(|| {
-        "attach host admission: expected recommend/route payload to be a JSON object".to_string()
-    })?;
-    object.insert("host_admission".to_string(), admission.to_json());
-    serde_json::to_string(&value).map_err(|e| format!("serialize host admission attach: {e}"))
 }
 
 /// Defense-in-depth for the task facade; primary gate is F3
@@ -329,29 +248,8 @@ fn attach_host_admission(
 fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<(), String> {
     if !tachi_hub::facade_action_allowed("tachi_task", Some(action), server.active_tool_profile()) {
         return Err(format!(
-            "tachi_task(action='{action}') is not available to the active tool profile; delegate workers may use 'plan', 'complete', 'status', 'board', 'briefing', or 'doc_index'."
+            "tachi_task(action='{action}') is not available to the active tool profile; delegate workers may use 'complete', 'status', 'board', 'briefing', or 'doc_index'."
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod host_admission_tests {
-    use super::attach_host_admission;
-
-    #[test]
-    fn attach_host_admission_rejects_non_object_producer_payloads() {
-        let _profile = crate::host_profile::HostProfileTestOverride::set(Some("development"));
-        let admission =
-            crate::host_profile::admit_execution_level(Some(tachi_params::ExecutionLevel::L0));
-
-        for raw in ["[]", "null", r#""scalar""#] {
-            let error = attach_host_admission(raw.to_string(), &admission)
-                .expect_err("non-object producer payload must fail closed");
-            assert_eq!(
-                error,
-                "attach host admission: expected recommend/route payload to be a JSON object"
-            );
-        }
-    }
 }

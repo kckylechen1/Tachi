@@ -283,33 +283,6 @@ pub struct TachiDispatchParams {
     pub inject_card: Option<bool>,
 }
 
-// ─── Facade: worktree merge ──────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct TachiApproveMergeParams {
-    /// Path to the git worktree to merge
-    pub worktree: String,
-
-    /// Branch name to merge (default: inferred from worktree HEAD)
-    #[serde(default)]
-    pub branch: Option<String>,
-
-    /// Merge strategy (default: "recursive")
-    #[serde(default)]
-    pub strategy: Option<String>,
-
-    /// Whether to remove the worktree after merge (default: true)
-    #[serde(default = "super::default_true")]
-    pub delete_worktree: bool,
-
-    /// Set to true to execute the merge. When false (default), computes a
-    /// non-mutating merge-tree preview with Git's default merge algorithm and
-    /// returns the diff stat. Callers should preview first, then confirm with
-    /// confirm=true.
-    #[serde(default)]
-    pub confirm: bool,
-}
-
 // ─── Facade: task completion + eval ledger ───────────────────────────────────
 
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]

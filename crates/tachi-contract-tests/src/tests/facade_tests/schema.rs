@@ -312,16 +312,36 @@ fn staff_status_without_dispatch_id_is_handler_rejected() {
 }
 
 #[test]
-fn tachi_task_action_schema_declares_feature_briefing() {
+fn tachi_task_action_schema_declares_c1a_survivor_list() {
     let schema = rmcp::schemars::schema_for!(TachiTaskParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
     let action = &value["properties"]["action"];
 
     assert_eq!(action["type"], json!("string"));
     let values = action["enum"].as_array().expect("action enum");
-    assert!(values.contains(&json!("briefing")));
-    assert!(values.contains(&json!("doc_index")));
-    assert!(values.contains(&json!("plan")));
+    assert_eq!(
+        values,
+        &vec![
+            json!("intake"),
+            json!("claim"),
+            json!("heartbeat"),
+            json!("handoff"),
+            json!("release"),
+            json!("board"),
+            json!("status"),
+            json!("complete"),
+            json!("adjudicate"),
+            json!("briefing"),
+            json!("doc_index"),
+            json!("cycle_status"),
+            json!("profiles"),
+            json!("profile"),
+            json!("card"),
+            json!("build_references"),
+            json!("close_loop"),
+        ],
+        "tachi_task schema must expose exactly the #1683 C1a survivor list"
+    );
     // #1319-C2: dispatch/cancel/wait were removed from tachi_task (external
     // staffing now flows through tachi_staff). The schema must NOT list them.
     assert!(
@@ -336,8 +356,6 @@ fn tachi_task_action_schema_declares_feature_briefing() {
         !values.contains(&json!("wait")),
         "tachi_task must not advertise wait after [1319-C2]"
     );
-    assert!(values.contains(&json!("complete")));
-    assert!(values.contains(&json!("recommend")));
     for removed in [
         "route_simulate",
         "proposals",
@@ -349,12 +367,12 @@ fn tachi_task_action_schema_declares_feature_briefing() {
             "tachi_task must not advertise route tuning action {removed} after #1426"
         );
     }
-    assert!(values.contains(&json!("status")));
-    assert!(values.contains(&json!("intake")));
-    assert!(values.contains(&json!("cycle_plan")));
-    assert!(values.contains(&json!("ux_matrix")));
-    assert!(values.contains(&json!("build_references")));
-    assert!(values.contains(&json!("close_loop")));
+    for removed in tachi_params::TACHI_TASK_RETIRED_C1A_ACTIONS {
+        assert!(
+            !values.contains(&json!(*removed)),
+            "tachi_task schema must not advertise #1683 C1a retired action {removed}"
+        );
+    }
     // #757: GH PR lifecycle is tachi_gh only — not on tachi_task schema at all.
     for removed in tachi_params::TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
         assert!(
@@ -603,6 +621,25 @@ fn tachi_task_schema_descriptions_do_not_reference_removed_actions() {
             "tachi_task schema must not reference removed route-tuning action text '{stale}' after #1426"
         );
     }
+    for stale in [
+        "action=plan",
+        "action='plan'",
+        "action=cycle_plan",
+        "action='cycle_plan'",
+        "action=recommend",
+        "action='recommend'",
+        "action=refine_issues",
+        "action='refine_issues'",
+        "action=merge",
+        "action='merge'",
+        "action=ux_matrix",
+        "action='ux_matrix'",
+    ] {
+        assert!(
+            !serialized.contains(stale),
+            "tachi_task schema must not reference #1683 C1a retired action text '{stale}'"
+        );
+    }
 }
 
 /// #1319-C2 discriminator: dispatch-only execution knobs (fields with no live
@@ -652,6 +689,18 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
             "route-tuning parameter '{orphaned}' must be hidden from the public tachi_task schema after #1426"
         );
     }
+    for deleted in [
+        "include_card",
+        "execution_level",
+        "strategy",
+        "delete_worktree",
+        "confirm",
+    ] {
+        assert!(
+            !properties.contains_key(deleted),
+            "#1683 C1a deleted field '{deleted}' must not appear in the public tachi_task schema"
+        );
+    }
 }
 
 /// #1319-C2 discriminator (positive): fields still READ by surviving public
@@ -667,8 +716,6 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
 ///   explicitness signal (task_router.rs complete arm); its schema property
 ///   name is the serde rename `__tachi_project_explicit`, which IS the wire
 ///   name clients send;
-/// - `execution_level` is read by the Recommend arm for host admission
-///   (task_router.rs);
 /// - `timeout_secs` is read by the Status arm for the acpx control command
 ///   timeout (task_facade.rs handle_tachi_task_status).
 #[test]
@@ -681,7 +728,6 @@ fn tachi_task_schema_keeps_fields_read_by_surviving_actions() {
         ("cwd", "action=briefing"),
         ("auto_capability_bundle", "action=briefing"),
         ("__tachi_project_explicit", "action=complete"),
-        ("execution_level", "action=recommend"),
         ("timeout_secs", "action=status"),
     ] {
         let property = properties.get(field).unwrap_or_else(|| {

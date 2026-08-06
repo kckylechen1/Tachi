@@ -130,7 +130,7 @@ pub(crate) async fn handle_tachi_task_brief(
         "suggested_next_tools": [
             "tachi_wiki(action='search')",
             "tachi_skill(action='discover')",
-            "tachi_task(action='plan')",
+            "tachi_task(action='briefing')",
             "tachi_task(action='board')"
         ],
     }))

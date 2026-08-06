@@ -2310,7 +2310,6 @@ dependencies = [
  "rmcp",
  "serde_json",
  "tachi-hub",
- "tachi-merge-ops",
  "tachi-params",
 ]
 
@@ -2413,8 +2412,6 @@ version = "1.9.2"
 dependencies = [
  "serde",
  "serde_json",
- "tachi-params",
- "tempfile",
  "tokio",
 ]
 

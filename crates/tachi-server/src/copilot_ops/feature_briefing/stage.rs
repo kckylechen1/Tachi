@@ -47,9 +47,9 @@ pub(super) fn feature_next_action(
     {
         return "Poll tachi_task(action='board') and collect the active worker result before dispatching more work.".to_string();
     }
-    if let Some(command) = cycle_plan_command(params) {
+    if let Some(command) = cycle_status_command(params) {
         return format!(
-            "Run {command} to select the next lifecycle step from current issue/PR/docs/verification state."
+            "Run {command} to inspect current issue/PR/docs/verification lifecycle state."
         );
     }
     if run_artifacts.iter().any(|artifact| {
@@ -68,24 +68,24 @@ pub(super) fn feature_next_action(
         return "Use the flow instruction packet as the handoff source for a bounded harness-native subagent; use Tachi dispatch only for an explicit durable/remote exception.".to_string();
     }
     if memory_rows.is_empty() {
-        return "Start with tachi_task(action='plan') or save a checkpoint after the next concrete decision.".to_string();
+        return "Save a checkpoint after the next concrete decision.".to_string();
     }
-    "Optionally run tachi_task(action='recommend') for advisory card evidence, then use a harness-native subagent or review with explicit verification.".to_string()
+    "Use a harness-native subagent or review with explicit verification.".to_string()
 }
 
-fn cycle_plan_command(params: &TachiTaskParams) -> Option<String> {
+fn cycle_status_command(params: &TachiTaskParams) -> Option<String> {
     params
         .flow_id
         .as_deref()
         .filter(|flow_id| !flow_id.trim().is_empty())
-        .map(|flow_id| format!("tachi_task(action='cycle_plan', flow_id='{flow_id}')"))
+        .map(|flow_id| format!("tachi_task(action='cycle_status', flow_id='{flow_id}')"))
         .or_else(|| {
             params
                 .issue_ref
                 .as_deref()
                 .filter(|issue_ref| !issue_ref.trim().is_empty())
                 .map(|issue_ref| {
-                    format!("tachi_task(action='cycle_plan', issue_ref='{issue_ref}')")
+                    format!("tachi_task(action='cycle_status', issue_ref='{issue_ref}')")
                 })
         })
         .or_else(|| {
@@ -93,6 +93,6 @@ fn cycle_plan_command(params: &TachiTaskParams) -> Option<String> {
                 .pr_ref
                 .as_deref()
                 .filter(|pr_ref| !pr_ref.trim().is_empty())
-                .map(|pr_ref| format!("tachi_task(action='cycle_plan', pr_ref='{pr_ref}')"))
+                .map(|pr_ref| format!("tachi_task(action='cycle_status', pr_ref='{pr_ref}')"))
         })
 }

@@ -36,30 +36,24 @@ fn hub_call_arguments_schema_and_deserialize_preserve_nested_tool_args() {
 }
 
 #[test]
-fn tachi_task_schema_advertises_recommend_and_profiles() {
+fn tachi_task_schema_advertises_survivors_not_retired_c1a_actions() {
     let schema = rmcp::handler::server::tool::schema_for_type::<TachiTaskParams>();
     let action_description = schema["properties"]["action"]["description"]
         .as_str()
         .expect("action description");
 
     assert!(
-        action_description.contains("recommend"),
-        "tachi_task.action schema must advertise recommend for worker routing: {action_description}"
-    );
-    assert!(
         action_description.contains("profiles"),
         "tachi_task.action schema must advertise profile discovery: {action_description}"
     );
     assert!(
-        action_description.contains("dispatch"),
-        "tachi_task.action schema must still advertise dispatch: {action_description}"
+        action_description.contains("cycle_status"),
+        "tachi_task.action schema must advertise lifecycle status: {action_description}"
     );
-    assert!(
-        action_description.contains("local dispatched worktree git merge only"),
-        "tachi_task.action schema must distinguish local worktree merge from GitHub PR merge: {action_description}"
-    );
-    assert!(
-        action_description.contains("tachi_gh(action='safe_merge')"),
-        "tachi_task.action schema must route GitHub PR merges to safe_merge: {action_description}"
-    );
+    for retired in tachi_params::TACHI_TASK_RETIRED_C1A_ACTIONS {
+        assert!(
+            !action_description.contains(retired),
+            "tachi_task.action schema must not advertise retired C1a action {retired}: {action_description}"
+        );
+    }
 }
