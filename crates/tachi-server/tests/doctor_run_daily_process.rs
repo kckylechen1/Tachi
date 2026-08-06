@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,8 @@ fn process_test_lock() -> MutexGuard<'static, ()> {
 struct MockProvider {
     endpoint: String,
     stop: Arc<AtomicBool>,
+    /// Accepted HTTP connections — proves packaged doctor probe traffic started.
+    requests: Arc<AtomicUsize>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -32,11 +34,14 @@ impl MockProvider {
             .expect("make mock provider nonblocking");
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(AtomicUsize::new(0));
         let thread_stop = stop.clone();
+        let thread_requests = requests.clone();
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        thread_requests.fetch_add(1, Ordering::Release);
                         std::thread::spawn(move || respond_unauthorized(stream));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -49,7 +54,35 @@ impl MockProvider {
         Self {
             endpoint,
             stop,
+            requests,
             thread: Some(thread),
+        }
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.load(Ordering::Acquire)
+    }
+
+    /// Wait until the request counter is stable for `quiet` (probes settled).
+    fn wait_until_requests_settle(&self, quiet: Duration, deadline: Duration) {
+        let started = Instant::now();
+        let mut last = self.request_count();
+        let mut quiet_since = Instant::now();
+        loop {
+            let now = self.request_count();
+            if now != last {
+                last = now;
+                quiet_since = Instant::now();
+            } else if quiet_since.elapsed() >= quiet {
+                return;
+            }
+            if started.elapsed() >= deadline {
+                panic!(
+                    "mock provider requests did not settle (count={last}) within {} ms",
+                    deadline.as_millis()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 }
@@ -326,24 +359,51 @@ fn parse_one_terminal_json(stdout: &[u8], stderr: &[u8]) -> serde_json::Value {
     })
 }
 
+fn is_sqlite_extension_load_flake(output: &ProcessOutput) -> bool {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stdout.contains("automatic extension loading failed")
+        || stderr.contains("automatic extension loading failed")
+}
+
+/// Retry a packaged-doctor attempt only on the known libsimple auto-extension
+/// registration race. The closure should rebuild a fresh fixture each call.
+fn with_extension_load_retries(mut run: impl FnMut() -> ProcessOutput) -> ProcessOutput {
+    let mut last = run();
+    for _ in 0..4 {
+        if !is_sqlite_extension_load_flake(&last) {
+            return last;
+        }
+        std::thread::sleep(Duration::from_millis(750));
+        last = run();
+    }
+    last
+}
+
 #[test]
 fn packaged_doctor_run_daily_success_completes_persist_and_distill_phases() {
     let _guard = process_test_lock();
-    let temp = tempfile::tempdir().expect("temporary packaged-doctor home");
-    let home = temp.path().join("home");
-    let app_home = temp.path().join("tachi-home");
-    let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
-    std::fs::create_dir_all(&home).expect("create isolated HOME");
-    std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global DB parent");
-
-    let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("seed global DB");
-    drop(store);
-
     let provider = MockProvider::unauthorized();
-    let output = wait_with_deadline(
-        spawn_packaged_doctor(&global_db, &home, &app_home, &provider),
-        Duration::from_secs(35),
-    );
+    let mut kept: Option<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> = None;
+    let output = with_extension_load_retries(|| {
+        let temp = tempfile::tempdir().expect("temporary packaged-doctor home");
+        let home = temp.path().join("home");
+        let app_home = temp.path().join("tachi-home");
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(&home).expect("create isolated HOME");
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global DB parent");
+        let store =
+            memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("seed global DB");
+        drop(store);
+        let output = wait_with_deadline(
+            spawn_packaged_doctor(&global_db, &home, &app_home, &provider),
+            Duration::from_secs(35),
+        );
+        if !is_sqlite_extension_load_flake(&output) {
+            kept = Some((temp, app_home, global_db));
+        }
+        output
+    });
 
     assert!(
         output.status.success(),
@@ -363,6 +423,8 @@ fn packaged_doctor_run_daily_success_completes_persist_and_distill_phases() {
         "success path must complete distill phase cleanly: {remediation}"
     );
 
+    let (_temp, app_home, global_db) =
+        kept.expect("accepted success attempt must retain fixture paths");
     let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
     let marker: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&marker_path).expect("success distill marker must exist"),
@@ -387,22 +449,28 @@ fn packaged_doctor_run_daily_success_completes_persist_and_distill_phases() {
 #[test]
 fn packaged_doctor_run_daily_distill_failure_surfaces_typed_cause_without_success_artifact() {
     let _guard = process_test_lock();
-    let temp = tempfile::tempdir().expect("temporary packaged-doctor home");
-    let home = temp.path().join("home");
-    let app_home = temp.path().join("tachi-home");
-    let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
-    std::fs::create_dir_all(&home).expect("create isolated HOME");
-    std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global DB parent");
-
-    let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("seed global DB");
-    drop(store);
-    seed_named_project_distill_candidates(&app_home, "fixture-distill");
-
     let provider = MockProvider::unauthorized();
-    let output = wait_with_deadline(
-        spawn_packaged_doctor(&global_db, &home, &app_home, &provider),
-        Duration::from_secs(45),
-    );
+    let mut kept: Option<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> = None;
+    let output = with_extension_load_retries(|| {
+        let temp = tempfile::tempdir().expect("temporary packaged-doctor home");
+        let home = temp.path().join("home");
+        let app_home = temp.path().join("tachi-home");
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(&home).expect("create isolated HOME");
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global DB parent");
+        let store =
+            memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("seed global DB");
+        drop(store);
+        seed_named_project_distill_candidates(&app_home, "fixture-distill");
+        let output = wait_with_deadline(
+            spawn_packaged_doctor(&global_db, &home, &app_home, &provider),
+            Duration::from_secs(45),
+        );
+        if !is_sqlite_extension_load_flake(&output) {
+            kept = Some((temp, app_home, global_db));
+        }
+        output
+    });
 
     assert!(
         !output.status.success(),
@@ -429,6 +497,8 @@ fn packaged_doctor_run_daily_distill_failure_surfaces_typed_cause_without_succes
         "typed cause must remain visible in remediation: {remediation}"
     );
 
+    let (_temp, app_home, global_db) =
+        kept.expect("accepted distill-failure attempt must retain fixture paths");
     let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
     match std::fs::read_to_string(&marker_path) {
         Ok(raw) => {
@@ -441,6 +511,38 @@ fn packaged_doctor_run_daily_distill_failure_surfaces_typed_cause_without_succes
                     .is_some_and(|e| !e.is_empty()),
                 "failure marker must be error-shaped, not clean success: {marker}"
             );
+            // When absorbed errors>0, durable marker counters must match the
+            // terminal summary (cold-review prescription #1).
+            if remediation.contains("distill failed:") {
+                let summary_errors = parse_remediation_counter(remediation, "errors=");
+                let summary_distilled = parse_remediation_counter(remediation, "distilled=");
+                let summary_skipped = parse_remediation_counter(remediation, "skipped=");
+                let summary_fallback = parse_remediation_counter(remediation, "fallback=");
+                assert!(
+                    summary_errors > 0,
+                    "absorbed-error path must report errors>0: {remediation}"
+                );
+                assert_eq!(
+                    marker["errors"].as_u64().expect("marker errors u64"),
+                    summary_errors,
+                    "marker errors must match terminal summary: marker={marker}; remediation={remediation}"
+                );
+                assert_eq!(
+                    marker["groups_distilled"].as_u64().expect("marker distilled"),
+                    summary_distilled,
+                    "marker groups_distilled must match summary: marker={marker}; remediation={remediation}"
+                );
+                assert_eq!(
+                    marker["groups_skipped"].as_u64().expect("marker skipped"),
+                    summary_skipped,
+                    "marker groups_skipped must match summary: marker={marker}; remediation={remediation}"
+                );
+                assert_eq!(
+                    marker["fallback_used"].as_u64().expect("marker fallback"),
+                    summary_fallback,
+                    "marker fallback_used must match summary: marker={marker}; remediation={remediation}"
+                );
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // Absent marker is also acceptable (no clean success artifact).
@@ -449,6 +551,18 @@ fn packaged_doctor_run_daily_distill_failure_surfaces_typed_cause_without_succes
     }
 
     assert_db_reopenable(&global_db);
+}
+
+fn parse_remediation_counter(remediation: &str, key: &str) -> u64 {
+    remediation
+        .split_whitespace()
+        .find_map(|token| {
+            let rest = token.strip_prefix(key)?;
+            // Counters may be glued to the next field via cause=…; take digits only.
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse().ok()
+        })
+        .unwrap_or_else(|| panic!("missing {key} counter in remediation: {remediation}"))
 }
 
 #[test]
@@ -463,16 +577,64 @@ fn packaged_doctor_run_daily_cancellation_releases_db_without_success_claim() {
 
     let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("seed global DB");
     drop(store);
+    // Hold BEGIN IMMEDIATE so provider-health persist blocks after probes.
     let lock_owner = rusqlite::Connection::open(&global_db).expect("open external lock owner");
     lock_owner
         .execute_batch("BEGIN IMMEDIATE")
         .expect("hold provider-health writer lock");
 
     let provider = MockProvider::unauthorized();
-    let child = spawn_packaged_doctor(&global_db, &home, &app_home, &provider);
+    let mut child = spawn_packaged_doctor(&global_db, &home, &app_home, &provider);
 
-    // Give the child time to enter the blocked persist-join phase, then cancel.
-    std::thread::sleep(Duration::from_millis(500));
+    // Prove the child entered the bounded blocked provider-persistence path
+    // before SIGTERM:
+    // 1) MockProvider request latch — probes have started (HTTP accepted).
+    // 2) Request counter quiet — probes settled.
+    // 3) Brief settle — persist has had time to contend on BEGIN IMMEDIATE.
+    // Startup under a held writer lock can take >15s (same budget as the
+    // blocked-writer process test), so the latch deadline is 30s.
+    let latch_deadline = Duration::from_secs(30);
+    let latch_started = Instant::now();
+    while provider.request_count() < 1 {
+        if let Some(status) = child.try_wait().expect("poll child during latch") {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut out) = child.stdout.take() {
+                let _ = out.read_to_end(&mut stdout);
+            }
+            if let Some(mut err) = child.stderr.take() {
+                let _ = err.read_to_end(&mut stderr);
+            }
+            panic!(
+                "packaged doctor exited before any mock provider probe; status={status}; requests={}; stdout={}; stderr={}",
+                provider.request_count(),
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        if latch_started.elapsed() >= latch_deadline {
+            let _ = child.kill();
+            let output = wait_with_deadline(child, Duration::from_secs(5));
+            panic!(
+                "mock provider saw {} requests within {} ms; child still running until kill; stdout={}; stderr={}",
+                provider.request_count(),
+                latch_deadline.as_millis(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    provider.wait_until_requests_settle(Duration::from_millis(250), Duration::from_secs(20));
+    // After probes settle, persist opens the DB (loads SQLite extensions) then
+    // contends on BEGIN IMMEDIATE. Wait past persist's 2s sqlite busy budget
+    // start so SIGTERM lands in the busy-wait, not mid-extension-init.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(
+        provider.request_count() >= 1,
+        "cancellation must fire only after probe traffic proved blocked-phase entry"
+    );
+
     let pid = child.id();
     let kill_status = Command::new("kill")
         .args(["-TERM", &pid.to_string()])
@@ -487,21 +649,27 @@ fn packaged_doctor_run_daily_cancellation_releases_db_without_success_claim() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // Hold the file lock after reaping so a SIGTERM'd child's extension
+    // teardown does not overlap the next packaged binary's libsimple
+    // registration (host-global SQLite auto-extension race).
+    std::thread::sleep(Duration::from_secs(2));
 
+    // Non-empty stdout must be exactly one valid JSON document — never skip
+    // on parse failure. Empty stdout is OK only for abrupt kills that emit
+    // nothing; success claim is still forbidden via exit status + marker.
     if !output.stdout.is_empty() {
-        if let Ok(document) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-            let remediation = document
-                .get("daily_remediation")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            assert!(
-                !remediation.contains("errors=0")
-                    || remediation.contains("timeout")
-                    || remediation.contains("distill failed")
-                    || remediation.contains("distill skipped"),
-                "emitted JSON must not claim clean distill success after cancel: {remediation}"
-            );
-        }
+        let document = parse_one_terminal_json(&output.stdout, &output.stderr);
+        let remediation = document
+            .get("daily_remediation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !remediation.contains("errors=0")
+                || remediation.contains("timeout")
+                || remediation.contains("distill failed")
+                || remediation.contains("distill skipped"),
+            "emitted JSON must not claim clean distill success after cancel: {remediation}"
+        );
     }
 
     let marker_path = app_home.join("foundry-runs").join(".last_distill_run");

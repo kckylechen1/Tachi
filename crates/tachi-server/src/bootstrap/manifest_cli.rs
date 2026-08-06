@@ -691,6 +691,40 @@ mod tests {
             "the distill lane's own key chain must resolve the pooled Vault secret"
         );
     }
+
+    #[test]
+    fn distill_failure_marker_mirrors_absorbed_report_counters() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker_path = temp.path().join(".last_distill_run");
+        write_distill_failure_marker(&marker_path, "api boom; other", 1, 2, 3, 4);
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).expect("marker written"))
+                .expect("marker JSON");
+        assert_eq!(marker["error"], "api boom; other");
+        assert_eq!(marker["groups_distilled"], 1);
+        assert_eq!(marker["groups_skipped"], 2);
+        assert_eq!(marker["fallback_used"], 3);
+        assert_eq!(marker["errors"], 4);
+        assert!(
+            marker.get("ts").and_then(|v| v.as_str()).is_some(),
+            "failure marker must carry ts: {marker}"
+        );
+    }
+
+    #[test]
+    fn distill_failure_marker_zeros_when_hard_err_has_no_report() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker_path = temp.path().join("nested").join(".last_distill_run");
+        write_distill_failure_marker(&marker_path, "batch exploded", 0, 0, 0, 0);
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).expect("marker written"))
+                .expect("marker JSON");
+        assert_eq!(marker["error"], "batch exploded");
+        assert_eq!(marker["groups_distilled"], 0);
+        assert_eq!(marker["groups_skipped"], 0);
+        assert_eq!(marker["fallback_used"], 0);
+        assert_eq!(marker["errors"], 0);
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -827,9 +861,17 @@ async fn run_daily_pipeline_remediation(
                     Ok(report) => {
                         // Absorbed per-group/API errors are still a distill
                         // failure for the packaged doctor receipt (#1505): do
-                        // not leave a clean success marker.
+                        // not leave a clean success marker. Marker counters
+                        // must mirror the terminal summary (same report).
                         let cause = report.errors.join("; ");
-                        write_distill_failure_marker(&marker_path, &cause);
+                        write_distill_failure_marker(
+                            &marker_path,
+                            &cause,
+                            report.groups_distilled,
+                            report.groups_skipped,
+                            report.fallback_used,
+                            report.errors.len(),
+                        );
                         Err(format!(
                             "distill failed: dispatched={} distilled={} skipped={} fallback={} errors={} cause={cause} provider_keys={provider_keys}",
                             report.batches_dispatched,
@@ -840,7 +882,9 @@ async fn run_daily_pipeline_remediation(
                         ))
                     }
                     Err(e) => {
-                        write_distill_failure_marker(&marker_path, &e);
+                        // Hard Err with no DistillBatchReport: zeros mean
+                        // nothing ran far enough to produce batch counters.
+                        write_distill_failure_marker(&marker_path, &e, 0, 0, 0, 0);
                         Err(format!(
                             "distill batch failed: {e} provider_keys={provider_keys}"
                         ))
@@ -857,17 +901,31 @@ async fn run_daily_pipeline_remediation(
     }
 }
 
-fn write_distill_failure_marker(marker_path: &Path, error: &str) {
+/// Write a failure-shaped `.last_distill_run` marker.
+///
+/// When a `DistillBatchReport` exists (absorbed per-group errors), pass that
+/// report's counters so the durable marker cannot contradict the terminal
+/// summary. Hard `Err(e)` with no report uses zeros — nothing ran far enough
+/// to produce batch counters. `errors` must be `report.errors.len()` when a
+/// report exists; the `"error"` cause string is always retained.
+fn write_distill_failure_marker(
+    marker_path: &Path,
+    error: &str,
+    groups_distilled: usize,
+    groups_skipped: usize,
+    fallback_used: usize,
+    errors: usize,
+) {
     if let Some(parent) = marker_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let marker_body = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "error": error,
-        "groups_distilled": 0,
-        "groups_skipped": 0,
-        "fallback_used": 0,
-        "errors": 0,
+        "groups_distilled": groups_distilled,
+        "groups_skipped": groups_skipped,
+        "fallback_used": fallback_used,
+        "errors": errors,
     })
     .to_string();
     let _ = std::fs::write(marker_path, marker_body);
