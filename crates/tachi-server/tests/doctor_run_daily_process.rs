@@ -616,18 +616,26 @@ fn packaged_doctor_run_daily_cancellation_releases_db_without_success_claim() {
     // Non-empty stdout must be exactly one valid JSON document — never skip
     // on parse failure. Empty stdout is OK only for abrupt kills that emit
     // nothing; success claim is still forbidden via exit status + marker.
+    // When stdout is non-empty, `daily_remediation` must actually be present
+    // (no unwrap_or("") fallback — a syntactically valid but empty/irrelevant
+    // `{}` must fail) and must carry an explicit non-success disposition for
+    // the provider/daily phase, not just parse as JSON.
     if !output.stdout.is_empty() {
         let document = parse_one_terminal_json(&output.stdout, &output.stderr);
         let remediation = document
             .get("daily_remediation")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .unwrap_or_else(|| {
+                panic!(
+                    "non-empty stdout after cancellation must carry a daily_remediation string: document={document}"
+                )
+            });
         assert!(
-            !remediation.contains("errors=0")
-                || remediation.contains("timeout")
+            remediation.contains("status=timeout")
                 || remediation.contains("distill failed")
+                || remediation.contains("distill batch failed")
                 || remediation.contains("distill skipped"),
-            "emitted JSON must not claim clean distill success after cancel: {remediation}"
+            "cancelled packaged doctor terminal JSON must carry a non-success provider/daily disposition (timeout/distill failed/distill skipped), not merely be well-formed JSON: {remediation}"
         );
     }
 
