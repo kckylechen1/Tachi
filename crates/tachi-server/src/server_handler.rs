@@ -221,6 +221,67 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     tool.annotations = Some(annotations);
 }
 
+/// Build the non-admin `tachi_task` description's action-naming clauses from
+/// the `allowed` set already computed by the caller (the same list
+/// `narrow_action_enum_property` uses for the schema enum), so the
+/// description can never name an action the profile can't actually invoke.
+/// [C1a review round 2]: the prior code carried one hand-written sentence for
+/// every non-admin profile, which drifted from the real per-profile allow-list
+/// the moment a narrower profile (e.g. delegate) trimmed `allowed` below what
+/// the sentence claimed — the same "hand-written list vs. real gate" pattern
+/// as the retired-action leak this file already fixed once in round 1. Only
+/// mention a group when at least one of its actions survives the filter;
+/// omitting an allowed action from the prose is fine (it is not a promise to
+/// be exhaustive), naming a denied one is the bug this generates around.
+fn describe_allowed_task_actions(allowed: &[&str]) -> String {
+    let has = |action: &str| allowed.contains(&action);
+    let mut clauses: Vec<String> = Vec::new();
+
+    let context: Vec<&str> = ["briefing", "doc_index", "cycle_status"]
+        .into_iter()
+        .filter(|a| has(a))
+        .collect();
+    if !context.is_empty() {
+        clauses.push(format!("Use {} for context", context.join("/")));
+    }
+
+    let advisory: Vec<&str> = ["profile", "card"].into_iter().filter(|a| has(a)).collect();
+    if !advisory.is_empty() {
+        clauses.push(format!("{} for advisory evidence", advisory.join("/")));
+    }
+
+    let ledger_core: Vec<&str> = ["complete", "adjudicate", "board"]
+        .into_iter()
+        .filter(|a| has(a))
+        .collect();
+    let lifecycle: Vec<&str> = ["claim", "heartbeat", "handoff", "release"]
+        .into_iter()
+        .filter(|a| has(a))
+        .collect();
+    if !ledger_core.is_empty() || !lifecycle.is_empty() {
+        let mut ledger_clause = String::new();
+        if !ledger_core.is_empty() {
+            ledger_clause.push_str(&ledger_core.join("/"));
+        }
+        if !lifecycle.is_empty() {
+            if !ledger_clause.is_empty() {
+                ledger_clause.push_str(" and ");
+            }
+            ledger_clause.push_str("lifecycle actions (");
+            ledger_clause.push_str(&lifecycle.join("/"));
+            ledger_clause.push(')');
+        }
+        ledger_clause.push_str(" for work-ledger state");
+        clauses.push(ledger_clause);
+    }
+
+    if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" {}.", clauses.join("; "))
+    }
+}
+
 /// Intersect the advertised `tachi_task.action` enum with the same action
 /// policy used at call time. This keeps ordinary profiles from planning around
 /// operator-only Tachi dispatch and prevents restricted profiles from seeing
@@ -246,9 +307,10 @@ fn narrow_gated_action_schemas(
             .collect();
         narrow_action_enum_property(tool, &allowed);
         hide_operator_dispatch_properties(tool);
-        tool.description = Some(std::borrow::Cow::Borrowed(
-            "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent. Use briefing/doc_index/cycle_status for context; profile/card for advisory evidence; complete/adjudicate/board and lifecycle actions (claim/heartbeat/handoff/release) for work-ledger state. Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
-        ));
+        let action_summary = describe_allowed_task_actions(&allowed);
+        tool.description = Some(std::borrow::Cow::Owned(format!(
+            "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
+        )));
     }
 }
 
