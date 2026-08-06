@@ -247,7 +247,7 @@ fn narrow_gated_action_schemas(
         narrow_action_enum_property(tool, &allowed);
         hide_operator_dispatch_properties(tool);
         tool.description = Some(std::borrow::Cow::Borrowed(
-            "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent. Use briefing/doc_index/cycle_status for context; profile/card for advisory evidence; complete/adjudicate/board and lifecycle actions (claim/heartbeat/handoff/release) for work-ledger state. Sequencing and dispatch decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
+            "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent. Use briefing/doc_index/cycle_status for context; profile/card for advisory evidence; complete/adjudicate/board and lifecycle actions (claim/heartbeat/handoff/release) for work-ledger state. Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
         ));
     }
 }
