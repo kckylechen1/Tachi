@@ -3,7 +3,7 @@
   "issue": 1317,
   "observation": {
     "date": "2026-08-06",
-    "revision": "54082ee5a42a60546dac27330480665baff15352",
+    "revision": "51f57bd78487d5e1c9dbb13a2f7d930f19a2a514",
     "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
   },
   "provisional_budgets": {
@@ -376,7 +376,7 @@
       },
       "delegate": {
         "total_input_schema_bytes": 68864,
-        "total_tool_definition_bytes": 74330,
+        "total_tool_definition_bytes": 74214,
         "visible_tool_count": 11,
         "visible_tools": [
           "peer_query",
@@ -394,7 +394,7 @@
       },
       "operate": {
         "total_input_schema_bytes": 122516,
-        "total_tool_definition_bytes": 141603,
+        "total_tool_definition_bytes": 141595,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
