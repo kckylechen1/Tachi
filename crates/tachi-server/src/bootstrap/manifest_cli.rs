@@ -133,6 +133,8 @@ pub(super) async fn run_doctor_command(
     // Runs the provider probe refresh and the daily distill batch, then writes the
     // marker so the next `tachi status` sees a fresh (or failure-detailed) marker
     // instead of a bare stale warning.
+    // Distill batch Err / errors>0 / typed distill-step failure exits non-zero after
+    // the terminal receipt is printed (#1505). Persist-gate skips stay exit 0.
     let daily_remediation = if run_daily {
         Some(
             run_daily_pipeline_remediation(
@@ -146,6 +148,10 @@ pub(super) async fn run_doctor_command(
     } else {
         None
     };
+    let daily_remediation_text = daily_remediation.as_ref().map(|outcome| match outcome {
+        Ok(summary) | Err(summary) => summary.clone(),
+    });
+    let daily_remediation_failed = matches!(daily_remediation, Some(Err(_)));
 
     // Branch #5: optional foundry job-status histogram per manifest DB.
     let jobs_section = if jobs_report {
@@ -175,14 +181,14 @@ pub(super) async fn run_doctor_command(
                 "models".into(),
                 serde_json::to_value(crate::status_ops::status_health::model_lanes_json())?,
             );
-            if let Some(remediation) = &daily_remediation {
+            if let Some(remediation) = &daily_remediation_text {
                 obj.insert(
                     "daily_remediation".into(),
                     serde_json::Value::String(remediation.clone()),
                 );
             }
         }
-        print_pretty_json(&full)
+        print_pretty_json(&full)?;
     } else {
         println!("{}", crate::doctor::render_report(&report));
         println!();
@@ -234,12 +240,18 @@ pub(super) async fn run_doctor_command(
         for line in model_lane_lines() {
             println!("  {line}");
         }
-        if let Some(remediation) = &daily_remediation {
+        if let Some(remediation) = &daily_remediation_text {
             println!("\n=== daily pipeline remediation ===");
             println!("{remediation}");
         }
-        Ok(())
     }
+
+    if daily_remediation_failed {
+        let summary = daily_remediation_text
+            .unwrap_or_else(|| "daily pipeline remediation failed".to_string());
+        return Err(format!("daily pipeline remediation failed:{summary}").into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -397,14 +409,32 @@ mod tests {
         let project_db = dir.path().join("project.db");
         seed_and_stamp_older_schema_version(&global_db);
 
+        // Isolate named-project discovery so the allow path cannot scan the
+        // host's real ~/.tachi projects and absorb unrelated migration denials
+        // into report.errors (#1505 exit wiring surfaces those as Err).
+        let prev_tachi_home = std::env::var_os("TACHI_HOME");
+        std::env::set_var("TACHI_HOME", &app_home);
+        struct RestoreTachiHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreTachiHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("TACHI_HOME", value),
+                    None => std::env::remove_var("TACHI_HOME"),
+                }
+            }
+        }
+        let _restore_tachi_home = RestoreTachiHome(prev_tachi_home);
+
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-        let deny_summary = rt.block_on(run_daily_pipeline_remediation(
-            &app_home,
-            &global_db,
-            Some(project_db.as_path()),
-            &memcore::MigrationAuthority::Deny,
-        ));
+        let deny_summary = rt
+            .block_on(run_daily_pipeline_remediation(
+                &app_home,
+                &global_db,
+                Some(project_db.as_path()),
+                &memcore::MigrationAuthority::Deny,
+            ))
+            .expect_err("schema-deny distill step must fail closed");
         assert!(
             deny_summary.contains("refusing to migrate db schema"),
             "doctor --run-daily without --allow-schema-migration must surface the \
@@ -416,14 +446,16 @@ mod tests {
             "deny must not mutate the old schema stamp"
         );
 
-        let allow_summary = rt.block_on(run_daily_pipeline_remediation(
-            &app_home,
-            &global_db,
-            Some(project_db.as_path()),
-            &memcore::MigrationAuthority::Allow {
-                approved_by: "test:1181-doctor-run-daily".to_string(),
-            },
-        ));
+        let allow_summary = rt
+            .block_on(run_daily_pipeline_remediation(
+                &app_home,
+                &global_db,
+                Some(project_db.as_path()),
+                &memcore::MigrationAuthority::Allow {
+                    approved_by: "test:1181-doctor-run-daily".to_string(),
+                },
+            ))
+            .unwrap_or_else(|summary| summary);
         assert!(
             !allow_summary.contains("refusing to migrate db schema"),
             "doctor --run-daily WITH --allow-schema-migration must not refuse the \
@@ -659,6 +691,40 @@ mod tests {
             "the distill lane's own key chain must resolve the pooled Vault secret"
         );
     }
+
+    #[test]
+    fn distill_failure_marker_mirrors_absorbed_report_counters() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker_path = temp.path().join(".last_distill_run");
+        write_distill_failure_marker(&marker_path, "api boom; other", 1, 2, 3, 4);
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).expect("marker written"))
+                .expect("marker JSON");
+        assert_eq!(marker["error"], "api boom; other");
+        assert_eq!(marker["groups_distilled"], 1);
+        assert_eq!(marker["groups_skipped"], 2);
+        assert_eq!(marker["fallback_used"], 3);
+        assert_eq!(marker["errors"], 4);
+        assert!(
+            marker.get("ts").and_then(|v| v.as_str()).is_some(),
+            "failure marker must carry ts: {marker}"
+        );
+    }
+
+    #[test]
+    fn distill_failure_marker_zeros_when_hard_err_has_no_report() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker_path = temp.path().join("nested").join(".last_distill_run");
+        write_distill_failure_marker(&marker_path, "batch exploded", 0, 0, 0, 0);
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).expect("marker written"))
+                .expect("marker JSON");
+        assert_eq!(marker["error"], "batch exploded");
+        assert_eq!(marker["groups_distilled"], 0);
+        assert_eq!(marker["groups_skipped"], 0);
+        assert_eq!(marker["fallback_used"], 0);
+        assert_eq!(marker["errors"], 0);
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -700,13 +766,17 @@ impl From<crate::status_ops::ApiKeyStatus> for ProviderKeyStatus {
 /// 1. Refreshes the provider key probe cache.
 /// 2. Runs the daily distill batch and writes the marker.
 ///
-/// Returns a human-readable summary line for the doctor report.
+/// Returns `Ok(summary)` when distill completed cleanly (or was skipped by the
+/// provider-persist gate). Returns `Err(summary)` when the distill step itself
+/// failed — batch `Err`, absorbed `report.errors > 0`, or server-init failure
+/// after persist authorized the distill owner — so the doctor CLI can exit
+/// non-zero while still emitting the typed cause in the terminal receipt (#1505).
 async fn run_daily_pipeline_remediation(
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
     schema_migration: &memcore::MigrationAuthority,
-) -> String {
+) -> Result<String, String> {
     // Step 1: refresh provider probe cache.
     let probe_refresh = crate::status_ops::status_health::refresh_doctor_probe_cache(
         app_home,
@@ -719,9 +789,10 @@ async fn run_daily_pipeline_remediation(
     // Step 2: run the distill batch. Only an explicit successful receipt may
     // authorize the next write-capable owner. Missing, timeout, and failure all
     // fail closed; cache-write failure cannot erase the in-memory typed receipt
-    // (#1505).
-    let distill_summary = if !provider_persistence_allows_distill(&probe_refresh) {
-        provider_persistence_distill_skip_summary(&probe_refresh)
+    // (#1505). Persist-gate skips remain Ok (doctor exit 0); distill-step
+    // failures return Err so the packaged CLI exits non-zero.
+    let distill_outcome = if !provider_persistence_allows_distill(&probe_refresh) {
+        Ok(provider_persistence_distill_skip_summary(&probe_refresh))
     } else {
         let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
         // Codex review (2026-07-17, checkpoint 7, MERGE-BLOCKING) + leader
@@ -765,7 +836,7 @@ async fn run_daily_pipeline_remediation(
                 // doctor report instead of needing a code-level trace.
                 let provider_keys = server.llm.provider_secret_count();
                 match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {
-                    Ok(report) => {
+                    Ok(report) if report.errors.is_empty() => {
                         // Write success marker (same shape as the scheduler).
                         if let Some(parent) = marker_path.parent() {
                             let _ = std::fs::create_dir_all(parent);
@@ -775,43 +846,89 @@ async fn run_daily_pipeline_remediation(
                             "groups_distilled": report.groups_distilled,
                             "groups_skipped": report.groups_skipped,
                             "fallback_used": report.fallback_used,
-                            "errors": report.errors.len(),
-                        })
-                        .to_string();
-                        let _ = std::fs::write(&marker_path, marker_body);
-                        format!(
-                        "distill: dispatched={} distilled={} skipped={} fallback={} errors={} provider_keys={provider_keys}",
-                        report.batches_dispatched,
-                        report.groups_distilled,
-                        report.groups_skipped,
-                        report.fallback_used,
-                        report.errors.len()
-                    )
-                    }
-                    Err(e) => {
-                        // Write failure marker so status surfaces the reason.
-                        if let Some(parent) = marker_path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let marker_body = serde_json::json!({
-                            "ts": chrono::Utc::now().to_rfc3339(),
-                            "error": e.to_string(),
-                            "groups_distilled": 0,
-                            "groups_skipped": 0,
-                            "fallback_used": 0,
                             "errors": 0,
                         })
                         .to_string();
                         let _ = std::fs::write(&marker_path, marker_body);
-                        format!("distill batch failed: {e} provider_keys={provider_keys}")
+                        Ok(format!(
+                            "distill: dispatched={} distilled={} skipped={} fallback={} errors=0 provider_keys={provider_keys}",
+                            report.batches_dispatched,
+                            report.groups_distilled,
+                            report.groups_skipped,
+                            report.fallback_used,
+                        ))
+                    }
+                    Ok(report) => {
+                        // Absorbed per-group/API errors are still a distill
+                        // failure for the packaged doctor receipt (#1505): do
+                        // not leave a clean success marker. Marker counters
+                        // must mirror the terminal summary (same report).
+                        let cause = report.errors.join("; ");
+                        write_distill_failure_marker(
+                            &marker_path,
+                            &cause,
+                            report.groups_distilled,
+                            report.groups_skipped,
+                            report.fallback_used,
+                            report.errors.len(),
+                        );
+                        Err(format!(
+                            "distill failed: dispatched={} distilled={} skipped={} fallback={} errors={} cause={cause} provider_keys={provider_keys}",
+                            report.batches_dispatched,
+                            report.groups_distilled,
+                            report.groups_skipped,
+                            report.fallback_used,
+                            report.errors.len(),
+                        ))
+                    }
+                    Err(e) => {
+                        // Hard Err with no DistillBatchReport: zeros mean
+                        // nothing ran far enough to produce batch counters.
+                        write_distill_failure_marker(&marker_path, &e, 0, 0, 0, 0);
+                        Err(format!(
+                            "distill batch failed: {e} provider_keys={provider_keys}"
+                        ))
                     }
                 }
             }
-            Err(e) => format!("distill skipped (server init failed): {e}"),
+            Err(e) => Err(format!("distill skipped (server init failed): {e}")),
         }
     };
 
-    format!("  {probe_summary}\n  {distill_summary}")
+    match distill_outcome {
+        Ok(distill_summary) => Ok(format!("  {probe_summary}\n  {distill_summary}")),
+        Err(distill_summary) => Err(format!("  {probe_summary}\n  {distill_summary}")),
+    }
+}
+
+/// Write a failure-shaped `.last_distill_run` marker.
+///
+/// When a `DistillBatchReport` exists (absorbed per-group errors), pass that
+/// report's counters so the durable marker cannot contradict the terminal
+/// summary. Hard `Err(e)` with no report uses zeros — nothing ran far enough
+/// to produce batch counters. `errors` must be `report.errors.len()` when a
+/// report exists; the `"error"` cause string is always retained.
+fn write_distill_failure_marker(
+    marker_path: &Path,
+    error: &str,
+    groups_distilled: usize,
+    groups_skipped: usize,
+    fallback_used: usize,
+    errors: usize,
+) {
+    if let Some(parent) = marker_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let marker_body = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "error": error,
+        "groups_distilled": groups_distilled,
+        "groups_skipped": groups_skipped,
+        "fallback_used": fallback_used,
+        "errors": errors,
+    })
+    .to_string();
+    let _ = std::fs::write(marker_path, marker_body);
 }
 
 fn provider_persistence_receipt(
