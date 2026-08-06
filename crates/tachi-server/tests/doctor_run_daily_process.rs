@@ -359,51 +359,22 @@ fn parse_one_terminal_json(stdout: &[u8], stderr: &[u8]) -> serde_json::Value {
     })
 }
 
-fn is_sqlite_extension_load_flake(output: &ProcessOutput) -> bool {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    stdout.contains("automatic extension loading failed")
-        || stderr.contains("automatic extension loading failed")
-}
-
-/// Retry a packaged-doctor attempt only on the known libsimple auto-extension
-/// registration race. The closure should rebuild a fresh fixture each call.
-fn with_extension_load_retries(mut run: impl FnMut() -> ProcessOutput) -> ProcessOutput {
-    let mut last = run();
-    for _ in 0..4 {
-        if !is_sqlite_extension_load_flake(&last) {
-            return last;
-        }
-        std::thread::sleep(Duration::from_millis(750));
-        last = run();
-    }
-    last
-}
-
 #[test]
 fn packaged_doctor_run_daily_success_completes_persist_and_distill_phases() {
     let _guard = process_test_lock();
     let provider = MockProvider::unauthorized();
-    let mut kept: Option<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> = None;
-    let output = with_extension_load_retries(|| {
-        let temp = tempfile::tempdir().expect("temporary packaged-doctor home");
-        let home = temp.path().join("home");
-        let app_home = temp.path().join("tachi-home");
-        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
-        std::fs::create_dir_all(&home).expect("create isolated HOME");
-        std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global DB parent");
-        let store =
-            memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("seed global DB");
-        drop(store);
-        let output = wait_with_deadline(
-            spawn_packaged_doctor(&global_db, &home, &app_home, &provider),
-            Duration::from_secs(35),
-        );
-        if !is_sqlite_extension_load_flake(&output) {
-            kept = Some((temp, app_home, global_db));
-        }
-        output
-    });
+    let temp = tempfile::tempdir().expect("temporary packaged-doctor home");
+    let home = temp.path().join("home");
+    let app_home = temp.path().join("tachi-home");
+    let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(&home).expect("create isolated HOME");
+    std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global DB parent");
+    let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("seed global DB");
+    drop(store);
+    let output = wait_with_deadline(
+        spawn_packaged_doctor(&global_db, &home, &app_home, &provider),
+        Duration::from_secs(35),
+    );
 
     assert!(
         output.status.success(),
@@ -423,8 +394,6 @@ fn packaged_doctor_run_daily_success_completes_persist_and_distill_phases() {
         "success path must complete distill phase cleanly: {remediation}"
     );
 
-    let (_temp, app_home, global_db) =
-        kept.expect("accepted success attempt must retain fixture paths");
     let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
     let marker: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&marker_path).expect("success distill marker must exist"),
@@ -450,27 +419,19 @@ fn packaged_doctor_run_daily_success_completes_persist_and_distill_phases() {
 fn packaged_doctor_run_daily_distill_failure_surfaces_typed_cause_without_success_artifact() {
     let _guard = process_test_lock();
     let provider = MockProvider::unauthorized();
-    let mut kept: Option<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> = None;
-    let output = with_extension_load_retries(|| {
-        let temp = tempfile::tempdir().expect("temporary packaged-doctor home");
-        let home = temp.path().join("home");
-        let app_home = temp.path().join("tachi-home");
-        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
-        std::fs::create_dir_all(&home).expect("create isolated HOME");
-        std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global DB parent");
-        let store =
-            memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("seed global DB");
-        drop(store);
-        seed_named_project_distill_candidates(&app_home, "fixture-distill");
-        let output = wait_with_deadline(
-            spawn_packaged_doctor(&global_db, &home, &app_home, &provider),
-            Duration::from_secs(45),
-        );
-        if !is_sqlite_extension_load_flake(&output) {
-            kept = Some((temp, app_home, global_db));
-        }
-        output
-    });
+    let temp = tempfile::tempdir().expect("temporary packaged-doctor home");
+    let home = temp.path().join("home");
+    let app_home = temp.path().join("tachi-home");
+    let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(&home).expect("create isolated HOME");
+    std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global DB parent");
+    let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("seed global DB");
+    drop(store);
+    seed_named_project_distill_candidates(&app_home, "fixture-distill");
+    let output = wait_with_deadline(
+        spawn_packaged_doctor(&global_db, &home, &app_home, &provider),
+        Duration::from_secs(45),
+    );
 
     assert!(
         !output.status.success(),
@@ -497,8 +458,6 @@ fn packaged_doctor_run_daily_distill_failure_surfaces_typed_cause_without_succes
         "typed cause must remain visible in remediation: {remediation}"
     );
 
-    let (_temp, app_home, global_db) =
-        kept.expect("accepted distill-failure attempt must retain fixture paths");
     let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
     match std::fs::read_to_string(&marker_path) {
         Ok(raw) => {
