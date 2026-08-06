@@ -92,7 +92,7 @@ otherwise.
 | `runtime_info` | routing identity | Cheap route/profile self-check. |
 | `tachi_status` | health | Session-start health and readiness signal. |
 | `tachi_memory` | memory facade | Canonical search/get/save/extract/briefing/checkpoint/alerts surface. |
-| `tachi_task` | task lifecycle facade | Canonical plan/dispatch/complete/status/board/wait surface, but currently overloaded. |
+| `tachi_task` | task lifecycle facade | Historical (2026-07-07 base) plan/dispatch/complete/status/board/wait surface, since narrowed further — `dispatch`/`cancel`/`wait` were removed by #1319-C2 and `plan`/`cycle_plan`/`recommend`/`refine_issues`/`merge`/`ux_matrix` were retired by #1683 C1a. Current action set lives in `TachiTaskAction::PRIMARY`, not in this historical row. |
 | `tachi_tune` | route/recall tuning | Extracted from task/memory in #1426. Admin/operator only — never part of the standard keep-set. |
 | `tachi_verify` | verification ledger | Keep as evidence ledger for dispatch and safe-merge workflows. |
 | `tachi_wiki` | wiki facade | Canonical wiki search/browse/read/write facade. |
