@@ -1293,6 +1293,90 @@ mod tests {
     }
 
     #[test]
+    fn projected_tools_list_never_teaches_retired_c1a_actions() {
+        // [C1a review round 1] The enum/schema/census discriminators (see
+        // `f0_task_primary_does_not_advertise_gh_lifecycle` and the
+        // facade_tests schema census) only ever checked the `action` enum.
+        // They missed free-text tool descriptions, which is exactly how
+        // #1683 C1a's retired tachi_task actions kept getting taught to the
+        // model after the enum was pruned (F1: `narrow_gated_action_schemas`
+        // rewrote the non-admin description but still said "Use
+        // briefing/doc_index/plan ... recommend for advisory ... merge only
+        // for..."). This walks the same projection `list_tools` actually
+        // serves (`project_tool_definitions`) across profiles.
+        //
+        // Word-boundary, not substring, and split by scope:
+        //   - tachi_task's OWN description is checked against the full
+        //     retired list — that tool owns every one of these action names.
+        //   - every OTHER tool's description is checked only against the
+        //     three compound/unambiguous tokens (cycle_plan, refine_issues,
+        //     ux_matrix). Plain "plan"/"recommend"/"merge" are ordinary
+        //     English words that legitimately appear in unrelated tools
+        //     (tachi_component's own live action='plan', tachi_gh's
+        //     "routing plan"/"Safe-merge", tachi_memory's "merge
+        //     duplicates", dispatch's "auto-merge worktrees") — scanning
+        //     those tools for the bare words would be a false-positive
+        //     factory, not a real regression signal.
+        fn leaks_retired_token(description: &str, token: &str) -> bool {
+            description
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|word| word == token)
+        }
+
+        const CROSS_TOOL_UNAMBIGUOUS_TOKENS: &[&str] =
+            &["cycle_plan", "refine_issues", "ux_matrix"];
+
+        // Full native tool surface (mirrors server_state/init.rs's tool_router
+        // sum) so the cross-tool unambiguous-token check has real
+        // defense-in-depth instead of only covering tachi_task's own router.
+        fn native_tools() -> Vec<rmcp::model::Tool> {
+            (MemoryServer::continuity_tool_router()
+                + MemoryServer::component_tool_router()
+                + MemoryServer::copilot_tool_router()
+                + MemoryServer::dispatch_tool_router()
+                + MemoryServer::handoff_tool_router()
+                + MemoryServer::runtime_context_tool_router()
+                + MemoryServer::hub_tool_router()
+                + MemoryServer::pipeline_tool_router()
+                + MemoryServer::kanban_tool_router()
+                + MemoryServer::memory_tool_router()
+                + MemoryServer::vault_tool_router()
+                + MemoryServer::workflow_tool_router()
+                + MemoryServer::tune_tool_router()
+                + MemoryServer::wiki_tool_router()
+                + MemoryServer::sandbox_tool_router()
+                + MemoryServer::peer_tool_router())
+            .list_all()
+        }
+
+        for profile in [
+            None,
+            Some(tachi_hub::ToolProfile::standard()),
+            Some(tachi_hub::ToolProfile::delegate()),
+            Some(tachi_hub::ToolProfile::coordinate()),
+            Some(tachi_hub::ToolProfile::admin()),
+        ] {
+            let projected = project_tool_definitions(native_tools(), profile, None);
+            for tool in &projected {
+                let description = tool.description.as_deref().unwrap_or_default();
+                let scoped_tokens: &[&str] = if tool.name.as_ref() == "tachi_task" {
+                    tachi_params::TACHI_TASK_RETIRED_C1A_ACTIONS
+                } else {
+                    CROSS_TOOL_UNAMBIGUOUS_TOKENS
+                };
+                for retired in scoped_tokens {
+                    assert!(
+                        !leaks_retired_token(description, retired),
+                        "profile {:?} tool '{}' description still teaches retired C1a action {retired:?}: {description}",
+                        profile.map(tachi_hub::ToolProfile::as_str),
+                        tool.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn native_project_tool_schema_advertises_bound_alias_normalization() {
         let mut tool: rmcp::model::Tool = serde_json::from_value(json!({
             "name": "tachi_memory",
