@@ -94,12 +94,24 @@ written before the PR gate became ready.
 The `cycle_status` response is read-only. It does not dispatch, comment, merge,
 or close anything. It derives:
 
-- `steps`: ordered lifecycle checkpoints from intake through close_loop.
-- `next_step`: the first required checkpoint that is not passed.
-- `current_blockers`: blocking gaps from the next step plus blocking drift items.
-- `readiness`: booleans for dispatch, PR handoff, PR gate, release note, close_loop,
-  and closed state.
-- `status_summary`: the status evidence used to derive the plan.
+- `stage`: a single inferred lifecycle stage (`infer_cycle_stage`), computed from
+  local status, verification, release-note presence, and `close_loop` evidence.
+- `spec_drift`: the missing/inconsistent lifecycle evidence list described above.
+- `next_action`: the single next required action, derived from issue/PR refs,
+  linked docs/specs, verification, merge state, release-note presence, and
+  `close_loop`.
+- `warnings`: non-fatal issues hit while reading GitHub issue/PR snapshots.
+- `contract_refs` / `authority_order`: the linked docs/specs plus the authority
+  order above, so callers can resolve conflicting state signals themselves.
+
+See `crates/tachi-server/src/task_lifecycle/cycle_status.rs` for the authoritative
+response shape (`ok`, `action`, `cycle_id`, `flow_id`, `stage`, `state`, `issue_ref`,
+`pr_ref`, `linked_docs`, `linked_specs`, `contract_refs`, `authority_order`,
+`github`, `verification`, `artifacts`, `events`, `spec_drift`, `warnings`,
+`next_action`, `source`, `timing_ms`) — it does not emit `steps`, `next_step`,
+`current_blockers`, `readiness`, or `status_summary`; those were the field list of
+the `cycle_plan` action this section was renamed from, and were never carried
+forward into `cycle_status`.
 
 This gives agents one lifecycle state surface without making it another write path.
 
