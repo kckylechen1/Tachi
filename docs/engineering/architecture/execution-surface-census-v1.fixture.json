@@ -3,7 +3,7 @@
   "issue": 1317,
   "observation": {
     "date": "2026-08-06",
-    "revision": "fdbf8ab9019e8c7c3c8033d8ee8fd02dd7cc536d",
+    "revision": "54082ee5a42a60546dac27330480665baff15352",
     "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
   },
   "provisional_budgets": {
@@ -330,7 +330,7 @@
       },
       "coordinate": {
         "total_input_schema_bytes": 126367,
-        "total_tool_definition_bytes": 144331,
+        "total_tool_definition_bytes": 144365,
         "visible_tool_count": 39,
         "visible_tools": [
           "extract_facts",
@@ -376,7 +376,7 @@
       },
       "delegate": {
         "total_input_schema_bytes": 68864,
-        "total_tool_definition_bytes": 74296,
+        "total_tool_definition_bytes": 74330,
         "visible_tool_count": 11,
         "visible_tools": [
           "peer_query",
@@ -394,7 +394,7 @@
       },
       "operate": {
         "total_input_schema_bytes": 122516,
-        "total_tool_definition_bytes": 141569,
+        "total_tool_definition_bytes": 141603,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
@@ -451,7 +451,7 @@
       },
       "standard": {
         "total_input_schema_bytes": 64791,
-        "total_tool_definition_bytes": 74011,
+        "total_tool_definition_bytes": 74045,
         "visible_tool_count": 16,
         "visible_tools": [
           "peer_query",
