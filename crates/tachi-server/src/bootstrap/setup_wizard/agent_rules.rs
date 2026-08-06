@@ -13,7 +13,7 @@ pub(crate) fn agent_memory_rules_block() -> String {
 - Optionally `tachi_status` when DB health, vectors, or Foundry jobs may matter.\n\n\
 ### Project lifecycle (issue/PR/flow work)\n\
 - When a `flow_id`, `issue_ref`, or `pr_ref` exists, run `tachi_task` with `action=\"cycle_status\"` before PR handoff, release notes, or close-loop.\n\
-- Treat `cycle_status` as read-only lifecycle state; use it before selecting the next step.\n\n\
+- Treat `cycle_status` as read-only lifecycle state; follow its `next_action`.\n\n\
 ### Delegation — native subagent first\n\
 - Use the host harness's native subagent for ordinary local delegation. Tachi remains memory, policy, claims, ledger, receipts, and eval.\n\
 - `tachi_task` no longer owns worker launch (`action=\"dispatch\"`/`wait`/`cancel` were removed): use the host harness's native subagent, or `tachi_staff(action=\"start\", task=..., staffing_reason=\"durable_cross_session\")` for an explicit durable/remote exception. `staffing_reason` is a REQUIRED typed value: explicit_user_request | durable_cross_session | cross_device_remote | native_subagent_unavailable. Tachi availability, parallelism, tracking, or vendor choice alone is not a reason.\n\n\
