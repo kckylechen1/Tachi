@@ -1186,6 +1186,31 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Full native tool surface (mirrors server_state/init.rs's tool_router
+    /// sum). Shared by every test in this module that needs to walk the real
+    /// `list_tools` projection instead of hand-building a single tool, so the
+    /// router-sum listing has exactly one copy to keep in sync with
+    /// `server_state/init.rs`.
+    fn native_tools() -> Vec<rmcp::model::Tool> {
+        (MemoryServer::continuity_tool_router()
+            + MemoryServer::component_tool_router()
+            + MemoryServer::copilot_tool_router()
+            + MemoryServer::dispatch_tool_router()
+            + MemoryServer::handoff_tool_router()
+            + MemoryServer::runtime_context_tool_router()
+            + MemoryServer::hub_tool_router()
+            + MemoryServer::pipeline_tool_router()
+            + MemoryServer::kanban_tool_router()
+            + MemoryServer::memory_tool_router()
+            + MemoryServer::vault_tool_router()
+            + MemoryServer::workflow_tool_router()
+            + MemoryServer::tune_tool_router()
+            + MemoryServer::wiki_tool_router()
+            + MemoryServer::sandbox_tool_router()
+            + MemoryServer::peer_tool_router())
+        .list_all()
+    }
+
     #[test]
     fn peer_query_is_annotated_read_only() {
         // #1016 S1: peer_query answers through a structurally read-only
@@ -1388,29 +1413,6 @@ mod tests {
         const CROSS_TOOL_UNAMBIGUOUS_TOKENS: &[&str] =
             &["cycle_plan", "refine_issues", "ux_matrix"];
 
-        // Full native tool surface (mirrors server_state/init.rs's tool_router
-        // sum) so the cross-tool unambiguous-token check has real
-        // defense-in-depth instead of only covering tachi_task's own router.
-        fn native_tools() -> Vec<rmcp::model::Tool> {
-            (MemoryServer::continuity_tool_router()
-                + MemoryServer::component_tool_router()
-                + MemoryServer::copilot_tool_router()
-                + MemoryServer::dispatch_tool_router()
-                + MemoryServer::handoff_tool_router()
-                + MemoryServer::runtime_context_tool_router()
-                + MemoryServer::hub_tool_router()
-                + MemoryServer::pipeline_tool_router()
-                + MemoryServer::kanban_tool_router()
-                + MemoryServer::memory_tool_router()
-                + MemoryServer::vault_tool_router()
-                + MemoryServer::workflow_tool_router()
-                + MemoryServer::tune_tool_router()
-                + MemoryServer::wiki_tool_router()
-                + MemoryServer::sandbox_tool_router()
-                + MemoryServer::peer_tool_router())
-            .list_all()
-        }
-
         for profile in [
             None,
             Some(tachi_hub::ToolProfile::standard()),
@@ -1432,6 +1434,63 @@ mod tests {
                         "profile {:?} tool '{}' description still teaches retired C1a action {retired:?}: {description}",
                         profile.map(tachi_hub::ToolProfile::as_str),
                         tool.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn projected_task_description_never_names_an_action_outside_its_own_enum() {
+        // [C1a review round 2] `narrow_gated_action_schemas` used to filter
+        // the advertised `action` enum down to the profile's real allow-list
+        // (240-246 of this file) and then paste a SEPARATE hand-written
+        // sentence naming actions for the description — one sentence shared
+        // by every non-admin profile, regardless of what that profile's
+        // filtered enum actually contained. Delegate's enum was
+        // complete/status/board/briefing/doc_index, but the shared sentence
+        // still taught cycle_status/profile/card/adjudicate/claim/heartbeat/
+        // handoff/release — a discoverable-but-not-callable trap. This test
+        // makes that class of drift structurally impossible to reintroduce:
+        // for every non-admin profile, every `TachiTaskAction` wire token
+        // that appears (word-boundary, not substring — `plan` must not match
+        // inside `planning`) in the projected `tachi_task` description must
+        // also appear in that same projection's action enum.
+        fn contains_word(haystack: &str, word: &str) -> bool {
+            haystack
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|token| token == word)
+        }
+
+        for profile in [
+            tachi_hub::ToolProfile::observe(),
+            tachi_hub::ToolProfile::remember(),
+            tachi_hub::ToolProfile::coordinate(),
+            tachi_hub::ToolProfile::operate(),
+            tachi_hub::ToolProfile::standard(),
+            tachi_hub::ToolProfile::delegate(),
+        ] {
+            let projected = project_tool_definitions(native_tools(), Some(profile), None);
+            let task_tool = projected
+                .iter()
+                .find(|tool| tool.name.as_ref() == "tachi_task")
+                .expect("tachi_task survives projection for every non-admin profile");
+            let description = task_tool.description.as_deref().unwrap_or_default();
+            let enum_actions: std::collections::HashSet<&str> = task_tool.input_schema
+                ["properties"]["action"]["enum"]
+                .as_array()
+                .expect("tachi_task action enum")
+                .iter()
+                .map(|v| v.as_str().expect("action enum entries are strings"))
+                .collect();
+
+            for wire in tachi_params::TachiTaskAction::primary_wire_strings() {
+                if contains_word(description, wire) && !enum_actions.contains(wire) {
+                    panic!(
+                        "profile {:?} tachi_task description names action {wire:?}, \
+                         which is NOT in this profile's own projected action enum \
+                         ({enum_actions:?}): {description}",
+                        profile.as_str(),
                     );
                 }
             }
