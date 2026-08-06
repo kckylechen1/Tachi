@@ -43,6 +43,11 @@ members = [
     # workspace membership, and the nextest known-red gate is widened with this
     # crate when the tests move out of tachi-server.
     "crates/tachi-lesson-forge",
+    # Build-broker domain runtime (#1702 Track T3, carve 4). Membership is
+    # load-bearing, not bookkeeping — the DDL/test census roots come from
+    # workspace membership, and the nextest known-red gate is widened with this
+    # crate when the tests move out of tachi-server.
+    "crates/tachi-build-broker",
     "crates/tachi-hub",
     "crates/tachi-llm",
     "crates/tachi-merge-ops",

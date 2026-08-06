@@ -1,0 +1,20 @@
+[package]
+name = "tachi-build-broker"
+version = "1.9.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "Build-broker domain runtime for Tachi: serialized cargo seat, ticket queue, target generations, and quarantine-aware resource registration (#1702 Track T3, carve 4). Carved out of tachi-server with no MemoryServer coupling."
+
+[dependencies]
+chrono = { workspace = true }
+memcore = { path = "../memcore" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = "0.1"
+uuid = { workspace = true }
+
+[dev-dependencies]
+dirs = "5.0"
+tempfile = "3"
