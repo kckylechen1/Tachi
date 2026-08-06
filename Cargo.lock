@@ -2292,6 +2292,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-build-broker"
+version = "1.9.2"
+dependencies = [
+ "chrono",
+ "dirs",
+ "memcore",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "tachi-clean"
 version = "0.1.0"
 dependencies = [
@@ -2466,6 +2481,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tachi-bootstrap",
+ "tachi-build-broker",
  "tachi-clean",
  "tachi-credential-profile",
  "tachi-dispatch",

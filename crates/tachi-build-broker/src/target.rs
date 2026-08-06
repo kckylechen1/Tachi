@@ -35,7 +35,7 @@ pub(crate) const GENERATION_NS: &str = "build_target_generation";
 /// What last drove a target dir. This is the "generation" the compatibility
 /// check runs against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TargetGeneration {
+pub struct TargetGeneration {
     pub repo_root: String,
     pub head_sha: String,
     pub ticket_id: String,
@@ -90,7 +90,7 @@ pub(crate) struct TargetPlan {
 /// Injected so the decision logic is testable without a git repo — and because
 /// the production answer is a subprocess (`git merge-base --is-ancestor`) that
 /// has no business being inside the planner.
-pub(crate) trait LineageOracle {
+pub trait LineageOracle {
     /// True iff `a` and `b` are the same commit, or one is an ancestor of the
     /// other. False = the trees have DIVERGED (the fork case).
     fn same_lineage(&self, repo_root: &str, a: &str, b: &str) -> Result<bool, String>;
@@ -211,7 +211,7 @@ fn short(sha: &str) -> String {
 }
 
 /// Read the generation stamp for a target dir.
-pub(crate) fn read_generation(
+pub fn read_generation(
     store: &MemoryStore,
     target_path: &str,
 ) -> Result<Option<TargetGeneration>, String> {
@@ -254,7 +254,7 @@ pub(crate) fn clear_generation(store: &MemoryStore, target_path: &str) -> Result
 }
 
 /// Production [`LineageOracle`]: `git merge-base --is-ancestor`, both ways.
-pub(crate) struct GitLineage;
+pub struct GitLineage;
 
 impl LineageOracle for GitLineage {
     fn same_lineage(&self, repo_root: &str, a: &str, b: &str) -> Result<bool, String> {

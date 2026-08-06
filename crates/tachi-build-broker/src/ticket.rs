@@ -29,9 +29,9 @@ use memcore::MemoryStore;
 use serde::{Deserialize, Serialize};
 
 /// `hard_state` namespace for the immutable ticket payloads.
-pub(crate) const TICKET_NS: &str = "build_ticket";
+pub const TICKET_NS: &str = "build_ticket";
 /// `hard_state` namespace for the mutable per-ticket lifecycle record.
-pub(crate) const STATUS_NS: &str = "build_ticket_status";
+pub const STATUS_NS: &str = "build_ticket_status";
 
 /// How many times the executor may fail a ticket before it is dead-lettered.
 ///
@@ -52,7 +52,7 @@ pub(crate) const MAX_TICKET_ATTEMPTS: u32 = 3;
 /// the queue can be filtered by it (a seat only ever runs its own repo's
 /// tickets).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SourceIdentity {
+pub struct SourceIdentity {
     pub repo_root: String,
     pub base_sha: String,
     pub head_sha: String,
@@ -63,7 +63,7 @@ pub(crate) struct SourceIdentity {
 /// reason about (and later, key targets on) feature sets rather than parsing
 /// them back out of an arg vector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BuildCommand {
+pub struct BuildCommand {
     pub program: String,
     pub args: Vec<String>,
     pub features: Vec<String>,
@@ -71,7 +71,7 @@ pub(crate) struct BuildCommand {
 
 /// An immutable build ticket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BuildTicket {
+pub struct BuildTicket {
     pub ticket_id: String,
     pub source: SourceIdentity,
     pub command: BuildCommand,
@@ -103,7 +103,7 @@ impl BuildTicket {
     ///   identity (it floats with the caller's cwd) nor safe to shell out with.
     /// - a ticket with no `program` has nothing to serialize the executor seat
     ///   *for*.
-    pub(crate) fn new(
+    pub fn new(
         ticket_id: impl Into<String>,
         source: SourceIdentity,
         command: BuildCommand,
@@ -182,7 +182,7 @@ fn is_object_id(raw: &str) -> bool {
 /// attempted; that is [`TicketState::Queued`] by omission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TicketState {
+pub enum TicketState {
     /// Waiting for the seat (possibly after some failed attempts).
     Queued,
     /// Dead letter: the executor failed it [`MAX_TICKET_ATTEMPTS`] times. It is
@@ -195,11 +195,11 @@ pub(crate) enum TicketState {
 
 impl TicketState {
     /// Terminal = out of the queue for good.
-    pub(crate) fn is_terminal(self) -> bool {
+    pub fn is_terminal(self) -> bool {
         matches!(self, TicketState::Failed | TicketState::Cancelled)
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             TicketState::Queued => "queued",
             TicketState::Failed => "failed",
@@ -210,7 +210,7 @@ impl TicketState {
 
 /// The mutable half of a ticket: attempts + terminal state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TicketStatus {
+pub struct TicketStatus {
     pub ticket_id: String,
     pub state: TicketState,
     /// How many times the executor has taken this ticket and failed it.
@@ -244,7 +244,7 @@ pub(crate) struct TicketStatus {
 /// (`env_id` / `dispatch_id`) is accepted as idempotent, and the STORED ticket's
 /// attribution stands — a ticket is immutable, so the first submit wins. That is
 /// warned about rather than silently swallowed.
-pub(crate) fn submit_ticket(store: &MemoryStore, ticket: &BuildTicket) -> Result<(), String> {
+pub fn submit_ticket(store: &MemoryStore, ticket: &BuildTicket) -> Result<(), String> {
     let value = serde_json::to_string(ticket).map_err(|e| format!("serialize ticket: {e}"))?;
     let inserted = store
         .insert_state_if_absent(TICKET_NS, &ticket.ticket_id, &value)
@@ -401,7 +401,7 @@ pub(crate) fn record_failed_attempt(
 
 /// Outcome of [`cancel_ticket`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CancelOutcome {
+pub enum CancelOutcome {
     /// It was queued; it is now terminal and will never be picked up.
     Cancelled,
     /// It was already terminal (failed/cancelled) — idempotent no-op.
@@ -451,7 +451,7 @@ pub(crate) fn cancel_ticket(
 
 /// Every ticket that has reached a terminal state without a receipt — the dead
 /// letters. `repo` filters to one repo identity when given.
-pub(crate) fn terminal_tickets(
+pub fn terminal_tickets(
     store: &MemoryStore,
     repo: Option<&str>,
 ) -> Result<Vec<(BuildTicket, TicketStatus)>, String> {

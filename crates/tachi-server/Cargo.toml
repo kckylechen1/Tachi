@@ -59,6 +59,7 @@ tachi-dispatch = { path = "../tachi-dispatch", optional = true }
 tachi-foundry = { path = "../tachi-foundry", optional = true }
 tachi-github-runtime = { path = "../tachi-github-runtime" }
 tachi-lesson-forge = { path = "../tachi-lesson-forge" }
+tachi-build-broker = { path = "../tachi-build-broker" }
 tachi-hub = { path = "../tachi-hub", optional = true }
 tachi-merge-ops = { path = "../tachi-merge-ops", optional = true }
 tachi-llm = { path = "../tachi-llm" }

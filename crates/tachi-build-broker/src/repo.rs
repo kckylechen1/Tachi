@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 /// Resolve a user-supplied repo path to this machine's identity for that repo.
 ///
 /// Absolute, canonical, and stable across the repo's linked worktrees.
-pub(crate) fn repo_identity(path: &Path) -> Result<String, String> {
+pub fn repo_identity(path: &Path) -> Result<String, String> {
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("resolve repo {}: {e}", path.display()))?;

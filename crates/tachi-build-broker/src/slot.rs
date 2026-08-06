@@ -31,7 +31,7 @@ pub(crate) const EXECUTOR_SLOT_KEY: &str = "executor_slot";
 
 /// Who holds the executor slot right now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SlotHolder {
+pub struct SlotHolder {
     pub ticket_id: String,
     pub pid: u32,
     pub acquired_at: String,
@@ -81,7 +81,7 @@ pub(crate) fn acquire_slot(store: &MemoryStore, ticket_id: &str) -> Result<SlotO
 }
 
 /// Read the current holder, if any.
-pub(crate) fn current_holder(store: &MemoryStore) -> Result<Option<SlotHolder>, String> {
+pub fn current_holder(store: &MemoryStore) -> Result<Option<SlotHolder>, String> {
     let row = store
         .get_state_kv(BROKER_NS, EXECUTOR_SLOT_KEY)
         .map_err(|e| format!("read executor slot: {e}"))?;
