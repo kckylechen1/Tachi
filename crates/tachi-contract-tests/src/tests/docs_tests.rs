@@ -10,4 +10,5 @@ mod memories_writer_census;
 mod portable_kernel_split;
 mod release_distribution;
 mod store_trigger_ddl_census;
+mod task_action_contract;
 mod task_field_disposition_census;

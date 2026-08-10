@@ -85,9 +85,6 @@ pub enum TachiTaskAction {
     Complete,
     Adjudicate,
     Brief,
-    Profiles,
-    Profile,
-    Card,
 }
 
 impl TachiTaskAction {
@@ -103,9 +100,6 @@ impl TachiTaskAction {
         Self::Complete,
         Self::Adjudicate,
         Self::Brief,
-        Self::Profiles,
-        Self::Profile,
-        Self::Card,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -120,9 +114,6 @@ impl TachiTaskAction {
             Self::Complete => "complete",
             Self::Adjudicate => "adjudicate",
             Self::Brief => "brief",
-            Self::Profiles => "profiles",
-            Self::Profile => "profile",
-            Self::Card => "card",
         }
     }
 
@@ -157,9 +148,9 @@ impl FromStr for TachiTaskAction {
             "briefing" | "doc_index" | "cycle_status" => Err(format!(
                 "Invalid tachi_task action '{s}'. This Task action was retired by #1712 C1b; use tachi_task(action='brief') for the feature briefing or tachi_task(action='status', flow_id=..., issue_ref=..., or pr_ref=...) for the lifecycle read model."
             )),
-            "profiles" => Ok(Self::Profiles),
-            "profile" => Ok(Self::Profile),
-            "card" => Ok(Self::Card),
+            "profiles" | "profile" | "card" => Err(format!(
+                "Invalid tachi_task action '{s}'. Model-facing profile/card inspection was retired by #1687 C1c; operators use `tachi card list` or `tachi card show <profile-id>`, evaluators use the append-only eval surface, and static profile admission remains a dispatch concern."
+            )),
             "build_references" | "close_loop" => Err(format!(
                 "Invalid tachi_task action '{s}'. Closure moved to tachi_gh(action='close_loop') by #1713; use dry_run=true there for the reference/promotion preview."
             )),
@@ -231,9 +222,6 @@ mod tests {
             "complete",
             "adjudicate",
             "brief",
-            "profiles",
-            "profile",
-            "card",
         ];
         assert_eq!(TachiTaskAction::primary_wire_strings(), expected);
         for &action in TachiTaskAction::PRIMARY {
@@ -244,6 +232,23 @@ mod tests {
             assert_eq!(wire, format!("\"{s}\""));
         }
         assert!("nope".parse::<TachiTaskAction>().is_err());
+    }
+
+    #[test]
+    fn f1687_c1c_task_rejects_retired_profile_card_actions() {
+        for retired in ["profiles", "profile", "card"] {
+            let err = retired
+                .parse::<TachiTaskAction>()
+                .expect_err("retired profile/card action must not parse as tachi_task action");
+            assert!(
+                err.contains("#1687 C1c"),
+                "error for {retired} should name #1687 C1c, got: {err}"
+            );
+            assert!(
+                err.contains("tachi card"),
+                "error for {retired} should point at the operator surface, got: {err}"
+            );
+        }
     }
 
     #[test]

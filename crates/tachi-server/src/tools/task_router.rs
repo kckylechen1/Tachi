@@ -163,28 +163,6 @@ pub(super) async fn handle_tachi_task_facade(
                 .map_err(|err| format!("serialize status cycle response: {err}"))
             }
         }
-        // codex review round 2 (#1182 checkpoint 2): the issue #1173 escape
-        // hatch is "verbose=true OR action='profile'" — two independent ways
-        // to get the full card. `profiles` (the listing) is the one item 2
-        // names as needing to slim; `profile`/`card` (singular-sounding
-        // aliases of the same underlying listing call, pre-existing before
-        // #1173) are the promised on-demand full-card fetch and must default
-        // to full unless the caller explicitly asks for the slim shape via
-        // verbose=false.
-        TachiTaskAction::Profiles => {
-            serde_json::to_string(&crate::dispatch_profile::dispatch_profiles_json_for_server(
-                server,
-                params.verbose.unwrap_or(false),
-            )?)
-            .map_err(|e| format!("serialize dispatch profiles: {e}"))
-        }
-        TachiTaskAction::Profile | TachiTaskAction::Card => {
-            serde_json::to_string(&crate::dispatch_profile::dispatch_profiles_json_for_server(
-                server,
-                params.verbose.unwrap_or(true),
-            )?)
-            .map_err(|e| format!("serialize dispatch profiles: {e}"))
-        }
         TachiTaskAction::Intake => crate::task_lifecycle::handle_task_intake(server, &params).await,
         TachiTaskAction::Adjudicate => {
             let adjudication = params

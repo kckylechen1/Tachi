@@ -48,7 +48,7 @@ invent calls that are not exposed yet.
 | Capability | Public surface | Status |
 |---|---|---|
 | feature intake and board | `tachi_task(action="intake"|"brief")` | implemented |
-| profile/card listing | `tachi_task(action="profiles"|"profile"|"card")` | implemented |
+| operator profile/admission diagnostics | `tachi card list [--json]` / `tachi card show <profile-id> [--json]` | implemented; local operator-only, not launch approval |
 | route recommendation | `tachi_tune(action="route_simulate")` | implemented |
 | route policy replay | `tachi_tune(action="route_simulate")` | implemented |
 | route policy proposals | `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` (admin-only since #1426) | implemented |
@@ -199,7 +199,7 @@ Every substantial policy-learning slice should be able to pass this workflow:
 1. `tachi_task(action="intake", issue_ref=...)`
 2. `tachi_task(action="brief", flow_id=...)`
 3. `tachi_task(action="status", flow_id=...)` (the cycle view is nested under `status.cycle`)
-4. `tachi_task(action="profiles")` / `tachi_skill(action="loadout")` as needed
+4. Operator-only static diagnostics (`tachi card list/show`) and `tachi_skill(action="loadout")` are separate surfaces when needed; the model-facing Task facade does not inspect profile/card projections.
 6. launch the host harness's native subagent with the frozen packet; use the
    admin/operator external staffing exception only when a proven boundary
    requirement exceeds host-native guarantees

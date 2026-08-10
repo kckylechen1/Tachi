@@ -34,8 +34,7 @@ fn tachi_task_action_schema(
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
     /// Primary actions (F4 enum): intake, claim, heartbeat, handoff, release,
-    /// board, status, complete, adjudicate, brief,
-    /// profiles, profile, card.
+    /// board, status, complete, adjudicate, brief.
     /// Worker launch/wait/cancel left Task in #1319-C2 — use
     /// tachi_staff(action='start'|'status') for worker lifecycle.
     /// action="intake" binds a GitHub issue to a flow.
@@ -44,22 +43,12 @@ pub struct TachiTaskParams {
     /// GitHub PR and closure lifecycle: use **tachi_gh only** (#757, #1713).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,
-    /// Response shape: default JSON for agent automation, with two
-    /// exceptions — [action=profiles|profile|card] (tachi#1201)
-    /// default to compact markdown (a table plus key fields) when `format`
-    /// is omitted, since these are read-heavy discovery endpoints most often
-    /// consumed by a human/agent skimming a summary, not parsing JSON. Pass
-    /// format="json" to get the machine-readable shape for those three
-    /// actions; every other action's default is unaffected. Pass "markdown"
-    /// on any action for human-readable text.
+    /// Response shape: default JSON for agent automation. Pass "markdown" on
+    /// any surviving action for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
     /// tachi#1173 items 1+2+3: request the full payload instead of the
-    /// default slim shape. Response verbosity for board/profile/status
-    /// payloads.
-    /// [action=profiles|profile|card]: each row includes the full mbit_card
-    /// (stats/guidance/moves/personality/skill_loadout/evidence_contract)
-    /// rather than just name/backend/model/role.
+    /// default slim shape. Response verbosity for board/status payloads.
     /// [action=board]: forwarded to `TachiBoardParams.verbose` -- restores
     /// identity_receipt/acpx/acpx_events per row and stops folding terminal
     /// rows into count rows.
@@ -548,6 +537,38 @@ mod tests {
             assert!(
                 err.contains("#1712 C1b"),
                 "folded action {retired} error should name #1712 C1b, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn c1c_profile_actions_left_task() {
+        use std::str::FromStr;
+
+        use super::super::action_enums::TachiTaskAction;
+
+        for retired in ["profiles", "profile", "card"] {
+            let err =
+                serde_json::from_str::<TachiTaskParams>(&format!("{{\"action\":\"{retired}\"}}"))
+                    .expect_err("retired profile action must not deserialize as tachi_task action");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unknown variant"),
+                "retired profile action {retired} should be an unknown variant, got: {msg}"
+            );
+            let accepted = msg.split("expected one of ").nth(1).unwrap_or_default();
+            assert!(
+                !accepted.contains(&format!("`{retired}`")),
+                "retired profile action {retired} must not appear in the accepted-variants list, got: {msg}"
+            );
+
+            let err = TachiTaskAction::from_str(retired)
+                .expect_err("retired profile action must not parse as tachi_task action");
+            assert!(
+                err.contains("tachi card")
+                    && err.contains("append-only eval")
+                    && err.contains("static profile admission"),
+                "retired profile action {retired} guidance is incomplete: {err}"
             );
         }
     }

@@ -47,7 +47,7 @@ fn task_action_requires_admin(action: &str) -> bool {
     action == "dispatch"
 }
 
-fn task_action_retired_c1a(action: &str) -> bool {
+fn task_action_retired(action: &str) -> bool {
     matches!(
         action,
         "plan"
@@ -61,6 +61,9 @@ fn task_action_retired_c1a(action: &str) -> bool {
             | "cycle_status"
             | "build_references"
             | "close_loop"
+            | "profiles"
+            | "profile"
+            | "card"
     )
 }
 
@@ -84,7 +87,9 @@ fn profile_has_full_bundle_access(profile: ToolProfile) -> bool {
 
 /// Whether `tool_name` + `action` is allowed under `profile`.
 ///
-/// - Admin: always allowed.
+/// - Admin: always allowed for live actions; retired `tachi_task` tokens are
+///   denied before the admin pass-through so no model profile can resurrect a
+///   deleted Task surface.
 /// - Delegate: curated per-facade action allow-list (prevents recursive
 ///   dispatch); missing/unknown actions on a delegate-gated facade are
 ///   denied — a delegate tool must explicitly enumerate its allowed actions.
@@ -105,7 +110,7 @@ pub fn facade_action_allowed(
     let action = action.map(str::trim).filter(|a| !a.is_empty());
     if tool_name == "tachi_task"
         && action
-            .map(|a| task_action_retired_c1a(&a.to_ascii_lowercase()))
+            .map(|a| task_action_retired(&a.to_ascii_lowercase()))
             .unwrap_or(false)
     {
         return false;
@@ -214,9 +219,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
     let action = action.trim().to_ascii_lowercase();
     match tool_name {
         "tachi_task" => match action.as_str() {
-            "brief" | "status" | "board" | "profiles" | "profile" | "card" => {
-                Some(ToolBundle::Observe)
-            }
+            "brief" | "status" | "board" => Some(ToolBundle::Observe),
             "complete" | "adjudicate" | "claim" | "release" | "heartbeat" => {
                 Some(ToolBundle::Remember)
             }
@@ -425,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn f1683_c1a_retired_task_actions_are_denied_by_active_contract() {
+    fn f1687_c1c_retired_task_actions_are_denied_by_active_contract() {
         for action in [
             "plan",
             "cycle_plan",
@@ -436,6 +439,11 @@ mod tests {
             "briefing",
             "doc_index",
             "cycle_status",
+            "build_references",
+            "close_loop",
+            "profiles",
+            "profile",
+            "card",
         ] {
             assert_eq!(
                 facade_action_required_bundle("tachi_task", action),
