@@ -654,6 +654,22 @@ pub(crate) fn handle_route_policy_proposals(
             "matrix_rows": performance_matrix.len(),
             "limit": limit.max(1),
         },
+        // tachi#1675 PR4 BUG-1: this generator still mines `/eval` memory, and
+        // `/eval` was retired as a ROUTING evidence base by the same cutover.
+        // Say so here rather than letting a caller infer from the silence that
+        // an approved+applied route_policy rule still steers `recommend`: it
+        // does not. `build_route_policy_rule_loadout` refuses any rule whose
+        // declared `evidence.source` is not `decision_fact_ledger`, so these
+        // proposals are reviewable notes and an inert rule row until the
+        // generator itself is moved onto the ledger.
+        "routing_effect": {
+            "route_policy_rules_steer_recommend": false,
+            "retired_evidence_source": "live_memory_eval",
+            "required_evidence_source": tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
+            "skip_reason_on_recommend": tachi_dispatch::RETIRED_EVIDENCE_SOURCE_SKIP_REASON,
+            "since": "kckylechen1/tachi#1675 PR4",
+            "note": "applying an approved route_policy proposal writes the rule row and is fully audited, but recommend skips it as retired_evidence_source:live_memory_eval; loadout_evolution proposals are unaffected (they never fed routing scores)",
+        },
         "count": out.len(),
         "proposals": out,
         "next_actions": [

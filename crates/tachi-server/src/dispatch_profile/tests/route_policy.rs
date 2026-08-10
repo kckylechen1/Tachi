@@ -54,32 +54,67 @@ fn build_route_policy_rule_loadout_classifies_persisted_rules() {
     let server = MemoryServer::new(db_path, None).expect("test memory server");
     let min_samples = tachi_dispatch::MIN_ROUTE_POLICY_RULE_SAMPLES;
 
-    for (id, task_type, prefer_profile, samples) in [
+    let ledger = tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER;
+    for (id, task_type, prefer_profile, samples, evidence_source) in [
         (
             "route_policy:fix_request:opencode_builder",
             "fix_request",
             "opencode_builder",
             min_samples,
+            ledger,
         ),
         (
             "route_policy:review_request:codex_55_review",
             "review_request",
             "codex_55_review",
             min_samples,
+            ledger,
         ),
         (
             "route_policy:fix_request:glm_51_impl_sparse",
             "fix_request",
             "glm_impl",
             0,
+            ledger,
         ),
         (
             "route_policy:fix_request:codex_53_fast_blocked",
             "fix_request",
             "codex_53_fast",
             min_samples,
+            ledger,
+        ),
+        // tachi#1675 PR4 BUG-1: identical to the applied rule above in every
+        // structural respect — applied, approved, task-type matched, enough
+        // samples, a known and unblocked profile — and refused anyway,
+        // because its evidence was mined from the `/eval` memory base the
+        // cutover retired. This is the exact shape
+        // `build_route_policy_proposals` mints (`evidence.source =
+        // "live_memory_eval"`).
+        (
+            "route_policy:fix_request:kimi_arch_eval_sourced",
+            "fix_request",
+            "kimi_arch",
+            min_samples,
+            "live_memory_eval",
+        ),
+        // ...and an undeclared row, the case an allowlist must also refuse.
+        (
+            "route_policy:fix_request:deepseek_explore_undeclared",
+            "fix_request",
+            "deepseek_explore",
+            min_samples,
+            "",
         ),
     ] {
+        let mut evidence = serde_json::json!({
+            "proposed": {
+                "samples": samples,
+            },
+        });
+        if !evidence_source.is_empty() {
+            evidence["source"] = serde_json::json!(evidence_source);
+        }
         let rule = serde_json::json!({
             "proposal_id": id,
             "kind": "route_policy",
@@ -97,12 +132,7 @@ fn build_route_policy_rule_loadout_classifies_persisted_rules() {
                 "policy": "cost_sensitive",
                 "fallback_to_current_profile": "claude_plan",
             },
-            "evidence": {
-                "source": "test",
-                "proposed": {
-                    "samples": samples,
-                },
-            },
+            "evidence": evidence,
         });
         server
             .with_global_store(|store| {
@@ -157,6 +187,30 @@ fn build_route_policy_rule_loadout_classifies_persisted_rules() {
         && rule
             .reason
             .contains("blocked_by_risk_classifier:codex_53_fast")));
+
+    // tachi#1675 PR4 BUG-1: the `/eval`-mined rule and the undeclared one are
+    // refused, and refused for the RIGHT reason — a structurally perfect rule
+    // cannot steer a route on evidence the cutover retired.
+    assert!(
+        loadout.skipped.iter().any(|rule| rule.proposal_id
+            == "route_policy:fix_request:kimi_arch_eval_sourced"
+            && rule.reason == "retired_evidence_source:live_memory_eval"),
+        "an /eval-mined rule must be skipped as retired_evidence_source: {loadout:#?}"
+    );
+    assert!(
+        loadout.skipped.iter().any(|rule| rule.proposal_id
+            == "route_policy:fix_request:deepseek_explore_undeclared"
+            && rule.reason == "retired_evidence_source:undeclared"),
+        "a rule that declares no evidence source must be refused, not admitted: {loadout:#?}"
+    );
+    assert!(
+        !loadout
+            .applied
+            .iter()
+            .any(|rule| rule.prefer_profile == "kimi_arch"
+                || rule.prefer_profile == "deepseek_explore"),
+        "neither refused rule may reach the applied loadout: {loadout:#?}"
+    );
 }
 
 // ─── v3 proposal-safety discrimination tests ─────────────────────────────────

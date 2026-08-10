@@ -108,13 +108,21 @@ pub(crate) async fn handle_agent_eval(
         // history, not retire a role), with the demotion declared in the
         // payload so no consumer keeps treating them as the routing base.
         //
-        // Two `/eval` readers remain by design and are NOT part of this
-        // retirement: `dispatch_profile::cards` renders per-profile eval
-        // FEEDBACK on a card, and `tune_ops::route_policy` simulates and
-        // drafts route-policy PROPOSALS from it. Neither is an automatic
-        // routing input — a proposal only affects routing after human review
-        // and apply — so moving them is its own decision, not a rider on this
-        // cutover.
+        // Two `/eval` readers remain: `dispatch_profile::cards` renders
+        // per-profile eval FEEDBACK on a card, and `tune_ops::route_policy`
+        // simulates and drafts route-policy PROPOSALS from it.
+        //
+        // The route-policy one WAS a routing input — human review and apply do
+        // not launder the evidence base, they only put a person between it and
+        // `ROUTE_POLICY_RULE_NS`, whose rules then bought a +35 score bonus on
+        // this very surface (codex review of PR4, BUG-1). It is now closed
+        // where policy enters the decision:
+        // `build_route_policy_rule_loadout` refuses any rule that does not
+        // declare `evidence.source = "decision_fact_ledger"`, so a rule mined
+        // from `/eval` is reviewable, applyable, audited — and inert. Mining
+        // proposals from the ledger instead is the follow-up that would make
+        // the chain live again; it is a feature, not a rider on this cutover.
+        // The card-feedback reader is display-only and feeds no route score.
         "aggregate_live" => {
             let rows = load_live_eval_rows(_server, capped_eval_limit(params.limit))?;
             let scores = aggregate_scores(&rows);

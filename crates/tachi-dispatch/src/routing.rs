@@ -30,6 +30,18 @@ pub const ROUTE_EVIDENCE_SOURCE_LIVE_EVAL_MEMORY: &str = "live_eval_memory";
 /// already declares.
 pub const ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER: &str = "decision_fact_ledger";
 
+/// Prefix of the skip reason for a route-policy rule whose EVIDENCE comes from
+/// an evidence base tachi#1675 PR4 retired as a routing input.
+///
+/// The rule row records the base its proposal was mined from (`evidence.source`
+/// — `build_route_policy_proposals` writes `live_memory_eval` there). After the
+/// flip, only a rule that declares the decision-fact ledger may move a routing
+/// score; every other declaration — and an ABSENT one — is refused. Allowlist,
+/// not blocklist: an undeclared rule is exactly the case a blocklist would let
+/// through, and the retired base must not re-enter routing through a row whose
+/// provenance nobody wrote down.
+pub const RETIRED_EVIDENCE_SOURCE_SKIP_REASON: &str = "retired_evidence_source";
+
 /// The zero-signal fallback reason of the legacy `/eval`-memory scorer. Kept
 /// ONLY for that path: the #1202 owner ruling
 /// (`docs/engineering/architecture/dispatch-lifecycle.md` §4.2) demoted MBIT to
@@ -631,6 +643,15 @@ fn score_profile_candidate(
     }
 }
 
+/// The fallback chain for a recommendation: who to try if the primary is
+/// unavailable.
+///
+/// Every entry comes from `candidates`. tachi#1675 PR4 (BUG-2): the
+/// agent-affinity fill used to scan all of `DISPATCH_PROFILES`, so at high risk
+/// it could name a profile the risk classifier had blocked or excluded — an
+/// actionable output naming an inadmissible profile is the same hard-gate leak
+/// as naming one in `recommended_profile`, one field over. The caller hands in
+/// the gated candidate set; this function never widens it.
 pub fn build_profile_fallback_chain(
     primary: &DispatchProfileDef,
     candidates: &[ProfileCandidate],
@@ -649,7 +670,11 @@ pub fn build_profile_fallback_chain(
             break;
         }
         if let Some(profile) = DISPATCH_PROFILES.iter().find(|profile| {
-            profile_matches_agent(profile, agent) && !out.iter().any(|p| p == profile.name)
+            profile_matches_agent(profile, agent)
+                && candidates
+                    .iter()
+                    .any(|candidate| candidate.profile == profile.name)
+                && !out.iter().any(|p| p == profile.name)
         }) {
             out.push(profile.name.to_string());
         }
@@ -800,6 +825,16 @@ pub fn build_route_policy_rule_loadout(
             .map(str::to_string);
         let sample_count = route_policy_rule_sample_count(&value);
         let score_delta = value.get("score_delta").and_then(serde_json::Value::as_f64);
+        // Which evidence base this rule was mined from, as the rule row itself
+        // declares it (`build_route_policy_proposals` stamps
+        // `evidence.source`). `None` means the row declares nothing, which the
+        // gate below treats exactly like a retired declaration.
+        let evidence_source = value
+            .get("evidence")
+            .and_then(|evidence| evidence.get("evidence_source"))
+            .or_else(|| value.get("evidence").and_then(|e| e.get("source")))
+            .or_else(|| value.get("evidence_source"))
+            .and_then(serde_json::Value::as_str);
 
         let skip_reason = if status != "applied" {
             Some(format!("status_not_applied:{status}"))
@@ -831,6 +866,47 @@ pub fn build_route_policy_rule_loadout(
             Some(format!(
                 "blocked_by_risk_classifier:{}",
                 prefer_profile.as_deref().unwrap_or("missing")
+            ))
+        } else if !risk.required_profiles.is_empty()
+            && prefer_profile.as_deref().is_some_and(|profile| {
+                !risk
+                    .required_profiles
+                    .iter()
+                    .any(|required| required == profile)
+            })
+        {
+            // tachi#1675 PR4, BUG-2 (codex review finding 2): a `required`
+            // classification RESTRICTS the admissible set — at high/critical
+            // risk the classifier is naming who may run at all, not who gets a
+            // bonus. Skipping only `blocked` profiles here let a rule spend its
+            // +35 on a profile the hard gate had already removed, which is how
+            // an excluded profile could out-score a required one. Same reason
+            // string the projection's gate uses
+            // (`agent_eval::projection::REASON_NOT_REQUIRED`), so both halves
+            // of the gate speak one vocabulary.
+            Some(format!(
+                "not_required_for_risk_class:{}",
+                prefer_profile.as_deref().unwrap_or("missing")
+            ))
+        } else if evidence_source != Some(ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER) {
+            // tachi#1675 PR4, BUG-1: the LAST surviving `/eval` -> routing
+            // policy path. `tachi_tune(action='route_proposals')` still mines
+            // `/eval` memory, and an approved proposal still lands in
+            // `ROUTE_POLICY_RULE_NS` via `route_apply` — so without this gate
+            // the retired evidence base kept steering the flipped recommend
+            // surface through a +35 score bonus, one human approval removed.
+            // The refusal is here, at the moment policy enters the DECISION,
+            // rather than at proposal mint/apply: mint and apply keep their
+            // reviewable human-notes value (and their identity/CAS/drift
+            // discipline), while nothing they produce can score a route again
+            // until it is mined from the ledger.
+            //
+            // Evaluated last so a rule that also fails a structural filter
+            // still reports the more specific reason; a rule that clears every
+            // structural filter cannot apply on retired evidence.
+            Some(format!(
+                "{RETIRED_EVIDENCE_SOURCE_SKIP_REASON}:{}",
+                evidence_source.unwrap_or("undeclared")
             ))
         } else {
             None

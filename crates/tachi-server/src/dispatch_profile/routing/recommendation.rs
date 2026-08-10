@@ -87,6 +87,47 @@ pub(crate) fn handle_dispatch_recommendation(
         tachi_dispatch::RouteEvidenceSource::DecisionFactLedger,
         |profile| profile_weak_against_for_server(server, profile),
     )?;
+    // tachi#1675 PR4, BUG-2 (codex review finding 2): HARD GATES FIRST, on the
+    // set that gets SERIALIZED — not merely reported beside it.
+    //
+    // The scorer above enumerates every profile and only PENALIZES a blocked
+    // one (-40), so a route-policy bonus or a strong role fit could carry a
+    // profile the classifier excluded (`not_required_for_risk_class` at
+    // high/critical risk) to the front of the list and out through
+    // `recommended_profile` — while `ledger_evidence.hard_gates` truthfully
+    // reported it excluded. The projection's gate has to CUT the list, not
+    // annotate it: design D6, "historical score can never resurrect a removed
+    // candidate", and a score is not the only thing that must not.
+    //
+    // The same `evidence.gates` the response reports and the projection ranked
+    // its own candidates under — one gate, computed once, applied everywhere.
+    candidates.retain(|candidate| {
+        evidence
+            .gates
+            .eligible
+            .iter()
+            .any(|profile| profile == &candidate.profile)
+    });
+    // Fail closed. An empty eligible set means the classification contradicted
+    // itself (every required profile is also blocked); `eligible_candidate_set`
+    // deliberately returns EMPTY there rather than dropping the restriction, so
+    // the honest answer is a refusal. Naming the best of the excluded remainder
+    // would be exactly the resurrection the gate exists to prevent.
+    if candidates.is_empty() {
+        return Err(format!(
+            "no_admissible_dispatch_profile: the {} risk classification admits no profile \
+             (required: [{}], blocked: [{}]); {}",
+            risk.risk,
+            risk.required_profiles.join(", "),
+            risk.blocked_profiles.join(", "),
+            if evidence.gates.notes.is_empty() {
+                "no dispatch profiles are configured".to_string()
+            } else {
+                evidence.gates.notes.join("; ")
+            }
+        ));
+    }
+
     // The ledger's own recommendation takes the top slot when it made one. It
     // can only ever name a candidate the hard gates already admitted
     // (`rules::project` ranks the gated set), so this reorders survivors and
@@ -210,9 +251,10 @@ pub(crate) fn handle_dispatch_recommendation(
 /// upgraded into a ranking claim.
 ///
 /// A recommended profile that is somehow absent from the scored list (it
-/// cannot be today — both sides enumerate `DISPATCH_PROFILES`) is treated as an
-/// abstain rather than inserted: the response must not name a profile the
-/// scorer never produced a candidate row for.
+/// cannot be today — since PR4's BUG-2 fix both sides enumerate the SAME
+/// `evidence.gates.eligible` set) is treated as an abstain rather than
+/// inserted: the response must not name a profile the scorer never produced a
+/// candidate row for.
 fn promote_ledger_recommendation(
     candidates: &mut [tachi_dispatch::ProfileCandidate],
     evidence: &LedgerRouteEvidence,
@@ -923,6 +965,291 @@ mod evidence_flip_tests {
         assert_eq!(
             row.policy_source_revision.as_deref(),
             Some(second_revision.as_str())
+        );
+    }
+
+    fn candidate_score(payload: &Value, profile: &str) -> f64 {
+        payload["candidates"]
+            .as_array()
+            .expect("candidates array")
+            .iter()
+            .find(|candidate| candidate["profile"] == json!(profile))
+            .unwrap_or_else(|| panic!("candidate {profile} present: {payload:#}"))["score"]
+            .as_f64()
+            .expect("candidate score")
+    }
+
+    fn seed_route_policy_rule(
+        server: &MemoryServer,
+        key: &str,
+        task_type: &str,
+        prefer_profile: &str,
+        evidence_source: &str,
+    ) {
+        let rule = json!({
+            "proposal_id": key,
+            "kind": "route_policy",
+            "status": "applied",
+            "review": {"status": "approved"},
+            "policy": "cost_sensitive",
+            "task_type": task_type,
+            "proposed_profile": prefer_profile,
+            "score_delta": 12.5,
+            "policy_rule": {
+                "when_task_type": task_type,
+                "prefer_profile": prefer_profile,
+                "policy": "cost_sensitive",
+                "fallback_to_current_profile": "claude_plan",
+            },
+            "evidence": {
+                "source": evidence_source,
+                "proposed": {"samples": tachi_dispatch::MIN_ROUTE_POLICY_RULE_SAMPLES},
+            },
+        });
+        server
+            .with_global_store(|store| {
+                store
+                    .set_state(ROUTE_POLICY_RULE_NS, key, &rule.to_string())
+                    .map_err(|err| err.to_string())
+            })
+            .expect("seed route policy rule");
+    }
+
+    /// tachi#1675 PR4 BUG-1 (codex review finding 1): `/eval` memory is retired
+    /// as a routing evidence base, and `tachi_tune(action='route_proposals')`
+    /// still mines it — so an approved, applied rule that came from that mine
+    /// must not move a score on the flipped surface.
+    ///
+    /// Discriminating: the SAME rule, differing ONLY in the evidence source it
+    /// declares, is refused when it says `live_memory_eval` and applied when it
+    /// says `decision_fact_ledger`. If the refusal came from anything else
+    /// (samples, task type, an unknown profile) the ledger-declared half could
+    /// not apply either, and the test would prove nothing.
+    #[test]
+    fn an_eval_mined_route_policy_rule_cannot_steer_the_flipped_recommendation() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+
+        let baseline = recommend(&server);
+        let task_type = baseline["task_type"]
+            .as_str()
+            .expect("task_type")
+            .to_string();
+        // The runner-up: a profile the classifier admits, so nothing but the
+        // evidence-source gate can be what keeps the rule off it.
+        let target = baseline["candidates"][1]["profile"]
+            .as_str()
+            .expect("a second candidate")
+            .to_string();
+        let baseline_score = candidate_score(&baseline, &target);
+        let key = "route_policy:pr4-bug1:target";
+
+        seed_route_policy_rule(&server, key, &task_type, &target, "live_memory_eval");
+        let refused = recommend(&server);
+        assert_eq!(
+            refused["route_policy_rules"]["applied"],
+            json!([]),
+            "an /eval-mined rule must never reach the applied loadout: {refused:#}"
+        );
+        assert!(
+            refused["route_policy_rules"]["skipped"]
+                .as_array()
+                .expect("skipped array")
+                .iter()
+                .any(|rule| rule["proposal_id"] == json!(key)
+                    && rule["reason"] == json!("retired_evidence_source:live_memory_eval")),
+            "the refusal must be stated, not silent: {refused:#}"
+        );
+        assert_eq!(
+            candidate_score(&refused, &target),
+            baseline_score,
+            "the retired rule moved a candidate's score: {refused:#}"
+        );
+        assert_eq!(
+            refused["recommended_profile"], baseline["recommended_profile"],
+            "the retired rule changed the answer: {refused:#}"
+        );
+
+        // Same rule, same everything, ledger-declared: it applies. This is the
+        // half that proves the refusal above was the evidence-source gate.
+        seed_route_policy_rule(
+            &server,
+            key,
+            &task_type,
+            &target,
+            tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
+        );
+        let admitted = recommend(&server);
+        assert!(
+            admitted["route_policy_rules"]["applied"]
+                .as_array()
+                .expect("applied array")
+                .iter()
+                .any(|rule| rule["proposal_id"] == json!(key)),
+            "a ledger-declared rule must still apply: {admitted:#}"
+        );
+        let moved = candidate_score(&admitted, &target) - baseline_score;
+        assert!(
+            (moved - tachi_dispatch::ROUTE_POLICY_RULE_SCORE_BONUS).abs() < 1e-6,
+            "the score moved by {moved}, not by the route-policy bonus \
+             {}: {admitted:#}",
+            tachi_dispatch::ROUTE_POLICY_RULE_SCORE_BONUS
+        );
+    }
+
+    /// tachi#1675 PR4 BUG-2 (codex review finding 2), the trigger verbatim:
+    /// "high/critical risk plus an applied rule preferring a non-required
+    /// profile can serialize that excluded profile as `recommended_profile`
+    /// even when the ledger `decision` abstains."
+    ///
+    /// The hard gate has to CUT the serialized set, not merely report beside
+    /// it. Two layers are pinned here and each fails alone:
+    ///   * the route-policy loadout refuses a rule preferring an excluded
+    ///     profile (`not_required_for_risk_class`), so the +35 bonus never
+    ///     lands — revert that and `applied` is non-empty;
+    ///   * the candidate list handed to the response builder IS the eligible
+    ///     set — revert that and `candidates` carries all eight profiles,
+    ///     six of them excluded, whatever their scores.
+    #[test]
+    fn hard_gate_excluded_profiles_are_never_serialized_in_the_recommendation() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+
+        // A high-risk classification: the classifier RESTRICTS the admissible
+        // set to its required profiles, so most profiles are excluded as
+        // `not_required_for_risk_class`.
+        let probe: Value = serde_json::from_str(
+            &handle_dispatch_recommendation(&server, TASK, Some("high"), 200, &[])
+                .expect("recommendation succeeds at high risk"),
+        )
+        .expect("probe payload is JSON");
+        let eligible = string_array(&probe["ledger_evidence"]["hard_gates"]["eligible_profiles"]);
+        assert!(
+            eligible.len() >= 2,
+            "the fixture needs a restricted-but-non-empty eligible set: {probe:#}"
+        );
+        let excluded = probe["ledger_evidence"]["hard_gates"]["excluded_profiles"]
+            .as_array()
+            .expect("excluded_profiles array")
+            .iter()
+            .map(|entry| {
+                (
+                    entry["profile"].as_str().expect("profile").to_string(),
+                    entry["reason"].as_str().expect("reason").to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let preferred_excluded = excluded
+            .iter()
+            .find(|(_, reason)| reason == "not_required_for_risk_class")
+            .map(|(profile, _)| profile.clone())
+            .expect("a profile excluded by the required-restriction");
+
+        // The rule declares LEDGER evidence, so BUG-1's evidence-source gate
+        // is not what refuses it — only the hard gate can be.
+        seed_route_policy_rule(
+            &server,
+            "route_policy:pr4-bug2:excluded",
+            probe["task_type"].as_str().expect("task_type"),
+            &preferred_excluded,
+            tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
+        );
+
+        let raw = handle_dispatch_recommendation(&server, TASK, Some("high"), 200, &[])
+            .expect("recommendation succeeds with the rule seeded");
+        let payload: Value = serde_json::from_str(&raw).expect("payload is JSON");
+
+        assert_eq!(
+            payload["decision"]["kind"],
+            json!("abstain"),
+            "the ledger is empty here: the gate, not the evidence, is on trial: {payload:#}"
+        );
+        assert_eq!(
+            payload["route_policy_rules"]["applied"],
+            json!([]),
+            "a rule preferring an excluded profile must not be applied: {payload:#}"
+        );
+        assert!(
+            payload["route_policy_rules"]["skipped"]
+                .as_array()
+                .expect("skipped array")
+                .iter()
+                .any(
+                    |rule| rule["proposal_id"] == json!("route_policy:pr4-bug2:excluded")
+                        && rule["reason"]
+                            == json!(format!("not_required_for_risk_class:{preferred_excluded}"))
+                ),
+            "the skip must name the hard gate that refused it: {payload:#}"
+        );
+
+        // The serialized answer: recommendation, candidate rows, and fallback
+        // chain are all inside the eligible set.
+        let recommended = payload["recommended_profile"]
+            .as_str()
+            .expect("recommended_profile")
+            .to_string();
+        assert!(
+            eligible.contains(&recommended),
+            "recommended {recommended} is not in the eligible set {eligible:?}: {payload:#}"
+        );
+        let mut serialized_candidates = payload["candidates"]
+            .as_array()
+            .expect("candidates array")
+            .iter()
+            .map(|candidate| candidate["profile"].as_str().expect("profile").to_string())
+            .collect::<Vec<_>>();
+        serialized_candidates.sort();
+        let mut expected = eligible.clone();
+        expected.sort();
+        assert_eq!(
+            serialized_candidates, expected,
+            "the serialized candidate set must BE the eligible set: {payload:#}"
+        );
+        for profile in string_array(&payload["fallback_chain"]) {
+            assert!(
+                eligible.contains(&profile),
+                "fallback chain names inadmissible profile {profile}: {payload:#}"
+            );
+        }
+        for (profile, _) in &excluded {
+            assert!(
+                !serialized_candidates.contains(profile),
+                "excluded profile {profile} was serialized as a candidate: {payload:#}"
+            );
+            assert_ne!(
+                payload["recommended_profile"],
+                json!(profile),
+                "excluded profile {profile} was serialized as the recommendation"
+            );
+        }
+
+        // The recorded decision-time fact carries the gated set too — a replay
+        // must not learn from a candidate the gate had removed.
+        let recommendation_id = payload["recommendation_id"]
+            .as_str()
+            .expect("recommendation_id")
+            .to_string();
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_route_recommendation(store.connection(), &recommendation_id)
+                    .map_err(|err| err.to_string())
+            })
+            .expect("read the recommendation row")
+            .expect("row present");
+        let recorded = row
+            .candidates
+            .as_array()
+            .expect("recorded candidates array")
+            .iter()
+            .map(|candidate| candidate["profile"].as_str().expect("profile").to_string())
+            .collect::<Vec<_>>();
+        for (profile, _) in &excluded {
+            assert!(
+                !recorded.contains(profile),
+                "excluded profile {profile} was recorded on the route_recommendations row"
+            );
+        }
+        assert_eq!(
+            row.recommended_profile.as_deref(),
+            Some(recommended.as_str())
         );
     }
 }
