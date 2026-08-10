@@ -157,6 +157,12 @@ impl super::super::super::LlmClient {
         }
     }
 
+    /// Test scaffold, not a fourth writer (#1680 D6). The two `expire_*`
+    /// helpers forge a row *in the past* — an already-elapsed cooldown, an
+    /// auth failure older than the retry TTL — which is precisely the one
+    /// thing `record_key_outcome` cannot express: every write it makes is
+    /// stamped `now`. They stay hand-written for that reason, and they are
+    /// compiled out of production builds.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn expire_provider_key_cooldown_for_tests(&self, logical_name: &str, key_id: &str) {
