@@ -420,6 +420,38 @@ mod tests {
         assert_eq!(AuthMode::parse(""), None);
     }
 
+    /// The stored string and the serialized string must be the same string.
+    /// `as_str` is what reaches SQLite (and the `CHECK` clauses); serde's
+    /// `rename_all` is what reaches JSON. Nothing but this test stops the two
+    /// from drifting into a state where a plan says `apiKeyPool` while the
+    /// database says `api_key_pool` and every join by that value silently
+    /// misses.
+    #[test]
+    fn serde_rendering_equals_the_stored_string_for_every_closed_set() {
+        for mode in AuthMode::ALL {
+            assert_eq!(
+                serde_json::to_string(mode).unwrap(),
+                format!("\"{}\"", mode.as_str())
+            );
+        }
+        for class in [
+            AccountClass::ModelApi,
+            AccountClass::SearchApi,
+            AccountClass::Infra,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&class).unwrap(),
+                format!("\"{}\"", class.as_str())
+            );
+        }
+        for kind in [CustodyKind::VaultRotationPool, CustodyKind::VaultEntry] {
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{}\"", kind.as_str())
+            );
+        }
+    }
+
     #[test]
     fn account_class_and_custody_kind_strings_round_trip() {
         for class in [
