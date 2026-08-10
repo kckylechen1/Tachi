@@ -80,6 +80,21 @@ impl Default for Row {
 
 impl Row {
     fn build(self, index: usize) -> ProjectionRow {
+        // A dispatch that RAN `profile` but recorded a candidate set without
+        // it is not a shape the ledger can produce — the chosen profile came
+        // out of that very set. Building one anyway silently turns a row
+        // off-policy (`no_decision_candidate_set`), which reads at the
+        // assertion site as a rule bug rather than a fixture bug. An empty
+        // set is the real `unadvised` shape and stays allowed.
+        assert!(
+            self.spine != EvalSpine::Dispatch
+                || self.candidate_profiles.is_empty()
+                || self.candidate_profiles.contains(&self.profile),
+            "fixture row for `{}` records a candidate set {:?} that excludes it — \
+             set `candidate_profiles` when renaming `profile`",
+            self.profile,
+            self.candidate_profiles,
+        );
         let subject_id = if self.subject_id.is_empty() {
             format!("{}-{index}", self.profile)
         } else {
@@ -270,6 +285,7 @@ fn disc4_safety_fail_is_not_buyable_with_cheaper_cost_or_latency() {
         Row {
             profile: "cheap_unsafe",
             safety: "fail",
+            candidate_profiles: vec!["cheap_unsafe", "safe_expensive"],
             // Everything else about it is excellent, and it is free.
             cost_usd: Some(0.0),
             cost_tokens: Some(1),
@@ -281,6 +297,7 @@ fn disc4_safety_fail_is_not_buyable_with_cheaper_cost_or_latency() {
         Row {
             profile: "safe_expensive",
             safety: "pass",
+            candidate_profiles: vec!["cheap_unsafe", "safe_expensive"],
             // Two orders of magnitude more expensive.
             cost_usd: Some(100.0),
             cost_tokens: Some(1_000_000),
@@ -317,6 +334,7 @@ fn cost_only_breaks_ties_after_every_judged_tier_is_equal() {
     let mut specs = repeat(
         Row {
             profile: "cheap",
+            candidate_profiles: vec!["cheap", "pricey"],
             cost_usd: Some(0.1),
             ..Row::default()
         },
@@ -325,6 +343,7 @@ fn cost_only_breaks_ties_after_every_judged_tier_is_equal() {
     specs.extend(repeat(
         Row {
             profile: "pricey",
+            candidate_profiles: vec!["cheap", "pricey"],
             cost_usd: Some(9.0),
             ..Row::default()
         },
@@ -345,6 +364,7 @@ fn cost_only_breaks_ties_after_every_judged_tier_is_equal() {
             evidence_quality: "concern",
             scope_discipline: "concern",
             intervention_burden: "concern",
+            candidate_profiles: vec!["cheap", "pricey"],
             cost_usd: Some(0.1),
             ..Row::default()
         },
@@ -353,6 +373,7 @@ fn cost_only_breaks_ties_after_every_judged_tier_is_equal() {
     specs.extend(repeat(
         Row {
             profile: "pricey",
+            candidate_profiles: vec!["cheap", "pricey"],
             cost_usd: Some(9.0),
             ..Row::default()
         },

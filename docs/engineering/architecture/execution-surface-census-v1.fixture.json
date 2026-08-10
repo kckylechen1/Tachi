@@ -23,21 +23,21 @@
       },
       "coordinate": {
         "max_visible_tools": 39,
-        "max_total_input_schema_bytes": 129232,
-        "max_total_tool_definition_bytes": 147230,
-        "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
+        "max_total_input_schema_bytes": 131176,
+        "max_total_tool_definition_bytes": 149174,
+        "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status. #1675 PR2 adds the tachi_agent_eval route_projection payload (+1944 bytes), re-pinned with the decision-fact-ledger projection."
       },
       "operate": {
         "max_visible_tools": 50,
-        "max_total_input_schema_bytes": 124868,
-        "max_total_tool_definition_bytes": 143947,
-        "rationale": "Post-#1540 runtime-adapter surface ceiling pending #1315 re-slice."
+        "max_total_input_schema_bytes": 126812,
+        "max_total_tool_definition_bytes": 145891,
+        "rationale": "Post-#1540 runtime-adapter surface ceiling pending #1315 re-slice. #1675 PR2 adds the tachi_agent_eval route_projection payload (+1944 bytes), re-pinned with the decision-fact-ledger projection."
       },
       "admin": {
         "max_visible_tools": 103,
-        "max_total_input_schema_bytes": 187040,
-        "max_total_tool_definition_bytes": 224288,
-        "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification. #1426 adds tachi_tune as an admin-only routed facade (102->103), ratified with the tuning-migration cutover."
+        "max_total_input_schema_bytes": 188984,
+        "max_total_tool_definition_bytes": 226232,
+        "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification. #1426 adds tachi_tune as an admin-only routed facade (102->103), ratified with the tuning-migration cutover. #1675 PR2 adds the tachi_agent_eval route_projection payload (+1944 bytes), re-pinned with the decision-fact-ledger projection."
       }
     },
     "surfaces": {
@@ -219,8 +219,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 187040,
-        "total_tool_definition_bytes": 224288,
+        "total_input_schema_bytes": 188984,
+        "total_tool_definition_bytes": 226232,
         "visible_tool_count": 103,
         "visible_tools": [
           "archive_memory",
@@ -329,8 +329,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 129232,
-        "total_tool_definition_bytes": 147230,
+        "total_input_schema_bytes": 131176,
+        "total_tool_definition_bytes": 149174,
         "visible_tool_count": 39,
         "visible_tools": [
           "extract_facts",
@@ -393,8 +393,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 124868,
-        "total_tool_definition_bytes": 143947,
+        "total_input_schema_bytes": 126812,
+        "total_tool_definition_bytes": 145891,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
@@ -585,8 +585,8 @@
       "comparisons": {
         "admin": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 9857,
-            "property_count": 7,
+            "input_schema_bytes": 11801,
+            "property_count": 8,
             "property_names": [
               "action",
               "adjudicate",
@@ -594,6 +594,7 @@
               "get",
               "limit",
               "observe",
+              "projection",
               "register"
             ]
           },
@@ -731,8 +732,8 @@
         },
         "coordinate": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 9857,
-            "property_count": 7,
+            "input_schema_bytes": 11801,
+            "property_count": 8,
             "property_names": [
               "action",
               "adjudicate",
@@ -740,6 +741,7 @@
               "get",
               "limit",
               "observe",
+              "projection",
               "register"
             ]
           },
