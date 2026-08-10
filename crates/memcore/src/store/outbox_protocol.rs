@@ -13,11 +13,12 @@
 //! anyone. It is transport-agnostic on purpose (#1630: the sync adapter is a
 //! downstream consumer, and a `StoreProfile::PortableKernel` database must be
 //! able to run this protocol with no Tachi daemon anywhere). So every name here
-//! says what actually happened locally: a caller *reported* an outcome. A1's
-//! honesty rule for `last_successful_sync` — "when a caller last told this
-//! store an event was accepted", never "when a remote confirmed" — is the same
-//! rule, and it is why this module's entry point is `apply_outbox_outcome`
-//! rather than anything containing the word "remote".
+//! says what actually happened locally: a caller *reported* an outcome. The
+//! health seam preserves `last_successful_sync` for a host adapter but leaves
+//! it `None` while `RemoteSyncStatus::Unconfigured`; a local outcome report is
+//! never remote-success evidence. That honesty rule is why this module's entry
+//! point is `apply_outbox_outcome` rather than anything containing the word
+//! "remote".
 //!
 //! ## The three invariants this layer exists to hold
 //!
@@ -93,7 +94,9 @@ impl OutboxClaimRequest {
     }
 
     /// Claim pending events, and also take over any event that has been in
-    /// flight for at least `stale_after`.
+    /// flight for at least `stale_after`. A zero bound makes every current
+    /// `in_flight` event immediately eligible; callers proving expiry gating
+    /// and post-takeover exclusion should use a small positive bound.
     pub fn with_reclaim(limit: usize, stale_after: Duration) -> Self {
         Self {
             limit,
@@ -1754,7 +1757,7 @@ mod tests {
         assert_eq!(drained.pending_count, 1);
         assert_eq!(drained.last_successful_sync, None);
 
-        let acknowledged = store
+        store
             .apply_outbox_outcome("evt-a", &OutboxOutcome::Acknowledged, &evidence())
             .expect("acknowledge");
         let partly = store.outbox_health().expect("health");
@@ -1763,8 +1766,8 @@ mod tests {
             db::RemoteSyncStatus::Unconfigured
         );
         assert_eq!(
-            partly.last_successful_sync.as_deref(),
-            Some(acknowledged.event.state_changed_at.as_str())
+            partly.last_successful_sync, None,
+            "a local acknowledgement cannot fabricate remote success"
         );
 
         store
@@ -1837,7 +1840,7 @@ mod tests {
         store
             .claim_outbox_events(&OutboxClaimRequest::first_claims_only(10))
             .expect("claim the successor");
-        let successor_ack = store
+        store
             .apply_outbox_outcome(
                 &outbox_local_wins_successor_id("evt-d"),
                 &OutboxOutcome::Acknowledged,
@@ -1850,10 +1853,7 @@ mod tests {
             db::RemoteSyncStatus::Unconfigured,
             "the kernel has no configured remote transport"
         );
-        assert_eq!(
-            settled.last_successful_sync.as_deref(),
-            Some(successor_ack.event.state_changed_at.as_str())
-        );
+        assert_eq!(settled.last_successful_sync, None);
         assert_eq!(settled.pending_count, 0);
         assert_eq!(settled.oldest_pending_at, None);
     }

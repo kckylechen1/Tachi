@@ -1,4 +1,10 @@
-use std::{env, path::Path, process::Command, time::Duration};
+use std::{
+    env,
+    path::Path,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use portable_kernel::{
     outbox_local_wins_successor_id, outbox_payload_digest, DanglingSupersession, LocalStoreStatus,
@@ -367,11 +373,12 @@ fn portable_outbox_subprocess_crash_after_commit_reopens_pending_and_object() {
 }
 
 /// A real child process exits after claiming and before reporting an outcome.
-/// Reopen proves the lease is inspectable, the explicit bound blocks a fresh
-/// claim, and the post-bound public reclaim is one-shot once the event reaches
-/// its terminal outcome.
+/// Reopen proves the lease is inspectable, a positive bound refuses the fresh
+/// lease, expiry permits one takeover, and the immediately repeated claim is
+/// refused before the event reaches its terminal outcome.
 #[test]
 fn portable_outbox_subprocess_claim_crash_reopens_and_reclaims_once() {
+    let lease_bound = Duration::from_millis(250);
     if let Some(path) = child_outbox_path() {
         assert_eq!(env::var(OUTBOX_CHILD_MODE_ENV).as_deref(), Ok("claim"));
         let mut store = MemoryStore::open(&path).expect("child open file store");
@@ -385,6 +392,13 @@ fn portable_outbox_subprocess_claim_crash_reopens_and_reclaims_once() {
             .claim_outbox_events(&OutboxClaimRequest::first_claims_only(8))
             .expect("child claim");
         assert_eq!(claimed.len(), 1);
+        assert!(
+            store
+                .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, lease_bound))
+                .expect("child pre-expiry bounded reclaim")
+                .is_empty(),
+            "the child must refuse to reclaim its own fresh lease before simulated process loss"
+        );
         std::process::exit(0);
     }
 
@@ -411,26 +425,33 @@ fn portable_outbox_subprocess_claim_crash_reopens_and_reclaims_once() {
         "the source object remains locally readable while its event is leased"
     );
 
-    let fresh_health = store
-        .outbox_health_with_stale_after(Duration::from_secs(3600))
-        .expect("fresh explicit-bound health");
-    assert_eq!(fresh_health.pending_count, 0);
-    assert_eq!(fresh_health.in_flight_count, 1);
+    let health_after_reopen = store
+        .outbox_health_with_stale_after(lease_bound)
+        .expect("explicit-bound health after reopen");
+    assert_eq!(health_after_reopen.pending_count, 0);
+    assert_eq!(health_after_reopen.in_flight_count, 1);
     assert_eq!(
-        fresh_health.oldest_in_flight_at.as_deref(),
+        health_after_reopen.oldest_in_flight_at.as_deref(),
         Some(event.state_changed_at.as_str())
     );
-    assert_eq!(fresh_health.stale_lease_count, 0);
-    assert!(
-        store
-            .claim_outbox_events(&OutboxClaimRequest::first_claims_only(8))
-            .expect("pre-expiry first-only claim")
-            .is_empty(),
-        "a fresh in-flight lease is not silently reclaimed"
-    );
+
+    let expiry_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let health = store
+            .outbox_health_with_stale_after(lease_bound)
+            .expect("poll lease expiry");
+        if health.stale_lease_count == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < expiry_deadline,
+            "the explicit lease bound did not expire before the test deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 
     let reclaimed = store
-        .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, Duration::ZERO))
+        .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, lease_bound))
         .expect("post-bound reclaim");
     assert_eq!(reclaimed.len(), 1);
     assert!(matches!(
@@ -438,6 +459,13 @@ fn portable_outbox_subprocess_claim_crash_reopens_and_reclaims_once() {
         OutboxClaimKind::Reclaimed { .. }
     ));
     assert_eq!(reclaimed[0].event.state, OutboxState::InFlight);
+    assert!(
+        store
+            .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, lease_bound))
+            .expect("immediate duplicate bounded reclaim")
+            .is_empty(),
+        "the takeover renews the lease and must refuse an immediate duplicate claim"
+    );
 
     let object_before_outcome = store
         .get("portable-crash-claim-object")
@@ -478,7 +506,7 @@ fn portable_outbox_subprocess_claim_crash_reopens_and_reclaims_once() {
     );
     assert!(
         restarted
-            .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, Duration::ZERO))
+            .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, lease_bound))
             .expect("terminal event reclaim probe")
             .is_empty(),
         "a terminal event is never returned to pending or reclaimed"
@@ -619,8 +647,8 @@ fn portable_build_outbox_state_machine_and_health() {
     assert_eq!(drained.pending_count, 0);
     assert_eq!(drained.oldest_pending_at, None);
     assert_eq!(
-        drained.last_successful_sync.as_deref(),
-        Some(acknowledged.state_changed_at.as_str())
+        drained.last_successful_sync, None,
+        "a local acknowledgement cannot fabricate remote success"
     );
 
     // Quarantine is reachable from any state and requires its class; it is

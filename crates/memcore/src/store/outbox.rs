@@ -426,10 +426,9 @@ impl MemoryStore {
     /// * `remote_sync_status` is explicitly
     ///   [`db::RemoteSyncStatus::Unconfigured`]: this crate has no transport,
     ///   so local terminal rows cannot be presented as remote success.
-    /// * `last_successful_sync` is the newest `state_changed_at` among
-    ///   `acknowledged` events, i.e. when a caller last *told this store* an
-    ///   event was accepted. It is `None` until something reports an
-    ///   acknowledgment.
+    /// * `last_successful_sync` is preserved for the host-owned remote health
+    ///   seam, but is always `None` here: this crate has no transport, and a
+    ///   local `acknowledged` row is not evidence of remote synchronization.
     /// * `last_error_class` is the class of the most recently changed event
     ///   still in a failure state. Non-failure transitions clear the column,
     ///   so it never reports a class the outbox has moved past.
@@ -443,9 +442,11 @@ impl MemoryStore {
     /// Read health using an explicit lease staleness bound.
     ///
     /// `stale_lease_count` is the number of currently `in_flight` rows whose
-    /// lease stamp is at or before `now - stale_after`; `Duration::ZERO` is a
-    /// valid deterministic boundary for callers and tests. The entire report
-    /// is derived from one SQLite snapshot.
+    /// lease stamp is at or before `now - stale_after`. `Duration::ZERO` is a
+    /// valid immediate boundary: every currently held lease is eligible, so it
+    /// is unsuitable for proving pre-expiry refusal or post-takeover
+    /// one-shot exclusion. Use a small positive bound for that proof. The
+    /// entire report is derived from one SQLite snapshot.
     pub fn outbox_health_with_stale_after(
         &self,
         stale_after: Duration,
@@ -970,14 +971,13 @@ mod tests {
             "the kernel has no configured remote transport"
         );
 
-        let acknowledged = store
+        store
             .transition_outbox_event("evt-health-1", OutboxState::Acknowledged, None)
             .expect("acknowledged");
         let synced = store.outbox_health().expect("health");
         assert_eq!(
-            synced.last_successful_sync.as_deref(),
-            Some(acknowledged.state_changed_at.as_str()),
-            "the stamp is when a caller reported acceptance, not when a remote confirmed"
+            synced.last_successful_sync, None,
+            "a local acknowledgement cannot fabricate remote success"
         );
         assert_eq!(synced.pending_count, 1);
 

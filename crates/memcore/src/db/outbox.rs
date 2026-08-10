@@ -851,7 +851,10 @@ fn renew_outbox_claim_within_tx(
 /// The comparison is semantic RFC3339 instant order, so a supported legacy
 /// offset/precision form cannot evade or prematurely trigger the bound. `<=`
 /// rather than `<` so a zero-length bound means "every in-flight event is
-/// reclaimable", which is the reading a caller passing zero intends.
+/// immediately reclaimable", which is the reading a caller passing zero
+/// intends. A zero-length bound is therefore useful for an immediate probe but
+/// cannot prove expiry gating or the post-takeover refusal; those proofs need a
+/// small positive bound.
 ///
 /// Ordering and bounding are `list_outbox_events_by_state`'s: `created_at ASC,
 /// event_id ASC`, `LIMIT limit`, and `limit == 0` returns an empty batch
@@ -1038,13 +1041,12 @@ pub struct OutboxHealth {
     /// The semantically oldest lease stamp over `in_flight` events, rendered
     /// canonically, or `None` when none are in flight.
     pub oldest_in_flight_at: Option<String>,
-    /// `MAX(state_changed_at)` over `acknowledged` events, or `None`.
+    /// The most recent successful remote synchronization stamp, or `None`.
     ///
-    /// Read this as "when a caller last told this store an event was
-    /// accepted", not "when a remote last confirmed anything" — no remote
-    /// exists here, and the stamp is written by the local transition seam. It
-    /// is `None` on every store that has not had an acknowledgment reported,
-    /// which today is every store.
+    /// This kernel has no remote transport, so [`RemoteSyncStatus::Unconfigured`]
+    /// always pairs with `None`; a local `acknowledged` transition is not
+    /// evidence of remote success. A host-owned adapter may populate this
+    /// preserved field when it owns a configured remote status.
     pub last_successful_sync: Option<String>,
     /// The `last_error_class` of the most recently changed event that carries
     /// one, tie-broken by `event_id` descending for determinism. `None` when
@@ -1135,7 +1137,6 @@ pub(crate) fn read_outbox_health(
     let mut stale_lease_count = 0_u64;
     let mut oldest_pending_at: Option<(DateTime<Utc>, String)> = None;
     let mut oldest_in_flight_at: Option<(DateTime<Utc>, String)> = None;
-    let mut last_successful_sync: Option<(DateTime<Utc>, String)> = None;
     let mut last_error_class: Option<(DateTime<Utc>, String, String)> = None;
 
     for (event_id, state_raw, created_at_raw, state_changed_at_raw, error_class) in raw_rows {
@@ -1187,19 +1188,6 @@ pub(crate) fn read_outbox_health(
             }
         }
 
-        if state == OutboxState::Acknowledged {
-            let candidate = (
-                state_changed_at,
-                canonical_outbox_timestamp(&state_changed_at_raw, "state_changed_at")?,
-            );
-            if last_successful_sync
-                .as_ref()
-                .is_none_or(|(latest, _)| candidate.0 > *latest)
-            {
-                last_successful_sync = Some(candidate);
-            }
-        }
-
         if let Some(class) = error_class {
             let candidate = (state_changed_at, event_id, class);
             if last_error_class.as_ref().is_none_or(|latest| {
@@ -1233,7 +1221,10 @@ pub(crate) fn read_outbox_health(
         quarantined_count,
         oldest_pending_at: oldest_pending_at.map(|(_, timestamp)| timestamp),
         oldest_in_flight_at: oldest_in_flight_at.map(|(_, timestamp)| timestamp),
-        last_successful_sync: last_successful_sync.map(|(_, timestamp)| timestamp),
+        // There is no remote transport in this kernel. Preserve the field for
+        // the host-owned health seam, but never infer remote success from a
+        // locally acknowledged row.
+        last_successful_sync: None,
         last_error_class: last_error_class.map(|(_, _, class)| class),
         resolved_count,
         stale_lease_count,
@@ -1878,7 +1869,7 @@ mod tests {
     }
 
     #[test]
-    fn health_reports_in_flight_ahead_of_pending_and_acknowledged_stamps_the_last_sync() {
+    fn health_reports_in_flight_ahead_of_pending_without_fabricating_remote_success() {
         let mut conn = open_conn();
         seed_event(&mut conn, "evt-p", "obj-p");
         seed_event(&mut conn, "evt-q", "obj-q");
@@ -1889,17 +1880,16 @@ mod tests {
         assert_eq!(health.pending_count, 1);
         assert_eq!(health.last_successful_sync, None);
 
-        let acknowledged = transition(&mut conn, "evt-q", OutboxState::Acknowledged, None).unwrap();
+        transition(&mut conn, "evt-q", OutboxState::Acknowledged, None).unwrap();
         transition(&mut conn, "evt-p", OutboxState::InFlight, None).unwrap();
-        let acknowledged_p =
-            transition(&mut conn, "evt-p", OutboxState::Acknowledged, None).unwrap();
+        transition(&mut conn, "evt-p", OutboxState::Acknowledged, None).unwrap();
         let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
         assert_eq!(health.pending_count, 0);
-        let newest = acknowledged
-            .state_changed_at
-            .max(acknowledged_p.state_changed_at);
-        assert_eq!(health.last_successful_sync.as_deref(), Some(&*newest));
+        assert_eq!(
+            health.last_successful_sync, None,
+            "local acknowledgements do not prove remote synchronization"
+        );
         assert_eq!(health.last_error_class, None);
         assert_eq!(health.resolved_count, 0);
     }
