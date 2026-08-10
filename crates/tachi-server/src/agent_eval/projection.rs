@@ -27,14 +27,15 @@ use crate::tool_params::RouteProjectionParams;
 
 use self::rules::{ProjectionRow, TerminalCheck};
 
-/// Row cap for one projection read. The ledger stays independently
-/// inspectable; this only bounds one response.
-const MAX_PROJECTION_ROWS: usize = 2_000;
-
 pub(crate) fn handle_route_projection(
     server: &MemoryServer,
     params: RouteProjectionParams,
+    limit: Option<usize>,
 ) -> Result<String, String> {
+    // Same cap the other `tachi_agent_eval` read actions use — one bound for
+    // the whole facade, not a second one invented here. It also bounds the
+    // per-row `status.json` reads below.
+    let row_limit = super::capped_eval_limit(limit);
     let now = memcore::now_utc_iso();
     let window_days = params
         .window_days
@@ -66,9 +67,13 @@ pub(crate) fn handle_route_projection(
     let gates = eligible_candidate_set(&risk);
 
     let observations = server.with_global_store_read(|store| {
-        memcore::list_eval_observations(store.connection(), &since, None, MAX_PROJECTION_ROWS)
+        memcore::list_eval_observations(store.connection(), &since, None, row_limit)
             .map_err(|err| format!("route_projection: read eval ledger: {err}"))
     })?;
+    // A truncated read is a fact the consumer has to see: silently answering
+    // from a capped slice of the window would be the projection overstating
+    // what it looked at.
+    let rows_truncated = observations.len() >= row_limit;
 
     let rows = observations
         .into_iter()
@@ -125,6 +130,8 @@ pub(crate) fn handle_route_projection(
         "excluded_rows": outcome.explained_exclusions_json(),
         "decision": outcome.decision.to_json(),
         "rows_considered": outcome.rows_considered,
+        "rows_limit": row_limit,
+        "rows_truncated": rows_truncated,
         "usable_rows": outcome.usable_rows,
         "quality_only_rows": outcome.quality_only_rows,
         "n_min_usable_rows": rules::N_MIN_USABLE_ROWS,
@@ -343,6 +350,13 @@ mod tests {
         assert_eq!(payload["decision"]["profile"], Value::Null);
         assert_eq!(payload["rows_considered"], json!(0));
         assert_eq!(payload["task"]["task_type"], json!("fix_request"));
+        // A capped read is declared, so a truncated answer can never look
+        // like a complete one.
+        assert_eq!(
+            payload["rows_limit"],
+            json!(super::super::capped_eval_limit(None))
+        );
+        assert_eq!(payload["rows_truncated"], json!(false));
         assert!(
             payload["hard_gates"]["eligible_profiles"]
                 .as_array()

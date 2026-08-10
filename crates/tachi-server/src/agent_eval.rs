@@ -61,6 +61,7 @@ pub(crate) async fn handle_agent_eval(
         "route_projection" => self::projection::handle_route_projection(
             _server,
             params.projection.unwrap_or_default(),
+            params.limit,
         ),
         "aggregate" => {
             if !eval_fixture_replay_allowed() {
