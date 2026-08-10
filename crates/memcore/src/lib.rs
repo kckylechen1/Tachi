@@ -124,7 +124,7 @@ pub use db::mirror_eval::{
 /// portable build can drive it.
 pub use db::outbox::{
     LocalStoreStatus, OutboxEventRow, OutboxHealth, OutboxState, RemoteSyncStatus,
-    MAX_OUTBOX_CLASS_BYTES,
+    DEFAULT_OUTBOX_HEALTH_STALE_AFTER, MAX_OUTBOX_CLASS_BYTES,
 };
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]

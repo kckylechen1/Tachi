@@ -1714,7 +1714,7 @@ mod tests {
     fn health_reflects_the_distribution_through_the_whole_protocol_walk() {
         let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
         let empty = store.outbox_health().expect("health");
-        assert_eq!(empty.remote_sync_status, db::RemoteSyncStatus::Idle);
+        assert_eq!(empty.remote_sync_status, db::RemoteSyncStatus::Unconfigured);
         assert_eq!(empty.local_store_status, db::LocalStoreStatus::Healthy);
 
         commit(&mut store, "obj-a", "evt-a");
@@ -1737,7 +1737,7 @@ mod tests {
         let queued = store.outbox_health().expect("health");
         assert_eq!(
             queued.remote_sync_status,
-            db::RemoteSyncStatus::Backlogged { pending_count: 3 }
+            db::RemoteSyncStatus::Unconfigured
         );
         assert_eq!(queued.pending_count, 3);
 
@@ -1748,8 +1748,8 @@ mod tests {
         let drained = store.outbox_health().expect("health");
         assert_eq!(
             drained.remote_sync_status,
-            db::RemoteSyncStatus::InFlight { in_flight_count: 2 },
-            "live work outranks the remaining backlog"
+            db::RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
         assert_eq!(drained.pending_count, 1);
         assert_eq!(drained.last_successful_sync, None);
@@ -1760,7 +1760,7 @@ mod tests {
         let partly = store.outbox_health().expect("health");
         assert_eq!(
             partly.remote_sync_status,
-            db::RemoteSyncStatus::InFlight { in_flight_count: 1 }
+            db::RemoteSyncStatus::Unconfigured
         );
         assert_eq!(
             partly.last_successful_sync.as_deref(),
@@ -1779,8 +1779,8 @@ mod tests {
         let conflicted = store.outbox_health().expect("health");
         assert_eq!(
             conflicted.remote_sync_status,
-            db::RemoteSyncStatus::Backlogged { pending_count: 1 },
-            "the untouched third event still outranks a historical failure"
+            db::RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
         assert_eq!(
             conflicted.last_error_class.as_deref(),
@@ -1802,10 +1802,7 @@ mod tests {
         let failing = store.outbox_health().expect("health");
         assert_eq!(
             failing.remote_sync_status,
-            db::RemoteSyncStatus::Failing {
-                rejected_count: 1,
-                conflicted_count: 1
-            }
+            db::RemoteSyncStatus::Unconfigured
         );
         assert_eq!(failing.pending_count, 0);
         assert_eq!(failing.local_store_status, db::LocalStoreStatus::Healthy);
@@ -1819,7 +1816,7 @@ mod tests {
         let resolved = store.outbox_health().expect("health");
         assert_eq!(
             resolved.remote_sync_status,
-            db::RemoteSyncStatus::Backlogged { pending_count: 1 }
+            db::RemoteSyncStatus::Unconfigured
         );
         assert_eq!(
             resolved.local_store_status,
@@ -1850,11 +1847,8 @@ mod tests {
         let settled = store.outbox_health().expect("health");
         assert_eq!(
             settled.remote_sync_status,
-            db::RemoteSyncStatus::Failing {
-                rejected_count: 1,
-                conflicted_count: 0
-            },
-            "the decided conflict no longer counts as an unresolved one"
+            db::RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
         assert_eq!(
             settled.last_successful_sync.as_deref(),

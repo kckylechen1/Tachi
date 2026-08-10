@@ -39,6 +39,9 @@
 //! daemon, so a `StoreProfile::PortableKernel` database carries the outbox and
 //! a portable build can drive it.
 
+use std::time::Duration;
+
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::error::MemoryError;
@@ -169,6 +172,13 @@ pub const MAX_OUTBOX_CLASS_BYTES: usize = 64;
 
 /// Length of the lowercase-hex SHA-256 `payload_digest` this table stores.
 pub const OUTBOX_PAYLOAD_DIGEST_HEX_LEN: usize = 64;
+
+/// Provisional compatibility default for [`read_outbox_health`]'s lease
+/// staleness view. Callers that need deterministic behavior should use
+/// `MemoryStore::outbox_health_with_stale_after` and provide their own bound;
+/// this named value exists only to preserve the pre-#1665 zero-argument
+/// `outbox_health()` surface while a host chooses its operational lease.
+pub const DEFAULT_OUTBOX_HEALTH_STALE_AFTER: Duration = Duration::from_secs(300);
 
 /// One `memory_outbox_events` row, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -687,9 +697,9 @@ pub(crate) fn read_outbox_event(
 ///
 /// Order is `created_at ASC, event_id ASC`: enqueue order, with the id as a
 /// total tie-break so two events stamped in the same millisecond still come
-/// back in a stable order across calls. Lexical ordering of `created_at` is
-/// chronological only because every writer here stamps canonical UTC-ISO
-/// (tachi#1432) — the same property the health read model depends on.
+/// back in a stable order across calls. Timestamp order is semantic rather
+/// than lexical so canonical and supported legacy RFC3339 forms cannot invert
+/// the queue.
 ///
 /// `limit` of 0 returns an empty vector rather than a refusal, matching SQL
 /// `LIMIT 0`.
@@ -698,16 +708,18 @@ pub(crate) fn list_outbox_events_by_state(
     state: OutboxState,
     limit: usize,
 ) -> Result<Vec<OutboxEventRow>, MemoryError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let mut stmt = conn.prepare(&format!(
         "SELECT {OUTBOX_SELECT_COLUMNS} FROM memory_outbox_events WHERE state = ?1 \
-         ORDER BY created_at ASC, event_id ASC LIMIT ?2"
+         "
     ))?;
-    let rows = stmt
-        .query_map(
-            params![state.as_str(), i64::try_from(limit).unwrap_or(i64::MAX)],
-            row_to_outbox_event,
-        )?
+    let mut rows = stmt
+        .query_map(params![state.as_str()], row_to_outbox_event)?
         .collect::<Result<Vec<_>, _>>()?;
+    sort_outbox_rows_by_created_at(&mut rows)?;
+    rows.truncate(limit);
     Ok(rows)
 }
 
@@ -729,6 +741,48 @@ pub(crate) struct ClaimedOutboxRow {
     pub previous_state: OutboxState,
     /// The `state_changed_at` this claim replaced.
     pub previous_state_changed_at: String,
+}
+
+/// Parse one persisted RFC3339 timestamp into an instant.
+///
+/// Outbox writers stamp canonical millisecond UTC strings, but a supported
+/// legacy database can still carry a numeric offset or a different fractional
+/// precision. Health and replay ordering therefore compare instants, never
+/// raw text. Invalid legacy data fails closed instead of being treated as an
+/// arbitrarily old or new lease.
+fn parse_outbox_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>, MemoryError> {
+    DateTime::parse_from_rfc3339(value.trim())
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| {
+            MemoryError::InvalidArg(format!(
+                "outbox {field} timestamp '{value}' is not a supported RFC3339 instant: {error}"
+            ))
+        })
+}
+
+fn canonical_outbox_timestamp(value: &str, field: &str) -> Result<String, MemoryError> {
+    Ok(parse_outbox_timestamp(value, field)?.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+/// Sort rows by the event's enqueue timestamp semantically, then by the
+/// caller-stable event id as the same-second FIFO tie-break. The timestamp
+/// keys are parsed before sorting so an invalid row is a typed read failure,
+/// not a panic from a comparator.
+fn sort_outbox_rows_by_created_at(rows: &mut Vec<OutboxEventRow>) -> Result<(), MemoryError> {
+    let mut keyed = rows
+        .drain(..)
+        .map(|row| {
+            let created_at = parse_outbox_timestamp(&row.created_at, "created_at")?;
+            Ok((created_at, row))
+        })
+        .collect::<Result<Vec<_>, MemoryError>>()?;
+    keyed.sort_by(|(left_at, left), (right_at, right)| {
+        left_at
+            .cmp(right_at)
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+    rows.extend(keyed.into_iter().map(|(_, row)| row));
+    Ok(())
 }
 
 /// Renew the lease on an event that is already `in_flight`.
@@ -794,10 +848,9 @@ fn renew_outbox_claim_within_tx(
 /// must opt out of, because taking over another consumer's in-flight event is
 /// only safe if the caller can say how long a claim may live.
 ///
-/// The comparison is lexical on canonical UTC-ISO (tachi#1432), which is
-/// chronological **only** because every writer in this module stamps that one
-/// shape; the caller mints the cutoff with the same formatter. `<=` rather
-/// than `<` so a zero-length bound means "every in-flight event is
+/// The comparison is semantic RFC3339 instant order, so a supported legacy
+/// offset/precision form cannot evade or prematurely trigger the bound. `<=`
+/// rather than `<` so a zero-length bound means "every in-flight event is
 /// reclaimable", which is the reading a caller passing zero intends.
 ///
 /// Ordering and bounding are `list_outbox_events_by_state`'s: `created_at ASC,
@@ -818,26 +871,46 @@ pub(crate) fn claim_outbox_events_within_tx(
         return Ok(Vec::new());
     }
 
-    let candidates = {
+    let cutoff = reclaim_stamped_at_or_before
+        .map(|value| parse_outbox_timestamp(value, "claim cutoff"))
+        .transpose()?;
+    let mut candidates = {
         let mut stmt = tx.prepare(&format!(
             "SELECT {OUTBOX_SELECT_COLUMNS} FROM memory_outbox_events \
              WHERE state = ?1 \
-                OR (state = ?2 AND ?3 IS NOT NULL AND state_changed_at <= ?3) \
-             ORDER BY created_at ASC, event_id ASC LIMIT ?4"
+                OR state = ?2"
         ))?;
         let rows = stmt
             .query_map(
                 params![
                     OutboxState::Pending.as_str(),
-                    OutboxState::InFlight.as_str(),
-                    reclaim_stamped_at_or_before,
-                    i64::try_from(limit).unwrap_or(i64::MAX)
+                    OutboxState::InFlight.as_str()
                 ],
                 row_to_outbox_event,
             )?
             .collect::<Result<Vec<_>, _>>()?;
         rows
     };
+    sort_outbox_rows_by_created_at(&mut candidates)?;
+    let mut drainable = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        match candidate.state {
+            OutboxState::Pending => drainable.push(candidate),
+            OutboxState::InFlight => {
+                let Some(cutoff) = cutoff else {
+                    continue;
+                };
+                let claimed_at =
+                    parse_outbox_timestamp(&candidate.state_changed_at, "state_changed_at")?;
+                if claimed_at <= cutoff {
+                    drainable.push(candidate);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut candidates = drainable;
+    candidates.truncate(limit);
 
     let mut claimed = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -891,12 +964,13 @@ pub enum LocalStoreStatus {
 /// transition out of `pending` is performed by a caller. So this status is
 /// derived *entirely* from the local state distribution and must be read as
 /// "what the local queue implies", never as evidence that a remote saw
-/// anything. Concretely: [`Self::Drained`] means callers reported every event
-/// terminal, and with no A2 sync loop wired up an installation will sit at
-/// [`Self::Idle`] or [`Self::Backlogged`] forever, which is the honest answer
-/// rather than a fabricated "healthy".
+/// anything. The #1665 health seam therefore emits [`Self::Unconfigured`]
+/// until a host-owned adapter supplies a configured remote status. The legacy
+/// queue-derived variants remain in the wire enum for source compatibility,
+/// but this kernel does not manufacture them.
 ///
-/// Derivation, first match wins:
+/// Legacy queue-derived precedence (for callers that still construct these
+/// variants themselves):
 ///
 /// 1. no rows at all -> [`Self::Idle`]
 /// 2. any `in_flight` -> [`Self::InFlight`]
@@ -914,6 +988,10 @@ pub enum LocalStoreStatus {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteSyncStatus {
+    /// No remote transport is configured in this kernel. This is explicit so
+    /// an empty or locally drained outbox cannot serialize as a synchronized
+    /// success while the host-owned adapter is absent.
+    Unconfigured,
     /// The outbox has never held an event.
     Idle,
     /// At least one event is with a consumer awaiting an outcome.
@@ -932,17 +1010,34 @@ pub enum RemoteSyncStatus {
     Drained,
 }
 
-/// The six #1643 health fields, from one consistent snapshot.
+/// Consumer-neutral health snapshot from one consistent SQLite snapshot.
+///
+/// All six lifecycle counts are included even though some callers only need a
+/// backlog view. This makes the snapshot an inventory rather than a derived
+/// status that can hide terminal failures or quarantines. It intentionally
+/// carries no event ids, payloads, memory content, or product labels.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OutboxHealth {
     pub local_store_status: LocalStoreStatus,
     pub remote_sync_status: RemoteSyncStatus,
     /// Events in `pending`.
     pub pending_count: u64,
-    /// `MIN(created_at)` over `pending` events, or `None` when none are
-    /// pending. Chronologically correct because `created_at` is canonical
-    /// UTC-ISO, so the lexical minimum is the earliest instant.
+    /// Events in `in_flight`.
+    pub in_flight_count: u64,
+    /// Events in `acknowledged`.
+    pub acknowledged_count: u64,
+    /// Events in `rejected`.
+    pub rejected_count: u64,
+    /// Events in `conflicted`.
+    pub conflicted_count: u64,
+    /// Events in `quarantined`, including resolved conflict records.
+    pub quarantined_count: u64,
+    /// The semantically oldest `created_at` over `pending` events, rendered in
+    /// canonical UTC-ISO form, or `None` when none are pending.
     pub oldest_pending_at: Option<String>,
+    /// The semantically oldest lease stamp over `in_flight` events, rendered
+    /// canonically, or `None` when none are in flight.
+    pub oldest_in_flight_at: Option<String>,
     /// `MAX(state_changed_at)` over `acknowledged` events, or `None`.
     ///
     /// Read this as "when a caller last told this store an event was
@@ -969,21 +1064,10 @@ pub struct OutboxHealth {
     /// `quarantined_count` — a resolved conflict is not excluded from the
     /// table, only from the *degradation* signal.
     pub resolved_count: u64,
+    /// `in_flight` events whose lease stamp is at or before the explicit
+    /// stale-after cutoff used for this snapshot.
+    pub stale_lease_count: u64,
 }
-
-/// Raw column tuple read back for an outbox row (id, event fields, timestamps, error class).
-type OutboxRowColumns = (
-    i64,
-    i64,
-    i64,
-    i64,
-    i64,
-    i64,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
 
 /// The exact prefix that marks a `quarantined` row as a resolved conflict
 /// rather than a live durability problem (tachi#1644 review fix).
@@ -999,110 +1083,160 @@ type OutboxRowColumns = (
 /// resolved through `resolve_outbox_conflict`" and nothing a caller could
 /// spoof by naming their own quarantine reason similarly — an ordinary
 /// operator hold uses a caller-chosen class like `"operator_hold"`, which
-/// this prefix does not match. The health query uses `substr(...) = ?` rather
-/// than `LIKE` so SQLite wildcard handling cannot widen the namespace.
+/// this prefix does not match. Health uses the same exact prefix comparison
+/// in Rust, so SQLite wildcard handling cannot widen the namespace.
 ///
-/// Compute all seven health fields in one statement.
+/// Compute the health snapshot from one consistent SQLite read transaction.
 ///
-/// One statement, not several, because the fields are read together and must
-/// describe the same instant: two statements on a connection outside a
-/// transaction are two snapshots, and a concurrent writer between them could
-/// produce a `pending_count` of 0 next to an `oldest_pending_at` of some
-/// timestamp — a self-contradictory report. An aggregate query with no
-/// `GROUP BY` returns exactly one row even over an empty table, and the
-/// correlated subquery for `last_error_class` yields NULL when nothing
-/// matches, so the empty-outbox case needs no special path.
-pub(crate) fn read_outbox_health(conn: &Connection) -> Result<OutboxHealth, MemoryError> {
-    let (
+/// The rows are selected once, while the transaction holds one snapshot, and
+/// all extrema are then derived from parsed instants in Rust. SQLite's raw
+/// `MIN`/`MAX` on text is deliberately not used: canonical UTC strings sort
+/// lexically, but supported legacy offsets and precision forms do not.
+pub(crate) fn read_outbox_health(
+    conn: &Connection,
+    stale_after: Duration,
+) -> Result<OutboxHealth, MemoryError> {
+    let stale_after = chrono::Duration::from_std(stale_after).map_err(|_| {
+        MemoryError::InvalidArg(format!(
+            "outbox health staleness bound {stale_after:?} is too large to express as a timestamp offset"
+        ))
+    })?;
+    let stale_cutoff = Utc::now().checked_sub_signed(stale_after).ok_or_else(|| {
+        MemoryError::InvalidArg(format!(
+            "outbox health staleness bound {stale_after:?} moves the cutoff outside the representable timestamp range"
+        ))
+    })?;
+
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(
+        "SELECT event_id, state, created_at, state_changed_at, last_error_class \
+         FROM memory_outbox_events",
+    )?;
+    let raw_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut pending_count = 0_u64;
+    let mut in_flight_count = 0_u64;
+    let mut acknowledged_count = 0_u64;
+    let mut rejected_count = 0_u64;
+    let mut conflicted_count = 0_u64;
+    let mut quarantined_count = 0_u64;
+    let mut resolved_count = 0_u64;
+    let mut stale_lease_count = 0_u64;
+    let mut oldest_pending_at: Option<(DateTime<Utc>, String)> = None;
+    let mut oldest_in_flight_at: Option<(DateTime<Utc>, String)> = None;
+    let mut last_successful_sync: Option<(DateTime<Utc>, String)> = None;
+    let mut last_error_class: Option<(DateTime<Utc>, String, String)> = None;
+
+    for (event_id, state_raw, created_at_raw, state_changed_at_raw, error_class) in raw_rows {
+        let state = OutboxState::parse(&state_raw)?;
+        let created_at = parse_outbox_timestamp(&created_at_raw, "created_at")?;
+        let state_changed_at = parse_outbox_timestamp(&state_changed_at_raw, "state_changed_at")?;
+
+        match state {
+            OutboxState::Pending => {
+                pending_count += 1;
+                let candidate = (
+                    created_at,
+                    canonical_outbox_timestamp(&created_at_raw, "created_at")?,
+                );
+                if oldest_pending_at
+                    .as_ref()
+                    .is_none_or(|(oldest, _)| candidate.0 < *oldest)
+                {
+                    oldest_pending_at = Some(candidate);
+                }
+            }
+            OutboxState::InFlight => {
+                in_flight_count += 1;
+                if state_changed_at <= stale_cutoff {
+                    stale_lease_count += 1;
+                }
+                let candidate = (
+                    state_changed_at,
+                    canonical_outbox_timestamp(&state_changed_at_raw, "state_changed_at")?,
+                );
+                if oldest_in_flight_at
+                    .as_ref()
+                    .is_none_or(|(oldest, _)| candidate.0 < *oldest)
+                {
+                    oldest_in_flight_at = Some(candidate);
+                }
+            }
+            OutboxState::Acknowledged => acknowledged_count += 1,
+            OutboxState::Rejected => rejected_count += 1,
+            OutboxState::Conflicted => conflicted_count += 1,
+            OutboxState::Quarantined => {
+                quarantined_count += 1;
+                if error_class
+                    .as_deref()
+                    .is_some_and(|class| class.starts_with(OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX))
+                {
+                    resolved_count += 1;
+                }
+            }
+        }
+
+        if state == OutboxState::Acknowledged {
+            let candidate = (
+                state_changed_at,
+                canonical_outbox_timestamp(&state_changed_at_raw, "state_changed_at")?,
+            );
+            if last_successful_sync
+                .as_ref()
+                .is_none_or(|(latest, _)| candidate.0 > *latest)
+            {
+                last_successful_sync = Some(candidate);
+            }
+        }
+
+        if let Some(class) = error_class {
+            let candidate = (state_changed_at, event_id, class);
+            if last_error_class.as_ref().is_none_or(|latest| {
+                candidate.0 > latest.0 || (candidate.0 == latest.0 && candidate.1 > latest.1)
+            }) {
+                last_error_class = Some(candidate);
+            }
+        }
+    }
+    tx.commit()?;
+
+    let unresolved_quarantined_count = quarantined_count.saturating_sub(resolved_count);
+    let local_store_status = if unresolved_quarantined_count == 0 {
+        LocalStoreStatus::Healthy
+    } else {
+        LocalStoreStatus::Quarantined {
+            quarantined_count: unresolved_quarantined_count,
+        }
+    };
+
+    Ok(OutboxHealth {
+        local_store_status,
+        // There is no transport in this crate. Never derive a remote success
+        // shape from local terminal rows; the host adapter owns that claim.
+        remote_sync_status: RemoteSyncStatus::Unconfigured,
         pending_count,
         in_flight_count,
         acknowledged_count,
         rejected_count,
         conflicted_count,
         quarantined_count,
+        oldest_pending_at: oldest_pending_at.map(|(_, timestamp)| timestamp),
+        oldest_in_flight_at: oldest_in_flight_at.map(|(_, timestamp)| timestamp),
+        last_successful_sync: last_successful_sync.map(|(_, timestamp)| timestamp),
+        last_error_class: last_error_class.map(|(_, _, class)| class),
         resolved_count,
-        oldest_pending_at,
-        last_successful_sync,
-        last_error_class,
-    ): OutboxRowColumns = conn.query_row(
-        "SELECT
-             COALESCE(SUM(state = 'pending'), 0),
-             COALESCE(SUM(state = 'in_flight'), 0),
-             COALESCE(SUM(state = 'acknowledged'), 0),
-             COALESCE(SUM(state = 'rejected'), 0),
-             COALESCE(SUM(state = 'conflicted'), 0),
-             COALESCE(SUM(state = 'quarantined'
-                           AND NOT (substr(last_error_class, 1, length(?1)) = ?1)), 0),
-             COALESCE(SUM(state = 'quarantined'
-                           AND substr(last_error_class, 1, length(?1)) = ?1), 0),
-             MIN(CASE WHEN state = 'pending' THEN created_at END),
-             MAX(CASE WHEN state = 'acknowledged' THEN state_changed_at END),
-             (SELECT last_error_class FROM memory_outbox_events
-               WHERE last_error_class IS NOT NULL
-               ORDER BY state_changed_at DESC, event_id DESC LIMIT 1)
-         FROM memory_outbox_events",
-        params![OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX],
-        |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-            ))
-        },
-    )?;
-
-    let count = |value: i64| u64::try_from(value).unwrap_or(0);
-    let pending_count = count(pending_count);
-    let in_flight_count = count(in_flight_count);
-    let acknowledged_count = count(acknowledged_count);
-    let rejected_count = count(rejected_count);
-    let conflicted_count = count(conflicted_count);
-    let quarantined_count = count(quarantined_count);
-    let resolved_count = count(resolved_count);
-    let total = pending_count
-        + in_flight_count
-        + acknowledged_count
-        + rejected_count
-        + conflicted_count
-        + quarantined_count
-        + resolved_count;
-
-    let local_store_status = if quarantined_count == 0 {
-        LocalStoreStatus::Healthy
-    } else {
-        LocalStoreStatus::Quarantined { quarantined_count }
-    };
-
-    let remote_sync_status = if total == 0 {
-        RemoteSyncStatus::Idle
-    } else if in_flight_count > 0 {
-        RemoteSyncStatus::InFlight { in_flight_count }
-    } else if pending_count > 0 {
-        RemoteSyncStatus::Backlogged { pending_count }
-    } else if rejected_count > 0 || conflicted_count > 0 {
-        RemoteSyncStatus::Failing {
-            rejected_count,
-            conflicted_count,
-        }
-    } else {
-        RemoteSyncStatus::Drained
-    };
-
-    Ok(OutboxHealth {
-        local_store_status,
-        remote_sync_status,
-        pending_count,
-        oldest_pending_at,
-        last_successful_sync,
-        last_error_class,
-        resolved_count,
+        stale_lease_count,
     })
 }
 
@@ -1698,9 +1832,9 @@ mod tests {
     #[test]
     fn health_of_an_empty_outbox_is_idle_and_healthy_with_no_stamps() {
         let conn = open_conn();
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(health.local_store_status, LocalStoreStatus::Healthy);
-        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Idle);
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
         assert_eq!(health.pending_count, 0);
         assert_eq!(health.oldest_pending_at, None);
         assert_eq!(health.last_successful_sync, None);
@@ -1723,7 +1857,7 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(health.pending_count, 2);
         assert_eq!(
             health.oldest_pending_at.as_deref(),
@@ -1731,8 +1865,8 @@ mod tests {
         );
         assert_eq!(
             health.remote_sync_status,
-            RemoteSyncStatus::Backlogged { pending_count: 2 },
-            "pending work outranks a historical failure"
+            RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
         assert_eq!(health.local_store_status, LocalStoreStatus::Healthy);
         assert_eq!(
@@ -1750,11 +1884,8 @@ mod tests {
         seed_event(&mut conn, "evt-q", "obj-q");
         transition(&mut conn, "evt-q", OutboxState::InFlight, None).unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
-        assert_eq!(
-            health.remote_sync_status,
-            RemoteSyncStatus::InFlight { in_flight_count: 1 }
-        );
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
         assert_eq!(health.pending_count, 1);
         assert_eq!(health.last_successful_sync, None);
 
@@ -1762,8 +1893,8 @@ mod tests {
         transition(&mut conn, "evt-p", OutboxState::InFlight, None).unwrap();
         let acknowledged_p =
             transition(&mut conn, "evt-p", OutboxState::Acknowledged, None).unwrap();
-        let health = read_outbox_health(&conn).unwrap();
-        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Drained);
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
         assert_eq!(health.pending_count, 0);
         let newest = acknowledged
             .state_changed_at
@@ -1794,20 +1925,14 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(
             health.local_store_status,
             LocalStoreStatus::Quarantined {
                 quarantined_count: 1
             }
         );
-        assert_eq!(
-            health.remote_sync_status,
-            RemoteSyncStatus::Failing {
-                rejected_count: 1,
-                conflicted_count: 0
-            }
-        );
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
         assert_eq!(health.pending_count, 0);
         assert_eq!(health.oldest_pending_at, None);
         assert_eq!(
@@ -1828,7 +1953,7 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(
             health.local_store_status,
             LocalStoreStatus::Quarantined {
@@ -1878,7 +2003,7 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(
             health.local_store_status,
             LocalStoreStatus::Quarantined {
@@ -1905,7 +2030,7 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(health.local_store_status, LocalStoreStatus::Healthy);
         assert_eq!(health.resolved_count, 1);
     }
@@ -1948,7 +2073,7 @@ mod tests {
 
         // Age one lease deterministically rather than by sleeping.
         conn.execute(
-            "UPDATE memory_outbox_events SET state_changed_at = '2020-01-01T00:00:00.000Z' \
+            "UPDATE memory_outbox_events SET state_changed_at = '2020-01-01T01:00:00+01:00' \
              WHERE event_id = 'evt-stale'",
             [],
         )
@@ -1962,7 +2087,7 @@ mod tests {
             OutboxState::InFlight,
             "a takeover is not a state change"
         );
-        assert_eq!(taken.previous_state_changed_at, "2020-01-01T00:00:00.000Z");
+        assert_eq!(taken.previous_state_changed_at, "2020-01-01T01:00:00+01:00");
         assert_eq!(taken.event.state, OutboxState::InFlight);
         assert!(
             taken.event.state_changed_at > taken.previous_state_changed_at,
@@ -2026,5 +2151,131 @@ mod tests {
         assert!(OutboxState::parse("shipped").is_err());
         assert!(OutboxState::parse("Pending").is_err());
         assert_eq!(OutboxState::parse("pending").unwrap(), OutboxState::Pending);
+    }
+
+    #[test]
+    fn health_orders_mixed_supported_timestamp_forms_semantically() {
+        let mut conn = open_conn();
+        seed_event(&mut conn, "evt-legacy-old", "obj-legacy-old");
+        seed_event(&mut conn, "evt-canonical-new", "obj-canonical-new");
+        conn.execute(
+            "UPDATE memory_outbox_events SET created_at = ?1 WHERE event_id = ?2",
+            params!["2026-01-01T01:00:00+01:00", "evt-legacy-old"],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE memory_outbox_events SET created_at = ?1 WHERE event_id = ?2",
+            params!["2026-01-01T00:30:00Z", "evt-canonical-new"],
+        )
+        .unwrap();
+
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
+        assert_eq!(
+            health.oldest_pending_at.as_deref(),
+            Some("2026-01-01T00:00:00.000Z"),
+            "the +01:00 legacy form is the older instant"
+        );
+    }
+
+    #[test]
+    fn health_inventory_counts_all_states_and_mixed_extrema_semantically() {
+        let mut conn = open_conn();
+        for (event_id, object_id) in [
+            ("evt-pending-old", "obj-pending-old"),
+            ("evt-pending-new", "obj-pending-new"),
+            ("evt-inflight-old", "obj-inflight-old"),
+            ("evt-inflight-new", "obj-inflight-new"),
+            ("evt-ack", "obj-ack"),
+            ("evt-rejected", "obj-rejected"),
+            ("evt-conflicted", "obj-conflicted"),
+            ("evt-quarantined", "obj-quarantined"),
+        ] {
+            seed_event(&mut conn, event_id, object_id);
+        }
+        transition(&mut conn, "evt-inflight-old", OutboxState::InFlight, None).unwrap();
+        transition(&mut conn, "evt-inflight-new", OutboxState::InFlight, None).unwrap();
+        transition(&mut conn, "evt-ack", OutboxState::InFlight, None).unwrap();
+        transition(&mut conn, "evt-ack", OutboxState::Acknowledged, None).unwrap();
+        transition(&mut conn, "evt-rejected", OutboxState::InFlight, None).unwrap();
+        transition(
+            &mut conn,
+            "evt-rejected",
+            OutboxState::Rejected,
+            Some("schema_refused"),
+        )
+        .unwrap();
+        transition(&mut conn, "evt-conflicted", OutboxState::InFlight, None).unwrap();
+        transition(
+            &mut conn,
+            "evt-conflicted",
+            OutboxState::Conflicted,
+            Some("divergent_revision"),
+        )
+        .unwrap();
+        transition(
+            &mut conn,
+            "evt-quarantined",
+            OutboxState::Quarantined,
+            Some("operator_hold"),
+        )
+        .unwrap();
+
+        // Deliberately mix supported offset and canonical forms. Raw text
+        // ordering would choose the 00:30 rows, while instant ordering must
+        // choose the 00:00 rows.
+        for (event_id, created_at, state_changed_at) in [
+            (
+                "evt-pending-old",
+                "2026-01-01T01:00:00+01:00",
+                "2026-01-01T01:00:00+01:00",
+            ),
+            (
+                "evt-pending-new",
+                "2026-01-01T00:30:00Z",
+                "2026-01-01T00:30:00Z",
+            ),
+            (
+                "evt-inflight-old",
+                "2026-01-01T02:00:00+02:00",
+                "2026-01-01T02:00:00+02:00",
+            ),
+            (
+                "evt-inflight-new",
+                "2026-01-01T00:30:00Z",
+                "2026-01-01T00:30:00Z",
+            ),
+        ] {
+            conn.execute(
+                "UPDATE memory_outbox_events SET created_at = ?1, state_changed_at = ?2 \
+                 WHERE event_id = ?3",
+                params![created_at, state_changed_at, event_id],
+            )
+            .unwrap();
+        }
+
+        let health = read_outbox_health(&conn, Duration::ZERO).unwrap();
+        assert_eq!(health.pending_count, 2);
+        assert_eq!(health.in_flight_count, 2);
+        assert_eq!(health.acknowledged_count, 1);
+        assert_eq!(health.rejected_count, 1);
+        assert_eq!(health.conflicted_count, 1);
+        assert_eq!(health.quarantined_count, 1);
+        assert_eq!(health.resolved_count, 0);
+        assert_eq!(health.stale_lease_count, 2);
+        assert_eq!(
+            health.oldest_pending_at.as_deref(),
+            Some("2026-01-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            health.oldest_in_flight_at.as_deref(),
+            Some("2026-01-01T00:00:00.000Z")
+        );
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
+        assert_eq!(
+            health.local_store_status,
+            LocalStoreStatus::Quarantined {
+                quarantined_count: 1
+            }
+        );
     }
 }
