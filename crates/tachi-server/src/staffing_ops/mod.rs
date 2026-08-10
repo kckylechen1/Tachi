@@ -280,30 +280,59 @@ fn record_route_decision_best_effort(
         .get("authority")
         .map(crate::tune_ops::route_policy::content_digest_hex);
 
-    let assignment_mode = if recommendation_ref.is_some() {
+    // tachi#1675 BUG-10: `assignment_mode` and `recommendation_id` must
+    // reflect a recommendation the DB actually resolved, never the mere
+    // presence of a caller-supplied ref. A caller can pass any string
+    // (stale, typo'd, forged) as `recommendation_ref`; recording 'advised'
+    // for a ref that doesn't resolve would be the ledger fabricating advice
+    // that was never given. `resolved_recommendation` is the ONE lookup
+    // whose outcome both `assignment_mode` and `override_flag` are derived
+    // from — a miss (not found OR a query error) degrades to the honest
+    // 'unadvised' floor with `recommendation_id` stored NULL, exactly the
+    // same shape as no ref ever being supplied.
+    let resolved_recommendation = recommendation_ref.and_then(|rec_id| {
+        match server.with_global_store_read(|store| {
+            memcore::get_route_recommendation(store.connection(), rec_id)
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(Some(row)) => Some(row),
+            Ok(None) => {
+                tracing::warn!(
+                    dispatch_id,
+                    recommendation_ref = rec_id,
+                    "tachi#1675 Seam B: recommendation_ref does not resolve to a route_recommendations \
+                     row; recording assignment_mode='unadvised' rather than fabricating advice"
+                );
+                None
+            }
+            Err(err) => {
+                tracing::warn!(
+                    dispatch_id,
+                    recommendation_ref = rec_id,
+                    error = %err,
+                    "tachi#1675 Seam B: recommendation lookup failed; recording assignment_mode='unadvised' \
+                     rather than fabricating advice"
+                );
+                None
+            }
+        }
+    });
+    let assignment_mode = if resolved_recommendation.is_some() {
         "advised"
     } else {
         "unadvised"
     };
-    let override_flag = match recommendation_ref {
-        Some(rec_id) => {
-            let recommendation = server.with_global_store_read(|store| {
-                memcore::get_route_recommendation(store.connection(), rec_id)
-                    .map_err(|e| e.to_string())
-            });
-            match recommendation {
-                Ok(Some(row)) => row.recommended_profile != selected_profile,
-                _ => false,
-            }
-        }
-        None => false,
-    };
+    let override_flag = resolved_recommendation
+        .as_ref()
+        .map(|row| row.recommended_profile != selected_profile)
+        .unwrap_or(false);
+    let recommendation_id = resolved_recommendation.map(|row| row.recommendation_id);
 
     let route_decision_id = uuid::Uuid::new_v4().to_string();
     let new_decision = memcore::NewRouteDecision {
         route_decision_id: route_decision_id.clone(),
         dispatch_id: dispatch_id.to_string(),
-        recommendation_id: recommendation_ref.map(str::to_string),
+        recommendation_id,
         selected_profile,
         selected_model,
         assignment_mode: assignment_mode.to_string(),
@@ -818,6 +847,47 @@ mod tests {
             !row.override_flag,
             "selected_profile matches the recommendation -> no override"
         );
+    }
+
+    /// BUG-10: a `recommendation_ref` that does NOT resolve to any
+    /// `route_recommendations` row (stale, typo'd, forged — no row is ever
+    /// seeded here) must NOT be recorded as 'advised'. The ledger must never
+    /// fabricate advice that was never actually given: the honest floor for
+    /// an unresolved ref is identical to no ref at all — 'unadvised' with
+    /// `recommendation_id` stored NULL.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn record_route_decision_unadvised_when_recommendation_ref_does_not_resolve() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = test_server();
+
+        // Deliberately NO route_recommendations row seeded for this id.
+        let dispatch_id = "20260810T000006Z-claude-ffffffff";
+        seed_status_json(dispatch_id, "env-1", "dev", "claude-sonnet-5");
+        let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
+
+        record_route_decision_best_effort(&server, &raw, Some("rec-does-not-exist"));
+
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_route_decision_by_dispatch_id(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .expect("route_decisions row still lands even when the ref is unresolved");
+        assert_eq!(
+            row.assignment_mode, "unadvised",
+            "an unresolved recommendation_ref must never be recorded as advised"
+        );
+        assert!(
+            row.recommendation_id.is_none(),
+            "recommendation_id must be NULL, not the unresolved ref string"
+        );
+        assert!(!row.override_flag);
     }
 
     #[allow(clippy::await_holding_lock)]

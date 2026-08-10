@@ -12,7 +12,31 @@ pub(crate) fn handle_dispatch_recommendation(
     let rows = load_live_eval_rows(server, limit.max(1))?;
     let subagent_scores = aggregate_subagent_scores(&rows);
     let performance_matrix = aggregate_performance_matrix(&rows);
-    let route_policy_rules = load_route_policy_rule_loadout(server, &risk)?;
+    // tachi#1675 BUG-8 (TOCTOU): read the route-policy state ONCE. The
+    // candidate-scoring loadout below and `policy_source_revision`'s hash
+    // (further down) MUST be built from the exact SAME snapshot —
+    // `load_route_policy_rule_loadout` internally does its own
+    // `list_state(ROUTE_POLICY_RULE_NS)` read, so calling it here and then
+    // reading again later (as this PR's first cut did) opens a window where
+    // a concurrent route-policy write lands between the two reads: the
+    // recorded hash would then describe a policy state that never actually
+    // produced this recommendation. `route_policy_rows` is threaded through
+    // to both consumers below; nothing after this point re-reads
+    // `ROUTE_POLICY_RULE_NS`.
+    let route_policy_rows = server.with_global_store_read(|store| {
+        store
+            .list_state(ROUTE_POLICY_RULE_NS)
+            .map_err(|e| format!("list active route policy rules: {e}"))
+    })?;
+    let route_policy_records = route_policy_rows
+        .iter()
+        .map(|row| tachi_dispatch::RoutePolicyRuleRecord {
+            proposal_id: row.key.clone(),
+            value_json: row.value_json.clone(),
+        })
+        .collect::<Vec<_>>();
+    let route_policy_rules =
+        tachi_dispatch::build_route_policy_rule_loadout(&route_policy_records, &risk);
 
     let candidates = tachi_dispatch::recommend_dispatch_profile_candidates(
         &risk,
@@ -63,14 +87,10 @@ pub(crate) fn handle_dispatch_recommendation(
     // through this one function.
     let recommendation_id = uuid::Uuid::new_v4().to_string();
     let occurred_at = memcore::now_utc_iso();
-    let policy_source_revision = {
-        let source_rows = server.with_global_store_read(|store| {
-            store
-                .list_state(ROUTE_POLICY_RULE_NS)
-                .map_err(|e| format!("list active route policy rules: {e}"))
-        })?;
-        crate::tune_ops::route_policy::route_policy_source_revision(&source_rows)
-    };
+    // Same `route_policy_rows` snapshot the loadout above was built from —
+    // no second read (BUG-8 fix).
+    let policy_source_revision =
+        crate::tune_ops::route_policy::route_policy_source_revision(&route_policy_rows);
     let new_recommendation = memcore::NewRouteRecommendation {
         recommendation_id: recommendation_id.clone(),
         task_type: Some(risk.task_type.clone()),
@@ -225,6 +245,81 @@ mod route_recommendation_ledger_tests {
         assert_eq!(
             before_identities,
             rubric_table_row_count(&server, "agent_identities")
+        );
+    }
+
+    /// BUG-8 (TOCTOU): `policy_source_revision` must hash the SAME
+    /// route-policy snapshot that scored the candidates, not a second,
+    /// independently-timed read. A live race between the two reads can't be
+    /// constructed deterministically in a unit test (there is no seam to
+    /// inject a concurrent write mid-call), so this locks down the
+    /// observable, structural consequence of the fix instead: the recorded
+    /// `policy_source_revision` must equal `route_policy_source_revision`
+    /// computed over a snapshot this test reads directly (proving the
+    /// production code's hash is a pure function of rows, not a
+    /// re-derived/independently-timed read) AND `route_policy_source_revision`
+    /// itself only ever accepts `rows: &[StateRow]` — it has no store handle
+    /// of its own to open a second, later read with.
+    #[test]
+    fn policy_source_revision_hashes_the_rows_that_scored_the_candidates() {
+        let server = test_server();
+        let rule = serde_json::json!({
+            "proposal_id": "route_policy:fix_request:wizard_sonnet",
+            "kind": "route_policy",
+            "status": "applied",
+            "review": {"status": "approved"},
+            "policy": "cost_sensitive",
+            "task_type": "fix_request",
+            "proposed_profile": "wizard_sonnet",
+            "score_delta": 12.5,
+            "policy_rule": {
+                "when_task_type": "fix_request",
+                "prefer_profile": "wizard_sonnet",
+                "policy": "cost_sensitive",
+                "fallback_to_current_profile": "claude_plan",
+            },
+            "evidence": {"source": "test", "proposed": {"samples": tachi_dispatch::MIN_ROUTE_POLICY_RULE_SAMPLES}},
+        });
+        server
+            .with_global_store(|store| {
+                store
+                    .set_state(
+                        ROUTE_POLICY_RULE_NS,
+                        "route_policy:fix_request:wizard_sonnet",
+                        &rule.to_string(),
+                    )
+                    .map_err(|err| err.to_string())
+            })
+            .expect("seed route policy rule");
+
+        let raw = handle_dispatch_recommendation(&server, "fix a bug", None, 50, &[])
+            .expect("recommendation succeeds");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let recommendation_id = payload["recommendation_id"].as_str().unwrap().to_string();
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_route_recommendation(store.connection(), &recommendation_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .expect("row present");
+
+        // Independently read the (unchanged, single-threaded-test) state and
+        // hash it the SAME way the production code does — this must equal
+        // what got recorded, proving the recorded hash really is a function
+        // of `route_policy_rows`, not something else.
+        let expected_rows = server
+            .with_global_store_read(|store| {
+                store
+                    .list_state(ROUTE_POLICY_RULE_NS)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let expected_hash =
+            crate::tune_ops::route_policy::route_policy_source_revision(&expected_rows);
+        assert_eq!(
+            row.policy_source_revision.as_deref(),
+            Some(expected_hash.as_str())
         );
     }
 }

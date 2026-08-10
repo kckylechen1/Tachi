@@ -1,5 +1,10 @@
 use super::super::*;
 
+/// tachi#1675 BUG-8: `recommendation.rs` (the last production caller)
+/// inlines this same sequence itself now — see the note in
+/// `dispatch_profile::policy`. Left un-gated (not `#[cfg(test)]`) since its
+/// own dedicated unit test still documents the risk-classification contract
+/// `build_route_policy_rule_loadout` implements.
 pub(in crate::dispatch_profile) fn load_route_policy_rule_loadout(
     server: &MemoryServer,
     risk: &DispatchRisk,

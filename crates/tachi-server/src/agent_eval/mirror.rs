@@ -215,10 +215,17 @@ pub(crate) fn handle_adjudicate(
             .map_err(|e| e.to_string())
     })?;
 
-    // `_run` is fetched only as an existence check (the "vanished after
-    // adjudication" error below) — gating below uses ONLY the observation,
-    // never the run's requested identity (see `producer_lineage_for_gating`).
-    let (_run, observation) = server.with_global_store_read(|store| {
+    // `run` is fetched for its existence check (the "vanished after
+    // adjudication" error below) AND, since BUG-5's fix, its
+    // `requested_agent` — the closest comparable "who executed this" identity
+    // the mirror spine carries — for the actor-vs-executor self check in
+    // `compute_independence_basis`. Gating in the JSON response below still
+    // uses ONLY the observation, never the run's requested identity (see
+    // `producer_lineage_for_gating`) — `requested_agent` is PLANNED, not
+    // OBSERVED, identity, so it is deliberately restricted to the
+    // conservative "is this literally the same actor" self-check and never
+    // substituted for `producer_lineage` itself.
+    let (run, observation) = server.with_global_store_read(|store| {
         let conn = store.connection();
         let run = memcore::get_run_by_id(conn, &eval_run_id)
             .map_err(|e| e.to_string())?
@@ -240,6 +247,7 @@ pub(crate) fn handle_adjudicate(
             &adjudicator_actor,
             &producer_lineage,
             &verifier_lineage,
+            run.requested_agent.as_deref(),
             rubric,
         )
     });
@@ -279,25 +287,76 @@ fn rubric_v1_hash() -> String {
 }
 
 /// tachi#1675 PR1 D5: `independence_basis` is a MACHINE-COMPUTED disposition,
-/// never caller-asserted. On the mirror spine there is no
-/// `dispatch_outcomes.vendor` / `identity_attribution_basis` pair to read —
-/// this reuses the SAME structural primitives (`is_self_eval` /
-/// `cross_model_independent`, both already gating cross_model_independent/
-/// self_eval in the response above) as the mirror-spine equivalent of D5's
-/// dispatch-spine rule: same known lineage on both sides -> `self`
-/// (hard-excluded); different KNOWN lineages -> `structural_cross_vendor`
-/// (the only basis eligible for positive routing evidence); anything with an
-/// unknown lineage on either side -> `declared_only` (kept as evidence,
-/// excluded from positive labels). `identity_bound` is reserved and never
-/// returned here — [`memcore::insert_eval_rubric_score`] independently
-/// refuses it regardless.
-fn compute_independence_basis(producer_lineage: &str, verifier_lineage: &str) -> &'static str {
+/// never caller-asserted.
+///
+/// The mirror spine has NO `dispatch_outcomes.vendor` /
+/// `identity_attribution_basis` pair to read — those are dispatch-spine-only
+/// columns. This function is therefore a conservative, mirror-appropriate
+/// PROJECTION of the frozen D5 rule, not a literal reimplementation of it.
+/// The dispatch spine's full rule (reading `dispatch_outcomes.vendor` and
+/// `identity_attribution_basis` directly) is deferred to the follow-up PR
+/// that wires a rubric block onto `dispatch_adjudications`
+/// (`complete_ops::dispatch_outcome`) — out of this leaf's scope.
+///
+/// Evaluated in order:
+/// 1. **actor == executor check**: when the run carries a comparable
+///    "who executed this" identity (`requested_agent`) and it
+///    case-insensitively matches the adjudicating `actor`, this IS the same
+///    identity reviewing its own work -> `'self'`, regardless of lineage.
+///    `requested_agent` is PLANNED identity (not carrier-observed), so this
+///    check is deliberately narrow (exact-ish name match) rather than fed
+///    into the lineage comparisons below.
+/// 2. **Same known model lineage** (`is_self_eval`) -> `'self'`.
+/// 3. **UNKNOWN LINEAGE GATE**: either side's lineage is
+///    `tachi_dispatch::UNKNOWN_IDENTITY` -> `'declared_only'`, NEVER
+///    `'structural_cross_vendor'` — an unattributable identity can never
+///    prove cross-vendor independence, no matter what the OTHER side is.
+/// 4. **Same provider, different family** (`model_lineage_id` reduces to
+///    `provider/family`; e.g. `anthropic/claude-sonnet` vs
+///    `anthropic/claude-opus` both carry provider `anthropic`) ->
+///    `'declared_only'`, NOT `'structural_cross_vendor'` — two models from
+///    the SAME vendor are not independent evidence of anything (a vendor's
+///    own lineup reviewing itself is still a same-vendor conflict of
+///    interest), even when `is_self_eval` (which requires the full
+///    `provider/family` string to match) does not itself call it self.
+/// 5. **Different providers, both known** -> `'structural_cross_vendor'` —
+///    the only basis eligible for positive routing evidence.
+///
+/// `identity_bound` is reserved and never returned here —
+/// [`memcore::insert_eval_rubric_score`] independently refuses it
+/// regardless.
+fn compute_independence_basis(
+    producer_lineage: &str,
+    verifier_lineage: &str,
+    adjudicator_actor: &str,
+    executor_identity: Option<&str>,
+) -> &'static str {
+    if let Some(executor) = executor_identity
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let actor_trimmed = adjudicator_actor.trim();
+        if !actor_trimmed.is_empty() && executor.eq_ignore_ascii_case(actor_trimmed) {
+            return "self";
+        }
+    }
     if is_self_eval(producer_lineage, verifier_lineage) {
-        "self"
-    } else if cross_model_independent(producer_lineage, verifier_lineage) {
-        "structural_cross_vendor"
-    } else {
-        "declared_only"
+        return "self";
+    }
+    if producer_lineage == tachi_dispatch::UNKNOWN_IDENTITY
+        || verifier_lineage == tachi_dispatch::UNKNOWN_IDENTITY
+    {
+        return "declared_only";
+    }
+    let producer_provider = producer_lineage
+        .split_once('/')
+        .map(|(provider, _)| provider);
+    let verifier_provider = verifier_lineage
+        .split_once('/')
+        .map(|(provider, _)| provider);
+    match (producer_provider, verifier_provider) {
+        (Some(left), Some(right)) if left == right => "declared_only",
+        _ => "structural_cross_vendor",
     }
 }
 
@@ -308,6 +367,7 @@ fn write_rubric_score_best_effort(
     adjudicator_actor: &str,
     producer_lineage: &str,
     verifier_lineage: &str,
+    executor_identity: Option<&str>,
     rubric: EvalRubricParams,
 ) -> Option<memcore::EvalRubricScoreRow> {
     let adjudicator_vendor = rubric
@@ -315,7 +375,12 @@ fn write_rubric_score_best_effort(
         .map(scrub)
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| verifier_lineage.to_string());
-    let independence_basis = compute_independence_basis(producer_lineage, verifier_lineage);
+    let independence_basis = compute_independence_basis(
+        producer_lineage,
+        verifier_lineage,
+        adjudicator_actor,
+        executor_identity,
+    );
     let new_score = memcore::NewEvalRubricScore {
         rubric_score_id: uuid::Uuid::new_v4().to_string(),
         adjudication_id: adjudication_id.to_string(),
@@ -473,6 +538,14 @@ mod rubric_tests {
     }
 
     fn register(server: &MemoryServer, native_child_id: &str) -> String {
+        register_with_requested_agent(server, native_child_id, None)
+    }
+
+    fn register_with_requested_agent(
+        server: &MemoryServer,
+        native_child_id: &str,
+        requested_agent: Option<&str>,
+    ) -> String {
         let params = MirrorEvalRegisterParams {
             frozen_contract_ref: "kckylechen1/tachi#1675".to_string(),
             execution_origin: "host_native_subagent".to_string(),
@@ -481,7 +554,7 @@ mod rubric_tests {
             native_child_id: Some(native_child_id.to_string()),
             requested_profile: None,
             requested_model: None,
-            requested_agent: None,
+            requested_agent: requested_agent.map(str::to_string),
         };
         let raw = handle_register(server, params).expect("register succeeds");
         let value: Value = serde_json::from_str(&raw).unwrap();
@@ -674,6 +747,119 @@ mod rubric_tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.independence_basis, "declared_only");
+    }
+
+    /// BUG-5(a): the UNKNOWN LINEAGE GATE. Both sides carry bare,
+    /// unparseable model strings (no `provider/model` shape) -> BOTH
+    /// lineages resolve to `UNKNOWN_IDENTITY` -> `declared_only`. An
+    /// unattributable identity must NEVER be able to produce
+    /// `structural_cross_vendor`, even though the two raw strings visibly
+    /// differ from each other.
+    #[test]
+    fn independence_basis_bare_model_strings_never_yield_cross_vendor() {
+        let server = test_server();
+        let eval_run_id = register(&server, "native-bare");
+        observe(&server, &eval_run_id, "claude-sonnet-5");
+
+        let raw = handle_adjudicate(
+            &server,
+            adjudicate_params(
+                &eval_run_id,
+                "leader",
+                Some("gpt-5.1"),
+                Some(rubric_block()),
+            ),
+        )
+        .expect("adjudicate succeeds");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let adjudication_id = value["adjudication_id"].as_str().unwrap().to_string();
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_eval_rubric_score(store.connection(), "mirror", &adjudication_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.independence_basis, "declared_only");
+        assert_ne!(
+            row.independence_basis, "structural_cross_vendor",
+            "bare unparseable model strings must never be read as cross-vendor evidence"
+        );
+    }
+
+    /// BUG-5(b): `model_lineage_id` reduces to `provider/family`. Two
+    /// different families under the SAME provider (`anthropic/claude-sonnet`
+    /// vs `anthropic/opus-4`) are not independent evidence — same-vendor
+    /// self-review — so this must land `declared_only`, not
+    /// `structural_cross_vendor`, even though the two full lineages differ
+    /// (so `is_self_eval` correctly does NOT call it `self` either).
+    #[test]
+    fn independence_basis_same_provider_different_family_is_not_cross_vendor() {
+        let server = test_server();
+        let eval_run_id = register(&server, "native-same-provider");
+        observe(&server, &eval_run_id, "anthropic/claude-sonnet");
+
+        let raw = handle_adjudicate(
+            &server,
+            adjudicate_params(
+                &eval_run_id,
+                "leader",
+                Some("anthropic/opus-4"),
+                Some(rubric_block()),
+            ),
+        )
+        .expect("adjudicate succeeds");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let adjudication_id = value["adjudication_id"].as_str().unwrap().to_string();
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_eval_rubric_score(store.connection(), "mirror", &adjudication_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.independence_basis, "declared_only",
+            "same provider, different family, must not be structural_cross_vendor"
+        );
+    }
+
+    /// BUG-5(c): the actor==executor check. The adjudicating `actor` matches
+    /// the run's `requested_agent` (case-insensitively) -> `self`,
+    /// regardless of what the model lineages alone would suggest — here the
+    /// lineages (anthropic vs openai) would otherwise read as
+    /// `structural_cross_vendor`, but the actor identity check must
+    /// override that.
+    #[test]
+    fn independence_basis_self_when_actor_matches_executor_identity() {
+        let server = test_server();
+        let eval_run_id =
+            register_with_requested_agent(&server, "native-actor-match", Some("Worker-X"));
+        observe(&server, &eval_run_id, "anthropic/claude-sonnet");
+
+        let raw = handle_adjudicate(
+            &server,
+            adjudicate_params(
+                &eval_run_id,
+                "worker-x",
+                Some("openai/gpt-5"),
+                Some(rubric_block()),
+            ),
+        )
+        .expect("adjudicate succeeds");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let adjudication_id = value["adjudication_id"].as_str().unwrap().to_string();
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_eval_rubric_score(store.connection(), "mirror", &adjudication_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.independence_basis, "self",
+            "actor matching the run's executor identity must hard-override lineage-based cross-vendor evidence"
+        );
     }
 
     /// Negative test: the rubric write path never touches session_claims or
