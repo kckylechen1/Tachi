@@ -548,8 +548,9 @@ fn xai_and_zai_are_recognized_provider_env_names() {
     // literal on disk). That only works end-to-end if this name is in the
     // provider-key filter that gates which unlocked-vault secrets get
     // injected into the lane subprocess env
-    // (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
-    let names = provider_api_key_env_names();
+    // (`load_unlocked_provider_env_secrets` -> `admitted_env_secret_names`,
+    // #1680/D3).
+    let names = admitted_env_secret_names();
     assert!(
         names.contains("XAI_API_KEY"),
         "XAI_API_KEY must be a recognized provider env name so an unlocked-vault \
@@ -575,7 +576,7 @@ fn zhipuai_is_a_recognized_provider_env_name() {
     // different value than `ZAI_API_KEY`. Without `ZHIPUAI_API_KEY` in the
     // provider-key filter, the GLM lane subprocess never receives its
     // vault secret and `{env:ZHIPUAI_API_KEY}` resolves to nothing.
-    let names = provider_api_key_env_names();
+    let names = admitted_env_secret_names();
     assert!(
         names.contains("ZHIPUAI_API_KEY"),
         "ZHIPUAI_API_KEY must be a recognized provider env name so an unlocked-vault \
@@ -590,8 +591,9 @@ fn kimi_is_a_recognized_provider_env_name() {
     // "收权" can never blank it (no literal on disk). That only works
     // end-to-end if this name is in the provider-key filter that gates
     // which unlocked-vault secrets get injected into the lane subprocess
-    // env (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
-    let names = provider_api_key_env_names();
+    // env (`load_unlocked_provider_env_secrets` -> `admitted_env_secret_names`,
+    // #1680/D3).
+    let names = admitted_env_secret_names();
     assert!(
         names.contains("KIMI_API_KEY"),
         "KIMI_API_KEY must be a recognized provider env name so an unlocked-vault \
@@ -603,4 +605,29 @@ fn kimi_is_a_recognized_provider_env_name() {
         names.contains("MOONSHOT_API_KEY"),
         "MOONSHOT_API_KEY alias must be admitted by the provider-key filter"
     );
+}
+
+/// #1680/D3 env-injection regression: `admitted_env_secret_names()` (the
+/// surface that gates lane env injection, providers-doctor admission, and
+/// the plaintext secret scanner) must stay exactly as wide as the old,
+/// undivided `provider_api_key_env_names()` was — every `API_KEY_DEFS` key
+/// and every alias, with no class filtering. This is the guard that lane env
+/// injection behavior did not change: only the *materialization* allowlist
+/// (`model_provider_env_names()`) narrowed.
+#[test]
+fn admitted_env_secret_names_matches_legacy_unsplit_flattened_set() {
+    let mut expected_legacy_set = HashSet::new();
+    for def in API_KEY_DEFS {
+        expected_legacy_set.insert(def.key.to_string());
+        for alias in def.aliases {
+            expected_legacy_set.insert((*alias).to_string());
+        }
+    }
+
+    assert_eq!(admitted_env_secret_names(), expected_legacy_set);
+    // And the narrowed materialization view must be a strict subset that
+    // drops at least the SearchApi names — never equal to the admitted set,
+    // or the split accomplished nothing.
+    assert!(model_provider_env_names().is_subset(&admitted_env_secret_names()));
+    assert!(model_provider_env_names().len() < admitted_env_secret_names().len());
 }

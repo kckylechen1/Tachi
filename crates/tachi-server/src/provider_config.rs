@@ -15,8 +15,46 @@ pub use tachi_llm::{
 };
 use tachi_llm::{LlmClient, ProviderSecret, VaultSourceAvailability};
 
+/// #1680/D3: the LLM materialization allowlist — `ModelApi`-class names only.
+/// This is the compile-time allowlist consulted by
+/// `materialize_provider_secrets_from_durable_source`; it deliberately
+/// excludes SearchApi (Exa/Tavily/Google Search) so a Vault-stored search key
+/// can never enter the LLM provider cache through the env-name filter. The
+/// filter alone is insufficient against a Vault-stored search key entering
+/// through the *pool* seam (`resolve_vault_pools` loads every `*_API_KEY`
+/// pool, class-blind) — see [`filter_model_provider_pools`], which is the
+/// actual enforcement point.
 pub(crate) fn provider_env_keys() -> HashSet<String> {
-    crate::status_ops::status_health::provider_api_key_env_names()
+    crate::status_ops::status_health::model_provider_env_names()
+}
+
+/// #1680/D3: the all-class admitted-secret-name surface — lane env injection,
+/// providers-doctor admission, and the plaintext secret scanner all need to
+/// recognize every provider key class (not just ModelApi), so they must not
+/// share `provider_env_keys()`'s narrowed allowlist.
+pub(crate) fn admitted_provider_env_keys() -> HashSet<String> {
+    crate::status_ops::status_health::admitted_env_secret_names()
+}
+
+/// #1680/D3 (codex finding 1, the sharpest catch of the cross-vendor review):
+/// the env-name split alone cannot stop a Vault-stored search key from
+/// reaching the LLM provider cache, because `resolve_vault_pools` seeds its
+/// map from the *entire* loaded Vault pool set — Vault pool loading admits
+/// any standalone `*_API_KEY` entry regardless of class
+/// (`vault_ops::access::load_unlocked_api_key_secret_pools`). This is the
+/// seam that closes the gap: every pool handed to
+/// `materialize_provider_secrets_from_durable_source` is filtered down to
+/// `ModelApi`-class pool names before it reaches `tachi_llm`. `tachi-llm`'s
+/// signature and internals are untouched — the filter lives entirely on the
+/// tachi-server side of the existing closure seam.
+pub(crate) fn filter_model_provider_pools(
+    pools: HashMap<String, Vec<ProviderSecret>>,
+) -> HashMap<String, Vec<ProviderSecret>> {
+    let allowed = provider_env_keys();
+    pools
+        .into_iter()
+        .filter(|(name, _)| allowed.contains(name))
+        .collect()
 }
 
 /// Load API keys from an unlocked in-process Vault session.
@@ -285,11 +323,12 @@ fn materialize_for_server_inner(
         server.llm.as_ref(),
         provider_env_keys(),
         || {
-            let resolved = resolve_vault_pools(Some(server), &global)?;
+            let (pools, availability) = resolve_vault_pools(Some(server), &global)?;
+            let pools = filter_model_provider_pools(pools);
             if let Some(hook) = after_vault_pools_resolved {
                 hook();
             }
-            Ok(resolved)
+            Ok((pools, availability))
         },
     )
     .map_err(format_provider_materialization_error)
@@ -308,7 +347,8 @@ pub fn materialize_standalone(
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
     tachi_llm::materialize_provider_secrets_from_durable_source(llm, provider_env_keys(), || {
-        resolve_vault_pools(None, global_db_path)
+        let (pools, availability) = resolve_vault_pools(None, global_db_path)?;
+        Ok((filter_model_provider_pools(pools), availability))
     })
     .map_err(format_provider_materialization_error)
 }
@@ -507,6 +547,98 @@ pub fn collect_config_env_values(resolved_home: Option<&Path>) -> HashMap<String
 mod tests {
     use super::*;
     use crate::test_support::EnvRestore;
+
+    /// #1680/D3 (codex finding 1, the sharpest catch of the cross-vendor
+    /// review): a Vault-stored search key must never reach the LLM provider
+    /// cache, even though Vault pool loading is class-blind and admits any
+    /// standalone `*_API_KEY` entry. This exercises the actual enforcement
+    /// seam — `filter_model_provider_pools`, which every production caller of
+    /// `materialize_provider_secrets_from_durable_source` routes its resolved
+    /// pools through before handing them to `tachi_llm` — rather than the
+    /// env-name allowlist alone, which #1680's frozen design explicitly
+    /// states is insufficient.
+    #[test]
+    fn filter_model_provider_pools_drops_search_keys_keeps_model_keys() {
+        let vault_pools = HashMap::from([
+            (
+                "TAVILY_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "TAVILY_API_KEY".to_string(),
+                    value: "tavily-secret".to_string(),
+                }],
+            ),
+            (
+                "EXA_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "EXA_API_KEY".to_string(),
+                    value: "exa-secret".to_string(),
+                }],
+            ),
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "DEEPSEEK_API_KEY".to_string(),
+                    value: "deepseek-secret".to_string(),
+                }],
+            ),
+        ]);
+
+        let filtered = filter_model_provider_pools(vault_pools);
+
+        assert!(
+            !filtered.contains_key("TAVILY_API_KEY"),
+            "a Vault-stored search key must not reach the LLM materialization pools: {filtered:?}"
+        );
+        assert!(
+            !filtered.contains_key("EXA_API_KEY"),
+            "a Vault-stored search key must not reach the LLM materialization pools: {filtered:?}"
+        );
+        assert!(
+            filtered.contains_key("DEEPSEEK_API_KEY"),
+            "a Vault-stored ModelApi key must still reach the LLM materialization pools: {filtered:?}"
+        );
+    }
+
+    /// #1680/D3: `provider_env_keys()` (the materialization allowlist) and
+    /// `admitted_provider_env_keys()` (the all-class admitted-secret-name
+    /// surface) must disagree on exactly the SearchApi names — that
+    /// divergence is the whole point of the split. A regression that
+    /// re-merges the two views would make this test start failing at the
+    /// `assert!(!...)` lines.
+    #[test]
+    fn model_and_admitted_provider_env_keys_diverge_on_search_api_names() {
+        let model_only = provider_env_keys();
+        let admitted = admitted_provider_env_keys();
+
+        assert!(model_only.contains("DEEPSEEK_API_KEY"));
+        assert!(admitted.contains("DEEPSEEK_API_KEY"));
+
+        assert!(
+            !model_only.contains("TAVILY_API_KEY"),
+            "materialization allowlist must not admit a SearchApi name"
+        );
+        assert!(
+            !model_only.contains("EXA_API_KEY"),
+            "materialization allowlist must not admit a SearchApi name"
+        );
+        assert!(
+            !model_only.contains("GOOGLE_SEARCH_API_KEY"),
+            "materialization allowlist must not admit a SearchApi name"
+        );
+
+        assert!(
+            admitted.contains("TAVILY_API_KEY"),
+            "the all-class admitted set must still recognize SearchApi names"
+        );
+        assert!(
+            admitted.contains("EXA_API_KEY"),
+            "the all-class admitted set must still recognize SearchApi names"
+        );
+        assert!(
+            admitted.contains("GOOGLE_SEARCH_API_KEY"),
+            "the all-class admitted set must still recognize SearchApi names"
+        );
+    }
 
     /// #1096 leaf-2a round-2 (codex B4-status): `resolved_home` is additive —
     /// `None` reproduces the exact pre-existing scan set (unchanged for every
