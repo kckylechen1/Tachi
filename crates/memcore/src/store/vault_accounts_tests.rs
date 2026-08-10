@@ -61,6 +61,14 @@ fn store() -> MemoryStore {
     MemoryStore::open_in_memory().expect("open in-memory store")
 }
 
+/// Seed a Vault entry whose `updated_at` column really is `updated_at`.
+///
+/// `vault_upsert_entry` stamps that column with wall-clock now and ignores the
+/// field on the struct it was handed (`db/vault_db.rs`), so the write has to be
+/// followed by a pin. Apply's Vault-entry precondition is an exact string
+/// compare against this column, and the pool digest hashes it, so a fixture
+/// that could not set it could only ever produce "now", which no plan can bind
+/// — the two happy-path tests below were reading their own seed as drift.
 fn seed_vault_entry(store: &MemoryStore, name: &str, updated_at: &str) {
     store
         .vault_upsert_entry(&VaultEntry {
@@ -76,6 +84,14 @@ fn seed_vault_entry(store: &MemoryStore, name: &str, updated_at: &str) {
             access_count: 0,
         })
         .expect("seed vault entry");
+    let pinned = store
+        .connection()
+        .execute(
+            "UPDATE vault_entries SET updated_at = ?2 WHERE name = ?1",
+            rusqlite::params![name, updated_at],
+        )
+        .expect("pin the seeded entry's updated_at");
+    assert_eq!(pinned, 1, "the seeded entry must exist to be pinned");
 }
 
 fn seed_account(store: &MemoryStore, account_id: &str, auth_ref: &str, alias: &str) {
