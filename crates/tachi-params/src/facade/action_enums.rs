@@ -87,16 +87,29 @@ pub enum TachiTaskAction {
     Brief,
 }
 
-/// Deserialize the wire action through the same typed parser used by router
-/// callers. This keeps retired-action guidance reachable at the MCP boundary
-/// instead of replacing it with serde's generic `unknown variant` message.
+/// Deserialize the wire action through the exact schema-advertised token set.
+/// Exact retired tokens then use the canonical typed parser so their migration
+/// guidance remains reachable at the MCP boundary; normalized aliases never
+/// become accepted wire actions.
 impl<'de> Deserialize<'de> for TachiTaskAction {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let wire = String::deserialize(deserializer)?;
-        wire.parse::<Self>().map_err(serde::de::Error::custom)
+        if let Some(&action) = Self::PRIMARY.iter().find(|action| action.as_str() == wire) {
+            return Ok(action);
+        }
+
+        if Self::is_explicit_retired_wire(&wire) {
+            if let Err(error) = wire.parse::<Self>() {
+                return Err(serde::de::Error::custom(error));
+            }
+        }
+
+        Err(serde::de::Error::custom(Self::invalid_exact_wire_error(
+            &wire,
+        )))
     }
 }
 
@@ -134,6 +147,44 @@ impl TachiTaskAction {
     /// positive inventory for `tachi_task` (no separate `&[&str]` mirror).
     pub fn primary_wire_strings() -> Vec<&'static str> {
         Self::PRIMARY.iter().map(|action| action.as_str()).collect()
+    }
+
+    fn is_explicit_retired_wire(wire: &str) -> bool {
+        matches!(
+            wire,
+            "dispatch"
+                | "wait"
+                | "cancel"
+                | "plan"
+                | "cycle_plan"
+                | "recommend"
+                | "refine_issues"
+                | "merge"
+                | "ux_matrix"
+                | "briefing"
+                | "doc_index"
+                | "cycle_status"
+                | "profiles"
+                | "profile"
+                | "card"
+                | "build_references"
+                | "close_loop"
+                | "route_simulate"
+                | "proposals"
+                | "review_proposal"
+                | "apply_proposals"
+                | "link_pr"
+                | "pr_status"
+                | "pr_handoff"
+                | "release_note"
+        )
+    }
+
+    fn invalid_exact_wire_error(wire: &str) -> String {
+        format!(
+            "Invalid tachi_task action '{wire}'. Wire actions must exactly match one of: {}.",
+            Self::primary_wire_strings().join(", ")
+        )
     }
 }
 

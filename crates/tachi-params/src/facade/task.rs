@@ -465,6 +465,44 @@ mod tests {
     }
 
     #[test]
+    fn task_wire_actions_require_exact_lowercase_primary_tokens() {
+        use super::super::action_enums::TachiTaskAction;
+
+        for &action in TachiTaskAction::PRIMARY {
+            let token = action.as_str();
+            let exact = serde_json::json!({"action": token});
+            let params: TachiTaskParams = serde_json::from_value(exact)
+                .expect("every exact lowercase primary action must deserialize");
+            assert_eq!(params.action, action);
+
+            for malformed in [
+                token.to_ascii_uppercase(),
+                format!(" {token}"),
+                format!("{token} "),
+                format!(" {token} "),
+            ] {
+                let wire = serde_json::json!({"action": malformed});
+                let error = serde_json::from_value::<TachiTaskParams>(wire)
+                    .expect_err("normalized action aliases must not deserialize");
+                let message = error.to_string();
+                assert!(
+                    message.contains("must exactly match one of")
+                        && !message.contains("unknown variant"),
+                    "wire action {malformed:?} must receive an exact-token refusal, got: {message}"
+                );
+            }
+        }
+
+        let unknown = serde_json::json!({"action": "not_a_task_action"});
+        let error = serde_json::from_value::<TachiTaskParams>(unknown)
+            .expect_err("unknown action must not deserialize");
+        assert!(
+            error.to_string().contains("must exactly match one of"),
+            "unknown wire action must receive an exact-token refusal: {error}"
+        );
+    }
+
+    #[test]
     fn c1a_actions_left_task() {
         use std::str::FromStr;
 
