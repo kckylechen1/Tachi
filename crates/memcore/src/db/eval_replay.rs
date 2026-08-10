@@ -45,6 +45,7 @@
 //! Strictly READ-ONLY, exactly like `eval_projection`: no `INSERT`/`UPDATE`/
 //! `DELETE` and no write accessor.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::Connection;
@@ -229,8 +230,9 @@ struct JudgmentEvent {
 fn fold_judgment_stream(events: Vec<JudgmentEvent>) -> BTreeMap<String, EvalAdjudicationFacts> {
     let mut folded: BTreeMap<String, EvalAdjudicationFacts> = BTreeMap::new();
     for event in events {
-        match folded.get_mut(&event.subject_id) {
-            Some(current) => {
+        match folded.entry(event.subject_id.clone()) {
+            Entry::Occupied(mut occupied) => {
+                let current = occupied.get_mut();
                 let event_count = current.event_count + 1;
                 if event.insertion_seq >= current.insertion_seq {
                     *current = facts_of(event, event_count);
@@ -238,9 +240,8 @@ fn fold_judgment_stream(events: Vec<JudgmentEvent>) -> BTreeMap<String, EvalAdju
                     current.event_count = event_count;
                 }
             }
-            None => {
-                let subject_id = event.subject_id.clone();
-                folded.insert(subject_id, facts_of(event, 1));
+            Entry::Vacant(vacant) => {
+                vacant.insert(facts_of(event, 1));
             }
         }
     }
