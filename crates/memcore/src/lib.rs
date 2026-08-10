@@ -227,9 +227,9 @@ pub use types::{
 };
 #[cfg(feature = "admin")]
 pub use vault::accounts::{
-    mint_account_id, mint_auth_ref, AccountClass, AccountCustody, AuthMode, CustodyKind,
-    CustodyResolution, NewProviderAccount, NewProviderAccountEvent, ProviderAccount,
-    ProviderAccountAlias, ProviderAccountEvent,
+    mint_account_id, mint_auth_ref, names_rotation_pool_member, AccountClass, AccountCustody,
+    AuthMode, CustodyKind, CustodyResolution, NewProviderAccount, NewProviderAccountEvent,
+    ProviderAccount, ProviderAccountAlias, ProviderAccountEvent,
 };
 #[cfg(feature = "admin")]
 pub use vault::fingerprint::{account_fingerprint_class, AccountFingerprintClass, FingerprintKey};

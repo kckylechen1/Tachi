@@ -4,8 +4,20 @@
 /// opposed to what the credential is. Sits beside [`VaultKeyHealth`] for the
 /// same reason that type does — it is vault-adjacent product data whose SQL
 /// lives in `db`.
+///
+/// `admin`-gated for the same reason `db::vault_accounts` is: these are
+/// operator-surface product types, and the `portable-kernel` facade resolves
+/// `memcore` with `default-features = false`.
+#[cfg(feature = "admin")]
 pub mod accounts;
 /// Keyed credential fingerprints (tachi#1680 D2).
+///
+/// **Must stay `admin`-gated**: this module hashes with `blake2`, which
+/// `Cargo.toml` enables through `admin = ["dep:blake2"]` only. Declaring it
+/// unconditionally compiles here (the workspace build turns `admin` on) while
+/// breaking `portable-kernel`, whose whole point is a `memcore` without the
+/// admin feature — a failure no default-feature build can see.
+#[cfg(feature = "admin")]
 pub mod fingerprint;
 
 use serde::{Deserialize, Serialize};

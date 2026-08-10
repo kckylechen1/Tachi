@@ -153,6 +153,7 @@ fn member_rotation_keeps_account_id_and_leaves_a_trail() {
     let update = record_account_fingerprint(
         &conn,
         &account_id,
+        Some(1),
         &after,
         EVENT_KIND_FINGERPRINT_OBSERVED,
         Some("pd1:rotation"),
@@ -207,6 +208,7 @@ fn master_key_rekey_refingerprints_without_reminting_identity() {
     record_account_fingerprint(
         &conn,
         &account_id,
+        None,
         &after,
         EVENT_KIND_FINGERPRINT_REKEYED,
         None,
@@ -255,6 +257,7 @@ fn recording_an_unchanged_fingerprint_writes_nothing() {
     let update = record_account_fingerprint(
         &conn,
         &account_id,
+        None,
         &fingerprint,
         EVENT_KIND_FINGERPRINT_OBSERVED,
         None,
@@ -467,6 +470,7 @@ fn custody_resolves_and_repoints_without_changing_the_auth_ref() {
     let updated = update_custody_target(
         &conn,
         &auth_ref,
+        Some(1),
         CustodyKind::VaultRotationPool,
         "DEEPSEEK_API_KEY",
     )
@@ -480,6 +484,7 @@ fn custody_resolves_and_repoints_without_changing_the_auth_ref() {
     let repeated = update_custody_target(
         &conn,
         &auth_ref,
+        None,
         CustodyKind::VaultRotationPool,
         "DEEPSEEK_API_KEY",
     )
@@ -507,6 +512,7 @@ fn an_unknown_auth_ref_resolves_to_nothing_rather_than_guessing() {
     assert!(update_custody_target(
         &conn,
         "va1:deadbeef",
+        None,
         CustodyKind::VaultEntry,
         "DEEPSEEK_API_KEY"
     )
@@ -781,6 +787,7 @@ fn recording_a_fingerprint_for_an_unknown_account_is_an_error() {
     let err = record_account_fingerprint(
         &conn,
         "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        None,
         "fpa1:kv:0123456789ab",
         EVENT_KIND_FINGERPRINT_OBSERVED,
         None,
@@ -788,4 +795,249 @@ fn recording_a_fingerprint_for_an_unknown_account_is_an_error() {
     )
     .expect_err("an unknown account must not be silently ignored");
     assert!(format!("{err}").contains("does not exist"), "{err}");
+}
+
+// ── Revision safety: a lost compare-and-swap is refused, never published ─────
+
+/// The counter #1680 D4 binds apply-time preconditions to must not be
+/// advanceable from stale evidence. A caller that planned against revision 1
+/// and arrives after somebody else has already published revision 2 must be
+/// refused with a typed conflict — not allowed to overwrite the newer
+/// fingerprint, and not allowed to append a second event claiming a revision
+/// the row never held.
+///
+/// Pre-fix this test is RED in the way that matters: the accessor updated
+/// `WHERE account_id = ?1` with no revision predicate and no expected-revision
+/// parameter at all, so the stale write landed, the newer fingerprint was
+/// silently discarded, and the event log grew a third row.
+#[test]
+fn a_stale_planned_revision_is_refused_rather_than_published() {
+    let conn = make_conn();
+    let key = fp_key();
+
+    let first = key.account_fingerprint_from_members([key.key_fingerprint("deepseek", SECRET_A)]);
+    let (account_id, _) = seed_account(&conn, "deepseek", &first);
+
+    // Somebody else's pass lands first: the account is now at revision 2.
+    let second = key.account_fingerprint_from_members([key.key_fingerprint("deepseek", SECRET_B)]);
+    record_account_fingerprint(
+        &conn,
+        &account_id,
+        Some(1),
+        &second,
+        EVENT_KIND_FINGERPRINT_OBSERVED,
+        None,
+        "{}",
+    )
+    .expect("the first writer wins");
+
+    // Our pass was planned against revision 1 and must now be refused.
+    let third = key.account_fingerprint_from_members([
+        key.key_fingerprint("deepseek", SECRET_A),
+        key.key_fingerprint("deepseek", SECRET_B),
+    ]);
+    let err = record_account_fingerprint(
+        &conn,
+        &account_id,
+        Some(1),
+        &third,
+        EVENT_KIND_FINGERPRINT_OBSERVED,
+        Some("pd1:stale"),
+        "{}",
+    )
+    .expect_err("a stale plan must not be allowed to publish");
+    assert!(
+        matches!(
+            err,
+            crate::error::MemoryError::ProviderAccountRevisionConflict(_)
+        ),
+        "a lost race must be typed, not a generic error: {err:?}"
+    );
+
+    let account = get_provider_account(&conn, &account_id).unwrap().unwrap();
+    assert_eq!(
+        account.account_fingerprint, second,
+        "the refused write must not have overwritten the winner"
+    );
+    assert_eq!(account.revision, 2);
+
+    let events = list_provider_account_events(&conn, &account_id).unwrap();
+    assert_eq!(
+        events.len(),
+        2,
+        "a refused write appends no event: {events:?}"
+    );
+    let mut revisions: Vec<i64> = events.iter().map(|event| event.revision).collect();
+    revisions.sort_unstable();
+    revisions.dedup();
+    assert_eq!(
+        revisions,
+        vec![1, 2],
+        "two events must never claim the same revision"
+    );
+}
+
+/// The same guard on the custody pointer, where losing it is worse: the writer
+/// that lost would believe the resolver now answers with *its* target while the
+/// resolver actually answers with somebody else's.
+#[test]
+fn a_stale_custody_revision_is_refused_rather_than_repointed() {
+    let conn = make_conn();
+    let key = fp_key();
+    let fingerprint =
+        key.account_fingerprint_from_members([key.key_fingerprint("deepseek", SECRET_A)]);
+    let (account_id, auth_ref) = seed_account(&conn, "deepseek", &fingerprint);
+    insert_account_custody(
+        &conn,
+        &auth_ref,
+        &account_id,
+        CustodyKind::VaultEntry,
+        "DEEPSEEK_API_KEY",
+    )
+    .unwrap();
+
+    update_custody_target(
+        &conn,
+        &auth_ref,
+        Some(1),
+        CustodyKind::VaultRotationPool,
+        "DEEPSEEK_API_KEY",
+    )
+    .expect("the first repoint wins")
+    .expect("custody exists");
+
+    let err = update_custody_target(
+        &conn,
+        &auth_ref,
+        Some(1),
+        CustodyKind::VaultEntry,
+        "DEEPSEEK_LEGACY_API_KEY",
+    )
+    .expect_err("a repoint bound to a stale revision must be refused");
+    assert!(
+        matches!(
+            err,
+            crate::error::MemoryError::ProviderAccountRevisionConflict(_)
+        ),
+        "{err:?}"
+    );
+
+    let resolved = resolve_auth_ref(&conn, &auth_ref).unwrap().unwrap();
+    assert_eq!(resolved.custody_kind, CustodyKind::VaultRotationPool);
+    assert_eq!(resolved.custody_target, "DEEPSEEK_API_KEY");
+    assert_eq!(resolved.revision, 2);
+}
+
+// ── Layout never reaches a serialized account surface ────────────────────────
+
+/// `source_refs` and `alias_name` are caller-supplied strings that land on a
+/// serialized, public-safe surface. A rotation-pool member name
+/// (`DEEPSEEK_API_KEY_2` — the `vault_key_health.key_id` shape) is custody
+/// layout, so the store refuses it at the door rather than trusting every
+/// future caller to remember D5. The logical name itself is not layout and
+/// must keep working: it is exactly what an alias row is for.
+#[test]
+fn rotation_pool_member_layout_is_refused_on_account_surfaces() {
+    let conn = make_conn();
+    let key = fp_key();
+    let fingerprint =
+        key.account_fingerprint_from_members([key.key_fingerprint("deepseek", SECRET_A)]);
+
+    let leaky_id = mint_account_id();
+    let mut leaky = NewProviderAccount::api_key_pool(
+        leaky_id.clone(),
+        "deepseek",
+        mint_auth_ref(),
+        fingerprint.clone(),
+        AccountClass::ModelApi,
+    );
+    leaky.source_refs = vec![
+        "config_env".to_string(),
+        "vault_entry:DEEPSEEK_API_KEY_2".to_string(),
+    ];
+    let err = insert_provider_account(&conn, &leaky)
+        .expect_err("a source_ref carrying pool layout must be refused");
+    assert!(
+        format!("{err}").contains("rotation-pool member"),
+        "the refusal must say what it refused: {err}"
+    );
+    assert!(
+        get_provider_account(&conn, &leaky_id).unwrap().is_none(),
+        "a refused insert must not half-write the account"
+    );
+
+    let (account_id, _) = seed_account(&conn, "deepseek", &fingerprint);
+    let err =
+        record_provider_account_alias(&conn, &account_id, "DEEPSEEK_API_KEY_2", "vault_entry")
+            .expect_err("a pool member name is not an alias");
+    assert!(format!("{err}").contains("rotation-pool member"), "{err}");
+    assert!(
+        list_provider_account_aliases(&conn, &account_id)
+            .unwrap()
+            .is_empty(),
+        "a refused alias must not be stored"
+    );
+
+    // The logical name and ordinary descriptors are unaffected.
+    assert_eq!(
+        record_provider_account_alias(&conn, &account_id, "DEEPSEEK_API_KEY", "config_env")
+            .unwrap(),
+        AliasObservation::Created
+    );
+    let mut clean = NewProviderAccount::api_key_pool(
+        mint_account_id(),
+        "deepseek",
+        mint_auth_ref(),
+        fingerprint,
+        AccountClass::ModelApi,
+    );
+    clean.source_refs = vec![
+        "config_env".to_string(),
+        "vault_entry:DEEPSEEK_API_KEY".to_string(),
+        "file:~/.config/tachi/env#L12".to_string(),
+    ];
+    insert_provider_account(&conn, &clean).expect("ordinary descriptors stay legal");
+}
+
+/// The log half of "custody never travels with an account". The missing
+/// `Serialize` stops an API response; only a redacting `Debug` stops the far
+/// commoner leak — a `tracing` line, a panic message, or an `assert_eq!`
+/// failure printing the resolver's answer straight into a log file.
+#[test]
+fn custody_debug_output_carries_no_vault_target() {
+    let conn = make_conn();
+    let key = fp_key();
+    let fingerprint =
+        key.account_fingerprint_from_members([key.key_fingerprint("deepseek", SECRET_A)]);
+    let (account_id, auth_ref) = seed_account(&conn, "deepseek", &fingerprint);
+    insert_account_custody(
+        &conn,
+        &auth_ref,
+        &account_id,
+        CustodyKind::VaultRotationPool,
+        "DEEPSEEK_API_KEY",
+    )
+    .unwrap();
+
+    let rendered = vec![
+        format!("{:?}", resolve_auth_ref(&conn, &auth_ref).unwrap().unwrap()),
+        format!(
+            "{:?}",
+            get_account_custody(&conn, &account_id).unwrap().unwrap()
+        ),
+    ];
+    for line in &rendered {
+        assert!(
+            !line.contains("DEEPSEEK_API_KEY"),
+            "custody Debug leaked the Vault target: {line}"
+        );
+        assert!(
+            line.contains("[REDACTED]"),
+            "the redaction must be visible rather than the field silently dropped: {line}"
+        );
+        assert!(
+            line.contains("VaultRotationPool"),
+            "the pointer's shape has diagnostic value and stays: {line}"
+        );
+    }
 }

@@ -26,9 +26,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::MemoryError;
 use crate::vault::accounts::{
-    AccountClass, AccountCustody, AuthMode, CustodyKind, CustodyResolution, NewProviderAccount,
-    NewProviderAccountEvent, ProviderAccount, ProviderAccountAlias, ProviderAccountEvent,
-    EVENT_KIND_ACCOUNT_CREATED,
+    names_rotation_pool_member, AccountClass, AccountCustody, AuthMode, CustodyKind,
+    CustodyResolution, NewProviderAccount, NewProviderAccountEvent, ProviderAccount,
+    ProviderAccountAlias, ProviderAccountEvent, EVENT_KIND_ACCOUNT_CREATED,
 };
 
 use super::common::now_utc_iso;
@@ -90,6 +90,10 @@ pub fn insert_provider_account(
              that cannot exist",
             new.auth_mode.as_str()
         )));
+    }
+
+    for source_ref in &new.source_refs {
+        refuse_rotation_pool_layout("source_refs", source_ref)?;
     }
 
     let now = now_utc_iso();
@@ -184,17 +188,27 @@ pub fn list_provider_accounts(conn: &Connection) -> Result<Vec<ProviderAccount>,
 }
 
 /// Observe an env-var name for an account: insert it, or move `last_seen` (and
-/// un-retire it) if it is already known. Never deletes, and never rewrites
-/// `first_seen` — the first time a name was seen is a fact about history.
-/// `source_kind` *is* overwritten, because it describes the latest observation
-/// (a name that moved from a config file into the Vault has genuinely changed
-/// source), and the sequence of sources is recoverable from the event log.
+/// un-retire it) if it is already known.
+///
+/// Never deletes, and never rewrites `first_seen` — the first time a name was
+/// seen is a fact about history. `source_kind` *is* overwritten, because it
+/// describes the latest observation (a name that moved from a config file into
+/// the Vault has genuinely changed source); the previous sources stay
+/// recoverable only if the caller records the [`AliasObservation`] this returns
+/// as an `alias_observed` event, which is what the return value is for.
+///
+/// A **rotation-pool member name is refused** (`DEEPSEEK_API_KEY_2`): an alias
+/// is a logical name, this table is serialized, and member indices are custody
+/// layout (#1680 D5). The pool belongs in `account_custody`, reachable only
+/// through the account's `auth_ref`.
 pub fn record_provider_account_alias(
     conn: &Connection,
     account_id: &str,
     alias_name: &str,
     source_kind: &str,
 ) -> Result<AliasObservation, MemoryError> {
+    refuse_rotation_pool_layout("alias_name", alias_name)?;
+
     let now = now_utc_iso();
     let existing: Option<i64> = conn
         .query_row(
@@ -326,9 +340,30 @@ pub fn list_provider_account_events(
 /// added or dropped, or the Vault master key being rekeyed all land here with
 /// a different `event_kind`; none of them touches `account_id`, so identity
 /// survives every one of them and the event row says which happened.
+///
+/// The write is a **compare-and-swap on the revision that was read**, not a
+/// blind update by `account_id`. `revision` is the counter #1680 D4's apply
+/// binds its preconditions to, so a lost update here is not a cosmetic
+/// off-by-one: two writers that both read revision *n* would both publish
+/// *n+1*, leaving two `provider_account_events` rows claiming the same
+/// revision, one of the two fingerprints silently discarded, and a plan
+/// precondition that verified revision *n+1* satisfied by a state it never
+/// saw. Losing the race is therefore a typed
+/// [`MemoryError::ProviderAccountRevisionConflict`] — the caller re-reads and
+/// re-plans, exactly as D4's drift refusal does. (Inside apply's transaction
+/// SQLite already serializes the two writers; this makes the accessor safe on
+/// its own, which is how every caller outside that transaction uses it.)
+///
+/// `expected_revision` is the caller's half of that check, in the shape
+/// `session_claims`' versioned transitions already use here: a caller that
+/// planned against revision *n* passes `Some(n)` and is refused if the account
+/// has moved since, instead of quietly recording a fingerprint decided from
+/// stale evidence. `None` means "no plan is bound to this" and leaves only the
+/// swap on the revision this call itself read.
 pub fn record_account_fingerprint(
     conn: &Connection,
     account_id: &str,
+    expected_revision: Option<i64>,
     account_fingerprint: &str,
     event_kind: &str,
     plan_digest: Option<&str>,
@@ -347,6 +382,15 @@ pub fn record_account_fingerprint(
         ))
     })?;
 
+    if let Some(expected) = expected_revision {
+        if expected != current_revision {
+            return Err(MemoryError::ProviderAccountRevisionConflict(format!(
+                "provider account '{account_id}' is at revision {current_revision}, but the \
+                 caller planned against revision {expected}"
+            )));
+        }
+    }
+
     if current_fingerprint == account_fingerprint {
         return Ok(FingerprintUpdate::Unchanged {
             revision: current_revision,
@@ -354,17 +398,25 @@ pub fn record_account_fingerprint(
     }
 
     let next_revision = current_revision + 1;
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE provider_accounts
             SET account_fingerprint = ?2, revision = ?3, updated_at = ?4
-          WHERE account_id = ?1",
+          WHERE account_id = ?1 AND revision = ?5 AND account_fingerprint = ?6",
         params![
             account_id,
             account_fingerprint,
             next_revision,
-            now_utc_iso()
+            now_utc_iso(),
+            current_revision,
+            current_fingerprint
         ],
     )?;
+    if changed != 1 {
+        return Err(MemoryError::ProviderAccountRevisionConflict(format!(
+            "provider account '{account_id}' moved off revision {current_revision} while its \
+             fingerprint was being recorded"
+        )));
+    }
 
     let mut event =
         NewProviderAccountEvent::new(account_id, next_revision, event_kind).with_evidence(evidence);
@@ -381,9 +433,14 @@ pub fn record_account_fingerprint(
 
 /// Bind an `auth_ref` to the Vault object that actually holds the secret.
 ///
-/// The custody row is the only place this mapping exists, and it is reachable
-/// only through [`resolve_auth_ref`] — which is why no account-shaped
-/// serialization can leak Vault layout by accident.
+/// The custody row is the only place this mapping exists. Reading it requires
+/// asking for it by `auth_ref` or `account_id` through one of this module's
+/// three custody accessors ([`resolve_auth_ref`] for use-the-credential paths,
+/// [`get_account_custody`] / [`get_account_custody_by_auth_ref`] for the
+/// operator/apply paths that must inspect the pointer itself) — no account read
+/// joins it, and neither of the types it returns can be serialized or logged
+/// with its target intact. That, not the number of accessors, is why no
+/// account-shaped surface can leak Vault layout by accident.
 pub fn insert_account_custody(
     conn: &Connection,
     auth_ref: &str,
@@ -473,30 +530,58 @@ pub fn get_account_custody_by_auth_ref(
 /// therefore every upper-layer reference to the account — unchanged. A
 /// no-change call is a no-op, so restructuring twice with the same result does
 /// not inflate the revision.
+///
+/// Compare-and-swap on the custody revision that was read, for the same reason
+/// [`record_account_fingerprint`] is: two concurrent repoints that both read
+/// revision *n* would otherwise both write *n+1*, and the one that lost would
+/// have no way to know its target is not the one custody now points at — a
+/// resolver answering with the wrong Vault object is the worst failure this
+/// table has.
+///
+/// `expected_revision` carries the caller's bound precondition, exactly as in
+/// [`record_account_fingerprint`]; `None` leaves only the swap on the revision
+/// this call read.
 pub fn update_custody_target(
     conn: &Connection,
     auth_ref: &str,
+    expected_revision: Option<i64>,
     custody_kind: CustodyKind,
     custody_target: &str,
 ) -> Result<Option<AccountCustody>, MemoryError> {
     let Some(existing) = get_account_custody_by_auth_ref(conn, auth_ref)? else {
         return Ok(None);
     };
+    if let Some(expected) = expected_revision {
+        if expected != existing.revision {
+            return Err(MemoryError::ProviderAccountRevisionConflict(format!(
+                "custody for auth_ref '{auth_ref}' is at revision {}, but the caller planned \
+                 against revision {expected}",
+                existing.revision
+            )));
+        }
+    }
     if existing.custody_kind == custody_kind && existing.custody_target == custody_target {
         return Ok(Some(existing));
     }
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE account_custody
             SET custody_kind = ?2, custody_target = ?3, revision = ?4, updated_at = ?5
-          WHERE auth_ref = ?1",
+          WHERE auth_ref = ?1 AND revision = ?6",
         params![
             auth_ref,
             custody_kind.as_str(),
             custody_target,
             existing.revision + 1,
-            now_utc_iso()
+            now_utc_iso(),
+            existing.revision
         ],
     )?;
+    if changed != 1 {
+        return Err(MemoryError::ProviderAccountRevisionConflict(format!(
+            "custody for auth_ref '{auth_ref}' moved off revision {} while it was being repointed",
+            existing.revision
+        )));
+    }
     get_account_custody_by_auth_ref(conn, auth_ref)
 }
 
@@ -534,6 +619,24 @@ fn custody_row(
         },
     )
     .transpose()
+}
+
+/// Refuse a caller-supplied string that carries rotation-pool layout before it
+/// reaches a serialized account surface.
+///
+/// The refusal is deliberately narrow: it does not police the descriptor
+/// grammar (#1680 D4 owns that), only the one shape D5 names as custody. The
+/// error names the field and the offending value so a reconcile pass can say
+/// which descriptor it must rewrite — the value is layout, not a secret, so
+/// echoing it costs nothing that the caller did not already hold.
+fn refuse_rotation_pool_layout(field: &str, value: &str) -> Result<(), MemoryError> {
+    if names_rotation_pool_member(value) {
+        return Err(MemoryError::InvalidArg(format!(
+            "{field} '{value}' names a Vault rotation-pool member; pool layout belongs in \
+             account_custody, reachable only through the account's auth_ref"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_custody_kind(value: &str) -> Result<CustodyKind, MemoryError> {

@@ -13,12 +13,18 @@
 // member entry names) is custody, and custody lives in a physically separate
 // row type ([`AccountCustody`]) reachable only through the opaque `auth_ref`.
 //
-// That separation is enforced by types, not by reviewer vigilance: there is no
-// constructor, no accessor, and no serialization path on this file's account
-// types that can produce a struct holding both. A future field added to
-// `ProviderAccount` is checked by
-// `db::tests::vault_accounts_ops::account_serialization_is_secret_negative`,
+// That separation is enforced by types, not by reviewer vigilance: no
+// constructor and no serialization path on this file's account types can
+// produce a struct holding both, and the custody types are neither
+// `Serialize` nor plainly `Debug` — the two ways a struct usually escapes into
+// a file or a log. A future field added to `ProviderAccount` is checked by
+// `db::tests::vault_accounts_ops::account_serialized_field_set_is_frozen`,
 // which pins the exact serialized key set.
+//
+// Types cannot check the *contents* of a caller-supplied string, so the one
+// remaining way layout could reach these surfaces — writing a pool member name
+// into an alias or a source descriptor — is refused at the store door instead;
+// see [`names_rotation_pool_member`].
 
 use serde::{Deserialize, Serialize};
 
@@ -181,10 +187,16 @@ pub const AUTH_REF_SCHEME: &str = "va1";
 /// A provider account: public-safe metadata only.
 ///
 /// `capabilities` and `source_refs` are stored as JSON arrays. `source_refs`
-/// is intentionally opaque at this layer — the reconcile pipeline (#1680 D4)
-/// owns the descriptor grammar and the redaction rule that keeps a source
-/// descriptor from becoming a path/secret leak; this type only guarantees the
-/// column round-trips as an array of strings.
+/// stays opaque at this layer — the reconcile pipeline (#1680 D4) owns the
+/// descriptor grammar and the redaction rule that keeps a source descriptor
+/// from becoming a path/secret leak.
+///
+/// What this layer does enforce is a floor, not a grammar: because the account
+/// row *is* a serialized public surface, `db::vault_accounts` refuses a
+/// `source_ref` (or an alias name) that carries rotation-pool layout, per
+/// [`names_rotation_pool_member`]. Without it "public-safe metadata" would rest
+/// on every future caller remembering the rule, which is exactly the kind of
+/// field discipline the custody table split was introduced to replace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderAccount {
     pub account_id: String,
@@ -322,10 +334,17 @@ impl NewProviderAccountEvent {
 ///
 /// Deliberately **not** `Serialize`. Every other type in this module is
 /// serializable because it is public-safe; this one is not public-safe, and
-/// leaving the derive off means a future "just log the whole struct" or "return
-/// it in the API response" cannot compile rather than quietly shipping Vault
-/// layout to a plan file, an MCP response, or a log line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// leaving the derive off means a future "return it in the API response"
+/// cannot compile rather than quietly shipping Vault layout to a plan file or
+/// an MCP response.
+///
+/// `Debug` is hand-written and redacts `custody_target` for the other half of
+/// that rule: a *derived* `Debug` would have made `tracing::debug!("{custody:?}")`
+/// — and every `assert_eq!` failure, panic message and `unwrap` backtrace —
+/// print the rotation prefix or entry name that the missing `Serialize` was
+/// there to keep off log surfaces. The pointer's shape (`custody_kind`) stays
+/// visible because it is the part with diagnostic value and no layout in it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct AccountCustody {
     pub auth_ref: String,
     pub account_id: String,
@@ -335,15 +354,96 @@ pub struct AccountCustody {
     pub updated_at: String,
 }
 
-/// What an `auth_ref` resolves to. Same non-`Serialize` rule as
-/// [`AccountCustody`], for the same reason: this is the resolver's answer, and
-/// the resolver's answer is Vault layout.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for AccountCustody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountCustody")
+            .field("auth_ref", &self.auth_ref)
+            .field("account_id", &self.account_id)
+            .field("custody_kind", &self.custody_kind)
+            .field("custody_target", &RedactedCustodyTarget)
+            .field("revision", &self.revision)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+/// What an `auth_ref` resolves to. Same non-`Serialize` and same redacting
+/// `Debug` as [`AccountCustody`], for the same reason: this is the resolver's
+/// answer, and the resolver's answer is Vault layout.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CustodyResolution {
     pub account_id: String,
     pub custody_kind: CustodyKind,
     pub custody_target: String,
     pub revision: i64,
+}
+
+impl std::fmt::Debug for CustodyResolution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustodyResolution")
+            .field("account_id", &self.account_id)
+            .field("custody_kind", &self.custody_kind)
+            .field("custody_target", &RedactedCustodyTarget)
+            .field("revision", &self.revision)
+            .finish()
+    }
+}
+
+/// What a redacted `custody_target` renders as. A unit struct rather than a
+/// string literal so `{:?}` prints it bare (`custody_target: [REDACTED]`)
+/// instead of quoting it like a value that could be mistaken for a real target.
+struct RedactedCustodyTarget;
+
+impl std::fmt::Debug for RedactedCustodyTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+/// Separators a source descriptor might use around the identifiers it embeds.
+/// Deliberately **not** a grammar — #1680 D4 owns the descriptor grammar, and
+/// this module must not pre-empt it. This is only wide enough to find a layout
+/// token hiding inside whatever shape D4 eventually picks
+/// (`"vault_entry:GEMINI_API_KEY_2"`, `"config_env GEMINI_API_KEY_2"`, …).
+const DESCRIPTOR_SEPARATORS: &[char] = &[':', ',', ';', ' ', '\t', '\n', '/', '\\', '=', '#', '|'];
+
+/// Whether a string names a Vault **rotation-pool member** — the one shape
+/// D5 says must never appear on an account surface (`"DEEPSEEK_API_KEY_2"`,
+/// where the member entry name is also the `vault_key_health.key_id`).
+///
+/// The logical name itself (`DEEPSEEK_API_KEY`) is deliberately *not* layout:
+/// it is exactly what `provider_account_aliases.alias_name` stores. What leaks
+/// is the member index, because that is the pool's internal structure — the
+/// thing `auth_ref` + `account_custody` exist to keep on one side of a table
+/// boundary.
+///
+/// Shape-based rather than a lookup against `vault_key_rotations`, on purpose:
+/// a DB lookup would make the same string legal before a pool is registered and
+/// illegal after, so a descriptor's admissibility would depend on when it was
+/// written. This predicate is a pure function of the string.
+pub fn names_rotation_pool_member(value: &str) -> bool {
+    value
+        .split(DESCRIPTOR_SEPARATORS)
+        .any(is_rotation_member_token)
+}
+
+/// `PREFIX_<n>` where `PREFIX` is env-var-shaped (upper-case ASCII, digits and
+/// underscores, containing at least one letter) and `n` is a positive decimal
+/// without a leading zero — i.e. what [`api_key_pool_member_index`] would
+/// accept for the pool named `PREFIX`.
+///
+/// [`api_key_pool_member_index`]: crate::vault::api_key_pool_member_index
+fn is_rotation_member_token(token: &str) -> bool {
+    let Some((prefix, index)) = token.rsplit_once('_') else {
+        return false;
+    };
+    let index_ok =
+        !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) && !index.starts_with('0');
+    let prefix_ok = prefix.bytes().any(|b| b.is_ascii_uppercase())
+        && prefix
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    index_ok && prefix_ok
 }
 
 /// Mint an opaque `auth_ref`.
@@ -571,6 +671,76 @@ mod tests {
         }
         let round_trip: ProviderAccount = serde_json::from_str(&json).expect("account round-trips");
         assert_eq!(round_trip, account);
+    }
+
+    /// The `Debug` half of the same rule, at the type level: re-deriving
+    /// `Debug` on either custody type would put the Vault target back into
+    /// every log line, panic message and assertion failure. The store-level
+    /// guard is
+    /// `db::tests::vault_accounts_ops::custody_debug_output_carries_no_vault_target`;
+    /// this one fails at the type that owns the decision.
+    #[test]
+    fn custody_types_redact_their_target_in_debug() {
+        let custody = AccountCustody {
+            auth_ref: "va1:0123".to_string(),
+            account_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            custody_kind: CustodyKind::VaultRotationPool,
+            custody_target: "DEEPSEEK_API_KEY".to_string(),
+            revision: 3,
+            updated_at: "2026-08-09T00:00:00.000Z".to_string(),
+        };
+        let resolution = CustodyResolution {
+            account_id: custody.account_id.clone(),
+            custody_kind: custody.custody_kind,
+            custody_target: custody.custody_target.clone(),
+            revision: custody.revision,
+        };
+
+        for rendered in [format!("{custody:?}"), format!("{resolution:?}")] {
+            assert!(
+                !rendered.contains("DEEPSEEK_API_KEY"),
+                "custody target leaked into Debug: {rendered}"
+            );
+            assert!(
+                rendered.contains("custody_target: [REDACTED]"),
+                "the field must stay visible as redacted, not vanish: {rendered}"
+            );
+            assert!(
+                rendered.contains("VaultRotationPool"),
+                "the pointer kind carries no layout and stays: {rendered}"
+            );
+        }
+    }
+
+    /// The layout predicate the store refuses writes with. A member index is
+    /// pool structure; the logical name it is built from is not, because that
+    /// is precisely what an alias row stores.
+    #[test]
+    fn rotation_member_names_are_recognized_without_catching_logical_names() {
+        for layout in [
+            "DEEPSEEK_API_KEY_2",
+            "GEMINI_API_KEY_10",
+            "vault_entry:DEEPSEEK_API_KEY_2",
+            "config_env DEEPSEEK_API_KEY_2",
+            "pool=GOOGLE_SEARCH_API_KEY_3",
+        ] {
+            assert!(names_rotation_pool_member(layout), "{layout}");
+        }
+        for safe in [
+            "DEEPSEEK_API_KEY",
+            "config_env",
+            "vault_entry:DEEPSEEK_API_KEY",
+            "file:~/.config/tachi/env#L12",
+            // Not a member index: a leading zero is not how members are named,
+            // and `api_key_pool_member_index` would not accept index 0 either.
+            "DEEPSEEK_API_KEY_02",
+            "DEEPSEEK_API_KEY_0",
+            // Lower-case is a descriptor word, not an env-var name.
+            "revision_2",
+            "",
+        ] {
+            assert!(!names_rotation_pool_member(safe), "{safe}");
+        }
     }
 
     #[test]
