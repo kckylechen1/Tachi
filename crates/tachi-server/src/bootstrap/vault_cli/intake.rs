@@ -344,14 +344,13 @@ fn is_config_name(name: &str) -> bool {
 /// now also covering every other aliased registry entry (e.g.
 /// `XAI_API_KEY`/`GROK_API_KEY`), which the old two-entry table never did.
 fn alias_family(name: &str) -> Option<String> {
-    let def = crate::status_ops::status_health::registry_def_for_env_name(name)?;
-    if def.aliases.is_empty() {
+    let family = crate::status_ops::status_health::family_env_names_for_env_name(name)?;
+    // One name means the entry has no aliases, so there is no family to flag
+    // as an advisory merge candidate.
+    if family.len() < 2 {
         return None;
     }
-    let mut stems: Vec<String> = std::iter::once(def.key)
-        .chain(def.aliases.iter().copied())
-        .map(alias_family_stem)
-        .collect();
+    let mut stems: Vec<String> = family.into_iter().map(alias_family_stem).collect();
     stems.sort_unstable_by(|a, b| b.cmp(a));
     Some(stems.join("/"))
 }

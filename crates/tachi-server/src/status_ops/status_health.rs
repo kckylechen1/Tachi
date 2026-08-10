@@ -15,9 +15,7 @@ mod vault;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use api_keys::{
-    collect_api_key_status_with_probe_cache, ApiKeyDef, KeyClass, API_KEY_DEFS,
-};
+pub(crate) use api_keys::{collect_api_key_status_with_probe_cache, KeyClass, API_KEY_DEFS};
 pub(crate) use inference::{
     apply_inferred_provider_failures, format_elapsed, infer_provider_from_failed_job,
 };
@@ -131,10 +129,26 @@ pub(crate) fn canonical_key_for_env_name(name: &str) -> Option<&'static str> {
     registry_def_for_env_name(name).map(|def| def.canonical_key)
 }
 
-/// The single registry lookup the three name-keyed views above share:
-/// primary-key match first (never shadowed by another entry that merely lists
-/// the name as an alias), then the alias tables.
-pub(crate) fn registry_def_for_env_name(name: &str) -> Option<&'static api_keys::ApiKeyDef> {
+/// Every interchangeable env-var name of the registry entry an admitted name
+/// belongs to — the entry's own key plus its aliases — or `None` when the name
+/// is not in the registry.
+///
+/// This is what `intake`'s advisory alias-family label is derived from. It
+/// hands out the *names* rather than the `ApiKeyDef` so the registry row type
+/// stays inside this module: a caller that can see the row can start depending
+/// on fields the derived views deliberately do not expose.
+pub(crate) fn family_env_names_for_env_name(name: &str) -> Option<Vec<&'static str>> {
+    registry_def_for_env_name(name).map(|def| {
+        std::iter::once(def.key)
+            .chain(def.aliases.iter().copied())
+            .collect()
+    })
+}
+
+/// The single registry lookup the name-keyed views above share: primary-key
+/// match first (never shadowed by another entry that merely lists the name as
+/// an alias), then the alias tables.
+fn registry_def_for_env_name(name: &str) -> Option<&'static api_keys::ApiKeyDef> {
     api_keys::API_KEY_DEFS
         .iter()
         .find(|def| def.key == name)
