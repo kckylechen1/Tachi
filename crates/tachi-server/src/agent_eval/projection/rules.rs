@@ -667,9 +667,12 @@ pub(crate) struct ExcludedRow {
     pub(crate) subject_id: String,
     pub(crate) profile: Option<String>,
     pub(crate) reason: &'static str,
-    /// Quality-only rows are RETAINED (they still feed the quality vector);
-    /// excluded rows are not.
-    pub(crate) retained: bool,
+    /// Whether this row still feeds the candidate's QUALITY vector. Never a
+    /// statement about retention in the ledger: EVERY row here — including
+    /// `user_forced`/`experiment` — stays in its source table, queryable and
+    /// counted. This flag says only whether the projection reads it as
+    /// quality evidence.
+    pub(crate) contributes_quality_evidence: bool,
 }
 
 impl ExcludedRow {
@@ -679,7 +682,7 @@ impl ExcludedRow {
             "subject_id": self.subject_id,
             "profile": self.profile,
             "reason": self.reason,
-            "retained": self.retained,
+            "contributes_quality_evidence": self.contributes_quality_evidence,
         })
     }
 }
@@ -768,7 +771,7 @@ pub(crate) fn project(
                         subject_id: observation.subject_id.clone(),
                         profile: Some(profile.clone()),
                         reason,
-                        retained: true,
+                        contributes_quality_evidence: true,
                     });
                 }
                 quality_by_profile
@@ -790,7 +793,7 @@ pub(crate) fn project(
                         subject_id: observation.subject_id.clone(),
                         profile,
                         reason,
-                        retained: false,
+                        contributes_quality_evidence: false,
                     });
                 }
             }

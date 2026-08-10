@@ -568,6 +568,11 @@ fn user_forced_and_experiment_rows_are_counted_but_never_trained() {
     let candidate = candidate(&outcome, "profile_a");
     assert_eq!(candidate.metrics.samples, 0);
     assert_eq!(
+        candidate.quality_metrics.samples, 0,
+        "an overridden assignment is not quality evidence either — it trains \
+         nothing anywhere, it is only counted"
+    );
+    assert_eq!(
         candidate
             .excluded_counts
             .get(reason::ASSIGNMENT_MODE_USER_FORCED),
