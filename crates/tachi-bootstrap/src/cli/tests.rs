@@ -604,6 +604,17 @@ fn cards_cli_parses_sync_and_list_distinct_from_singular_card() {
 }
 
 #[test]
+fn card_help_distinguishes_operator_diagnostics_from_plural_ledger_cards() {
+    let help = Cli::command().render_long_help().to_string();
+    assert!(help.contains("static operator profile/admission diagnostics"));
+    assert!(help.contains("no DB access"));
+    assert!(help.contains("dispatch-ledger cards"));
+    assert!(help.contains("GLOBAL memory DB"));
+    assert!(help.contains("singular `tachi card`"));
+    assert!(help.contains("plural dispatch-ledger cards"));
+}
+
+#[test]
 fn cards_governance_cli_parses_explicit_json_artifacts() {
     let draft =
         Cli::try_parse_from(["tachi", "cards", "draft", "--input", "request.json"]).unwrap();

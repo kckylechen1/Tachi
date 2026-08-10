@@ -55,13 +55,13 @@ fn all_c1a_c1b_c1c_retired_tokens_are_rejected_and_absent_from_active_examples()
         let wire = serde_json::json!({"action": token});
         let err = serde_json::from_value::<TachiTaskParams>(wire)
             .expect_err("retired token must not deserialize as TachiTaskParams");
+        let wire_error = err.to_string();
+        let typed_error = token
+            .parse::<TachiTaskAction>()
+            .expect_err("retired token must be rejected by typed FromStr");
         assert!(
-            err.to_string().contains("unknown variant"),
-            "retired token {token} should be rejected by the wire enum: {err}"
-        );
-        assert!(
-            token.parse::<TachiTaskAction>().is_err(),
-            "retired token {token} must be rejected by typed FromStr"
+            !wire_error.contains("unknown variant") && wire_error.contains(&typed_error),
+            "retired token {token} must preserve the canonical typed wire refusal: {wire_error}"
         );
     }
 }

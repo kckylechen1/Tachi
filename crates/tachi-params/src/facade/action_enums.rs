@@ -72,7 +72,7 @@ impl FromStr for TachiVerifyAction {
 /// is **not** accepted here — use `tachi_gh` (#757). Worker launch/wait/cancel
 /// left Task in #1319-C2; use `tachi_staff(action='start'|'status')` instead.
 /// Route tuning left Task in #1426; use `tachi_tune` instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TachiTaskAction {
     Intake,
@@ -85,6 +85,19 @@ pub enum TachiTaskAction {
     Complete,
     Adjudicate,
     Brief,
+}
+
+/// Deserialize the wire action through the same typed parser used by router
+/// callers. This keeps retired-action guidance reachable at the MCP boundary
+/// instead of replacing it with serde's generic `unknown variant` message.
+impl<'de> Deserialize<'de> for TachiTaskAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = String::deserialize(deserializer)?;
+        wire.parse::<Self>().map_err(serde::de::Error::custom)
+    }
 }
 
 impl TachiTaskAction {

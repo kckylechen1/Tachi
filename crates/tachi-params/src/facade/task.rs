@@ -437,27 +437,17 @@ mod tests {
 
         use super::super::action_enums::TachiTaskAction;
 
-        // Serde path (the wire/MCP path): the #[serde(rename_all)] derive
-        // rejects retired variants with a standard "unknown variant" error
-        // listing the surviving actions. The accepted-variants list (after
-        // "expected one of") must NOT contain dispatch/wait/cancel anymore.
+        // Serde path (the wire/MCP path): route through TachiTaskAction's
+        // canonical FromStr parser so the typed staffing guidance remains
+        // visible at the boundary.
         for retired in ["dispatch", "wait", "cancel"] {
             let err =
                 serde_json::from_str::<TachiTaskParams>(&format!("{{\"action\":\"{retired}\"}}"))
                     .expect_err("retired action must not deserialize as tachi_task action");
             let msg = err.to_string();
             assert!(
-                msg.contains("unknown variant"),
-                "retired action {retired} should be an unknown variant, got: {msg}"
-            );
-            // The "expected one of `<...>`" list is the accepted surface;
-            // the retired action must not be admitted there. (The message
-            // does echo the rejected value back, so check the accepted list
-            // fragment specifically.)
-            let accepted = msg.split("expected one of ").nth(1).unwrap_or_default();
-            assert!(
-                !accepted.contains(&format!("`{retired}`")),
-                "retired action {retired} must not appear in the accepted-variants list, got: {msg}"
+                !msg.contains("unknown variant") && msg.contains("tachi_staff"),
+                "retired action {retired} must retain typed tachi_staff guidance, got: {msg}"
             );
         }
 
@@ -493,13 +483,8 @@ mod tests {
                     .expect_err("retired action must not deserialize as tachi_task action");
             let msg = err.to_string();
             assert!(
-                msg.contains("unknown variant"),
-                "retired action {retired} should be an unknown variant, got: {msg}"
-            );
-            let accepted = msg.split("expected one of ").nth(1).unwrap_or_default();
-            assert!(
-                !accepted.contains(&format!("`{retired}`")),
-                "retired action {retired} must not appear in the accepted-variants list, got: {msg}"
+                !msg.contains("unknown variant") && msg.contains("#1683 C1a"),
+                "retired action {retired} must retain typed #1683 C1a guidance, got: {msg}"
             );
 
             let err = TachiTaskAction::from_str(retired)
@@ -523,13 +508,8 @@ mod tests {
                     .expect_err("folded action must not deserialize as tachi_task action");
             let msg = err.to_string();
             assert!(
-                msg.contains("unknown variant"),
-                "folded action {retired} should be an unknown variant, got: {msg}"
-            );
-            let accepted = msg.split("expected one of ").nth(1).unwrap_or_default();
-            assert!(
-                !accepted.contains(&format!("`{retired}`")),
-                "folded action {retired} must not appear in the accepted-variants list, got: {msg}"
+                !msg.contains("unknown variant") && msg.contains("#1712 C1b"),
+                "folded action {retired} must retain typed #1712 C1b guidance, got: {msg}"
             );
 
             let err = TachiTaskAction::from_str(retired)
@@ -553,13 +533,11 @@ mod tests {
                     .expect_err("retired profile action must not deserialize as tachi_task action");
             let msg = err.to_string();
             assert!(
-                msg.contains("unknown variant"),
-                "retired profile action {retired} should be an unknown variant, got: {msg}"
-            );
-            let accepted = msg.split("expected one of ").nth(1).unwrap_or_default();
-            assert!(
-                !accepted.contains(&format!("`{retired}`")),
-                "retired profile action {retired} must not appear in the accepted-variants list, got: {msg}"
+                !msg.contains("unknown variant")
+                    && msg.contains("tachi card")
+                    && msg.contains("append-only eval")
+                    && msg.contains("static profile admission"),
+                "retired profile action {retired} must retain typed operator/eval/admission guidance, got: {msg}"
             );
 
             let err = TachiTaskAction::from_str(retired)
@@ -569,6 +547,58 @@ mod tests {
                     && err.contains("append-only eval")
                     && err.contains("static profile admission"),
                 "retired profile action {retired} guidance is incomplete: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_retired_actions_keep_typed_guidance_on_wire() {
+        use std::str::FromStr;
+
+        use super::super::action_enums::TachiTaskAction;
+
+        let cases = [
+            ("dispatch", "tachi_staff"),
+            ("wait", "tachi_staff"),
+            ("cancel", "tachi_staff"),
+            ("plan", "#1683 C1a"),
+            ("cycle_plan", "#1683 C1a"),
+            ("recommend", "#1683 C1a"),
+            ("refine_issues", "#1683 C1a"),
+            ("merge", "#1683 C1a"),
+            ("ux_matrix", "#1683 C1a"),
+            ("briefing", "#1712 C1b"),
+            ("doc_index", "#1712 C1b"),
+            ("cycle_status", "#1712 C1b"),
+            ("profiles", "#1687 C1c"),
+            ("profile", "#1687 C1c"),
+            ("card", "#1687 C1c"),
+            ("build_references", "#1713"),
+            ("close_loop", "#1713"),
+            ("route_simulate", "tachi_tune"),
+            ("proposals", "tachi_tune"),
+            ("review_proposal", "tachi_tune"),
+            ("apply_proposals", "tachi_tune"),
+            ("link_pr", "tachi_gh"),
+            ("pr_status", "tachi_gh"),
+            ("pr_handoff", "tachi_gh"),
+            ("release_note", "tachi_gh"),
+        ];
+
+        for (retired, guidance) in cases {
+            let wire = format!("{{\"action\":\"{retired}\"}}");
+            let serde_error = serde_json::from_str::<TachiTaskParams>(&wire)
+                .expect_err("explicit retired action must fail on the wire")
+                .to_string();
+            let typed_error = TachiTaskAction::from_str(retired)
+                .expect_err("explicit retired action must fail in the typed parser");
+            assert!(
+                !serde_error.contains("unknown variant"),
+                "wire error for {retired} must not fall back to generic serde text: {serde_error}"
+            );
+            assert!(
+                serde_error.contains(guidance) && serde_error.contains(&typed_error),
+                "wire error for {retired} must preserve typed guidance {guidance:?}: {serde_error}"
             );
         }
     }
