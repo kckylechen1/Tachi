@@ -469,10 +469,10 @@ fn build_plan(
     }
 
     let conn = store.connection();
-    let existing_accounts = memcore::list_provider_accounts(conn)?;
+    let existing_accounts = memcore::db::list_provider_accounts(conn)?;
     let mut custody_target_index: HashMap<String, String> = HashMap::new();
     for account in &existing_accounts {
-        if let Some(custody) = memcore::get_account_custody(conn, &account.account_id)? {
+        if let Some(custody) = memcore::db::get_account_custody(conn, &account.account_id)? {
             custody_target_index.insert(custody.custody_target.clone(), account.account_id.clone());
         }
     }
@@ -508,7 +508,7 @@ fn build_plan(
             if let Some(prefix) = &credential.pool_prefix {
                 bound_pools.insert(
                     prefix.clone(),
-                    memcore::vault_pool_members_digest(conn, prefix)?,
+                    memcore::db::vault_pool_members_digest(conn, prefix)?,
                 );
             }
             source_refs.insert(format!("vault:{}", credential.logical_name));
@@ -567,7 +567,8 @@ fn build_plan(
                     },
                 );
                 if let Some(auth_ref) = &account.auth_ref {
-                    if let Some(custody) = memcore::get_account_custody_by_auth_ref(conn, auth_ref)?
+                    if let Some(custody) =
+                        memcore::db::get_account_custody_by_auth_ref(conn, auth_ref)?
                     {
                         bindings.custody.push(CustodyBinding {
                             auth_ref: auth_ref.clone(),
@@ -585,7 +586,7 @@ fn build_plan(
                     });
                 }
                 let known: HashSet<String> =
-                    memcore::list_provider_account_aliases(conn, &account.account_id)?
+                    memcore::db::list_provider_account_aliases(conn, &account.account_id)?
                         .into_iter()
                         .filter(|alias| !alias.retired)
                         .map(|alias| alias.alias_name)
@@ -691,7 +692,8 @@ fn resolve_existing_account(
     custody_target_index: &HashMap<String, String>,
     advisories: &mut Vec<Advisory>,
 ) -> Result<Option<memcore::ProviderAccount>, Box<dyn std::error::Error>> {
-    let by_fingerprint = memcore::find_provider_accounts_by_fingerprint(conn, account_fingerprint)?;
+    let by_fingerprint =
+        memcore::db::find_provider_accounts_by_fingerprint(conn, account_fingerprint)?;
     match by_fingerprint.len() {
         1 => return Ok(Some(by_fingerprint.into_iter().next().expect("len == 1"))),
         0 => {}
@@ -710,7 +712,7 @@ fn resolve_existing_account(
     let Some(account_id) = custody_target_index.get(custody_logical_name) else {
         return Ok(None);
     };
-    Ok(memcore::get_provider_account(conn, account_id)?)
+    Ok(memcore::db::get_provider_account(conn, account_id)?)
 }
 
 fn alias_source_kind(alias_name: &str, group: &[VaultCredential]) -> String {

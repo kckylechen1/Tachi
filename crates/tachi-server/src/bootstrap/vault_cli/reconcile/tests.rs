@@ -344,7 +344,7 @@ fn plan_apply_replay_is_idempotent_through_the_artifact_file() {
     assert_eq!(first.accounts_created.len(), 1);
 
     let revisions_after_first: Vec<(String, i64)> =
-        memcore::list_provider_accounts(store.connection())
+        memcore::db::list_provider_accounts(store.connection())
             .expect("accounts")
             .into_iter()
             .map(|account| (account.account_id, account.revision))
@@ -360,7 +360,7 @@ fn plan_apply_replay_is_idempotent_through_the_artifact_file() {
     assert!(!replay.noop_event_ids.is_empty());
 
     let revisions_after_replay: Vec<(String, i64)> =
-        memcore::list_provider_accounts(store.connection())
+        memcore::db::list_provider_accounts(store.connection())
             .expect("accounts")
             .into_iter()
             .map(|account| (account.account_id, account.revision))
@@ -412,7 +412,7 @@ fn a_hand_edited_artifact_is_refused_with_zero_writes() {
         "unexpected error: {err}"
     );
     assert!(
-        memcore::list_provider_accounts(store.connection())
+        memcore::db::list_provider_accounts(store.connection())
             .expect("accounts")
             .is_empty(),
         "a refused apply must create no account"
@@ -450,7 +450,7 @@ fn a_source_file_rewritten_after_planning_refuses_the_apply() {
         "unexpected error: {err}"
     );
     assert!(
-        memcore::list_provider_accounts(store.connection())
+        memcore::db::list_provider_accounts(store.connection())
             .expect("accounts")
             .is_empty(),
         "a refused apply must create no account"
