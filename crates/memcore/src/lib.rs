@@ -126,6 +126,14 @@ pub use db::outbox::{
     LocalStoreStatus, OutboxEventRow, OutboxHealth, OutboxState, RemoteSyncStatus,
     MAX_OUTBOX_CLASS_BYTES,
 };
+#[cfg(feature = "admin")]
+pub use db::route_eval::{
+    get_eval_rubric_score, get_route_decision_by_dispatch_id, get_route_recommendation,
+    insert_eval_rubric_score, insert_route_decision_idempotent, insert_route_recommendation,
+    EvalRubricScoreRow, NewEvalRubricScore, NewRouteDecision, NewRouteRecommendation,
+    RouteDecisionRow, RouteRecommendationRow, ASSIGNMENT_MODES, RUBRIC_CONFIDENCE_VALUES,
+    RUBRIC_DIMENSION_VALUES, RUBRIC_INDEPENDENCE_BASIS_VALUES, RUBRIC_SUBJECT_KINDS,
+};
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]
 pub use db::session_claims::{
