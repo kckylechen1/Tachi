@@ -386,6 +386,15 @@ fn local_commit_claim_remote_apply_acknowledge() {
         &destination,
         OutboxDestinationApplyApplication::Duplicate,
     );
+    assert_eq!(ack_evidence.reported_by, durable_receipt.destination_store);
+    assert_eq!(
+        ack_evidence.peer_revision,
+        Some(durable_receipt.destination_object_revision)
+    );
+    assert_eq!(
+        ack_evidence.peer_payload_digest.as_deref(),
+        Some(durable_receipt.destination_payload_digest.as_str())
+    );
 
     let acknowledged = source
         .apply_outbox_outcome("evt-happy", &OutboxOutcome::Acknowledged, &ack_evidence)
