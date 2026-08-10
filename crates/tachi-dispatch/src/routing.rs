@@ -1384,6 +1384,98 @@ mod tests {
         );
     }
 
+    /// tachi#1675 PR4 / design D7: on the ledger path a candidate with no
+    /// evidence says exactly that (`no_ledger_evidence`) and NEVER
+    /// `baseline_mbit_fit` — the #1202 ruling demoted MBIT to derived evidence,
+    /// so "the card fits" is not a routing ground. The legacy `/eval`-memory
+    /// path keeps its own fallback, which is why the source is threaded rather
+    /// than the string simply deleted.
+    ///
+    /// A risk with NO reasons and NO role-matching task type is the point: it
+    /// makes EVERY profile a zero-signal candidate, so the fallback is what is
+    /// under test rather than an incidental scoring path.
+    #[test]
+    fn the_ledger_path_never_falls_back_to_a_baseline_mbit_fit() {
+        let risk = DispatchRisk {
+            task_type: "unknown_request".to_string(),
+            risk: "medium".to_string(),
+            reasons: Vec::new(),
+            required_profiles: Vec::new(),
+            blocked_profiles: Vec::new(),
+        };
+        let loadout = RoutePolicyRuleLoadout {
+            namespace: ROUTE_POLICY_RULE_NS,
+            min_samples: MIN_ROUTE_POLICY_RULE_SAMPLES,
+            applied: Vec::new(),
+            skipped: Vec::new(),
+        };
+
+        let ledger = recommend_dispatch_profile_candidates(
+            &risk,
+            &[],
+            &[],
+            &[],
+            &loadout,
+            RouteEvidenceSource::DecisionFactLedger,
+            |_| Ok(Vec::new()),
+        )
+        .expect("ledger-sourced candidates");
+        assert!(
+            !ledger.is_empty(),
+            "the profile set must not be empty or this proves nothing"
+        );
+        for candidate in &ledger {
+            assert!(
+                !candidate
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == BASELINE_MBIT_FIT_REASON),
+                "{} reported a baseline MBIT fit on the ledger path: {:?}",
+                candidate.profile,
+                candidate.reasons
+            );
+            assert!(
+                candidate
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == NO_LEDGER_EVIDENCE_REASON),
+                "{} must name the absence of ledger evidence: {:?}",
+                candidate.profile,
+                candidate.reasons
+            );
+        }
+
+        // The legacy path is unchanged — the flip moved which evidence is
+        // read, it did not silently rewrite the old path's vocabulary.
+        let legacy = recommend_dispatch_profile_candidates(
+            &risk,
+            &[],
+            &[],
+            &[],
+            &loadout,
+            RouteEvidenceSource::LiveEvalMemory,
+            |_| Ok(Vec::new()),
+        )
+        .expect("memory-sourced candidates");
+        assert!(legacy.iter().all(|candidate| candidate
+            .reasons
+            .iter()
+            .any(|reason| reason == BASELINE_MBIT_FIT_REASON)));
+    }
+
+    /// The declared source is one vocabulary, not two spellings.
+    #[test]
+    fn evidence_sources_declare_stable_names() {
+        assert_eq!(
+            RouteEvidenceSource::DecisionFactLedger.as_str(),
+            "decision_fact_ledger"
+        );
+        assert_eq!(
+            RouteEvidenceSource::LiveEvalMemory.as_str(),
+            "live_eval_memory"
+        );
+    }
+
     #[test]
     fn research_request_prefers_read_role_over_executor_even_with_better_eval() {
         let risk = DispatchRisk {
