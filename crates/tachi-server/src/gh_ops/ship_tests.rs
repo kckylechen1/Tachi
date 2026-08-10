@@ -398,6 +398,67 @@ async fn ship_gb9_chinese_filename_ships_with_unquoted_staged_compare() {
     );
 }
 
+/// A ship that *loses* the exclusive-create race must fail without touching
+/// the file — the winner is mid-`git commit -F` on it. The regression this
+/// pins: the delete-on-drop guard used to be armed before `create_new`, so the
+/// loser's early return deleted the winner's message file and the winner died
+/// with `could not read log file ... No such file or directory`.
+#[test]
+fn ship_gb9b_commit_message_writer_leaves_a_lost_race_untouched() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("tachi-ship-commit-message-collision.txt");
+    std::fs::write(&path, "winner's message\n").expect("seed the winner's file");
+
+    let err = write_commit_message_file(&path, "loser's message\n")
+        .err()
+        .expect("exclusive create must lose against an existing file");
+
+    assert!(
+        err.starts_with("create commit message tempfile: "),
+        "unexpected error: {err}"
+    );
+    assert!(
+        path.exists(),
+        "the losing writer deleted a commit-message file it did not create"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the winner's file"),
+        "winner's message\n"
+    );
+}
+
+/// The tempfile name must be unique per call, not per microsecond:
+/// `SystemTime::now()` is microsecond-granular on macOS, so a burst of ships
+/// on several threads used to mint identical `pid-nanos` names.
+#[test]
+fn ship_gb9c_commit_message_temp_paths_are_unique_within_one_process() {
+    const THREADS: usize = 4;
+    const PER_THREAD: usize = 500;
+
+    let mut workers = Vec::with_capacity(THREADS);
+    for _ in 0..THREADS {
+        workers.push(std::thread::spawn(|| {
+            (0..PER_THREAD)
+                .map(|_| commit_message_temp_path().expect("mint commit message temp path"))
+                .collect::<Vec<_>>()
+        }));
+    }
+
+    let mut minted = Vec::with_capacity(THREADS * PER_THREAD);
+    for worker in workers {
+        minted.extend(worker.join().expect("join minting thread"));
+    }
+    let unique: BTreeSet<_> = minted.iter().cloned().collect();
+
+    assert_eq!(
+        unique.len(),
+        minted.len(),
+        "commit-message temp paths collided: {} unique out of {}",
+        unique.len(),
+        minted.len()
+    );
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn ship_gb10_push_failure_after_commit_returns_partial_and_records_flow_event() {

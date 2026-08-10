@@ -147,12 +147,24 @@ impl Drop for GhBodyFileGuard {
     }
 }
 
+/// A per-call unique path for the `gh --body-file` tempfile.
+///
+/// Same defect class as the ship commit-message path: `pid` separates
+/// processes but the timestamp does not separate *threads*
+/// (`SystemTime::now()` is microsecond-granular on macOS), so two concurrent
+/// `gh` calls could mint the same name and one would die on `create_new`.
 fn gh_body_temp_path() -> Result<PathBuf, String> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| format!("system clock before UNIX_EPOCH: {err}"))?
         .as_nanos();
-    Ok(std::env::temp_dir().join(format!("tachi-gh-body-{}-{nanos}.txt", std::process::id())))
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(std::env::temp_dir().join(format!(
+        "tachi-gh-body-{}-{nanos}-{seq}.txt",
+        std::process::id()
+    )))
 }
 
 /// Write `body` to a temp file and append `--body-file <path>` to `cmd`.
@@ -299,5 +311,37 @@ mod tests {
         let guard = attach_gh_body_file(&mut cmd, body).expect("attach body file");
         let written = fs::read_to_string(&guard.0).expect("read body tempfile");
         assert_eq!(written, body);
+    }
+
+    /// The name must be unique per call, not per microsecond — a burst of `gh`
+    /// calls on several threads used to mint identical `pid-nanos` names and
+    /// lose the `create_new`.
+    #[test]
+    fn gh_body_temp_paths_are_unique_within_one_process() {
+        const THREADS: usize = 4;
+        const PER_THREAD: usize = 500;
+
+        let mut workers = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            workers.push(std::thread::spawn(|| {
+                (0..PER_THREAD)
+                    .map(|_| gh_body_temp_path().expect("mint gh body temp path"))
+                    .collect::<Vec<_>>()
+            }));
+        }
+
+        let mut minted = Vec::with_capacity(THREADS * PER_THREAD);
+        for worker in workers {
+            minted.extend(worker.join().expect("join minting thread"));
+        }
+        let unique: std::collections::BTreeSet<_> = minted.iter().cloned().collect();
+
+        assert_eq!(
+            unique.len(),
+            minted.len(),
+            "gh body temp paths collided: {} unique out of {}",
+            unique.len(),
+            minted.len()
+        );
     }
 }
