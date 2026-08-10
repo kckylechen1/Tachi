@@ -163,6 +163,9 @@ fn create_plan() -> BoundAccountPlan {
                 entry_name: "SILICONFLOW_API_KEY".to_string(),
                 updated_at: Some("2026-08-01T00:00:00Z".to_string()),
             }],
+            // A single-entry credential binds no rotation pool; the pool
+            // precondition has its own fixture below.
+            vault_pools: Vec::new(),
             accounts: Vec::new(),
             custody: Vec::new(),
         },

@@ -357,6 +357,10 @@ mod tests {
                     entry_name: "DEEPSEEK_API_KEY".to_string(),
                     updated_at: Some("2026-08-01T00:00:00Z".to_string()),
                 }],
+                vault_pools: vec![VaultPoolBinding {
+                    prefix: "DEEPSEEK_API_KEY".to_string(),
+                    members_digest: format!("vp1:{}", "c".repeat(64)),
+                }],
                 accounts: Vec::new(),
                 custody: Vec::new(),
             },
@@ -405,6 +409,14 @@ mod tests {
             plan_digest(&edited_entry),
             base,
             "vault binding is digested"
+        );
+
+        let mut edited_pool = sample_plan();
+        edited_pool.bindings.vault_pools[0].members_digest = format!("vp1:{}", "d".repeat(64));
+        assert_ne!(
+            plan_digest(&edited_pool),
+            base,
+            "pool membership binding is digested"
         );
     }
 
