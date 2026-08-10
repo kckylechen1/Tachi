@@ -285,10 +285,12 @@ pub struct TachiOrchestratorParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiAgentEvalParams {
     /// aggregate | aggregate_live | telemetry | perf | register | observe |
-    /// adjudicate | get. aggregate replays a local JSONL fixture only when
-    /// TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set. register/observe/adjudicate/get
-    /// (#1066) are the mirror eval intake for harness-native subagents — work
-    /// Tachi did not dispatch and only observes.
+    /// adjudicate | get | route_projection. aggregate replays a local JSONL
+    /// fixture only when TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set.
+    /// register/observe/adjudicate/get (#1066) are the mirror eval intake for
+    /// harness-native subagents — work Tachi did not dispatch and only
+    /// observes. route_projection (#1675) is the ledger-backed routing
+    /// projection that runs in parallel with the `/eval`-memory path.
     pub action: String,
     #[serde(default)]
     pub fixture_path: Option<String>,
@@ -317,6 +319,47 @@ pub struct TachiAgentEvalParams {
     /// `native_child_id`.
     #[serde(default)]
     pub get: Option<MirrorEvalGetParams>,
+
+    /// action=route_projection payload (tachi#1675 PR2 / design D6 phase 1):
+    /// the ledger-backed routing projection. It runs in PARALLEL with the
+    /// `/eval`-memory path — `recommend` is untouched — and every response
+    /// declares `evidence_source` so a consumer can tell the two apart. The
+    /// payload is optional: with no payload the projection answers for an
+    /// unclassified task over the default window.
+    #[serde(default)]
+    pub projection: Option<RouteProjectionParams>,
+}
+
+/// tachi#1675 PR2 `route_projection`: what task the projection is being
+/// asked about, and how far back to look. The candidate set itself is NOT a
+/// parameter — it comes from the existing admission/required/blocked risk
+/// classifier, which prunes before any scoring so a historical score can
+/// never resurrect a candidate the current rules removed.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
+pub struct RouteProjectionParams {
+    /// Free-text task description, classified exactly the way
+    /// `tachi_orchestrator(recommend)` classifies it.
+    #[serde(default)]
+    pub task: Option<String>,
+
+    /// Explicit task type (e.g. `fix_request`), when the caller already knows
+    /// it. Omitted, it is derived from `task`.
+    #[serde(default)]
+    pub task_type: Option<String>,
+
+    /// Risk override (`low`/`medium`/`high`/`critical`), same semantics as
+    /// the recommendation path.
+    #[serde(default)]
+    pub risk: Option<String>,
+
+    /// Files in scope, used by the risk classifier.
+    #[serde(default)]
+    pub file_paths: Option<Vec<String>>,
+
+    /// Evidence window in days (default 30, capped at 365). Rows older than
+    /// the window are counted as excluded, never silently dropped.
+    #[serde(default)]
+    pub window_days: Option<u32>,
 }
 
 /// #1066 `register`: records the parent contract, execution origin,

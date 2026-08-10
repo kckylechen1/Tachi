@@ -8,6 +8,7 @@ use std::path::Path;
 mod fixture;
 mod live;
 mod mirror;
+mod projection;
 
 pub(crate) use self::fixture::*;
 pub(crate) use self::live::*;
@@ -51,6 +52,16 @@ pub(crate) async fn handle_agent_eval(
                 .ok_or_else(|| "get payload is required for action='get'".to_string())?;
             self::mirror::handle_get(_server, get)
         }
+        // tachi#1675 PR2 (design D6 phase 1): the ledger-backed routing
+        // projection. It runs in PARALLEL with the `/eval`-memory path above
+        // — `tachi_orchestrator(recommend)` still sources from memory, and
+        // flipping it is PR4's explicitly versioned cutover. The payload is
+        // optional: with none, the projection answers for an unclassified
+        // task over the default window.
+        "route_projection" => self::projection::handle_route_projection(
+            _server,
+            params.projection.unwrap_or_default(),
+        ),
         "aggregate" => {
             if !eval_fixture_replay_allowed() {
                 return Err(format!(
@@ -105,7 +116,7 @@ pub(crate) async fn handle_agent_eval(
         }
         _ => Err(format!(
             "Invalid eval action '{}'. Use aggregate, aggregate_live, telemetry, perf, \
-             register, observe, adjudicate, or get.",
+             register, observe, adjudicate, get, or route_projection.",
             params.action
         )),
     }
