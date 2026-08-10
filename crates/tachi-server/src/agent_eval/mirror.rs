@@ -561,14 +561,19 @@ mod rubric_tests {
     fn adjudicate_with_rubric_writes_a_rubric_row() {
         let server = test_server();
         let eval_run_id = register(&server, "native-1");
-        observe(&server, &eval_run_id, "claude-sonnet-5");
+        // tachi_dispatch::model_lineage_id requires a "provider/model" shape
+        // (no '/' -> UNKNOWN_IDENTITY, see identity.rs:331-334) — a bare
+        // "claude-sonnet-5" here silently collapses BOTH sides to unknown,
+        // which is the RED-before-fix bug (both assertions below observed
+        // "declared_only" instead of the intended basis).
+        observe(&server, &eval_run_id, "anthropic/claude-sonnet");
 
         let raw = handle_adjudicate(
             &server,
             adjudicate_params(
                 &eval_run_id,
                 "leader",
-                Some("gpt-5.1"),
+                Some("openai/gpt-5"),
                 Some(rubric_block()),
             ),
         )
@@ -599,11 +604,11 @@ mod rubric_tests {
     fn adjudicate_without_rubric_writes_no_rubric_row() {
         let server = test_server();
         let eval_run_id = register(&server, "native-2");
-        observe(&server, &eval_run_id, "claude-sonnet-5");
+        observe(&server, &eval_run_id, "anthropic/claude-sonnet");
 
         let raw = handle_adjudicate(
             &server,
-            adjudicate_params(&eval_run_id, "leader", Some("gpt-5.1"), None),
+            adjudicate_params(&eval_run_id, "leader", Some("openai/gpt-5"), None),
         )
         .expect("adjudicate succeeds");
         let value: Value = serde_json::from_str(&raw).unwrap();
@@ -616,14 +621,14 @@ mod rubric_tests {
     fn independence_basis_self_when_lineages_match() {
         let server = test_server();
         let eval_run_id = register(&server, "native-3");
-        observe(&server, &eval_run_id, "claude-sonnet-5");
+        observe(&server, &eval_run_id, "anthropic/claude-sonnet");
 
         let raw = handle_adjudicate(
             &server,
             adjudicate_params(
                 &eval_run_id,
                 "leader",
-                Some("claude-sonnet-5"),
+                Some("anthropic/claude-sonnet"),
                 Some(rubric_block()),
             ),
         )
@@ -654,7 +659,7 @@ mod rubric_tests {
             adjudicate_params(
                 &eval_run_id,
                 "leader",
-                Some("gpt-5.1"),
+                Some("openai/gpt-5"),
                 Some(rubric_block()),
             ),
         )
@@ -677,7 +682,7 @@ mod rubric_tests {
     fn rubric_write_never_touches_session_or_identity_tables() {
         let server = test_server();
         let eval_run_id = register(&server, "native-5");
-        observe(&server, &eval_run_id, "claude-sonnet-5");
+        observe(&server, &eval_run_id, "anthropic/claude-sonnet");
 
         let count_of = |table: &str| -> i64 {
             server
@@ -697,7 +702,7 @@ mod rubric_tests {
             adjudicate_params(
                 &eval_run_id,
                 "leader",
-                Some("gpt-5.1"),
+                Some("openai/gpt-5"),
                 Some(rubric_block()),
             ),
         )

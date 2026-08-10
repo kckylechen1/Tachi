@@ -23,20 +23,20 @@
       },
       "coordinate": {
         "max_visible_tools": 39,
-        "max_total_input_schema_bytes": 127918,
-        "max_total_tool_definition_bytes": 145993,
+        "max_total_input_schema_bytes": 129232,
+        "max_total_tool_definition_bytes": 147230,
         "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
       },
       "operate": {
         "max_visible_tools": 50,
-        "max_total_input_schema_bytes": 124047,
-        "max_total_tool_definition_bytes": 143144,
+        "max_total_input_schema_bytes": 124868,
+        "max_total_tool_definition_bytes": 143947,
         "rationale": "Post-#1540 runtime-adapter surface ceiling pending #1315 re-slice."
       },
       "admin": {
         "max_visible_tools": 103,
-        "max_total_input_schema_bytes": 186408,
-        "max_total_tool_definition_bytes": 224016,
+        "max_total_input_schema_bytes": 187040,
+        "max_total_tool_definition_bytes": 224288,
         "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification. #1426 adds tachi_tune as an admin-only routed facade (102->103), ratified with the tuning-migration cutover."
       }
     },
@@ -219,8 +219,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 184175,
-        "total_tool_definition_bytes": 221423,
+        "total_input_schema_bytes": 187040,
+        "total_tool_definition_bytes": 224288,
         "visible_tool_count": 103,
         "visible_tools": [
           "archive_memory",
@@ -329,8 +329,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 126367,
-        "total_tool_definition_bytes": 144365,
+        "total_input_schema_bytes": 129232,
+        "total_tool_definition_bytes": 147230,
         "visible_tool_count": 39,
         "visible_tools": [
           "extract_facts",
@@ -393,8 +393,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 122516,
-        "total_tool_definition_bytes": 141595,
+        "total_input_schema_bytes": 124868,
+        "total_tool_definition_bytes": 143947,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
@@ -585,7 +585,7 @@
       "comparisons": {
         "admin": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 7505,
+            "input_schema_bytes": 9857,
             "property_count": 7,
             "property_names": [
               "action",
@@ -625,8 +625,8 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 2905,
-            "property_count": 12,
+            "input_schema_bytes": 3418,
+            "property_count": 13,
             "property_names": [
               "action",
               "dispatch_id",
@@ -636,6 +636,7 @@
               "pr_ref",
               "profile",
               "project",
+              "recommendation_ref",
               "staffing_reason",
               "stage",
               "task",
@@ -730,7 +731,7 @@
         },
         "coordinate": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 7505,
+            "input_schema_bytes": 9857,
             "property_count": 7,
             "property_names": [
               "action",
@@ -770,8 +771,8 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 2905,
-            "property_count": 12,
+            "input_schema_bytes": 3418,
+            "property_count": 13,
             "property_names": [
               "action",
               "dispatch_id",
@@ -781,6 +782,7 @@
               "pr_ref",
               "profile",
               "project",
+              "recommendation_ref",
               "staffing_reason",
               "stage",
               "task",
