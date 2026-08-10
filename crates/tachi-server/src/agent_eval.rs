@@ -107,6 +107,14 @@ pub(crate) async fn handle_agent_eval(
         // that answers "what did the day's eval notes say" would destroy
         // history, not retire a role), with the demotion declared in the
         // payload so no consumer keeps treating them as the routing base.
+        //
+        // Two `/eval` readers remain by design and are NOT part of this
+        // retirement: `dispatch_profile::cards` renders per-profile eval
+        // FEEDBACK on a card, and `tune_ops::route_policy` simulates and
+        // drafts route-policy PROPOSALS from it. Neither is an automatic
+        // routing input — a proposal only affects routing after human review
+        // and apply — so moving them is its own decision, not a rider on this
+        // cutover.
         "aggregate_live" => {
             let rows = load_live_eval_rows(_server, capped_eval_limit(params.limit))?;
             let scores = aggregate_scores(&rows);
