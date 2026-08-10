@@ -52,10 +52,12 @@
 //! - v27: content-free typo-fallback attribution columns on the v26 ledger (#1506).
 //! - v28: Wiki REM source-claim and exact-dedupe apply-lineage recovery ledgers (#1542).
 //! - v29: `memory_outbox_events` durable outbox for outbound memory mutations
-//!   (#1643 / #1630 A1). A NEW TABLE, so a bump is unavoidable: the v22 and
-//!   v28 precedents both state why a table may not arrive through idempotent
-//!   init DDL — a stamped-older database would silently acquire a new write
-//!   surface without migration authority or a matching stamp.
+//!   (#1643 / #1630 A1).
+//! - v30: destination-side outbox apply/readback receipts (#1718).
+//!   Both are NEW TABLE migrations, so a bump is unavoidable: the v22 and v28
+//!   precedents both state why a table may not arrive through idempotent init
+//!   DDL — a stamped-older database would silently acquire a new write surface
+//!   without migration authority or a matching stamp.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -99,7 +101,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 29;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 30;
 
 mod basic;
 mod cross_db;
@@ -179,6 +181,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v27_typo_fallback_attribution",
     "v28_wiki_recovery_ledgers",
     "v29_memory_outbox",
+    "v30_memory_outbox_destination_apply",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -214,6 +217,7 @@ pub struct MigrationReport {
     pub typo_fallback_attribution_columns_added: usize,
     pub wiki_recovery_schema_objects_created: usize,
     pub memory_outbox_schema_objects_created: usize,
+    pub memory_outbox_destination_apply_schema_objects_created: usize,
 }
 
 #[cfg(test)]
@@ -313,7 +317,9 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
     }
     crate::db::schema::validate_recall_impression_ledger_schema(conn)?;
     crate::db::schema::validate_typo_fallback_attribution_schema(conn)?;
-    crate::db::schema::validate_wiki_recovery_ledgers_schema(conn)
+    crate::db::schema::validate_wiki_recovery_ledgers_schema(conn)?;
+    crate::db::schema::validate_memory_outbox_schema(conn)?;
+    crate::db::schema::validate_memory_outbox_destination_apply_schema(conn)
 }
 
 /// #1119 typed schema-migration gate. Runs at the DB-open funnel
@@ -692,6 +698,15 @@ pub(crate) fn run_data_migrations_in_tx(
     report.memory_outbox_schema_objects_created =
         apply_versioned_migration(conn, "v29_memory_outbox", migrate_v29_memory_outbox)?
             .unwrap_or(0);
+    // No `profile` argument on purpose (#1718): destination apply is part of
+    // the portable host-owned sync boundary, so every profile gets its
+    // durable receipt ledger.
+    report.memory_outbox_destination_apply_schema_objects_created = apply_versioned_migration(
+        conn,
+        "v30_memory_outbox_destination_apply",
+        migrate_v30_memory_outbox_destination_apply,
+    )?
+    .unwrap_or(0);
 
     Ok(report)
 }
@@ -736,6 +751,13 @@ fn migrate_v29_memory_outbox(conn: &Connection) -> Result<usize, MemoryError> {
     crate::db::schema::install_memory_outbox_schema(conn)?;
     crate::db::schema::validate_memory_outbox_schema(conn)?;
     Ok(4)
+}
+
+/// One destination receipt table plus its object lookup index (#1718).
+fn migrate_v30_memory_outbox_destination_apply(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::schema::install_memory_outbox_destination_apply_schema(conn)?;
+    crate::db::schema::validate_memory_outbox_destination_apply_schema(conn)?;
+    Ok(2)
 }
 
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
@@ -1476,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn private_fresh_init_installs_v25_through_v29_migrations_once() {
+    fn private_fresh_init_installs_v25_through_v30_migrations_once() {
         let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open in-memory");
@@ -1497,10 +1519,12 @@ mod tests {
         assert_eq!(sentinel_version("v27_typo_fallback_attribution"), 1);
         assert_eq!(sentinel_version("v28_wiki_recovery_ledgers"), 1);
         assert_eq!(sentinel_version("v29_memory_outbox"), 1);
+        assert_eq!(sentinel_version("v30_memory_outbox_destination_apply"), 1);
         crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
         crate::db::schema::validate_typo_fallback_attribution_schema(&conn).unwrap();
         crate::db::schema::validate_wiki_recovery_ledgers_schema(&conn).unwrap();
         crate::db::schema::validate_memory_outbox_schema(&conn).unwrap();
+        crate::db::schema::validate_memory_outbox_destination_apply_schema(&conn).unwrap();
 
         init_schema(&conn).expect("valid current private schema reopens idempotently");
         assert_eq!(
@@ -1527,6 +1551,11 @@ mod tests {
             sentinel_version("v29_memory_outbox"),
             1,
             "v29 migration must run once"
+        );
+        assert_eq!(
+            sentinel_version("v30_memory_outbox_destination_apply"),
+            1,
+            "v30 migration must run once"
         );
     }
 
