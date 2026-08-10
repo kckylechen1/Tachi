@@ -628,10 +628,9 @@ async fn a_probe_that_never_left_the_process_records_nothing() {
     );
     assert!(health.is_none(), "no request means no evidence");
     assert!(
-        client
+        !client
             .provider_health_memory_snapshot()
-            .get(MEMBER_POOL)
-            .is_none(),
+            .contains_key(MEMBER_POOL),
         "an unmade probe must not create a health row"
     );
 
