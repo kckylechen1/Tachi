@@ -343,3 +343,98 @@ async fn tachi_gh_close_loop_dry_run_is_pure_preview() {
         "preview must not emit feedback"
     );
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_gh_close_loop_dry_run_markdown_preserves_payload_and_is_pure() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let temp_runs = tempfile::tempdir().expect("temp run root");
+    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
+    let server = make_server();
+    let flow_id = "flow_20260810T000003Z_gh_close_markdown_preview_test";
+    let before_memories = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM memories", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("count memories before markdown preview");
+    let before_events = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM tachi_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("count events before markdown preview");
+
+    let params: crate::tool_params::TachiGhParams = serde_json::from_value(json!({
+        "action": "close_loop",
+        "dry_run": true,
+        "format": "markdown",
+        "issue_ref": "kckylechen1/tachi#1713",
+        "doc_paths": ["docs/engineering/architecture/agent-flow.md"],
+        "related_issues": ["#153"],
+        "flow_id": flow_id,
+    }))
+    .expect("GH close_loop markdown preview params");
+    let markdown = server
+        .tachi_gh(Parameters(params))
+        .await
+        .expect("GH close_loop markdown preview should succeed");
+
+    assert!(markdown.contains("## Tachi GH close_loop"));
+    assert!(markdown.contains("### references"));
+    assert!(markdown.contains("### promotion_plan"));
+    assert!(markdown.contains("\"kckylechen1/tachi#1713\""));
+    assert!(markdown.contains("\"docs/engineering/architecture/agent-flow.md\""));
+    assert!(markdown.contains("\"destination\": \"wiki\""));
+    assert!(markdown.contains("\"automatic_double_write\": false"));
+    assert!(!markdown.contains("### wiki"));
+    assert!(!markdown.contains("### pattern_feedback"));
+    assert!(!markdown.contains("### closure_actions"));
+
+    assert!(
+        !crate::task_lifecycle::run_dir_for_flow_id(flow_id)
+            .expect("markdown preview run dir")
+            .exists(),
+        "markdown dry_run must not create flow artifacts"
+    );
+    let after_memories = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM memories", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("count memories after markdown preview");
+    let after_events = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM tachi_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("count events after markdown preview");
+    assert_eq!(
+        after_memories, before_memories,
+        "markdown preview must not write wiki"
+    );
+    assert_eq!(
+        after_events, before_events,
+        "markdown preview must not emit pattern feedback or flow events"
+    );
+}

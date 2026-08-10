@@ -1,6 +1,6 @@
 use rmcp::model::Tool;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const FIXTURE: &str = include_str!(
     "../../../../../docs/engineering/architecture/execution-surface-census-v1.fixture.json"
@@ -220,6 +220,36 @@ fn budget_violations(observed: &Value, budgets: &Value) -> Vec<String> {
     violations
 }
 
+fn zero_headroom_surface_violations(observed: &Value, budgets: &Value) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (surface, budget) in budgets["surfaces"].as_object().expect("surface budgets") {
+        if !budget["rationale"]
+            .as_str()
+            .is_some_and(|rationale| rationale.contains("zero headroom"))
+        {
+            continue;
+        }
+        let (profile, tool) = surface.split_once('.').expect("profile.tool budget name");
+        let actual = if profile == "standard" {
+            &observed["schema_surfaces"]["standard"][tool]
+        } else {
+            &observed["schema_surfaces"]["comparisons"][profile][tool]
+        };
+        for (actual_key, budget_key) in [
+            ("property_count", "max_top_level_properties"),
+            ("input_schema_bytes", "max_input_schema_bytes"),
+        ] {
+            if actual[actual_key] != budget[budget_key] {
+                violations.push(format!(
+                    "surface.{surface}.{actual_key}: observed {} differs from exact {budget_key} {}",
+                    actual[actual_key], budget[budget_key]
+                ));
+            }
+        }
+    }
+    violations
+}
+
 #[test]
 fn live_execution_surface_matches_fixture_and_provisional_budgets() {
     let fixture: Value = serde_json::from_str(FIXTURE).expect("execution census fixture parses");
@@ -236,6 +266,13 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
     );
     let violations = budget_violations(&observed, &fixture["provisional_budgets"]);
     assert!(violations.is_empty(), "{}", violations.join("\n"));
+    let exact_violations =
+        zero_headroom_surface_violations(&observed, &fixture["provisional_budgets"]);
+    assert!(
+        exact_violations.is_empty(),
+        "zero-headroom surfaces drifted:\n{}",
+        exact_violations.join("\n")
+    );
 
     let standard_task = &observed["schema_surfaces"]["standard"]["tachi_task"];
     let admin_task = &observed["schema_surfaces"]["comparisons"]["admin"]["tachi_task"];
@@ -282,34 +319,86 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
 }
 
 #[test]
-fn tachi_task_input_schema_caps_have_zero_headroom_per_profile() {
+fn zero_headroom_schema_surfaces_have_exact_caps() {
     let fixture: Value = serde_json::from_str(FIXTURE).expect("execution census fixture parses");
     let observed = observed_census();
     let surfaces = fixture["provisional_budgets"]["surfaces"]
         .as_object()
         .expect("surface budgets");
-    let mut checked = 0;
-    for (surface, budget) in surfaces {
-        let Some((profile, tool)) = surface.split_once('.') else {
-            continue;
-        };
-        if tool != "tachi_task" {
-            continue;
-        }
-        let actual = if profile == "standard" {
-            &observed["schema_surfaces"]["standard"][tool]["input_schema_bytes"]
-        } else {
-            &observed["schema_surfaces"]["comparisons"][profile][tool]["input_schema_bytes"]
-        };
-        assert_eq!(
-            actual, &budget["max_input_schema_bytes"],
-            "#1712 tachi_task schema cap for {profile} must have zero headroom"
-        );
-        checked += 1;
-    }
+    let checked = surfaces
+        .iter()
+        .filter(|(_, budget)| {
+            budget["rationale"]
+                .as_str()
+                .is_some_and(|rationale| rationale.contains("zero headroom"))
+        })
+        .map(|(surface, _)| surface.clone())
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        checked, 2,
-        "#1712 requires standard and admin tachi_task schema caps"
+        checked,
+        BTreeSet::from([
+            "admin.tachi_task".to_string(),
+            "standard.tachi_gh".to_string(),
+            "standard.tachi_task".to_string(),
+        ]),
+        "#1713 must check the three expected zero-headroom surfaces"
+    );
+    let violations = zero_headroom_surface_violations(&observed, &fixture["provisional_budgets"]);
+    assert!(
+        violations.is_empty(),
+        "zero-headroom surface caps must match both property count and schema bytes:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn zero_headroom_gate_rejects_gh_growth_and_cap_slack_mutants() {
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("execution census fixture parses");
+    let observed = observed_census();
+
+    let mut grown = observed.clone();
+    for metric in ["property_count", "input_schema_bytes"] {
+        let value = grown["schema_surfaces"]["standard"]["tachi_gh"][metric]
+            .as_u64()
+            .expect("GH schema metric");
+        grown["schema_surfaces"]["standard"]["tachi_gh"][metric] = json!(value + 1);
+    }
+    let growth_violations =
+        zero_headroom_surface_violations(&grown, &fixture["provisional_budgets"]);
+    assert!(
+        growth_violations
+            .iter()
+            .any(|message| message.contains("surface.standard.tachi_gh.property_count")),
+        "standard GH property growth must trip the exact zero-headroom gate"
+    );
+    assert!(
+        growth_violations
+            .iter()
+            .any(|message| message.contains("surface.standard.tachi_gh.input_schema_bytes")),
+        "standard GH schema-byte growth must trip the exact zero-headroom gate"
+    );
+
+    let mut slack_fixture = fixture.clone();
+    for metric in ["max_top_level_properties", "max_input_schema_bytes"] {
+        let value = slack_fixture["provisional_budgets"]["surfaces"]["standard.tachi_gh"][metric]
+            .as_u64()
+            .expect("GH schema cap");
+        slack_fixture["provisional_budgets"]["surfaces"]["standard.tachi_gh"][metric] =
+            json!(value + 1);
+    }
+    let slack_violations =
+        zero_headroom_surface_violations(&observed, &slack_fixture["provisional_budgets"]);
+    assert!(
+        slack_violations
+            .iter()
+            .any(|message| message.contains("surface.standard.tachi_gh.property_count")),
+        "standard GH property-cap slack must fail the exact gate"
+    );
+    assert!(
+        slack_violations
+            .iter()
+            .any(|message| message.contains("surface.standard.tachi_gh.input_schema_bytes")),
+        "standard GH schema-byte cap slack must fail the exact gate"
     );
 }
 

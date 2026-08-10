@@ -763,6 +763,8 @@ fn render_lifecycle_markdown(action: &str, value: &Value) -> String {
         format!("action: `{action}`"),
     ];
     for field in [
+        "ok",
+        "dry_run",
         "flow_id",
         "issue_ref",
         "pr_ref",
@@ -791,6 +793,29 @@ fn render_lifecycle_markdown(action: &str, value: &Value) -> String {
             .join(", ");
         if !blockers.is_empty() {
             lines.push(format!("blocked_reasons: {blockers}"));
+        }
+    }
+    if action == "close_loop" {
+        for field in [
+            "references",
+            "promotion_plan",
+            "wiki",
+            "pattern_feedback",
+            "closure_actions",
+        ] {
+            let Some(field_value) = value.get(field) else {
+                continue;
+            };
+            lines.push(String::new());
+            lines.push(format!("### {field}"));
+            lines.push("```json".to_string());
+            lines.extend(
+                serde_json::to_string_pretty(field_value)
+                    .expect("JSON values used in a lifecycle response serialize")
+                    .lines()
+                    .map(str::to_owned),
+            );
+            lines.push("```".to_string());
         }
     }
     for body_field in ["pr_body", "release_note"] {
