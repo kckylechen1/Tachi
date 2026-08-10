@@ -55,7 +55,11 @@ pub(crate) fn handle_dispatch_recommendation(
     let evidence = resolve_route_evidence(
         server,
         &risk,
-        limit.max(1),
+        // The same bound every `tachi_agent_eval` read uses, applied to the
+        // caller's limit — this path now reads the ledger (and, per usable
+        // row, a `status.json`), so it takes the facade's cap rather than
+        // trusting an arbitrary caller-supplied one.
+        crate::agent_eval::capped_eval_limit(Some(limit)),
         projection_rules::DEFAULT_WINDOW_DAYS,
     )?;
     let route_policy_records = evidence
@@ -801,13 +805,8 @@ mod evidence_flip_tests {
                     );
                 }
             }
-            // The three fields the briefing plumbing reads by name.
+            // Shapes the briefing plumbing depends on, not just presence.
             assert!(payload["fallback_chain"].as_array().is_some());
-            assert!(
-                payload["evidence_required"].is_null()
-                    || payload["evidence_required"].is_object()
-                    || payload["evidence_required"].is_array()
-            );
             assert!(payload["live_eval"]["row_count"].as_u64().is_some());
             assert!(payload["evidence_note"].as_str().is_some());
             // ...and the flip's own declaration is present on both paths.

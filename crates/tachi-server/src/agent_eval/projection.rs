@@ -87,7 +87,7 @@ impl LedgerRouteEvidence {
         let task_type = self.query_task_type();
         self.rows
             .iter()
-            .filter(|row| {
+            .filter(|row: &&ProjectionRow| {
                 matches!(
                     rules::classify_row(
                         row,
