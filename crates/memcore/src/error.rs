@@ -97,6 +97,83 @@ impl std::fmt::Display for RecallReplayCompatibilityReason {
     }
 }
 
+/// Why a bound provider-account reconcile plan was refused at apply time
+/// (tachi#1680 D4). Every one of these means **zero writes**: the refusal is
+/// raised inside apply's write transaction, which rolls back.
+///
+/// Typed for the reason [`OutboxOutcomeRefusal`] is typed: the operator's next
+/// move differs per reason (re-plan vs. re-read vs. confirm explicitly vs. fix
+/// a hand-edited file), and drift is the security-relevant outcome of the whole
+/// slice — deciding what happened must never require parsing prose.
+///
+/// Declared here rather than in `crate::vault::apply` on purpose, following
+/// [`WorkClaimTransitionReason`] and [`OutboxOutcomeRefusal`]: this module
+/// depends on nothing else in the crate, so the refusal reason survives the
+/// trip to a caller that never enables the `admin` feature the plan types
+/// themselves are gated behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderPlanRefusal {
+    /// The digest recomputed from the plan's own bound content does not equal
+    /// the digest the plan was presented under. Covers both directions of the
+    /// same tamper: an edited action (content moved, digest did not) and an
+    /// edited digest (digest moved, content did not).
+    PlanDigestMismatch,
+    /// A bound discovery source's SHA-256 is not what the plan recorded, or the
+    /// source has disappeared. The evidence the plan reasoned from is gone.
+    SourceDigestMismatch,
+    /// A bound `vault_entries` row's `updated_at` moved, or the entry appeared
+    /// or vanished against what the plan bound. The credential itself changed
+    /// under the plan.
+    VaultEntryDrift,
+    /// A bound account is no longer at the revision the plan was built against.
+    AccountRevisionDrift,
+    /// A bound account's `auth_ref` is not the one the plan bound — the account
+    /// now points at different custody than it did at plan time.
+    AuthRefDrift,
+    /// A bound account's `credential_policy_ref` changed. The policy the plan
+    /// was authorized under is not the policy in force.
+    PolicyRefDrift,
+    /// A bound custody row is not at the revision the plan bound, or has
+    /// disappeared. Deliberately carries no custody target: the refusal is a
+    /// public surface and the target is Vault layout.
+    CustodyRevisionDrift,
+    /// An action targets an account the plan never bound a precondition for.
+    /// Structural: an unbound account is an unverified write, so it is refused
+    /// even when nothing has actually drifted.
+    UnboundAccount,
+    /// An action targets an account that does not exist.
+    UnknownAccount,
+    /// An account-merge action carries no explicit operator confirmation.
+    /// Alias-family similarity is advisory evidence only; collapsing two
+    /// account identities is never something a plan may do on its own
+    /// authority (#1680 D4).
+    UnconfirmedMerge,
+    /// The plan is internally malformed — an empty identifier, a duplicate
+    /// binding, non-object evidence, or a create action whose account already
+    /// exists in a different shape. Refused before any write for the same
+    /// reason drift is: apply never guesses what a plan meant.
+    MalformedPlan,
+}
+
+impl std::fmt::Display for ProviderPlanRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::PlanDigestMismatch => "plan_digest_mismatch",
+            Self::SourceDigestMismatch => "source_digest_mismatch",
+            Self::VaultEntryDrift => "vault_entry_drift",
+            Self::AccountRevisionDrift => "account_revision_drift",
+            Self::AuthRefDrift => "auth_ref_drift",
+            Self::PolicyRefDrift => "policy_ref_drift",
+            Self::CustodyRevisionDrift => "custody_revision_drift",
+            Self::UnboundAccount => "unbound_account",
+            Self::UnknownAccount => "unknown_account",
+            Self::UnconfirmedMerge => "unconfirmed_merge",
+            Self::MalformedPlan => "malformed_plan",
+        };
+        formatter.write_str(reason)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MemoryError {
     #[error("SQLite error: {0}")]
@@ -144,6 +221,22 @@ pub enum MemoryError {
     /// turn exactly this into a drift refusal without sniffing a message.
     #[error("provider account revision conflict: {0}")]
     ProviderAccountRevisionConflict(String),
+
+    /// tachi#1680 D4: a bound reconcile plan was refused at apply time.
+    ///
+    /// **Nothing was written.** The refusal is raised inside apply's single
+    /// write transaction, so the database is exactly as it was before the call
+    /// — that is the whole contract of "drift yields zero writes", and it is
+    /// why this is one typed error rather than a partial-success report.
+    ///
+    /// `detail` is secret-negative and layout-negative by construction: it
+    /// carries account ids, alias names, revisions and source ids, never a
+    /// credential value and never a custody target.
+    #[error("provider account plan refused ({reason}): {detail}")]
+    ProviderAccountPlanRefused {
+        reason: ProviderPlanRefusal,
+        detail: String,
+    },
 
     /// tachi#1643: a durable-outbox transition the frozen #1630 state machine
     /// does not permit. Typed rather than a generic `InvalidArg` string so a

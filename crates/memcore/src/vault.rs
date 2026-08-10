@@ -10,6 +10,10 @@
 /// `memcore` with `default-features = false`.
 #[cfg(feature = "admin")]
 pub mod accounts;
+/// The bound reconcile plan apply consumes (tachi#1680 D4). `admin`-gated for
+/// the same reason [`accounts`] is: it is built out of those types.
+#[cfg(feature = "admin")]
+pub mod apply;
 /// Keyed credential fingerprints (tachi#1680 D2).
 ///
 /// **Must stay `admin`-gated**: this module hashes with `blake2`, which
