@@ -23,8 +23,10 @@
 //!
 //! And one refusal: with fewer than [`N_MIN_USABLE_ROWS`] usable rows, a
 //! single sample, a top-2 difference inside the uncertainty band, or an
-//! overturn newer than the settling window, the projection ABSTAINS. The
-//! no-evidence branch is abstain too — never `baseline_mbit_fit` (design D7).
+//! overturn newer than the settling window on ANY scoped candidate, the
+//! projection ABSTAINS. An empty candidate set abstains under its own
+//! reason, and the no-evidence branch is abstain too — never
+//! `baseline_mbit_fit` (design D7).
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -114,6 +116,11 @@ pub(crate) mod reason {
 /// Abstain reasons (closed set).
 pub(crate) mod abstain {
     pub(crate) const INSUFFICIENT_EVIDENCE: &str = "insufficient_usable_evidence";
+    /// The hard gates left no candidate at all (e.g. a contradictory
+    /// required/blocked classification). Distinct from "no evidence": there is
+    /// nobody to have evidence ABOUT, and the projection must say so rather
+    /// than report a thin-evidence abstain over an empty set.
+    pub(crate) const NO_ELIGIBLE_CANDIDATE: &str = "no_eligible_candidate";
     pub(crate) const RECENT_OVERTURN_UNSETTLED: &str = "recent_overturn_unsettled";
     pub(crate) const TOP_TWO_UNCERTAINTY_OVERLAP: &str = "top_two_uncertainty_overlap";
     pub(crate) const NO_DISCRIMINATING_EVIDENCE: &str = "no_discriminating_evidence";
@@ -188,29 +195,38 @@ fn in_window(ts: &str, since: &str, until: Option<&str>) -> bool {
     }
 }
 
-/// The per-row usability rule (design D6), evaluated in the design's own
-/// order so the reported reason is the FIRST thing that disqualified the row.
-pub(crate) fn classify_row(
-    row: &ProjectionRow,
+/// The SCOPE gate: is this row evidence about an eligible candidate, for this
+/// task type, inside this window — regardless of whether it is fit to score?
+///
+/// Split out of [`classify_row`] because two different questions share it. The
+/// usability rule asks "may this row feed the metric vector"; the settling
+/// rule asks "did the evidence base for this candidate MOVE recently", and the
+/// second must survive every usability filter the first applies. A correction
+/// that strips a row's rubric is precisely the case where the answers differ.
+///
+/// `Ok(profile)` names the candidate the row is about; `Err(reason)` is the
+/// first scope gate it failed, in the design's own order.
+fn row_scope<'a>(
+    row: &'a ProjectionRow,
     eligible_profiles: &[String],
     since: &str,
     until: Option<&str>,
     task_type: Option<&str>,
-) -> RowDisposition {
+) -> Result<&'a str, &'static str> {
     let observation = &row.observation;
 
     if !in_window(&observation.occurred_at, since, until) {
-        return RowDisposition::Excluded(reason::OUTSIDE_WINDOW);
+        return Err(reason::OUTSIDE_WINDOW);
     }
 
     let Some(profile) = observation.profile.as_deref() else {
-        return RowDisposition::Excluded(reason::UNATTRIBUTED_PROFILE);
+        return Err(reason::UNATTRIBUTED_PROFILE);
     };
 
     // Hard gate BEFORE any scoring: a candidate the current admission logic
     // removed contributes nothing, however good its history is.
     if !eligible_profiles.iter().any(|p| p == profile) {
-        return RowDisposition::Excluded(reason::NOT_IN_ELIGIBLE_CANDIDATE_SET);
+        return Err(reason::NOT_IN_ELIGIBLE_CANDIDATE_SET);
     }
 
     // Task-type scoping, applied only when both sides state one.
@@ -223,8 +239,26 @@ pub(crate) fn classify_row(
             .filter(|t| !t.is_empty()),
     ) {
         if query != row_task_type {
-            return RowDisposition::Excluded(reason::TASK_TYPE_MISMATCH);
+            return Err(reason::TASK_TYPE_MISMATCH);
         }
+    }
+
+    Ok(profile)
+}
+
+/// The per-row usability rule (design D6), evaluated in the design's own
+/// order so the reported reason is the FIRST thing that disqualified the row.
+pub(crate) fn classify_row(
+    row: &ProjectionRow,
+    eligible_profiles: &[String],
+    since: &str,
+    until: Option<&str>,
+    task_type: Option<&str>,
+) -> RowDisposition {
+    let observation = &row.observation;
+
+    if let Err(reason) = row_scope(row, eligible_profiles, since, until, task_type) {
+        return RowDisposition::Excluded(reason);
     }
 
     if observation.terminal_outcome.is_none() {
@@ -549,8 +583,11 @@ pub(crate) struct CandidateSummary {
     pub(crate) excluded_counts: BTreeMap<String, usize>,
     pub(crate) first_occurred_at: Option<String>,
     pub(crate) last_occurred_at: Option<String>,
-    /// Event time of the most recent overturn among this candidate's usable
-    /// rows, if any.
+    /// Event time of the most recent overturn among the rows SCOPED to this
+    /// candidate (in window, eligible, same task type), if any — deliberately
+    /// not restricted to usable rows: a correction that made its own row
+    /// unusable is exactly the evidence movement the settling window exists
+    /// to wait out.
     pub(crate) latest_overturn_at: Option<String>,
 }
 
@@ -736,8 +773,31 @@ pub(crate) fn project(
     let mut quality_only_rows = 0usize;
 
     for row in rows {
-        let disposition = classify_row(row, eligible_profiles, since, until, task_type);
         let observation = &row.observation;
+        // The settling signal is read off the SCOPE gate, not off usability.
+        // A correction that made its own row unscoreable (rubric dropped,
+        // independence downgraded, terminal receipt now disagreeing) is still
+        // the evidence base moving under this candidate — reading it only
+        // from surviving rows is how "overturn newer than the settling window
+        // => abstain" silently stops firing for the corrections that matter
+        // most.
+        if let Ok(profile) = row_scope(row, eligible_profiles, since, until, task_type) {
+            if let Some(adjudication) = observation
+                .adjudication
+                .as_ref()
+                .filter(|adjudication| adjudication.is_overturn())
+            {
+                if let Some(summary) = summaries.get_mut(profile) {
+                    let at = normalized(&adjudication.created_at);
+                    summary.latest_overturn_at = Some(match summary.latest_overturn_at.take() {
+                        Some(existing) if existing >= at => existing,
+                        _ => at,
+                    });
+                }
+            }
+        }
+
+        let disposition = classify_row(row, eligible_profiles, since, until, task_type);
         let profile = observation.profile.clone();
         match disposition {
             // `classify_row` only returns Usable/QualityOnly for a row that
@@ -816,17 +876,6 @@ pub(crate) fn project(
                 Some(existing) if existing >= occurred => existing,
                 _ => occurred.clone(),
             });
-            if let Some(adjudication) = observation
-                .adjudication
-                .as_ref()
-                .filter(|adjudication| adjudication.is_overturn())
-            {
-                let at = normalized(&adjudication.created_at);
-                summary.latest_overturn_at = Some(match summary.latest_overturn_at.take() {
-                    Some(existing) if existing >= at => existing,
-                    _ => at,
-                });
-            }
         }
     }
     for (profile, observations) in &quality_by_profile {
@@ -854,6 +903,13 @@ pub(crate) fn project(
 
 /// Recommend-or-abstain over already-sorted candidates.
 pub(crate) fn decide(candidates: &[CandidateSummary], now: &str) -> ProjectionDecision {
+    if candidates.is_empty() {
+        return ProjectionDecision::Abstain {
+            reason: abstain::NO_ELIGIBLE_CANDIDATE,
+            detail: "the hard gates left no eligible candidate for this task class".to_string(),
+        };
+    }
+
     let qualified = candidates
         .iter()
         .filter(|candidate| candidate.qualified())
@@ -876,9 +932,14 @@ pub(crate) fn decide(candidates: &[CandidateSummary], now: &str) -> ProjectionDe
 
     // An overturn that has not settled means the evidence base itself is
     // still moving; ranking on it would publish a verdict that just changed.
+    //
+    // Checked over EVERY candidate, not only the qualified ones: a correction
+    // strong enough to drop a candidate below N_min is the most disruptive
+    // kind there is, and skipping it would let the projection crown the
+    // runner-up on the strength of a verdict that moved an hour ago.
     let settling_floor = shift_iso(now, -OVERTURN_SETTLING_SECS);
     if let Some(floor) = settling_floor.as_deref() {
-        if let Some(unsettled) = qualified.iter().find(|candidate| {
+        if let Some(unsettled) = candidates.iter().find(|candidate| {
             candidate
                 .latest_overturn_at
                 .as_deref()

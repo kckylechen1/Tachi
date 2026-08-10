@@ -532,6 +532,95 @@ fn disc6_recent_overturn_inside_settling_window_abstains() {
     ));
 }
 
+/// Discrimination 6d, the case the settling rule is actually FOR: the
+/// correction itself made its row unusable (the re-judgment carries no
+/// structured rubric), so the row never reaches the metric vector. The
+/// evidence base still moved, and reading the settling signal only off
+/// surviving rows would let the projection answer as if it had not.
+#[test]
+fn disc6_recent_overturn_on_an_unscoreable_row_still_abstains() {
+    let mut specs = repeat(Row::default(), 3);
+    specs.push(Row {
+        // Excluded as `unstructured_verdict` — and an overturn, one hour old.
+        with_rubric: false,
+        adjudication_events: 2,
+        adjudicated_at: "2026-08-09T23:00:00.000Z".to_string(),
+        ..Row::default()
+    });
+    let outcome = run(&rows(specs), &eligible(&["profile_a"]));
+    assert_eq!(
+        outcome.excluded_counts.get(reason::UNSTRUCTURED_VERDICT),
+        Some(&1),
+        "the corrected row is genuinely unusable, not quietly usable"
+    );
+    assert_eq!(candidate(&outcome, "profile_a").usable_rows, 3);
+    assert!(matches!(
+        &outcome.decision,
+        ProjectionDecision::Abstain { reason, .. }
+            if *reason == abstain::RECENT_OVERTURN_UNSETTLED
+    ));
+}
+
+/// ...and the same when the correction knocked its candidate BELOW `N_min`:
+/// the unsettled evidence sits on an unqualified candidate, while a rival is
+/// qualified and clean. Consulting the settling window only on qualified
+/// candidates would crown that rival on the strength of a verdict that moved
+/// an hour ago.
+#[test]
+fn disc6_recent_overturn_on_an_unqualified_candidate_still_abstains() {
+    let mut specs = repeat(Row::default(), 2);
+    specs.push(Row {
+        with_rubric: false,
+        adjudication_events: 2,
+        adjudicated_at: "2026-08-09T23:00:00.000Z".to_string(),
+        ..Row::default()
+    });
+    specs.extend(repeat(
+        Row {
+            profile: "profile_b",
+            ..Row::default()
+        },
+        3,
+    ));
+    let outcome = run(&rows(specs), &eligible(&["profile_a", "profile_b"]));
+    assert!(
+        !candidate(&outcome, "profile_a").qualified(),
+        "the correction left profile_a under N_min — the precondition of this test"
+    );
+    assert!(candidate(&outcome, "profile_b").qualified());
+    match &outcome.decision {
+        ProjectionDecision::Abstain { reason, detail } => {
+            assert_eq!(*reason, abstain::RECENT_OVERTURN_UNSETTLED);
+            assert!(
+                detail.contains("profile_a"),
+                "the abstain names the moving candidate, got {detail}"
+            );
+        }
+        other => panic!("expected an unsettled-overturn abstain, got {other:?}"),
+    }
+}
+
+/// An empty eligible set is its OWN answer, not a thin-evidence abstain over
+/// nobody: the hard gates removed every candidate, and the projection says
+/// exactly that.
+#[test]
+fn an_empty_eligible_set_abstains_as_no_eligible_candidate() {
+    let outcome = run(&rows(repeat(Row::default(), 5)), &eligible(&[]));
+    assert!(outcome.candidates.is_empty());
+    assert_eq!(
+        outcome
+            .excluded_counts
+            .get(reason::NOT_IN_ELIGIBLE_CANDIDATE_SET),
+        Some(&5),
+        "the rows are still counted under an explicit reason"
+    );
+    assert!(matches!(
+        &outcome.decision,
+        ProjectionDecision::Abstain { reason, .. }
+            if *reason == abstain::NO_ELIGIBLE_CANDIDATE
+    ));
+}
+
 /// The no-evidence branch is abstain — never a baseline MBIT fit (design D7).
 #[test]
 fn no_evidence_at_all_abstains() {
