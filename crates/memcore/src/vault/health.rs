@@ -560,6 +560,68 @@ mod tests {
         }
     }
 
+    /// The other half of that rule, and the half nothing pinned: `Exhausted`
+    /// used to clear `auth_failed` **and** `cooldown_until` outright. It now
+    /// leaves both where it found them, so a credential that is throttled
+    /// *and* reported out of quota keeps its live cooldown instead of becoming
+    /// selectable again on the strength of a second, unrelated complaint.
+    ///
+    /// `chat_lanes::chat_lane_marks_insufficient_balance_as_exhausted` asserts
+    /// that a *fresh* exhausted row carries no cooldown — a different
+    /// sentence, and one that stays true either way. Without this test the
+    /// preserving half could regress silently.
+    #[test]
+    fn exhausted_preserves_a_live_cooldown_and_the_auth_binding() {
+        // Canonical stamp from the pinned test clock rather than wall time:
+        // the row must carry exactly what a real writer would have stored.
+        let cooling_until =
+            crate::normalize_utc_iso(&at(3_600).to_rfc3339()).expect("canonical cooldown stamp");
+        let mut throttled = new_key_health("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_1", at(0));
+        throttled.status = HEALTH_STATUS_RATE_LIMITED.to_string();
+        throttled.cooldown_until = Some(cooling_until.clone());
+        throttled.auth_failed = true;
+        throttled.error_count = 2;
+        throttled.last_error = Some("rate limited; retry after 3600s".to_string());
+        throttled.last_success = Some(at(0).to_rfc3339());
+
+        let write = record_key_outcome(
+            Some(&throttled),
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY_1",
+            TypedOutcome::Exhausted,
+            EvidenceKind::SelfReported,
+            None,
+            at(1),
+        );
+
+        // Kept: the cooldown is still in the future, and nothing in an
+        // out-of-quota report says otherwise.
+        assert_eq!(
+            write.health.cooldown_until.as_deref(),
+            Some(cooling_until.as_str()),
+            "an exhausted report must not void a live cooldown"
+        );
+        assert!(
+            write.health.auth_failed,
+            "an exhausted report must not clear an auth failure"
+        );
+        assert_eq!(write.health.last_success, throttled.last_success);
+        // The ephemeral cooldown mirror is told neither to set one nor to
+        // void one — `tachi_llm` keeps reading the row's own.
+        assert!(write.cooldown_until.is_none());
+        assert!(!write.clear_cooldown);
+
+        // Moved: the report is still recorded as exactly what it was.
+        assert_eq!(write.health.status, HEALTH_STATUS_EXHAUSTED);
+        assert_eq!(write.health.last_error.as_deref(), Some("key exhausted"));
+        assert_eq!(write.health.error_count, 3);
+        assert_eq!(
+            write.health.last_attempt.as_deref(),
+            Some(&*at(1).to_rfc3339())
+        );
+        assert_eq!(write.health.updated_at, at(1).to_rfc3339());
+    }
+
     #[test]
     fn evidence_kinds_are_distinguishable_in_storage() {
         let probed = record_key_outcome(
