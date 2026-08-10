@@ -145,7 +145,7 @@ pub(in crate::task_lifecycle) fn intake_briefing_params(
     // `format="full"` intake down to the 4-row packet.
     let wants_full = crate::facade_memory_ops::wants_full_format(params.format.as_deref());
     let mut briefing = params.clone();
-    briefing.action = crate::tool_params::TachiTaskAction::Briefing;
+    briefing.action = crate::tool_params::TachiTaskAction::Brief;
     briefing.format = Some("json".to_string());
     if briefing.compact.is_none() && wants_full {
         briefing.compact = Some(false);

@@ -185,7 +185,7 @@ mod tests {
 
     fn status_params(dispatch_id: &str, include_result: bool) -> TachiTaskParams {
         let json_str = format!(
-            r#"{{"action":"status","dispatch_id":"{}","include_result":{}}}"#,
+            r#"{{"action":"status","dispatch_id":"{}","include_result":{},"format":"json"}}"#,
             dispatch_id, include_result
         );
         serde_json::from_str(&json_str).expect("deserialize status params")
@@ -334,6 +334,31 @@ mod tests {
         assert!(
             response.get("result").is_none(),
             "result field should be absent when include_result=false, got: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_dispatch_id_precedes_cycle_selectors_without_byte_drift() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-mixed-status";
+        write_fake_run(&runs_dir, dispatch_id, Some("# Stable status bytes\n"));
+
+        let baseline = status_params(dispatch_id, true);
+        let baseline_route = crate::tools::task_router::handle_tachi_task_facade(&server, baseline)
+            .await
+            .expect("flat status route should succeed");
+
+        let mut mixed = status_params(dispatch_id, true);
+        mixed.flow_id = Some("flow_should_not_select_cycle_view".to_string());
+        mixed.issue_ref = Some("owner/repo#1712".to_string());
+        mixed.pr_ref = Some("owner/repo#2712".to_string());
+        let mixed_route = crate::tools::task_router::handle_tachi_task_facade(&server, mixed)
+            .await
+            .expect("dispatch_id must win over lifecycle selectors");
+        assert_eq!(
+            mixed_route, baseline_route,
+            "adding flow/issue/PR selectors must not rebuild or wrap dispatch status bytes"
         );
     }
 

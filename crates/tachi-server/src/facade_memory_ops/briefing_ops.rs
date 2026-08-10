@@ -529,7 +529,7 @@ pub(crate) async fn handle_memory_briefing(
             "recent_checkpoints": checkpoints,
             "component_governance": component_governance,
             "layer_authority": {
-                "docs_specs": "highest; use tachi_task(action='briefing') for feature-scoped canonical docs/specs",
+                "docs_specs": "highest; use tachi_task(action='brief') for feature-scoped canonical docs/specs",
                 "guide_sop": "high; procedural workflow guidance",
                 "wiki": "medium-high; synthesized durable knowledge",
                 "memory": "low-medium; fragmented decisions/checkpoints/evidence",

@@ -26,10 +26,10 @@ It is not a new workflow engine. The existing surfaces remain the write paths:
 - `tachi_task(action="close_loop")` records the final issue/docs/wiki sink.
 - `tachi_gh(action="safe_merge")` remains the GitHub PR merge surface.
 
-`tachi_task(action="cycle_status")` is the read-only projection across those artifacts.
+`tachi_task(action="status", flow_id=...)` is the read-only projection across those artifacts; its cycle read model is nested under `status.cycle`.
 
 Host adapters should consume this read model rather than inventing host-specific
-project state. In particular, `before_prompt` should use `cycle_status` to attach
+project state. In particular, `before_prompt` should use the `status` cycle view to attach
 the current lifecycle checklist, and `before_stop` should use the same evidence
 to decide whether the host can stop or needs a bounded continuation directive.
 
@@ -49,7 +49,7 @@ override active issue/PR state, linked contracts, or verification evidence.
 
 ## Data Sources
 
-`cycle_status` reads from existing local artifacts first:
+The `status` cycle view reads from existing local artifacts first:
 
 - `.tachi/runs/<flow_id>/status.json`
 - `.tachi/runs/<flow_id>/events.jsonl`
@@ -64,7 +64,7 @@ fall back to external issue/PR refs and report `no_local_flow` drift.
 
 ## Output Contract
 
-The `cycle_status` response is JSON-first and read-only:
+The nested `status.cycle` response is JSON-first and read-only:
 
 - `flow_id` / `cycle_id`
 - `stage`
@@ -91,7 +91,7 @@ evidence, including missing docs/specs, missing verification, mismatched refs,
 unclosed result artifacts, stale verification heads, or release notes that were
 written before the PR gate became ready.
 
-The `cycle_status` response is read-only. It does not dispatch, comment, merge,
+The `status.cycle` response is read-only. It does not dispatch, comment, merge,
 or close anything. It derives:
 
 - `stage`: a single inferred lifecycle stage (`infer_cycle_stage`), computed from
@@ -111,7 +111,7 @@ response shape (`ok`, `action`, `cycle_id`, `flow_id`, `stage`, `state`, `issue_
 `next_action`, `source`, `timing_ms`) — it does not emit `steps`, `next_step`,
 `current_blockers`, `readiness`, or `status_summary`; those were the field list of
 the `cycle_plan` action this section was renamed from, and were never carried
-forward into `cycle_status`.
+forward into the `status` cycle view.
 
 This gives agents one lifecycle state surface without making it another write path.
 
@@ -126,7 +126,7 @@ Continuity memory needs project lifecycle boundaries so it can distinguish:
 
 This makes Project Cycle the bridge between GitHub work management and long-term
 memory distillation. The memory system should distill durable lessons after
-`close_loop`, but `cycle_status` keeps the current operational truth anchored in
+`close_loop`, but the `status` cycle view keeps the current operational truth anchored in
 the flow artifacts.
 
 Issue refinement uses the same authority order but requires immutable snapshots.
@@ -140,7 +140,7 @@ similarity. See
 ## Non-Goals
 
 - Do not create a second GitHub sync database.
-- Do not merge PRs through `tachi_task(action="cycle_status")`.
+- Do not merge PRs through `tachi_task(action="status")`; the nested cycle view is read-only.
 - Do not treat memory/wiki summaries as higher authority than linked docs/specs or
   verification.
 - Do not require live GitHub reads when a local flow already contains the needed

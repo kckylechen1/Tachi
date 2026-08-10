@@ -43,9 +43,9 @@ pub(crate) fn build_issue_automation_plan(
         slug_for_branch(&issue.title)
     );
     let recommended_next_action = if dispatch_allowed {
-        "Run tachi_task(action='cycle_status', flow_id=...), then follow its next_action using harness-native workers by default; Tachi dispatch requires an explicit durable/remote exception."
+        "Run tachi_task(action='status', flow_id=...), then follow its cycle.next_action using harness-native workers by default; Tachi dispatch requires an explicit durable/remote exception."
     } else {
-        "Ask the leader to clarify acceptance criteria or approve the high-risk boundary, then rerun tachi_task(action='cycle_status', flow_id=...)."
+        "Ask the leader to clarify acceptance criteria or approve the high-risk boundary, then rerun tachi_task(action='status', flow_id=...)."
     };
 
     json!({
@@ -135,7 +135,7 @@ pub(crate) async fn handle_task_intake(
     } else {
         receipt.as_object_mut().expect("receipt object").insert(
             "note".to_string(),
-            json!("receipt: briefing omitted; format=full for feature briefing board, or tachi_task(action='briefing')"),
+            json!("receipt: brief omitted; format=full for feature briefing board, or tachi_task(action='brief')"),
         );
     }
     serde_json::to_string(&receipt).map_err(|e| format!("serialize intake: {e}"))

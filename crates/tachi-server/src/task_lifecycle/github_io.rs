@@ -208,7 +208,7 @@ pub(super) async fn seed_intake_orchestrator(
             task_id: Some(flow_id.to_string()),
             todo_id: Some("dispatch-or-plan".to_string()),
             todo_content: Some(
-                "Read cycle_status, then follow the next lifecycle step for briefing, harness-native execution, or PR handoff."
+                "Read status (the cycle view when flow_id/issue_ref/pr_ref is supplied), then follow the next lifecycle step for brief, harness-native execution, or PR handoff."
                     .to_string(),
             ),
             todo_status: Some(
@@ -261,7 +261,7 @@ pub(super) async fn seed_intake_orchestrator(
             completed_steps: vec!["Read issue and wrote intake flow artifacts.".to_string()],
             remaining_steps: vec![
                 "Confirm canonical docs/specs.".to_string(),
-                "Read cycle_status before selecting the next lifecycle step.".to_string(),
+                "Read status before selecting the next lifecycle step.".to_string(),
                 if dispatch_allowed {
                     "Dispatch bounded worker slice.".to_string()
                 } else {
@@ -277,7 +277,7 @@ pub(super) async fn seed_intake_orchestrator(
                 automation_plan
                     .get("recommended_next_action")
                     .and_then(Value::as_str)
-                    .unwrap_or("Call tachi_task(action='cycle_status', flow_id=...) and inspect the lifecycle state.")
+                    .unwrap_or("Call tachi_task(action='status', flow_id=...) and inspect the cycle lifecycle state.")
                     .to_string(),
             ),
             newest_user_instruction: None,

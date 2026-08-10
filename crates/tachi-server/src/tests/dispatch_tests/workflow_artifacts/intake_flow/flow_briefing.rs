@@ -58,8 +58,8 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
     assert!(run_dir.join("instruction.md").exists());
     let instruction = std::fs::read_to_string(run_dir.join("instruction.md")).unwrap();
     assert!(
-        instruction.contains("tachi_task(action='cycle_status', flow_id=...)"),
-        "intake instruction should route agents through cycle_status: {instruction}"
+        instruction.contains("tachi_task(action='status', flow_id=...)"),
+        "intake instruction should route agents through status cycle view: {instruction}"
     );
     let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
     assert!(events.contains("github_issue_linked"), "{events}");
@@ -74,14 +74,14 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
             .contains("link_pr issue_ref mismatch")
     );
 
-    let mut params = task_params("briefing");
+    let mut params = task_params("brief");
     params.format = Some("json".to_string());
     params.flow_id = Some(flow_id.to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await
-        .expect("briefing should read flow docs");
-    let briefing: Value = serde_json::from_str(&raw).expect("briefing JSON");
+        .expect("brief should read flow docs");
+    let briefing: Value = serde_json::from_str(&raw).expect("brief JSON");
     assert!(briefing["canonical_docs"]
         .as_array()
         .is_some_and(|docs| docs.iter().any(|doc| {
@@ -99,7 +99,7 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
     assert!(
         briefing["next_action"]
             .as_str()
-            .is_some_and(|action| action.contains("tachi_task(action='cycle_status'")),
-        "flow-bound briefing should route agents through cycle_status when no worker is active: {briefing:#}"
+            .is_some_and(|action| action.contains("tachi_task(action='status'")),
+        "flow-bound brief should route agents through the status cycle view when no worker is active: {briefing:#}"
     );
 }

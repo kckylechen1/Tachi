@@ -1,7 +1,7 @@
 use super::*;
 
-/// tachi#1575 fix-round: `tachi_task(action='briefing')` and
-/// `action='doc_index')` both route to `handle_tachi_feature_briefing`
+/// tachi#1575 fix-round: the folded `tachi_task(action='brief')` route
+/// reaches `handle_tachi_feature_briefing`
 /// (`tools/task_router.rs`), whose memory/eval searches run
 /// `project_only=true` by default (`!params.include_global`). That mode
 /// falls through to workspace/bound-store resolution on a named-project miss
@@ -9,14 +9,14 @@ use super::*;
 /// `facade_memory_ops::briefing_ops::handle_memory_briefing`'s companion
 /// test (`facade_tests/briefing/project_routing/missing_project.rs`) already
 /// pins for `tachi_memory(action='briefing')`. This is that same regression
-/// pin for the task facade's briefing/doc_index routes.
+/// pin for the task facade's brief route.
 ///
 /// The sentinel lives ONLY in the bound project DB, so if the named-project
 /// miss ever starts falling through to the bound store again, this call
 /// stops erroring and starts answering with the sentinel's project's data —
 /// making this test the one that must go red against that regression.
 #[tokio::test]
-async fn tachi_task_briefing_names_a_missing_project_instead_of_answering_from_the_bound_db() {
+async fn tachi_task_brief_names_a_missing_project_instead_of_answering_from_the_bound_db() {
     let (server, _project_db) =
         crate::tests::make_server_with_project_fixture("task-briefing-missing-project");
     let sentinel = "MissingProjectTaskBriefingDowngradeSentinel";
@@ -33,7 +33,7 @@ async fn tachi_task_briefing_names_a_missing_project_instead_of_answering_from_t
         })
         .expect("seed project row");
 
-    let mut params = task_params("briefing");
+    let mut params = task_params("brief");
     params.task = Some(sentinel.to_string());
     params.project = Some("ZqxvNoSuchNamedTaskBriefingProjectAnywhere".to_string());
 
@@ -52,10 +52,11 @@ async fn tachi_task_briefing_names_a_missing_project_instead_of_answering_from_t
     );
 }
 
-/// Same regression, `action='doc_index'` — the second of the two actions
-/// `handle_tachi_feature_briefing` serves.
+/// Keep a second discriminator for the folded brief action: it must retain the
+/// same named-project guard when the request carries a full-board shape.
 #[tokio::test]
-async fn tachi_task_doc_index_names_a_missing_project_instead_of_answering_from_the_bound_db() {
+async fn tachi_task_brief_full_board_names_a_missing_project_instead_of_answering_from_the_bound_db(
+) {
     let (server, _project_db) =
         crate::tests::make_server_with_project_fixture("task-doc-index-missing-project");
     let sentinel = "MissingProjectTaskDocIndexDowngradeSentinel";
@@ -72,12 +73,13 @@ async fn tachi_task_doc_index_names_a_missing_project_instead_of_answering_from_
         })
         .expect("seed project row");
 
-    let mut params = task_params("doc_index");
+    let mut params = task_params("brief");
+    params.compact = Some(false);
     params.task = Some(sentinel.to_string());
     params.project = Some("ZqxvNoSuchNamedTaskDocIndexProjectAnywhere".to_string());
 
     let err = server.tachi_task(Parameters(params)).await.expect_err(
-        "a tachi_task doc_index naming a project whose store does not exist must error, not \
+        "a tachi_task brief naming a project whose store does not exist must error, not \
          answer from the bound project DB",
     );
 
@@ -121,7 +123,7 @@ async fn tachi_task_briefing_trims_whitespace_padded_project_and_still_finds_it(
         })
         .expect("seed named project row");
 
-    let mut params = task_params("briefing");
+    let mut params = task_params("brief");
     params.task = Some(sentinel.to_string());
     params.project = Some(format!("  {project_name}  "));
 
@@ -151,7 +153,7 @@ async fn tachi_task_briefing_trims_whitespace_padded_project_and_still_finds_it(
 #[tokio::test]
 async fn tachi_task_briefing_rejects_whitespace_only_project_loudly() {
     let server = make_server();
-    let mut params = task_params("briefing");
+    let mut params = task_params("brief");
     params.project = Some("   ".to_string());
 
     let err = server

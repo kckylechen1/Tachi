@@ -27,7 +27,7 @@ pub(crate) async fn handle_task_cycle_status(
         });
     if flow_id.is_none() && requested_issue_ref.is_none() && requested_pr_ref.is_none() {
         return Err(
-            "cycle_status requires flow_id, issue_ref='owner/repo#123', or pr_ref='owner/repo#123' / GitHub PR URL"
+            "status lifecycle view requires flow_id, issue_ref='owner/repo#123', or pr_ref='owner/repo#123' / GitHub PR URL"
                 .to_string(),
         );
     }
@@ -140,7 +140,7 @@ pub(crate) async fn handle_task_cycle_status(
 
     serde_json::to_string(&json!({
         "ok": true,
-        "action": "cycle_status",
+        "action": "status",
         "cycle_id": flow_id.clone(),
         "flow_id": flow_id.clone(),
         "stage": stage,
@@ -179,7 +179,7 @@ pub(crate) async fn handle_task_cycle_status(
             "total": started.elapsed().as_millis() as u64,
         },
     }))
-    .map_err(|e| format!("serialize cycle_status: {e}"))
+    .map_err(|e| format!("serialize status lifecycle view: {e}"))
 }
 
 fn normalize_optional_issue_ref(raw: Option<&str>) -> Option<String> {
@@ -561,7 +561,7 @@ fn drift_item(kind: &str, detail: &str, action: &str) -> Value {
         "kind": kind,
         "detail": detail,
         "action": action,
-        "authority": "cycle_status",
+        "authority": "status",
     })
 }
 

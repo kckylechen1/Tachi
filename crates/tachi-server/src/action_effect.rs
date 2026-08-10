@@ -277,15 +277,7 @@ pub(crate) fn facade_action_effect(
         ),
         "tachi_wiki" => (&["search", "browse", "read"], &[], &["write"]),
         "tachi_task" => (
-            &[
-                "status",
-                "board",
-                "briefing",
-                "doc_index",
-                "cycle_status",
-                "profiles",
-                "profile",
-            ],
+            &["status", "board", "brief", "profiles", "profile"],
             &[],
             &[
                 "complete",
@@ -582,15 +574,8 @@ mod tests {
     }
 
     #[test]
-    fn f1683_c1a_retired_task_actions_are_unclassified() {
-        for action in [
-            "plan",
-            "cycle_plan",
-            "recommend",
-            "refine_issues",
-            "merge",
-            "ux_matrix",
-        ] {
+    fn retired_task_actions_are_unclassified() {
+        for action in tachi_params::TACHI_TASK_RETIRED_C1A_ACTIONS {
             assert_eq!(
                 facade_action_effect("tachi_task", Some(action)),
                 None,
