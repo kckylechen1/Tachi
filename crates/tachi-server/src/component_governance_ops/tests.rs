@@ -473,6 +473,83 @@ fn normalize_remote_handles_https_and_ssh_forms() {
     );
 }
 
+/// A *spawn* failure (the child process never started) must not be reported to
+/// `classify_repo` as an answer about the repository.
+///
+/// This is the mechanism behind the observed flake in
+/// `classify_repo_prefers_higher_path_match_count_on_remote_tie`: the fixture
+/// configures a real `origin`, yet a wide (3000+ test) parallel run reported
+/// the path-only `git origin remote is unavailable (possible fork / drift)`
+/// gap. `checkout_root` can only ever resolve to the fixture repo or its
+/// realpath (both carry `origin`), so a non-zero git exit cannot produce that
+/// result — the only remaining path is `Command::output()` returning
+/// `Err(io::Error)`, i.e. the OS refusing to create the process (`EAGAIN` from
+/// `fork` under the per-user process cap, `EMFILE`, or a torn `PATH` read
+/// racing another test's `setenv`/`unsetenv`).
+///
+/// Discriminating: with `retry_transient_spawn` reduced to a single attempt
+/// (i.e. the pre-fix `Command::output().map_err(..)?`), the first arm below
+/// returns `Err` and this test goes RED.
+#[test]
+fn retry_transient_spawn_reattempts_only_failures_to_start() {
+    // Fails twice (transient refusal), then starts: must be recovered.
+    let mut calls = 0_u32;
+    let recovered = retry_transient_spawn(|| {
+        calls += 1;
+        if calls < 3 {
+            Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+        } else {
+            Ok("origin-url")
+        }
+    });
+    assert_eq!(
+        recovered.expect("a spawn that succeeds on a later attempt must be recovered"),
+        "origin-url",
+        "the recovered attempt's value must reach the caller unchanged"
+    );
+    assert_eq!(calls, 3, "must stop retrying as soon as the child starts");
+
+    // A permanently unstartable child must terminate at the attempt cap and
+    // surface the last error — bounded, never an infinite loop.
+    let mut always_calls = 0_u32;
+    let exhausted: Result<&str, _> = retry_transient_spawn(|| {
+        always_calls += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    });
+    assert_eq!(
+        exhausted
+            .expect_err("a never-startable child must still fail")
+            .kind(),
+        std::io::ErrorKind::NotFound,
+        "the last spawn error must reach the caller unchanged"
+    );
+    assert_eq!(
+        always_calls, GIT_SPAWN_ATTEMPTS,
+        "retries must be bounded by GIT_SPAWN_ATTEMPTS"
+    );
+}
+
+/// The retry above must not extend to a git process that actually *ran* and
+/// exited non-zero — that is a real answer about the repo, not an infrastructure
+/// hiccup. A real, freshly initialised repo with no `origin` configured makes
+/// `git remote get-url origin` exit non-zero, so `run_git_readonly` must return
+/// the `git ... failed` (ran, non-zero) error shape, never the `run git ...:`
+/// (never started) shape that `retry_transient_spawn` guards. Initialising a
+/// real repo — rather than pointing at a bare temp directory — keeps this
+/// hermetic: git's own upward `.git` walk would otherwise find whatever
+/// enclosing checkout `TMPDIR` happens to live under and succeed.
+#[test]
+fn run_git_readonly_does_not_retry_a_git_process_that_ran_and_refused() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    run_git_readonly(temp.path(), &["init"]).expect("git init");
+    let err = run_git_readonly(temp.path(), &["remote", "get-url", "origin"])
+        .expect_err("a repo with no origin configured must not yield a remote URL");
+    assert!(
+        err.starts_with("git remote get-url origin failed"),
+        "a git process that ran and exited non-zero must surface the ran-and-failed shape, got {err:?}"
+    );
+}
+
 // ─── Issue #798: cutover planner ─────────────────────────────────────────────
 
 fn plan_params(from: &str, to: &str) -> TachiComponentParams {
