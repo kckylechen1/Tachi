@@ -258,34 +258,43 @@ mod tests {
         FingerprintKey::derive_from_master_key(&MASTER)
     }
 
-    /// Pinned vector. The construction is a stored format: every persisted
-    /// `fp1:` value in every database was minted by exactly these bytes in
-    /// exactly this order, so a refactor that "harmlessly" reorders the MAC
-    /// input, drops the separator, or widens the truncation silently
-    /// invalidates them all. This is the assertion that makes that loud.
+    /// Cross-implementation golden vectors. These constructions are a **stored
+    /// format**: every persisted `fp1:`/`fpa1:` value in every database was
+    /// minted by exactly these bytes in exactly this order, so a refactor that
+    /// "harmlessly" reorders the MAC input, drops the separator, changes a
+    /// domain label or widens the truncation silently invalidates all of them.
+    ///
+    /// The literals are **not** derived from this module — they were computed
+    /// independently with Python's `hashlib.blake2b(msg, key=…,
+    /// digest_size=32)` (standard keyed BLAKE2b, which is what
+    /// `Blake2bMac<U32>` is), so this pins the construction against the
+    /// specification rather than against itself. Reproduce with:
+    ///
+    /// ```text
+    /// import hashlib
+    /// mac = lambda k, m: hashlib.blake2b(m, key=k, digest_size=32).digest()
+    /// fp_key = mac(bytes([7]) * 32, b"tachi.fp.v1")
+    /// mac(fp_key, b"tachi.provider-key.v1" + b"deepseek" + b"\x00" + b"sk-pinned-value")[:6].hex()
+    /// ```
     #[test]
-    fn key_fingerprint_matches_the_pinned_construction() {
-        let expected = {
-            let mut mac = <FingerprintMac as Mac>::new_from_slice(&MASTER).unwrap();
-            mac.update(b"tachi.fp.v1");
-            let fp_key = mac.finalize().into_bytes();
-
-            let mut mac = <FingerprintMac as Mac>::new_from_slice(&fp_key).unwrap();
-            mac.update(b"tachi.provider-key.v1");
-            mac.update(b"deepseek");
-            mac.update(&[0x00]);
-            mac.update(b"sk-pinned-value");
-            let digest = mac.finalize().into_bytes();
-            let mut hex = String::new();
-            for byte in digest.iter().take(6) {
-                write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
-            }
-            format!("fp1:{hex}")
-        };
-
+    fn fingerprints_match_independently_computed_golden_vectors() {
+        let key = key();
         assert_eq!(
-            key().key_fingerprint("deepseek", "sk-pinned-value"),
-            expected
+            key.key_fingerprint("deepseek", "sk-pinned-value"),
+            "fp1:859869555fe6"
+        );
+
+        let a = key.key_fingerprint("deepseek", "sk-a");
+        let b = key.key_fingerprint("deepseek", "sk-b");
+        assert_eq!(a, "fp1:6f5f618660b1");
+        assert_eq!(b, "fp1:9259516557fb");
+        assert_eq!(
+            key.account_fingerprint_from_members([a.clone()]),
+            "fpa1:kv:0d1ea969211c"
+        );
+        assert_eq!(
+            key.account_fingerprint_from_members([a, b]),
+            "fpa1:kv:3c343f4d37ee"
         );
     }
 
