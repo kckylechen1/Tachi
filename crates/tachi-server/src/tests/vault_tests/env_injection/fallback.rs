@@ -84,6 +84,7 @@ async fn vault_lock_preserves_env_provider_fallback() {
 /// incidentally depend on) fails loudly here instead of only being caught
 /// by the absence of a warning.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // serializes process-wide env across async vault setup
 async fn vault_set_of_unregistered_synthetic_key_never_materializes_into_provider_cache() {
     let _guard = crate::utils::global_test_lock()
         .lock()
