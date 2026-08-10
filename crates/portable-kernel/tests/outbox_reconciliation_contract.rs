@@ -222,6 +222,25 @@ fn assert_destination_receipt(
     assert_eq!(digest, receipt.source_payload_digest);
 }
 
+/// Project only the production ack-evidence fields after every durable
+/// destination receipt binding has been read back and checked.  The public
+/// source outcome API carries reporter, peer revision, and peer digest; the
+/// remaining receipt fields are enforced by `assert_destination_receipt`
+/// before this projection can be passed to `apply_outbox_outcome`.
+fn ack_evidence_from_durable_receipt(
+    receipt: &OutboxDestinationApplyReceipt,
+    envelope: &OutboxDestinationApplyEnvelope,
+    destination: &MemoryStore,
+    application: OutboxDestinationApplyApplication,
+) -> OutboxOutcomeEvidence {
+    assert_destination_receipt(receipt, envelope, destination, application);
+    OutboxOutcomeEvidence {
+        reported_by: receipt.destination_store.clone(),
+        peer_revision: Some(receipt.destination_object_revision),
+        peer_payload_digest: Some(receipt.destination_payload_digest.clone()),
+    }
+}
+
 fn assert_destination_conflict(
     receipt: &portable_kernel::OutboxDestinationConflictReceipt,
     envelope: &OutboxDestinationApplyEnvelope,
@@ -321,7 +340,7 @@ fn child_path() -> Option<PathBuf> {
 
 #[test]
 fn local_commit_claim_remote_apply_acknowledge() {
-    let (_directory, mut source, mut destination) = fresh_pair();
+    let (directory, mut source, mut destination) = fresh_pair();
     let entry = entry("obj-happy", "happy body");
     let receipt = source
         .commit_with_outbox_event(&entry, &meta("evt-happy"))
@@ -341,46 +360,35 @@ fn local_commit_claim_remote_apply_acknowledge() {
         OutboxDestinationApplyResult::Applied(receipt) => receipt,
         other => panic!("expected production Applied, got {other:?}"),
     };
-    let stored = destination
-        .get("obj-happy")
-        .expect("destination readback")
-        .expect("destination object");
-    let digest = outbox_payload_digest(&stored).expect("destination digest");
-    assert_eq!(applied.event_id, envelope.claimed.event.event_id);
-    assert_eq!(applied.object_id, envelope.claimed.event.object_id);
-    assert_eq!(applied.source_store, envelope.claimed.event.source_store);
-    assert_eq!(
-        applied.source_partition,
-        envelope.claimed.event.source_partition
+    assert_destination_receipt(
+        &applied,
+        &envelope,
+        &destination,
+        OutboxDestinationApplyApplication::Applied,
     );
-    assert_eq!(
-        applied.source_revision,
-        envelope.claimed.event.source_revision
+
+    // Ack only after a fresh open reads the immutable destination receipt back
+    // through the production Duplicate branch.  The evidence passed below is
+    // therefore receipt-bound, not a free-standing reporter token.
+    let destination_path = directory.path().join("destination.sqlite");
+    drop(destination);
+    let mut destination = open_existing(&destination_path, DESTINATION_STORE);
+    let durable_receipt = match destination
+        .apply_outbox_destination(&envelope)
+        .expect("durable destination receipt replay")
+    {
+        OutboxDestinationApplyResult::Duplicate(receipt) => receipt,
+        other => panic!("expected durable Duplicate receipt, got {other:?}"),
+    };
+    let ack_evidence = ack_evidence_from_durable_receipt(
+        &durable_receipt,
+        &envelope,
+        &destination,
+        OutboxDestinationApplyApplication::Duplicate,
     );
-    assert_eq!(
-        applied.source_payload_digest,
-        envelope.claimed.event.payload_digest
-    );
-    assert_eq!(applied.destination_store, envelope.destination.store);
-    assert_eq!(
-        applied.destination_partition,
-        envelope.destination.partition
-    );
-    assert_eq!(applied.destination_object_revision, stored.revision);
-    assert_eq!(applied.destination_payload_digest, digest);
-    assert_eq!(
-        applied.application,
-        OutboxDestinationApplyApplication::Applied
-    );
-    assert_eq!(stored.revision, envelope.claimed.event.source_revision);
-    assert_eq!(digest, envelope.claimed.event.payload_digest);
 
     let acknowledged = source
-        .apply_outbox_outcome(
-            "evt-happy",
-            &OutboxOutcome::Acknowledged,
-            &OutboxOutcomeEvidence::from_reporter(DESTINATION_STORE),
-        )
+        .apply_outbox_outcome("evt-happy", &OutboxOutcome::Acknowledged, &ack_evidence)
         .expect("ack after destination readback");
     assert_eq!(acknowledged.application, OutboxOutcomeApplication::Applied);
     assert_eq!(acknowledged.prior_state, OutboxState::InFlight);
@@ -390,13 +398,13 @@ fn local_commit_claim_remote_apply_acknowledge() {
         acknowledged.event.payload_digest,
         receipt.event.payload_digest
     );
-    assert_eq!(acknowledged.evidence.reported_by, DESTINATION_STORE);
+    assert_eq!(acknowledged.evidence, ack_evidence);
     assert_health(&source, [0, 0, 1, 0, 0, 0, 0, 0]);
 }
 
 #[test]
 fn local_commit_remote_reject() {
-    let (_directory, mut source, destination) = fresh_pair();
+    let (directory, mut source, destination) = fresh_pair();
     let receipt = source
         .commit_with_outbox_event(&entry("obj-reject", "reject body"), &meta("evt-reject"))
         .expect("local commit");
@@ -411,14 +419,12 @@ fn local_commit_remote_reject() {
         .get("obj-reject")
         .expect("destination read")
         .is_none());
+    let reject_outcome = OutboxOutcome::Rejected {
+        error_class: "remote_refused".into(),
+    };
+    let rejection_evidence = OutboxOutcomeEvidence::from_reporter(DESTINATION_STORE);
     let rejected = source
-        .apply_outbox_outcome(
-            "evt-reject",
-            &OutboxOutcome::Rejected {
-                error_class: "remote_refused".into(),
-            },
-            &OutboxOutcomeEvidence::from_reporter(DESTINATION_STORE),
-        )
+        .apply_outbox_outcome("evt-reject", &reject_outcome, &rejection_evidence)
         .expect("remote rejection");
     assert_eq!(rejected.application, OutboxOutcomeApplication::Applied);
     assert_eq!(rejected.prior_state, OutboxState::InFlight);
@@ -438,6 +444,34 @@ fn local_commit_remote_reject() {
         receipt.event.payload_digest
     );
     assert_health(&source, [0, 0, 0, 1, 0, 0, 0, 0]);
+
+    let replay = source
+        .apply_outbox_outcome("evt-reject", &reject_outcome, &rejected.evidence)
+        .expect("replayed remote rejection");
+    assert_eq!(replay.application, OutboxOutcomeApplication::AlreadyApplied);
+    assert_eq!(replay.prior_state, OutboxState::Rejected);
+    assert_eq!(replay.event, rejected.event);
+    assert_eq!(replay.evidence, rejected.evidence);
+    assert_health(&source, [0, 0, 0, 1, 0, 0, 0, 0]);
+
+    drop(source);
+    let mut restarted = open_existing(&directory.path().join("source.sqlite"), SOURCE_STORE);
+    let durable_replay = restarted
+        .apply_outbox_outcome("evt-reject", &reject_outcome, &rejected.evidence)
+        .expect("durable replayed remote rejection");
+    assert_eq!(
+        durable_replay.application,
+        OutboxOutcomeApplication::AlreadyApplied
+    );
+    assert_eq!(durable_replay.prior_state, OutboxState::Rejected);
+    assert_eq!(durable_replay.event, rejected.event);
+    assert_eq!(durable_replay.evidence, rejected.evidence);
+    let durable_row = restarted
+        .outbox_event("evt-reject")
+        .expect("durable rejected row read")
+        .expect("durable rejected row");
+    assert_eq!(durable_row, rejected.event);
+    assert_health(&restarted, [0, 0, 0, 1, 0, 0, 0, 0]);
 }
 
 #[test]
