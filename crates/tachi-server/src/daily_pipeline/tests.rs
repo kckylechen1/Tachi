@@ -293,9 +293,38 @@ fn sample_pipeline_report(date: &str) -> DailyPipelineReport {
         skill_evolution: stage_report("skill", json!({"ok":true})),
         routing_analysis: stage_report(
             "routing",
-            json!({"routing_proposals":[],"marker":"routing"}),
+            json!({
+                "routing_proposals":[],
+                "disposition":"non_model_skip",
+                "marker":"routing"
+            }),
         ),
     }
+}
+
+fn sample_report_artifacts(
+    date: &str,
+    health_marker: &str,
+    routing_details: Value,
+) -> (DailyPipelineReport, String, String, String) {
+    let mut report = sample_pipeline_report(date);
+    report.health_check.details = json!({
+        "overall_health": "good",
+        "marker": health_marker,
+    });
+    report.routing_analysis.details = routing_details;
+    let health_section = serialize_daily_json_section_for_tests(&report.health_check.details)
+        .expect("health section");
+    let routing_section = serialize_daily_json_section_for_tests(&report.routing_analysis.details)
+        .expect("routing section");
+    let markdown = render_daily_report_markdown_for_tests(
+        &report,
+        &health_section,
+        "{}",
+        "{}",
+        &routing_section,
+    );
+    (report, health_section, routing_section, markdown)
 }
 
 async fn mint_receipt(
@@ -482,11 +511,12 @@ async fn injected_failure_between_payload_and_sidecar_leaves_neither_success_pai
         None,
     );
 
-    let err = publish_daily_report_pair_fail_after_payload_for_tests(
+    let err = publish_daily_report_pair_with_failure_for_tests(
         &report_path,
         &markdown,
         &sidecar_path,
         &sidecar,
+        DailyPublishFailurePoint::P3AfterSidecarTempFsyncBeforeHardLink,
     )
     .expect_err("injected failure");
 
@@ -831,6 +861,142 @@ async fn mismatched_sidecar_is_rejected_without_legacy_fallback() {
     );
 }
 
+#[tokio::test]
+async fn newest_stripped_health_identity_falls_back_to_prior_generation() {
+    let provider = MockReasoningProvider::start(vec![(
+        "health".to_string(),
+        "served-model",
+        "served-version",
+    )])
+    .await;
+    let health = mint_receipt(&provider, "health").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let reports_dir = tmp.path().join("reports").join("daily");
+    std::fs::create_dir_all(&reports_dir).expect("reports dir");
+    let report_path = reports_dir.join("2026-08-06.md");
+
+    for revision in [1_i64, 2] {
+        let (_report, health_section, routing_section, markdown) = sample_report_artifacts(
+            "2026-08-06",
+            &format!("health-{revision}"),
+            json!({"disposition":"non_model_skip","marker":revision}),
+        );
+        let sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, revision);
+        let sidecar = build_daily_sidecar_for_tests(
+            "2026-08-06",
+            revision,
+            &markdown,
+            &health_section,
+            &routing_section,
+            &health,
+            None,
+        );
+        publish_daily_report_pair_for_tests(&report_path, &markdown, &sidecar_path, &sidecar)
+            .expect("generation publish");
+    }
+
+    let newest_sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 2);
+    let mut newest: Value =
+        serde_json::from_str(&std::fs::read_to_string(&newest_sidecar_path).unwrap()).unwrap();
+    newest["health"]
+        .as_object_mut()
+        .expect("health receipt")
+        .remove("effective_model");
+    std::fs::write(&newest_sidecar_path, serde_json::to_vec(&newest).unwrap())
+        .expect("strip newest identity");
+
+    let latest = crate::daily_pipeline::validated_latest_daily_report(tmp.path())
+        .expect("prior valid generation");
+    assert!(latest.ends_with("2026-08-06.r1.md"), "latest={latest}");
+}
+
+#[tokio::test]
+async fn newest_model_derived_routing_without_receipt_falls_back_to_prior_generation() {
+    let provider = MockReasoningProvider::start(vec![
+        ("health".to_string(), "health-model", "health-version"),
+        ("routing".to_string(), "routing-model", "routing-version"),
+    ])
+    .await;
+    let health = mint_receipt(&provider, "health").await;
+    let routing = mint_receipt(&provider, "routing").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let reports_dir = tmp.path().join("reports").join("daily");
+    std::fs::create_dir_all(&reports_dir).expect("reports dir");
+    let report_path = reports_dir.join("2026-08-06.md");
+    let model_routing = json!({"routing_proposals":[],"marker":"model-derived"});
+
+    for (revision, routing_invocation) in [(1_i64, Some(&routing)), (2_i64, None)] {
+        let (_report, health_section, routing_section, markdown) = sample_report_artifacts(
+            "2026-08-06",
+            &format!("health-{revision}"),
+            model_routing.clone(),
+        );
+        let sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, revision);
+        let sidecar = build_daily_sidecar_for_tests(
+            "2026-08-06",
+            revision,
+            &markdown,
+            &health_section,
+            &routing_section,
+            &health,
+            routing_invocation,
+        );
+        publish_daily_report_pair_for_tests(&report_path, &markdown, &sidecar_path, &sidecar)
+            .expect("generation publish");
+    }
+
+    let latest = crate::daily_pipeline::validated_latest_daily_report(tmp.path())
+        .expect("prior valid generation");
+    assert!(latest.ends_with("2026-08-06.r1.md"), "latest={latest}");
+}
+
+#[tokio::test]
+async fn non_model_skip_allows_null_routing_receipt() {
+    let provider = MockReasoningProvider::start(vec![(
+        "health".to_string(),
+        "served-model",
+        "served-version",
+    )])
+    .await;
+    let health = mint_receipt(&provider, "health").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let reports_dir = tmp.path().join("reports").join("daily");
+    std::fs::create_dir_all(&reports_dir).expect("reports dir");
+    let report_path = reports_dir.join("2026-08-06.md");
+    let (_report, health_section, routing_section, markdown) = sample_report_artifacts(
+        "2026-08-06",
+        "health",
+        json!({"disposition":"non_model_skip","reason":"no eval rows"}),
+    );
+    let sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 1);
+    let sidecar = build_daily_sidecar_for_tests(
+        "2026-08-06",
+        1,
+        &markdown,
+        &health_section,
+        &routing_section,
+        &health,
+        None,
+    );
+    publish_daily_report_pair_for_tests(&report_path, &markdown, &sidecar_path, &sidecar)
+        .expect("generation publish");
+
+    let latest = crate::daily_pipeline::validated_latest_daily_report(tmp.path())
+        .expect("non-model skip generation");
+    assert!(latest.ends_with("2026-08-06.r1.md"), "latest={latest}");
+
+    let mut mismatched: Value =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar_path).expect("sidecar"))
+            .expect("sidecar json");
+    mismatched["routing"] = mismatched["health"].clone();
+    std::fs::write(&sidecar_path, serde_json::to_vec(&mismatched).unwrap())
+        .expect("inject receipt on non-model skip");
+    assert!(
+        crate::daily_pipeline::validated_latest_daily_report(tmp.path()).is_none(),
+        "a non-model skip cannot claim an invocation receipt"
+    );
+}
+
 #[test]
 fn corrupt_sidecar_does_not_reset_immutable_revision_allocation() {
     let tmp = tempfile::tempdir().expect("tmp");
@@ -991,14 +1157,15 @@ async fn precommit_failure_preserves_prior_valid_generation() {
         None,
     );
     let second_sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 2);
-    let err = publish_daily_report_pair_fail_after_payload_for_tests(
+    let err = publish_daily_report_pair_with_failure_for_tests(
         &report_path,
         &second_markdown,
         &second_sidecar_path,
         &second_sidecar,
+        DailyPublishFailurePoint::P3AfterSidecarTempFsyncBeforeHardLink,
     )
     .expect_err("injected precommit failure");
-    assert!(err.contains("before sidecar commit"), "{err}");
+    assert!(err.contains("before hard-link"), "{err}");
     assert!(first_sidecar_path.exists());
     assert!(!second_sidecar_path.exists());
     assert!(
@@ -1006,4 +1173,258 @@ async fn precommit_failure_preserves_prior_valid_generation() {
             .expect("prior generation")
             .ends_with("2026-08-06.r1.md")
     );
+}
+
+#[tokio::test]
+async fn publish_failure_points_preserve_or_commit_complete_generation() {
+    let provider = MockReasoningProvider::start(vec![(
+        "health".to_string(),
+        "served-model",
+        "served-version",
+    )])
+    .await;
+    let health = mint_receipt(&provider, "health").await;
+
+    for failure_point in [
+        DailyPublishFailurePoint::P1AfterPayloadBytesBeforePayloadFsync,
+        DailyPublishFailurePoint::P2AfterPayloadFsyncBeforeSidecarTemp,
+        DailyPublishFailurePoint::P3AfterSidecarTempFsyncBeforeHardLink,
+        DailyPublishFailurePoint::P4AfterHardLinkBeforeDirectoryFsync,
+    ] {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let reports_dir = tmp.path().join("reports").join("daily");
+        std::fs::create_dir_all(&reports_dir).expect("reports dir");
+        let report_path = reports_dir.join("2026-08-06.md");
+
+        let (_first_report, first_health_section, first_routing_section, first_markdown) =
+            sample_report_artifacts(
+                "2026-08-06",
+                "first",
+                json!({"disposition":"non_model_skip","marker":"first"}),
+            );
+        let first_sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 1);
+        let first_sidecar = build_daily_sidecar_for_tests(
+            "2026-08-06",
+            1,
+            &first_markdown,
+            &first_health_section,
+            &first_routing_section,
+            &health,
+            None,
+        );
+        publish_daily_report_pair_for_tests(
+            &report_path,
+            &first_markdown,
+            &first_sidecar_path,
+            &first_sidecar,
+        )
+        .expect("first generation");
+        assert!(
+            crate::daily_pipeline::validated_latest_daily_report(tmp.path())
+                .expect("first latest")
+                .ends_with("2026-08-06.r1.md")
+        );
+
+        let (_second_report, second_health_section, second_routing_section, second_markdown) =
+            sample_report_artifacts(
+                "2026-08-06",
+                "second",
+                json!({"disposition":"non_model_skip","marker":"second"}),
+            );
+        let second_sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 2);
+        let second_sidecar = build_daily_sidecar_for_tests(
+            "2026-08-06",
+            2,
+            &second_markdown,
+            &second_health_section,
+            &second_routing_section,
+            &health,
+            None,
+        );
+        let err = publish_daily_report_pair_with_failure_for_tests(
+            &report_path,
+            &second_markdown,
+            &second_sidecar_path,
+            &second_sidecar,
+            failure_point,
+        )
+        .expect_err("injected publication failure");
+        assert!(err.contains("injected"), "{err}");
+
+        let expected_latest_revision =
+            if failure_point == DailyPublishFailurePoint::P4AfterHardLinkBeforeDirectoryFsync {
+                2
+            } else {
+                1
+            };
+        let latest = crate::daily_pipeline::validated_latest_daily_report(tmp.path())
+            .expect("latest after injected failure");
+        assert!(
+            latest.ends_with(&format!("2026-08-06.r{expected_latest_revision}.md")),
+            "failure_point={failure_point:?} latest={latest}"
+        );
+
+        if expected_latest_revision == 2 {
+            let committed: Value = serde_json::from_str(
+                &std::fs::read_to_string(&second_sidecar_path).expect("p4 sidecar"),
+            )
+            .expect("p4 sidecar json");
+            let payload_path = reports_dir.join(
+                committed["payload_basename"]
+                    .as_str()
+                    .expect("p4 payload basename"),
+            );
+            let payload = std::fs::read_to_string(&payload_path).expect("p4 payload");
+            assert_eq!(
+                committed["report_content_hash"],
+                PersistedModelInvocationReceiptV1::content_hash_for(&payload)
+            );
+            assert_eq!(committed["revision"], 2);
+            assert_eq!(committed["health"]["revision"], 2);
+            assert_eq!(committed["health"]["completion_status"], "complete");
+        } else {
+            assert!(!second_sidecar_path.exists());
+        }
+
+        let (_clean_report, clean_health_section, clean_routing_section, clean_markdown) =
+            sample_report_artifacts(
+                "2026-08-06",
+                "clean",
+                json!({"disposition":"non_model_skip","marker":"clean"}),
+            );
+        let (clean_revision, clean_sidecar) = publish_daily_report_with_retry_for_tests(
+            &report_path,
+            "2026-08-06",
+            &clean_markdown,
+            &clean_health_section,
+            &clean_routing_section,
+            &health,
+            None,
+        )
+        .expect("clean later publish");
+        assert!(clean_revision > expected_latest_revision);
+        assert_eq!(clean_sidecar.revision, clean_revision);
+        let clean_latest =
+            crate::daily_pipeline::validated_latest_daily_report(tmp.path()).expect("clean latest");
+        assert!(
+            clean_latest.ends_with(&format!("2026-08-06.r{clean_revision}.md")),
+            "clean_latest={clean_latest}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn concurrent_publishers_commit_distinct_bound_generations() {
+    let provider = MockReasoningProvider::start(vec![
+        ("health-a".to_string(), "model-a", "version-a"),
+        ("health-b".to_string(), "model-b", "version-b"),
+    ])
+    .await;
+    let first_health = mint_receipt(&provider, "health-a").await;
+    let second_health = mint_receipt(&provider, "health-b").await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let reports_dir = tmp.path().join("reports").join("daily");
+    std::fs::create_dir_all(&reports_dir).expect("reports dir");
+    let report_path = reports_dir.join("2026-08-06.md");
+    // Both OS threads allocate revision 1 before either may publish. That
+    // forces one real create_new/hard-link collision through the production
+    // retry loop; a single-thread Tokio executor would only serialize these
+    // blocking publishers and would not discriminate the CAS path.
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+
+    let (_first_report, first_health_section, first_routing_section, first_markdown) =
+        sample_report_artifacts(
+            "2026-08-06",
+            "publisher-a",
+            json!({"disposition":"non_model_skip","marker":"publisher-a"}),
+        );
+    let first_task = {
+        let barrier = Arc::clone(&barrier);
+        let report_path = report_path.clone();
+        let health_section = first_health_section.clone();
+        let routing_section = first_routing_section.clone();
+        let markdown = first_markdown.clone();
+        let health = first_health.clone();
+        std::thread::spawn(move || {
+            let (revision, sidecar) =
+                publish_daily_report_with_retry_after_first_allocation_for_tests(
+                    &report_path,
+                    "2026-08-06",
+                    &markdown,
+                    &health_section,
+                    &routing_section,
+                    &health,
+                    None,
+                    &barrier,
+                )
+                .expect("publisher a");
+            (revision, sidecar, markdown, health_section)
+        })
+    };
+
+    let (_second_report, second_health_section, second_routing_section, second_markdown) =
+        sample_report_artifacts(
+            "2026-08-06",
+            "publisher-b",
+            json!({"disposition":"non_model_skip","marker":"publisher-b"}),
+        );
+    let second_task = {
+        let barrier = Arc::clone(&barrier);
+        let report_path = report_path.clone();
+        let health_section = second_health_section.clone();
+        let routing_section = second_routing_section.clone();
+        let markdown = second_markdown.clone();
+        let health = second_health.clone();
+        std::thread::spawn(move || {
+            let (revision, sidecar) =
+                publish_daily_report_with_retry_after_first_allocation_for_tests(
+                    &report_path,
+                    "2026-08-06",
+                    &markdown,
+                    &health_section,
+                    &routing_section,
+                    &health,
+                    None,
+                    &barrier,
+                )
+                .expect("publisher b");
+            (revision, sidecar, markdown, health_section)
+        })
+    };
+
+    let first = first_task.join().expect("publisher a join");
+    let second = second_task.join().expect("publisher b join");
+    assert_ne!(first.0, second.0);
+    let mut revisions = vec![first.0, second.0];
+    revisions.sort_unstable();
+    assert_eq!(revisions, vec![1, 2]);
+
+    for (revision, sidecar, markdown, health_section) in [&first, &second] {
+        assert_eq!(sidecar.revision, *revision);
+        let sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, *revision);
+        let sidecar_json: Value = serde_json::from_str(
+            &std::fs::read_to_string(&sidecar_path).expect("committed sidecar"),
+        )
+        .expect("sidecar json");
+        let payload_path = reports_dir.join(
+            sidecar_json["payload_basename"]
+                .as_str()
+                .expect("payload basename"),
+        );
+        let payload = std::fs::read_to_string(&payload_path).expect("committed payload");
+        assert_eq!(payload, *markdown);
+        assert_eq!(
+            sidecar_json["report_content_hash"],
+            PersistedModelInvocationReceiptV1::content_hash_for(&payload)
+        );
+        assert_eq!(
+            sidecar_json["health"]["content_hash"],
+            PersistedModelInvocationReceiptV1::content_hash_for(health_section)
+        );
+        assert_eq!(sidecar_json["health"]["revision"], *revision);
+    }
+
+    let latest = crate::daily_pipeline::validated_latest_daily_report(tmp.path())
+        .expect("highest valid generation");
+    assert!(latest.ends_with("2026-08-06.r2.md"), "latest={latest}");
 }

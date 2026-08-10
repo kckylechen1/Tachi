@@ -12,9 +12,8 @@ use evolution::run_skill_evolution_stage;
 use health::{load_manifest_targets, run_health_check};
 use maintenance::run_truth_maintenance_stage;
 use report::{
-    build_daily_model_invocations_sidecar, daily_report_generation_sidecar_path,
-    daily_report_payload_path, next_daily_report_revision, publish_daily_report_pair,
-    render_daily_report_markdown, save_daily_health_wiki, serialize_daily_json_section,
+    daily_report_payload_path, publish_daily_report_with_retry, render_daily_report_markdown,
+    save_daily_health_wiki, serialize_daily_json_section,
 };
 use routing::run_routing_analysis_stage;
 use schedule::shanghai_today;
@@ -32,9 +31,12 @@ pub(crate) use report::{
     daily_report_generation_sidecar_path as daily_report_generation_sidecar_path_for_tests,
     next_daily_report_revision as next_daily_report_revision_for_tests,
     publish_daily_report_pair as publish_daily_report_pair_for_tests,
-    publish_daily_report_pair_fail_after_payload as publish_daily_report_pair_fail_after_payload_for_tests,
+    publish_daily_report_pair_with_failure as publish_daily_report_pair_with_failure_for_tests,
+    publish_daily_report_with_retry as publish_daily_report_with_retry_for_tests,
+    publish_daily_report_with_retry_after_first_allocation as publish_daily_report_with_retry_after_first_allocation_for_tests,
     render_daily_report_markdown as render_daily_report_markdown_for_tests,
     serialize_daily_json_section as serialize_daily_json_section_for_tests,
+    DailyPublishFailurePoint,
 };
 pub(crate) use report::{parse_json_or_raw, parse_llm_json};
 pub(crate) use schedule::{next_daily_run_time, next_weekly_rem_run_time};
@@ -83,31 +85,15 @@ pub(crate) async fn run_daily_pipeline(
         &routing_section,
     );
 
-    const MAX_DAILY_PUBLISH_RETRIES: usize = 8; // provisional; calibrate from collision telemetry.
-    let mut committed = None;
-    for _ in 0..MAX_DAILY_PUBLISH_RETRIES {
-        let revision = next_daily_report_revision(&report_path);
-        let sidecar_path = daily_report_generation_sidecar_path(&report_path, revision);
-        let sidecar = build_daily_model_invocations_sidecar(
-            &date,
-            revision,
-            &markdown,
-            &health_section,
-            &routing_section,
-            &health_invocation,
-            routing_outcome.invocation.as_ref(),
-        );
-        match publish_daily_report_pair(&report_path, &markdown, &sidecar_path, &sidecar) {
-            Ok(()) => {
-                committed = Some((revision, sidecar));
-                break;
-            }
-            Err(error) if error.contains("daily generation collision") => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    let (revision, sidecar) = committed
-        .ok_or_else(|| "daily report generation collision retry budget exhausted".to_string())?;
+    let (revision, sidecar) = publish_daily_report_with_retry(
+        &report_path,
+        &date,
+        &markdown,
+        &health_section,
+        &routing_section,
+        &health_invocation,
+        routing_outcome.invocation.as_ref(),
+    )?;
     let payload_path = daily_report_payload_path(&report_path, revision);
 
     let health_body = health_section.clone();

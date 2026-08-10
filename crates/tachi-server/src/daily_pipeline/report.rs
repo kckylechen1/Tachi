@@ -1,6 +1,6 @@
 use crate::server_state::MemoryServer;
 use crate::tool_params::WikiWriteParams;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tachi_llm::PersistedModelInvocationReceiptV1;
@@ -157,6 +157,21 @@ pub(crate) fn build_daily_model_invocations_sidecar(
     }
 }
 
+const MAX_DAILY_PUBLISH_RETRIES: usize = 8;
+
+/// The sidecar is the immutable generation commit point. Keep every same-date
+/// generation: lock-free keep-one-prior garbage collection can race with a
+/// reader or publisher, so retention needs its own synchronization contract.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DailyPublishFailurePoint {
+    None,
+    P1AfterPayloadBytesBeforePayloadFsync,
+    P2AfterPayloadFsyncBeforeSidecarTemp,
+    P3AfterSidecarTempFsyncBeforeHardLink,
+    P4AfterHardLinkBeforeDirectoryFsync,
+}
+
 /// Publish one immutable payload and expose its generation sidecar as the
 /// commit point. The hard link is no-replace: an existing generation is a
 /// collision for the caller to rescan/retry, never an overwrite.
@@ -172,19 +187,20 @@ pub(crate) fn publish_daily_report_pair(
         sidecar_path,
         sidecar,
         #[cfg(test)]
-        false,
+        DailyPublishFailurePoint::None,
     )
 }
 
-/// Test-only: inject failure after payload/temp fsync and before sidecar link.
+/// Test-only: inject a failure at one of the publication durability points.
 #[cfg(test)]
-pub(crate) fn publish_daily_report_pair_fail_after_payload(
+pub(crate) fn publish_daily_report_pair_with_failure(
     report_path: &Path,
     markdown: &str,
     sidecar_path: &Path,
     sidecar: &DailyModelInvocationsSidecarV1,
+    failure_point: DailyPublishFailurePoint,
 ) -> Result<(), String> {
-    publish_daily_report_pair_inner(report_path, markdown, sidecar_path, sidecar, true)
+    publish_daily_report_pair_inner(report_path, markdown, sidecar_path, sidecar, failure_point)
 }
 
 fn publish_daily_report_pair_inner(
@@ -192,7 +208,7 @@ fn publish_daily_report_pair_inner(
     markdown: &str,
     sidecar_path: &Path,
     sidecar: &DailyModelInvocationsSidecarV1,
-    #[cfg(test)] fail_after_payload: bool,
+    #[cfg(test)] failure_point: DailyPublishFailurePoint,
 ) -> Result<(), String> {
     let sidecar_bytes = serde_json::to_vec_pretty(sidecar)
         .map_err(|e| format!("serialize daily model-invocations sidecar: {e}"))?;
@@ -212,19 +228,23 @@ fn publish_daily_report_pair_inner(
         let _ = std::fs::remove_file(sidecar_tmp);
     };
 
-    if let Err(error) = write_owner_only_create_new(&payload_path, report_bytes) {
+    if let Err(error) = write_owner_only_create_new(
+        &payload_path,
+        report_bytes,
+        #[cfg(test)]
+        failure_point,
+    ) {
         cleanup_temps(&sidecar_tmp);
         return Err(error);
     }
-    if let Err(error) = write_temp_owner_only(&sidecar_tmp, &sidecar_bytes) {
+    if let Err(error) = write_temp_owner_only(
+        &sidecar_tmp,
+        &sidecar_bytes,
+        #[cfg(test)]
+        failure_point,
+    ) {
         cleanup_temps(&sidecar_tmp);
         return Err(error);
-    }
-
-    #[cfg(test)]
-    if fail_after_payload {
-        cleanup_temps(&sidecar_tmp);
-        return Err("injected daily report publish failure before sidecar commit".to_string());
     }
 
     if let Err(error) = std::fs::hard_link(&sidecar_tmp, sidecar_path) {
@@ -240,8 +260,98 @@ fn publish_daily_report_pair_inner(
     }
     cleanup_temps(&sidecar_tmp);
 
+    #[cfg(test)]
+    if failure_point == DailyPublishFailurePoint::P4AfterHardLinkBeforeDirectoryFsync {
+        return Err(
+            "injected daily report publish failure after hard-link before directory fsync"
+                .to_string(),
+        );
+    }
+
     crate::utils::sync_parent_dir(&payload_path)?;
     Ok(())
+}
+
+pub(crate) fn publish_daily_report_with_retry(
+    report_path: &Path,
+    date: &str,
+    markdown: &str,
+    health_section: &str,
+    routing_section: &str,
+    health_invocation: &PersistedModelInvocationReceiptV1,
+    routing_invocation: Option<&PersistedModelInvocationReceiptV1>,
+) -> Result<(i64, DailyModelInvocationsSidecarV1), String> {
+    publish_daily_report_with_retry_inner(
+        report_path,
+        date,
+        markdown,
+        health_section,
+        routing_section,
+        health_invocation,
+        routing_invocation,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn publish_daily_report_with_retry_after_first_allocation(
+    report_path: &Path,
+    date: &str,
+    markdown: &str,
+    health_section: &str,
+    routing_section: &str,
+    health_invocation: &PersistedModelInvocationReceiptV1,
+    routing_invocation: Option<&PersistedModelInvocationReceiptV1>,
+    first_allocation_barrier: &std::sync::Barrier,
+) -> Result<(i64, DailyModelInvocationsSidecarV1), String> {
+    publish_daily_report_with_retry_inner(
+        report_path,
+        date,
+        markdown,
+        health_section,
+        routing_section,
+        health_invocation,
+        routing_invocation,
+        Some(first_allocation_barrier),
+    )
+}
+
+fn publish_daily_report_with_retry_inner(
+    report_path: &Path,
+    date: &str,
+    markdown: &str,
+    health_section: &str,
+    routing_section: &str,
+    health_invocation: &PersistedModelInvocationReceiptV1,
+    routing_invocation: Option<&PersistedModelInvocationReceiptV1>,
+    #[cfg(test)] first_allocation_barrier: Option<&std::sync::Barrier>,
+) -> Result<(i64, DailyModelInvocationsSidecarV1), String> {
+    for _attempt in 0..MAX_DAILY_PUBLISH_RETRIES {
+        let revision = next_daily_report_revision(report_path);
+        let sidecar_path = daily_report_generation_sidecar_path(report_path, revision);
+        let sidecar = build_daily_model_invocations_sidecar(
+            date,
+            revision,
+            markdown,
+            health_section,
+            routing_section,
+            health_invocation,
+            routing_invocation,
+        );
+        #[cfg(test)]
+        if _attempt == 0 {
+            if let Some(barrier) = first_allocation_barrier {
+                barrier.wait();
+            }
+        }
+        match publish_daily_report_pair(report_path, markdown, &sidecar_path, &sidecar) {
+            Ok(()) => return Ok((revision, sidecar)),
+            Err(error) if error.contains("daily generation collision") => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err("daily report generation collision retry budget exhausted".to_string())
 }
 
 fn temp_sibling(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -256,7 +366,11 @@ fn temp_sibling(path: &Path, label: &str) -> Result<PathBuf, String> {
     )))
 }
 
-fn write_temp_owner_only(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write_temp_owner_only(
+    path: &Path,
+    bytes: &[u8],
+    #[cfg(test)] failure_point: DailyPublishFailurePoint,
+) -> Result<(), String> {
     #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -279,10 +393,21 @@ fn write_temp_owner_only(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("write temp {}: {e}", path.display()))?;
     file.sync_all()
         .map_err(|e| format!("fsync temp {}: {e}", path.display()))?;
+    #[cfg(test)]
+    if failure_point == DailyPublishFailurePoint::P3AfterSidecarTempFsyncBeforeHardLink {
+        return Err(
+            "injected daily report publish failure after sidecar temp fsync before hard-link"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
-fn write_owner_only_create_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write_owner_only_create_new(
+    path: &Path,
+    bytes: &[u8],
+    #[cfg(test)] failure_point: DailyPublishFailurePoint,
+) -> Result<(), String> {
     #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -315,8 +440,22 @@ fn write_owner_only_create_new(path: &Path, bytes: &[u8]) -> Result<(), String> 
     use std::io::Write;
     file.write_all(bytes)
         .map_err(|e| format!("write immutable report {}: {e}", path.display()))?;
+    #[cfg(test)]
+    if failure_point == DailyPublishFailurePoint::P1AfterPayloadBytesBeforePayloadFsync {
+        return Err(
+            "injected daily report publish failure after payload bytes before payload fsync"
+                .to_string(),
+        );
+    }
     file.sync_all()
         .map_err(|e| format!("fsync immutable report {}: {e}", path.display()))?;
+    #[cfg(test)]
+    if failure_point == DailyPublishFailurePoint::P2AfterPayloadFsyncBeforeSidecarTemp {
+        return Err(
+            "injected daily report publish failure after payload fsync before sidecar temp"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -327,19 +466,97 @@ fn json_section(markdown: &str, heading: &str) -> Option<String> {
     Some(markdown[start..end].to_string())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedModelInvocationReceiptV1Wire {
+    schema: String,
+    lane: String,
+    engine_kind: String,
+    effective_provider: Option<String>,
+    effective_model: Option<String>,
+    effective_version: Option<String>,
+    fallback_chain: Vec<String>,
+    degraded: bool,
+    completion_status: String,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    latency_ms: Option<u64>,
+    content_hash: String,
+    memory_id: String,
+    revision: i64,
+}
+
 fn receipt_binding_matches(
     value: Option<&Value>,
     content: &str,
     memory_id: &str,
     revision: i64,
 ) -> bool {
-    let Some(value) = value.and_then(Value::as_object) else {
+    let Some(value) = value else {
         return false;
     };
-    value.get("content_hash").and_then(Value::as_str)
-        == Some(PersistedModelInvocationReceiptV1::content_hash_for(content).as_str())
-        && value.get("memory_id").and_then(Value::as_str) == Some(memory_id)
-        && value.get("revision").and_then(Value::as_i64) == Some(revision)
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    for key in [
+        "schema",
+        "lane",
+        "engine_kind",
+        "effective_provider",
+        "effective_model",
+        "effective_version",
+        "fallback_chain",
+        "degraded",
+        "completion_status",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "latency_ms",
+        "content_hash",
+        "memory_id",
+        "revision",
+    ] {
+        if !object.contains_key(key) {
+            return false;
+        }
+    }
+    let Ok(receipt) =
+        serde_json::from_value::<PersistedModelInvocationReceiptV1Wire>(value.clone())
+    else {
+        return false;
+    };
+    // These fields are intentionally validated by deserialization even though
+    // the daily reader does not interpret their values beyond their wire type.
+    let _ = (
+        receipt.degraded,
+        receipt.prompt_tokens,
+        receipt.completion_tokens,
+        receipt.total_tokens,
+        receipt.latency_ms,
+    );
+    receipt.schema == tachi_llm::MODEL_INVOCATION_SCHEMA_V1
+        && receipt.lane == "reasoning"
+        && matches!(receipt.engine_kind.as_str(), "provider_http" | "claude_cli")
+        && [
+            &receipt.effective_provider,
+            &receipt.effective_model,
+            &receipt.effective_version,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|identity| !identity.trim().is_empty())
+        && receipt.fallback_chain.len() <= 4
+        && receipt.fallback_chain.iter().all(|step| {
+            matches!(
+                step.as_str(),
+                "provider_http_fallback" | "claude_cli_to_provider_http"
+            )
+        })
+        && matches!(receipt.completion_status.as_str(), "complete" | "unknown")
+        && receipt.content_hash == PersistedModelInvocationReceiptV1::content_hash_for(content)
+        && receipt.memory_id == memory_id
+        && receipt.revision == revision
 }
 
 fn validated_payload_from_sidecar(sidecar_path: &Path) -> Option<(String, i64, PathBuf)> {
@@ -382,16 +599,26 @@ fn validated_payload_from_sidecar(sidecar_path: &Path) -> Option<(String, i64, P
     ) {
         return None;
     }
-    if let Some(routing) = sidecar.get("routing").filter(|value| !value.is_null()) {
-        let routing_section = json_section(&markdown, "Routing Analysis")?;
-        if !receipt_binding_matches(
-            Some(routing),
-            &routing_section,
-            &format!("daily-report:{date}:routing"),
-            revision,
-        ) {
-            return None;
+    let routing_section = json_section(&markdown, "Routing Analysis")?;
+    let routing_details: Value = serde_json::from_str(&routing_section).ok()?;
+    let routing = sidecar.get("routing")?;
+    let is_non_model_skip =
+        routing_details.get("disposition").and_then(Value::as_str) == Some("non_model_skip");
+    match (is_non_model_skip, routing.is_null()) {
+        (true, true) => {}
+        (false, false) => {
+            if !receipt_binding_matches(
+                Some(routing),
+                &routing_section,
+                &format!("daily-report:{date}:routing"),
+                revision,
+            ) {
+                return None;
+            }
         }
+        // A skip cannot carry a model receipt, and model-derived content
+        // cannot omit one. Either mismatch makes the generation invalid.
+        _ => return None,
     }
     Some((date.to_string(), revision, payload_path))
 }
