@@ -267,6 +267,38 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
 }
 
 #[test]
+fn tachi_task_input_schema_caps_have_zero_headroom_per_profile() {
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("execution census fixture parses");
+    let observed = observed_census();
+    let surfaces = fixture["provisional_budgets"]["surfaces"]
+        .as_object()
+        .expect("surface budgets");
+    let mut checked = 0;
+    for (surface, budget) in surfaces {
+        let Some((profile, tool)) = surface.split_once('.') else {
+            continue;
+        };
+        if tool != "tachi_task" {
+            continue;
+        }
+        let actual = if profile == "standard" {
+            &observed["schema_surfaces"]["standard"][tool]["input_schema_bytes"]
+        } else {
+            &observed["schema_surfaces"]["comparisons"][profile][tool]["input_schema_bytes"]
+        };
+        assert_eq!(
+            actual, &budget["max_input_schema_bytes"],
+            "#1712 tachi_task schema cap for {profile} must have zero headroom"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 2,
+        "#1712 requires standard and admin tachi_task schema caps"
+    );
+}
+
+#[test]
 fn census_is_order_stable_and_budget_gate_discriminates_growth() {
     let native = live_native_tools();
     let mut reversed_native = native.clone();

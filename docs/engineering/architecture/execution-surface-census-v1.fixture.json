@@ -43,7 +43,7 @@
     "surfaces": {
       "standard.tachi_task": {
         "max_top_level_properties": 79,
-        "max_input_schema_bytes": 27140,
+        "max_input_schema_bytes": 27137,
         "rationale": "Native-first task facade baseline re-pinned after [1712 C1b-1] folded three task actions; budget tracks observed with zero headroom so any property regrowth trips the named gate."
       },
       "standard.tachi_memory": {
@@ -58,7 +58,7 @@
       },
       "admin.tachi_task": {
         "max_top_level_properties": 79,
-        "max_input_schema_bytes": 28543,
+        "max_input_schema_bytes": 28540,
         "rationale": "Typed operator compatibility baseline re-pinned after [1712 C1b-1] folded three task actions; budget tracks observed with zero headroom."
       }
     }
