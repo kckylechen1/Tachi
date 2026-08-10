@@ -9,6 +9,7 @@ mod keys;
 mod output;
 mod password;
 mod providers_doctor;
+mod reconcile;
 mod secret_actions;
 mod session_actions;
 mod sync_actions;
@@ -78,6 +79,9 @@ pub(super) async fn run_vault_command(
         }
         action @ VaultAction::Intake { .. } => {
             intake::run_intake_action(global_db_path, app_home, action)
+        }
+        action @ VaultAction::Reconcile { .. } => {
+            reconcile::run_reconcile_action(global_db_path, action)
         }
     }
 }

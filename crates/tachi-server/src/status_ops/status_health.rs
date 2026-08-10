@@ -15,7 +15,9 @@ mod vault;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use api_keys::{collect_api_key_status_with_probe_cache, KeyClass, API_KEY_DEFS};
+pub(crate) use api_keys::{
+    collect_api_key_status_with_probe_cache, ApiKeyDef, KeyClass, API_KEY_DEFS,
+};
 pub(crate) use inference::{
     apply_inferred_provider_failures, format_elapsed, infer_provider_from_failed_job,
 };
@@ -102,8 +104,37 @@ pub(crate) fn admitted_env_secret_names() -> HashSet<String> {
 /// Consumed by #1680 PR-C's reconcile pipeline; declared here, with the other
 /// two derived views, because a fourth private copy of "which family is this
 /// name" is precisely the drift D3 deleted `intake::alias_family` to end.
-#[allow(dead_code)]
 pub(crate) fn provider_kind_for_env_name(name: &str) -> Option<&'static str> {
+    registry_def_for_env_name(name).map(|def| def.provider_kind)
+}
+
+/// The account class an admitted env-var name belongs to — the stored form of
+/// the `KeyClass` boundary D3 introduced, so an account row keeps saying
+/// "search credential" after the process that read the registry is gone.
+///
+/// Returns `None` for a name the registry does not recognize at all, which is
+/// the answer reconcile needs: an unrecognized name is not eligible to become
+/// an account of any class.
+pub(crate) fn account_class_for_env_name(name: &str) -> Option<memcore::AccountClass> {
+    registry_def_for_env_name(name).map(|def| match def.class {
+        KeyClass::ModelApi => memcore::AccountClass::ModelApi,
+        KeyClass::SearchApi => memcore::AccountClass::SearchApi,
+        KeyClass::Infra => memcore::AccountClass::Infra,
+    })
+}
+
+/// The canonical primary key of the registry entry an admitted name belongs
+/// to. Reconcile uses it to pick which of a group's interchangeable names is
+/// the one custody points at, so that choice is the registry's rather than an
+/// accident of iteration order.
+pub(crate) fn canonical_key_for_env_name(name: &str) -> Option<&'static str> {
+    registry_def_for_env_name(name).map(|def| def.canonical_key)
+}
+
+/// The single registry lookup the three name-keyed views above share:
+/// primary-key match first (never shadowed by another entry that merely lists
+/// the name as an alias), then the alias tables.
+pub(crate) fn registry_def_for_env_name(name: &str) -> Option<&'static api_keys::ApiKeyDef> {
     api_keys::API_KEY_DEFS
         .iter()
         .find(|def| def.key == name)
@@ -112,7 +143,6 @@ pub(crate) fn provider_kind_for_env_name(name: &str) -> Option<&'static str> {
                 .iter()
                 .find(|def| def.aliases.contains(&name))
         })
-        .map(|def| def.provider_kind)
 }
 
 /// Stable internal API for the doctor daily pipeline: refresh the on-disk

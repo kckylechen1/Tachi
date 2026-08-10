@@ -166,7 +166,7 @@ fn discover_env_values(env_home: &Path, cwd: &Path) -> Vec<(PathBuf, String, Str
         .collect()
 }
 
-fn env_source_paths(env_home: &Path, cwd: &Path) -> Vec<PathBuf> {
+pub(super) fn env_source_paths(env_home: &Path, cwd: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
         env_home.join(".secrets").join("master.env"),
         env_home.join(".tachi").join("config.env"),
@@ -186,7 +186,7 @@ fn env_source_paths(env_home: &Path, cwd: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn parse_env_file(path: &Path) -> Vec<(PathBuf, String, String)> {
+pub(super) fn parse_env_file(path: &Path) -> Vec<(PathBuf, String, String)> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -344,11 +344,7 @@ fn is_config_name(name: &str) -> bool {
 /// now also covering every other aliased registry entry (e.g.
 /// `XAI_API_KEY`/`GROK_API_KEY`), which the old two-entry table never did.
 fn alias_family(name: &str) -> Option<String> {
-    let defs = crate::status_ops::status_health::API_KEY_DEFS;
-    let def = defs
-        .iter()
-        .find(|def| def.key == name)
-        .or_else(|| defs.iter().find(|def| def.aliases.contains(&name)))?;
+    let def = crate::status_ops::status_health::registry_def_for_env_name(name)?;
     if def.aliases.is_empty() {
         return None;
     }

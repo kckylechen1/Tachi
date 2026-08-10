@@ -80,6 +80,51 @@ pub enum VaultIntakeAction {
     },
 }
 
+/// tachi#1680 D4: reconcile discovered credential evidence into the
+/// provider-account tables through a bound plan.
+///
+/// Split into `plan` and `apply` on purpose, and they need different things:
+/// `plan` unlocks the Vault (deciding whether two names hold one credential
+/// means comparing the values), while `apply` needs no password at all — it
+/// verifies the plan's bindings against the database and the source files, and
+/// never touches a secret.
+#[derive(Subcommand, Debug, Clone)]
+pub enum VaultReconcileAction {
+    /// Build a bound provider-account plan. Read-only: writes nothing to the
+    /// database, and writes a file only with --out.
+    Plan {
+        /// Emit the plan artifact as JSON on stdout.
+        #[arg(long)]
+        json: bool,
+        /// Also write the plan artifact to this path, for review and later
+        /// `reconcile apply --plan`.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+        /// Read vault password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read vault password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read vault password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
+    },
+    /// Apply a previously written plan. Every binding the plan recorded is
+    /// re-verified inside one write transaction; any drift writes nothing.
+    Apply {
+        /// Plan artifact written by `reconcile plan --out`.
+        #[arg(long, value_name = "PATH")]
+        plan: PathBuf,
+        /// Emit the apply report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum VaultAction {
     /// Initialize the vault with a master password.
@@ -315,6 +360,11 @@ pub enum VaultAction {
     Intake {
         #[command(subcommand)]
         action: VaultIntakeAction,
+    },
+    /// Plan or apply provider-account reconciliation (tachi#1680).
+    Reconcile {
+        #[command(subcommand)]
+        action: VaultReconcileAction,
     },
     /// Plan or apply credential profile materialization without exposing secret values.
     Materialize {
