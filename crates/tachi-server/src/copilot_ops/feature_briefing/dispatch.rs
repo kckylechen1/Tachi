@@ -120,3 +120,61 @@ pub(super) fn relevant_feature_profiles(recommendation: &Value) -> Vec<Value> {
         })
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool_params::TachiTaskParams;
+
+    fn test_server() -> MemoryServer {
+        let db_path = crate::utils::test_fixture_path(format!(
+            "feature-briefing-dispatch-seam-a-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        MemoryServer::new(db_path, None).expect("test memory server")
+    }
+
+    /// tachi#1675 PR1 Seam A: `feature_dispatch_recommendation` is a SECOND
+    /// call site into `handle_dispatch_recommendation` (the briefing
+    /// plumbing, distinct from the direct `recommend` action) — it must be
+    /// covered by the same `route_recommendations` write, not bypass it.
+    #[test]
+    fn feature_dispatch_recommendation_writes_a_route_recommendations_row() {
+        let server = test_server();
+        let before: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM route_recommendations", [], |r| {
+                        r.get(0)
+                    })
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+
+        let params: TachiTaskParams = serde_json::from_value(json!({"action": "briefing"}))
+            .expect("minimal task params parse");
+        let recommendation = feature_dispatch_recommendation(&server, &params, "fix a bug");
+        assert_eq!(
+            recommendation.get("available"),
+            None,
+            "a healthy recommendation carries no available:false error marker"
+        );
+        assert!(
+            recommendation.get("recommendation_id").is_some(),
+            "Seam A's recommendation_id must round-trip through the briefing plumbing too"
+        );
+
+        let after: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM route_recommendations", [], |r| {
+                        r.get(0)
+                    })
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert_eq!(after, before + 1);
+    }
+}

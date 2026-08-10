@@ -32,7 +32,7 @@ pub(crate) fn handle_dispatch_recommendation(
         recommended_transport_for_profile(best_profile);
 
     let profile_json = profile_json_for_server(server, best_profile)?;
-    let payload = tachi_dispatch::build_dispatch_recommendation_response(
+    let mut payload = tachi_dispatch::build_dispatch_recommendation_response(
         task,
         &risk,
         best_profile,
@@ -52,6 +52,40 @@ pub(crate) fn handle_dispatch_recommendation(
                 .unwrap_or(Value::Null),
         },
     )?;
+
+    // tachi#1675 PR1 Seam A: this is the ONLY moment the candidate set exists
+    // in memory — persist it as a `route_recommendations` fact before
+    // returning. Never deduplicated (every consult, including a byte-identical
+    // repeat, is its own fact — design D2). This turns a previously pure read
+    // path into a write; it is also reachable from the briefing plumbing
+    // (`copilot_ops::feature_briefing::dispatch::feature_dispatch_recommendation`),
+    // which is covered by this same write since both call sites funnel
+    // through this one function.
+    let recommendation_id = uuid::Uuid::new_v4().to_string();
+    let occurred_at = memcore::now_utc_iso();
+    let policy_source_revision = {
+        let source_rows = server.with_global_store_read(|store| {
+            store
+                .list_state(ROUTE_POLICY_RULE_NS)
+                .map_err(|e| format!("list active route policy rules: {e}"))
+        })?;
+        crate::tune_ops::route_policy::route_policy_source_revision(&source_rows)
+    };
+    let new_recommendation = memcore::NewRouteRecommendation {
+        recommendation_id: recommendation_id.clone(),
+        task_type: Some(risk.task_type.clone()),
+        risk: risk.risk.clone(),
+        candidates: serde_json::to_value(&candidates).unwrap_or_else(|_| json!([])),
+        recommended_profile: Some(best.profile.clone()),
+        policy_source_revision: Some(policy_source_revision),
+        rows_considered: rows.len() as u64,
+        occurred_at,
+    };
+    server.with_global_store(|store| {
+        memcore::insert_route_recommendation(store.connection(), &new_recommendation)
+            .map_err(|e| e.to_string())
+    })?;
+    payload["recommendation_id"] = json!(recommendation_id);
 
     serde_json::to_string(&payload).map_err(|e| format!("serialize recommendation: {e}"))
 }
@@ -97,4 +131,100 @@ pub(in crate::dispatch_profile) fn recommended_transport_for_profile(
         "opencode_cli".to_string(),
         json!({ "requested": "opencode_cli", "readiness": "cli" }),
     )
+}
+
+#[cfg(test)]
+mod route_recommendation_ledger_tests {
+    use super::*;
+
+    fn test_server() -> MemoryServer {
+        let db_path = crate::utils::test_fixture_path(format!(
+            "dispatch-recommendation-seam-a-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        MemoryServer::new(db_path, None).expect("test memory server")
+    }
+
+    fn rubric_table_row_count(server: &MemoryServer, table: &str) -> i64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+    }
+
+    /// tachi#1675 PR1 Seam A: a `recommend` call persists a
+    /// `route_recommendations` row and echoes `recommendation_id` in the
+    /// response payload — the id Seam B's `recommendation_ref` is meant to
+    /// carry.
+    #[test]
+    fn recommendation_call_writes_a_route_recommendations_row() {
+        let server = test_server();
+        let before = rubric_table_row_count(&server, "route_recommendations");
+
+        let raw = handle_dispatch_recommendation(&server, "fix a bug in the parser", None, 50, &[])
+            .expect("recommendation succeeds");
+        let payload: Value = serde_json::from_str(&raw).expect("valid JSON");
+        let recommendation_id = payload
+            .get("recommendation_id")
+            .and_then(Value::as_str)
+            .expect("recommendation_id present in payload")
+            .to_string();
+        assert!(!recommendation_id.is_empty());
+
+        let after = rubric_table_row_count(&server, "route_recommendations");
+        assert_eq!(after, before + 1, "exactly one row written per call");
+
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_route_recommendation(store.connection(), &recommendation_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .expect("row present");
+        assert_eq!(row.recommendation_id, recommendation_id);
+        assert!(!row.risk.is_empty());
+        assert!(row.candidates.is_array());
+        assert!(
+            !row.candidates.as_array().unwrap().is_empty(),
+            "candidates JSON carries the full scored candidate array"
+        );
+    }
+
+    /// Every consult is a new fact — two calls with identical arguments write
+    /// TWO rows, never deduplicated.
+    #[test]
+    fn repeated_recommendation_calls_are_never_deduplicated() {
+        let server = test_server();
+        let before = rubric_table_row_count(&server, "route_recommendations");
+
+        handle_dispatch_recommendation(&server, "review a PR", None, 50, &[]).unwrap();
+        handle_dispatch_recommendation(&server, "review a PR", None, 50, &[]).unwrap();
+
+        let after = rubric_table_row_count(&server, "route_recommendations");
+        assert_eq!(after, before + 2, "each consult is an independent fact");
+    }
+
+    /// Negative test: Seam A's write path never touches session_claims or
+    /// agent_identities.
+    #[test]
+    fn recommendation_write_never_touches_session_or_identity_tables() {
+        let server = test_server();
+        let before_claims = rubric_table_row_count(&server, "session_claims");
+        let before_identities = rubric_table_row_count(&server, "agent_identities");
+
+        handle_dispatch_recommendation(&server, "plan a feature", None, 50, &[]).unwrap();
+
+        assert_eq!(
+            before_claims,
+            rubric_table_row_count(&server, "session_claims")
+        );
+        assert_eq!(
+            before_identities,
+            rubric_table_row_count(&server, "agent_identities")
+        );
+    }
 }
