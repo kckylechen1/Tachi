@@ -69,6 +69,15 @@ const PRODUCT_TABLES: &[&str] = &[
     "hub_capabilities",
     "vault_entries",
     "vault_key_health",
+    // tachi#1680 D1's four provider-account tables. Listed in full rather than
+    // by one representative: they arrived as a group in a single commit, and
+    // the failure mode this list guards (a chunk tagged Portable so a portable
+    // kernel silently grows a product table, or tagged Product so a full store
+    // silently lacks one) is per-chunk, not per-family.
+    "provider_accounts",
+    "provider_account_aliases",
+    "provider_account_events",
+    "account_custody",
     "foundry_jobs",
     "exec_envs",
     "exec_env_resources",

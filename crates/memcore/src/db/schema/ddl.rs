@@ -691,6 +691,105 @@ pub(super) const BASE_SCHEMA_CHUNKS: &[(SchemaScope, &str)] = &[
         CREATE INDEX IF NOT EXISTS idx_vault_key_health_cooldown ON vault_key_health(logical_name, cooldown_until);
 "#,
     ),
+    // provider_accounts
+    (
+        SchemaScope::Product,
+        r#"
+        -- Vault provider accounts (tachi#1680 D1): public-safe account
+        -- metadata only. An account row says which vendor account a
+        -- credential belongs to; it never says which Vault entry or rotation
+        -- member physically holds the secret. That pointer lives in
+        -- `account_custody` — a separate table precisely so no serialization
+        -- of an account row can carry custody by accident. `auth_ref` is the
+        -- opaque ("va1:...") handle joining the two, and is NULL for
+        -- metadata-only auth modes that have no stored credential at all.
+        CREATE TABLE IF NOT EXISTS provider_accounts (
+            account_id            TEXT PRIMARY KEY,
+            provider_kind         TEXT NOT NULL,
+            auth_mode             TEXT NOT NULL CHECK (auth_mode IN (
+                                      'api_key_pool', 'brokered_oauth', 'cloud_iam',
+                                      'provider_owned_session', 'local_no_auth', 'unsupported'
+                                  )),
+            auth_ref              TEXT UNIQUE,
+            account_fingerprint   TEXT NOT NULL,
+            account_class         TEXT NOT NULL DEFAULT 'model_api',
+            capabilities          TEXT NOT NULL DEFAULT '[]',
+            credential_policy_ref TEXT,
+            refresh_authority     TEXT NOT NULL DEFAULT 'none',
+            status                TEXT NOT NULL DEFAULT 'active',
+            revision              INTEGER NOT NULL DEFAULT 1,
+            source_refs           TEXT NOT NULL DEFAULT '[]',
+            created_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_provider_accounts_kind ON provider_accounts(provider_kind);
+        CREATE INDEX IF NOT EXISTS idx_provider_accounts_fingerprint ON provider_accounts(account_fingerprint);
+"#,
+    ),
+    // provider_account_aliases
+    (
+        SchemaScope::Product,
+        r#"
+        -- Every env-var name an account has been observed under. Append and
+        -- retire, never delete: two names holding one value collapse into a
+        -- single account with two alias rows (#1680 D2 discrimination 1), and
+        -- a name that stops being observed is marked `retired` so the record
+        -- of what was once called what survives the rename.
+        CREATE TABLE IF NOT EXISTS provider_account_aliases (
+            account_id  TEXT NOT NULL,
+            alias_name  TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            first_seen  TEXT NOT NULL,
+            last_seen   TEXT NOT NULL,
+            retired     INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, alias_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_provider_account_aliases_name ON provider_account_aliases(alias_name);
+"#,
+    ),
+    // provider_account_events
+    (
+        SchemaScope::Product,
+        r#"
+        -- Append-only audit of everything that ever changed an account:
+        -- creation, alias observation, member rotation, re-fingerprint after a
+        -- Vault master-key rekey, apply/no-op. `revision` is the account
+        -- revision the event produced (which is how identity survives rotating
+        -- key material, #1680 D2); `plan_digest` binds an event to the
+        -- reconcile plan that caused it. Rows are never updated or deleted.
+        CREATE TABLE IF NOT EXISTS provider_account_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id  TEXT NOT NULL,
+            revision    INTEGER NOT NULL,
+            event_kind  TEXT NOT NULL,
+            plan_digest TEXT,
+            evidence    TEXT NOT NULL DEFAULT '{}',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_provider_account_events_account ON provider_account_events(account_id, id);
+"#,
+    ),
+    // account_custody
+    (
+        SchemaScope::Product,
+        r#"
+        -- The custody pointer for one account: which Vault rotation pool or
+        -- which Vault entry actually holds its secret. Deliberately NOT columns
+        -- on `provider_accounts` — a table boundary, not field discipline, is
+        -- what keeps Vault layout (rotation prefixes, member names) off every
+        -- account-shaped serialization surface (#1680 D1/D5). Restructuring a
+        -- pool bumps `revision` here and leaves `auth_ref` — and therefore
+        -- every upper-layer reference to the account — unchanged.
+        CREATE TABLE IF NOT EXISTS account_custody (
+            auth_ref       TEXT PRIMARY KEY,
+            account_id     TEXT NOT NULL UNIQUE,
+            custody_kind   TEXT NOT NULL CHECK (custody_kind IN ('vault_rotation_pool', 'vault_entry')),
+            custody_target TEXT NOT NULL,
+            revision       INTEGER NOT NULL,
+            updated_at     TEXT NOT NULL
+        );
+"#,
+    ),
     // foundry_jobs
     (
         SchemaScope::Product,
@@ -1519,6 +1618,19 @@ pub(super) const MIGRATED_INDEXES_CHUNKS: &[(SchemaScope, &str)] = &[
 /// at schema v28, before #1585 D3 cut it into [`BASE_SCHEMA_CHUNKS`]. Test-only
 /// and deliberately a verbatim duplicate — a golden that is *derived* from the
 /// thing it checks proves nothing.
+///
+/// **Amendment discipline.** The golden is not frozen against *additive* base
+/// schema growth — `CREATE TABLE IF NOT EXISTS` chunks that reach existing
+/// databases through `init_schema_inner` without a version bump — it is frozen
+/// against *silent edits to bytes that already shipped*. So the only legitimate
+/// way to touch this constant is to insert a new chunk's bytes verbatim, in the
+/// same position it occupies in [`BASE_SCHEMA_CHUNKS`], in the same commit that
+/// adds the chunk, changing not one byte of any existing statement. The one
+/// amendment so far: tachi#1680 D1's four provider-account tables, appended to
+/// the vault section (`provider_accounts`, `provider_account_aliases`,
+/// `provider_account_events`, `account_custody`). Rewriting an existing
+/// statement here to make a failing assertion pass is exactly the drift this
+/// golden exists to catch.
 #[cfg(test)]
 pub(super) const BASE_SCHEMA_SQL_V28_GOLDEN: &str = r#"
         CREATE TABLE IF NOT EXISTS memories (
@@ -1955,6 +2067,85 @@ pub(super) const BASE_SCHEMA_SQL_V28_GOLDEN: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_vault_key_health_status ON vault_key_health(status);
         CREATE INDEX IF NOT EXISTS idx_vault_key_health_logical ON vault_key_health(logical_name);
         CREATE INDEX IF NOT EXISTS idx_vault_key_health_cooldown ON vault_key_health(logical_name, cooldown_until);
+
+        -- Vault provider accounts (tachi#1680 D1): public-safe account
+        -- metadata only. An account row says which vendor account a
+        -- credential belongs to; it never says which Vault entry or rotation
+        -- member physically holds the secret. That pointer lives in
+        -- `account_custody` — a separate table precisely so no serialization
+        -- of an account row can carry custody by accident. `auth_ref` is the
+        -- opaque ("va1:...") handle joining the two, and is NULL for
+        -- metadata-only auth modes that have no stored credential at all.
+        CREATE TABLE IF NOT EXISTS provider_accounts (
+            account_id            TEXT PRIMARY KEY,
+            provider_kind         TEXT NOT NULL,
+            auth_mode             TEXT NOT NULL CHECK (auth_mode IN (
+                                      'api_key_pool', 'brokered_oauth', 'cloud_iam',
+                                      'provider_owned_session', 'local_no_auth', 'unsupported'
+                                  )),
+            auth_ref              TEXT UNIQUE,
+            account_fingerprint   TEXT NOT NULL,
+            account_class         TEXT NOT NULL DEFAULT 'model_api',
+            capabilities          TEXT NOT NULL DEFAULT '[]',
+            credential_policy_ref TEXT,
+            refresh_authority     TEXT NOT NULL DEFAULT 'none',
+            status                TEXT NOT NULL DEFAULT 'active',
+            revision              INTEGER NOT NULL DEFAULT 1,
+            source_refs           TEXT NOT NULL DEFAULT '[]',
+            created_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_provider_accounts_kind ON provider_accounts(provider_kind);
+        CREATE INDEX IF NOT EXISTS idx_provider_accounts_fingerprint ON provider_accounts(account_fingerprint);
+
+        -- Every env-var name an account has been observed under. Append and
+        -- retire, never delete: two names holding one value collapse into a
+        -- single account with two alias rows (#1680 D2 discrimination 1), and
+        -- a name that stops being observed is marked `retired` so the record
+        -- of what was once called what survives the rename.
+        CREATE TABLE IF NOT EXISTS provider_account_aliases (
+            account_id  TEXT NOT NULL,
+            alias_name  TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            first_seen  TEXT NOT NULL,
+            last_seen   TEXT NOT NULL,
+            retired     INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, alias_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_provider_account_aliases_name ON provider_account_aliases(alias_name);
+
+        -- Append-only audit of everything that ever changed an account:
+        -- creation, alias observation, member rotation, re-fingerprint after a
+        -- Vault master-key rekey, apply/no-op. `revision` is the account
+        -- revision the event produced (which is how identity survives rotating
+        -- key material, #1680 D2); `plan_digest` binds an event to the
+        -- reconcile plan that caused it. Rows are never updated or deleted.
+        CREATE TABLE IF NOT EXISTS provider_account_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id  TEXT NOT NULL,
+            revision    INTEGER NOT NULL,
+            event_kind  TEXT NOT NULL,
+            plan_digest TEXT,
+            evidence    TEXT NOT NULL DEFAULT '{}',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_provider_account_events_account ON provider_account_events(account_id, id);
+
+        -- The custody pointer for one account: which Vault rotation pool or
+        -- which Vault entry actually holds its secret. Deliberately NOT columns
+        -- on `provider_accounts` — a table boundary, not field discipline, is
+        -- what keeps Vault layout (rotation prefixes, member names) off every
+        -- account-shaped serialization surface (#1680 D1/D5). Restructuring a
+        -- pool bumps `revision` here and leaves `auth_ref` — and therefore
+        -- every upper-layer reference to the account — unchanged.
+        CREATE TABLE IF NOT EXISTS account_custody (
+            auth_ref       TEXT PRIMARY KEY,
+            account_id     TEXT NOT NULL UNIQUE,
+            custody_kind   TEXT NOT NULL CHECK (custody_kind IN ('vault_rotation_pool', 'vault_entry')),
+            custody_target TEXT NOT NULL,
+            revision       INTEGER NOT NULL,
+            updated_at     TEXT NOT NULL
+        );
 
         -- Foundry job persistence (survives process restarts)
         CREATE TABLE IF NOT EXISTS foundry_jobs (
@@ -2523,6 +2714,14 @@ mod golden_tests {
             ("vault_audit", SchemaScope::Product),
             ("vault_key_rotations", SchemaScope::Product),
             ("vault_key_health", SchemaScope::Product),
+            // tachi#1680 D1 — provider accounts. Product, for the same reason
+            // every other vault table is: they only exist alongside a Vault.
+            // A PortableKernel store must not carry them (the parity side of
+            // this is `store::profile_identity_tests::PRODUCT_TABLES`).
+            ("provider_accounts", SchemaScope::Product),
+            ("provider_account_aliases", SchemaScope::Product),
+            ("provider_account_events", SchemaScope::Product),
+            ("account_custody", SchemaScope::Product),
             ("foundry_jobs", SchemaScope::Product),
             ("foundry_config", SchemaScope::Product),
             ("exec_envs", SchemaScope::Product),
