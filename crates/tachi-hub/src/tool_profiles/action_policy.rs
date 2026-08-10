@@ -50,7 +50,15 @@ fn task_action_requires_admin(action: &str) -> bool {
 fn task_action_retired_c1a(action: &str) -> bool {
     matches!(
         action,
-        "plan" | "cycle_plan" | "recommend" | "refine_issues" | "merge" | "ux_matrix"
+        "plan"
+            | "cycle_plan"
+            | "recommend"
+            | "refine_issues"
+            | "merge"
+            | "ux_matrix"
+            | "briefing"
+            | "doc_index"
+            | "cycle_status"
     )
 }
 
@@ -163,10 +171,7 @@ pub fn facade_action_allowed(
 /// tool/action pair not recognized here is denied.
 fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
     match tool_name {
-        "tachi_task" => matches!(
-            action,
-            "complete" | "status" | "board" | "briefing" | "doc_index"
-        ),
+        "tachi_task" => matches!(action, "complete" | "status" | "board" | "brief"),
         "tachi_memory" => matches!(
             action,
             "search"
@@ -207,8 +212,9 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
     let action = action.trim().to_ascii_lowercase();
     match tool_name {
         "tachi_task" => match action.as_str() {
-            "briefing" | "doc_index" | "status" | "board" | "profiles" | "profile" | "card"
-            | "cycle_status" | "build_references" => Some(ToolBundle::Observe),
+            "brief" | "status" | "board" | "profiles" | "profile" | "card" | "build_references" => {
+                Some(ToolBundle::Observe)
+            }
             "complete" | "adjudicate" | "claim" | "release" | "heartbeat" => {
                 Some(ToolBundle::Remember)
             }
@@ -316,6 +322,7 @@ mod tests {
         ));
         assert!(facade_action_allowed("tachi_task", Some("status"), profile));
         assert!(facade_action_allowed("tachi_task", Some("board"), profile));
+        assert!(facade_action_allowed("tachi_task", Some("brief"), profile));
     }
 
     #[test]
@@ -375,6 +382,7 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_task", Some("status"), profile));
+        assert!(facade_action_allowed("tachi_task", Some("brief"), profile));
         assert!(!facade_action_allowed("tachi_task", Some("plan"), profile));
         assert!(!facade_action_allowed(
             "tachi_memory",
@@ -421,6 +429,9 @@ mod tests {
             "refine_issues",
             "merge",
             "ux_matrix",
+            "briefing",
+            "doc_index",
+            "cycle_status",
         ] {
             assert_eq!(
                 facade_action_required_bundle("tachi_task", action),
@@ -439,6 +450,52 @@ mod tests {
                 assert!(
                     !facade_action_allowed("tachi_task", Some(action), Some(profile)),
                     "retired task action {action} must be denied for {}",
+                    profile.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f1712_c1b1_brief_is_observe_and_folded_tokens_are_denied() {
+        assert_eq!(
+            facade_action_required_bundle("tachi_task", "brief"),
+            Some(ToolBundle::Observe),
+            "tachi_task(action='brief') must retain the Observe bundle"
+        );
+        for profile in [
+            ToolProfile::delegate(),
+            ToolProfile::observe(),
+            ToolProfile::remember(),
+            ToolProfile::coordinate(),
+            ToolProfile::operate(),
+            ToolProfile::standard(),
+            ToolProfile::admin(),
+        ] {
+            assert!(
+                facade_action_allowed("tachi_task", Some("brief"), Some(profile)),
+                "brief must be allowed for {}",
+                profile.as_str()
+            );
+        }
+        for retired in ["briefing", "doc_index", "cycle_status"] {
+            assert_eq!(
+                facade_action_required_bundle("tachi_task", retired),
+                None,
+                "retired folded action {retired} must not have a bundle classification"
+            );
+            for profile in [
+                ToolProfile::delegate(),
+                ToolProfile::observe(),
+                ToolProfile::remember(),
+                ToolProfile::coordinate(),
+                ToolProfile::operate(),
+                ToolProfile::standard(),
+                ToolProfile::admin(),
+            ] {
+                assert!(
+                    !facade_action_allowed("tachi_task", Some(retired), Some(profile)),
+                    "retired folded action {retired} must be denied for {}",
                     profile.as_str()
                 );
             }
