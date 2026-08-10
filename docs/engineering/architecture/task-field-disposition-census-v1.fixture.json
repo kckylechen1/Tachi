@@ -2,7 +2,7 @@
   "schema_version": "task_field_disposition.v1",
   "issue": 1319,
   "generated_from": "crates/tachi-params/src/facade/task.rs::TachiTaskParams + crates/tachi-server/src/tools/task_router.rs",
-  "total_fields": 100,
+  "total_fields": 87,
   "fields": {
     "action": {
       "used_by_actions": [
@@ -19,9 +19,7 @@
         "status",
         "profiles",
         "profile",
-        "card",
-        "build_references",
-        "close_loop"
+        "card"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
@@ -42,9 +40,7 @@
         "status",
         "profiles",
         "profile",
-        "card",
-        "build_references",
-        "close_loop"
+        "card"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
@@ -106,29 +102,16 @@
     "doc_paths": {
       "used_by_actions": [
         "brief",
-        "status",
-        "build_references",
-        "close_loop"
+        "status"
       ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
       "rationale": "Canonical docs prioritization; tuning/context surface, defer to #1467."
     },
-    "related_issues": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "defer_1467",
-      "rationale": "Related issues for close_loop/build_references; advisory context surface."
-    },
     "spec_paths": {
       "used_by_actions": [
         "brief",
-        "status",
-        "build_references",
-        "close_loop"
+        "status"
       ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
@@ -225,9 +208,7 @@
     },
     "notes": {
       "used_by_actions": [
-        "complete",
-        "build_references",
-        "close_loop"
+        "complete"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
@@ -443,8 +424,6 @@
         "brief",
         "complete",
         "board",
-        "build_references",
-        "close_loop",
         "adjudicate"
       ],
       "canonical_future_owner": "Staff",
@@ -504,8 +483,6 @@
         "brief",
         "intake",
         "status",
-        "build_references",
-        "close_loop",
         "claim"
       ],
       "canonical_future_owner": "Staff",
@@ -516,9 +493,7 @@
       "used_by_actions": [
         "complete",
         "brief",
-        "status",
-        "build_references",
-        "close_loop"
+        "status"
       ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
@@ -529,8 +504,6 @@
         "complete",
         "board",
         "intake",
-        "build_references",
-        "close_loop",
         "claim"
       ],
       "canonical_future_owner": "Staff",
@@ -654,114 +627,6 @@
       "disposition": "keep_task_shared",
       "rationale": "Umbrella/no-close override for tachi_gh helpers, not read by any tachi_task arm; conservative keep."
     },
-    "wiki_title": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure entry title; survives on close_loop surface."
-    },
-    "wiki_text": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure entry body; survives on close_loop surface."
-    },
-    "wiki_path": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure path; survives on close_loop surface."
-    },
-    "wiki_topic": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure topic label; survives on close_loop surface."
-    },
-    "wiki_summary": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure short summary; survives on close_loop surface."
-    },
-    "wiki_category": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure category; survives on close_loop surface."
-    },
-    "wiki_keywords": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure keywords/tags; survives on close_loop surface."
-    },
-    "wiki_entities": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure named entities; survives on close_loop surface."
-    },
-    "wiki_importance": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure importance; survives on close_loop surface."
-    },
-    "wiki_scope": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure scope; survives on close_loop surface."
-    },
-    "wiki_domain": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Wiki closure area/domain tag; survives on close_loop surface."
-    },
-    "force": {
-      "used_by_actions": [
-        "build_references",
-        "close_loop"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Bypass wiki noise filtering on close_loop; survives on close_loop surface."
-    },
     "agent_identity_id": {
       "used_by_actions": [
         "claim",
@@ -860,8 +725,8 @@
   },
   "disposition_summary": {
     "keep_task_ledger": 3,
-    "keep_task_shared": 60,
-    "defer_1467": 8,
+    "keep_task_shared": 48,
+    "defer_1467": 7,
     "move_to_staff": 8,
     "operator_only_internal": 21
   }

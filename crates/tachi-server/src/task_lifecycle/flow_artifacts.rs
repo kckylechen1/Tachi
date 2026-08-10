@@ -146,7 +146,7 @@ fn status_string(status: &Value, key: &str) -> Option<String> {
 
 fn close_loop_action_hint(flow_id: &str, issue_ref: &str, pr_ref: Option<&str>) -> String {
     let mut hint = format!(
-        "tachi_task(action='close_loop', flow_id='{}', issue_ref='{}'",
+        "tachi_gh(action='close_loop', flow_id='{}', issue_ref='{}'",
         pseudo_call_quote(flow_id),
         pseudo_call_quote(issue_ref)
     );

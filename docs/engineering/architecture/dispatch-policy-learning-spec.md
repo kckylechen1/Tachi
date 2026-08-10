@@ -58,7 +58,7 @@ invent calls that are not exposed yet.
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
 | skill bundle/loadout | `tachi_skill(action="bundle"|"loadout")` | implemented |
 | PR gate preview | `tachi_gh(action="pr_status")` | implemented |
-| release and closure | `tachi_gh(action="release_note")` / `tachi_task(action="close_loop")` | implemented |
+| release and closure | `tachi_gh(action="release_note")` / `tachi_gh(action="close_loop")` | implemented |
 
 Do not add new public facades such as `tachi_mbit`, `tachi_policy`, or
 `tachi_router` while an existing domain facade can carry the workflow. Internal
@@ -211,7 +211,7 @@ Every substantial policy-learning slice should be able to pass this workflow:
 11. `tachi_gh(action="link_pr", flow_id=..., pr_ref=...)`
 12. `tachi_gh(action="pr_status", flow_id=..., pr_ref=...)`
 13. `tachi_gh(action="release_note", flow_id=...)`
-14. `tachi_task(action="close_loop", flow_id=...)`
+14. `tachi_gh(action="close_loop", flow_id=...)`
 
 The UX matrix is not just a checklist. It is a product test for whether Tachi
 can guide an agent from issue to durable closure without relying on chat memory.
@@ -246,9 +246,9 @@ As of 2026-06-28, the baseline includes:
   weakness markers and skill demotion targets, and merged weak-against signals
   affect route recommendation scoring;
 - credentialed `opencode_builder` profile;
-- feature lifecycle: `tachi_task` owns `intake` / `status` (cycle view) /
-  `build_references` / `close_loop`; `tachi_gh` owns `link_pr` /
-  `pr_status` / `release_note` / `pr_handoff`;
+- feature lifecycle: `tachi_task` owns `intake` / `status` (cycle view);
+  `tachi_gh` owns `close_loop` (including its dry-run reference/promotion
+  preview) plus `link_pr` / `pr_status` / `release_note` / `pr_handoff`;
 - feature briefing, intake instructions, issue automation plans, and GitHub
   handoff text route flow/issue/PR-backed work through read-only `status` cycle views
   before PR handoff, release notes, or close-loop;

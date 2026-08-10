@@ -12,9 +12,9 @@
 pub const TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS: &[&str] =
     &["link_pr", "pr_status", "pr_handoff", "release_note"];
 
-/// C1a of #1611/#1683 and C1b-1 of #1712 retired these primary `tachi_task`
-/// actions without leaving them in the live Task inventory. Keep a
-/// machine-checkable deny-list so schemas, docs, and active profile
+/// C1a of #1611/#1683, C1b-1 of #1712, and #1713 retired these primary
+/// `tachi_task` actions without leaving them in the live Task inventory. Keep
+/// a machine-checkable deny-list so schemas, docs, and active profile
 /// discriminators cannot keep teaching them.
 pub const TACHI_TASK_RETIRED_C1A_ACTIONS: &[&str] = &[
     "plan",
@@ -26,6 +26,8 @@ pub const TACHI_TASK_RETIRED_C1A_ACTIONS: &[&str] = &[
     "briefing",
     "doc_index",
     "cycle_status",
+    "build_references",
+    "close_loop",
 ];
 
 /// Canonical WorkClaim lifecycle actions exposed on `tachi_task` by #1253.
@@ -52,6 +54,7 @@ pub const TACHI_GH_ACTIONS: &[&str] = &[
     "pr_status",
     "pr_handoff",
     "release_note",
+    "close_loop",
 ];
 
 /// `tachi_memory` facade actions.
@@ -184,14 +187,12 @@ mod tests {
                 "brief",
                 "profiles",
                 "profile",
-                "card",
-                "build_references",
-                "close_loop"
+                "card"
             ]
         );
-        // #1683 C1a plus #1712 C1b-1 contract the 23-action surface to 15.
+        // #1683 C1a plus #1712 C1b-1 plus #1713 contract the Task surface.
         // Keep this exact so the next inventory addition gets explicit review.
-        assert_eq!(primary.len(), 15);
+        assert_eq!(primary.len(), 13);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 
@@ -203,7 +204,7 @@ mod tests {
                 "tachi_gh must own lifecycle action {action}"
             );
         }
-        assert_eq!(TACHI_GH_ACTIONS.len(), 18);
+        assert_eq!(TACHI_GH_ACTIONS.len(), 19);
         assert!(TACHI_GH_ACTIONS.len() <= TACHI_GH_ACTION_SOFT_MAX);
     }
 

@@ -256,7 +256,7 @@ graph TD
 - **看板** —— 跨 Agent 卡片，支持 `ack` / `progress` / `result` 状态（`post_card`、`check_inbox`、`update_card`）。
 - **交接 Issue 晋升** —— 从已有交接备忘录创建/关联 GitHub issue（`tachi_handoff(action='promote_issue')`）。#1099:旧的 `handoff_leave`/`handoff_check` 备忘录传递路由已退役——短消息用 `tachi_memory(action='sticky_leave'|'sticky_check')`,结构化任务交接用 `tachi_orchestrator(action='handoff_write'|'handoff_read')`。
 
-> 幽灵与看板工具属于 `admin` Profile 的原生门面（未纳入 `standard`/`coordinate` bundle）。大多数 Agent 通过 `tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`、`tachi_task` 门面进行协调。
+> 幽灵与看板工具属于 `admin` Profile 的原生门面（未纳入 `standard`/`coordinate` bundle）。大多数 Agent 通过 `tachi_handoff`、`tachi_gh(action='close_loop')`、`tachi_orchestrator`、`tachi_task` 门面进行协调。
 
 ### 8. 工作流控制平面
 Tachi 不只是记忆库；它正在演变为 Agent 工程的持久控制平面：

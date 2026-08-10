@@ -536,7 +536,7 @@ fn spec_drift(
         drift.push(drift_item(
             "unclosed_loop",
             "Flow produced result.md but close_loop has not recorded issue/docs/wiki closure.",
-            "Run tachi_task(action='close_loop', flow_id=..., issue_ref=..., pr_ref=...).",
+            "Run tachi_gh(action='close_loop', flow_id=..., issue_ref=..., pr_ref=...).",
         ));
     }
     if close_loop.is_some() && linked_specs.is_empty() {
@@ -609,7 +609,7 @@ fn next_action(
             .to_string();
     }
     if close_loop.is_none() {
-        return "Run tachi_task(action='close_loop', flow_id=..., issue_ref=..., pr_ref=...) to sink lessons."
+        return "Run tachi_gh(action='close_loop', flow_id=..., issue_ref=..., pr_ref=...) to sink lessons."
             .to_string();
     }
     "Cycle is closed; distill durable lessons only if new reusable patterns emerged.".to_string()

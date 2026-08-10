@@ -6,7 +6,7 @@ use crate::handoff_ops::handle_handoff_promote_issue;
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::{
     ChainSkillsParams, DlqListParams, DlqRetryParams, HandoffPromoteIssueParams,
-    TachiHandoffParams, TachiOrchestratorParams, TachiWorkflowParams,
+    TachiHandoffParams, TachiOrchestratorParams,
 };
 use crate::MemoryServer;
 
@@ -80,16 +80,6 @@ impl MemoryServer {
                 params.action
             )),
         }
-    }
-
-    #[tool(
-        description = "Issue→Doc→Memory closure: action=close_loop writes wiki with references[] (issue + docs + related issues); build_references previews the array. Replaces nightly wiki compile (#77)."
-    )]
-    pub(crate) async fn tachi_workflow(
-        &self,
-        Parameters(params): Parameters<TachiWorkflowParams>,
-    ) -> Result<String, String> {
-        crate::workflow_closure::handle_workflow(self, params).await
     }
 
     #[tool(

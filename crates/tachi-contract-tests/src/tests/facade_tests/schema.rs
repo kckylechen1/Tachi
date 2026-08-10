@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use tachi_params::{
-    TachiEventParams, TachiMemoryParams, TachiSearchParams, TachiSkillParams, TachiTaskParams,
-    TachiTuneParams,
+    TachiEventParams, TachiGhParams, TachiMemoryParams, TachiSearchParams, TachiSkillParams,
+    TachiTaskParams, TachiTuneParams,
 };
 
 fn enum_values(property: &Value, name: &str) -> Vec<String> {
@@ -335,10 +335,8 @@ fn tachi_task_action_schema_declares_c1a_c1b_survivor_list() {
             json!("profiles"),
             json!("profile"),
             json!("card"),
-            json!("build_references"),
-            json!("close_loop"),
         ],
-        "tachi_task schema must expose exactly the #1683 C1a + #1712 C1b-1 survivor list"
+        "tachi_task schema must expose exactly the #1683 C1a + #1712 C1b-1 + #1713 survivor list"
     );
     // #1319-C2: dispatch/cancel/wait were removed from tachi_task (external
     // staffing now flows through tachi_staff). The schema must NOT list them.
@@ -368,7 +366,7 @@ fn tachi_task_action_schema_declares_c1a_c1b_survivor_list() {
     for removed in tachi_params::TACHI_TASK_RETIRED_C1A_ACTIONS {
         assert!(
             !values.contains(&json!(*removed)),
-            "tachi_task schema must not advertise a retired C1a/C1b task action {removed}"
+            "tachi_task schema must not advertise a retired C1a/C1b/#1713 task action {removed}"
         );
     }
     // #757: GH PR lifecycle is tachi_gh only — not on tachi_task schema at all.
@@ -388,7 +386,14 @@ fn tachi_gh_action_schema_mentions_lifecycle_actions() {
     let action = &value["properties"]["action"];
     let description = action["description"].as_str().expect("action description");
 
-    for expected in ["ship", "link_pr", "pr_status", "pr_handoff", "release_note"] {
+    for expected in [
+        "ship",
+        "link_pr",
+        "pr_status",
+        "pr_handoff",
+        "release_note",
+        "close_loop",
+    ] {
         assert!(
             description.contains(expected),
             "tachi_gh action schema should mention {expected}: {description}"
@@ -705,6 +710,69 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
         assert!(
             !properties.contains_key(deleted),
             "#1683 C1a deleted field '{deleted}' must not appear in the public tachi_task schema"
+        );
+    }
+}
+
+#[test]
+fn tachi_task_schema_excludes_relocated_closure_fields() {
+    let schema = rmcp::schemars::schema_for!(TachiTaskParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let properties = value["properties"].as_object().expect("task properties");
+    for field in [
+        "related_issues",
+        "post_comment",
+        "wiki_title",
+        "wiki_text",
+        "wiki_path",
+        "wiki_topic",
+        "wiki_summary",
+        "wiki_category",
+        "wiki_keywords",
+        "wiki_entities",
+        "wiki_importance",
+        "wiki_scope",
+        "wiki_domain",
+        "force",
+    ] {
+        assert!(
+            !properties.contains_key(field),
+            "closure field '{field}' must live on tachi_gh(action='close_loop'), not tachi_task"
+        );
+    }
+}
+
+#[test]
+fn tachi_gh_schema_exposes_relocated_closure_fields() {
+    let schema = rmcp::schemars::schema_for!(TachiGhParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let properties = value["properties"].as_object().expect("GH properties");
+    for field in [
+        "issue_ref",
+        "pr_ref",
+        "doc_paths",
+        "spec_paths",
+        "related_issues",
+        "post_comment",
+        "flow_id",
+        "notes",
+        "wiki_title",
+        "wiki_text",
+        "wiki_path",
+        "wiki_topic",
+        "wiki_summary",
+        "wiki_category",
+        "wiki_keywords",
+        "wiki_entities",
+        "wiki_importance",
+        "wiki_scope",
+        "wiki_domain",
+        "project",
+        "force",
+    ] {
+        assert!(
+            properties.contains_key(field),
+            "closure field '{field}' must be available on tachi_gh(action='close_loop')"
         );
     }
 }
