@@ -184,8 +184,11 @@ pub fn list_provider_accounts(conn: &Connection) -> Result<Vec<ProviderAccount>,
 }
 
 /// Observe an env-var name for an account: insert it, or move `last_seen` (and
-/// un-retire it) if it is already known. Never deletes, never rewrites
+/// un-retire it) if it is already known. Never deletes, and never rewrites
 /// `first_seen` — the first time a name was seen is a fact about history.
+/// `source_kind` *is* overwritten, because it describes the latest observation
+/// (a name that moved from a config file into the Vault has genuinely changed
+/// source), and the sequence of sources is recoverable from the event log.
 pub fn record_provider_account_alias(
     conn: &Connection,
     account_id: &str,
@@ -229,17 +232,24 @@ pub fn record_provider_account_alias(
 
 /// Mark an alias retired. The row stays: "this account was once reachable
 /// under that name" outlives the name.
+///
+/// `last_seen` is deliberately **not** touched. Retiring a name is the moment
+/// we stopped seeing it, not a sighting; stamping `last_seen` here would make
+/// "when was this name last actually observed" unanswerable. When the retirement
+/// happened is the event log's job (`alias_retired`).
+///
+/// Returns whether this call changed anything, so retiring twice is an honest
+/// no-op rather than a second event's worth of noise.
 pub fn retire_provider_account_alias(
     conn: &Connection,
     account_id: &str,
     alias_name: &str,
 ) -> Result<bool, MemoryError> {
-    let now = now_utc_iso();
     let changed = conn.execute(
         "UPDATE provider_account_aliases
-            SET retired = 1, last_seen = ?3
+            SET retired = 1
           WHERE account_id = ?1 AND alias_name = ?2 AND retired = 0",
-        params![account_id, alias_name, now],
+        params![account_id, alias_name],
     )?;
     Ok(changed > 0)
 }

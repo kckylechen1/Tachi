@@ -646,6 +646,12 @@ fn aliases_retire_and_revive_without_losing_first_seen() {
             .unwrap(),
         AliasObservation::Refreshed
     );
+    // Snapshot the last *observation* time immediately before retiring, so the
+    // assertion below is about retirement not stamping it, not about clock
+    // resolution.
+    let last_seen = list_provider_account_aliases(&conn, &account_id).unwrap()[0]
+        .last_seen
+        .clone();
     assert!(retire_provider_account_alias(&conn, &account_id, "DEEPSEEK_API_KEY").unwrap());
     assert!(
         !retire_provider_account_alias(&conn, &account_id, "DEEPSEEK_API_KEY").unwrap(),
@@ -656,6 +662,11 @@ fn aliases_retire_and_revive_without_losing_first_seen() {
     let retired = &after_retire[0];
     assert!(retired.retired);
     assert_eq!(retired.first_seen, first_seen, "history is not rewritten");
+    assert_eq!(
+        retired.last_seen, last_seen,
+        "retiring is the moment we stopped seeing a name, not a sighting — \
+         stamping last_seen here would make the column mean nothing"
+    );
 
     assert_eq!(
         record_provider_account_alias(&conn, &account_id, "DEEPSEEK_API_KEY", "vault_entry")
