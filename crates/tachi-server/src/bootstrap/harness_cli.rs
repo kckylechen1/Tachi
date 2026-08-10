@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::HarnessAction;
 
+use super::instruction_drift_sentinel::{build_instruction_drift_report, InstructionDriftReport};
 use super::instruction_manifest::{scan_instruction_manifest, InstructionManifestStatus};
 
 const SUPPORTED_HOSTS: &[&str] = &["codex", "claude", "gemini", "antigravity", "cursor"];
@@ -59,6 +60,8 @@ struct HarnessStatusReport {
     duplicate_groups: Vec<DuplicateGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instruction_manifest: Option<InstructionManifestStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instruction_drift: Option<InstructionDriftReport>,
 }
 
 pub(super) async fn run_harness_command(
@@ -128,6 +131,12 @@ fn build_harness_report_with_manifest(
         summary.issue_count += target.issues.len();
     }
 
+    let instruction_manifest = manifest_path.map(scan_instruction_manifest).transpose()?;
+    let instruction_drift = instruction_manifest
+        .as_ref()
+        .map(build_instruction_drift_report)
+        .transpose()?;
+
     Ok(HarnessStatusReport {
         schema_version: "tachi.harness.status.v1".to_string(),
         generated_at: chrono::Utc::now().to_rfc3339(),
@@ -136,7 +145,8 @@ fn build_harness_report_with_manifest(
         summary,
         targets,
         duplicate_groups,
-        instruction_manifest: manifest_path.map(scan_instruction_manifest).transpose()?,
+        instruction_manifest,
+        instruction_drift,
     })
 }
 
@@ -397,9 +407,10 @@ fn print_harness_report(report: &HarnessStatusReport) {
                 source.id, source.status, source.exists, bytes, hash, source.resolved_path
             );
             println!(
-                "    audience={} tier={} budget={} ({} bytes) remediation_owner={}",
+                "    audience={} tier={} adapter_version={} budget={} ({} bytes) remediation_owner={}",
                 source.audience,
                 source.tier,
+                source.adapter_version,
                 source.density_budget.name,
                 source.density_budget.bytes,
                 source.remediation_owner
@@ -411,14 +422,46 @@ fn print_harness_report(report: &HarnessStatusReport) {
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "-".to_string());
                 println!(
-                    "    target {:<12} {:<13} {:<10} exists={} bytes={} hash={} {}",
+                    "    target {:<12} {:<13} {:<10} projection={} exists={} bytes={} hash={} {}",
                     target.carrier,
                     target.ownership_mode,
                     target.status,
+                    target.projection,
                     target.exists,
                     bytes,
                     hash,
                     target.resolved_path
+                );
+            }
+        }
+    }
+
+    if let Some(instruction_drift) = &report.instruction_drift {
+        println!();
+        println!("Instruction drift sentinel:");
+        println!("  status: {}", instruction_drift.status);
+        println!(
+            "  findings: {} (incomplete {}, parity {}, density {}, audience_leak {})",
+            instruction_drift.summary.findings,
+            instruction_drift.summary.incomplete,
+            instruction_drift.summary.parity_drift,
+            instruction_drift.summary.density_overrun,
+            instruction_drift.summary.audience_leak
+        );
+        for finding in &instruction_drift.findings {
+            println!(
+                "  - [{}] source={} revision={} check={}",
+                finding.remediation_owner,
+                finding.source_id,
+                finding.source_revision,
+                finding.check_kind
+            );
+            println!("    evidence: {}", finding.evidence_span);
+            if let Some(target_path) = &finding.target_path {
+                println!(
+                    "    target={} hash={}",
+                    target_path,
+                    finding.target_hash.as_deref().unwrap_or("-")
                 );
             }
         }
@@ -477,6 +520,7 @@ mod tests {
         let report = build_harness_report(&home, &[]).expect("legacy report");
         let value = serde_json::to_value(report).expect("legacy JSON");
         assert!(value.get("instruction_manifest").is_none());
+        assert!(value.get("instruction_drift").is_none());
         let _ = std::fs::remove_dir_all(home);
     }
 }
