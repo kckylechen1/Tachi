@@ -3,7 +3,7 @@
   "issue": 1317,
   "observation": {
     "date": "2026-08-10",
-    "revision": "6398f3828d5f7f7b2b6dfb55c662bc77caf12ba4",
+    "revision": "8850c47897c8d65eaa77ca00f579499da25866fc",
     "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
   },
   "provisional_budgets": {
@@ -217,8 +217,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 184280,
-        "total_tool_definition_bytes": 221562,
+        "total_input_schema_bytes": 184277,
+        "total_tool_definition_bytes": 221559,
         "visible_tool_count": 103,
         "visible_tools": [
           "archive_memory",
@@ -327,8 +327,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 126368,
-        "total_tool_definition_bytes": 144341,
+        "total_input_schema_bytes": 126373,
+        "total_tool_definition_bytes": 144352,
         "visible_tool_count": 39,
         "visible_tools": [
           "extract_facts",
@@ -373,8 +373,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 68880,
-        "total_tool_definition_bytes": 74218,
+        "total_input_schema_bytes": 68885,
+        "total_tool_definition_bytes": 74229,
         "visible_tool_count": 11,
         "visible_tools": [
           "peer_query",
@@ -391,8 +391,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 122517,
-        "total_tool_definition_bytes": 141571,
+        "total_input_schema_bytes": 122522,
+        "total_tool_definition_bytes": 141582,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
@@ -448,8 +448,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 64800,
-        "total_tool_definition_bytes": 74035,
+        "total_input_schema_bytes": 64797,
+        "total_tool_definition_bytes": 74032,
         "visible_tool_count": 16,
         "visible_tools": [
           "peer_query",
@@ -641,7 +641,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 28543,
+            "input_schema_bytes": 28540,
             "property_count": 79,
             "property_names": [
               "__tachi_project_explicit",
@@ -786,7 +786,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 27132,
+            "input_schema_bytes": 27137,
             "property_count": 79,
             "property_names": [
               "__tachi_project_explicit",
@@ -1056,7 +1056,7 @@
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 27140,
+          "input_schema_bytes": 27137,
           "property_count": 79,
           "property_names": [
             "__tachi_project_explicit",
