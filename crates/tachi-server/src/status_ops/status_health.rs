@@ -86,6 +86,35 @@ pub(crate) fn admitted_env_secret_names() -> HashSet<String> {
     names
 }
 
+/// The canonical provider family an admitted env-var name belongs to, or
+/// `None` if the name is not in the registry at all.
+///
+/// This is the third derived view over `API_KEY_DEFS`, and the one #1680 D2's
+/// fingerprints are keyed by: `fp1` mixes in the *provider kind*, never an
+/// env-var name, which is exactly what lets two names of one family holding one
+/// secret collapse into a single account while the same value under two
+/// different vendors stays uncorrelated. Resolution prefers an exact primary-key
+/// match and falls back to the alias tables, and
+/// `provider_kind_assignment_is_unambiguous` pins that no name can resolve two
+/// ways — an ambiguous name would silently split or merge accounts depending on
+/// registry declaration order.
+///
+/// Consumed by #1680 PR-C's reconcile pipeline; declared here, with the other
+/// two derived views, because a fourth private copy of "which family is this
+/// name" is precisely the drift D3 deleted `intake::alias_family` to end.
+#[allow(dead_code)]
+pub(crate) fn provider_kind_for_env_name(name: &str) -> Option<&'static str> {
+    api_keys::API_KEY_DEFS
+        .iter()
+        .find(|def| def.key == name)
+        .or_else(|| {
+            api_keys::API_KEY_DEFS
+                .iter()
+                .find(|def| def.aliases.contains(&name))
+        })
+        .map(|def| def.provider_kind)
+}
+
 /// Stable internal API for the doctor daily pipeline: refresh the on-disk
 /// provider probe cache and return the updated cache.
 pub(crate) async fn refresh_doctor_probe_cache(

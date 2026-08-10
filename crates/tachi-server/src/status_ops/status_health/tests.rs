@@ -676,3 +676,72 @@ fn admitted_env_secret_names_matches_frozen_base_legacy_set_plus_google_search()
     assert!(model_provider_env_names().is_subset(&admitted_env_secret_names()));
     assert!(model_provider_env_names().len() < admitted_env_secret_names().len());
 }
+
+/// #1680 D2/D3: the fingerprint domain input must be unambiguous.
+///
+/// `fp1` is keyed by `provider_kind`, so if one env-var name could resolve to
+/// two different kinds — say `BIGMODEL_API_KEY` reading as `zai` through one
+/// registry row and as something else through another — the same secret would
+/// fingerprint two ways depending on which row a caller happened to match, and
+/// accounts would split or merge by declaration order. Every admitted name is
+/// checked against every row it appears in, as a primary key or as an alias.
+#[test]
+fn provider_kind_assignment_is_unambiguous_across_the_registry() {
+    for name in admitted_env_secret_names() {
+        let kinds: HashSet<&'static str> = API_KEY_DEFS
+            .iter()
+            .filter(|def| def.key == name || def.aliases.contains(&name.as_str()))
+            .map(|def| def.provider_kind)
+            .collect();
+        assert_eq!(
+            kinds.len(),
+            1,
+            "env name {name} resolves to {kinds:?}; a name may belong to exactly one provider \
+             family or #1680's key fingerprints become order-dependent"
+        );
+        assert_eq!(
+            provider_kind_for_env_name(&name),
+            kinds.into_iter().next(),
+            "the derived view must agree with the registry rows it reads"
+        );
+    }
+}
+
+/// The alias half, spelled out on the case that motivates it: the two names
+/// that hold one DeepSeek account's key resolve to one family, and an unknown
+/// name resolves to nothing rather than to a guess.
+#[test]
+fn provider_kind_resolves_aliases_and_refuses_unknown_names() {
+    assert_eq!(
+        provider_kind_for_env_name("DEEPSEEK_API_KEY"),
+        Some("deepseek")
+    );
+    assert_eq!(
+        provider_kind_for_env_name("DISTILL_API_KEY"),
+        Some("deepseek")
+    );
+    assert_eq!(provider_kind_for_env_name("GEMINI_API_KEY"), Some("google"));
+    assert_eq!(provider_kind_for_env_name("MOONSHOT_API_KEY"), Some("kimi"));
+    assert_eq!(provider_kind_for_env_name("NOT_A_PROVIDER_KEY"), None);
+    assert_eq!(provider_kind_for_env_name(""), None);
+}
+
+/// The discrimination-2 boundary restated in the fingerprint domain: search
+/// credentials must not share a provider family with the model accounts they
+/// were historically folded into (`intake::alias_family` put
+/// `GOOGLE_SEARCH_API_KEY` in the google/gemini family). Same family would mean
+/// same fingerprint domain, which would put a search key one merge away from a
+/// model account.
+#[test]
+fn search_keys_get_their_own_provider_kinds() {
+    assert_eq!(
+        provider_kind_for_env_name("GOOGLE_SEARCH_API_KEY"),
+        Some("google-search")
+    );
+    assert_ne!(
+        provider_kind_for_env_name("GOOGLE_SEARCH_API_KEY"),
+        provider_kind_for_env_name("GOOGLE_API_KEY")
+    );
+    assert_eq!(provider_kind_for_env_name("EXA_API_KEY"), Some("exa"));
+    assert_eq!(provider_kind_for_env_name("TAVILY_API_KEY"), Some("tavily"));
+}
