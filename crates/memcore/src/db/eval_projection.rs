@@ -196,7 +196,24 @@ fn candidate_profiles_from_json(raw: Option<String>) -> Vec<String> {
     let Some(raw) = raw else {
         return Vec::new();
     };
-    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&raw) else {
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    candidate_profiles_from_value(&value)
+}
+
+/// Profile names out of a recorded candidate array. Anything that is not an
+/// array of objects carrying a string `profile` yields an EMPTY set — a
+/// malformed or absent candidate array means "no candidate set was recorded",
+/// never a reconstructed guess.
+///
+/// `pub(crate)` so the replay reader (`super::eval_replay`), which holds the
+/// already-parsed `route_recommendations.candidates` value rather than its raw
+/// column text, extracts candidates through the SAME rule the incremental
+/// resolver uses. Two extractors would be an equivalence bug waiting to
+/// happen.
+pub(crate) fn candidate_profiles_from_value(candidates: &Value) -> Vec<String> {
+    let Value::Array(items) = candidates else {
         return Vec::new();
     };
     items
@@ -263,18 +280,143 @@ fn resolve_judgment(
     ))
 }
 
-const DISPATCH_PROJECTION_SQL: &str = "SELECT \
-     o.outcome_id, o.dispatch_id, o.model, o.vendor, o.task_type, o.execution_outcome, \
-     o.identity_attribution_basis, o.cost_tokens, o.cost_usd, o.identity_receipt, o.created_at, \
-     d.route_decision_id, d.recommendation_id, d.selected_profile, d.selected_model, \
-     d.assignment_mode, d.override_flag, \
-     r.candidates, r.recommended_profile, r.policy_source_revision \
-     FROM dispatch_outcomes o \
-     LEFT JOIN route_decisions d ON d.dispatch_id = o.dispatch_id \
-     LEFT JOIN route_recommendations r ON r.recommendation_id = d.recommendation_id \
-     WHERE o.created_at >= ?1 AND (?2 IS NULL OR o.created_at < ?2) \
-     ORDER BY o.created_at DESC, o.outcome_id DESC \
-     LIMIT ?3";
+/// Base execution facts for ONE dispatch-spine subject, before any judgment
+/// or route binding is attached.
+///
+/// Shared by the incremental resolver below and the replay reader in
+/// [`super::eval_replay`] (design D6's "full replay ≡ incremental
+/// projection"). The two paths differ ONLY where an append-only stream is
+/// collapsed into current state — the judgment fold and the route binding.
+/// The base column mapping is deliberately SHARED, not duplicated: a second
+/// copy of it would drift, and an equivalence test written over two copies
+/// grades the copy instead of the fold it is supposed to be testing.
+#[derive(Debug, Clone)]
+pub(crate) struct DispatchSubjectRow {
+    pub(crate) outcome_id: String,
+    pub(crate) dispatch_id: String,
+    pub(crate) model: Option<String>,
+    pub(crate) vendor: Option<String>,
+    pub(crate) task_type: Option<String>,
+    pub(crate) execution_outcome: String,
+    pub(crate) identity_attribution_basis: String,
+    pub(crate) cost_tokens: Option<u64>,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) identity_receipt: Option<Value>,
+    pub(crate) created_at: String,
+}
+
+/// The dispatch-spine base columns, in the exact order
+/// [`dispatch_subject_from_row`] reads them (indices 0..=10). ONE column list
+/// behind both the incremental resolver's joined query and the replay
+/// reader's unjoined one.
+const DISPATCH_SUBJECT_COLUMNS: &str = "o.outcome_id, o.dispatch_id, o.model, o.vendor, \
+     o.task_type, o.execution_outcome, o.identity_attribution_basis, o.cost_tokens, o.cost_usd, \
+     o.identity_receipt, o.created_at";
+
+/// The window/order/limit tail, identical on both paths so a replay and an
+/// incremental read over the same window select the SAME subject rows in the
+/// SAME order before either of them attaches a judgment.
+const DISPATCH_WINDOW_TAIL: &str =
+    "WHERE o.created_at >= ?1 AND (?2 IS NULL OR o.created_at < ?2) \
+     ORDER BY o.created_at DESC, o.outcome_id DESC LIMIT ?3";
+
+fn dispatch_subject_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<DispatchSubjectRow, rusqlite::Error> {
+    let cost_tokens: Option<i64> = row.get(7)?;
+    let identity_receipt = row
+        .get::<_, Option<String>>(9)?
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    Ok(DispatchSubjectRow {
+        outcome_id: row.get(0)?,
+        dispatch_id: row.get(1)?,
+        model: row.get(2)?,
+        vendor: row.get(3)?,
+        task_type: row.get(4)?,
+        execution_outcome: row.get(5)?,
+        identity_attribution_basis: row.get(6)?,
+        cost_tokens: cost_tokens.map(|v| v.max(0) as u64),
+        cost_usd: row.get(8)?,
+        identity_receipt,
+        created_at: row.get(10)?,
+    })
+}
+
+/// Dispatch-spine base rows in `[since, until)`, newest first — no judgment,
+/// no route binding. The replay reader's entry point into the same subject
+/// set the incremental resolver sees.
+pub(crate) fn list_dispatch_subject_rows(
+    conn: &Connection,
+    since: &str,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<DispatchSubjectRow>, MemoryError> {
+    let sql = format!(
+        "SELECT {DISPATCH_SUBJECT_COLUMNS} FROM dispatch_outcomes o {DISPATCH_WINDOW_TAIL}"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement
+        .query_map(
+            params![since, until, limit as i64],
+            dispatch_subject_from_row,
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Assemble one dispatch-spine [`EvalObservation`] from its base facts plus
+/// whatever judgment and route binding the caller resolved. Shared by both
+/// read paths — including the attribution ladder, which is the one place
+/// allowed to decide what a row's candidate identity IS.
+pub(crate) fn dispatch_observation(
+    subject: DispatchSubjectRow,
+    selected_profile: Option<String>,
+    route: Option<EvalRouteFacts>,
+    adjudication: Option<EvalAdjudicationFacts>,
+    rubric: Option<EvalRubricScoreRow>,
+) -> EvalObservation {
+    // Attribution ladder, strongest first: the acceptance-moment decision
+    // fact, then the carrier-OBSERVED receipt identity, then the PLANNED one.
+    // Never invent a profile from a mutable profile definition.
+    let (profile, profile_attribution_basis) =
+        if let Some(profile) = selected_profile.filter(|profile| !profile.trim().is_empty()) {
+            (Some(profile), ProfileAttributionBasis::RouteDecision)
+        } else if let Some(profile) = receipt_profile(
+            subject.identity_receipt.as_ref(),
+            "/observed/effective/profile",
+        ) {
+            (Some(profile), ProfileAttributionBasis::ObservedReceipt)
+        } else if let Some(profile) =
+            receipt_profile(subject.identity_receipt.as_ref(), "/planned/profile")
+        {
+            (Some(profile), ProfileAttributionBasis::PlannedReceipt)
+        } else {
+            (None, ProfileAttributionBasis::Unattributed)
+        };
+
+    EvalObservation {
+        spine: EvalSpine::Dispatch,
+        subject_id: subject.outcome_id,
+        dispatch_id: Some(subject.dispatch_id),
+        profile,
+        profile_attribution_basis,
+        model: subject.model,
+        vendor: subject.vendor,
+        task_type: subject.task_type,
+        terminal_outcome: Some(subject.execution_outcome)
+            .filter(|outcome| !outcome.trim().is_empty()),
+        identity_attribution_basis: Some(subject.identity_attribution_basis),
+        cost_tokens: subject.cost_tokens,
+        cost_usd: subject.cost_usd,
+        // Structurally absent on this spine — never fabricated.
+        duration_ms: None,
+        occurred_at: subject.created_at,
+        occurred_at_basis: OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
+        adjudication,
+        rubric,
+        route,
+    }
+}
 
 /// Dispatch-spine observations whose `created_at` falls in `[since, until)`,
 /// newest first. `until = None` means unbounded upper end.
@@ -285,28 +427,24 @@ pub fn list_dispatch_eval_observations(
     limit: usize,
 ) -> Result<Vec<EvalObservation>, MemoryError> {
     struct Raw {
-        outcome_id: String,
-        dispatch_id: String,
-        model: Option<String>,
-        vendor: Option<String>,
-        task_type: Option<String>,
-        execution_outcome: String,
-        identity_attribution_basis: String,
-        cost_tokens: Option<u64>,
-        cost_usd: Option<f64>,
-        identity_receipt: Option<Value>,
-        created_at: String,
+        subject: DispatchSubjectRow,
         selected_profile: Option<String>,
         route: Option<EvalRouteFacts>,
     }
 
-    let mut statement = conn.prepare(DISPATCH_PROJECTION_SQL)?;
+    let sql = format!(
+        "SELECT {DISPATCH_SUBJECT_COLUMNS}, \
+         d.route_decision_id, d.recommendation_id, d.selected_profile, d.selected_model, \
+         d.assignment_mode, d.override_flag, \
+         r.candidates, r.recommended_profile, r.policy_source_revision \
+         FROM dispatch_outcomes o \
+         LEFT JOIN route_decisions d ON d.dispatch_id = o.dispatch_id \
+         LEFT JOIN route_recommendations r ON r.recommendation_id = d.recommendation_id \
+         {DISPATCH_WINDOW_TAIL}"
+    );
+    let mut statement = conn.prepare(&sql)?;
     let raws = statement
         .query_map(params![since, until, limit as i64], |row| {
-            let cost_tokens: Option<i64> = row.get(7)?;
-            let identity_receipt = row
-                .get::<_, Option<String>>(9)?
-                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
             let route_decision_id: Option<String> = row.get(11)?;
             let recommendation_id: Option<String> = row.get(12)?;
             let selected_profile: Option<String> = row.get(13)?;
@@ -330,18 +468,8 @@ pub fn list_dispatch_eval_observations(
                 policy_source_revision,
             });
             Ok(Raw {
-                outcome_id: row.get(0)?,
-                dispatch_id: row.get(1)?,
-                model: row.get(2)?,
-                vendor: row.get(3)?,
-                task_type: row.get(4)?,
-                execution_outcome: row.get(5)?,
-                identity_attribution_basis: row.get(6)?,
-                cost_tokens: cost_tokens.map(|v| v.max(0) as u64),
-                cost_usd: row.get(8)?,
-                identity_receipt,
-                created_at: row.get(10)?,
-                selected_profile: selected_profile.filter(|p| !p.trim().is_empty()),
+                subject: dispatch_subject_from_row(row)?,
+                selected_profile,
                 route,
             })
         })?
@@ -349,48 +477,15 @@ pub fn list_dispatch_eval_observations(
 
     let mut out = Vec::with_capacity(raws.len());
     for raw in raws {
-        let events = dispatch_adjudication_events(conn, &raw.outcome_id)?;
+        let events = dispatch_adjudication_events(conn, &raw.subject.outcome_id)?;
         let (adjudication, rubric) = resolve_judgment(conn, EvalSpine::Dispatch, events)?;
-        let selected_profile = raw.selected_profile;
-        // Attribution ladder, strongest first: the acceptance-moment decision
-        // fact, then the carrier-OBSERVED receipt identity, then the PLANNED
-        // one. Never invent a profile from a mutable profile definition.
-        let (profile, profile_attribution_basis) = if let Some(profile) = selected_profile {
-            (Some(profile), ProfileAttributionBasis::RouteDecision)
-        } else if let Some(profile) =
-            receipt_profile(raw.identity_receipt.as_ref(), "/observed/effective/profile")
-        {
-            (Some(profile), ProfileAttributionBasis::ObservedReceipt)
-        } else if let Some(profile) =
-            receipt_profile(raw.identity_receipt.as_ref(), "/planned/profile")
-        {
-            (Some(profile), ProfileAttributionBasis::PlannedReceipt)
-        } else {
-            (None, ProfileAttributionBasis::Unattributed)
-        };
-
-        out.push(EvalObservation {
-            spine: EvalSpine::Dispatch,
-            subject_id: raw.outcome_id,
-            dispatch_id: Some(raw.dispatch_id),
-            profile,
-            profile_attribution_basis,
-            model: raw.model,
-            vendor: raw.vendor,
-            task_type: raw.task_type,
-            terminal_outcome: Some(raw.execution_outcome)
-                .filter(|outcome| !outcome.trim().is_empty()),
-            identity_attribution_basis: Some(raw.identity_attribution_basis),
-            cost_tokens: raw.cost_tokens,
-            cost_usd: raw.cost_usd,
-            // Structurally absent on this spine — never fabricated.
-            duration_ms: None,
-            occurred_at: raw.created_at,
-            occurred_at_basis: OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
+        out.push(dispatch_observation(
+            raw.subject,
+            raw.selected_profile,
+            raw.route,
             adjudication,
             rubric,
-            route: raw.route,
-        });
+        ));
     }
     Ok(out)
 }
@@ -421,35 +516,39 @@ const MIRROR_PROJECTION_SQL: &str = "SELECT \
      ORDER BY r.created_at DESC, r.eval_run_id DESC \
      LIMIT ?3";
 
-/// Mirror-spine observations in `[since, until)`, newest first.
-///
-/// Every returned row has `route: None` — the mirror spine has no route
-/// decision and no candidate set to bind (design D1 / spec correction 7).
-pub fn list_mirror_eval_observations(
+/// Base facts for ONE mirror-spine subject (its run row plus the at-most-one
+/// observation row), before any judgment is attached. Shared with
+/// [`super::eval_replay`] for the same reason as [`DispatchSubjectRow`].
+#[derive(Debug, Clone)]
+pub(crate) struct MirrorSubjectRow {
+    pub(crate) eval_run_id: String,
+    pub(crate) requested_profile: Option<String>,
+    pub(crate) requested_model: Option<String>,
+    pub(crate) harness: Option<String>,
+    pub(crate) created_at: String,
+    pub(crate) terminal_outcome: Option<String>,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) cost_tokens: Option<u64>,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) effective_model: Option<String>,
+}
+
+/// Mirror-spine base rows in `[since, until)`, newest first — no judgment
+/// attached. `mirror_eval_observations.eval_run_id` is UNIQUE, so the LEFT
+/// JOIN is at most one-to-one and this row set is a function of the window
+/// alone.
+pub(crate) fn list_mirror_subject_rows(
     conn: &Connection,
     since: &str,
     until: Option<&str>,
     limit: usize,
-) -> Result<Vec<EvalObservation>, MemoryError> {
-    struct Raw {
-        eval_run_id: String,
-        requested_profile: Option<String>,
-        requested_model: Option<String>,
-        harness: Option<String>,
-        created_at: String,
-        terminal_outcome: Option<String>,
-        duration_ms: Option<u64>,
-        cost_tokens: Option<u64>,
-        cost_usd: Option<f64>,
-        effective_model: Option<String>,
-    }
-
+) -> Result<Vec<MirrorSubjectRow>, MemoryError> {
     let mut statement = conn.prepare(MIRROR_PROJECTION_SQL)?;
-    let raws = statement
+    let rows = statement
         .query_map(params![since, until, limit as i64], |row| {
             let duration_ms: Option<i64> = row.get(6)?;
             let cost_tokens: Option<i64> = row.get(7)?;
-            Ok(Raw {
+            Ok(MirrorSubjectRow {
                 eval_run_id: row.get(0)?,
                 requested_profile: row.get(1)?,
                 requested_model: row.get(2)?,
@@ -465,10 +564,66 @@ pub fn list_mirror_eval_observations(
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
 
-    let mut out = Vec::with_capacity(raws.len());
-    for raw in raws {
-        let events = list_adjudications_for_run(conn, &raw.eval_run_id)?
+/// Assemble one mirror-spine [`EvalObservation`]. `route` is not a parameter
+/// at all: the mirror spine has no route decision and no candidate set, and
+/// giving this function somewhere to put one is exactly how a future caller
+/// would end up fabricating one (design D1 / spec correction 7).
+pub(crate) fn mirror_observation(
+    subject: MirrorSubjectRow,
+    adjudication: Option<EvalAdjudicationFacts>,
+    rubric: Option<EvalRubricScoreRow>,
+) -> EvalObservation {
+    let profile = subject
+        .requested_profile
+        .filter(|profile| !profile.trim().is_empty());
+    let profile_attribution_basis = if profile.is_some() {
+        ProfileAttributionBasis::MirrorRequested
+    } else {
+        ProfileAttributionBasis::Unattributed
+    };
+    EvalObservation {
+        spine: EvalSpine::Mirror,
+        subject_id: subject.eval_run_id,
+        dispatch_id: None,
+        profile,
+        profile_attribution_basis,
+        // The carrier-OBSERVED effective model when one exists; the
+        // register-time requested value is never laundered into the observed
+        // slot (the #1066 gating precedent).
+        model: subject.effective_model.or(subject.requested_model),
+        vendor: subject.harness,
+        task_type: None,
+        terminal_outcome: subject.terminal_outcome,
+        identity_attribution_basis: None,
+        cost_tokens: subject.cost_tokens,
+        cost_usd: subject.cost_usd,
+        duration_ms: subject.duration_ms,
+        occurred_at: subject.created_at,
+        occurred_at_basis: OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
+        adjudication,
+        rubric,
+        // Structural, not missing: there is no mirror candidate set.
+        route: None,
+    }
+}
+
+/// Mirror-spine observations in `[since, until)`, newest first.
+///
+/// Every returned row has `route: None` — the mirror spine has no route
+/// decision and no candidate set to bind (design D1 / spec correction 7).
+pub fn list_mirror_eval_observations(
+    conn: &Connection,
+    since: &str,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<EvalObservation>, MemoryError> {
+    let subjects = list_mirror_subject_rows(conn, since, until, limit)?;
+    let mut out = Vec::with_capacity(subjects.len());
+    for subject in subjects {
+        let events = list_adjudications_for_run(conn, &subject.eval_run_id)?
             .into_iter()
             .map(|event| AdjudicationEvent {
                 adjudication_id: event.adjudication_id,
@@ -480,40 +635,26 @@ pub fn list_mirror_eval_observations(
             })
             .collect::<Vec<_>>();
         let (adjudication, rubric) = resolve_judgment(conn, EvalSpine::Mirror, events)?;
-        let profile = raw
-            .requested_profile
-            .filter(|profile| !profile.trim().is_empty());
-        let profile_attribution_basis = if profile.is_some() {
-            ProfileAttributionBasis::MirrorRequested
-        } else {
-            ProfileAttributionBasis::Unattributed
-        };
-        out.push(EvalObservation {
-            spine: EvalSpine::Mirror,
-            subject_id: raw.eval_run_id,
-            dispatch_id: None,
-            profile,
-            profile_attribution_basis,
-            // The carrier-OBSERVED effective model when one exists; the
-            // register-time requested value is never laundered into the
-            // observed slot (the #1066 gating precedent).
-            model: raw.effective_model.or(raw.requested_model),
-            vendor: raw.harness,
-            task_type: None,
-            terminal_outcome: raw.terminal_outcome,
-            identity_attribution_basis: None,
-            cost_tokens: raw.cost_tokens,
-            cost_usd: raw.cost_usd,
-            duration_ms: raw.duration_ms,
-            occurred_at: raw.created_at,
-            occurred_at_basis: OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
-            adjudication,
-            rubric,
-            // Structural, not missing: there is no mirror candidate set.
-            route: None,
-        });
+        out.push(mirror_observation(subject, adjudication, rubric));
     }
     Ok(out)
+}
+
+/// The ONE total order both read paths publish rows in: newest first, ties
+/// broken by `(spine, subject_id)` so the same data always yields the same
+/// row sequence, then capped at `limit` overall.
+///
+/// Shared with [`super::eval_replay`] deliberately: a replay that ordered its
+/// output differently would fail the equivalence fixture for a reason that
+/// has nothing to do with the fold under test.
+pub(crate) fn sort_observations_newest_first(rows: &mut Vec<EvalObservation>, limit: usize) {
+    rows.sort_by(|a, b| {
+        b.occurred_at
+            .cmp(&a.occurred_at)
+            .then_with(|| a.spine.as_str().cmp(b.spine.as_str()))
+            .then_with(|| a.subject_id.cmp(&b.subject_id))
+    });
+    rows.truncate(limit);
 }
 
 /// Both spines unified, newest first, capped at `limit` rows overall.
@@ -525,15 +666,7 @@ pub fn list_eval_observations(
 ) -> Result<Vec<EvalObservation>, MemoryError> {
     let mut rows = list_dispatch_eval_observations(conn, since, until, limit)?;
     rows.extend(list_mirror_eval_observations(conn, since, until, limit)?);
-    // Deterministic total order: newest first, ties broken by (spine, id) so
-    // two runs over the same data always produce the same row order.
-    rows.sort_by(|a, b| {
-        b.occurred_at
-            .cmp(&a.occurred_at)
-            .then_with(|| a.spine.as_str().cmp(b.spine.as_str()))
-            .then_with(|| a.subject_id.cmp(&b.subject_id))
-    });
-    rows.truncate(limit);
+    sort_observations_newest_first(&mut rows, limit);
     Ok(rows)
 }
 
