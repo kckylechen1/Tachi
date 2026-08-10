@@ -167,40 +167,43 @@ const REASON_NOT_REQUIRED: &str = "not_required_for_risk_class";
 /// itself blocked (a contradictory classification), the restriction is
 /// dropped with an explicit note rather than yielding an empty set.
 fn eligible_candidate_set(risk: &tachi_dispatch::DispatchRisk) -> EligibleCandidates {
-    let mut gates = EligibleCandidates::default();
+    let mut excluded = Vec::new();
+    let mut notes = Vec::new();
     let mut after_block = Vec::new();
     for profile in tachi_dispatch::DISPATCH_PROFILES.iter() {
         if risk.blocked_profiles.iter().any(|p| p == profile.name) {
-            gates
-                .excluded
-                .push((profile.name.to_string(), REASON_BLOCKED));
+            excluded.push((profile.name.to_string(), REASON_BLOCKED));
         } else {
             after_block.push(profile.name.to_string());
         }
     }
 
-    if risk.required_profiles.is_empty() {
-        gates.eligible = after_block;
-        return gates;
-    }
+    let eligible = if risk.required_profiles.is_empty() {
+        after_block
+    } else {
+        let (required, rest): (Vec<String>, Vec<String>) = after_block
+            .into_iter()
+            .partition(|profile| risk.required_profiles.iter().any(|p| p == profile));
+        if required.is_empty() {
+            notes.push(format!(
+                "every required profile ({}) is also blocked for this risk class; the required \
+                 restriction was dropped rather than emptying the candidate set",
+                risk.required_profiles.join(", ")
+            ));
+            rest
+        } else {
+            for profile in rest {
+                excluded.push((profile, REASON_NOT_REQUIRED));
+            }
+            required
+        }
+    };
 
-    let (required, rest): (Vec<String>, Vec<String>) = after_block
-        .into_iter()
-        .partition(|profile| risk.required_profiles.iter().any(|p| p == profile));
-    if required.is_empty() {
-        gates.notes.push(format!(
-            "every required profile ({}) is also blocked for this risk class; the required \
-             restriction was dropped rather than emptying the candidate set",
-            risk.required_profiles.join(", ")
-        ));
-        gates.eligible = rest;
-        return gates;
+    EligibleCandidates {
+        eligible,
+        excluded,
+        notes,
     }
-    for profile in rest {
-        gates.excluded.push((profile, REASON_NOT_REQUIRED));
-    }
-    gates.eligible = required;
-    gates
 }
 
 /// Cross-check a durable terminal row against the live `status.json` receipt

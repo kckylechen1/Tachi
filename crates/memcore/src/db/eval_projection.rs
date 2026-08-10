@@ -218,19 +218,34 @@ fn receipt_profile(receipt: Option<&Value>, pointer: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// One adjudication event, spine-normalized (the dispatch spine's free-text
+/// `verdict` and the mirror spine's `usefulness` land in the same slot).
+struct AdjudicationEvent {
+    adjudication_id: String,
+    actor: String,
+    verdict: Option<String>,
+    created_at: String,
+    insertion_seq: i64,
+}
+
 /// Attach the authoritative adjudication + its rubric companion to a subject.
 fn resolve_judgment(
     conn: &Connection,
     spine: EvalSpine,
-    events: Vec<(String, String, Option<String>, String, i64)>,
+    events: Vec<AdjudicationEvent>,
 ) -> Result<(Option<EvalAdjudicationFacts>, Option<EvalRubricScoreRow>), MemoryError> {
     let event_count = events.len();
     // The LAST appended event is the current judgment (the #1035/#1066
     // append-only convention); an earlier event's rubric row must never stand
     // in for a correction that carries none — that is exactly the
     // `unstructured_verdict` case the projection is required to exclude.
-    let Some((adjudication_id, actor, verdict, created_at, insertion_seq)) =
-        events.into_iter().next_back()
+    let Some(AdjudicationEvent {
+        adjudication_id,
+        actor,
+        verdict,
+        created_at,
+        insertion_seq,
+    }) = events.into_iter().next_back()
     else {
         return Ok((None, None));
     };
@@ -383,17 +398,15 @@ pub fn list_dispatch_eval_observations(
 fn dispatch_adjudication_events(
     conn: &Connection,
     outcome_id: &str,
-) -> Result<Vec<(String, String, Option<String>, String, i64)>, MemoryError> {
+) -> Result<Vec<AdjudicationEvent>, MemoryError> {
     Ok(list_adjudications_for_outcome(conn, outcome_id)?
         .into_iter()
-        .map(|event| {
-            (
-                event.adjudication_id,
-                event.actor,
-                event.verdict,
-                event.created_at,
-                event.insertion_seq,
-            )
+        .map(|event| AdjudicationEvent {
+            adjudication_id: event.adjudication_id,
+            actor: event.actor,
+            verdict: event.verdict,
+            created_at: event.created_at,
+            insertion_seq: event.insertion_seq,
         })
         .collect())
 }
@@ -457,14 +470,13 @@ pub fn list_mirror_eval_observations(
     for raw in raws {
         let events = list_adjudications_for_run(conn, &raw.eval_run_id)?
             .into_iter()
-            .map(|event| {
-                (
-                    event.adjudication_id,
-                    event.actor,
-                    Some(event.usefulness),
-                    event.created_at,
-                    event.insertion_seq,
-                )
+            .map(|event| AdjudicationEvent {
+                adjudication_id: event.adjudication_id,
+                actor: event.actor,
+                // The mirror spine's judgment slot is `usefulness`.
+                verdict: Some(event.usefulness),
+                created_at: event.created_at,
+                insertion_seq: event.insertion_seq,
             })
             .collect::<Vec<_>>();
         let (adjudication, rubric) = resolve_judgment(conn, EvalSpine::Mirror, events)?;
