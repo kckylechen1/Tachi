@@ -150,7 +150,9 @@ pub use db::{
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
 pub use embed_config::embed_raw_tier_enabled;
-pub use error::{MemoryError, OutboxOutcomeRefusal, WorkClaimTransitionReason};
+pub use error::{
+    MemoryError, OutboxOutcomeRefusal, ProviderPlanRefusal, WorkClaimTransitionReason,
+};
 #[cfg(feature = "admin")]
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,
@@ -218,6 +220,9 @@ pub use store::outbox_protocol::{
 pub use store::snapshot_import::{
     DanglingSupersession, PortableImportEntry, PortableImportReceipt,
 };
+/// tachi#1680 D4 apply report. Re-exported beside the plan types it describes.
+#[cfg(feature = "admin")]
+pub use store::vault_accounts::{AccountApplyReport, AccountRevision, AliasRef};
 pub use types::{
     AuthorityLevel, ContinuityCandidate, ContinuityCandidateBatch, ContinuityMetrics,
     ContinuityOutcomeLabel, EffectScope, ExpectedMemoryState, GcConfig, GraphExpandResult,
@@ -230,6 +235,15 @@ pub use vault::accounts::{
     mint_account_id, mint_auth_ref, names_rotation_pool_member, AccountClass, AccountCustody,
     AuthMode, CustodyKind, CustodyResolution, NewProviderAccount, NewProviderAccountEvent,
     ProviderAccount, ProviderAccountAlias, ProviderAccountEvent,
+};
+/// tachi#1680 D4 bound reconcile plan: what `apply` consumes and the digest
+/// that binds it. Re-exported at the root so the reconcile pipeline reaches it
+/// without importing the internal `vault::` module layout.
+#[cfg(feature = "admin")]
+pub use vault::apply::{
+    plan_digest, AccountAction, AccountBinding, AliasSighting, BoundAccountPlan, CustodyBinding,
+    MergeConfirmation, NoPlanSources, PlanBindings, PlanSourceDigests, PlannedAccount,
+    SourceBinding, VaultEntryBinding, PLAN_DIGEST_SCHEME,
 };
 #[cfg(feature = "admin")]
 pub use vault::fingerprint::{account_fingerprint_class, AccountFingerprintClass, FingerprintKey};

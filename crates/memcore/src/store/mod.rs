@@ -64,3 +64,7 @@ pub mod state;
 pub mod tasks;
 #[cfg(feature = "admin")]
 pub mod vault;
+#[cfg(feature = "admin")]
+pub mod vault_accounts;
+#[cfg(all(test, feature = "admin"))]
+mod vault_accounts_tests;
