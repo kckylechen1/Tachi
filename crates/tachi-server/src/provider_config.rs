@@ -584,18 +584,23 @@ mod tests {
         ]);
 
         let filtered = filter_model_provider_pools(vault_pools);
+        // `ProviderSecret` deliberately does not implement `Debug` (secret-negative:
+        // no accidental leak surface via `{:?}`), so failure messages reference the
+        // pool's key names only, never the map/value contents.
+        let mut filtered_keys: Vec<&str> = filtered.keys().map(String::as_str).collect();
+        filtered_keys.sort_unstable();
 
         assert!(
             !filtered.contains_key("TAVILY_API_KEY"),
-            "a Vault-stored search key must not reach the LLM materialization pools: {filtered:?}"
+            "a Vault-stored search key must not reach the LLM materialization pools: {filtered_keys:?}"
         );
         assert!(
             !filtered.contains_key("EXA_API_KEY"),
-            "a Vault-stored search key must not reach the LLM materialization pools: {filtered:?}"
+            "a Vault-stored search key must not reach the LLM materialization pools: {filtered_keys:?}"
         );
         assert!(
             filtered.contains_key("DEEPSEEK_API_KEY"),
-            "a Vault-stored ModelApi key must still reach the LLM materialization pools: {filtered:?}"
+            "a Vault-stored ModelApi key must still reach the LLM materialization pools: {filtered_keys:?}"
         );
     }
 
