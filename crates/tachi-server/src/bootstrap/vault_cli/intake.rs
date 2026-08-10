@@ -253,7 +253,7 @@ fn candidate_from_value(
         in_vault,
         classification,
         suggested_action,
-        alias_family: alias_family(logical_name).map(str::to_string),
+        alias_family: alias_family(logical_name),
     }
 }
 
@@ -315,12 +315,55 @@ fn is_config_name(name: &str) -> bool {
     .any(|suffix| name.ends_with(suffix))
 }
 
-fn alias_family(name: &str) -> Option<&'static str> {
-    match name {
-        "KIMI_API_KEY" | "MOONSHOT_API_KEY" => Some("moonshot/kimi"),
-        "GOOGLE_API_KEY" | "GEMINI_API_KEY" | "GOOGLE_SEARCH_API_KEY" => Some("google/gemini"),
-        _ => None,
+/// #1680/D3: derived from the single compile-time provider registry
+/// (`status_health::API_KEY_DEFS`) instead of a second, independently
+/// hand-curated table. `alias_family` used to be that second table, and it
+/// drifted from the registry in one concrete way: it manually folded
+/// `GOOGLE_SEARCH_API_KEY` into the "google/gemini" family even though
+/// `GOOGLE_API_KEY`'s registry entry never listed it as an alias — a search
+/// credential grouped with model-provider accounts (the live
+/// discrimination-2 violation #1680 fixes). Deriving from the registry
+/// directly removes that drift by construction: `GOOGLE_SEARCH_API_KEY` is
+/// now its own registry row with no aliases, so it has no family here either
+/// (**intended behavior change** — verified by
+/// `vault_intake_g1680_google_search_is_not_merged_with_google_family`
+/// below).
+///
+/// A name resolves to the `ApiKeyDef` it is the *canonical key* of first
+/// (never shadowed by an unrelated entry that happens to list it as a
+/// fallback alias — e.g. `REASONING_API_KEY` is both an alias of
+/// `DEEPSEEK_API_KEY`'s entry and the canonical key of its own entry;
+/// canonical-key match wins), falling back to the entry whose `aliases`
+/// contains it. An entry with no aliases has no family (nothing to flag as
+/// an advisory merge candidate). The family label is a deterministic,
+/// order-independent function of the entry's own key + aliases (descending
+/// alphabetical join), which reproduces the exact pre-existing labels for
+/// both groups the old hand-curated table covered
+/// (`"moonshot/kimi"`, `"google/gemini"`) — see
+/// `vault_intake_g1680_family_labels_match_legacy_alias_family` below — while
+/// now also covering every other aliased registry entry (e.g.
+/// `XAI_API_KEY`/`GROK_API_KEY`), which the old two-entry table never did.
+fn alias_family(name: &str) -> Option<String> {
+    let defs = crate::status_ops::status_health::API_KEY_DEFS;
+    let def = defs
+        .iter()
+        .find(|def| def.key == name)
+        .or_else(|| defs.iter().find(|def| def.aliases.contains(&name)))?;
+    if def.aliases.is_empty() {
+        return None;
     }
+    let mut stems: Vec<String> = std::iter::once(def.key)
+        .chain(def.aliases.iter().copied())
+        .map(alias_family_stem)
+        .collect();
+    stems.sort_unstable_by(|a, b| b.cmp(a));
+    Some(stems.join("/"))
+}
+
+fn alias_family_stem(key: &str) -> String {
+    key.strip_suffix("_API_KEY")
+        .unwrap_or(key)
+        .to_ascii_lowercase()
 }
 
 fn fingerprint(value: &str) -> String {
@@ -446,7 +489,6 @@ fn plan_report(
     let vault_families: HashSet<String> = vault_names
         .iter()
         .filter_map(|name| alias_family(name))
-        .map(str::to_string)
         .collect();
 
     let mut seen_fingerprints: HashSet<String> = HashSet::new();
@@ -1097,6 +1139,77 @@ mod tests {
 
         assert_eq!(kimi.classification, "api_key");
         assert_eq!(kimi.alias_family.as_deref(), Some("moonshot/kimi"));
+    }
+
+    /// #1680/D3 golden: the registry-derived family mapping must reproduce
+    /// the exact labels the old hand-curated `alias_family()` table emitted
+    /// for both groups it covered — KIMI/MOONSHOT and GOOGLE/GEMINI — so this
+    /// refactor is behavior-preserving for every pre-existing family.
+    #[test]
+    fn vault_intake_g1680_family_labels_match_legacy_alias_family() {
+        assert_eq!(
+            alias_family("KIMI_API_KEY").as_deref(),
+            Some("moonshot/kimi")
+        );
+        assert_eq!(
+            alias_family("MOONSHOT_API_KEY").as_deref(),
+            Some("moonshot/kimi")
+        );
+        assert_eq!(
+            alias_family("GOOGLE_API_KEY").as_deref(),
+            Some("google/gemini")
+        );
+        assert_eq!(
+            alias_family("GEMINI_API_KEY").as_deref(),
+            Some("google/gemini")
+        );
+    }
+
+    /// #1680/D3 golden — intended behavior change: `GOOGLE_SEARCH_API_KEY` is
+    /// no longer folded into the google/gemini family. It is its own
+    /// registry entry (`KeyClass::SearchApi`) with no aliases, so it has no
+    /// family at all, and it must never collide with a real
+    /// `GOOGLE_API_KEY`/`GEMINI_API_KEY` discovery the way it used to. This
+    /// closes the live discrimination-2 violation: a search-only credential
+    /// no longer shares an advisory-merge family with model-provider
+    /// accounts.
+    #[test]
+    fn vault_intake_g1680_google_search_is_not_merged_with_google_family() {
+        assert_eq!(alias_family("GOOGLE_SEARCH_API_KEY"), None);
+
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write_file(
+            &cwd.path().join(".env"),
+            "GOOGLE_API_KEY=google-value\nGOOGLE_SEARCH_API_KEY=search-value\n",
+        );
+
+        let report = plan_report(
+            home.path(),
+            cwd.path(),
+            &home.path().join(".tachi/global/memory.db"),
+            None,
+        );
+        let google = planned(&report, "GOOGLE_API_KEY");
+        let google_search = planned(&report, "GOOGLE_SEARCH_API_KEY");
+
+        assert_eq!(google.candidate.alias_family.as_deref(), None);
+        assert_eq!(google_search.candidate.alias_family, None);
+        // Neither is flagged as a merge candidate against the other — they
+        // are independent credentials, not aliases of the same account.
+        assert_ne!(google.action, "merge_alias");
+        assert_ne!(google_search.action, "merge_alias");
+    }
+
+    /// #1680/D3: the registry-derived mapping generalizes beyond the two
+    /// groups the old table hand-curated — any aliased registry entry now
+    /// gets advisory-merge coverage in intake, proven here on a group
+    /// (`XAI_API_KEY`/`GROK_API_KEY`) the legacy `alias_family()` never
+    /// recognized at all.
+    #[test]
+    fn vault_intake_g1680_family_derivation_covers_previously_unrecognized_registry_alias() {
+        assert_eq!(alias_family("XAI_API_KEY").as_deref(), Some("xai/grok"));
+        assert_eq!(alias_family("GROK_API_KEY").as_deref(), Some("xai/grok"));
     }
 
     #[test]
