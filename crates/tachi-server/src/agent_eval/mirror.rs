@@ -9,10 +9,12 @@
 //! semantics live in memcore; this module never re-implements them.
 
 use serde_json::json;
+#[cfg(test)]
+use serde_json::Value;
 
 use crate::server_state::MemoryServer;
 use crate::tool_params::{
-    MirrorEvalAdjudicateParams, MirrorEvalGetParams, MirrorEvalObserveParams,
+    EvalRubricParams, MirrorEvalAdjudicateParams, MirrorEvalGetParams, MirrorEvalObserveParams,
     MirrorEvalRegisterParams,
 };
 
@@ -187,6 +189,11 @@ pub(crate) fn handle_adjudicate(
         .map(scrub)
         .filter(|k| !k.trim().is_empty())
         .unwrap_or_else(|| default_adjudication_event_key(&eval_run_id, &actor, &usefulness));
+    // tachi#1675 PR1 D3: hold onto the rubric block (if any) and the
+    // adjudicator actor identity BEFORE `new` partially moves `actor` — the
+    // rubric write below needs both.
+    let rubric_params = params.rubric;
+    let adjudicator_actor = actor.clone();
     let new = memcore::NewMirrorEvalAdjudication {
         adjudication_id: uuid::Uuid::new_v4().to_string(),
         eval_run_id: eval_run_id.clone(),
@@ -223,6 +230,20 @@ pub(crate) fn handle_adjudicate(
     let producer_lineage = producer_lineage_for_gating(observation.as_ref());
     let verifier_lineage = lineage_of(adjudication.verifier_model.as_deref());
 
+    // tachi#1675 PR1 D3: optional structured rubric companion row. Best-effort
+    // — a rubric write failure never fails the (already-appended, already
+    // authoritative) free-text adjudication above.
+    let rubric_row = rubric_params.map(|rubric| {
+        write_rubric_score_best_effort(
+            server,
+            &adjudication.adjudication_id,
+            &adjudicator_actor,
+            &producer_lineage,
+            &verifier_lineage,
+            rubric,
+        )
+    });
+
     serde_json::to_string(&json!({
         "eval_run_id": adjudication.eval_run_id,
         "adjudication_id": adjudication.adjudication_id,
@@ -233,8 +254,99 @@ pub(crate) fn handle_adjudicate(
         "created_at": adjudication.created_at,
         "cross_model_independent": cross_model_independent(&producer_lineage, &verifier_lineage),
         "self_eval": is_self_eval(&producer_lineage, &verifier_lineage),
+        "rubric_written": rubric_row.map(|r| r.is_some()),
     }))
     .map_err(|e| format!("serialize adjudicate: {e}"))
+}
+
+/// tachi#1675 PR1 D3: rubric v1 is a CODE CONSTANT — no runtime-mutable
+/// rubric entity, no new model-facing mutation surface (`tachi_tune`'s 8
+/// closed actions stay closed). `rubric_hash` on every row pins it to this
+/// exact definition so a later rubric revision cannot silently reinterpret
+/// an old row. Reuses the SAME content-addressing primitive
+/// `route_policy_source_revision`/route-policy proposals already use — not a
+/// second hashing scheme.
+fn rubric_v1_hash() -> String {
+    crate::tune_ops::route_policy::content_digest_hex(&json!({
+        "rubric": "v1",
+        "dimensions": [
+            "contract_correctness", "evidence_quality", "safety",
+            "scope_discipline", "intervention_burden", "completion_integrity",
+        ],
+        "dimension_values": memcore::RUBRIC_DIMENSION_VALUES,
+        "confidence_values": memcore::RUBRIC_CONFIDENCE_VALUES,
+    }))
+}
+
+/// tachi#1675 PR1 D5: `independence_basis` is a MACHINE-COMPUTED disposition,
+/// never caller-asserted. On the mirror spine there is no
+/// `dispatch_outcomes.vendor` / `identity_attribution_basis` pair to read —
+/// this reuses the SAME structural primitives (`is_self_eval` /
+/// `cross_model_independent`, both already gating cross_model_independent/
+/// self_eval in the response above) as the mirror-spine equivalent of D5's
+/// dispatch-spine rule: same known lineage on both sides -> `self`
+/// (hard-excluded); different KNOWN lineages -> `structural_cross_vendor`
+/// (the only basis eligible for positive routing evidence); anything with an
+/// unknown lineage on either side -> `declared_only` (kept as evidence,
+/// excluded from positive labels). `identity_bound` is reserved and never
+/// returned here — [`memcore::insert_eval_rubric_score`] independently
+/// refuses it regardless.
+fn compute_independence_basis(producer_lineage: &str, verifier_lineage: &str) -> &'static str {
+    if is_self_eval(producer_lineage, verifier_lineage) {
+        "self"
+    } else if cross_model_independent(producer_lineage, verifier_lineage) {
+        "structural_cross_vendor"
+    } else {
+        "declared_only"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_rubric_score_best_effort(
+    server: &MemoryServer,
+    adjudication_id: &str,
+    adjudicator_actor: &str,
+    producer_lineage: &str,
+    verifier_lineage: &str,
+    rubric: EvalRubricParams,
+) -> Option<memcore::EvalRubricScoreRow> {
+    let adjudicator_vendor = rubric
+        .adjudicator_vendor
+        .map(scrub)
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| verifier_lineage.to_string());
+    let independence_basis = compute_independence_basis(producer_lineage, verifier_lineage);
+    let new_score = memcore::NewEvalRubricScore {
+        rubric_score_id: uuid::Uuid::new_v4().to_string(),
+        adjudication_id: adjudication_id.to_string(),
+        subject_kind: "mirror".to_string(),
+        rubric_hash: rubric_v1_hash(),
+        contract_correctness: scrub(rubric.contract_correctness),
+        evidence_quality: scrub(rubric.evidence_quality),
+        safety: scrub(rubric.safety),
+        scope_discipline: scrub(rubric.scope_discipline),
+        intervention_burden: scrub(rubric.intervention_burden),
+        completion_integrity: scrub(rubric.completion_integrity),
+        adjudication_confidence: scrub(rubric.adjudication_confidence),
+        adjudicator_actor: adjudicator_actor.to_string(),
+        adjudicator_vendor,
+        independence_basis: independence_basis.to_string(),
+        occurred_at: memcore::now_utc_iso(),
+    };
+    let result = server.with_global_store(|store| {
+        memcore::insert_eval_rubric_score(store.connection(), &new_score).map_err(|e| e.to_string())
+    });
+    match result {
+        Ok(row) => Some(row),
+        Err(err) => {
+            tracing::warn!(
+                adjudication_id,
+                error = %err,
+                "tachi#1675 Seam D3: failed to record eval_rubric_scores row"
+            );
+            None
+        }
+    }
 }
 
 pub(crate) fn handle_get(
@@ -346,4 +458,252 @@ pub(crate) fn resolve_eval_run_id(
     })?;
     run.map(|r| r.eval_run_id)
         .ok_or_else(|| format!("no mirror eval run registered for native_child_id '{native_id}'"))
+}
+
+#[cfg(test)]
+mod rubric_tests {
+    use super::*;
+
+    fn test_server() -> MemoryServer {
+        let db_path = crate::utils::test_fixture_path(format!(
+            "agent-eval-rubric-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        MemoryServer::new(db_path, None).expect("test memory server")
+    }
+
+    fn register(server: &MemoryServer, native_child_id: &str) -> String {
+        let params = MirrorEvalRegisterParams {
+            frozen_contract_ref: "kckylechen1/tachi#1675".to_string(),
+            execution_origin: "host_native_subagent".to_string(),
+            lifecycle_owner: "host".to_string(),
+            harness: Some("claude_code_task_tool".to_string()),
+            native_child_id: Some(native_child_id.to_string()),
+            requested_profile: None,
+            requested_model: None,
+            requested_agent: None,
+        };
+        let raw = handle_register(server, params).expect("register succeeds");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        value["eval_run_id"].as_str().unwrap().to_string()
+    }
+
+    fn observe(server: &MemoryServer, eval_run_id: &str, effective_model: &str) {
+        let params = MirrorEvalObserveParams {
+            eval_run_id: Some(eval_run_id.to_string()),
+            native_child_id: None,
+            terminal_outcome: "success".to_string(),
+            duration_ms: Some(1000),
+            cost_tokens: Some(500),
+            cost_usd: Some(0.01),
+            result_ref: None,
+            artifacts: Vec::new(),
+            effective_model: Some(effective_model.to_string()),
+            effective_backend: None,
+            effective_harness: None,
+        };
+        handle_observe(server, params).expect("observe succeeds");
+    }
+
+    fn rubric_block() -> EvalRubricParams {
+        EvalRubricParams {
+            contract_correctness: "pass".to_string(),
+            evidence_quality: "pass".to_string(),
+            safety: "pass".to_string(),
+            scope_discipline: "pass".to_string(),
+            intervention_burden: "not_assessed".to_string(),
+            completion_integrity: "pass".to_string(),
+            adjudication_confidence: "high".to_string(),
+            adjudicator_vendor: None,
+        }
+    }
+
+    fn adjudicate_params(
+        eval_run_id: &str,
+        actor: &str,
+        verifier_model: Option<&str>,
+        rubric: Option<EvalRubricParams>,
+    ) -> MirrorEvalAdjudicateParams {
+        MirrorEvalAdjudicateParams {
+            eval_run_id: Some(eval_run_id.to_string()),
+            native_child_id: None,
+            actor: actor.to_string(),
+            verifier_model: verifier_model.map(str::to_string),
+            usefulness: "useful".to_string(),
+            failure_mode: None,
+            first_review_findings: Vec::new(),
+            plan_delta: None,
+            next_prompt_delta: None,
+            evidence_usable: true,
+            used_in_final_claim: true,
+            human_override: false,
+            evidence_ref: "run-1".to_string(),
+            event_key: None,
+            rubric,
+        }
+    }
+
+    fn rubric_row_count(server: &MemoryServer) -> i64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM eval_rubric_scores", [], |r| r.get(0))
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+    }
+
+    /// A rubric block on `adjudicate` writes an `eval_rubric_scores` row
+    /// keyed on the SAME `adjudication_id` the free-text verdict landed
+    /// under (subject_kind='mirror' — the only spine this seam wires).
+    #[test]
+    fn adjudicate_with_rubric_writes_a_rubric_row() {
+        let server = test_server();
+        let eval_run_id = register(&server, "native-1");
+        observe(&server, &eval_run_id, "claude-sonnet-5");
+
+        let raw = handle_adjudicate(
+            &server,
+            adjudicate_params(
+                &eval_run_id,
+                "leader",
+                Some("gpt-5.1"),
+                Some(rubric_block()),
+            ),
+        )
+        .expect("adjudicate succeeds");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let adjudication_id = value["adjudication_id"].as_str().unwrap().to_string();
+        assert_eq!(value["rubric_written"], serde_json::json!(true));
+
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_eval_rubric_score(store.connection(), "mirror", &adjudication_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .expect("rubric row present");
+        assert_eq!(row.subject_kind, "mirror");
+        assert_eq!(row.contract_correctness, "pass");
+        assert_eq!(row.adjudication_confidence, "high");
+        assert_eq!(
+            row.independence_basis, "structural_cross_vendor",
+            "distinct known producer/verifier lineages -> structural_cross_vendor"
+        );
+    }
+
+    /// No rubric block -> zero eval_rubric_scores rows, the free-text verdict
+    /// still lands normally.
+    #[test]
+    fn adjudicate_without_rubric_writes_no_rubric_row() {
+        let server = test_server();
+        let eval_run_id = register(&server, "native-2");
+        observe(&server, &eval_run_id, "claude-sonnet-5");
+
+        let raw = handle_adjudicate(
+            &server,
+            adjudicate_params(&eval_run_id, "leader", Some("gpt-5.1"), None),
+        )
+        .expect("adjudicate succeeds");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["rubric_written"], Value::Null);
+        assert_eq!(rubric_row_count(&server), 0);
+    }
+
+    /// D5 independence_basis: same known lineage on both sides -> 'self'.
+    #[test]
+    fn independence_basis_self_when_lineages_match() {
+        let server = test_server();
+        let eval_run_id = register(&server, "native-3");
+        observe(&server, &eval_run_id, "claude-sonnet-5");
+
+        let raw = handle_adjudicate(
+            &server,
+            adjudicate_params(
+                &eval_run_id,
+                "leader",
+                Some("claude-sonnet-5"),
+                Some(rubric_block()),
+            ),
+        )
+        .expect("adjudicate succeeds");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let adjudication_id = value["adjudication_id"].as_str().unwrap().to_string();
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_eval_rubric_score(store.connection(), "mirror", &adjudication_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.independence_basis, "self");
+    }
+
+    /// D5 independence_basis: an unknown producer lineage (no `observe`
+    /// carried an `effective_model`) -> 'declared_only', never a fabricated
+    /// cross-vendor claim.
+    #[test]
+    fn independence_basis_declared_only_when_producer_lineage_unknown() {
+        let server = test_server();
+        // register WITHOUT a following observe — producer lineage stays unknown.
+        let eval_run_id = register(&server, "native-4");
+
+        let raw = handle_adjudicate(
+            &server,
+            adjudicate_params(
+                &eval_run_id,
+                "leader",
+                Some("gpt-5.1"),
+                Some(rubric_block()),
+            ),
+        )
+        .expect("adjudicate succeeds");
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let adjudication_id = value["adjudication_id"].as_str().unwrap().to_string();
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_eval_rubric_score(store.connection(), "mirror", &adjudication_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.independence_basis, "declared_only");
+    }
+
+    /// Negative test: the rubric write path never touches session_claims or
+    /// agent_identities.
+    #[test]
+    fn rubric_write_never_touches_session_or_identity_tables() {
+        let server = test_server();
+        let eval_run_id = register(&server, "native-5");
+        observe(&server, &eval_run_id, "claude-sonnet-5");
+
+        let count_of = |table: &str| -> i64 {
+            server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap()
+        };
+        let before_claims = count_of("session_claims");
+        let before_identities = count_of("agent_identities");
+
+        handle_adjudicate(
+            &server,
+            adjudicate_params(
+                &eval_run_id,
+                "leader",
+                Some("gpt-5.1"),
+                Some(rubric_block()),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(before_claims, count_of("session_claims"));
+        assert_eq!(before_identities, count_of("agent_identities"));
+    }
 }
