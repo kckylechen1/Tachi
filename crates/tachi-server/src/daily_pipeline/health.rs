@@ -3,6 +3,7 @@ use chrono::Utc;
 use memcore::MemoryStore;
 use serde_json::Value;
 use std::path::PathBuf;
+use tachi_llm::PersistedModelInvocationReceiptV1;
 
 use super::{
     parse_llm_json, CategorySourceCount, DailyHealthPayload, DailyStageReport, DatabaseStats,
@@ -13,7 +14,15 @@ pub(crate) async fn run_health_check(
     server: &MemoryServer,
     app_home: &std::path::Path,
     date: &str,
-) -> Result<(DailyStageReport, Value, PathBuf), String> {
+) -> Result<
+    (
+        DailyStageReport,
+        Value,
+        PathBuf,
+        PersistedModelInvocationReceiptV1,
+    ),
+    String,
+> {
     let manifest_path = app_home.join("manifest.json");
     let targets = load_manifest_targets(server, &manifest_path)?;
     let databases = collect_database_stats_for_targets(targets).await?;
@@ -26,12 +35,23 @@ pub(crate) async fn run_health_check(
     };
     let user = serde_json::to_string_pretty(&payload)
         .map_err(|e| format!("serialize daily health payload: {e}"))?;
-    let raw = server
+    let outcome = server
         .llm
-        .call_reasoning_llm(crate::prompts::DAILY_HEALTH_PROMPT, &user, None, 0.2, 3000)
+        .call_reasoning_llm_with_receipt(
+            crate::prompts::DAILY_HEALTH_PROMPT,
+            &user,
+            None,
+            0.2,
+            3000,
+        )
         .await
         .map_err(|e| format!("daily health LLM call failed: {e}"))?;
-    let health_json = parse_llm_json(&raw)?;
+    if outcome.truncated {
+        return Err(
+            "daily health LLM output truncated; refusing clean report/wiki publish".to_string(),
+        );
+    }
+    let health_json = parse_llm_json(&outcome.text)?;
     let overall = health_json
         .get("overall_health")
         .and_then(Value::as_str)
@@ -55,6 +75,7 @@ pub(crate) async fn run_health_check(
         },
         health_json,
         report_path,
+        outcome.invocation,
     ))
 }
 
