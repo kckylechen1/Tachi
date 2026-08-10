@@ -292,6 +292,16 @@ Implemented route-policy loader:
   explains applied/skipped rules under `route_policy_rules`.
 - Applied rules add explainable weight rather than hard-overriding routing, so
   high-risk tasks can still block fast/unsafe profiles.
+- Since the `kckylechen1/tachi#1675` PR4 cutover, that weight is gated twice.
+  A rule is honoured only if it declares `evidence.source =
+  "decision_fact_ledger"`; the proposal generator still mines `/eval` memory,
+  which the cutover retired as a routing evidence base, so every rule it mints
+  is skipped as `retired_evidence_source:live_memory_eval` — reviewable and
+  audited, but inert until the generator itself moves onto the ledger. And a
+  rule preferring a profile the risk classifier excluded (blocked, or outside
+  the required set at high/critical risk) is skipped rather than scored: hard
+  gates cut the candidate set before scoring, and no weight may resurrect a
+  candidate they removed.
 
 ## Non-Goals
 
