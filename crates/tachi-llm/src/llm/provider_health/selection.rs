@@ -95,6 +95,52 @@ impl super::super::LlmClient {
             .ok_or_else(|| self.provider_secret_unavailable_error(keys))
     }
 
+    /// Read one **named** pool member's value: no selection, no round-robin,
+    /// and deliberately **no availability filter** (#1680 D6).
+    ///
+    /// `selected_secret_readonly` answers "which key would the lane use", so
+    /// it must skip members the health table calls unusable. A per-member
+    /// probe asks the opposite question — "what does the provider say about
+    /// *this* credential" — and re-examining a key that is currently
+    /// auth-failed or cooling down is the whole point of asking. Filtering
+    /// here would make a wrongly-condemned key permanently unverifiable.
+    ///
+    /// Falls back to the process env under the member id that equals the
+    /// logical name, matching how the env path models a one-member pool.
+    pub(in crate::llm) fn member_secret_readonly(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+    ) -> Option<SelectedProviderSecret> {
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pool_value = state.secrets.get(logical_name).and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.key_id == key_id)
+                .map(|entry| entry.value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+        drop(state);
+
+        pool_value
+            .or_else(|| {
+                (key_id == logical_name)
+                    .then(|| Self::first_env(&[logical_name]))
+                    .flatten()
+                    .filter(|value| !crate::provider_names::is_vault_alias(value))
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .map(|value| SelectedProviderSecret {
+                logical_name: logical_name.to_string(),
+                key_id: key_id.to_string(),
+                value,
+            })
+    }
+
     /// Select the same currently usable credential as the normal provider
     /// path without advancing its round-robin cursor, pruning state, or
     /// persisting health. This is reserved for the observation-only auth
