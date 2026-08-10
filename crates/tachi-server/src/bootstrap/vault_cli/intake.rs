@@ -1193,7 +1193,14 @@ mod tests {
         let google = planned(&report, "GOOGLE_API_KEY");
         let google_search = planned(&report, "GOOGLE_SEARCH_API_KEY");
 
-        assert_eq!(google.candidate.alias_family.as_deref(), None);
+        // GOOGLE_API_KEY legitimately keeps its google/gemini family — it
+        // still has GEMINI_API_KEY as a real registry alias, untouched by
+        // this PR. Only GOOGLE_SEARCH_API_KEY's *membership in that family*
+        // is what changed (it has none now).
+        assert_eq!(
+            google.candidate.alias_family.as_deref(),
+            Some("google/gemini")
+        );
         assert_eq!(google_search.candidate.alias_family, None);
         // Neither is flagged as a merge candidate against the other — they
         // are independent credentials, not aliases of the same account.
