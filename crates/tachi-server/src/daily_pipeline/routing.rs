@@ -1,28 +1,41 @@
 use crate::server_state::MemoryServer;
 use memcore::MemoryStore;
 use serde_json::{json, Value};
+use tachi_llm::PersistedModelInvocationReceiptV1;
 
 use super::{parse_llm_json, DailyStageReport, EvalEvidenceRow};
+
+pub(crate) struct RoutingStageOutcome {
+    pub report: DailyStageReport,
+    /// Present only when a model invocation produced the routing details.
+    pub invocation: Option<PersistedModelInvocationReceiptV1>,
+}
 
 pub(crate) async fn run_routing_analysis_stage(
     server: &MemoryServer,
     date: &str,
-) -> DailyStageReport {
+) -> Result<RoutingStageOutcome, String> {
     let eval_rows = match collect_eval_rows_30d(server) {
         Ok(rows) if !rows.is_empty() => rows,
         Ok(_) => {
-            return DailyStageReport {
-                status: "skipped".to_string(),
-                summary: "No eval records in the last 30 days".to_string(),
-                details: json!({ "eval_count": 0 }),
-            };
+            return Ok(RoutingStageOutcome {
+                report: DailyStageReport {
+                    status: "skipped".to_string(),
+                    summary: "No eval records in the last 30 days".to_string(),
+                    details: json!({ "eval_count": 0, "disposition": "non_model_skip" }),
+                },
+                invocation: None,
+            });
         }
         Err(e) => {
-            return DailyStageReport {
-                status: "skipped".to_string(),
-                summary: format!("Failed to collect eval records: {e}"),
-                details: json!({ "error": e }),
-            };
+            return Ok(RoutingStageOutcome {
+                report: DailyStageReport {
+                    status: "skipped".to_string(),
+                    summary: format!("Failed to collect eval records: {e}"),
+                    details: json!({ "error": e, "disposition": "non_model_skip" }),
+                },
+                invocation: None,
+            });
         }
     };
 
@@ -85,10 +98,11 @@ pub(crate) async fn run_routing_analysis_stage(
         "agents": agents_payload,
     });
 
-    let user = serde_json::to_string_pretty(&payload).unwrap_or_default();
-    let raw = match server
+    let user = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("serialize daily routing payload: {e}"))?;
+    let outcome = server
         .llm
-        .call_reasoning_llm(
+        .call_reasoning_llm_with_receipt(
             crate::prompts::ROUTING_ANALYSIS_PROMPT,
             &user,
             None,
@@ -96,38 +110,37 @@ pub(crate) async fn run_routing_analysis_stage(
             2000,
         )
         .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return DailyStageReport {
-                status: "failed".to_string(),
-                summary: format!("Routing analysis LLM call failed: {e}"),
-                details: json!({ "input": payload, "error": e }),
-            };
-        }
-    };
+        .map_err(|e| format!("daily routing LLM call failed: {e}"))?;
+    if outcome.truncated {
+        return Err(
+            "daily routing LLM output truncated; refusing clean report/wiki publish".to_string(),
+        );
+    }
 
-    let routing_json = parse_llm_json(&raw).unwrap_or(json!({ "raw": raw }));
+    let routing_json = parse_llm_json(&outcome.text)?;
     let proposals_count = routing_json
         .get("routing_proposals")
         .and_then(Value::as_array)
         .map(|a| a.len())
         .unwrap_or(0);
 
-    DailyStageReport {
-        status: if proposals_count > 0 {
-            "proposals_generated"
-        } else {
-            "no_changes"
-        }
-        .to_string(),
-        summary: format!(
-            "Routing analysis: {} agents evaluated, {} proposals",
-            agent_stats.len(),
-            proposals_count
-        ),
-        details: routing_json,
-    }
+    Ok(RoutingStageOutcome {
+        report: DailyStageReport {
+            status: if proposals_count > 0 {
+                "proposals_generated"
+            } else {
+                "no_changes"
+            }
+            .to_string(),
+            summary: format!(
+                "Routing analysis: {} agents evaluated, {} proposals",
+                agent_stats.len(),
+                proposals_count
+            ),
+            details: routing_json,
+        },
+        invocation: Some(outcome.invocation),
+    })
 }
 
 fn collect_eval_rows_30d(server: &MemoryServer) -> Result<Vec<EvalEvidenceRow>, String> {
