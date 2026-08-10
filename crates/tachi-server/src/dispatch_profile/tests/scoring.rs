@@ -58,6 +58,10 @@ fn recommended_candidates(
         &[],
         &[],
         &empty_route_policy_rules(),
+        // These cases score `/eval`-shaped `EvalRow`s, so they declare the
+        // legacy evidence source: the flip (tachi#1675 PR4) changed which
+        // evidence `recommend` reads, not how a row scores once read.
+        tachi_dispatch::RouteEvidenceSource::LiveEvalMemory,
         |profile| profile_weak_against_for_server(server, profile),
     )
     .expect("recommend candidates")

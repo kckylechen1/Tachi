@@ -82,8 +82,10 @@ pub use routing::{
     recommend_dispatch_profile_candidates, route_eval_rows, route_performance_rows,
     route_simulation_caveats, route_subagent_scores, sanitize_policy_key, simulate_route_policy,
     AppliedRoutePolicyRule, DispatchRisk, ProfileCandidate, RecommendationProfilePayload,
-    RouteEvalRow, RoutePerformanceRow, RoutePolicyRuleLoadout, RoutePolicyRuleRecord,
-    RouteSimulationChoice, RouteSimulationSummary, RouteSubagentScore, SkippedRoutePolicyRule,
+    RouteEvalRow, RouteEvidenceSource, RoutePerformanceRow, RoutePolicyRuleLoadout,
+    RoutePolicyRuleRecord, RouteSimulationChoice, RouteSimulationSummary, RouteSubagentScore,
+    SkippedRoutePolicyRule, BASELINE_MBIT_FIT_REASON, NO_LEDGER_EVIDENCE_REASON,
+    ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER, ROUTE_EVIDENCE_SOURCE_LIVE_EVAL_MEMORY,
 };
 pub use signatures::{
     dispatch_role_class, normalize_vendor, project_counter_clauses, resolve_signature_id,

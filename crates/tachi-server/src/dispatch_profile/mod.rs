@@ -4,9 +4,13 @@
 
 #[cfg(test)]
 use crate::agent_eval::CompletionStatus;
+// tachi#1675 PR4: `aggregate_subagent_scores` left with the recommendation
+// path's evidence flip — the decision-fact ledger has no subagent-role rollup
+// to aggregate. `load_live_eval_rows`/`aggregate_performance_matrix` stay for
+// the profile CARD surface (`cards::profile_eval_feedback_json`), which reads
+// `/eval` entries as human-readable feedback, not as routing evidence.
 use crate::agent_eval::{
-    aggregate_performance_matrix, aggregate_subagent_scores, load_live_eval_rows,
-    AgentPerformanceMatrixRow, EvalRow,
+    aggregate_performance_matrix, load_live_eval_rows, AgentPerformanceMatrixRow, EvalRow,
 };
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;

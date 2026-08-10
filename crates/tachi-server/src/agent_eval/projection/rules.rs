@@ -35,14 +35,18 @@ use serde_json::{json, Value};
 
 use memcore::{EvalObservation, EvalSpine};
 
-/// Bumped explicitly whenever these rules change meaning. PR4's evidence
-/// flip is a policy_version bump, never a silent change (design D6 phase 2).
+/// Bumped explicitly whenever these rules change meaning. PR4's evidence flip
+/// is a policy_version bump on the surface that flipped (`recommend`, see
+/// `dispatch_profile::routing::recommendation::RECOMMEND_RULES_VERSION`) and
+/// never a silent change (design D6 phase 2); these projection rules did not
+/// change meaning in that cutover, so this stays at v1.
 pub(crate) const POLICY_VERSION: &str = "route_projection/v1";
 
 /// What every response on this path declares its evidence came from, so a
-/// consumer can tell the ledger path from the `/eval`-memory path while both
-/// run in parallel (design D6 phase 1).
-pub(crate) const EVIDENCE_SOURCE: &str = "decision_fact_ledger";
+/// consumer can tell the ledger path from the `/eval`-memory path. Since PR4
+/// the `recommend` surface declares the SAME constant (it now reads the same
+/// ledger) — one vocabulary, defined once in `tachi_dispatch`.
+pub(crate) const EVIDENCE_SOURCE: &str = tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER;
 
 /// Minimum usable rows in window before a candidate may be recommended at
 /// all. A code constant in this phase on purpose: promoting it to

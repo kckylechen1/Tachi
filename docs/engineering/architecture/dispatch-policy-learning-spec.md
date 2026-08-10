@@ -94,6 +94,17 @@ Legacy `agent` dispatch remains supported, but lifecycle agents should prefer
 
 ## MBIT Card
 
+> **Authority pointer (2026-08-10).** Owner ruling #1202 governs what an MBIT
+> card *is*: see `dispatch-lifecycle.md` §4.2 "Storage split — three layers,
+> never merged" (declaration / evidence / projection). MBIT and other
+> statistical summaries are **derived evidence and projection only** — never a
+> persisted second authority, and never a routing baseline in their own right.
+> This section, written later (2026-07-20), described MBIT as a first-class
+> routing input; where the two disagree, #1202 wins. Concretely, since
+> kckylechen1/tachi#1675 PR4 the routing evidence base is the decision-fact
+> ledger, and a candidate with no usable ledger row resolves to **abstain**,
+> never to a `baseline_mbit_fit`.
+
 MBIT means Model Behavior Identity Tag. It is the machine-usable card attached
 to a dispatch profile. It is allowed to be lightweight and memorable, but it is
 not cosmetic.
@@ -109,8 +120,11 @@ Each card should expose:
 - evolution rules or proposal hooks when enough eval evidence exists.
 
 MBIT data feeds route explanations, fallback chains, prompt envelope selection,
-scorecard display, and future policy evolution. A card that does not affect
-routing is not a valid MBIT card.
+and scorecard display — as a rendered projection over the reviewed declaration
+plus recorded evidence (#1202), not as an independent routing authority. It is
+not a scoring input to the route decision: routing evidence is the decision-fact
+ledger, and the absence of ledger evidence is answered with `abstain`, not with
+a card-fit score.
 
 ## Skill Loadout
 
