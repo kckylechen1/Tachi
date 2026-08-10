@@ -1718,8 +1718,22 @@ mod tests {
         assert_eq!(empty.local_store_status, db::LocalStoreStatus::Healthy);
 
         commit(&mut store, "obj-a", "evt-a");
-        commit(&mut store, "obj-b", "evt-b");
+        commit(&mut store, "obj-b", "evt-d");
         commit(&mut store, "obj-c", "evt-c");
+        // The health tie-break intentionally makes resolved `evt-d` sort
+        // after rejected `evt-c`; fix enqueue order independently so a
+        // same-millisecond created_at tie cannot change the protocol walk.
+        store
+            .connection()
+            .execute(
+                "UPDATE memory_outbox_events SET created_at = CASE event_id \
+                 WHEN 'evt-a' THEN '2026-08-06T00:00:00.000Z' \
+                 WHEN 'evt-d' THEN '2026-08-06T00:00:00.001Z' \
+                 WHEN 'evt-c' THEN '2026-08-06T00:00:00.002Z' \
+                 END WHERE event_id IN ('evt-a', 'evt-d', 'evt-c')",
+                [],
+            )
+            .expect("fix the fixture enqueue order independently of wall-clock ties");
         let queued = store.outbox_health().expect("health");
         assert_eq!(
             queued.remote_sync_status,
@@ -1755,7 +1769,7 @@ mod tests {
 
         store
             .apply_outbox_outcome(
-                "evt-b",
+                "evt-d",
                 &OutboxOutcome::Conflicted {
                     error_class: "divergent_revision".to_string(),
                 },
@@ -1800,7 +1814,7 @@ mod tests {
         // event as withdrawn — so `conflicted` keeps meaning "still awaiting a
         // decision".
         store
-            .resolve_outbox_conflict("evt-b", &OutboxConflictResolution::LocalWins)
+            .resolve_outbox_conflict("evt-d", &OutboxConflictResolution::LocalWins)
             .expect("local wins");
         let resolved = store.outbox_health().expect("health");
         assert_eq!(
@@ -1816,6 +1830,8 @@ mod tests {
             resolved.resolved_count, 1,
             "the decision is still durably counted, just not flagged as degradation"
         );
+        // State stamps have millisecond precision; on a tie, health orders
+        // event IDs descending, so the resolved `evt-d` outranks rejected `evt-c`.
         assert_eq!(
             resolved.last_error_class.as_deref(),
             Some(OUTBOX_LOCAL_WINS_RESOLVED_CLASS)
@@ -1826,7 +1842,7 @@ mod tests {
             .expect("claim the successor");
         let successor_ack = store
             .apply_outbox_outcome(
-                &outbox_local_wins_successor_id("evt-b"),
+                &outbox_local_wins_successor_id("evt-d"),
                 &OutboxOutcome::Acknowledged,
                 &evidence(),
             )
