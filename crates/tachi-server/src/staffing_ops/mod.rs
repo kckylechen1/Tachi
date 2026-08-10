@@ -46,6 +46,7 @@ use rmcp::schemars::JsonSchema;
 // The `#[derive(JsonSchema)]` macro expands to reference `schemars::...`, so
 // the crate must be in scope under that name.
 use rmcp::schemars;
+use serde_json::Value;
 
 /// Default per-dispatch timeout (seconds) when the Staff request does not
 /// declare one. Mirrors `default_dispatch_timeout` in `tachi-params` (600s);
@@ -99,6 +100,13 @@ pub(crate) struct StaffStartRequest {
     /// Tachi flow id for feature-scoped briefing/dispatch/eval linkage.
     #[serde(default)]
     pub flow_id: Option<String>,
+    /// tachi#1675 PR1 Seam B: the `recommendation_id` a prior
+    /// `tachi_dispatch(action='recommend')` call returned, when this start
+    /// was placed on that advice. Optional — absence is itself evidence
+    /// (`route_decisions.assignment_mode` records `unadvised`, never a
+    /// fabricated advisory).
+    #[serde(default)]
+    pub recommendation_ref: Option<String>,
 }
 
 impl StaffStartRequest {
@@ -181,6 +189,19 @@ pub(crate) struct StaffStatusRequest {
 /// `status.json` (receipt-first) BEFORE prompt assembly / plan stage / spawn,
 /// so a successful `Ok` return guarantees the canonical receipt already exists
 /// on disk. This adapter creates NO parallel store.
+///
+/// tachi#1675 PR1 Seam B: on a successful acceptance, records a
+/// `route_decisions` row (idempotent on `dispatch_id`). This is an
+/// ACKNOWLEDGED DUAL WRITE, not a transaction with `status.json` — the
+/// canonical receipt is already durable (written inside
+/// `handle_tachi_dispatch`, which only returns `Ok` after that) by the time
+/// this insert runs; a crash between the two leaves no `route_decisions` row,
+/// and the honest floor for a missing row is `assignment_mode = 'unadvised'`
+/// at the projection layer — this function never fabricates one. Best-effort:
+/// a failure recording the decision row does NOT fail the dispatch itself
+/// (the worker is already running) — it is logged and swallowed, mirroring
+/// `claims_ops::auto_register_or_heartbeat_claim`'s "never fails the primary
+/// action" posture for parallel ledger writes.
 pub(crate) async fn staff_start(
     server: &MemoryServer,
     request: StaffStartRequest,
@@ -190,8 +211,149 @@ pub(crate) async fn staff_start(
     // runtime check is needed here — the struct's type IS the gate. The
     // kernel-side defense-in-depth check inside handle_tachi_dispatch catches
     // any future caller that reaches it without going through this struct.
+    let recommendation_ref = request.recommendation_ref.clone();
     let params = request.into_params();
-    handle_tachi_dispatch(server, params).await
+    let raw = handle_tachi_dispatch(server, params).await?;
+
+    record_route_decision_best_effort(server, &raw, recommendation_ref.as_deref());
+
+    Ok(raw)
+}
+
+/// tachi#1675 PR1 Seam B implementation. Parses the dispatch response for
+/// `dispatch_id`/`selected_profile`, re-reads the just-written canonical
+/// `status.json` for `env_id`/`host_profile`/`authority`/`identity_receipt`
+/// (all stamped there by `handle_tachi_dispatch` before it returned), and
+/// inserts the acceptance-moment `route_decisions` row. Every failure mode
+/// here (malformed response, missing receipt, DB error) is swallowed after a
+/// trace log — recording routing evidence must never retroactively fail an
+/// already-accepted, already-running dispatch.
+fn record_route_decision_best_effort(
+    server: &MemoryServer,
+    raw_response: &str,
+    recommendation_ref: Option<&str>,
+) {
+    let response: serde_json::Value = match serde_json::from_str(raw_response) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "tachi#1675 Seam B: dispatch response not JSON, skipping route_decisions write");
+            return;
+        }
+    };
+    let Some(dispatch_id) = response.get("dispatch_id").and_then(|v| v.as_str()) else {
+        tracing::warn!("tachi#1675 Seam B: dispatch response missing dispatch_id, skipping route_decisions write");
+        return;
+    };
+    let selected_profile = response
+        .get("selected_profile")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let run_dir = dispatch_runs_root().join(dispatch_id);
+    let status = match crate::task_lifecycle::read_json_file(&run_dir.join("status.json")) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            tracing::warn!(
+                dispatch_id,
+                "tachi#1675 Seam B: status.json missing, skipping route_decisions write"
+            );
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(dispatch_id, error = %err, "tachi#1675 Seam B: failed reading status.json, skipping route_decisions write");
+            return;
+        }
+    };
+    let env_id = status
+        .get("env_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let host_profile = status
+        .get("host_profile")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let selected_model = status
+        .pointer("/identity_receipt/planned/model")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let contract_hash = status
+        .get("authority")
+        .map(crate::tune_ops::route_policy::content_digest_hex);
+
+    let assignment_mode = if recommendation_ref.is_some() {
+        "advised"
+    } else {
+        "unadvised"
+    };
+    let override_flag = match recommendation_ref {
+        Some(rec_id) => {
+            let recommendation = server.with_global_store_read(|store| {
+                memcore::get_route_recommendation(store.connection(), rec_id)
+                    .map_err(|e| e.to_string())
+            });
+            match recommendation {
+                Ok(Some(row)) => row.recommended_profile != selected_profile,
+                _ => false,
+            }
+        }
+        None => false,
+    };
+
+    let route_decision_id = uuid::Uuid::new_v4().to_string();
+    let new_decision = memcore::NewRouteDecision {
+        route_decision_id: route_decision_id.clone(),
+        dispatch_id: dispatch_id.to_string(),
+        recommendation_id: recommendation_ref.map(str::to_string),
+        selected_profile,
+        selected_model,
+        assignment_mode: assignment_mode.to_string(),
+        override_flag,
+        contract_hash,
+        env_id,
+        host_profile,
+        // #1239 not yet wired — nullable pending v21 claim identity (spec
+        // correction 1).
+        work_claim_id: None,
+        occurred_at: memcore::now_utc_iso(),
+    };
+    let inserted = server.with_global_store(|store| {
+        memcore::insert_route_decision_idempotent(store.connection(), &new_decision)
+            .map_err(|e| e.to_string())
+    });
+    let inserted = match inserted {
+        Ok(row) => row,
+        Err(err) => {
+            tracing::warn!(dispatch_id, error = %err, "tachi#1675 Seam B: failed to record route_decisions row");
+            return;
+        }
+    };
+
+    // Stamp the (possibly pre-existing, on an idempotent replay)
+    // `route_decision_id` back into status.json — convenience only, the DB
+    // row above is the queryable authority. This is a ONE-TIME explicit
+    // patch, not a `write_status_json` call: no later writer may emit this
+    // key at all (see the `write_status_json` preserve-list in
+    // `dispatch_ops::dispatch_v2`, which carries it forward automatically
+    // once present — emitting `route_decision_id: null` there would erase
+    // it).
+    if let Ok(Value::Object(mut obj)) =
+        crate::task_lifecycle::read_json_file(&run_dir.join("status.json"))
+            .map(|v| v.unwrap_or(Value::Null))
+    {
+        obj.insert(
+            "route_decision_id".to_string(),
+            Value::String(inserted.route_decision_id),
+        );
+        let body = serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_default();
+        if !body.is_empty() {
+            if let Err(err) = crate::utils::write_owner_only_file_atomic(
+                &run_dir.join("status.json"),
+                body.as_bytes(),
+            ) {
+                tracing::warn!(dispatch_id, error = %err, "tachi#1675 Seam B: failed to stamp route_decision_id into status.json");
+            }
+        }
+    }
 }
 
 /// Read a worker's canonical status receipt.
@@ -320,6 +482,7 @@ mod tests {
             issue_ref: Some("o/r#42".to_string()),
             pr_ref: Some("o/r#43".to_string()),
             flow_id: Some("flow_xyz".to_string()),
+            recommendation_ref: Some("rec-xyz".to_string()),
         };
         let params = request.into_params();
         assert_eq!(
@@ -490,5 +653,254 @@ mod tests {
                 "malicious id {malicious:?} rejected as unknown: {err}"
             );
         }
+    }
+
+    // ─── tachi#1675 PR1 Seam B: record_route_decision_best_effort ──────────
+
+    fn test_server() -> MemoryServer {
+        let db_path = crate::utils::test_fixture_path(format!(
+            "staffing-seam-b-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        MemoryServer::new(db_path, None).expect("test memory server")
+    }
+
+    /// Seed a fake `<runs_root>/<dispatch_id>/status.json` the same shape
+    /// `dispatch_ops::dispatch::write_status_json` produces — this test
+    /// module intentionally drives `record_route_decision_best_effort`
+    /// directly rather than a full `staff_start()` (which spawns a real
+    /// execution backend) so it stays a fast, hermetic unit test.
+    fn seed_status_json(dispatch_id: &str, env_id: &str, host_profile: &str, model: &str) {
+        let run_dir = dispatch_runs_root().join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        let status = serde_json::json!({
+            "dispatch_id": dispatch_id,
+            "env_id": env_id,
+            "host_profile": host_profile,
+            "authority": {"level": "workspace-write", "enforced_by": "codex-cli"},
+            "identity_receipt": {"planned": {"model": model}},
+        });
+        std::fs::write(run_dir.join("status.json"), status.to_string()).expect("seed status.json");
+    }
+
+    fn fake_raw_response(dispatch_id: &str, selected_profile: &str) -> String {
+        serde_json::json!({
+            "dispatch_id": dispatch_id,
+            "selected_profile": selected_profile,
+        })
+        .to_string()
+    }
+
+    fn route_decisions_count(server: &MemoryServer) -> i64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM route_decisions", [], |r| r.get(0))
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn record_route_decision_writes_unadvised_row_with_env_and_host_profile() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = test_server();
+
+        let dispatch_id = "20260810T000001Z-claude-aaaaaaaa";
+        seed_status_json(dispatch_id, "env-42", "dev", "claude-sonnet-5");
+        let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
+
+        record_route_decision_best_effort(&server, &raw, None);
+
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_route_decision_by_dispatch_id(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .expect("route_decisions row present");
+        assert_eq!(row.assignment_mode, "unadvised");
+        assert_eq!(row.env_id.as_deref(), Some("env-42"));
+        assert_eq!(row.host_profile.as_deref(), Some("dev"));
+        assert_eq!(row.selected_profile.as_deref(), Some("wizard_sonnet"));
+        assert_eq!(row.selected_model.as_deref(), Some("claude-sonnet-5"));
+        assert!(row.contract_hash.is_some());
+        assert!(!row.override_flag);
+        assert!(row.recommendation_id.is_none());
+
+        // route_decision_id round-trips back into status.json.
+        let status_path = dispatch_runs_root().join(dispatch_id).join("status.json");
+        let status: Value =
+            serde_json::from_str(&std::fs::read_to_string(&status_path).unwrap()).unwrap();
+        assert_eq!(
+            status["route_decision_id"].as_str(),
+            Some(row.route_decision_id.as_str())
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn record_route_decision_replay_is_zero_write_idempotent() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = test_server();
+
+        let dispatch_id = "20260810T000002Z-claude-bbbbbbbb";
+        seed_status_json(dispatch_id, "env-1", "dev", "claude-sonnet-5");
+        let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
+
+        record_route_decision_best_effort(&server, &raw, None);
+        let before = route_decisions_count(&server);
+        record_route_decision_best_effort(&server, &raw, None);
+        let after = route_decisions_count(&server);
+
+        assert_eq!(before, 1);
+        assert_eq!(after, 1, "replayed acceptance is a zero-write no-op");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn record_route_decision_advised_when_recommendation_ref_present() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = test_server();
+
+        // Seed a recommendation row whose recommended_profile MATCHES the
+        // eventual selection -> override_flag must be false.
+        let recommendation_id = "rec-match".to_string();
+        server
+            .with_global_store(|store| {
+                memcore::insert_route_recommendation(
+                    store.connection(),
+                    &memcore::NewRouteRecommendation {
+                        recommendation_id: recommendation_id.clone(),
+                        task_type: Some("fix_request".to_string()),
+                        risk: "low".to_string(),
+                        candidates: serde_json::json!([{"profile": "wizard_sonnet"}]),
+                        recommended_profile: Some("wizard_sonnet".to_string()),
+                        policy_source_revision: Some("rev-1".to_string()),
+                        rows_considered: 3,
+                        occurred_at: memcore::now_utc_iso(),
+                    },
+                )
+                .map_err(|e| e.to_string())
+            })
+            .unwrap();
+
+        let dispatch_id = "20260810T000003Z-claude-cccccccc";
+        seed_status_json(dispatch_id, "env-1", "dev", "claude-sonnet-5");
+        let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
+
+        record_route_decision_best_effort(&server, &raw, Some(&recommendation_id));
+
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_route_decision_by_dispatch_id(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.assignment_mode, "advised");
+        assert_eq!(row.recommendation_id.as_deref(), Some("rec-match"));
+        assert!(
+            !row.override_flag,
+            "selected_profile matches the recommendation -> no override"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn record_route_decision_override_flag_when_selection_diverges_from_recommendation() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = test_server();
+
+        let recommendation_id = "rec-diverge".to_string();
+        server
+            .with_global_store(|store| {
+                memcore::insert_route_recommendation(
+                    store.connection(),
+                    &memcore::NewRouteRecommendation {
+                        recommendation_id: recommendation_id.clone(),
+                        task_type: Some("fix_request".to_string()),
+                        risk: "low".to_string(),
+                        candidates: serde_json::json!([{"profile": "codex_55_review"}]),
+                        recommended_profile: Some("codex_55_review".to_string()),
+                        policy_source_revision: Some("rev-1".to_string()),
+                        rows_considered: 3,
+                        occurred_at: memcore::now_utc_iso(),
+                    },
+                )
+                .map_err(|e| e.to_string())
+            })
+            .unwrap();
+
+        let dispatch_id = "20260810T000004Z-claude-dddddddd";
+        seed_status_json(dispatch_id, "env-1", "dev", "claude-sonnet-5");
+        // Caller actually got routed to a DIFFERENT profile than advised.
+        let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
+
+        record_route_decision_best_effort(&server, &raw, Some(&recommendation_id));
+
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_route_decision_by_dispatch_id(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.override_flag,
+            "selected profile diverges from the recommendation's advice"
+        );
+    }
+
+    /// Negative test: the Seam B write path never touches session_claims or
+    /// agent_identities.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn record_route_decision_never_touches_session_or_identity_tables() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = test_server();
+
+        let count_of = |table: &str| -> i64 {
+            server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap()
+        };
+        let before_claims = count_of("session_claims");
+        let before_identities = count_of("agent_identities");
+
+        let dispatch_id = "20260810T000005Z-claude-eeeeeeee";
+        seed_status_json(dispatch_id, "env-1", "dev", "claude-sonnet-5");
+        let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
+        record_route_decision_best_effort(&server, &raw, None);
+
+        assert_eq!(before_claims, count_of("session_claims"));
+        assert_eq!(before_identities, count_of("agent_identities"));
     }
 }

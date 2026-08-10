@@ -219,6 +219,16 @@ pub struct TachiStaffParams {
     /// Tachi flow id for feature-scoped briefing/dispatch/eval linkage. Start-only.
     #[serde(default)]
     pub flow_id: Option<String>,
+
+    /// tachi#1675 PR1 Seam B: the `recommendation_id` a prior
+    /// `tachi_dispatch(action='recommend')` call returned, when this start
+    /// was placed on that advice. Optional and start-only — absence is
+    /// itself evidence (`assignment_mode` records `unadvised`, never a
+    /// fabricated advisory). Not validated against a live
+    /// `route_recommendations` row here; the acceptance-time writer treats
+    /// a stale/unknown ref the same as any other reference id.
+    #[serde(default)]
+    pub recommendation_ref: Option<String>,
 }
 
 // ─── Facade: orchestrator (persistent TODO / handoff) ────────────────────────
@@ -460,6 +470,48 @@ pub struct MirrorEvalAdjudicateParams {
     /// callers do not need to invent one).
     #[serde(default)]
     pub event_key: Option<String>,
+
+    /// tachi#1675 PR1 D3: optional structured rubric block. When present, an
+    /// `eval_rubric_scores` row is written alongside the free-text verdict
+    /// above (the rubric is a companion, never a replacement — the verdict
+    /// stays the #1035 CHECK-constraint backbone). Omitted entirely, no
+    /// rubric row is written and this event's `excluded_reason` at the
+    /// projection layer is `unstructured_verdict`.
+    #[serde(default)]
+    pub rubric: Option<EvalRubricParams>,
+}
+
+/// tachi#1675 PR1 D3: structured judgment alongside the free-text `verdict`.
+/// Six ordinal dimensions (closed vocabulary `pass`/`concern`/`fail`/
+/// `not_assessed` — never a float; floats invite averaging into the
+/// forbidden one-dimensional reputation score) plus a confidence label.
+/// `adjudicator_vendor` is optional — when omitted the writer derives it from
+/// this same call's `verifier_model` (the existing cross-model-independence
+/// primitive); `adjudicator_actor` is not a separate field here — it is the
+/// enclosing call's own `actor`, the same identity `dispatch_adjudications`/
+/// `mirror_eval_adjudications` already record as the adjudicating actor.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
+pub struct EvalRubricParams {
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub contract_correctness: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub evidence_quality: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub safety: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub scope_discipline: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub intervention_burden: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub completion_integrity: String,
+    /// `low` | `medium` | `high`.
+    pub adjudication_confidence: String,
+    /// The adjudicator's OWN vendor/lineage identity. Optional — falls back
+    /// to `lineage_of(verifier_model)` (this call's existing field) when
+    /// omitted, so a caller that already sets `verifier_model` does not have
+    /// to restate it.
+    #[serde(default)]
+    pub adjudicator_vendor: Option<String>,
 }
 
 /// #1066 `get`: resolve a run by `eval_run_id` or `native_child_id`.
