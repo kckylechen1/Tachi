@@ -13,11 +13,12 @@
 //! anyone. It is transport-agnostic on purpose (#1630: the sync adapter is a
 //! downstream consumer, and a `StoreProfile::PortableKernel` database must be
 //! able to run this protocol with no Tachi daemon anywhere). So every name here
-//! says what actually happened locally: a caller *reported* an outcome. A1's
-//! honesty rule for `last_successful_sync` — "when a caller last told this
-//! store an event was accepted", never "when a remote confirmed" — is the same
-//! rule, and it is why this module's entry point is `apply_outbox_outcome`
-//! rather than anything containing the word "remote".
+//! says what actually happened locally: a caller *reported* an outcome. The
+//! health seam preserves `last_successful_sync` for a host adapter but leaves
+//! it `None` while `RemoteSyncStatus::Unconfigured`; a local outcome report is
+//! never remote-success evidence. That honesty rule is why this module's entry
+//! point is `apply_outbox_outcome` rather than anything containing the word
+//! "remote".
 //!
 //! ## The three invariants this layer exists to hold
 //!
@@ -93,7 +94,9 @@ impl OutboxClaimRequest {
     }
 
     /// Claim pending events, and also take over any event that has been in
-    /// flight for at least `stale_after`.
+    /// flight for at least `stale_after`. A zero bound makes every current
+    /// `in_flight` event immediately eligible; callers proving expiry gating
+    /// and post-takeover exclusion should use a small positive bound.
     pub fn with_reclaim(limit: usize, stale_after: Duration) -> Self {
         Self {
             limit,
@@ -1714,7 +1717,7 @@ mod tests {
     fn health_reflects_the_distribution_through_the_whole_protocol_walk() {
         let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
         let empty = store.outbox_health().expect("health");
-        assert_eq!(empty.remote_sync_status, db::RemoteSyncStatus::Idle);
+        assert_eq!(empty.remote_sync_status, db::RemoteSyncStatus::Unconfigured);
         assert_eq!(empty.local_store_status, db::LocalStoreStatus::Healthy);
 
         commit(&mut store, "obj-a", "evt-a");
@@ -1737,7 +1740,7 @@ mod tests {
         let queued = store.outbox_health().expect("health");
         assert_eq!(
             queued.remote_sync_status,
-            db::RemoteSyncStatus::Backlogged { pending_count: 3 }
+            db::RemoteSyncStatus::Unconfigured
         );
         assert_eq!(queued.pending_count, 3);
 
@@ -1748,23 +1751,23 @@ mod tests {
         let drained = store.outbox_health().expect("health");
         assert_eq!(
             drained.remote_sync_status,
-            db::RemoteSyncStatus::InFlight { in_flight_count: 2 },
-            "live work outranks the remaining backlog"
+            db::RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
         assert_eq!(drained.pending_count, 1);
         assert_eq!(drained.last_successful_sync, None);
 
-        let acknowledged = store
+        store
             .apply_outbox_outcome("evt-a", &OutboxOutcome::Acknowledged, &evidence())
             .expect("acknowledge");
         let partly = store.outbox_health().expect("health");
         assert_eq!(
             partly.remote_sync_status,
-            db::RemoteSyncStatus::InFlight { in_flight_count: 1 }
+            db::RemoteSyncStatus::Unconfigured
         );
         assert_eq!(
-            partly.last_successful_sync.as_deref(),
-            Some(acknowledged.event.state_changed_at.as_str())
+            partly.last_successful_sync, None,
+            "a local acknowledgement cannot fabricate remote success"
         );
 
         store
@@ -1779,8 +1782,8 @@ mod tests {
         let conflicted = store.outbox_health().expect("health");
         assert_eq!(
             conflicted.remote_sync_status,
-            db::RemoteSyncStatus::Backlogged { pending_count: 1 },
-            "the untouched third event still outranks a historical failure"
+            db::RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
         assert_eq!(
             conflicted.last_error_class.as_deref(),
@@ -1802,10 +1805,7 @@ mod tests {
         let failing = store.outbox_health().expect("health");
         assert_eq!(
             failing.remote_sync_status,
-            db::RemoteSyncStatus::Failing {
-                rejected_count: 1,
-                conflicted_count: 1
-            }
+            db::RemoteSyncStatus::Unconfigured
         );
         assert_eq!(failing.pending_count, 0);
         assert_eq!(failing.local_store_status, db::LocalStoreStatus::Healthy);
@@ -1819,7 +1819,7 @@ mod tests {
         let resolved = store.outbox_health().expect("health");
         assert_eq!(
             resolved.remote_sync_status,
-            db::RemoteSyncStatus::Backlogged { pending_count: 1 }
+            db::RemoteSyncStatus::Unconfigured
         );
         assert_eq!(
             resolved.local_store_status,
@@ -1840,7 +1840,7 @@ mod tests {
         store
             .claim_outbox_events(&OutboxClaimRequest::first_claims_only(10))
             .expect("claim the successor");
-        let successor_ack = store
+        store
             .apply_outbox_outcome(
                 &outbox_local_wins_successor_id("evt-d"),
                 &OutboxOutcome::Acknowledged,
@@ -1850,16 +1850,10 @@ mod tests {
         let settled = store.outbox_health().expect("health");
         assert_eq!(
             settled.remote_sync_status,
-            db::RemoteSyncStatus::Failing {
-                rejected_count: 1,
-                conflicted_count: 0
-            },
-            "the decided conflict no longer counts as an unresolved one"
+            db::RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
-        assert_eq!(
-            settled.last_successful_sync.as_deref(),
-            Some(successor_ack.event.state_changed_at.as_str())
-        );
+        assert_eq!(settled.last_successful_sync, None);
         assert_eq!(settled.pending_count, 0);
         assert_eq!(settled.oldest_pending_at, None);
     }
