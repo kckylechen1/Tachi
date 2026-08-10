@@ -18,7 +18,7 @@ It answers three questions raised during a facade review:
 
 ## TL;DR
 
-- Facades are the right idea, but several are **overloaded**. `tachi_task` carries **13 actions**
+- Facades are the right idea, but several are **overloaded**. `tachi_task` carries **10 actions**
   (28 before the 4 PR-lifecycle duplicates were removed to `tachi_gh` in #757);
   `tachi_memory` carries **21** actions and `tachi_gh` carries **19**.
 - Neither extreme (flatten to 100+ tools, or keep stuffing mega-facades) is correct. The fix is
@@ -35,7 +35,7 @@ It answers three questions raised during a facade review:
 
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
-| `tachi_task` | 13 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1) |
+| `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
 | `tachi_memory` | 21 | Overloaded — `recall_*` tuning extracted (#1426); the #757 fold added delete/gc/doctor_scan/ingest/ingest_source |
 | `tachi_gh` | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
 | `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
@@ -83,7 +83,7 @@ by the **agent's mental task**.
 
 ```diagram
 Now                            Proposed
-tachi_task (13) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
+tachi_task (10) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
                      ├──▶ tachi_gh      lifecycle closure: close_loop (1) [#1713]
                      ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
                      └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
@@ -118,7 +118,7 @@ someone hand-types `--profile observe+coordinate`. That is dead design.
 
 `ToolProfile` trims by **tool name** via glob matching
 ([`profiles/matching.rs#L77-L112`](../../../crates/tachi-server/src/profiles/matching.rs)).
-But a facade packs many capabilities behind one name (`tachi_task` = 13 actions), so a profile can
+But a facade packs many capabilities behind one name (`tachi_task` = 10 actions), so a profile can
 only allow or deny the *entire* `tachi_task` — it cannot deny just `dispatch`.
 
 ## 4. Case study: the `delegate`/worker surface proves the mismatch

@@ -131,41 +131,6 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
             .expect("card risk projection should apply");
     }
 
-    // tachi#1173 item 2 slimmed action='profiles' rows to name/backend/model/role
-    // by default; this assertion needs the full mbit_card/weak_against, so
-    // request the verbose escape hatch explicitly (#1182 consumer sweep).
-    let mut profiles_params = task_params("profiles");
-    profiles_params.verbose = Some(true);
-    let profiles_raw = server
-        .tachi_task(Parameters(profiles_params))
-        .await
-        .expect("profiles should include card risk projections");
-    let profiles: serde_json::Value = serde_json::from_str(&profiles_raw).expect("profiles JSON");
-    let claude_profile = profiles["dispatch_profiles"]
-        .as_array()
-        .expect("profiles")
-        .iter()
-        .find(|profile| profile["name"] == json!("claude_plan"))
-        .expect("claude_plan profile");
-    assert!(
-        claude_profile["mbit_card"]["stats"]["risk_control"]
-            .as_i64()
-            .expect("risk_control stat")
-            > 0
-    );
-    assert!(claude_profile["weak_against"]
-        .as_array()
-        .expect("merged weak_against")
-        .contains(&json!("plan_request")));
-    assert!(claude_profile["mbit_card"]["projected_weak_against"]
-        .as_array()
-        .expect("projected weak_against")
-        .contains(&json!("plan_request")));
-    assert!(claude_profile["mbit_card"]["demotion_targets"]
-        .as_array()
-        .expect("demotion targets")
-        .contains(&json!("skill:superpowers-writing-plans")));
-
     let loadout_raw = server
         .tachi_skill(Parameters(TachiSkillParams {
             action: "loadout".to_string(),

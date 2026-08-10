@@ -530,43 +530,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             .contains(&json!("acceptance_criteria"))
     );
 
-    // tachi#1173 item 2 slimmed action='profiles' rows to name/backend/model/role
-    // by default; this assertion needs the full mbit_card/skill_loadout, so
-    // request the verbose escape hatch explicitly (#1182 consumer sweep).
-    let mut profiles_params = task_params("profiles");
-    profiles_params.verbose = Some(true);
-    let profiles_raw = server
-        .tachi_task(Parameters(profiles_params))
-        .await
-        .expect("profiles should include projected loadout");
-    let profiles: serde_json::Value = serde_json::from_str(&profiles_raw).expect("profiles JSON");
-    let claude_profile = profiles["dispatch_profiles"]
-        .as_array()
-        .expect("profiles")
-        .iter()
-        .find(|profile| profile["name"] == json!("claude_plan"))
-        .expect("claude_plan profile");
-    assert!(claude_profile["skill_loadout"]["signature_skills"]
-        .as_array()
-        .expect("signature skills")
-        .contains(&json!("skill:planning-ux-review")));
-    assert!(
-        claude_profile["mbit_card"]["skill_loadout"]["projected_passive_traits"]
-            .as_array()
-            .expect("profile mbit projected passive traits")
-            .contains(&json!("evidence_backed_planning"))
-    );
-    assert!(claude_profile["evidence_contract"]["projected_required"]
-        .as_array()
-        .expect("profile projected evidence")
-        .contains(&json!("acceptance_criteria")));
-    assert!(
-        claude_profile["mbit_card"]["evidence_contract"]["projected_required"]
-            .as_array()
-            .expect("profile mbit projected evidence")
-            .contains(&json!("acceptance_criteria"))
-    );
-
     let agents_raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
             action: "profiles".to_string(),

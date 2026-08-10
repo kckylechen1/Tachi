@@ -15,11 +15,7 @@
         "status",
         "complete",
         "adjudicate",
-        "brief",
-        "status",
-        "profiles",
-        "profile",
-        "card"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
@@ -36,11 +32,7 @@
         "status",
         "complete",
         "adjudicate",
-        "brief",
-        "status",
-        "profiles",
-        "profile",
-        "card"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
@@ -49,14 +41,11 @@
     "verbose": {
       "used_by_actions": [
         "complete",
-        "board",
-        "profiles",
-        "profile",
-        "card"
+        "board"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Drives the slim-vs-full payload shape on multiple surviving actions (board/profiles); spec names it shared."
+      "rationale": "Drives the response verbosity shape on surviving board/complete paths; spec names it shared."
     },
     "task": {
       "used_by_actions": [

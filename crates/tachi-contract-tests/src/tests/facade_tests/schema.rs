@@ -312,7 +312,7 @@ fn staff_status_without_dispatch_id_is_handler_rejected() {
 }
 
 #[test]
-fn tachi_task_action_schema_declares_c1a_c1b_survivor_list() {
+fn tachi_task_action_schema_declares_exact_c1c_survivor_list() {
     let schema = rmcp::schemars::schema_for!(TachiTaskParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
     let action = &value["properties"]["action"];
@@ -332,11 +332,8 @@ fn tachi_task_action_schema_declares_c1a_c1b_survivor_list() {
             json!("complete"),
             json!("adjudicate"),
             json!("brief"),
-            json!("profiles"),
-            json!("profile"),
-            json!("card"),
         ],
-        "tachi_task schema must expose exactly the #1683 C1a + #1712 C1b-1 + #1713 survivor list"
+        "tachi_task schema must expose exactly the #1687 C1c survivor list"
     );
     // #1319-C2: dispatch/cancel/wait were removed from tachi_task (external
     // staffing now flows through tachi_staff). The schema must NOT list them.
@@ -363,10 +360,10 @@ fn tachi_task_action_schema_declares_c1a_c1b_survivor_list() {
             "tachi_task must not advertise route tuning action {removed} after #1426"
         );
     }
-    for removed in tachi_params::TACHI_TASK_RETIRED_C1A_ACTIONS {
+    for removed in tachi_params::TACHI_TASK_RETIRED_ACTIONS {
         assert!(
             !values.contains(&json!(*removed)),
-            "tachi_task schema must not advertise a retired C1a/C1b/#1713 task action {removed}"
+            "tachi_task schema must not advertise a retired C1a/C1b/C1c task action {removed}"
         );
     }
     // #757: GH PR lifecycle is tachi_gh only — not on tachi_task schema at all.
@@ -645,10 +642,17 @@ fn tachi_task_schema_descriptions_do_not_reference_removed_actions() {
         "action='cycle_status'",
         "briefing/intake",
         "briefing/intake/close_loop/status/complete",
+        "action=profiles",
+        "action='profiles'",
+        "action=profile",
+        "action='profile'",
+        "action=card",
+        "action='card'",
+        "profile/card",
     ] {
         assert!(
             !serialized.contains(stale),
-            "tachi_task schema must not reference retired C1a/C1b action text '{stale}'"
+            "tachi_task schema must not reference retired C1a/C1b/C1c action text '{stale}'"
         );
     }
 }

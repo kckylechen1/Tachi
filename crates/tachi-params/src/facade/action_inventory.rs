@@ -30,6 +30,30 @@ pub const TACHI_TASK_RETIRED_C1A_ACTIONS: &[&str] = &[
     "close_loop",
 ];
 
+/// C1c of #1687 retires model-facing profile/card inspection from
+/// `tachi_task`. The local operator-only `tachi card` command remains the
+/// diagnostics surface; evaluators and static dispatch admission remain
+/// separate owners.
+pub const TACHI_TASK_RETIRED_C1C_ACTIONS: &[&str] = &["profiles", "profile", "card"];
+
+/// Complete deny-list for retired `tachi_task` action tokens across C1a/b/c.
+pub const TACHI_TASK_RETIRED_ACTIONS: &[&str] = &[
+    "plan",
+    "cycle_plan",
+    "recommend",
+    "refine_issues",
+    "merge",
+    "ux_matrix",
+    "briefing",
+    "doc_index",
+    "cycle_status",
+    "build_references",
+    "close_loop",
+    "profiles",
+    "profile",
+    "card",
+];
+
 /// Canonical WorkClaim lifecycle actions exposed on `tachi_task` by #1253.
 #[cfg(test)]
 const TACHI_TASK_WORKCLAIM_ACTIONS: &[&str] = &["claim", "release", "heartbeat", "handoff"];
@@ -172,6 +196,12 @@ mod tests {
                 "#1683 C1a / #1712 C1b retired task action {action} must not be advertised"
             );
         }
+        for action in TACHI_TASK_RETIRED_C1C_ACTIONS {
+            assert!(
+                !primary.contains(action),
+                "#1687 C1c retired task action {action} must not be advertised"
+            );
+        }
         assert_eq!(
             primary,
             [
@@ -185,14 +215,11 @@ mod tests {
                 "complete",
                 "adjudicate",
                 "brief",
-                "profiles",
-                "profile",
-                "card"
             ]
         );
         // #1683 C1a plus #1712 C1b-1 plus #1713 contract the Task surface.
         // Keep this exact so the next inventory addition gets explicit review.
-        assert_eq!(primary.len(), 13);
+        assert_eq!(primary.len(), 10);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 

@@ -2,7 +2,6 @@ use super::*;
 
 mod opencode_transport;
 mod profile_resolution;
-mod profiles_listing;
 mod risk_classifier;
 mod route_policy;
 mod scoring;

@@ -772,15 +772,15 @@ pub enum InjectionSurfaceAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum CardAction {
-    /// List Cards available to the current project/runtime.
+    /// List static operator profile/admission diagnostics; reads no database.
     List {
         /// Emit machine-readable JSON instead of the human table.
         #[arg(long)]
         json: bool,
     },
-    /// Show one Card by dispatch profile id.
+    /// Show one static operator profile/admission diagnostic; reads no database.
     Show {
-        /// Card/profile id, e.g. codex_55_review.
+        /// Static dispatch profile id, e.g. codex_55_review.
         id: String,
         /// Emit machine-readable JSON instead of the human summary.
         #[arg(long)]
@@ -790,9 +790,10 @@ pub enum CardAction {
 
 /// `tachi cards` (plural) — dispatch-ledger LANE card ingest (tachi#1202
 /// Phase-1 / tachi#992). Deliberately a separate enum from `CardAction`
-/// above: that one projects Tachikoma dispatch-profile cards, this one
-/// mirrors `~/.agents/dispatch-ledger/cards/*.md` (leader-authored
-/// model/vendor playbooks) into GLOBAL-db `/cards/<seat>` rows.
+/// above: singular `tachi card` reports local operator-only static
+/// profile/admission diagnostics without DB access; plural `tachi cards`
+/// mirrors `~/.agents/dispatch-ledger/cards/*.md` into GLOBAL-db
+/// `/cards/<seat>` rows.
 #[derive(Subcommand, Debug, Clone)]
 pub enum CardsAction {
     /// Produce a deterministic, card-write-free draft artifact from JSON.

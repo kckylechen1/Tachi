@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 mod acp_transport;
 mod board_first;
 mod completion_eval;
-mod profiles_action;
 mod prompt_credentials_board;
 mod recommend_policy;
 mod signature_evidence;
