@@ -14,14 +14,15 @@ pub(crate) fn handle_dispatch_recommendation(
     let performance_matrix = aggregate_performance_matrix(&rows);
     // tachi#1675 BUG-8 (TOCTOU): read the route-policy state ONCE. The
     // candidate-scoring loadout below and `policy_source_revision`'s hash
-    // (further down) MUST be built from the exact SAME snapshot —
-    // `load_route_policy_rule_loadout` internally does its own
-    // `list_state(ROUTE_POLICY_RULE_NS)` read, so calling it here and then
-    // reading again later (as this PR's first cut did) opens a window where
-    // a concurrent route-policy write lands between the two reads: the
-    // recorded hash would then describe a policy state that never actually
-    // produced this recommendation. `route_policy_rows` is threaded through
-    // to both consumers below; nothing after this point re-reads
+    // (further down) MUST be built from the exact SAME snapshot — a helper
+    // that internally does its own `list_state(ROUTE_POLICY_RULE_NS)` read
+    // (this PR's first cut called one, `load_route_policy_rule_loadout`,
+    // since deleted — see `dispatch_profile::policy`'s module doc) and
+    // reading again later opens a window where a concurrent route-policy
+    // write lands between the two reads: the recorded hash would then
+    // describe a policy state that never actually produced this
+    // recommendation. `route_policy_rows` is threaded through to both
+    // consumers below; nothing after this point re-reads
     // `ROUTE_POLICY_RULE_NS`.
     let route_policy_rows = server.with_global_store_read(|store| {
         store
@@ -30,7 +31,7 @@ pub(crate) fn handle_dispatch_recommendation(
     })?;
     let route_policy_records = route_policy_rows
         .iter()
-        .map(|row| tachi_dispatch::RoutePolicyRuleRecord {
+        .map(|row| RoutePolicyRuleRecord {
             proposal_id: row.key.clone(),
             value_json: row.value_json.clone(),
         })

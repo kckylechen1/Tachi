@@ -36,8 +36,17 @@ fn route_policy_simulation_sinks_non_finite_scores() {
     assert!(summary.route_choices[0].score.is_finite());
 }
 
+/// tachi#1675 BUG-8 follow-up: this used to drive
+/// `load_route_policy_rule_loadout` (a thin `list_state` + rebuild wrapper);
+/// that wrapper was deleted once its only production caller
+/// (`dispatch_profile::routing::recommendation`) inlined the equivalent
+/// read-once-and-build sequence itself. The discriminating power is
+/// unchanged — same seeded rows, same risk fixture, same assertions — only
+/// the entry point moved to the ACTUAL production path: a direct
+/// `list_state` read plus `tachi_dispatch::build_route_policy_rule_loadout`,
+/// which is exactly what `recommendation.rs` calls today.
 #[test]
-fn load_route_policy_rule_loadout_classifies_persisted_rules() {
+fn build_route_policy_rule_loadout_classifies_persisted_rules() {
     let db_path = crate::utils::test_fixture_path(format!(
         "dispatch-route-policy-test-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -112,7 +121,25 @@ fn load_route_policy_rule_loadout_classifies_persisted_rules() {
         blocked_profiles: vec!["codex_53_fast".to_string()],
     };
 
-    let loadout = load_route_policy_rule_loadout(&server, &risk).expect("load route policy rules");
+    // The actual production sequence (recommendation.rs post-BUG-8): one
+    // `list_state` read, mapped to `RoutePolicyRuleRecord`, fed straight into
+    // `tachi_dispatch::build_route_policy_rule_loadout` — no intermediate
+    // wrapper.
+    let rows = server
+        .with_global_store_read(|store| {
+            store
+                .list_state(ROUTE_POLICY_RULE_NS)
+                .map_err(|e| e.to_string())
+        })
+        .expect("list route policy rules");
+    let records = rows
+        .into_iter()
+        .map(|row| RoutePolicyRuleRecord {
+            proposal_id: row.key,
+            value_json: row.value_json,
+        })
+        .collect::<Vec<_>>();
+    let loadout = tachi_dispatch::build_route_policy_rule_loadout(&records, &risk);
 
     assert_eq!(loadout.applied.len(), 1, "{loadout:#?}");
     assert_eq!(
