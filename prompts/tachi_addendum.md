@@ -23,7 +23,7 @@
 | 检索历史 | `tachi_memory(action="search")` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
 | 写入事实 | `tachi_save` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
 | 统一记忆面 | `tachi_memory(action=...)` | `search` / `get` / `save` / `extract_facts` / `briefing` / `ask` / `consolidate` / `progress` / `readiness`。 |
-| 任务与回执 | `tachi_task(action=...)` | `briefing` / `doc_index` / `profiles` / `profile` / `card` / `complete` / `board` / `cycle_status` 为 memory/ledger 面；外部 worker 例外见下方 `tachi_staff`，不是默认 subagent。PR 生命周期用 `tachi_gh`。 |
+| 任务与回执 | `tachi_task(action=...)` | `brief` / `profiles` / `profile` / `card` / `complete` / `board` / `status` 为 memory/ledger 面；带 `flow_id`/issue/PR 引用的 `status` 返回嵌套 cycle read model。外部 worker 例外见下方 `tachi_staff`，不是默认 subagent。PR 生命周期用 `tachi_gh`。 |
 | 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board`，记录后台验证证据。 |
 | 外部 staffing | `tachi_staff(action=...)` | `start`（要求 typed `staffing_reason`）派出可跟踪 worker，`status` 读运行状态；普通本地并行仍使用宿主原生 subagent，不因 Tachi 存在而切换执行器。 |
 | 查关联 | `tachi_memory(action="ask")` | 给 memory_id 或 query，返回邻居 + 边（底层 graph 原语已内化，非 MCP 表面）。 |

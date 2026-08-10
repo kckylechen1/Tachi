@@ -14,9 +14,7 @@ pub(super) async fn handle_tachi_task_facade(
     let action = params.action.as_str().to_string();
     reject_delegate_task_action(server, &action)?;
     let raw = match params.action {
-        TachiTaskAction::Briefing | TachiTaskAction::DocIndex => {
-            return handle_tachi_feature_briefing(server, &params).await
-        }
+        TachiTaskAction::Brief => return handle_tachi_feature_briefing(server, &params).await,
         TachiTaskAction::Complete => {
             let dispatch_defaults = params
                 .dispatch_id
@@ -141,7 +139,30 @@ pub(super) async fn handle_tachi_task_facade(
             serde_json::to_string(&crate::claims_ops::handle_task_handoff(server, &params)?)
                 .map_err(|err| err.to_string())
         }
-        TachiTaskAction::Status => handle_tachi_task_status(server, &params).await,
+        TachiTaskAction::Status => {
+            // #1712 C1b-1: dispatch_id keeps the original flat status
+            // snapshot, including its exact field order and optional ACPX /
+            // result branches. Any supplied dispatch_id wins over lifecycle
+            // selectors so an invalid id preserves the old lookup error
+            // rather than silently falling through to the cycle view.
+            if params.dispatch_id.is_some()
+                || (params.flow_id.is_none()
+                    && params.issue_ref.is_none()
+                    && params.pr_ref.is_none())
+            {
+                handle_tachi_task_status(server, &params).await
+            } else {
+                let cycle_raw =
+                    crate::task_lifecycle::handle_task_cycle_status(server, &params).await?;
+                let cycle: serde_json::Value = serde_json::from_str(&cycle_raw)
+                    .map_err(|err| format!("parse lifecycle status response: {err}"))?;
+                serde_json::to_string(&serde_json::json!({
+                    "status": "ok",
+                    "cycle": cycle,
+                }))
+                .map_err(|err| format!("serialize status cycle response: {err}"))
+            }
+        }
         // codex review round 2 (#1182 checkpoint 2): the issue #1173 escape
         // hatch is "verbose=true OR action='profile'" — two independent ways
         // to get the full card. `profiles` (the listing) is the one item 2
@@ -165,9 +186,6 @@ pub(super) async fn handle_tachi_task_facade(
             .map_err(|e| format!("serialize dispatch profiles: {e}"))
         }
         TachiTaskAction::Intake => crate::task_lifecycle::handle_task_intake(server, &params).await,
-        TachiTaskAction::CycleStatus => {
-            crate::task_lifecycle::handle_task_cycle_status(server, &params).await
-        }
         TachiTaskAction::Adjudicate => {
             let adjudication = params
                 .adjudication
@@ -248,7 +266,7 @@ pub(super) async fn handle_tachi_task_facade(
 fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<(), String> {
     if !tachi_hub::facade_action_allowed("tachi_task", Some(action), server.active_tool_profile()) {
         return Err(format!(
-            "tachi_task(action='{action}') is not available to the active tool profile; delegate workers may use 'complete', 'status', 'board', 'briefing', or 'doc_index'."
+            "tachi_task(action='{action}') is not available to the active tool profile; delegate workers may use 'complete', 'status', 'board', or 'brief'."
         ));
     }
     Ok(())

@@ -47,7 +47,7 @@ fn tachi_task_schema_advertises_survivors_not_retired_c1a_actions() {
         "tachi_task.action schema must advertise profile discovery: {action_description}"
     );
     assert!(
-        action_description.contains("cycle_status"),
+        action_description.contains("status"),
         "tachi_task.action schema must advertise lifecycle status: {action_description}"
     );
     for retired in tachi_params::TACHI_TASK_RETIRED_C1A_ACTIONS {

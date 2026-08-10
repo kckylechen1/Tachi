@@ -2,8 +2,8 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-08-06",
-    "revision": "51f57bd78487d5e1c9dbb13a2f7d930f19a2a514",
+    "date": "2026-08-10",
+    "revision": "1811c5a7538cf406e436ca2f276367af0e56a72d",
     "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
   },
   "provisional_budgets": {
@@ -43,8 +43,8 @@
     "surfaces": {
       "standard.tachi_task": {
         "max_top_level_properties": 79,
-        "max_input_schema_bytes": 27131,
-        "rationale": "Native-first task facade baseline re-pinned after [1683 C1a] retired six task actions; budget tracks observed with zero headroom so any property regrowth trips the named gate."
+        "max_input_schema_bytes": 27137,
+        "rationale": "Native-first task facade baseline re-pinned after [1712 C1b-1] folded three task actions; budget tracks observed with zero headroom so any property regrowth trips the named gate."
       },
       "standard.tachi_memory": {
         "max_top_level_properties": 68,
@@ -58,8 +58,8 @@
       },
       "admin.tachi_task": {
         "max_top_level_properties": 79,
-        "max_input_schema_bytes": 28438,
-        "rationale": "Typed operator compatibility baseline re-pinned after [1683 C1a] retired six task actions; budget tracks observed with zero headroom."
+        "max_input_schema_bytes": 28540,
+        "rationale": "Typed operator compatibility baseline re-pinned after [1712 C1b-1] folded three task actions; budget tracks observed with zero headroom."
       }
     }
   },
@@ -164,18 +164,16 @@
         ]
       },
       "tachi_task": {
-        "action_count": 17,
+        "action_count": 15,
         "actions": [
           "adjudicate",
           "board",
-          "briefing",
+          "brief",
           "build_references",
           "card",
           "claim",
           "close_loop",
           "complete",
-          "cycle_status",
-          "doc_index",
           "handoff",
           "heartbeat",
           "intake",
@@ -219,8 +217,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 184175,
-        "total_tool_definition_bytes": 221423,
+        "total_input_schema_bytes": 184277,
+        "total_tool_definition_bytes": 221559,
         "visible_tool_count": 103,
         "visible_tools": [
           "archive_memory",
@@ -329,8 +327,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 126367,
-        "total_tool_definition_bytes": 144365,
+        "total_input_schema_bytes": 126373,
+        "total_tool_definition_bytes": 144352,
         "visible_tool_count": 39,
         "visible_tools": [
           "extract_facts",
@@ -375,8 +373,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 68864,
-        "total_tool_definition_bytes": 74214,
+        "total_input_schema_bytes": 68885,
+        "total_tool_definition_bytes": 74229,
         "visible_tool_count": 11,
         "visible_tools": [
           "peer_query",
@@ -393,8 +391,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 122516,
-        "total_tool_definition_bytes": 141595,
+        "total_input_schema_bytes": 122522,
+        "total_tool_definition_bytes": 141582,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
@@ -450,8 +448,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 64791,
-        "total_tool_definition_bytes": 74045,
+        "total_input_schema_bytes": 64797,
+        "total_tool_definition_bytes": 74032,
         "visible_tool_count": 16,
         "visible_tools": [
           "peer_query",
@@ -643,7 +641,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 28438,
+            "input_schema_bytes": 28540,
             "property_count": 79,
             "property_names": [
               "__tachi_project_explicit",
@@ -788,7 +786,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 27131,
+            "input_schema_bytes": 27137,
             "property_count": 79,
             "property_names": [
               "__tachi_project_explicit",
@@ -1058,7 +1056,7 @@
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 27131,
+          "input_schema_bytes": 27137,
           "property_count": 79,
           "property_names": [
             "__tachi_project_explicit",

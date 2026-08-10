@@ -6,6 +6,14 @@ use memcore::MemoryEntry;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
+fn cycle_view(raw: &str) -> Value {
+    let response: Value = serde_json::from_str(raw).expect("status response JSON");
+    response
+        .get("cycle")
+        .cloned()
+        .expect("status lifecycle response must nest its cycle view")
+}
+
 mod briefing_doc_index;
 mod closure_dispatch_markers;
 mod cycle_status;

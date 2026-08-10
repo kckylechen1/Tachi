@@ -84,9 +84,7 @@ pub enum TachiTaskAction {
     Status,
     Complete,
     Adjudicate,
-    Briefing,
-    DocIndex,
-    CycleStatus,
+    Brief,
     Profiles,
     Profile,
     Card,
@@ -106,9 +104,7 @@ impl TachiTaskAction {
         Self::Status,
         Self::Complete,
         Self::Adjudicate,
-        Self::Briefing,
-        Self::DocIndex,
-        Self::CycleStatus,
+        Self::Brief,
         Self::Profiles,
         Self::Profile,
         Self::Card,
@@ -127,9 +123,7 @@ impl TachiTaskAction {
             Self::Status => "status",
             Self::Complete => "complete",
             Self::Adjudicate => "adjudicate",
-            Self::Briefing => "briefing",
-            Self::DocIndex => "doc_index",
-            Self::CycleStatus => "cycle_status",
+            Self::Brief => "brief",
             Self::Profiles => "profiles",
             Self::Profile => "profile",
             Self::Card => "card",
@@ -165,9 +159,10 @@ impl FromStr for TachiTaskAction {
             "status" => Ok(Self::Status),
             "complete" => Ok(Self::Complete),
             "adjudicate" => Ok(Self::Adjudicate),
-            "briefing" => Ok(Self::Briefing),
-            "doc_index" => Ok(Self::DocIndex),
-            "cycle_status" => Ok(Self::CycleStatus),
+            "brief" => Ok(Self::Brief),
+            "briefing" | "doc_index" | "cycle_status" => Err(format!(
+                "Invalid tachi_task action '{s}'. This Task action was retired by #1712 C1b; use tachi_task(action='brief') for the feature briefing or tachi_task(action='status', flow_id=..., issue_ref=..., or pr_ref=...) for the lifecycle read model."
+            )),
             "profiles" => Ok(Self::Profiles),
             "profile" => Ok(Self::Profile),
             "card" => Ok(Self::Card),
@@ -240,9 +235,7 @@ mod tests {
             "status",
             "complete",
             "adjudicate",
-            "briefing",
-            "doc_index",
-            "cycle_status",
+            "brief",
             "profiles",
             "profile",
             "card",
@@ -276,6 +269,19 @@ mod tests {
             assert!(
                 err.contains("#1683 C1a"),
                 "retired action {retired} error should name #1683 C1a, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn f1712_c1b1_task_rejects_folded_action_tokens() {
+        for retired in ["briefing", "doc_index", "cycle_status"] {
+            let err = retired
+                .parse::<TachiTaskAction>()
+                .expect_err("folded action token must not parse as tachi_task action");
+            assert!(
+                err.contains("#1712 C1b"),
+                "error for {retired} should name #1712 C1b, got: {err}"
             );
         }
     }

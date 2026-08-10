@@ -15,9 +15,8 @@
         "status",
         "complete",
         "adjudicate",
-        "briefing",
-        "doc_index",
-        "cycle_status",
+        "brief",
+        "status",
         "profiles",
         "profile",
         "card",
@@ -39,9 +38,8 @@
         "status",
         "complete",
         "adjudicate",
-        "briefing",
-        "doc_index",
-        "cycle_status",
+        "brief",
+        "status",
         "profiles",
         "profile",
         "card",
@@ -75,23 +73,23 @@
     },
     "agent_id": {
       "used_by_actions": [
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
-      "rationale": "Ledger identity of the requesting agent; threaded into TaskBriefParams and briefing."
+      "rationale": "Ledger identity of the requesting agent; threaded into TaskBriefParams and brief."
     },
     "domain": {
       "used_by_actions": [
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Area tag for briefing context scoping; survives Dispatch removal."
+      "rationale": "Area tag for brief context scoping; survives Dispatch removal."
     },
     "path_prefix": {
       "used_by_actions": [
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
@@ -99,7 +97,7 @@
     },
     "top_k": {
       "used_by_actions": [
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
@@ -107,8 +105,8 @@
     },
     "doc_paths": {
       "used_by_actions": [
-        "briefing",
-        "cycle_status",
+        "brief",
+        "status",
         "build_references",
         "close_loop"
       ],
@@ -127,8 +125,8 @@
     },
     "spec_paths": {
       "used_by_actions": [
-        "briefing",
-        "cycle_status",
+        "brief",
+        "status",
         "build_references",
         "close_loop"
       ],
@@ -138,7 +136,7 @@
     },
     "include_global": {
       "used_by_actions": [
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
@@ -146,7 +144,7 @@
     },
     "compact": {
       "used_by_actions": [
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "defer_1467",
@@ -179,7 +177,7 @@
     "task_type": {
       "used_by_actions": [
         "complete",
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
@@ -336,12 +334,11 @@
     },
     "cwd": {
       "used_by_actions": [
-        "briefing",
-        "doc_index"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Read by briefing/doc_index to resolve relative doc_paths/spec_paths (feature_briefing/docs.rs) and echoed into the brief packet; stays in the public schema after [1319-C2]."
+      "rationale": "Read by brief to resolve relative doc_paths/spec_paths (feature_briefing/docs.rs) and echoed into the brief packet; stays in the public schema after [1319-C2]."
     },
     "env_id": {
       "used_by_actions": [],
@@ -443,8 +440,7 @@
     },
     "project": {
       "used_by_actions": [
-        "briefing",
-        "doc_index",
+        "brief",
         "complete",
         "board",
         "build_references",
@@ -465,16 +461,16 @@
     },
     "stage": {
       "used_by_actions": [
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
-      "rationale": "Workflow stage hint; read by copilot_ops feature-briefing (Briefing arm) feedback path; duplicates StaffStartFields.stage."
+      "rationale": "Workflow stage hint; read by copilot_ops feature-briefing (Brief arm) feedback path; duplicates StaffStartFields.stage."
     },
     "profile": {
       "used_by_actions": [
         "complete",
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Staff",
       "disposition": "move_to_staff",
@@ -505,9 +501,9 @@
     "issue_ref": {
       "used_by_actions": [
         "complete",
-        "briefing",
+        "brief",
         "intake",
-        "cycle_status",
+        "status",
         "build_references",
         "close_loop",
         "claim"
@@ -519,8 +515,8 @@
     "pr_ref": {
       "used_by_actions": [
         "complete",
-        "briefing",
-        "cycle_status",
+        "brief",
+        "status",
         "build_references",
         "close_loop"
       ],
@@ -584,11 +580,11 @@
     },
     "auto_capability_bundle": {
       "used_by_actions": [
-        "briefing"
+        "brief"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
-      "rationale": "Read by briefing to inject the capability bundle into the briefing context (feature_briefing/dispatch.rs); stays in the public schema after [1319-C2]."
+      "rationale": "Read by brief to inject the capability bundle into the briefing context (feature_briefing/dispatch.rs); stays in the public schema after [1319-C2]."
     },
     "mcp_access": {
       "used_by_actions": [],

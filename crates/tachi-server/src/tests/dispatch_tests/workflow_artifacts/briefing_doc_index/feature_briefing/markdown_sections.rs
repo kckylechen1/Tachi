@@ -12,7 +12,7 @@ async fn tachi_task_briefing_supports_markdown_layered_sections() {
     let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
     let server = make_server();
 
-    let mut params = task_params("briefing");
+    let mut params = task_params("brief");
     params.format = Some("markdown".to_string());
     params.task = Some("Prepare feature handoff".to_string());
     params.doc_paths = vec!["docs/engineering/architecture/subagent-eval-system.md".to_string()];
@@ -76,7 +76,7 @@ async fn tachi_task_briefing_markdown_renders_presence_section() {
         },
     );
 
-    let mut params = task_params("briefing");
+    let mut params = task_params("brief");
     params.format = Some("markdown".to_string());
     params.task = Some("Prepare feature handoff".to_string());
     params.issue_ref = Some("org/repo#1004".to_string());

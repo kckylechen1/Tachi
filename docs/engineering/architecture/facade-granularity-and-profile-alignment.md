@@ -53,8 +53,9 @@ It answers three questions raised during a facade review:
 2. **`merge` was semantically split, then resolved (#1683 C1a).** `tachi_task(merge)` used to mean
    local worktree merge, distinct from `tachi_gh(safe_merge)`'s GitHub PR merge — same word, different
    machine. `tachi_task(merge)` is retired; `tachi_gh(safe_merge)` is now the only `merge` on either facade.
-3. **`briefing` appears in three places** — `tachi_briefing` (standalone), `tachi_memory(briefing)`,
-   `tachi_task(briefing)`. `save` is duplicated across `tachi_save` and `tachi_memory(save)`.
+3. **Briefing still appears in three surfaces** — `tachi_briefing` (standalone),
+   `tachi_memory(briefing)`, and the feature-scoped `tachi_task(brief)`. `save` is duplicated
+   across `tachi_save` and `tachi_memory(save)`.
 4. **Self-tuning actions were interleaved with execution (resolved #1426).** Eight of the nine —
    `route_simulate` / `proposals` / `review_proposal` / `apply_proposals` (task side) and
    `recall_simulate` / `recall_proposals` / `review_recall_proposal` / `apply_recall_proposals`
@@ -79,7 +80,7 @@ by the **agent's mental task**.
 ```diagram
 Now                            Proposed
 tachi_task (24) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
-                     ├──▶ tachi_flow    lifecycle: intake/cycle_status/close_loop (3)
+                     ├──▶ tachi_flow    lifecycle: intake/status/close_loop (3)
                      ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
                      └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
 

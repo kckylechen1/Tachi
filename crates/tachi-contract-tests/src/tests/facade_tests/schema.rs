@@ -312,7 +312,7 @@ fn staff_status_without_dispatch_id_is_handler_rejected() {
 }
 
 #[test]
-fn tachi_task_action_schema_declares_c1a_survivor_list() {
+fn tachi_task_action_schema_declares_c1a_c1b_survivor_list() {
     let schema = rmcp::schemars::schema_for!(TachiTaskParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
     let action = &value["properties"]["action"];
@@ -331,16 +331,14 @@ fn tachi_task_action_schema_declares_c1a_survivor_list() {
             json!("status"),
             json!("complete"),
             json!("adjudicate"),
-            json!("briefing"),
-            json!("doc_index"),
-            json!("cycle_status"),
+            json!("brief"),
             json!("profiles"),
             json!("profile"),
             json!("card"),
             json!("build_references"),
             json!("close_loop"),
         ],
-        "tachi_task schema must expose exactly the #1683 C1a survivor list"
+        "tachi_task schema must expose exactly the #1683 C1a + #1712 C1b-1 survivor list"
     );
     // #1319-C2: dispatch/cancel/wait were removed from tachi_task (external
     // staffing now flows through tachi_staff). The schema must NOT list them.
@@ -370,7 +368,7 @@ fn tachi_task_action_schema_declares_c1a_survivor_list() {
     for removed in tachi_params::TACHI_TASK_RETIRED_C1A_ACTIONS {
         assert!(
             !values.contains(&json!(*removed)),
-            "tachi_task schema must not advertise #1683 C1a retired action {removed}"
+            "tachi_task schema must not advertise a retired C1a/C1b task action {removed}"
         );
     }
     // #757: GH PR lifecycle is tachi_gh only — not on tachi_task schema at all.
@@ -634,10 +632,18 @@ fn tachi_task_schema_descriptions_do_not_reference_removed_actions() {
         "action='merge'",
         "action=ux_matrix",
         "action='ux_matrix'",
+        "action=briefing",
+        "action='briefing'",
+        "action=doc_index",
+        "action='doc_index'",
+        "action=cycle_status",
+        "action='cycle_status'",
+        "briefing/intake",
+        "briefing/intake/close_loop/status/complete",
     ] {
         assert!(
             !serialized.contains(stale),
-            "tachi_task schema must not reference #1683 C1a retired action text '{stale}'"
+            "tachi_task schema must not reference retired C1a/C1b action text '{stale}'"
         );
     }
 }
@@ -708,9 +714,9 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
 /// hiding them would make their live readers unactionable no-ops.
 /// - `agent` is read by the Complete arm (task_router.rs, with
 ///   dispatch-defaults fallback);
-/// - `cwd` is read by briefing/doc_index for relative doc path resolution
-///   (feature_briefing/docs.rs);
-/// - `auto_capability_bundle` is read by briefing for context injection
+/// - `cwd` is shared by brief and lifecycle/closure readers for relative doc
+///   path resolution (feature_briefing/docs.rs and task_lifecycle);
+/// - `auto_capability_bundle` is read by brief for context injection
 ///   (feature_briefing/dispatch.rs);
 /// - `project_explicit` is read by the Complete arm for the #1041 B7 wire
 ///   explicitness signal (task_router.rs complete arm); its schema property
@@ -725,8 +731,7 @@ fn tachi_task_schema_keeps_fields_read_by_surviving_actions() {
     let properties = value["properties"].as_object().expect("task properties");
     for (field, reader_hint) in [
         ("agent", "action=complete"),
-        ("cwd", "action=briefing"),
-        ("auto_capability_bundle", "action=briefing"),
+        ("auto_capability_bundle", "action=brief"),
         ("__tachi_project_explicit", "action=complete"),
         ("timeout_secs", "action=status"),
     ] {
@@ -739,4 +744,17 @@ fn tachi_task_schema_keeps_fields_read_by_surviving_actions() {
             "{field} description must name its surviving reader action ({reader_hint})"
         );
     }
+    let cwd_description = properties["cwd"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        cwd_description.contains("task context/lifecycle records"),
+        "cwd description must preserve its shared task-context/lifecycle disposition"
+    );
+    assert!(
+        !cwd_description.contains("action=briefing")
+            && !cwd_description.contains("action=doc_index")
+            && !cwd_description.contains("action=cycle_status"),
+        "cwd description must not teach a retired Task action"
+    );
 }

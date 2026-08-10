@@ -354,7 +354,7 @@ mod tests {
 
         assert!(default_named_project_available(&server, "wiki"));
         let params: TachiTaskParams =
-            serde_json::from_value(json!({"action": "briefing"})).expect("task params");
+            serde_json::from_value(json!({"action": "brief"})).expect("task params");
         let candidates = load_feature_guide_candidates(&server, &params, 20);
         let ids = candidates
             .iter()
@@ -410,7 +410,7 @@ mod tests {
             .expect("seed guide lifecycle fixtures");
 
         let params: TachiTaskParams = serde_json::from_value(json!({
-            "action": "briefing",
+            "action": "brief",
             "project": "wiki"
         }))
         .expect("feature briefing params");
@@ -453,7 +453,7 @@ mod tests {
             Some("active"),
         );
         let params: TachiTaskParams = serde_json::from_value(json!({
-            "action": "briefing",
+            "action": "brief",
             "project": "quant"
         }))
         .expect("feature briefing params");
@@ -640,7 +640,7 @@ mod tests {
             .expect("seed shared guide");
 
         let params: TachiTaskParams = serde_json::from_value(json!({
-            "action": "briefing",
+            "action": "brief",
             "repo": "kckylechen1/tachi",
             "domain": "rust"
         }))
@@ -678,7 +678,7 @@ mod tests {
             .expect("seed legacy global guide");
 
         let params: TachiTaskParams = serde_json::from_value(json!({
-            "action": "briefing",
+            "action": "brief",
             "repo": "kckylechen1/tachi",
             "domain": "memory"
         }))

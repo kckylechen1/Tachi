@@ -12,9 +12,10 @@
 pub const TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS: &[&str] =
     &["link_pr", "pr_status", "pr_handoff", "release_note"];
 
-/// C1a of #1611/#1683 retired these primary `tachi_task` actions without
-/// folding them into Task replacements. Keep a machine-checkable deny-list so
-/// schemas, docs, and active profile discriminators cannot keep teaching them.
+/// C1a of #1611/#1683 and C1b-1 of #1712 retired these primary `tachi_task`
+/// actions without leaving them in the live Task inventory. Keep a
+/// machine-checkable deny-list so schemas, docs, and active profile
+/// discriminators cannot keep teaching them.
 pub const TACHI_TASK_RETIRED_C1A_ACTIONS: &[&str] = &[
     "plan",
     "cycle_plan",
@@ -22,6 +23,9 @@ pub const TACHI_TASK_RETIRED_C1A_ACTIONS: &[&str] = &[
     "refine_issues",
     "merge",
     "ux_matrix",
+    "briefing",
+    "doc_index",
+    "cycle_status",
 ];
 
 /// Canonical WorkClaim lifecycle actions exposed on `tachi_task` by #1253.
@@ -162,7 +166,7 @@ mod tests {
         for action in TACHI_TASK_RETIRED_C1A_ACTIONS {
             assert!(
                 !primary.contains(action),
-                "#1683 C1a retired task action {action} must not be advertised"
+                "#1683 C1a / #1712 C1b retired task action {action} must not be advertised"
             );
         }
         assert_eq!(
@@ -177,9 +181,7 @@ mod tests {
                 "status",
                 "complete",
                 "adjudicate",
-                "briefing",
-                "doc_index",
-                "cycle_status",
+                "brief",
                 "profiles",
                 "profile",
                 "card",
@@ -187,9 +189,9 @@ mod tests {
                 "close_loop"
             ]
         );
-        // #1683 C1a removes six task actions from the 23-action surface.
+        // #1683 C1a plus #1712 C1b-1 contract the 23-action surface to 15.
         // Keep this exact so the next inventory addition gets explicit review.
-        assert_eq!(primary.len(), 17);
+        assert_eq!(primary.len(), 15);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 

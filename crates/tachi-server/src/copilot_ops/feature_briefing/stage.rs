@@ -78,21 +78,19 @@ fn cycle_status_command(params: &TachiTaskParams) -> Option<String> {
         .flow_id
         .as_deref()
         .filter(|flow_id| !flow_id.trim().is_empty())
-        .map(|flow_id| format!("tachi_task(action='cycle_status', flow_id='{flow_id}')"))
+        .map(|flow_id| format!("tachi_task(action='status', flow_id='{flow_id}')"))
         .or_else(|| {
             params
                 .issue_ref
                 .as_deref()
                 .filter(|issue_ref| !issue_ref.trim().is_empty())
-                .map(|issue_ref| {
-                    format!("tachi_task(action='cycle_status', issue_ref='{issue_ref}')")
-                })
+                .map(|issue_ref| format!("tachi_task(action='status', issue_ref='{issue_ref}')"))
         })
         .or_else(|| {
             params
                 .pr_ref
                 .as_deref()
                 .filter(|pr_ref| !pr_ref.trim().is_empty())
-                .map(|pr_ref| format!("tachi_task(action='cycle_status', pr_ref='{pr_ref}')"))
+                .map(|pr_ref| format!("tachi_task(action='status', pr_ref='{pr_ref}')"))
         })
 }

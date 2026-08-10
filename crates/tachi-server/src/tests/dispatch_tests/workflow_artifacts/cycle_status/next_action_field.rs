@@ -23,24 +23,24 @@ async fn cycle_status_json_exposes_next_action_not_next_step() {
     );
     write_intake_flow(flow_id, &issue);
 
-    let mut params = task_params("cycle_status");
+    let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await
-        .expect("cycle_status should succeed");
-    let parsed: Value = serde_json::from_str(&raw).expect("cycle_status JSON");
+        .expect("status cycle should succeed");
+    let parsed = cycle_view(&raw);
 
     let next = parsed["next_action"]
         .as_str()
-        .expect("cycle_status must return next_action as a string");
+        .expect("status cycle must return next_action as a string");
     assert!(
         !next.is_empty(),
         "next_action must be a non-empty coaching string, got: {next:?}"
     );
     assert!(
         parsed.get("next_step").is_none(),
-        "cycle_status must not expose retired next_step; got: {parsed:#}"
+        "status cycle must not expose retired next_step; got: {parsed:#}"
     );
 }
 
@@ -56,22 +56,22 @@ fn intake_and_agent_rules_coach_cycle_status_next_action_not_next_step() {
         .as_str()
         .expect("recommended_next_action string");
     assert!(
-        recommended.contains("tachi_task(action='cycle_status'"),
-        "intake plan must route through cycle_status: {recommended}"
+        recommended.contains("tachi_task(action='status'"),
+        "intake plan must route through status cycle view: {recommended}"
     );
     assert!(
-        recommended.contains("follow its next_action"),
-        "intake plan must teach cycle_status.next_action, got: {recommended}"
+        recommended.contains("follow its cycle.next_action"),
+        "intake plan must teach status.cycle.next_action, got: {recommended}"
     );
     assert!(
         !recommended.contains("next_step"),
-        "intake plan must not teach retired next_step for cycle_status, got: {recommended}"
+        "intake plan must not teach retired next_step for status cycle, got: {recommended}"
     );
 
     let rules = crate::bootstrap::setup_wizard::agent_rules::agent_memory_rules_block();
     assert!(
-        rules.contains("cycle_status") && rules.contains("`next_action`"),
-        "agent rules must teach cycle_status next_action, got: {rules}"
+        rules.contains("action=\"status\"") && rules.contains("next_action"),
+        "agent rules must teach status cycle next_action, got: {rules}"
     );
     assert!(
         !rules.contains("`next_step`"),

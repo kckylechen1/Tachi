@@ -185,10 +185,44 @@ mod tests {
 
     fn status_params(dispatch_id: &str, include_result: bool) -> TachiTaskParams {
         let json_str = format!(
-            r#"{{"action":"status","dispatch_id":"{}","include_result":{}}}"#,
+            r#"{{"action":"status","dispatch_id":"{}","include_result":{},"format":"json"}}"#,
             dispatch_id, include_result
         );
         serde_json::from_str(&json_str).expect("deserialize status params")
+    }
+
+    fn make_status_golden_server() -> (tempfile::TempDir, MemoryServer) {
+        let tmp = tempfile::tempdir().expect("status golden home");
+        let home = tmp.path().to_path_buf();
+        std::fs::create_dir_all(home.join("global")).expect("create global dir");
+        let server = MemoryServer::new_with_home_for_test(
+            home.join("global").join("memory.db"),
+            None,
+            home.clone(),
+        )
+        .expect("server");
+        (tmp, server)
+    }
+
+    fn json_string_fragment(value: &str) -> String {
+        let encoded = serde_json::to_string(value).expect("JSON string fragment");
+        encoded[1..encoded.len() - 1].to_owned()
+    }
+
+    fn normalize_status_golden_home(
+        raw: &str,
+        home: &std::path::Path,
+        dispatch_id: &str,
+    ) -> String {
+        let dynamic_run_dir = home.join("runs").join(dispatch_id);
+        let dynamic_fragment = json_string_fragment(&dynamic_run_dir.to_string_lossy());
+        let marker_fragment = json_string_fragment(&format!("<TACHI_HOME>/runs/{dispatch_id}"));
+        let occurrences = raw.matches(&dynamic_fragment).count();
+        assert_eq!(
+            occurrences, 1,
+            "status response must contain exactly one dynamic run_dir home token"
+        );
+        raw.replacen(&dynamic_fragment, &marker_fragment, 1)
     }
 
     fn write_input_required_run(
@@ -334,6 +368,50 @@ mod tests {
         assert!(
             response.get("result").is_none(),
             "result field should be absent when include_result=false, got: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_dispatch_id_precedes_cycle_selectors_without_byte_drift() {
+        // Literal response captured independently from exact base
+        // 16e11a1020bfa05b33c14c9bbe679b580d474992 using the fixed fixture
+        // below. This is deliberately not reconstructed from candidate code.
+        const BASE_STATUS_GOLDEN: &str = r##"{"action":"status","dispatch_id":"issue1712-base-status-golden","result":{"body":"# Stable status bytes\n","full_size_bytes":22,"full_size_chars":22,"truncated":false},"run_status":{"agent":"claude","dispatch_id":"issue1712-base-status-golden","exit_code":0,"state":"TASK_STATE_COMPLETED","updated_at":"2026-08-10T00:00:00Z"},"state":"TASK_STATE_COMPLETED","status":"ok","task":{"acpx":null,"acpx_events":null,"agent":"claude","closure_kind":null,"dispatch_id":"issue1712-base-status-golden","execution_backend":null,"exit_code":0,"flow_id":null,"harness_server_status":null,"harness_server_url":null,"harness_transport":null,"identity_receipt":null,"result_written":true,"run_dir":"<TACHI_HOME>/runs/issue1712-base-status-golden","source":"run","stale":false,"stale_reason":null,"state":"TASK_STATE_COMPLETED","state_source":"run","summary":null,"updated_at":"2026-08-10T00:00:00Z"},"terminal":true}"##;
+        let (tmp, server) = make_status_golden_server();
+        let home = tmp.path();
+        let runs_dir = home.join("runs");
+        let dispatch_id = "issue1712-base-status-golden";
+        write_fake_run(&runs_dir, dispatch_id, Some("# Stable status bytes\n"));
+        let status_path = runs_dir.join(dispatch_id).join("status.json");
+        std::fs::write(
+            status_path,
+            r#"{"dispatch_id":"issue1712-base-status-golden","agent":"claude","state":"TASK_STATE_COMPLETED","exit_code":0,"updated_at":"2026-08-10T00:00:00Z"}"#,
+        )
+        .expect("write deterministic status.json");
+
+        let baseline_route = crate::tools::task_router::handle_tachi_task_facade(
+            &server,
+            status_params(dispatch_id, true),
+        )
+        .await
+        .expect("flat status route should succeed");
+        let baseline_route = normalize_status_golden_home(&baseline_route, home, dispatch_id);
+        assert_eq!(
+            baseline_route, BASE_STATUS_GOLDEN,
+            "dispatch_id status response must retain exact base bytes and order"
+        );
+
+        let mut mixed = status_params(dispatch_id, true);
+        mixed.flow_id = Some("flow_should_not_select_cycle_view".to_string());
+        mixed.issue_ref = Some("owner/repo#1712".to_string());
+        mixed.pr_ref = Some("owner/repo#2712".to_string());
+        let mixed_route = crate::tools::task_router::handle_tachi_task_facade(&server, mixed)
+            .await
+            .expect("dispatch_id must win over lifecycle selectors");
+        let mixed_route = normalize_status_golden_home(&mixed_route, home, dispatch_id);
+        assert_eq!(
+            mixed_route, BASE_STATUS_GOLDEN,
+            "mixed selectors must preserve exact base dispatch status bytes"
         );
     }
 

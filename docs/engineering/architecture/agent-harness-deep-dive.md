@@ -439,7 +439,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 
 **对策：**
 - Issue 创建时强制写 `## Spec` section（明确 scope）
-- 计划与验收标准由 planning owner surface 产出；`tachi_task(action='briefing')` 提供上下文读模（Shell 已删除）
+- 计划与验收标准由 planning owner surface 产出；`tachi_task(action='brief')` 提供上下文读模（Shell 已删除）
 - Agent 输出超过 N turns 无进展 → 自动暂停，要求用户确认
 
 #### 陷阱 2：环境泥潭
