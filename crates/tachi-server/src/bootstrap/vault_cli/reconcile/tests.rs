@@ -7,6 +7,11 @@
 //! different values stay two accounts, that the same names holding one value
 //! collapse into one account with two aliases, that planning writes nothing,
 //! and that plan → apply → replay is idempotent through the artifact file.
+//!
+//! The cross-vendor review of PR-C added three more, all of the same shape —
+//! what the pipeline does when it is handed something it cannot justify: a plan
+//! naming a source outside the admitted vocabulary, a fingerprint two accounts
+//! carry, and a custody target two accounts hold.
 
 use super::*;
 
@@ -83,6 +88,12 @@ impl Fixture {
             self.cwd.path(),
         )
         .expect("plan builds")
+    }
+
+    /// Apply's source re-reader, admitted for this fixture's host — the same
+    /// vocabulary `plan` discovered from.
+    fn sources(&self) -> EnvFileSources {
+        EnvFileSources::admitted_for(self.home.path(), self.cwd.path())
     }
 }
 
@@ -338,7 +349,7 @@ fn plan_apply_replay_is_idempotent_through_the_artifact_file() {
 
     let mut store = fixture.store();
     let first = store
-        .apply_provider_account_plan(&reloaded.bound, &reloaded.plan_digest, &EnvFileSources)
+        .apply_provider_account_plan(&reloaded.bound, &reloaded.plan_digest, &fixture.sources())
         .expect("first apply");
     assert!(first.changed);
     assert_eq!(first.accounts_created.len(), 1);
@@ -351,7 +362,7 @@ fn plan_apply_replay_is_idempotent_through_the_artifact_file() {
             .collect();
 
     let replay = store
-        .apply_provider_account_plan(&reloaded.bound, &reloaded.plan_digest, &EnvFileSources)
+        .apply_provider_account_plan(&reloaded.bound, &reloaded.plan_digest, &fixture.sources())
         .expect("replay applies");
     assert!(
         !replay.changed,
@@ -399,7 +410,7 @@ fn a_hand_edited_artifact_is_refused_with_zero_writes() {
 
     let mut store = fixture.store();
     let err = store
-        .apply_provider_account_plan(&artifact.bound, &artifact.plan_digest, &EnvFileSources)
+        .apply_provider_account_plan(&artifact.bound, &artifact.plan_digest, &fixture.sources())
         .expect_err("a hand-edited artifact must be refused");
     assert!(
         matches!(
@@ -437,7 +448,7 @@ fn a_source_file_rewritten_after_planning_refuses_the_apply() {
 
     let mut store = fixture.store();
     let err = store
-        .apply_provider_account_plan(&outcome.plan, &digest, &EnvFileSources)
+        .apply_provider_account_plan(&outcome.plan, &digest, &fixture.sources())
         .expect_err("source drift must refuse");
     assert!(
         matches!(
@@ -509,8 +520,171 @@ fn a_rotation_pool_plans_one_account_and_leaks_no_member_name() {
         .apply_provider_account_plan(
             &outcome.plan,
             &memcore::plan_digest(&outcome.plan),
-            &EnvFileSources,
+            &fixture.sources(),
         )
         .expect("pool plan applies");
     assert_eq!(report.accounts_created.len(), 1);
+}
+
+// ── The artifact names sources; it does not choose them ────────────────────
+
+/// A plan file may name any path its author likes; apply reads only the
+/// sources this host's intake vocabulary admits.
+///
+/// The digest fences are deliberately *satisfied* here — the plan hashes to its
+/// declared digest and the named file's SHA is recorded honestly — because a
+/// plan digest is an unkeyed hash over content the artifact's author controls,
+/// so recomputing it is free for whoever edited the file. Only the admitted-set
+/// check stands between a hand-written plan and apply opening an arbitrary path
+/// on the host.
+#[test]
+fn a_plan_naming_a_source_outside_the_admitted_set_is_refused_with_zero_writes() {
+    let (_lock, _tachi_home) = env_guard();
+    let fixture = Fixture::new();
+    fixture.seed_secret("SILICONFLOW_API_KEY", SILICONFLOW_VALUE);
+    fixture.write_env(&format!("EXTRACT_API_KEY={SILICONFLOW_VALUE}\n"));
+
+    let outcome = fixture.plan();
+    let mut plan = outcome.plan;
+    assert!(
+        !plan.bindings.sources.is_empty(),
+        "the fixture must bind at least one source for the swap to mean anything"
+    );
+
+    let outside = fixture.home.path().join("not-an-intake-source.env");
+    std::fs::write(&outside, b"OUTSIDE_API_KEY=whatever\n").expect("write outside file");
+    plan.bindings.sources = vec![memcore::SourceBinding {
+        source_id: env_file_source_id(&outside),
+        sha256: tachi_params::sha256_hex(&std::fs::read(&outside).expect("outside bytes")),
+    }];
+    let digest = memcore::plan_digest(&plan);
+
+    let mut store = fixture.store();
+    let err = store
+        .apply_provider_account_plan(&plan, &digest, &fixture.sources())
+        .expect_err("a source outside the admitted set must be refused");
+    assert!(
+        matches!(
+            err,
+            memcore::MemoryError::ProviderAccountPlanRefused {
+                reason: memcore::ProviderPlanRefusal::SourceDigestMismatch,
+                ..
+            }
+        ),
+        "unexpected error: {err}"
+    );
+    assert!(
+        memcore::db::list_provider_accounts(store.connection())
+            .expect("accounts")
+            .is_empty(),
+        "a refused apply must create no account"
+    );
+}
+
+// ── Ambiguity plans nothing; it never plans a duplicate ────────────────────
+
+/// Two accounts carrying one fingerprint is a state the schema permits
+/// (`account_fingerprint` is indexed, not unique). The planner reports it and
+/// plans nothing — the failure mode being pinned out is the one where "I cannot
+/// tell which account this is" arrives at the caller as "no account holds this
+/// credential" and mints a third.
+#[test]
+fn a_fingerprint_carried_by_two_accounts_plans_nothing_and_mints_no_third() {
+    let (_lock, _tachi_home) = env_guard();
+    let fixture = Fixture::new();
+    fixture.seed_secret("SILICONFLOW_API_KEY", SILICONFLOW_VALUE);
+
+    let outcome = fixture.plan();
+    let digest = memcore::plan_digest(&outcome.plan);
+    let mut store = fixture.store();
+    store
+        .apply_provider_account_plan(&outcome.plan, &digest, &fixture.sources())
+        .expect("first apply");
+    let recorded = memcore::db::list_provider_accounts(store.connection()).expect("accounts");
+    assert_eq!(recorded.len(), 1, "{recorded:#?}");
+
+    memcore::db::insert_provider_account(
+        store.connection(),
+        &memcore::NewProviderAccount::api_key_pool(
+            memcore::mint_account_id(),
+            recorded[0].provider_kind.clone(),
+            memcore::mint_auth_ref(),
+            recorded[0].account_fingerprint.clone(),
+            recorded[0].account_class,
+        ),
+    )
+    .expect("a second account carrying the same fingerprint");
+    drop(store);
+
+    let second = fixture.plan();
+    assert!(
+        second.plan.actions.is_empty(),
+        "an ambiguous fingerprint must plan nothing at all: {:#?}",
+        second.plan.actions
+    );
+    assert!(
+        advisory_codes(&second.advisories).contains(&"ambiguous_account_fingerprint"),
+        "{:#?}",
+        second.advisories
+    );
+}
+
+/// The same ruling on the custody axis. `account_custody.custody_target` is not
+/// unique either, so the fallback lookup can see two accounts holding one Vault
+/// object; picking whichever row was read last would make identity a function of
+/// row order.
+#[test]
+fn two_accounts_holding_one_custody_target_plan_nothing() {
+    let (_lock, _tachi_home) = env_guard();
+    let fixture = Fixture::new();
+    fixture.seed_secret("SILICONFLOW_API_KEY", SILICONFLOW_VALUE);
+
+    let outcome = fixture.plan();
+    let digest = memcore::plan_digest(&outcome.plan);
+    let mut store = fixture.store();
+    store
+        .apply_provider_account_plan(&outcome.plan, &digest, &fixture.sources())
+        .expect("first apply");
+    let recorded = memcore::db::list_provider_accounts(store.connection()).expect("accounts");
+    assert_eq!(recorded.len(), 1, "{recorded:#?}");
+
+    // A second account, different credential, same custody target.
+    let rival_id = memcore::mint_account_id();
+    let rival_auth_ref = memcore::mint_auth_ref();
+    memcore::db::insert_provider_account(
+        store.connection(),
+        &memcore::NewProviderAccount::api_key_pool(
+            rival_id.clone(),
+            recorded[0].provider_kind.clone(),
+            rival_auth_ref.clone(),
+            "fp1:a-different-credential-entirely",
+            recorded[0].account_class,
+        ),
+    )
+    .expect("rival account");
+    memcore::db::insert_account_custody(
+        store.connection(),
+        &rival_auth_ref,
+        &rival_id,
+        memcore::CustodyKind::VaultEntry,
+        "SILICONFLOW_API_KEY",
+    )
+    .expect("rival custody");
+    drop(store);
+
+    // Rotate the key material so identity can no longer be settled by
+    // fingerprint and the custody fallback is what answers.
+    fixture.seed_secret("SILICONFLOW_API_KEY", "sk-tachi-1680-siliconflow-ROTATED");
+
+    let second = fixture.plan();
+    assert!(
+        second.plan.actions.is_empty(),
+        "an ambiguous custody target must plan nothing at all: {:#?}",
+        second.plan.actions
+    );
+    assert!(
+        advisory_codes(&second.advisories).contains(&"ambiguous_custody_target"),
+        "{:#?}",
+        second.advisories
+    );
 }

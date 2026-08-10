@@ -33,6 +33,15 @@
 //!   values fingerprint identically; anything weaker is an advisory line, and
 //!   fusing two persisted identities needs an operator confirmation the planner
 //!   cannot supply.
+//! - **It never resolves an ambiguity by creating something.** When the record
+//!   cannot say which account a credential is — two accounts under one
+//!   fingerprint, two accounts holding one custody target — the group is left
+//!   alone with an advisory. Minting a new account there would answer "I cannot
+//!   tell these apart" by adding a third thing to tell apart.
+//! - **It never reads a path a plan file names.** Apply re-reads its sources
+//!   from the same `intake` vocabulary discovery used; a plan artifact is an
+//!   operator-readable record, and a record that could point apply at any path
+//!   on the host would be an authority instead.
 //! - **It never touches `providers doctor`.** The doctor stays a pure report
 //!   over the same read-only primitives.
 
@@ -81,11 +90,43 @@ struct ReconcilePlanArtifact {
     bound: BoundAccountPlan,
 }
 
+/// The descriptor for one discovered env file. One function so plan time and
+/// apply time cannot disagree about how a path becomes a `source_id`.
+fn env_file_source_id(path: &Path) -> String {
+    format!("{SOURCE_SCHEME_ENV_FILE}{}", path.display())
+}
+
 /// Re-reads a plan's env-file sources from inside apply's transaction.
-struct EnvFileSources;
+///
+/// Carries the admitted source list rather than trusting the artifact: the
+/// plan file is an operator-readable record, not an authority, so the paths it
+/// names are checked against the same `intake` vocabulary discovery used
+/// instead of being opened because the artifact asked. Without that fence a
+/// hand-written plan turns apply into a read primitive over any path on the
+/// host — and a digest an attacker computed themselves would satisfy it.
+struct EnvFileSources {
+    admitted: HashSet<String>,
+}
+
+impl EnvFileSources {
+    fn admitted_for(env_home: &Path, cwd: &Path) -> Self {
+        Self {
+            admitted: super::intake::env_source_paths(env_home, cwd)
+                .into_iter()
+                .map(|path| env_file_source_id(&path))
+                .collect(),
+        }
+    }
+}
 
 impl PlanSourceDigests for EnvFileSources {
     fn current_digest(&self, source_id: &str) -> Result<Option<String>, String> {
+        if !self.admitted.contains(source_id) {
+            return Err(format!(
+                "source descriptor '{source_id}' is not one of this host's admitted intake \
+                 sources; apply re-reads the source vocabulary, never a path a plan file names"
+            ));
+        }
         let Some(path) = source_id.strip_prefix(SOURCE_SCHEME_ENV_FILE) else {
             return Err(format!(
                 "source descriptor '{source_id}' is not one this build knows how to re-read"
@@ -166,7 +207,7 @@ pub(super) fn run_reconcile_action(
             let report = store.apply_provider_account_plan(
                 &artifact.bound,
                 &artifact.plan_digest,
-                &EnvFileSources,
+                &EnvFileSources::admitted_for(&env_home, &cwd),
             )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -251,15 +292,23 @@ fn discover_env_sightings(env_home: &Path, cwd: &Path) -> (Vec<SourceBinding>, V
     let mut sources = Vec::new();
     let mut sightings = Vec::new();
     for path in super::intake::env_source_paths(env_home, cwd) {
+        // Read once. The bytes hashed into the binding and the bytes parsed
+        // into sightings must be the same bytes: re-opening the path to parse
+        // it would let a file rewritten in between produce actions from one
+        // version while the plan binds the digest of another, and apply's
+        // re-read would then confirm the version nobody planned against.
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
-        let source_id = format!("{SOURCE_SCHEME_ENV_FILE}{}", path.display());
+        let source_id = env_file_source_id(&path);
         sources.push(SourceBinding {
             source_id: source_id.clone(),
             sha256: tachi_params::sha256_hex(&bytes),
         });
-        for (_, logical_name, raw_value) in super::intake::parse_env_file(&path) {
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        for (_, logical_name, raw_value) in super::intake::parse_env_content(&path, &text) {
             sightings.push(EnvSighting {
                 source_id: source_id.clone(),
                 logical_name,
@@ -470,10 +519,17 @@ fn build_plan(
 
     let conn = store.connection();
     let existing_accounts = memcore::db::list_provider_accounts(conn)?;
-    let mut custody_target_index: HashMap<String, String> = HashMap::new();
+    // Every account holding custody of a target, not the last one read.
+    // `account_custody.custody_target` is not unique, so a map keyed by target
+    // would silently keep whichever row came last and hand the planner an
+    // identity decision made by row order.
+    let mut custody_target_index: HashMap<String, Vec<String>> = HashMap::new();
     for account in &existing_accounts {
         if let Some(custody) = memcore::db::get_account_custody(conn, &account.account_id)? {
-            custody_target_index.insert(custody.custody_target.clone(), account.account_id.clone());
+            custody_target_index
+                .entry(custody.custody_target.clone())
+                .or_default()
+                .push(account.account_id.clone());
         }
     }
 
@@ -556,7 +612,12 @@ fn build_plan(
         )?;
 
         match existing {
-            Some(account) => {
+            // The recorded state does not say which account this is, and a
+            // planner that cannot tell must not decide: creating an account
+            // here would mint a duplicate identity *because* the world was
+            // already ambiguous. The advisory is the whole output.
+            AccountResolution::Ambiguous => continue,
+            AccountResolution::Existing(account) => {
                 bound_accounts.insert(
                     account.account_id.clone(),
                     AccountBinding {
@@ -602,7 +663,7 @@ fn build_plan(
                     });
                 }
             }
-            None => {
+            AccountResolution::Fresh => {
                 let account_id = memcore::mint_account_id();
                 actions.push(AccountAction::CreateAccount {
                     account: Box::new(PlannedAccount {
@@ -679,40 +740,80 @@ fn pick_custody_credential(group: &[VaultCredential]) -> &VaultCredential {
         })
 }
 
-/// The persisted account this credential group belongs to, if any.
+/// Which persisted account a credential group is — or that the record does not
+/// say.
+///
+/// Three answers, not two, because "no account is this one" and "the recorded
+/// state cannot tell me which account this is" must not collapse: both would
+/// otherwise arrive at the caller as `None`, and the caller's answer to `None`
+/// is to mint a new account.
+enum AccountResolution {
+    /// This group is that recorded account. Boxed because the payload dwarfs
+    /// the other two variants.
+    Existing(Box<memcore::ProviderAccount>),
+    /// Nothing recorded carries this credential yet; it is a new account.
+    Fresh,
+    /// The record is ambiguous. Plan nothing for this group and say so.
+    Ambiguous,
+}
+
+/// The persisted account this credential group belongs to, if the record says.
 ///
 /// Fingerprint evidence first — that is identity. Custody target second, which
 /// is the rotation case: the same Vault object, new key material, so the
-/// account is the same account and its fingerprint is what moves. Two accounts
-/// carrying one fingerprint is reported and never guessed at.
+/// account is the same account and its fingerprint is what moves. Ambiguity on
+/// either axis is reported and never guessed at — and, just as load-bearing, is
+/// never answered by minting a second identity.
 fn resolve_existing_account(
     conn: &rusqlite::Connection,
     account_fingerprint: &str,
     custody_logical_name: &str,
-    custody_target_index: &HashMap<String, String>,
+    custody_target_index: &HashMap<String, Vec<String>>,
     advisories: &mut Vec<Advisory>,
-) -> Result<Option<memcore::ProviderAccount>, Box<dyn std::error::Error>> {
+) -> Result<AccountResolution, Box<dyn std::error::Error>> {
     let by_fingerprint =
         memcore::db::find_provider_accounts_by_fingerprint(conn, account_fingerprint)?;
     match by_fingerprint.len() {
-        1 => return Ok(Some(by_fingerprint.into_iter().next().expect("len == 1"))),
+        1 => {
+            return Ok(AccountResolution::Existing(Box::new(
+                by_fingerprint.into_iter().next().expect("len == 1"),
+            )))
+        }
         0 => {}
         _ => {
             advisories.push(Advisory {
                 code: "ambiguous_account_fingerprint".to_string(),
                 subject: account_fingerprint.to_string(),
                 detail: "more than one account carries this fingerprint; reconcile plans nothing \
-                         for it rather than picking one"
+                         for it rather than picking one, and never resolves the ambiguity by \
+                         minting a further account"
                     .to_string(),
             });
-            return Ok(None);
+            return Ok(AccountResolution::Ambiguous);
         }
     }
 
-    let Some(account_id) = custody_target_index.get(custody_logical_name) else {
-        return Ok(None);
+    let Some(account_ids) = custody_target_index.get(custody_logical_name) else {
+        return Ok(AccountResolution::Fresh);
     };
-    Ok(memcore::db::get_provider_account(conn, account_id)?)
+    match account_ids.as_slice() {
+        [] => Ok(AccountResolution::Fresh),
+        [account_id] => Ok(match memcore::db::get_provider_account(conn, account_id)? {
+            Some(account) => AccountResolution::Existing(Box::new(account)),
+            None => AccountResolution::Fresh,
+        }),
+        _ => {
+            advisories.push(Advisory {
+                code: "ambiguous_custody_target".to_string(),
+                subject: custody_logical_name.to_string(),
+                detail: "more than one account holds custody of this Vault object; reconcile \
+                         plans nothing for it rather than picking whichever custody row it read \
+                         last"
+                    .to_string(),
+            });
+            Ok(AccountResolution::Ambiguous)
+        }
+    }
 }
 
 fn alias_source_kind(alias_name: &str, group: &[VaultCredential]) -> String {

@@ -190,6 +190,17 @@ pub(super) fn parse_env_file(path: &Path) -> Vec<(PathBuf, String, String)> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
+    parse_env_content(path, &raw)
+}
+
+/// Parse env-file text the caller already holds, attributing it to `path`.
+///
+/// Split out of [`parse_env_file`] for the one caller that must *bind* what it
+/// read: `reconcile` hashes the source bytes into the plan, and re-opening the
+/// path to parse it would mean the digest and the actions can come from two
+/// different versions of the file. This function opens nothing — `path` is a
+/// label here, not a source.
+pub(super) fn parse_env_content(path: &Path, raw: &str) -> Vec<(PathBuf, String, String)> {
     raw.lines()
         .filter_map(|raw_line| {
             let line = raw_line.trim();
@@ -1063,6 +1074,30 @@ mod tests {
 
         assert_eq!(candidate(&rows, "DOUBLE_QUOTED").fingerprint, unquoted);
         assert_eq!(candidate(&rows, "SINGLE_QUOTED").fingerprint, unquoted);
+    }
+
+    /// `parse_env_content` parses the bytes handed to it and opens nothing.
+    ///
+    /// That is what lets `reconcile` bind a source digest honestly: it hashes
+    /// the bytes once and parses *those* bytes, so the actions in a plan and
+    /// the SHA the plan carries can never describe two different versions of
+    /// the file. The on-disk contents here disagree with the caller's bytes on
+    /// purpose — if this function ever re-read the path, the assertion below
+    /// would see the disk.
+    #[test]
+    fn vault_intake_parse_env_content_uses_the_callers_bytes_and_never_reopens_the_path() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(".env");
+        write_file(&path, "ON_DISK_API_KEY=from-disk\n");
+
+        let parsed = parse_env_content(&path, "IN_HAND_API_KEY=from-hand\n");
+
+        let pairs: Vec<(&str, &str)> = parsed
+            .iter()
+            .map(|(_, name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(pairs, vec![("IN_HAND_API_KEY", "from-hand")]);
+        assert_eq!(parsed[0].0, path, "the path stays the attribution label");
     }
 
     #[test]
