@@ -21,9 +21,20 @@ license = "AGPL-3.0-only"
 # `portable-kernel` facade crate, which disables `admin` by default.
 [features]
 default = ["admin"]
-admin = []
+# `dep:blake2` rather than a bare dependency: the fingerprints in
+# `vault::fingerprint` (tachi#1680 D2) need a *keyed* hash, and `sha2` — this
+# crate's only hash family, deliberately so per `store::outbox`'s note — cannot
+# produce a MAC without also pulling in `hmac`. Scoping it to `admin` keeps the
+# portable kernel on exactly one hash family, which is what that note was
+# protecting; a portable build resolves no `blake2` at all.
+admin = ["dep:blake2"]
 
 [dependencies]
+# Keyed-hash (MAC) primitive for tachi#1680's credential fingerprints. Optional
+# and enabled only by `admin` — see the feature comment above. blake2 0.10.6 is
+# already resolved in this workspace (tachi-server, tachi-llm, tachi-params), so
+# this adds no new crate to the build graph.
+blake2 = { version = "0.10", optional = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

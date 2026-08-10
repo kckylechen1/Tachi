@@ -1,5 +1,13 @@
 // vault.rs — encrypted secret storage types
 
+/// Provider-account metadata (tachi#1680): who a credential belongs to, as
+/// opposed to what the credential is. Sits beside [`VaultKeyHealth`] for the
+/// same reason that type does — it is vault-adjacent product data whose SQL
+/// lives in `db`.
+pub mod accounts;
+/// Keyed credential fingerprints (tachi#1680 D2).
+pub mod fingerprint;
+
 use serde::{Deserialize, Serialize};
 
 pub const SECRET_TYPE_API_KEY: &str = "api_key";
