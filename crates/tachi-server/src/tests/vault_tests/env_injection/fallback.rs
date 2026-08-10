@@ -18,13 +18,20 @@ use super::*;
 // convention for any test mutating ambient process env — see
 // `rotation.rs`/`child_policy.rs` — which this test was missing even under
 // its old unique sentinel name).
+//
+// codex NEEDS-FIXES OK-BUT-6: the raw `std::env::set_var`/`remove_var` pair
+// leaked `ZHIPUAI_API_KEY` into the process environment on panic (the
+// unconditional `remove_var` at the end never runs if an `.expect(...)`
+// above it fails). Switched to `crate::test_support::EnvRestore` (this
+// file's sibling `rotation.rs` already uses it) — its `Drop` impl restores
+// the prior value unconditionally, including on panic/early-return.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes process-wide env across async vault setup
 async fn vault_lock_preserves_env_provider_fallback() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("ZHIPUAI_API_KEY", "env-secret");
+    let _env = crate::test_support::EnvRestore::set("ZHIPUAI_API_KEY", "env-secret");
     let server = make_server();
 
     server
@@ -68,7 +75,8 @@ async fn vault_lock_preserves_env_provider_fallback() {
         Some("env-secret"),
         "locking vault must clear only vault overrides and preserve env fallback"
     );
-    std::env::remove_var("ZHIPUAI_API_KEY");
+    // `_env` (EnvRestore) restores/removes ZHIPUAI_API_KEY on drop, including
+    // on an earlier panic — no explicit remove_var needed or wanted here.
 }
 
 /// #1680/D3 default-deny discriminator (positive contract): a synthetic

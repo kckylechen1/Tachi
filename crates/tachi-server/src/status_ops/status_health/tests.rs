@@ -607,24 +607,69 @@ fn kimi_is_a_recognized_provider_env_name() {
     );
 }
 
-/// #1680/D3 env-injection regression: `admitted_env_secret_names()` (the
-/// surface that gates lane env injection, providers-doctor admission, and
-/// the plaintext secret scanner) must stay exactly as wide as the old,
-/// undivided `provider_api_key_env_names()` was — every `API_KEY_DEFS` key
-/// and every alias, with no class filtering. This is the guard that lane env
-/// injection behavior did not change: only the *materialization* allowlist
-/// (`model_provider_env_names()`) narrowed.
+/// #1680/D3 env-injection regression, codex NEEDS-FIXES BUG-3: the legacy
+/// comparison set below is a **hardcoded literal**, copied by hand from
+/// `git show 6800f09d:crates/tachi-server/src/status_ops/status_health/api_keys.rs`
+/// (the frozen base commit this whole PR branches from) — every primary key
+/// and every alias in that pre-#1680 `API_KEY_DEFS`, flattened. It is
+/// deliberately NOT derived from `HEAD`'s `API_KEY_DEFS` (that would let a
+/// regression prove itself correct by re-deriving its own expected answer
+/// from the same registry it just changed).
+///
+/// `admitted_env_secret_names()` (the surface that gates lane env injection,
+/// providers-doctor admission, and the plaintext secret scanner) is asserted
+/// to equal that frozen legacy set **plus exactly one new name**:
+/// `GOOGLE_SEARCH_API_KEY`. That growth is an intended, explicit consequence
+/// of this PR (#1680/D3: `GOOGLE_SEARCH_API_KEY` becomes its own independent
+/// SearchApi registry entry instead of being unreachable outside intake's
+/// old alias table) — not an accidental widening. If lane env injection ever
+/// admits anything beyond that one explicit addition, this test goes red.
 #[test]
-fn admitted_env_secret_names_matches_legacy_unsplit_flattened_set() {
-    let mut expected_legacy_set = HashSet::new();
-    for def in API_KEY_DEFS {
-        expected_legacy_set.insert(def.key.to_string());
-        for alias in def.aliases {
-            expected_legacy_set.insert((*alias).to_string());
-        }
-    }
+fn admitted_env_secret_names_matches_frozen_base_legacy_set_plus_google_search() {
+    let legacy_set_at_6800f09d: HashSet<String> = [
+        "VOYAGE_API_KEY",
+        "VOYAGE_RERANK_API_KEY",
+        "SILICONFLOW_API_KEY",
+        "EXTRACT_API_KEY",
+        "SUMMARY_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "DISTILL_API_KEY",
+        "REASONING_API_KEY",
+        "ZAI_API_KEY",
+        "BIGMODEL_API_KEY",
+        "XAI_API_KEY",
+        "GROK_API_KEY",
+        "ZHIPUAI_API_KEY",
+        "KIMI_API_KEY",
+        "MOONSHOT_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "EXA_API_KEY",
+        "TAVILY_API_KEY",
+        "MINIMAX_API_KEY",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(
+        legacy_set_at_6800f09d.len(),
+        22,
+        "the hardcoded legacy literal itself must have 22 unique names — a \
+         miscount here would silently weaken this discriminator"
+    );
 
-    assert_eq!(admitted_env_secret_names(), expected_legacy_set);
+    let mut expected_admitted_set = legacy_set_at_6800f09d.clone();
+    expected_admitted_set.insert("GOOGLE_SEARCH_API_KEY".to_string());
+
+    assert_eq!(
+        admitted_env_secret_names(),
+        expected_admitted_set,
+        "env-injection admitted set must grow by exactly GOOGLE_SEARCH_API_KEY \
+         over the frozen pre-#1680 base — no other name may appear or vanish"
+    );
+
     // And the narrowed materialization view must be a strict subset that
     // drops at least the SearchApi names — never equal to the admitted set,
     // or the split accomplished nothing.

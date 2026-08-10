@@ -47,13 +47,31 @@ pub(crate) fn admitted_provider_env_keys() -> HashSet<String> {
 /// `ModelApi`-class pool names before it reaches `tachi_llm`. `tachi-llm`'s
 /// signature and internals are untouched — the filter lives entirely on the
 /// tachi-server side of the existing closure seam.
+///
+/// codex NEEDS-FIXES BUG-1: a bare `allowed.contains(name)` check missed
+/// rotation-member-shaped pool keys. When a `*_API_KEY_N` name has no
+/// *configured* rotation row, `group_api_key_values_by_configured_rotations`
+/// (tachi-llm) does not fold it under its logical prefix — it stores the pool
+/// under the raw member name itself (e.g. `VOYAGE_API_KEY_2`), which never
+/// exact-matches `model_provider_env_names()`'s primary/alias names and would
+/// be wrongly dropped as if it were unregistered. Fix: reuse the exact same
+/// parsed-prefix primitive `doctor::secrets::is_provider_secret_name` already
+/// uses for this — `parse_rotation_member_name` — rather than hand-rolling a
+/// second parser. A member name is admitted iff its own name OR its parsed
+/// prefix is ModelApi-registered, so `VOYAGE_API_KEY_2` (prefix
+/// `VOYAGE_API_KEY`, ModelApi) survives while `TAVILY_API_KEY_2` (prefix
+/// `TAVILY_API_KEY`, SearchApi) is still rejected.
 pub(crate) fn filter_model_provider_pools(
     pools: HashMap<String, Vec<ProviderSecret>>,
 ) -> HashMap<String, Vec<ProviderSecret>> {
     let allowed = provider_env_keys();
     pools
         .into_iter()
-        .filter(|(name, _)| allowed.contains(name))
+        .filter(|(name, _)| {
+            allowed.contains(name)
+                || parse_rotation_member_name(name)
+                    .is_some_and(|(prefix, _)| allowed.contains(prefix))
+        })
         .collect()
 }
 
@@ -601,6 +619,131 @@ mod tests {
         assert!(
             filtered.contains_key("DEEPSEEK_API_KEY"),
             "a Vault-stored ModelApi key must still reach the LLM materialization pools: {filtered_keys:?}"
+        );
+    }
+
+    /// codex NEEDS-FIXES BUG-1: when a `*_API_KEY_N`-shaped name has no
+    /// *configured* rotation row, `group_api_key_values_by_configured_rotations`
+    /// (tachi-llm) does not fold it under its logical prefix — it stores the
+    /// pool under the raw member name itself (e.g. `VOYAGE_API_KEY_2`). A
+    /// bare exact-name lookup against `model_provider_env_names()` would
+    /// never match that raw member name and would wrongly drop a real
+    /// ModelApi credential. `filter_model_provider_pools` must also try the
+    /// name's parsed rotation prefix (the same primitive
+    /// `doctor::secrets::is_provider_secret_name` already uses for this
+    /// exact purpose).
+    #[test]
+    fn filter_model_provider_pools_admits_model_rotation_member_rejects_search_rotation_member() {
+        let vault_pools = HashMap::from([
+            (
+                "VOYAGE_API_KEY_2".to_string(),
+                vec![ProviderSecret {
+                    key_id: "VOYAGE_API_KEY_2".to_string(),
+                    value: "voyage-member".to_string(),
+                }],
+            ),
+            (
+                "TAVILY_API_KEY_2".to_string(),
+                vec![ProviderSecret {
+                    key_id: "TAVILY_API_KEY_2".to_string(),
+                    value: "tavily-member".to_string(),
+                }],
+            ),
+        ]);
+
+        let filtered = filter_model_provider_pools(vault_pools);
+        let filtered_keys: Vec<&str> = filtered.keys().map(String::as_str).collect();
+
+        assert!(
+            filtered.contains_key("VOYAGE_API_KEY_2"),
+            "a rotation-member-shaped ModelApi pool key (no configured rotation \
+             row, so it arrives as its own standalone pool key) must still be \
+             admitted via its parsed prefix: {filtered_keys:?}"
+        );
+        assert!(
+            !filtered.contains_key("TAVILY_API_KEY_2"),
+            "a rotation-member-shaped SearchApi pool key must still be rejected \
+             via its parsed prefix: {filtered_keys:?}"
+        );
+    }
+
+    /// codex NEEDS-FIXES BUG-2 (lock/readable asymmetry): the filter must
+    /// treat a rotation-configured pool (loaded as a prefix-keyed pool with
+    /// multiple `ProviderSecret` members — what a readable Vault with a
+    /// configured rotation row produces) and the same underlying credential
+    /// arriving unshaped by rotation config (member name used directly as
+    /// the standalone pool key — exactly what
+    /// `group_api_key_values_by_configured_rotations` produces when no
+    /// `vault_setup_rotation` row is visible for that prefix, which a
+    /// locked/Keychain-fallback read can observe) identically. The visible
+    /// set after filtering must not depend on which loading path produced
+    /// the map — BUG-1's fix (parsed-prefix fallback) makes both shapes
+    /// agree; this pins that agreement so it can't silently regress.
+    #[test]
+    fn filter_model_provider_pools_is_symmetric_across_rotation_configured_and_unconfigured_shapes()
+    {
+        // Shape A: rotation configured — the vault pool loader groups both
+        // members under the logical prefix key.
+        let rotation_configured = HashMap::from([
+            (
+                "VOYAGE_API_KEY".to_string(),
+                vec![
+                    ProviderSecret {
+                        key_id: "VOYAGE_API_KEY_1".to_string(),
+                        value: "voyage-a".to_string(),
+                    },
+                    ProviderSecret {
+                        key_id: "VOYAGE_API_KEY_2".to_string(),
+                        value: "voyage-b".to_string(),
+                    },
+                ],
+            ),
+            (
+                "TAVILY_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "TAVILY_API_KEY_1".to_string(),
+                    value: "tavily-a".to_string(),
+                }],
+            ),
+        ]);
+        // Shape B: no rotation row configured for either prefix — the loader
+        // stores each member under its own raw name instead (the shape a
+        // locked/Keychain-fallback read, or a readable Vault with no
+        // `vault_setup_rotation` row, actually produces).
+        let rotation_unconfigured = HashMap::from([
+            (
+                "VOYAGE_API_KEY_2".to_string(),
+                vec![ProviderSecret {
+                    key_id: "VOYAGE_API_KEY_2".to_string(),
+                    value: "voyage-b".to_string(),
+                }],
+            ),
+            (
+                "TAVILY_API_KEY_2".to_string(),
+                vec![ProviderSecret {
+                    key_id: "TAVILY_API_KEY_2".to_string(),
+                    value: "tavily-b".to_string(),
+                }],
+            ),
+        ]);
+
+        let filtered_configured = filter_model_provider_pools(rotation_configured);
+        let filtered_unconfigured = filter_model_provider_pools(rotation_unconfigured);
+        let unconfigured_keys: Vec<&str> =
+            filtered_unconfigured.keys().map(String::as_str).collect();
+
+        assert!(filtered_configured.contains_key("VOYAGE_API_KEY"));
+        assert!(!filtered_configured.contains_key("TAVILY_API_KEY"));
+        assert!(
+            filtered_unconfigured.contains_key("VOYAGE_API_KEY_2"),
+            "a ModelApi rotation member surfaced as a standalone pool key (the \
+             unconfigured-rotation shape) must survive filtering identically to \
+             the configured shape: {unconfigured_keys:?}"
+        );
+        assert!(
+            !filtered_unconfigured.contains_key("TAVILY_API_KEY_2"),
+            "a SearchApi rotation member must be rejected in the unconfigured \
+             shape exactly as its prefix-keyed pool would be: {unconfigured_keys:?}"
         );
     }
 
