@@ -202,48 +202,10 @@ pub(super) async fn handle_tachi_task_facade(
             );
             serde_json::to_string(&result).map_err(|e| format!("serialize adjudicate result: {e}"))
         }
-        TachiTaskAction::BuildReferences | TachiTaskAction::CloseLoop => {
-            let workflow_params = TachiWorkflowParams {
-                action: action.clone(),
-                issue_ref: params.issue_ref.clone(),
-                pr_ref: params.pr_ref.clone(),
-                doc_paths: params.doc_paths.clone(),
-                spec_paths: params.spec_paths.clone(),
-                related_issues: params.related_issues.clone(),
-                post_comment: None,
-                flow_id: params.flow_id.clone(),
-                notes: params.notes.clone(),
-                wiki_title: params.wiki_title.clone(),
-                wiki_text: params.wiki_text.clone(),
-                wiki_path: params.wiki_path.clone(),
-                wiki_topic: params.wiki_topic.clone(),
-                wiki_summary: params.wiki_summary.clone(),
-                wiki_category: params.wiki_category.clone(),
-                wiki_keywords: params.wiki_keywords.clone(),
-                wiki_entities: params.wiki_entities.clone(),
-                wiki_importance: params.wiki_importance,
-                wiki_scope: params.wiki_scope.clone(),
-                wiki_domain: params.wiki_domain.clone(),
-                project: params.project.clone(),
-                force: params.force,
-            };
-            let result = crate::workflow_closure::handle_workflow(server, workflow_params).await?;
-            if action == "close_loop" {
-                if let Some(flow_id) = params
-                    .flow_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|id| !id.is_empty())
-                {
-                    crate::task_lifecycle::mark_task_close_loop(flow_id, &result)?;
-                }
-            }
-            Ok(result)
-        } // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched above
-          // (#919 concern) — a new variant fails to compile here until it is
-          // explicitly routed, instead of silently returning "Invalid action" for
-          // a value that already deserialized successfully.
-    }?;
+    }?; // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched above
+        // (#919 concern) — a new variant fails to compile here until it is
+        // explicitly routed, instead of silently returning "Invalid action" for
+        // a value that already deserialized successfully.
     if action == "complete" && crate::facade_memory_ops::wants_full_format(params.format.as_deref())
     {
         return Ok(raw);

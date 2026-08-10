@@ -24,7 +24,7 @@ fn tachi_task_action_schema(
     // #1319-C2: worker launch/wait/cancel left Task; use tachi_staff instead.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. Route tuning lives on tachi_tune. action='brief' returns the feature-scoped handoff and layered source board; action='status'/'board' read existing worker state, while status also returns the lifecycle read model when flow_id, issue_ref, or pr_ref is supplied (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='intake' binds issues; action='build_references' prepares closure references; action='close_loop' writes wiki closure.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. GitHub PR lifecycle is tachi_gh only. Route tuning lives on tachi_tune. action='brief' returns the feature-scoped handoff and layered source board; action='status'/'board' read existing worker state, while status also returns the lifecycle read model when flow_id, issue_ref, or pr_ref is supplied (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='intake' binds issues.",
         generator,
     )
 }
@@ -35,14 +35,13 @@ fn tachi_task_action_schema(
 pub struct TachiTaskParams {
     /// Primary actions (F4 enum): intake, claim, heartbeat, handoff, release,
     /// board, status, complete, adjudicate, brief,
-    /// profiles, profile, card, build_references, close_loop.
+    /// profiles, profile, card.
     /// Worker launch/wait/cancel left Task in #1319-C2 — use
     /// tachi_staff(action='start'|'status') for worker lifecycle.
     /// action="intake" binds a GitHub issue to a flow.
     /// action="status" with flow_id/issue_ref/pr_ref is a read-only lifecycle model;
     /// dispatch_id takes precedence and preserves the flat status snapshot.
-    /// action="build_references" / "close_loop" close the issue loop.
-    /// GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note): use **tachi_gh only** (#757).
+    /// GitHub PR and closure lifecycle: use **tachi_gh only** (#757, #1713).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,
     /// Response shape: default JSON for agent automation, with two
@@ -92,11 +91,6 @@ pub struct TachiTaskParams {
         description = "Canonical docs to prioritize for task context and lifecycle records, e.g. docs/engineering/architecture/subagent-eval-system.md."
     )]
     pub doc_paths: Vec<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "Related GitHub issues/PRs for action='close_loop' or action='build_references'."
-    )]
-    pub related_issues: Vec<String>,
     #[serde(default)]
     #[schemars(
         description = "Canonical spec docs to prioritize for task context and lifecycle records. Kept separate from memory/wiki fragments."
@@ -160,8 +154,6 @@ pub struct TachiTaskParams {
     #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub quality_score: Option<f64>,
     /// [action=complete] Completion notes or summary.
-    /// [action=close_loop] When wiki_title/wiki_text are omitted and result.md
-    /// is missing, used as a draft source for the wiki body (#925).
     #[serde(default)]
     pub notes: Option<String>,
     /// [action=complete] Execution trajectory. Store compact step objects, not raw transcripts.
@@ -329,7 +321,7 @@ pub struct TachiTaskParams {
     pub pr_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Tachi flow id for feature-scoped artifacts, also linking a completion back to its flow (brief/intake/close_loop/status/complete)."
+        description = "Tachi flow id for feature-scoped artifacts, also linking a completion back to its flow (brief/intake/status/complete)."
     )]
     pub flow_id: Option<String>,
     /// [action=complete|status] Dispatch id linked to this task lifecycle event.
@@ -398,49 +390,6 @@ pub struct TachiTaskParams {
         description = "Explicit umbrella/no-close override for tachi_gh safe_merge/pr_status helpers shared via lifecycle field bags. Defaults false."
     )]
     pub allow_umbrella_close: bool,
-    // close_loop fields
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure entry title.")]
-    pub wiki_title: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure entry body text.")]
-    pub wiki_text: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure path, e.g. /wiki/....")]
-    pub wiki_path: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure topic label.")]
-    pub wiki_topic: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure short summary.")]
-    pub wiki_summary: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure category.")]
-    pub wiki_category: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure keywords/tags.")]
-    pub wiki_keywords: Vec<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure named entities.")]
-    pub wiki_entities: Vec<String>,
-    #[serde(
-        default,
-        deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
-    )]
-    #[schemars(
-        schema_with = "crate::coerce::opt_number_from_string_or_number_schema",
-        description = "[action=close_loop] Wiki closure importance 0.0-1.0."
-    )]
-    pub wiki_importance: Option<f64>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure scope: global or project.")]
-    pub wiki_scope: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure area/domain tag.")]
-    pub wiki_domain: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Bypass wiki noise filtering for action='close_loop'.")]
-    pub force: bool,
     // --- canonical WorkClaim fields (#1253) ---
     #[serde(default)]
     #[schemars(

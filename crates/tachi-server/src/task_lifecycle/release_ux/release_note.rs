@@ -230,7 +230,9 @@ pub(super) fn build_release_note_markdown(
     if spec_paths.is_empty() && doc_paths.is_empty() && verification.is_none() {
         body.push_str("- Keep this note as a draft until docs and verification are attached.\n");
     } else {
-        body.push_str("- Use `tachi_task(action='close_loop', ...)` to promote durable lessons after review.\n");
+        body.push_str(
+            "- Use `tachi_gh(action='close_loop', ...)` to promote durable lessons after review.\n",
+        );
     }
     body
 }

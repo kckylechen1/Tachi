@@ -188,7 +188,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_staff"
             | "tachi_orchestrator"
             | "tachi_verify"
-            | "tachi_workflow"
             | "tachi_gh"
             // #757 Cut3-S1 round-2 (review fixup): `tachi_sandbox` folds
             // `sandbox_set_rule`/`sandbox_set_policy` (both destructive:true

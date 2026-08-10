@@ -253,8 +253,23 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
     assert!(!actions.iter().any(|action| action == "dispatch"));
     assert_eq!(
         observed["canonical_action_inventories"]["tachi_gh"]["action_count"],
-        json!(18)
+        json!(19)
     );
+    assert!(!observed["registered_native_tools"]["tools"]
+        .as_array()
+        .expect("registered native tool names")
+        .iter()
+        .any(|tool| tool == "tachi_workflow"));
+    assert!(observed["profiles"]["coordinate"]["visible_tools"]
+        .as_array()
+        .expect("coordinate visible tools")
+        .iter()
+        .any(|tool| tool == "tachi_gh"));
+    assert!(!observed["profiles"]["delegate"]["visible_tools"]
+        .as_array()
+        .expect("delegate visible tools")
+        .iter()
+        .any(|tool| tool == "tachi_gh"));
     let properties = task.input_schema["properties"]
         .as_object()
         .expect("standard task properties");

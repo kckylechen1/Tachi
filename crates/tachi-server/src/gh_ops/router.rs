@@ -198,6 +198,25 @@ pub(crate) async fn handle_tachi_gh(
             Ok(out)
         }
         "ship" => handle_github_ship(server, &params).await,
+        "close_loop" => {
+            let dry_run = params.dry_run.unwrap_or(false);
+            let result = crate::workflow_closure::handle_close_loop(server, params.clone()).await?;
+            // The closure handler has completed the wiki write (and its
+            // pattern feedback/comment fan-out) before this marker is allowed
+            // to advance the lifecycle. Preview and failed closure paths never
+            // reach this branch.
+            if !dry_run {
+                if let Some(flow_id) = params
+                    .flow_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                {
+                    crate::task_lifecycle::mark_task_close_loop(flow_id, &result)?;
+                }
+            }
+            Ok(result)
+        }
         "link_pr" => {
             let task_params = lifecycle_task_params(&params)?;
             Box::pin(crate::task_lifecycle::handle_task_link_pr(
@@ -260,7 +279,7 @@ pub(crate) async fn handle_tachi_gh(
             Box::pin(handle_gh_handoff_repair(server, repo, number)).await
         }
         other => Err(format!(
-            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, issue_label, issue_freshness_scan, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, ship, link_pr, pr_status, pr_handoff, release_note, handoff_draft, handoff_publish, handoff_repair",
+            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, issue_label, issue_freshness_scan, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, ship, close_loop, link_pr, pr_status, pr_handoff, release_note, handoff_draft, handoff_publish, handoff_repair",
             other
         )),
     }?;
@@ -622,7 +641,7 @@ async fn handle_issue_freshness_scan(
 fn is_lifecycle_action(action: &str) -> bool {
     matches!(
         action,
-        "link_pr" | "pr_status" | "pr_handoff" | "release_note"
+        "link_pr" | "pr_status" | "pr_handoff" | "release_note" | "close_loop"
     )
 }
 
@@ -733,7 +752,7 @@ fn normalize_gh_response(action: &str, raw: &str, format: Option<&str>) -> Resul
 }
 
 /// Render a tachi_gh lifecycle response (`link_pr`/`pr_status`/`pr_handoff`/
-/// `release_note`) as markdown. `TachiGhParams::format` has advertised
+/// `release_note`/`close_loop`) as markdown. `TachiGhParams::format` has advertised
 /// `format="markdown"` for lifecycle actions since the field was added, but
 /// this path was never wired up — every response was JSON regardless of
 /// `format`. Field list matches what each lifecycle handler actually emits

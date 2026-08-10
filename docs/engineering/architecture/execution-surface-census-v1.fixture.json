@@ -3,7 +3,7 @@
   "issue": 1317,
   "observation": {
     "date": "2026-08-10",
-    "revision": "1811c5a7538cf406e436ca2f276367af0e56a72d",
+    "revision": "33540b686b7233a23e94991574b25b8e6d6fa21c",
     "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
   },
   "provisional_budgets": {
@@ -11,40 +11,40 @@
     "profiles": {
       "standard": {
         "max_visible_tools": 16,
-        "max_total_input_schema_bytes": 66342,
-        "max_total_tool_definition_bytes": 75629,
-        "rationale": "Post-#1540 daily-agent ceiling; any regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 65602,
+        "max_total_tool_definition_bytes": 75154,
+        "rationale": "Exact live observed #1713 census for standard; any regrowth requires explicit adjudication."
       },
       "delegate": {
         "max_visible_tools": 11,
-        "max_total_input_schema_bytes": 70354,
-        "max_total_tool_definition_bytes": 75830,
-        "rationale": "Post-#1540 managed-worker compatibility ceiling."
+        "max_total_input_schema_bytes": 67050,
+        "max_total_tool_definition_bytes": 72394,
+        "rationale": "Exact live observed #1713 census for delegate; any regrowth requires explicit adjudication."
       },
       "coordinate": {
-        "max_visible_tools": 39,
-        "max_total_input_schema_bytes": 127918,
-        "max_total_tool_definition_bytes": 145993,
-        "rationale": "Post-#1540 expert coordination ceiling after contracting tachi_shell to dispatch/status."
+        "max_visible_tools": 38,
+        "max_total_input_schema_bytes": 124607,
+        "max_total_tool_definition_bytes": 142557,
+        "rationale": "Exact live observed #1713 census for coordinate; any regrowth requires explicit adjudication."
       },
       "operate": {
         "max_visible_tools": 50,
-        "max_total_input_schema_bytes": 124047,
-        "max_total_tool_definition_bytes": 143144,
-        "rationale": "Post-#1540 runtime-adapter surface ceiling pending #1315 re-slice."
+        "max_total_input_schema_bytes": 120668,
+        "max_total_tool_definition_bytes": 139728,
+        "rationale": "Exact live observed #1713 census for operate; any regrowth requires explicit adjudication."
       },
       "admin": {
-        "max_visible_tools": 103,
-        "max_total_input_schema_bytes": 186408,
-        "max_total_tool_definition_bytes": 224016,
-        "rationale": "Post-#1540 full native compatibility ceiling; additions still require explicit classification. #1426 adds tachi_tune as an admin-only routed facade (102->103), ratified with the tuning-migration cutover."
+        "max_visible_tools": 102,
+        "max_total_input_schema_bytes": 182388,
+        "max_total_tool_definition_bytes": 219589,
+        "rationale": "Exact live observed #1713 census for admin; any regrowth requires explicit adjudication."
       }
     },
     "surfaces": {
       "standard.tachi_task": {
-        "max_top_level_properties": 79,
-        "max_input_schema_bytes": 27137,
-        "rationale": "Native-first task facade baseline re-pinned after [1712 C1b-1] folded three task actions; budget tracks observed with zero headroom so any property regrowth trips the named gate."
+        "max_top_level_properties": 66,
+        "max_input_schema_bytes": 25270,
+        "rationale": "Exact live observed #1713 tachi_task schema; zero headroom."
       },
       "standard.tachi_memory": {
         "max_top_level_properties": 68,
@@ -52,14 +52,14 @@
         "rationale": "Daily memory facade baseline under the facade-width review."
       },
       "standard.tachi_gh": {
-        "max_top_level_properties": 42,
-        "max_input_schema_bytes": 9311,
-        "rationale": "Daily GitHub/evidence facade baseline under the facade-width review."
+        "max_top_level_properties": 57,
+        "max_input_schema_bytes": 11983,
+        "rationale": "Exact live observed #1713 tachi_gh schema after close_loop relocation; zero headroom."
       },
       "admin.tachi_task": {
-        "max_top_level_properties": 79,
-        "max_input_schema_bytes": 28540,
-        "rationale": "Typed operator compatibility baseline re-pinned after [1712 C1b-1] folded three task actions; budget tracks observed with zero headroom."
+        "max_top_level_properties": 66,
+        "max_input_schema_bytes": 26550,
+        "rationale": "Exact live observed #1713 operator tachi_task schema; zero headroom."
       }
     }
   },
@@ -88,8 +88,9 @@
         ]
       },
       "tachi_gh": {
-        "action_count": 18,
+        "action_count": 19,
         "actions": [
+          "close_loop",
           "issue_comment",
           "issue_create",
           "issue_freshness_scan",
@@ -164,15 +165,13 @@
         ]
       },
       "tachi_task": {
-        "action_count": 15,
+        "action_count": 13,
         "actions": [
           "adjudicate",
           "board",
           "brief",
-          "build_references",
           "card",
           "claim",
-          "close_loop",
           "complete",
           "handoff",
           "heartbeat",
@@ -217,9 +216,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 184277,
-        "total_tool_definition_bytes": 221559,
-        "visible_tool_count": 103,
+        "total_input_schema_bytes": 182388,
+        "total_tool_definition_bytes": 219589,
+        "visible_tool_count": 102,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -304,7 +303,6 @@
           "tachi_wiki_organize",
           "tachi_wiki_search",
           "tachi_wiki_write",
-          "tachi_workflow",
           "update_card",
           "vault_get",
           "vault_init",
@@ -327,9 +325,9 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 126373,
-        "total_tool_definition_bytes": 144352,
-        "visible_tool_count": 39,
+        "total_input_schema_bytes": 124607,
+        "total_tool_definition_bytes": 142557,
+        "visible_tool_count": 38,
         "visible_tools": [
           "extract_facts",
           "hub_discover",
@@ -368,13 +366,12 @@
           "tachi_wiki_ingest",
           "tachi_wiki_search",
           "tachi_wiki_write",
-          "tachi_workflow",
           "wiki_search"
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 68885,
-        "total_tool_definition_bytes": 74229,
+        "total_input_schema_bytes": 67050,
+        "total_tool_definition_bytes": 72394,
         "visible_tool_count": 11,
         "visible_tools": [
           "peer_query",
@@ -391,8 +388,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 122522,
-        "total_tool_definition_bytes": 141582,
+        "total_input_schema_bytes": 120668,
+        "total_tool_definition_bytes": 139728,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
@@ -448,8 +445,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 64797,
-        "total_tool_definition_bytes": 74032,
+        "total_input_schema_bytes": 65602,
+        "total_tool_definition_bytes": 75154,
         "visible_tool_count": 16,
         "visible_tools": [
           "peer_query",
@@ -472,7 +469,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 103,
+      "tool_count": 102,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -557,7 +554,6 @@
         "tachi_wiki_organize",
         "tachi_wiki_search",
         "tachi_wiki_write",
-        "tachi_workflow",
         "update_card",
         "vault_get",
         "vault_init",
@@ -641,8 +637,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 28540,
-            "property_count": 79,
+            "input_schema_bytes": 26550,
+            "property_count": 66,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -672,7 +668,6 @@
               "expected_head",
               "feedback_rules_applied",
               "flow_id",
-              "force",
               "format",
               "include_global",
               "include_result",
@@ -689,7 +684,6 @@
               "profile",
               "project",
               "quality_score",
-              "related_issues",
               "release_reason",
               "repo",
               "risk",
@@ -710,17 +704,6 @@
               "trajectory",
               "transition_version",
               "verbose",
-              "wiki_category",
-              "wiki_domain",
-              "wiki_entities",
-              "wiki_importance",
-              "wiki_keywords",
-              "wiki_path",
-              "wiki_scope",
-              "wiki_summary",
-              "wiki_text",
-              "wiki_title",
-              "wiki_topic",
               "worktree",
               "worktree_path"
             ]
@@ -786,8 +769,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 27137,
-            "property_count": 79,
+            "input_schema_bytes": 25270,
+            "property_count": 66,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -817,7 +800,6 @@
               "expected_head",
               "feedback_rules_applied",
               "flow_id",
-              "force",
               "format",
               "include_global",
               "include_result",
@@ -834,7 +816,6 @@
               "profile",
               "project",
               "quality_score",
-              "related_issues",
               "release_reason",
               "repo",
               "risk",
@@ -855,17 +836,6 @@
               "trajectory",
               "transition_version",
               "verbose",
-              "wiki_category",
-              "wiki_domain",
-              "wiki_entities",
-              "wiki_importance",
-              "wiki_keywords",
-              "wiki_path",
-              "wiki_scope",
-              "wiki_summary",
-              "wiki_text",
-              "wiki_title",
-              "wiki_topic",
               "worktree",
               "worktree_path"
             ]
@@ -879,8 +849,8 @@
           "property_names": []
         },
         "tachi_gh": {
-          "input_schema_bytes": 9311,
-          "property_count": 42,
+          "input_schema_bytes": 11983,
+          "property_count": 57,
           "property_names": [
             "action",
             "allow_umbrella_close",
@@ -898,6 +868,7 @@
             "expect_branch",
             "files",
             "flow_id",
+            "force",
             "format",
             "issue_ref",
             "label_mode",
@@ -907,12 +878,15 @@
             "merge_strategy",
             "notes",
             "number",
+            "post_comment",
             "pr_base",
             "pr_body",
             "pr_ref",
             "pr_title",
+            "project",
             "reclaim_worktree",
             "refs",
+            "related_issues",
             "repo",
             "scan_limit",
             "since",
@@ -922,6 +896,17 @@
             "task",
             "tests_run",
             "title",
+            "wiki_category",
+            "wiki_domain",
+            "wiki_entities",
+            "wiki_importance",
+            "wiki_keywords",
+            "wiki_path",
+            "wiki_scope",
+            "wiki_summary",
+            "wiki_text",
+            "wiki_title",
+            "wiki_topic",
             "worktree",
             "write_digest"
           ]
@@ -1056,8 +1041,8 @@
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 27137,
-          "property_count": 79,
+          "input_schema_bytes": 25270,
+          "property_count": 66,
           "property_names": [
             "__tachi_project_explicit",
             "action",
@@ -1087,7 +1072,6 @@
             "expected_head",
             "feedback_rules_applied",
             "flow_id",
-            "force",
             "format",
             "include_global",
             "include_result",
@@ -1104,7 +1088,6 @@
             "profile",
             "project",
             "quality_score",
-            "related_issues",
             "release_reason",
             "repo",
             "risk",
@@ -1125,17 +1108,6 @@
             "trajectory",
             "transition_version",
             "verbose",
-            "wiki_category",
-            "wiki_domain",
-            "wiki_entities",
-            "wiki_importance",
-            "wiki_keywords",
-            "wiki_path",
-            "wiki_scope",
-            "wiki_summary",
-            "wiki_text",
-            "wiki_title",
-            "wiki_topic",
             "worktree",
             "worktree_path"
           ]

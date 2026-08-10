@@ -23,7 +23,7 @@ It is not a new workflow engine. The existing surfaces remain the write paths:
 - `tachi_verify` records required checks.
 - `tachi_gh(action="pr_status")` previews GitHub PR gates.
 - `tachi_gh(action="release_note")` writes release context.
-- `tachi_task(action="close_loop")` records the final issue/docs/wiki sink.
+- `tachi_gh(action="close_loop")` records the final issue/docs/wiki sink.
 - `tachi_gh(action="safe_merge")` remains the GitHub PR merge surface.
 
 `tachi_task(action="status", flow_id=...)` is the read-only projection across those artifacts; its cycle read model is nested under `status.cycle`.

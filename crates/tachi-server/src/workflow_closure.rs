@@ -1,6 +1,6 @@
 //! Issue → Doc → Memory closure helpers (#150).
 
-use crate::tool_params::{TachiWorkflowParams, WikiWriteParams};
+use crate::tool_params::{TachiGhParams, WikiWriteParams};
 use crate::MemoryServer;
 use serde_json::{json, Value};
 use tachi_llm::PersistedModelInvocationReceiptV1;
@@ -95,7 +95,7 @@ pub(crate) fn build_promotion_plan(issue_ref: &str, references: &[String]) -> Va
                 "destination": "wiki",
                 "layer": "wiki",
                 "authority": "advisory",
-                "tool": "tachi_task",
+                "tool": "tachi_gh",
                 "action": "close_loop",
                 "when": "project-specific durable lesson or decision after the work is complete"
             },
@@ -103,7 +103,7 @@ pub(crate) fn build_promotion_plan(issue_ref: &str, references: &[String]) -> Va
                 "destination": "guide",
                 "layer": "guide",
                 "authority": "playbook",
-                "tool": "tachi_task",
+                "tool": "tachi_gh",
                 "action": "close_loop",
                 "when": "reusable workflow/SOP lesson; pass wiki_path under /guide"
             },
@@ -363,206 +363,198 @@ fn close_loop_missing_draft_error(flow_id: Option<&str>, has_notes: bool) -> Str
     )
 }
 
-pub(crate) async fn handle_workflow(
+pub(crate) async fn handle_close_loop(
     server: &MemoryServer,
-    params: TachiWorkflowParams,
+    params: TachiGhParams,
 ) -> Result<String, String> {
-    let action = params.action.trim().to_ascii_lowercase();
-    match action.as_str() {
-        "close_loop" => {
-            let issue_ref = params
-                .issue_ref
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| "issue_ref is required for close_loop".to_string())?
-                .to_string();
-            let doc_paths = trimmed_nonempty_unique(&params.doc_paths);
-            let spec_paths = trimmed_nonempty_unique(&params.spec_paths);
-            // Resolve the wiki title/text. If either is omitted, draft it from
-            // the flow's result.md, then from notes (#925).
-            let explicit_title = params.wiki_title.clone().filter(|s| !s.trim().is_empty());
-            let explicit_text = params.wiki_text.clone().filter(|s| !s.trim().is_empty());
-            let mut auto_drafted = false;
-            let mut draft_source = "explicit";
-            let (title, text, model_invocation) =
-                match (explicit_title.clone(), explicit_text.clone()) {
-                    (Some(t), Some(x)) => (t, x, None),
-                    (maybe_t, maybe_x) => {
-                        let drafted = match params.flow_id.as_deref() {
-                            Some(fid) => draft_from_result(server, fid, &issue_ref).await,
-                            None => None,
-                        };
-                        let drafted = match drafted {
-                            Some(d) => Some(d),
-                            None => params
-                                .notes
-                                .as_deref()
-                                .and_then(|notes| draft_from_notes(notes, &issue_ref)),
-                        };
-                        match drafted {
-                            Some((dt, dx, src, invocation)) => {
-                                auto_drafted = maybe_t.is_none() || maybe_x.is_none();
-                                draft_source = src;
-                                (maybe_t.unwrap_or(dt), maybe_x.unwrap_or(dx), invocation)
-                            }
-                            None => {
-                                return Err(close_loop_missing_draft_error(
-                                    params.flow_id.as_deref(),
-                                    params
-                                        .notes
-                                        .as_deref()
-                                        .is_some_and(|n| !n.trim().is_empty()),
-                                ));
-                            }
-                        }
-                    }
-                };
+    let doc_paths = trimmed_nonempty_unique(&params.doc_paths);
+    let related_issues = trimmed_nonempty_unique(&params.related_issues);
+    let issue_ref = params.issue_ref.as_deref().unwrap_or("").trim().to_string();
+    let references = build_closure_references(&issue_ref, &doc_paths, &related_issues);
+    let promotion_plan = build_promotion_plan(&issue_ref, &references);
 
-            let references =
-                build_closure_references(&issue_ref, &doc_paths, &params.related_issues);
-            crate::wiki_ops::validate_references(&references)?;
-            let metadata = build_close_loop_metadata(
-                &issue_ref,
-                &doc_paths,
-                &params.related_issues,
-                params.wiki_path.as_deref(),
-                &references,
-            );
-            let promotion_plan = build_promotion_plan(&issue_ref, &references);
-
-            // Build the write-back comment BEFORE the wiki write moves `title`
-            // and `references` into WikiWriteParams.
-            let comment_body = build_closure_comment_body(
-                &title,
-                params.wiki_path.as_deref(),
-                &doc_paths,
-                &spec_paths,
-                &references,
-            );
-            let spec_advisory = spec_advisory(&spec_paths, &doc_paths);
-            let pattern_query = format!(
-                "{} {} {}",
-                title,
-                params.wiki_summary.as_deref().unwrap_or_default(),
-                text.chars().take(500).collect::<String>()
-            );
-
-            let wiki_params = WikiWriteParams {
-                title,
-                text,
-                path: params.wiki_path.clone(),
-                topic: params.wiki_topic.clone(),
-                summary: params.wiki_summary.clone(),
-                category: params
-                    .wiki_category
-                    .clone()
-                    .unwrap_or_else(|| "experience".to_string()),
-                keywords: params.wiki_keywords.clone(),
-                entities: params.wiki_entities.clone(),
-                importance: params.wiki_importance.unwrap_or(0.85),
-                scope: params
-                    .wiki_scope
-                    .clone()
-                    .unwrap_or_else(|| "global".to_string()),
-                retention_policy: "permanent".to_string(),
-                domain: params.wiki_domain.clone(),
-                project: params.project.clone(),
-                metadata: Some(metadata),
-                force: params.force,
-                references,
-                include_patterns: true,
-                pattern_query: Some(pattern_query),
-                pattern_top_k: Some(5),
-            };
-            let wiki_result = match model_invocation {
-                Some(invocation) => {
-                    crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
-                        server,
-                        wiki_params,
-                        invocation,
-                    )
-                    .await?
-                }
-                None => crate::copilot_ops::handle_tachi_wiki_write(server, wiki_params).await?,
-            };
-            let wiki_json =
-                serde_json::from_str::<Value>(&wiki_result).unwrap_or(json!(wiki_result));
-            let pattern_refs = wiki_json
-                .get("pattern_refs")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let pattern_feedback = if pattern_refs.is_empty() {
-                json!("skipped (no pattern refs attached)")
-            } else {
-                crate::continuity_ops::emit_pattern_feedback_for_refs(
-                    server,
-                    params.project.as_deref(),
-                    &pattern_refs,
-                    "hit",
-                    Some(&comment_body),
-                    Some("close_loop promoted a reviewed closure artifact that referenced this pattern"),
-                    "tachi_task.close_loop",
-                    json!({
-                        "source": "close_loop.pattern_refs",
-                        "issue_ref": issue_ref,
-                        "wiki_path": params.wiki_path,
-                    }),
-                )
-            };
-
-            // Write-back arc: post the closure comment to the source issue (and
-            // PR, if given). Best-effort — a GitHub outage never fails the wiki
-            // closure; the failure is recorded so the briefing can resurface it.
-            let post = params.post_comment.unwrap_or(true);
-            let issue_comment = if post {
-                post_closure_comment(server, &issue_ref, false, &comment_body).await
-            } else {
-                json!({ "posted": false, "reason": "post_comment=false" })
-            };
-            let pr_comment = match (post, params.pr_ref.as_deref()) {
-                (true, Some(pr)) if !pr.trim().is_empty() => {
-                    post_closure_comment(server, pr, true, &comment_body).await
-                }
-                _ => json!({ "posted": false, "reason": "no pr_ref or post_comment=false" }),
-            };
-
-            serde_json::to_string(&json!({
-                "ok": true,
-                "action": "close_loop",
-                "issue_ref": issue_ref,
-                "promotion_plan": promotion_plan,
-                "wiki": wiki_json,
-                "pattern_feedback": pattern_feedback,
-                "closure_actions": {
-                    "comment_body": comment_body,
-                    "issue_comment": issue_comment,
-                    "pr_comment": pr_comment,
-                    "spec_advisory": spec_advisory,
-                    "auto_drafted": auto_drafted,
-                    "draft_source": draft_source,
-                },
-            }))
-            .map_err(|e| format!("serialize close_loop: {e}"))
-        }
-        "build_references" => {
-            let issue_ref = params.issue_ref.as_deref().unwrap_or("");
-            let doc_paths = trimmed_nonempty_unique(&params.doc_paths);
-            let references =
-                build_closure_references(issue_ref, &doc_paths, &params.related_issues);
-            crate::wiki_ops::validate_references(&references)?;
-            let promotion_plan = build_promotion_plan(issue_ref, &references);
-            serde_json::to_string(&json!({
-                "references": references,
-                "promotion_plan": promotion_plan,
-            }))
-            .map_err(|e| format!("serialize build_references: {e}"))
-        }
-        other => Err(format!(
-            "Invalid workflow action '{other}'. Use close_loop or build_references."
-        )),
+    // Preview is deliberately side-effect free: it validates and returns the
+    // exact reference/promotion plan, before drafting, wiki writes, pattern
+    // feedback, comments, or flow markers can run.
+    if params.dry_run.unwrap_or(false) {
+        crate::wiki_ops::validate_references(&references)?;
+        return serde_json::to_string(&json!({
+            "ok": true,
+            "action": "close_loop",
+            "dry_run": true,
+            "references": references,
+            "promotion_plan": promotion_plan,
+        }))
+        .map_err(|e| format!("serialize close_loop preview: {e}"));
     }
+
+    let issue_ref = if issue_ref.is_empty() {
+        return Err("issue_ref is required for close_loop".to_string());
+    } else {
+        issue_ref
+    };
+    let spec_paths = trimmed_nonempty_unique(&params.spec_paths);
+    // Resolve the wiki title/text. If either is omitted, draft it from
+    // the flow's result.md, then from notes (#925).
+    let explicit_title = params.wiki_title.clone().filter(|s| !s.trim().is_empty());
+    let explicit_text = params.wiki_text.clone().filter(|s| !s.trim().is_empty());
+    let mut auto_drafted = false;
+    let mut draft_source = "explicit";
+    let (title, text, model_invocation) = match (explicit_title.clone(), explicit_text.clone()) {
+        (Some(t), Some(x)) => (t, x, None),
+        (maybe_t, maybe_x) => {
+            let drafted = match params.flow_id.as_deref() {
+                Some(fid) => draft_from_result(server, fid, &issue_ref).await,
+                None => None,
+            };
+            let drafted = match drafted {
+                Some(d) => Some(d),
+                None => params
+                    .notes
+                    .as_deref()
+                    .and_then(|notes| draft_from_notes(notes, &issue_ref)),
+            };
+            match drafted {
+                Some((dt, dx, src, invocation)) => {
+                    auto_drafted = maybe_t.is_none() || maybe_x.is_none();
+                    draft_source = src;
+                    (maybe_t.unwrap_or(dt), maybe_x.unwrap_or(dx), invocation)
+                }
+                None => {
+                    return Err(close_loop_missing_draft_error(
+                        params.flow_id.as_deref(),
+                        params
+                            .notes
+                            .as_deref()
+                            .is_some_and(|n| !n.trim().is_empty()),
+                    ));
+                }
+            }
+        }
+    };
+
+    let metadata = build_close_loop_metadata(
+        &issue_ref,
+        &doc_paths,
+        &related_issues,
+        params.wiki_path.as_deref(),
+        &references,
+    );
+
+    // Build the write-back comment BEFORE the wiki write moves `title`
+    // and `references` into WikiWriteParams.
+    let comment_body = build_closure_comment_body(
+        &title,
+        params.wiki_path.as_deref(),
+        &doc_paths,
+        &spec_paths,
+        &references,
+    );
+    let spec_advisory = spec_advisory(&spec_paths, &doc_paths);
+    let pattern_query = format!(
+        "{} {} {}",
+        title,
+        params.wiki_summary.as_deref().unwrap_or_default(),
+        text.chars().take(500).collect::<String>()
+    );
+
+    let wiki_params = WikiWriteParams {
+        title,
+        text,
+        path: params.wiki_path.clone(),
+        topic: params.wiki_topic.clone(),
+        summary: params.wiki_summary.clone(),
+        category: params
+            .wiki_category
+            .clone()
+            .unwrap_or_else(|| "experience".to_string()),
+        keywords: params.wiki_keywords.clone(),
+        entities: params.wiki_entities.clone(),
+        importance: params.wiki_importance.unwrap_or(0.85),
+        scope: params
+            .wiki_scope
+            .clone()
+            .unwrap_or_else(|| "global".to_string()),
+        retention_policy: "permanent".to_string(),
+        domain: params.wiki_domain.clone(),
+        project: params.project.clone(),
+        metadata: Some(metadata),
+        force: params.force,
+        references,
+        include_patterns: true,
+        pattern_query: Some(pattern_query),
+        pattern_top_k: Some(5),
+    };
+    let wiki_result = match model_invocation {
+        Some(invocation) => {
+            crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
+                server,
+                wiki_params,
+                invocation,
+            )
+            .await?
+        }
+        None => crate::copilot_ops::handle_tachi_wiki_write(server, wiki_params).await?,
+    };
+    let wiki_json = serde_json::from_str::<Value>(&wiki_result).unwrap_or(json!(wiki_result));
+    let pattern_refs = wiki_json
+        .get("pattern_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let pattern_feedback = if pattern_refs.is_empty() {
+        json!("skipped (no pattern refs attached)")
+    } else {
+        crate::continuity_ops::emit_pattern_feedback_for_refs(
+            server,
+            params.project.as_deref(),
+            &pattern_refs,
+            "hit",
+            Some(&comment_body),
+            Some("close_loop promoted a reviewed closure artifact that referenced this pattern"),
+            "tachi_gh.close_loop",
+            json!({
+                "source": "close_loop.pattern_refs",
+                "issue_ref": issue_ref,
+                "wiki_path": params.wiki_path,
+            }),
+        )
+    };
+
+    // Write-back arc: post the closure comment to the source issue (and
+    // PR, if given). Best-effort — a GitHub outage never fails the wiki
+    // closure; the failure is recorded so the briefing can resurface it.
+    let post = params.post_comment.unwrap_or(true);
+    let issue_comment = if post {
+        post_closure_comment(server, &issue_ref, false, &comment_body).await
+    } else {
+        json!({ "posted": false, "reason": "post_comment=false" })
+    };
+    let pr_comment = match (post, params.pr_ref.as_deref()) {
+        (true, Some(pr)) if !pr.trim().is_empty() => {
+            post_closure_comment(server, pr, true, &comment_body).await
+        }
+        _ => json!({ "posted": false, "reason": "no pr_ref or post_comment=false" }),
+    };
+
+    serde_json::to_string(&json!({
+        "ok": true,
+        "action": "close_loop",
+        "dry_run": false,
+        "issue_ref": issue_ref,
+        "promotion_plan": promotion_plan,
+        "wiki": wiki_json,
+        "pattern_feedback": pattern_feedback,
+        "closure_actions": {
+            "comment_body": comment_body,
+            "issue_comment": issue_comment,
+            "pr_comment": pr_comment,
+            "spec_advisory": spec_advisory,
+            "auto_drafted": auto_drafted,
+            "draft_source": draft_source,
+        },
+    }))
+    .map_err(|e| format!("serialize close_loop: {e}"))
 }
 
 #[cfg(test)]

@@ -59,6 +59,8 @@ fn task_action_retired_c1a(action: &str) -> bool {
             | "briefing"
             | "doc_index"
             | "cycle_status"
+            | "build_references"
+            | "close_loop"
     )
 }
 
@@ -212,13 +214,13 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
     let action = action.trim().to_ascii_lowercase();
     match tool_name {
         "tachi_task" => match action.as_str() {
-            "brief" | "status" | "board" | "profiles" | "profile" | "card" | "build_references" => {
+            "brief" | "status" | "board" | "profiles" | "profile" | "card" => {
                 Some(ToolBundle::Observe)
             }
             "complete" | "adjudicate" | "claim" | "release" | "heartbeat" => {
                 Some(ToolBundle::Remember)
             }
-            "dispatch" | "cancel" | "intake" | "close_loop" => Some(ToolBundle::Coordinate),
+            "dispatch" | "cancel" | "intake" => Some(ToolBundle::Coordinate),
             "handoff" => Some(ToolBundle::Coordinate),
             _ => None,
         },
@@ -281,7 +283,9 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             | "pr_review_digest"
             | "pr_status" => Some(ToolBundle::Observe),
             "issue_create" | "issue_comment" | "issue_label" | "pr_comment" | "safe_merge"
-            | "ship" | "link_pr" | "pr_handoff" | "release_note" => Some(ToolBundle::Coordinate),
+            | "ship" | "link_pr" | "pr_handoff" | "release_note" | "close_loop" => {
+                Some(ToolBundle::Coordinate)
+            }
             _ => None,
         },
         "tachi_event" => match action.as_str() {
@@ -775,5 +779,45 @@ mod tests {
             Some("doctor_scan"),
             Some(ToolProfile::delegate())
         ));
+    }
+
+    #[test]
+    fn f1713_close_loop_is_coordinate_and_delegate_denied() {
+        assert!(facade_action_allowed(
+            "tachi_gh",
+            Some("close_loop"),
+            Some(ToolProfile::coordinate())
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_gh",
+            Some("close_loop"),
+            Some(ToolProfile::delegate())
+        ));
+    }
+
+    #[test]
+    fn f1713_retired_task_closure_actions_are_unclassified_and_denied() {
+        for action in ["build_references", "close_loop"] {
+            assert_eq!(
+                facade_action_required_bundle("tachi_task", action),
+                None,
+                "retired Task closure action {action} must not have a bundle"
+            );
+            for profile in [
+                ToolProfile::delegate(),
+                ToolProfile::observe(),
+                ToolProfile::remember(),
+                ToolProfile::coordinate(),
+                ToolProfile::operate(),
+                ToolProfile::standard(),
+                ToolProfile::admin(),
+            ] {
+                assert!(
+                    !facade_action_allowed("tachi_task", Some(action), Some(profile)),
+                    "retired Task closure action {action} must be denied for {}",
+                    profile.as_str()
+                );
+            }
+        }
     }
 }
