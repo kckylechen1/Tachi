@@ -329,7 +329,7 @@ pub struct TachiTaskParams {
     pub pr_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Tachi flow id for feature-scoped artifacts, also linking a completion back to its flow (briefing/intake/close_loop/status/complete)."
+        description = "Tachi flow id for feature-scoped artifacts, also linking a completion back to its flow (brief/intake/close_loop/status/complete)."
     )]
     pub flow_id: Option<String>,
     /// [action=complete|status] Dispatch id linked to this task lifecycle event.

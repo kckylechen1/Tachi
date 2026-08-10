@@ -638,6 +638,8 @@ fn tachi_task_schema_descriptions_do_not_reference_removed_actions() {
         "action='doc_index'",
         "action=cycle_status",
         "action='cycle_status'",
+        "briefing/intake",
+        "briefing/intake/close_loop/status/complete",
     ] {
         assert!(
             !serialized.contains(stale),

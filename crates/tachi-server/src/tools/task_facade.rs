@@ -191,6 +191,19 @@ mod tests {
         serde_json::from_str(&json_str).expect("deserialize status params")
     }
 
+    fn make_fixed_status_server() -> (std::path::PathBuf, MemoryServer) {
+        let home = std::path::PathBuf::from("/tmp/tachi-1712-status-golden");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("global")).expect("create global dir");
+        let server = MemoryServer::new_with_home_for_test(
+            home.join("global").join("memory.db"),
+            None,
+            home.clone(),
+        )
+        .expect("server");
+        (home, server)
+    }
+
     fn write_input_required_run(
         runs_dir: &std::path::Path,
         dispatch_id: &str,
@@ -339,15 +352,31 @@ mod tests {
 
     #[tokio::test]
     async fn status_dispatch_id_precedes_cycle_selectors_without_byte_drift() {
-        let (tmp, server) = make_server_with_runs_dir();
-        let runs_dir = tmp.path().join("runs");
-        let dispatch_id = "test-dispatch-mixed-status";
+        // Literal response captured independently from exact base
+        // 16e11a1020bfa05b33c14c9bbe679b580d474992 using the fixed fixture
+        // below. This is deliberately not reconstructed from candidate code.
+        const BASE_STATUS_GOLDEN: &str = r##"{"action":"status","dispatch_id":"issue1712-base-status-golden","result":{"body":"# Stable status bytes\n","full_size_bytes":22,"full_size_chars":22,"truncated":false},"run_status":{"agent":"claude","dispatch_id":"issue1712-base-status-golden","exit_code":0,"state":"TASK_STATE_COMPLETED","updated_at":"2026-08-10T00:00:00Z"},"state":"TASK_STATE_COMPLETED","status":"ok","task":{"acpx":null,"acpx_events":null,"agent":"claude","closure_kind":null,"dispatch_id":"issue1712-base-status-golden","execution_backend":null,"exit_code":0,"flow_id":null,"harness_server_status":null,"harness_server_url":null,"harness_transport":null,"identity_receipt":null,"result_written":true,"run_dir":"/tmp/tachi-1712-status-golden/runs/issue1712-base-status-golden","source":"run","stale":false,"stale_reason":null,"state":"TASK_STATE_COMPLETED","state_source":"run","summary":null,"updated_at":"2026-08-10T00:00:00Z"},"terminal":true}"##;
+        let (home, server) = make_fixed_status_server();
+        let runs_dir = home.join("runs");
+        let dispatch_id = "issue1712-base-status-golden";
         write_fake_run(&runs_dir, dispatch_id, Some("# Stable status bytes\n"));
+        let status_path = runs_dir.join(dispatch_id).join("status.json");
+        std::fs::write(
+            status_path,
+            r#"{"dispatch_id":"issue1712-base-status-golden","agent":"claude","state":"TASK_STATE_COMPLETED","exit_code":0,"updated_at":"2026-08-10T00:00:00Z"}"#,
+        )
+        .expect("write deterministic status.json");
 
-        let baseline = status_params(dispatch_id, true);
-        let baseline_route = crate::tools::task_router::handle_tachi_task_facade(&server, baseline)
-            .await
-            .expect("flat status route should succeed");
+        let baseline_route = crate::tools::task_router::handle_tachi_task_facade(
+            &server,
+            status_params(dispatch_id, true),
+        )
+        .await
+        .expect("flat status route should succeed");
+        assert_eq!(
+            baseline_route, BASE_STATUS_GOLDEN,
+            "dispatch_id status response must retain exact base bytes and order"
+        );
 
         let mut mixed = status_params(dispatch_id, true);
         mixed.flow_id = Some("flow_should_not_select_cycle_view".to_string());
@@ -357,9 +386,10 @@ mod tests {
             .await
             .expect("dispatch_id must win over lifecycle selectors");
         assert_eq!(
-            mixed_route, baseline_route,
-            "adding flow/issue/PR selectors must not rebuild or wrap dispatch status bytes"
+            mixed_route, BASE_STATUS_GOLDEN,
+            "mixed selectors must preserve exact base dispatch status bytes"
         );
+        std::fs::remove_dir_all(home).expect("remove fixture home");
     }
 
     #[tokio::test]
