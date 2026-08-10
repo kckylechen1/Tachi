@@ -8,6 +8,10 @@ pub mod dispatch_adjudications;
 #[cfg(feature = "admin")]
 pub mod dispatch_outcomes;
 mod doctor_probe;
+/// tachi#1675 PR2: read-side unification of the dispatch and mirror eval
+/// spines (design D1). Read-only — it owns the join, never the policy.
+#[cfg(feature = "admin")]
+pub mod eval_projection;
 mod event_ledger;
 #[cfg(feature = "admin")]
 pub mod exec_env;
