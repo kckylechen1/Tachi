@@ -13,7 +13,7 @@
 use crate::db::vault_accounts::{
     get_account_custody, get_provider_account, insert_account_custody, insert_provider_account,
     list_provider_account_aliases, list_provider_account_events, list_provider_accounts,
-    record_provider_account_alias,
+    record_provider_account_alias, vault_pool_members_digest,
 };
 use crate::error::{MemoryError, ProviderPlanRefusal};
 use crate::vault::accounts::{
@@ -23,7 +23,7 @@ use crate::vault::accounts::{
 use crate::vault::apply::{
     plan_digest, AccountAction, AccountBinding, AliasSighting, BoundAccountPlan, CustodyBinding,
     MergeConfirmation, PlanBindings, PlanSourceDigests, PlannedAccount, SourceBinding,
-    VaultEntryBinding,
+    VaultEntryBinding, VaultPoolBinding,
 };
 use crate::vault::{VaultEntry, SECRET_TYPE_API_KEY};
 use crate::MemoryStore;
@@ -708,4 +708,65 @@ fn a_merge_into_a_missing_account_is_refused_with_zero_writes() {
     let err = apply(&mut store, &plan, &FixedSources::empty()).expect_err("missing merge target");
     assert_eq!(refusal(&err), ProviderPlanRefusal::UnknownAccount);
     assert_eq!(snapshot(&store), before, "refusal must write nothing");
+}
+
+/// A rotation pool binds its whole membership through one digest, so a member
+/// rewritten, added or dropped is drift — and the plan never had to name a
+/// member to say so.
+#[test]
+fn a_rewritten_pool_member_is_refused_with_zero_writes() {
+    let mut store = store();
+    seed_vault_entry(&store, "DEEPSEEK_API_KEY_1", "2026-08-01T00:00:00Z");
+    seed_vault_entry(&store, "DEEPSEEK_API_KEY_2", "2026-08-01T00:00:00Z");
+    seed_account(&store, ACCOUNT_A, AUTH_REF_A, "DEEPSEEK_API_KEY");
+
+    let planned_digest =
+        vault_pool_members_digest(store.connection(), "DEEPSEEK_API_KEY").expect("pool digest");
+    let plan = BoundAccountPlan {
+        bindings: PlanBindings {
+            vault_pools: vec![VaultPoolBinding {
+                prefix: "DEEPSEEK_API_KEY".to_string(),
+                members_digest: planned_digest.clone(),
+            }],
+            accounts: vec![AccountBinding {
+                account_id: ACCOUNT_A.to_string(),
+                revision: 1,
+                auth_ref: Some(AUTH_REF_A.to_string()),
+                credential_policy_ref: None,
+            }],
+            ..PlanBindings::default()
+        },
+        actions: vec![AccountAction::RecordFingerprint {
+            account_id: ACCOUNT_A.to_string(),
+            account_fingerprint: "fpa1:kv:eeeeeeeeeeee".to_string(),
+            event_kind: EVENT_KIND_FINGERPRINT_OBSERVED.to_string(),
+            evidence: "{}".to_string(),
+        }],
+    };
+
+    // No member is named anywhere in the plan — that is the point of the digest.
+    let encoded = serde_json::to_string(&plan).expect("encode plan");
+    assert!(
+        !encoded.contains("DEEPSEEK_API_KEY_1") && !encoded.contains("DEEPSEEK_API_KEY_2"),
+        "a plan must not carry rotation-pool member names: {encoded}"
+    );
+
+    // A third member appears (a rotation added a key).
+    seed_vault_entry(&store, "DEEPSEEK_API_KEY_3", "2026-08-09T00:00:00Z");
+    let before = snapshot(&store);
+    let err = apply(&mut store, &plan, &FixedSources::empty()).expect_err("pool membership drift");
+    assert_eq!(refusal(&err), ProviderPlanRefusal::VaultEntryDrift);
+    assert_eq!(snapshot(&store), before, "refusal must write nothing");
+
+    // The same plan against the membership it was built on still applies.
+    store
+        .vault_delete_entry("DEEPSEEK_API_KEY_3")
+        .expect("drop the added member");
+    assert_eq!(
+        vault_pool_members_digest(store.connection(), "DEEPSEEK_API_KEY").expect("pool digest"),
+        planned_digest,
+        "restoring the membership must restore the digest"
+    );
+    let report = apply(&mut store, &plan, &FixedSources::empty()).expect("plan applies");
+    assert!(report.changed);
 }

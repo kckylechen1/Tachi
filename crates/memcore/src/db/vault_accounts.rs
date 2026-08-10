@@ -187,6 +187,59 @@ pub fn list_provider_accounts(conn: &Connection) -> Result<Vec<ProviderAccount>,
     rows.into_iter().map(|row| row.parse()).collect()
 }
 
+/// Scheme prefix of a rotation-pool membership digest.
+pub const POOL_MEMBERS_DIGEST_SCHEME: &str = "vp1";
+
+/// Domain label, so a pool digest can never be confused with — or replayed as
+/// — any other SHA-256 this crate computes.
+const POOL_MEMBERS_DIGEST_DOMAIN: &[u8] = b"tachi.pool-binding.v1";
+
+/// A digest over a rotation pool's current membership: every
+/// `vault_entries` row that is a member of `prefix`, with its index, name and
+/// `updated_at`.
+///
+/// This is the value a plan binds instead of one timestamp per member
+/// ([`crate::vault::apply::VaultPoolBinding`] explains why: member indices are
+/// custody layout and a plan is a public surface). Computed here rather than in
+/// the plan builder so plan time and apply time are provably the same function
+/// — a second implementation on the verifying side is how a precondition
+/// quietly stops meaning what the planner meant.
+///
+/// Contains no secret material: names and timestamps only.
+pub fn vault_pool_members_digest(conn: &Connection, prefix: &str) -> Result<String, MemoryError> {
+    use sha2::{Digest, Sha256};
+
+    let mut stmt = conn.prepare("SELECT name, updated_at FROM vault_entries")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut members: Vec<(usize, String, String)> = Vec::new();
+    for row in rows {
+        let (name, updated_at) = row?;
+        if let Some(index) = crate::vault::api_key_pool_member_index(&name, prefix) {
+            members.push((index, name, updated_at));
+        }
+    }
+    members.sort();
+
+    let mut hasher = Sha256::new();
+    hasher.update(POOL_MEMBERS_DIGEST_DOMAIN);
+    hasher.update(prefix.as_bytes());
+    for (index, name, updated_at) in &members {
+        hasher.update([0u8]);
+        hasher.update(index.to_string().as_bytes());
+        hasher.update([0u8]);
+        hasher.update(name.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(updated_at.as_bytes());
+    }
+    Ok(format!(
+        "{POOL_MEMBERS_DIGEST_SCHEME}:{:x}",
+        hasher.finalize()
+    ))
+}
+
 /// Observe an env-var name for an account: insert it, or move `last_seen` (and
 /// un-retire it) if it is already known.
 ///

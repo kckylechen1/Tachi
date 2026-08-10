@@ -58,6 +58,9 @@ pub struct PlanBindings {
     /// Vault entries whose metadata the plan depended on.
     #[serde(default)]
     pub vault_entries: Vec<VaultEntryBinding>,
+    /// Rotation pools whose membership the plan depended on.
+    #[serde(default)]
+    pub vault_pools: Vec<VaultPoolBinding>,
     /// Accounts the plan's actions touch.
     #[serde(default)]
     pub accounts: Vec<AccountBinding>,
@@ -87,6 +90,29 @@ pub struct VaultEntryBinding {
     /// drift exactly as a changed timestamp is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+}
+
+/// A rotation pool and a digest of the membership the plan read.
+///
+/// # Why a digest and not a list of member timestamps
+///
+/// The obvious binding — one [`VaultEntryBinding`] per pool member — would put
+/// `DEEPSEEK_API_KEY_2` in the plan file, and member indices are exactly the
+/// custody layout `auth_ref` exists to keep off account surfaces (#1680 D5). A
+/// plan is an account surface: it is written to disk, read by an operator, and
+/// quite possibly pasted into a ticket.
+///
+/// So the plan carries the pool *prefix*, which is the same logical name the
+/// account's aliases already carry and leaks nothing, plus an opaque digest
+/// over the members' names and timestamps. Apply recomputes it from
+/// `vault_entries` inside its transaction. The digest is also a strictly
+/// stronger precondition than a list of timestamps would have been: a member
+/// added or removed changes it, and a per-name list could not have noticed a
+/// member that was not in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultPoolBinding {
+    pub prefix: String,
+    pub members_digest: String,
 }
 
 /// An existing account and the state the plan was decided against.

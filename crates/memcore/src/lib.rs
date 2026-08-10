@@ -243,7 +243,7 @@ pub use vault::accounts::{
 pub use vault::apply::{
     plan_digest, AccountAction, AccountBinding, AliasSighting, BoundAccountPlan, CustodyBinding,
     MergeConfirmation, NoPlanSources, PlanBindings, PlanSourceDigests, PlannedAccount,
-    SourceBinding, VaultEntryBinding, PLAN_DIGEST_SCHEME,
+    SourceBinding, VaultEntryBinding, VaultPoolBinding, PLAN_DIGEST_SCHEME,
 };
 #[cfg(feature = "admin")]
 pub use vault::fingerprint::{account_fingerprint_class, AccountFingerprintClass, FingerprintKey};

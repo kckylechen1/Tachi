@@ -40,8 +40,8 @@ use crate::db::vault_accounts::{
     append_provider_account_event, get_account_custody_by_auth_ref, get_provider_account,
     insert_account_custody, insert_provider_account, list_provider_account_aliases,
     record_account_fingerprint, record_provider_account_alias, retire_provider_account,
-    retire_provider_account_alias, update_custody_target, AccountRetirement, AliasObservation,
-    FingerprintUpdate,
+    retire_provider_account_alias, update_custody_target, vault_pool_members_digest,
+    AccountRetirement, AliasObservation, FingerprintUpdate,
 };
 use crate::error::{MemoryError, ProviderPlanRefusal};
 use crate::vault::accounts::{
@@ -150,6 +150,7 @@ fn apply_within(
     verify_plan_shape(plan)?;
     verify_sources(plan, sources)?;
     verify_vault_entries(tx, plan)?;
+    verify_vault_pools(tx, plan)?;
     verify_accounts(tx, plan)?;
     verify_custody(tx, plan)?;
 
@@ -440,6 +441,23 @@ fn verify_vault_entries(tx: &Transaction<'_>, plan: &BoundAccountPlan) -> Result
                     ),
                 )
             }
+        }
+    }
+    Ok(())
+}
+
+fn verify_vault_pools(tx: &Transaction<'_>, plan: &BoundAccountPlan) -> Result<(), MemoryError> {
+    for binding in &plan.bindings.vault_pools {
+        let current = vault_pool_members_digest(tx, &binding.prefix)?;
+        if current != binding.members_digest {
+            return refuse(
+                ProviderPlanRefusal::VaultEntryDrift,
+                format!(
+                    "rotation pool '{}' has different membership than the plan read \
+                     (a member was added, removed, or rewritten)",
+                    binding.prefix
+                ),
+            );
         }
     }
     Ok(())

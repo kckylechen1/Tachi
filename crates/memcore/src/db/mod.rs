@@ -238,7 +238,8 @@ pub use vault_accounts::{
     list_provider_account_aliases, list_provider_account_events, list_provider_accounts,
     record_account_fingerprint, record_provider_account_alias, resolve_auth_ref,
     retire_provider_account, retire_provider_account_alias, update_custody_target,
-    AccountRetirement, AliasObservation, FingerprintUpdate,
+    vault_pool_members_digest, AccountRetirement, AliasObservation, FingerprintUpdate,
+    POOL_MEMBERS_DIGEST_SCHEME,
 };
 #[cfg(feature = "admin")]
 pub use vault_db::{
