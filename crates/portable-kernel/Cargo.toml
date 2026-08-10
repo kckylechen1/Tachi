@@ -45,3 +45,8 @@ required-features = ["portable-contract-test"]
 name = "exact_dedupe_contract"
 path = "tests/exact_dedupe_contract.rs"
 required-features = ["portable-contract-test"]
+
+[[test]]
+name = "outbox_destination_apply_contract"
+path = "tests/outbox_destination_apply_contract.rs"
+required-features = ["portable-contract-test"]

@@ -228,6 +228,25 @@ pub struct NewOutboxEvent {
     pub payload_digest: String,
 }
 
+/// One durable destination-side apply receipt row (#1718).  This lower-layer
+/// row deliberately carries the storage token `application = 'applied'` only:
+/// a duplicate call returns the same immutable row and the store layer marks
+/// the *returned* receipt as `duplicate` without rewriting the ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutboxDestinationApplyReceiptRow {
+    pub event_id: String,
+    pub object_id: String,
+    pub source_store: String,
+    pub source_partition: String,
+    pub source_revision: i64,
+    pub source_payload_digest: String,
+    pub destination_store: String,
+    pub destination_partition: String,
+    pub destination_object_revision: i64,
+    pub destination_payload_digest: String,
+    pub application: String,
+}
+
 const OUTBOX_SELECT_COLUMNS: &str = "event_id, object_id, object_class, authority_class, \
      source_store, source_partition, source_revision, payload_digest, state, last_error_class, \
      created_at, state_changed_at";
@@ -398,6 +417,144 @@ pub(crate) fn refuse_non_canonical_digest(value: &str) -> Result<(), MemoryError
         )));
     }
     Ok(())
+}
+
+/// Validate the immutable fields of a claimed source event before a
+/// destination transaction opens.  A destination apply has no source-side
+/// outbox row to consult, so this is the shared lower-layer class/digest law
+/// that keeps the portable boundary from accepting a caller-defined token or
+/// a malformed digest.
+pub(crate) fn validate_destination_event_binding(
+    event: &OutboxEventRow,
+) -> Result<(), MemoryError> {
+    refuse_blank("event_id", &event.event_id)?;
+    refuse_reserved_successor_suffix("event_id", &event.event_id)?;
+    refuse_blank("object_id", &event.object_id)?;
+    refuse_blank("source_store", &event.source_store)?;
+    refuse_blank("source_partition", &event.source_partition)?;
+    refuse_invalid_class("object_class", &event.object_class)?;
+    refuse_invalid_class("authority_class", &event.authority_class)?;
+    refuse_reserved_resolved_class("object_class", &event.object_class)?;
+    refuse_reserved_resolved_class("authority_class", &event.authority_class)?;
+    refuse_non_canonical_digest(&event.payload_digest)?;
+    if event.source_revision < 1 {
+        return Err(MemoryError::InvalidArg(
+            "outbox event source_revision must be positive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+const DESTINATION_APPLY_RECEIPT_SELECT_COLUMNS: &str =
+    "event_id, object_id, source_store, source_partition, source_revision, \
+     source_payload_digest, destination_store, destination_partition, \
+     destination_object_revision, destination_payload_digest, application";
+
+fn row_to_destination_apply_receipt(
+    row: &rusqlite::Row<'_>,
+) -> Result<OutboxDestinationApplyReceiptRow, rusqlite::Error> {
+    Ok(OutboxDestinationApplyReceiptRow {
+        event_id: row.get(0)?,
+        object_id: row.get(1)?,
+        source_store: row.get(2)?,
+        source_partition: row.get(3)?,
+        source_revision: row.get(4)?,
+        source_payload_digest: row.get(5)?,
+        destination_store: row.get(6)?,
+        destination_partition: row.get(7)?,
+        destination_object_revision: row.get(8)?,
+        destination_payload_digest: row.get(9)?,
+        application: row.get(10)?,
+    })
+}
+
+/// Read one durable destination receipt.  The row is validated by the store
+/// layer against the object before it can be returned as a duplicate or used
+/// as conflict evidence; this function only decodes the exact ledger shape.
+pub(crate) fn read_outbox_destination_apply_receipt(
+    conn: &Connection,
+    event_id: &str,
+) -> Result<Option<OutboxDestinationApplyReceiptRow>, MemoryError> {
+    conn.query_row(
+        &format!(
+            "SELECT {DESTINATION_APPLY_RECEIPT_SELECT_COLUMNS}
+             FROM memory_outbox_destination_apply_receipts WHERE event_id = ?1"
+        ),
+        params![event_id],
+        row_to_destination_apply_receipt,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Insert one kernel-stamped `applied` receipt inside the caller's immediate
+/// transaction and read it back.  The helper refuses any other application
+/// token so no generic public state path can mint a fake duplicate or conflict
+/// row.
+pub(crate) fn insert_outbox_destination_apply_receipt_within_tx(
+    tx: &Transaction<'_>,
+    receipt: &OutboxDestinationApplyReceiptRow,
+) -> Result<OutboxDestinationApplyReceiptRow, MemoryError> {
+    refuse_blank("destination receipt event_id", &receipt.event_id)?;
+    refuse_blank("destination receipt object_id", &receipt.object_id)?;
+    refuse_blank("destination receipt source_store", &receipt.source_store)?;
+    refuse_blank(
+        "destination receipt source_partition",
+        &receipt.source_partition,
+    )?;
+    refuse_blank(
+        "destination receipt destination_store",
+        &receipt.destination_store,
+    )?;
+    refuse_blank(
+        "destination receipt destination_partition",
+        &receipt.destination_partition,
+    )?;
+    if receipt.source_revision < 1 || receipt.destination_object_revision < 1 {
+        return Err(MemoryError::InvalidArg(
+            "destination receipt revisions must be positive".to_string(),
+        ));
+    }
+    refuse_non_canonical_digest(&receipt.source_payload_digest)?;
+    refuse_non_canonical_digest(&receipt.destination_payload_digest)?;
+    if receipt.application != "applied" {
+        return Err(MemoryError::InvalidArg(
+            "destination receipt application must be 'applied'".to_string(),
+        ));
+    }
+    if read_outbox_destination_apply_receipt(tx, &receipt.event_id)?.is_some() {
+        return Err(MemoryError::Duplicate(format!(
+            "destination apply receipt for event '{}' already exists",
+            receipt.event_id
+        )));
+    }
+
+    tx.execute(
+        &format!(
+            "INSERT INTO memory_outbox_destination_apply_receipts \
+             ({DESTINATION_APPLY_RECEIPT_SELECT_COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+        ),
+        params![
+            receipt.event_id,
+            receipt.object_id,
+            receipt.source_store,
+            receipt.source_partition,
+            receipt.source_revision,
+            receipt.source_payload_digest,
+            receipt.destination_store,
+            receipt.destination_partition,
+            receipt.destination_object_revision,
+            receipt.destination_payload_digest,
+            receipt.application,
+        ],
+    )?;
+    read_outbox_destination_apply_receipt(tx, &receipt.event_id)?.ok_or_else(|| {
+        MemoryError::Internal(format!(
+            "destination apply receipt '{}' vanished between insert and readback",
+            receipt.event_id
+        ))
+    })
 }
 
 /// Read the destination object's current revision from inside the enqueueing
