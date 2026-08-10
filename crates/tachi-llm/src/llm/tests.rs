@@ -2,8 +2,8 @@
 
 use super::embedding::parse_voyage_batch_embeddings;
 use super::provider_health::{
-    ChatLane, ClaudeCliFailureKind, KeyAvailability, CLAUDE_CLI_FAILURE_COOLDOWN, HEALTH_OK,
-    HEALTH_RATE_LIMITED,
+    ChatLane, ClaudeCliFailureKind, KeyAvailability, CLAUDE_CLI_FAILURE_COOLDOWN,
+    HEALTH_AUTH_FAILED, HEALTH_OK, HEALTH_RATE_LIMITED,
 };
 use super::rerank::{
     non_empty_rerank_documents, voyage_rerank_request_body, RerankConfig, RerankProviderKind,
