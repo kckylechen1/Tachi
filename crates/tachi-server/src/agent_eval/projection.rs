@@ -12,11 +12,21 @@
 //! - the hard-gate candidate set, taken from the EXISTING risk classifier
 //!   (`admission/required/blocked`) so pruning happens before any scoring;
 //! - the `status.json` cross-check for the dispatch spine;
+//! - the LIVE route-policy revision, which it REPORTS next to the revisions
+//!   its evidence was recorded under and never applies to a row (tachi#1675
+//!   PR3 / spec correction 5: route rules are mutable, so a row is always
+//!   interpreted under the revision stamped with it);
 //! - the store read and the response shape.
 //!
 //! Every decision rule is in [`rules`], as a pure function of its inputs.
 
 mod rules;
+
+/// tachi#1675 PR3: the same projection, run over a full ledger REPLAY instead
+/// of the incremental read, must produce the same answer — and a route-policy
+/// rule written today must not change what yesterday's rows replay to.
+#[cfg(test)]
+mod replay_equivalence;
 
 use serde_json::{json, Value};
 
@@ -66,14 +76,36 @@ pub(crate) fn handle_route_projection(
     };
     let gates = eligible_candidate_set(&risk);
 
-    let observations = server.with_global_store_read(|store| {
-        memcore::list_eval_observations(store.connection(), &since, None, row_limit)
-            .map_err(|err| format!("route_projection: read eval ledger: {err}"))
+    let (observations, live_policy_source_revision) = server.with_global_store_read(|store| {
+        let observations =
+            memcore::list_eval_observations(store.connection(), &since, None, row_limit)
+                .map_err(|err| format!("route_projection: read eval ledger: {err}"))?;
+        // The LIVE route-policy revision, read in the SAME store checkout as
+        // the rows it is about to be compared against (the tachi#1675 BUG-8
+        // discipline): a hash taken from a separately-timed read could
+        // describe a policy state that never coexisted with this evidence.
+        // It is REPORTED, never applied — rows are always interpreted under
+        // the revision recorded with them (spec correction 5).
+        let route_policy_rows = store
+            .list_state(crate::dispatch_profile::ROUTE_POLICY_RULE_NS)
+            .map_err(|err| format!("route_projection: read live route policy: {err}"))?;
+        Ok((
+            observations,
+            crate::tune_ops::route_policy::route_policy_source_revision(&route_policy_rows),
+        ))
     })?;
     // A truncated read is a fact the consumer has to see: silently answering
     // from a capped slice of the window would be the projection overstating
     // what it looked at.
     let rows_truncated = observations.len() >= row_limit;
+    // Which recorded policy revisions this evidence actually spans. Computed
+    // from the rows themselves, by the same function the replay reader uses,
+    // so the live surface and a replay can never disagree about it.
+    let policy_revisions = memcore::policy_revision_census(&observations);
+    let evidence_spans_other_revisions = policy_revisions
+        .revisions
+        .keys()
+        .any(|revision| revision != &live_policy_source_revision);
 
     let rows = observations
         .into_iter()
@@ -135,6 +167,12 @@ pub(crate) fn handle_route_projection(
         "usable_rows": outcome.usable_rows,
         "quality_only_rows": outcome.quality_only_rows,
         "n_min_usable_rows": rules::N_MIN_USABLE_ROWS,
+        "policy_provenance": {
+            "live_policy_source_revision": live_policy_source_revision,
+            "evidence_policy_revisions": policy_revisions.revisions,
+            "rows_without_policy_revision": policy_revisions.rows_without_revision,
+            "evidence_spans_other_revisions": evidence_spans_other_revisions,
+        },
         "notes": [
             "latency is not_available for dispatch-spine rows: dispatch_outcomes has no \
              duration column (design D3 / codex finding 3); only mirror observations carry one",
@@ -143,6 +181,9 @@ pub(crate) fn handle_route_projection(
             "no-evidence resolves to abstain, never to a baseline MBIT fit (design D7)",
             "raw ledger rows stay independently inspectable; excluded_rows is a capped explain \
              list, not the source of truth",
+            "policy_provenance.live_policy_source_revision is REPORTED, never applied: every row \
+             is interpreted under the route-policy revision recorded with it, so a rule written \
+             after a row cannot re-score it (spec correction 5)",
         ],
     });
     serde_json::to_string(&payload).map_err(|err| format!("serialize route_projection: {err}"))

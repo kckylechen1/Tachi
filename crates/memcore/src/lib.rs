@@ -94,8 +94,8 @@ pub use db::dispatch_outcomes::{
 #[cfg(feature = "admin")]
 pub use db::eval_projection::{
     list_dispatch_eval_observations, list_eval_observations, list_mirror_eval_observations,
-    EvalAdjudicationFacts, EvalObservation, EvalRouteFacts, EvalSpine, ProfileAttributionBasis,
-    OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
+    policy_revision_census, EvalAdjudicationFacts, EvalObservation, EvalRouteFacts, EvalSpine,
+    PolicyRevisionCensus, ProfileAttributionBasis, OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
 };
 /// tachi#1675 PR3 (design D6): the replay half of the same read surface —
 /// the ledger folded forward from its append-only judgment log rather than

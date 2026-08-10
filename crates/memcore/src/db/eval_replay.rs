@@ -55,8 +55,9 @@ use crate::error::MemoryError;
 
 use super::eval_projection::{
     candidate_profiles_from_value, dispatch_observation, list_dispatch_subject_rows,
-    list_mirror_subject_rows, mirror_observation, sort_observations_newest_first,
-    EvalAdjudicationFacts, EvalObservation, EvalRouteFacts, EvalSpine,
+    list_mirror_subject_rows, mirror_observation, policy_revision_census,
+    sort_observations_newest_first, EvalAdjudicationFacts, EvalObservation, EvalRouteFacts,
+    EvalSpine,
 };
 use super::route_eval::{
     get_route_recommendation, list_eval_rubric_scores, list_route_decisions, EvalRubricScoreRow,
@@ -187,23 +188,15 @@ pub fn replay_eval_observations(
 
     sort_observations_newest_first(&mut observations, limit);
 
-    let mut policy_revisions: BTreeMap<String, usize> = BTreeMap::new();
-    let mut rows_without_policy_revision = 0usize;
-    for observation in &observations {
-        match observation
-            .route
-            .as_ref()
-            .and_then(|route| route.policy_source_revision.as_deref())
-        {
-            Some(revision) => *policy_revisions.entry(revision.to_string()).or_insert(0) += 1,
-            None => rows_without_policy_revision += 1,
-        }
-    }
+    // Same census the live projection publishes over its incremental read —
+    // one function, so the two surfaces can never disagree about which policy
+    // states a body of evidence was recorded under.
+    let census = policy_revision_census(&observations);
 
     Ok(EvalReplay {
         observations,
-        policy_revisions,
-        rows_without_policy_revision,
+        policy_revisions: census.revisions,
+        rows_without_policy_revision: census.rows_without_revision,
         judgment_events_applied,
         corrected_subjects,
         ordering_basis: REPLAY_ORDERING_BASIS,

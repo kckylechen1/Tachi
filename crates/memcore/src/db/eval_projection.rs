@@ -640,6 +640,42 @@ pub fn list_mirror_eval_observations(
     Ok(out)
 }
 
+/// Which recorded route-policy revisions a set of rows was interpreted under
+/// (tachi#1675 PR3 / spec correction 5).
+///
+/// Route-policy rules live in a MUTABLE key-value table, so "this evidence is
+/// replayable" is only true if each row carries the content-bearing policy
+/// snapshot hash that was live when its recommendation was made. This census
+/// is how a reader sees which policy states its evidence actually spans —
+/// and, next to the LIVE revision, whether the rules have moved underneath it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicyRevisionCensus {
+    /// Recorded `policy_source_revision` → number of rows carrying it.
+    pub revisions: std::collections::BTreeMap<String, usize>,
+    /// Rows with no recorded revision at all: an `unadvised` acceptance, a
+    /// decision whose recommendation row is gone, or a mirror row (which
+    /// structurally has neither). Counted, never defaulted to the live one.
+    pub rows_without_revision: usize,
+}
+
+/// Census the recorded policy revisions of a row set. A pure function of the
+/// rows — deliberately no store handle, so it can never reach for the live
+/// route-policy state to fill a gap.
+pub fn policy_revision_census(rows: &[EvalObservation]) -> PolicyRevisionCensus {
+    let mut census = PolicyRevisionCensus::default();
+    for row in rows {
+        match row
+            .route
+            .as_ref()
+            .and_then(|route| route.policy_source_revision.as_deref())
+        {
+            Some(revision) => *census.revisions.entry(revision.to_string()).or_insert(0) += 1,
+            None => census.rows_without_revision += 1,
+        }
+    }
+    census
+}
+
 /// The ONE total order both read paths publish rows in: newest first, ties
 /// broken by `(spine, subject_id)` so the same data always yields the same
 /// row sequence, then capped at `limit` overall.
