@@ -162,9 +162,9 @@ fn the_response_corpus_reaches_every_outcome_and_every_completion_kind() {
 
     assert!(completed >= 5 && rejected >= 3 && violated >= 4,
         "outcome coverage is lopsided: {completed} completed / {rejected} rejected / {violated} violations");
-    for kind in CompletionKindV1::ALL.iter().copied() {
+    for kind in CompletionKindV1::ALL {
         assert!(
-            kinds.contains(&kind),
+            kinds.contains(kind),
             "no response fixture produces completion kind {kind:?}"
         );
     }

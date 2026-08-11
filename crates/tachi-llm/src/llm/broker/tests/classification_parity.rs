@@ -450,15 +450,15 @@ fn the_corpus_covers_every_error_class_and_every_advice() {
             seen_advice.push(classified.advice);
         }
     }
-    for class in ProviderErrorClass::ALL.iter().copied() {
+    for class in ProviderErrorClass::ALL {
         assert!(
-            seen_classes.contains(&class),
+            seen_classes.contains(class),
             "no classification fixture produces {class:?}"
         );
     }
-    for advice in RetryAdvice::ALL.iter().copied() {
+    for advice in RetryAdvice::ALL {
         assert!(
-            seen_advice.contains(&advice),
+            seen_advice.contains(advice),
             "no classification fixture produces {advice:?}"
         );
     }

@@ -273,6 +273,7 @@ fn response_format_value(format: &ResponseFormat) -> Option<Value> {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn sampling_fields(
     sampling: &SamplingParams,
 ) -> (
