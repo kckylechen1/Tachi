@@ -55,6 +55,8 @@ mod search_ops;
 mod stats_ops;
 mod surface_ops;
 mod tier;
+#[cfg(feature = "admin")]
+mod vault_accounts_ops;
 mod vec_archived_overfetch;
 mod write_ops;
 

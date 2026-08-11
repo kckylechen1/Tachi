@@ -104,13 +104,28 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
             endpoint: Some("https://api.siliconflow.cn/v1/models"),
         }),
     },
+    // #1680/D2: `REASONING_API_KEY` used to sit in this alias list as well,
+    // which made it the one env-var name in the registry that resolved to two
+    // provider families — "deepseek" through this row, "zai" through its own
+    // row below (whose accepted aliases are `ZAI_API_KEY`/`BIGMODEL_API_KEY`,
+    // and which is how the shipped configs actually use the name:
+    // `${vault:ZAI_API_KEY|BIGMODEL_API_KEY|REASONING_API_KEY}` in
+    // `builtins::mcp`). `aliases` here means "another name for this account",
+    // which is what `provider_kind` and D2's `fp1` are keyed by; it is not the
+    // lane resolver's fallback chain. That chain
+    // (DEEPSEEK → REASONING → ZAI → …) lives in
+    // `tachi_llm::llm::provider_health::config` and is unchanged — a reasoning
+    // lane still falls back to a Z.AI secret, it just no longer claims the
+    // DeepSeek *account* is configured because a Z.AI key exists.
+    // `DISTILL_API_KEY` stays: it is genuinely the same DeepSeek family
+    // (its own row also declares `provider_kind: "deepseek"`).
     ApiKeyDef {
         key: "DEEPSEEK_API_KEY",
         label: "DeepSeek OpenAI-compatible LLM",
         required: false,
         deprecated: false,
         canonical_key: "DEEPSEEK_API_KEY",
-        aliases: &["DISTILL_API_KEY", "REASONING_API_KEY"],
+        aliases: &["DISTILL_API_KEY"],
         class: KeyClass::ModelApi,
         provider_kind: "deepseek",
         probe: Some(ProbeDescriptor {

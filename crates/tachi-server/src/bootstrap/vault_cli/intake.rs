@@ -330,12 +330,12 @@ fn is_config_name(name: &str) -> bool {
 /// below).
 ///
 /// A name resolves to the `ApiKeyDef` it is the *canonical key* of first
-/// (never shadowed by an unrelated entry that happens to list it as a
-/// fallback alias — e.g. `REASONING_API_KEY` is both an alias of
-/// `DEEPSEEK_API_KEY`'s entry and the canonical key of its own entry;
-/// canonical-key match wins), falling back to the entry whose `aliases`
-/// contains it. An entry with no aliases has no family (nothing to flag as
-/// an advisory merge candidate). The family label is a deterministic,
+/// (never shadowed by another entry that happens to list it as an alias —
+/// e.g. `ZAI_API_KEY` is both the canonical key of its own entry and an alias
+/// of `REASONING_API_KEY`'s entry, and canonical-key match wins, so its family
+/// is `"zai/bigmodel"` rather than the reasoning entry's wider group),
+/// falling back to the entry whose `aliases` contains it. An entry with no
+/// aliases has no family (nothing to flag as an advisory merge candidate). The family label is a deterministic,
 /// order-independent function of the entry's own key + aliases (descending
 /// alphabetical join), which reproduces the exact pre-existing labels for
 /// both groups the old hand-curated table covered

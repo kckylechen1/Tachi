@@ -57,6 +57,8 @@ mod stats_gc;
 pub mod store_identity;
 pub mod store_profile;
 #[cfg(feature = "admin")]
+pub mod vault_accounts;
+#[cfg(feature = "admin")]
 mod vault_db;
 #[cfg(feature = "admin")]
 mod virtual_capability;
@@ -249,6 +251,15 @@ pub use stats_gc::{
 pub use store_identity::StoreIdentity;
 pub use store_profile::{
     StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
+};
+#[cfg(feature = "admin")]
+pub use vault_accounts::{
+    append_provider_account_event, find_provider_account_by_auth_ref,
+    find_provider_accounts_by_fingerprint, get_account_custody, get_account_custody_by_auth_ref,
+    get_provider_account, insert_account_custody, insert_provider_account,
+    list_provider_account_aliases, list_provider_account_events, list_provider_accounts,
+    record_account_fingerprint, record_provider_account_alias, resolve_auth_ref,
+    retire_provider_account_alias, update_custody_target, AliasObservation, FingerprintUpdate,
 };
 #[cfg(feature = "admin")]
 pub use vault_db::{

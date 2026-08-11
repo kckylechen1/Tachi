@@ -137,6 +137,14 @@ pub enum MemoryError {
     #[error("WorkClaim incompatible state: {0}")]
     WorkClaimIncompatibleState(String),
 
+    /// tachi#1680: a `provider_accounts` or `account_custody` write lost its
+    /// compare-and-swap against the revision it read. Typed rather than a
+    /// generic `Internal` string because the correct response is specific —
+    /// re-read, re-plan, retry — and because #1680 D4's apply must be able to
+    /// turn exactly this into a drift refusal without sniffing a message.
+    #[error("provider account revision conflict: {0}")]
+    ProviderAccountRevisionConflict(String),
+
     /// tachi#1643: a durable-outbox transition the frozen #1630 state machine
     /// does not permit. Typed rather than a generic `InvalidArg` string so a
     /// reconciliation loop can branch on "this outcome no longer applies to

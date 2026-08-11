@@ -536,14 +536,56 @@ pub(crate) const CATEGORY_BRIDGE: &str = "bridge";
 pub(crate) const CATEGORY_FRONTEND_SHELL: &str = "frontend_shell";
 pub(crate) const CATEGORY_UNKNOWN: &str = "unknown";
 
+/// How many times [`retry_transient_spawn`] tries a child process that the OS
+/// refused to *start* before giving up (1 initial attempt + 3 retries).
+const GIT_SPAWN_ATTEMPTS: u32 = 4;
+
+/// Retry `run` while it reports a *spawn* failure (`Err(io::Error)` from
+/// `Command::output()` — the child never ran), up to [`GIT_SPAWN_ATTEMPTS`]
+/// total attempts with a short linear backoff.
+///
+/// A spawn failure carries no information about the repository: it means the
+/// OS would not create the process. Under a wide parallel test suite or a busy
+/// server this happens transiently — `EAGAIN` from `fork` under the per-user
+/// process cap, `EMFILE`, or a torn `PATH` read while another thread mutates
+/// the process environment (`setenv`/`unsetenv` are not atomic against a
+/// concurrent `posix_spawnp` PATH lookup). `classify_repo` cannot tell that
+/// apart from "git ran and reported no origin", so a single transient spawn
+/// failure silently downgrades a Remote-strength match to a path-only match
+/// and stamps a false `possible fork / drift` governance gap on a checkout
+/// whose origin is in fact configured and correct. Re-attempting is safe for
+/// every command routed through [`run_git_readonly`]: a failed spawn executed
+/// nothing, so a retry cannot double-apply anything.
+///
+/// Only spawn failures are retried. A git process that *ran* and exited
+/// non-zero is a real answer and is returned to the caller untouched.
+fn retry_transient_spawn<T, F>(mut run: F) -> Result<T, std::io::Error>
+where
+    F: FnMut() -> Result<T, std::io::Error>,
+{
+    let mut attempt: u32 = 1;
+    loop {
+        match run() {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt >= GIT_SPAWN_ATTEMPTS => return Err(err),
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(25 * u64::from(attempt)));
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// Run `git -C <cwd> <args>` and return trimmed stdout (read-only commands only).
 fn run_git_readonly(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .map_err(|e| format!("run git {}: {e}", args.join(" ")))?;
+    let output = retry_transient_spawn(|| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+    })
+    .map_err(|e| format!("run git {}: {e}", args.join(" ")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!(

@@ -258,6 +258,14 @@ pub use types::{
     SessionOutcomeMetrics, StatsResult, TachiEventQuery, TachiEventRecord,
 };
 #[cfg(feature = "admin")]
+pub use vault::accounts::{
+    mint_account_id, mint_auth_ref, names_rotation_pool_member, AccountClass, AccountCustody,
+    AuthMode, CustodyKind, CustodyResolution, NewProviderAccount, NewProviderAccountEvent,
+    ProviderAccount, ProviderAccountAlias, ProviderAccountEvent,
+};
+#[cfg(feature = "admin")]
+pub use vault::fingerprint::{account_fingerprint_class, AccountFingerprintClass, FingerprintKey};
+#[cfg(feature = "admin")]
 pub use vault::{
     api_key_pool_member_index, normalize_secret_type, VaultCipher, VaultConfig, VaultEntry,
     VaultKeyRotation, SECRET_TYPES, SECRET_TYPE_API_KEY, SECRET_TYPE_COOKIE, SECRET_TYPE_JSON_BLOB,
