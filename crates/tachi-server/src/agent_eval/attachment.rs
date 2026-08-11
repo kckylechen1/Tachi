@@ -16,7 +16,6 @@ use serde_json::{json, Value};
 fn required(value: Option<String>, field: &str) -> Result<String, String> {
     value
         .filter(|value| !value.trim().is_empty())
-        .map(|value| value.trim().to_string())
         .ok_or_else(|| format!("{field} is required"))
 }
 
@@ -364,7 +363,7 @@ mod tests {
                         display_name: None,
                         seat: None,
                         capability_json: Some(
-                            r#"{"acp":{"tool_profiles":["standard"],"capability_classes":["tachi"]}}"#
+                            r#"{"acp":{"tool_profiles":["delegate"],"capability_classes":["tachi"]}}"#
                                 .to_string(),
                         ),
                         created_at: String::new(),
@@ -421,7 +420,7 @@ mod tests {
             remote_session_id: Some("remote-1".to_string()),
             contract_digest: Some("contract-digest".to_string()),
             session_capabilities: vec!["observe".to_string(), "load".to_string()],
-            tool_profile: Some("standard".to_string()),
+            tool_profile: Some("delegate".to_string()),
             capability_class: Some("tachi".to_string()),
             idempotency_key: Some(idempotency_key.to_string()),
             admission_receipt_ref: Some("admission-1".to_string()),
@@ -498,7 +497,7 @@ mod tests {
     #[test]
     fn descriptor_projection_is_an_acp_array_with_absolute_stdio_command() {
         let (servers, descriptor_digest) =
-            project_descriptors("standard", "tachi", "agent-1").unwrap();
+            project_descriptors("delegate", "tachi", "agent-1").unwrap();
         assert_eq!(servers.len(), 1);
         assert!(servers[0]["command"]
             .as_str()
@@ -512,8 +511,19 @@ mod tests {
     #[test]
     fn non_canonical_policy_names_are_refused_before_projection() {
         assert!(project_descriptors("admin", "tachi", "agent-1").is_err());
-        assert!(project_descriptors("standard", "admin", "agent-1").is_err());
-        assert!(project_descriptors("STANDARD", "tachi", "agent-1").is_err());
+        for (tool_profile, capability_class) in [
+            ("coordinate", "tachi"),
+            ("standard", "tachi"),
+            ("delegate", "memory"),
+            ("observe", "standard"),
+            ("delegate", "admin"),
+            ("STANDARD", "tachi"),
+        ] {
+            assert!(
+                project_descriptors(tool_profile, capability_class, "agent-1").is_err(),
+                "{tool_profile}/{capability_class} must not materialize an ACP descriptor"
+            );
+        }
     }
 
     #[tokio::test]
@@ -631,40 +641,78 @@ mod tests {
         );
         assert_eq!(row_count(&server), 0);
 
-        for (grant, idempotency_key, expected) in [
+        for (grant, idempotency_key, expected, requested_profile, requested_class) in [
             (
-                r#"{"other":{"tool_profiles":["standard"]}}"#,
+                r#"{"other":{"tool_profiles":["delegate"]}}"#,
                 "idem-missing-acp",
                 "missing object acp",
+                "delegate",
+                "tachi",
             ),
             (
-                r#"{"acp":{"tool_profiles":["standard","standard"],"capability_classes":["tachi"]}}"#,
+                r#"{"acp":{"tool_profiles":["delegate","delegate"],"capability_classes":["tachi"]}}"#,
                 "idem-duplicate-acp",
                 "duplicate name",
+                "delegate",
+                "tachi",
             ),
             (
                 r#"{"acp":{"tool_profiles":["admin"],"capability_classes":["tachi"]}}"#,
                 "idem-unknown-acp",
                 "unknown canonical name",
+                "delegate",
+                "tachi",
             ),
             (
                 r#"{"acp":{"tool_profiles":[1],"capability_classes":["tachi"]}}"#,
                 "idem-non-string-acp",
                 "entries must be strings",
+                "delegate",
+                "tachi",
             ),
             (
                 r#"{"acp":{"tool_profiles":["observe"],"capability_classes":["tachi"]}}"#,
                 "idem-absent-profile",
                 "not admitted",
+                "delegate",
+                "tachi",
+            ),
+            (
+                r#"{"acp":{"tool_profiles":["coordinate"],"capability_classes":["tachi"]}}"#,
+                "idem-coordinate-profile",
+                "not a canonical admitted profile",
+                "coordinate",
+                "tachi",
+            ),
+            (
+                r#"{"acp":{"tool_profiles":["standard"],"capability_classes":["tachi"]}}"#,
+                "idem-standard-profile",
+                "not a canonical admitted profile",
+                "standard",
+                "tachi",
+            ),
+            (
+                r#"{"acp":{"tool_profiles":["delegate"],"capability_classes":["memory"]}}"#,
+                "idem-memory-class",
+                "not a canonical admitted class",
+                "delegate",
+                "memory",
+            ),
+            (
+                r#"{"acp":{"tool_profiles":["observe"],"capability_classes":["standard"]}}"#,
+                "idem-standard-class",
+                "not a canonical admitted class",
+                "observe",
+                "standard",
             ),
         ] {
             set_capability_json(&server, Some(grant));
-            let error = crate::agent_eval::handle_agent_eval(
-                &server,
-                attachment_params("attach_session", idempotency_key),
-            )
-            .await
-            .expect_err("malformed or insufficient ACP grant must refuse");
+            let mut params = attachment_params("attach_session", idempotency_key);
+            params.tool_profile = Some(requested_profile.to_string());
+            params.capability_class = Some(requested_class.to_string());
+            let error = crate::agent_eval::handle_agent_eval(&server, params)
+                .await
+                .expect_err("malformed or insufficient ACP grant must refuse");
             assert!(error.contains(expected), "expected {expected} in {error}");
             assert_eq!(row_count(&server), 0);
         }
@@ -682,6 +730,51 @@ mod tests {
             assert!(error.contains("Invalid eval action"), "{error}");
         }
         assert_eq!(row_count(&server), 0);
+    }
+
+    #[tokio::test]
+    async fn opaque_binding_whitespace_conflicts_without_mutating_the_full_row() {
+        let server = test_server();
+        seed_valid_admission(&server);
+        let params = attachment_params("attach_session", "idem-opaque-whitespace");
+        crate::agent_eval::handle_agent_eval(&server, params.clone())
+            .await
+            .expect("valid ACP attachment");
+        let before = stored_rows(&server);
+
+        for field in [
+            "adapter_connection_identity",
+            "remote_session_id",
+            "work_claim_id",
+            "contract_digest",
+            "admission_receipt_ref",
+        ] {
+            let mut changed = params.clone();
+            match field {
+                "adapter_connection_identity" => {
+                    changed.adapter_connection_identity = Some(" adapter-1 ".to_string())
+                }
+                "remote_session_id" => changed.remote_session_id = Some(" remote-1 ".to_string()),
+                "work_claim_id" => changed.work_claim_id = Some(" claim-1 ".to_string()),
+                "contract_digest" => {
+                    changed.contract_digest = Some(" contract-digest ".to_string())
+                }
+                "admission_receipt_ref" => {
+                    changed.admission_receipt_ref = Some(" admission-1 ".to_string())
+                }
+                _ => unreachable!("test field must be covered"),
+            }
+            let error = crate::agent_eval::handle_agent_eval(&server, changed)
+                .await
+                .expect_err("opaque whitespace changes must conflict with the original binding");
+            assert!(error.contains("conflicts"), "{field}: {error}");
+            assert_eq!(row_count(&server), 1, "{field} must not add a row");
+            assert_eq!(
+                stored_rows(&server),
+                before,
+                "{field} must preserve every row byte"
+            );
+        }
     }
 
     #[tokio::test]

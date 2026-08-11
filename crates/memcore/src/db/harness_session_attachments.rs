@@ -44,16 +44,8 @@ pub const ACP_SESSION_CAPABILITIES: &[&str] = &[
 /// Canonical policy names accepted in an admitted AgentIdentity's `acp`
 /// capability grant.  These are intentionally separate from host/provider
 /// aliases: an alias can never mint an ACP attachment capability.
-pub const ACP_TOOL_PROFILES: &[&str] = &[
-    "observe",
-    "remember",
-    "coordinate",
-    "operate",
-    "standard",
-    "delegate",
-    "workflow",
-];
-pub const ACP_CAPABILITY_CLASSES: &[&str] = &["tachi", "memory", "standard", "delegate"];
+pub const ACP_TOOL_PROFILES: &[&str] = &["observe", "delegate"];
+pub const ACP_CAPABILITY_CLASSES: &[&str] = &["tachi"];
 
 /// Truth Tachi is allowed to persist for this attachment slice.  The latter
 /// two states are reserved for a host-owned reconnect receipt; this module's
@@ -965,7 +957,7 @@ mod tests {
                 display_name: None,
                 seat: None,
                 capability_json: Some(
-                    r#"{"acp":{"tool_profiles":["standard"],"capability_classes":["tachi"]}}"#
+                    r#"{"acp":{"tool_profiles":["delegate"],"capability_classes":["tachi"]}}"#
                         .to_string(),
                 ),
                 created_at: String::new(),
@@ -1015,7 +1007,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap(),
-            tool_profile: "standard".into(),
+            tool_profile: "delegate".into(),
             capability_class: "tachi".into(),
             policy_digest: "policy-digest".into(),
             descriptor_digest: "descriptor-digest".into(),
@@ -1023,9 +1015,9 @@ mod tests {
             admission_receipt_ref: "admission-1".into(),
         };
         input.policy_digest = authorization_from_capability_json(
-            Some(r#"{"acp":{"tool_profiles":["standard"],"capability_classes":["tachi"]}}"#),
+            Some(r#"{"acp":{"tool_profiles":["delegate"],"capability_classes":["tachi"]}}"#),
             "agent-1",
-            "standard",
+            "delegate",
             "tachi",
         )
         .unwrap()
@@ -1199,7 +1191,7 @@ mod tests {
         conn.execute(
             "UPDATE agent_identities
              SET capability_json = ?1 WHERE agent_identity_id = 'agent-1'",
-            [r#"{"acp":{"tool_profiles":["observe","standard"],"capability_classes":["tachi"]}}"#],
+            [r#"{"acp":{"tool_profiles":["observe","delegate"],"capability_classes":["tachi"]}}"#],
         )
         .unwrap();
 
@@ -1213,6 +1205,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    fn legacy_policy_digest(tool_profile: &str, capability_class: &str) -> String {
+        let decision = serde_json::json!({
+            "grant": {
+                "acp": {
+                    "tool_profiles": [tool_profile],
+                    "capability_classes": [capability_class],
+                }
+            },
+            "selected": {
+                "tool_profile": tool_profile,
+                "capability_class": capability_class,
+            }
+        });
+        sha256_hex(&canonical_json(&decision))
+    }
+
+    #[test]
+    fn historical_profiles_and_non_tachi_classes_refuse_before_insert() {
+        for (tool_profile, capability_class) in [
+            ("coordinate", "tachi"),
+            ("standard", "tachi"),
+            ("delegate", "memory"),
+            ("observe", "standard"),
+        ] {
+            let mut conn = setup();
+            let mut input = seed(&mut conn);
+            input.tool_profile = tool_profile.to_string();
+            input.capability_class = capability_class.to_string();
+            let grant = format!(
+                r#"{{"acp":{{"tool_profiles":["{tool_profile}"],"capability_classes":["{capability_class}"]}}}}"#
+            );
+            conn.execute(
+                "UPDATE agent_identities
+                 SET capability_json = ?1 WHERE agent_identity_id = 'agent-1'",
+                [&grant],
+            )
+            .unwrap();
+            input.policy_digest = legacy_policy_digest(tool_profile, capability_class);
+
+            let error = attach(&mut conn, &input)
+                .expect_err("historical ACP profile/class must be refused");
+            assert!(
+                error.to_string().contains("not a canonical admitted"),
+                "{tool_profile}/{capability_class}: {error}"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM harness_session_attachments",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0,
+                "{tool_profile}/{capability_class} must not materialize a row"
+            );
+        }
     }
 
     #[test]
