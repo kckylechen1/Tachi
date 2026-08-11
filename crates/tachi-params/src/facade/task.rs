@@ -24,7 +24,7 @@ fn tachi_task_action_schema(
     // #1319-C2: worker launch/wait/cancel left Task; use tachi_staff instead.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. Route tuning lives on tachi_tune. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'board' read existing worker state (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='intake' binds issues; action='cycle_status' returns the lifecycle read model; action='build_references' prepares closure references; action='close_loop' writes wiki closure.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. GitHub PR lifecycle is tachi_gh only. Route tuning lives on tachi_tune. action='brief' returns the feature-scoped handoff and layered source board; action='status'/'board' read existing worker state, while status also returns the lifecycle read model when flow_id, issue_ref, or pr_ref is supplied (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='intake' binds issues.",
         generator,
     )
 }
@@ -34,32 +34,21 @@ fn tachi_task_action_schema(
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
     /// Primary actions (F4 enum): intake, claim, heartbeat, handoff, release,
-    /// board, status, complete, adjudicate, briefing, doc_index, cycle_status,
-    /// profiles, profile, card, build_references, close_loop.
+    /// board, status, complete, adjudicate, brief.
     /// Worker launch/wait/cancel left Task in #1319-C2 — use
     /// tachi_staff(action='start'|'status') for worker lifecycle.
     /// action="intake" binds a GitHub issue to a flow.
-    /// action="cycle_status" is a read-only lifecycle model.
-    /// action="build_references" / "close_loop" close the issue loop.
-    /// GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note): use **tachi_gh only** (#757).
+    /// action="status" with flow_id/issue_ref/pr_ref is a read-only lifecycle model;
+    /// dispatch_id takes precedence and preserves the flat status snapshot.
+    /// GitHub PR and closure lifecycle: use **tachi_gh only** (#757, #1713).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,
-    /// Response shape: default JSON for agent automation, with two
-    /// exceptions — [action=profiles|profile|card] (tachi#1201)
-    /// default to compact markdown (a table plus key fields) when `format`
-    /// is omitted, since these are read-heavy discovery endpoints most often
-    /// consumed by a human/agent skimming a summary, not parsing JSON. Pass
-    /// format="json" to get the machine-readable shape for those three
-    /// actions; every other action's default is unaffected. Pass "markdown"
-    /// on any action for human-readable text.
+    /// Response shape: default JSON for agent automation. Pass "markdown" on
+    /// any surviving action for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
     /// tachi#1173 items 1+2+3: request the full payload instead of the
-    /// default slim shape. Response verbosity for board/profile/status
-    /// payloads.
-    /// [action=profiles|profile|card]: each row includes the full mbit_card
-    /// (stats/guidance/moves/personality/skill_loadout/evidence_contract)
-    /// rather than just name/backend/model/role.
+    /// default slim shape. Response verbosity for board/status payloads.
     /// [action=board]: forwarded to `TachiBoardParams.verbose` -- restores
     /// identity_receipt/acpx/acpx_events per row and stops folding terminal
     /// rows into count rows.
@@ -70,42 +59,41 @@ pub struct TachiTaskParams {
     #[schemars(description = "[action=complete|intake] Task description / prompt text.")]
     pub task: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=briefing] Requesting agent id.")]
+    #[schemars(
+        description = "Requesting agent id; shared by task context and ledger-aware operations."
+    )]
     pub agent_id: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=briefing] Area tag (e.g. rust, mcp) to scope context.")]
+    #[schemars(description = "Area tag (e.g. rust, mcp) used to scope task context.")]
     pub domain: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=briefing] Optional recall path prefix filter.")]
+    #[schemars(description = "Optional recall path prefix filter for task context.")]
     pub path_prefix: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=briefing] Maximum context fragments to recall.")]
+    #[schemars(
+        description = "Maximum context fragments to recall when task context is requested."
+    )]
     pub top_k: Option<usize>,
     // feature briefing fields
     #[serde(default)]
     #[schemars(
-        description = "Canonical docs to prioritize in action='briefing', e.g. docs/engineering/architecture/subagent-eval-system.md."
+        description = "Canonical docs to prioritize for task context and lifecycle records, e.g. docs/engineering/architecture/subagent-eval-system.md."
     )]
     pub doc_paths: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "Related GitHub issues/PRs for action='close_loop' or action='build_references'."
-    )]
-    pub related_issues: Vec<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "Canonical spec docs to prioritize in action='briefing'. Kept separate from memory/wiki fragments."
+        description = "Canonical spec docs to prioritize for task context and lifecycle records. Kept separate from memory/wiki fragments."
     )]
     pub spec_paths: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "When true, action='briefing' may include broader global memory fragments. Default false keeps briefing feature/project scoped."
+        description = "When true, action='brief' may include broader global memory fragments. Default false keeps briefing feature/project scoped."
     )]
     pub include_global: bool,
     // #527: agent-facing default is compact when omitted; set false for full boards.
     #[serde(default)]
     #[schemars(
-        description = "[action=briefing|doc_index] When true or omitted, use the tight agent packet (smaller top_k). Set false for the full feature board."
+        description = "[action=brief] When true or omitted, use the tight agent packet (smaller top_k). Set false for the full feature board."
     )]
     pub compact: Option<bool>,
     // complete fields
@@ -155,8 +143,6 @@ pub struct TachiTaskParams {
     #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub quality_score: Option<f64>,
     /// [action=complete] Completion notes or summary.
-    /// [action=close_loop] When wiki_title/wiki_text are omitted and result.md
-    /// is missing, used as a draft source for the wiki body (#925).
     #[serde(default)]
     pub notes: Option<String>,
     /// [action=complete] Execution trajectory. Store compact step objects, not raw transcripts.
@@ -212,7 +198,7 @@ pub struct TachiTaskParams {
     pub scope: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=briefing|doc_index] Working directory used to resolve relative doc_paths/spec_paths; also echoed into the brief packet."
+        description = "Working directory used to resolve relative doc_paths/spec_paths and shared by task context/lifecycle records; also echoed into the brief packet."
     )]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -288,7 +274,7 @@ pub struct TachiTaskParams {
     )]
     pub project_explicit: bool,
     #[serde(default)]
-    #[schemars(description = "[action=briefing] Workflow stage hint, e.g. plan, build, review.")]
+    #[schemars(description = "[action=brief] Workflow stage hint, e.g. plan, build, review.")]
     pub stage: Option<String>,
     #[serde(default, alias = "dispatch_profile")]
     #[schemars(
@@ -324,7 +310,7 @@ pub struct TachiTaskParams {
     pub pr_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Tachi flow id for feature-scoped artifacts, also linking a completion back to its flow (briefing/intake/close_loop/status/complete)."
+        description = "Tachi flow id for feature-scoped artifacts, also linking a completion back to its flow (brief/intake/status/complete)."
     )]
     pub flow_id: Option<String>,
     /// [action=complete|status] Dispatch id linked to this task lifecycle event.
@@ -349,7 +335,7 @@ pub struct TachiTaskParams {
     pub tool_profile: Option<String>,
     #[serde(default, alias = "include_capability_bundle")]
     #[schemars(
-        description = "[action=briefing] When true, includes the capability bundle in the briefing context when supported."
+        description = "[action=brief] When true, includes the capability bundle in the briefing context when supported."
     )]
     pub auto_capability_bundle: Option<bool>,
     #[serde(default)]
@@ -393,49 +379,6 @@ pub struct TachiTaskParams {
         description = "Explicit umbrella/no-close override for tachi_gh safe_merge/pr_status helpers shared via lifecycle field bags. Defaults false."
     )]
     pub allow_umbrella_close: bool,
-    // close_loop fields
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure entry title.")]
-    pub wiki_title: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure entry body text.")]
-    pub wiki_text: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure path, e.g. /wiki/....")]
-    pub wiki_path: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure topic label.")]
-    pub wiki_topic: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure short summary.")]
-    pub wiki_summary: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure category.")]
-    pub wiki_category: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure keywords/tags.")]
-    pub wiki_keywords: Vec<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure named entities.")]
-    pub wiki_entities: Vec<String>,
-    #[serde(
-        default,
-        deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
-    )]
-    #[schemars(
-        schema_with = "crate::coerce::opt_number_from_string_or_number_schema",
-        description = "[action=close_loop] Wiki closure importance 0.0-1.0."
-    )]
-    pub wiki_importance: Option<f64>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure scope: global or project.")]
-    pub wiki_scope: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=close_loop] Wiki closure area/domain tag.")]
-    pub wiki_domain: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Bypass wiki noise filtering for action='close_loop'.")]
-    pub force: bool,
     // --- canonical WorkClaim fields (#1253) ---
     #[serde(default)]
     #[schemars(
@@ -494,27 +437,17 @@ mod tests {
 
         use super::super::action_enums::TachiTaskAction;
 
-        // Serde path (the wire/MCP path): the #[serde(rename_all)] derive
-        // rejects retired variants with a standard "unknown variant" error
-        // listing the surviving actions. The accepted-variants list (after
-        // "expected one of") must NOT contain dispatch/wait/cancel anymore.
+        // Serde path (the wire/MCP path): route through TachiTaskAction's
+        // canonical FromStr parser so the typed staffing guidance remains
+        // visible at the boundary.
         for retired in ["dispatch", "wait", "cancel"] {
             let err =
                 serde_json::from_str::<TachiTaskParams>(&format!("{{\"action\":\"{retired}\"}}"))
                     .expect_err("retired action must not deserialize as tachi_task action");
             let msg = err.to_string();
             assert!(
-                msg.contains("unknown variant"),
-                "retired action {retired} should be an unknown variant, got: {msg}"
-            );
-            // The "expected one of `<...>`" list is the accepted surface;
-            // the retired action must not be admitted there. (The message
-            // does echo the rejected value back, so check the accepted list
-            // fragment specifically.)
-            let accepted = msg.split("expected one of ").nth(1).unwrap_or_default();
-            assert!(
-                !accepted.contains(&format!("`{retired}`")),
-                "retired action {retired} must not appear in the accepted-variants list, got: {msg}"
+                !msg.contains("unknown variant") && msg.contains("tachi_staff"),
+                "retired action {retired} must retain typed tachi_staff guidance, got: {msg}"
             );
         }
 
@@ -529,6 +462,44 @@ mod tests {
                 "retired action {retired} error should point at tachi_staff, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn task_wire_actions_require_exact_lowercase_primary_tokens() {
+        use super::super::action_enums::TachiTaskAction;
+
+        for &action in TachiTaskAction::PRIMARY {
+            let token = action.as_str();
+            let exact = serde_json::json!({"action": token});
+            let params: TachiTaskParams = serde_json::from_value(exact)
+                .expect("every exact lowercase primary action must deserialize");
+            assert_eq!(params.action, action);
+
+            for malformed in [
+                token.to_ascii_uppercase(),
+                format!(" {token}"),
+                format!("{token} "),
+                format!(" {token} "),
+            ] {
+                let wire = serde_json::json!({"action": malformed});
+                let error = serde_json::from_value::<TachiTaskParams>(wire)
+                    .expect_err("normalized action aliases must not deserialize");
+                let message = error.to_string();
+                assert!(
+                    message.contains("must exactly match one of")
+                        && !message.contains("unknown variant"),
+                    "wire action {malformed:?} must receive an exact-token refusal, got: {message}"
+                );
+            }
+        }
+
+        let unknown = serde_json::json!({"action": "not_a_task_action"});
+        let error = serde_json::from_value::<TachiTaskParams>(unknown)
+            .expect_err("unknown action must not deserialize");
+        assert!(
+            error.to_string().contains("must exactly match one of"),
+            "unknown wire action must receive an exact-token refusal: {error}"
+        );
     }
 
     #[test]
@@ -550,13 +521,8 @@ mod tests {
                     .expect_err("retired action must not deserialize as tachi_task action");
             let msg = err.to_string();
             assert!(
-                msg.contains("unknown variant"),
-                "retired action {retired} should be an unknown variant, got: {msg}"
-            );
-            let accepted = msg.split("expected one of ").nth(1).unwrap_or_default();
-            assert!(
-                !accepted.contains(&format!("`{retired}`")),
-                "retired action {retired} must not appear in the accepted-variants list, got: {msg}"
+                !msg.contains("unknown variant") && msg.contains("#1683 C1a"),
+                "retired action {retired} must retain typed #1683 C1a guidance, got: {msg}"
             );
 
             let err = TachiTaskAction::from_str(retired)
@@ -564,6 +530,113 @@ mod tests {
             assert!(
                 err.contains("#1683 C1a"),
                 "retired action {retired} error should name #1683 C1a, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn c1b_folded_actions_left_task() {
+        use std::str::FromStr;
+
+        use super::super::action_enums::TachiTaskAction;
+
+        for retired in ["briefing", "doc_index", "cycle_status"] {
+            let err =
+                serde_json::from_str::<TachiTaskParams>(&format!("{{\"action\":\"{retired}\"}}"))
+                    .expect_err("folded action must not deserialize as tachi_task action");
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("unknown variant") && msg.contains("#1712 C1b"),
+                "folded action {retired} must retain typed #1712 C1b guidance, got: {msg}"
+            );
+
+            let err = TachiTaskAction::from_str(retired)
+                .expect_err("folded action must not parse as tachi_task action");
+            assert!(
+                err.contains("#1712 C1b"),
+                "folded action {retired} error should name #1712 C1b, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn c1c_profile_actions_left_task() {
+        use std::str::FromStr;
+
+        use super::super::action_enums::TachiTaskAction;
+
+        for retired in ["profiles", "profile", "card"] {
+            let err =
+                serde_json::from_str::<TachiTaskParams>(&format!("{{\"action\":\"{retired}\"}}"))
+                    .expect_err("retired profile action must not deserialize as tachi_task action");
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("unknown variant")
+                    && msg.contains("tachi card")
+                    && msg.contains("append-only eval")
+                    && msg.contains("static profile admission"),
+                "retired profile action {retired} must retain typed operator/eval/admission guidance, got: {msg}"
+            );
+
+            let err = TachiTaskAction::from_str(retired)
+                .expect_err("retired profile action must not parse as tachi_task action");
+            assert!(
+                err.contains("tachi card")
+                    && err.contains("append-only eval")
+                    && err.contains("static profile admission"),
+                "retired profile action {retired} guidance is incomplete: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_retired_actions_keep_typed_guidance_on_wire() {
+        use std::str::FromStr;
+
+        use super::super::action_enums::TachiTaskAction;
+
+        let cases = [
+            ("dispatch", "tachi_staff"),
+            ("wait", "tachi_staff"),
+            ("cancel", "tachi_staff"),
+            ("plan", "#1683 C1a"),
+            ("cycle_plan", "#1683 C1a"),
+            ("recommend", "#1683 C1a"),
+            ("refine_issues", "#1683 C1a"),
+            ("merge", "#1683 C1a"),
+            ("ux_matrix", "#1683 C1a"),
+            ("briefing", "#1712 C1b"),
+            ("doc_index", "#1712 C1b"),
+            ("cycle_status", "#1712 C1b"),
+            ("profiles", "#1687 C1c"),
+            ("profile", "#1687 C1c"),
+            ("card", "#1687 C1c"),
+            ("build_references", "#1713"),
+            ("close_loop", "#1713"),
+            ("route_simulate", "tachi_tune"),
+            ("proposals", "tachi_tune"),
+            ("review_proposal", "tachi_tune"),
+            ("apply_proposals", "tachi_tune"),
+            ("link_pr", "tachi_gh"),
+            ("pr_status", "tachi_gh"),
+            ("pr_handoff", "tachi_gh"),
+            ("release_note", "tachi_gh"),
+        ];
+
+        for (retired, guidance) in cases {
+            let wire = format!("{{\"action\":\"{retired}\"}}");
+            let serde_error = serde_json::from_str::<TachiTaskParams>(&wire)
+                .expect_err("explicit retired action must fail on the wire")
+                .to_string();
+            let typed_error = TachiTaskAction::from_str(retired)
+                .expect_err("explicit retired action must fail in the typed parser");
+            assert!(
+                !serde_error.contains("unknown variant"),
+                "wire error for {retired} must not fall back to generic serde text: {serde_error}"
+            );
+            assert!(
+                serde_error.contains(guidance) && serde_error.contains(&typed_error),
+                "wire error for {retired} must preserve typed guidance {guidance:?}: {serde_error}"
             );
         }
     }

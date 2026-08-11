@@ -130,7 +130,7 @@ pub(crate) async fn handle_tachi_task_brief(
         "suggested_next_tools": [
             "tachi_wiki(action='search')",
             "tachi_skill(action='discover')",
-            "tachi_task(action='briefing')",
+            "tachi_task(action='brief')",
             "tachi_task(action='board')"
         ],
     }))
@@ -141,9 +141,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
-    // #1575 fix-round: this handler serves BOTH action='briefing' and
-    // action='doc_index' (`TachiTaskAction::Briefing | TachiTaskAction::
-    // DocIndex` both route here in `tools/task_router.rs`), and its
+    // #1575 fix-round: this handler serves the folded action='brief', and its
     // memory/eval searches below run `project_only=true` (via
     // `!params.include_global`, which defaults to `false`) — the same shape
     // `memory_search_ops::require_named_project_exists`'s doc comment
@@ -367,11 +365,11 @@ pub(crate) async fn handle_tachi_feature_briefing(
         &run_artifacts,
     );
     let top_level_wiki_hits = filter_wiki_hits_not_in_doc_index(&wiki_hits, &doc_index);
-    let kind = if params.action.as_str() == "doc_index" {
-        "doc_index"
-    } else {
-        "feature_briefing"
-    };
+    // #1712 C1b-1: briefing and doc-index were one handler before the fold;
+    // retain the established feature-briefing packet kind as the sole
+    // canonical result discriminator instead of preserving an unreachable
+    // retired-token fork.
+    let kind = "feature_briefing";
     let mut response = json!({
         "status": "ok",
         "kind": kind,

@@ -269,8 +269,8 @@ pub struct TachiDispatchParams {
     /// small metadata) — the full routing card (`profile`, `identity_receipt`,
     /// `dispatch_profile`/mbit_card) is selection-time information, not
     /// receipt information, and is omitted by default. Set verbose=true to
-    /// get the full payload back on the dispatch response itself (or fetch
-    /// it separately via `tachi_task(action='profile')`).
+    /// get the full payload back on the dispatch response itself; operator
+    /// profile diagnostics remain on the local CLI surface.
     #[serde(default)]
     pub verbose: Option<bool>,
 

@@ -560,9 +560,9 @@ fn card_cli_parses_list_and_show() {
 }
 
 /// tachi#1202: `cards` (plural, dispatch-ledger lane-card ingest) must parse
-/// as a DISTINCT command from `card` (singular, Tachikoma dispatch-profile
-/// projection) above — regression guard against the two verbs colliding or
-/// clap accidentally treating one as an alias of the other.
+/// as a DISTINCT command from `card` (singular, static operator diagnostics)
+/// above — regression guard against the two verbs colliding or clap
+/// accidentally treating one as an alias of the other.
 #[test]
 fn cards_cli_parses_sync_and_list_distinct_from_singular_card() {
     let sync = Cli::try_parse_from([
@@ -601,6 +601,17 @@ fn cards_cli_parses_sync_and_list_distinct_from_singular_card() {
         } => assert!(!json),
         other => panic!("unexpected command: {other:?}"),
     }
+}
+
+#[test]
+fn card_help_distinguishes_operator_diagnostics_from_plural_ledger_cards() {
+    let help = Cli::command().render_long_help().to_string();
+    assert!(help.contains("static operator profile/admission diagnostics"));
+    assert!(help.contains("no DB access"));
+    assert!(help.contains("dispatch-ledger cards"));
+    assert!(help.contains("GLOBAL memory DB"));
+    assert!(help.contains("singular `tachi card`"));
+    assert!(help.contains("plural dispatch-ledger cards"));
 }
 
 #[test]

@@ -134,7 +134,7 @@ pub(super) fn build_dispatch_response(
     // x2, personality dump) is selection-time information an agent needs
     // when CHOOSING a profile, not receipt information it needs after
     // dispatch already committed to one — so it moves behind verbose=true (or
-    // a separate `tachi_task(action='profile')` call).
+    // a separate operator-only local `tachi card show` diagnostic).
     let verbose = inputs.params.verbose.unwrap_or(false);
 
     let mut response = json!({

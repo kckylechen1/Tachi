@@ -10,9 +10,9 @@
 //! for routing context but never projected as a single-seat prompt overlay.
 //!
 //! Deliberately distinct from the singular `tachi card` command (`cards.rs`
-//! in this same directory), which projects Tachikoma dispatch-profile cards
-//! from `tachi_task(action='profiles')` — unrelated data, unrelated source of
-//! truth. Do not conflate the two "cards" concepts.
+//! in this same directory), which reports static dispatch-profile diagnostics
+//! from the dispatch registry — unrelated data, unrelated source of truth. Do
+//! not conflate the two "cards" concepts.
 //!
 //! # Frozen interface contract (owner-ratified, tachi#1202, three points all A)
 //!

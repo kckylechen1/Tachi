@@ -32,7 +32,11 @@ pub(super) fn load_unlocked_env_secrets(
 fn load_unlocked_provider_env_secrets(
     server: &MemoryServer,
 ) -> Result<Vec<(String, String)>, String> {
-    let provider_keys = crate::provider_config::provider_env_keys();
+    // #1680/D3: lane env injection must keep delivering every provider-key
+    // class (e.g. TAVILY_API_KEY rotation members), not just the narrowed
+    // ModelApi materialization allowlist — see
+    // `provider_config::admitted_provider_env_keys` doc.
+    let provider_keys = crate::provider_config::admitted_provider_env_keys();
     let pools = load_unlocked_api_key_secret_pools(server)?;
     let mut secrets = Vec::new();
     for (logical_name, entries) in pools {

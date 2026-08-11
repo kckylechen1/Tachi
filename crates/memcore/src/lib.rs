@@ -124,7 +124,7 @@ pub use db::mirror_eval::{
 /// portable build can drive it.
 pub use db::outbox::{
     LocalStoreStatus, OutboxEventRow, OutboxHealth, OutboxState, RemoteSyncStatus,
-    MAX_OUTBOX_CLASS_BYTES,
+    DEFAULT_OUTBOX_HEALTH_STALE_AFTER, MAX_OUTBOX_CLASS_BYTES,
 };
 #[cfg(feature = "admin")]
 pub use db::route_eval::{
@@ -211,6 +211,12 @@ pub use search::{
 /// tachi#1643 single-transaction commit boundary. Re-exported at the root for
 /// the same reason as the snapshot-import contract below.
 pub use store::outbox::{outbox_payload_digest, OutboxCommitReceipt, OutboxEventMeta};
+/// tachi#1718 portable destination-side outbox apply/readback boundary.
+pub use store::outbox_destination_apply::{
+    OutboxDestinationApplyApplication, OutboxDestinationApplyEnvelope,
+    OutboxDestinationApplyReceipt, OutboxDestinationApplyResult, OutboxDestinationConflictReason,
+    OutboxDestinationConflictReceipt, OutboxDestinationIdentity,
+};
 /// tachi#1644 outbox reconciliation protocol (#1630 A2). Ungated for the same
 /// reason A1 is: a host-owned sync loop drives this from a portable build,
 /// with no Tachi daemon in the picture.

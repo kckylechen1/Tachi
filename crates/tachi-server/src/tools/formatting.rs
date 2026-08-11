@@ -4,23 +4,16 @@ pub(super) fn wants_json_format(format: Option<&str>) -> bool {
     crate::facade_memory_ops::wants_json(format)
 }
 
-/// tachi#1201: `profiles`/`profile`/`card` are read-heavy
-/// discovery endpoints. Historically an omitted `format` meant JSON
-/// everywhere (`wants_json`'s global `None => true` default, shared by every
-/// OTHER facade action — save/checkpoint/briefing/wiki/... ). Scope the
-/// default-format flip to just these three actions instead of touching that
-/// global default: when the caller hasn't set `format` at all (or set it to
-/// an empty string), resolve it to `"markdown"` for these actions only.
+/// Historically an omitted `format` meant JSON everywhere. Keep that default
+/// for the surviving Task actions; the operator-only `tachi card` command
+/// owns its own rendering.
 fn resolved_action_format(action: &str, format: Option<&str>) -> Option<String> {
     let explicit = format.map(str::trim).filter(|f| !f.is_empty());
     if explicit.is_some() {
         return explicit.map(str::to_string);
     }
-    if matches!(action, "profiles" | "profile" | "card") {
-        Some("markdown".to_string())
-    } else {
-        None
-    }
+    let _ = action;
+    None
 }
 
 pub(crate) fn format_facade_response(
@@ -41,14 +34,6 @@ pub(crate) fn format_facade_response(
     let value = serde_json::from_str::<Value>(raw).map_err(|e| {
         format!("format {title} markdown response: expected JSON from action '{action}': {e}")
     })?;
-    // tachi#1201: `profile`/`card` are pre-existing on-demand-full-card
-    // aliases of the same `dispatch_profiles_json_for_server` listing
-    // `profiles` renders — same response shape (`dispatch_profiles` +
-    // `verbose`), so they share the same table renderer now that all three
-    // default to markdown.
-    if matches!(action, "profiles" | "profile" | "card") {
-        return Ok(render_profiles_markdown(title, action, &value));
-    }
     let mut lines = vec![format!("## {title}")];
     lines.push(format!("action: `{action}`"));
     append_known_field(&mut lines, &value, "flow_id");
@@ -211,37 +196,6 @@ pub(super) fn md_table_cell(text: &str) -> String {
     text.replace('|', "\\|").replace('\n', " ")
 }
 
-pub(super) fn md_opt_str(value: &Value, field: &str) -> String {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(md_table_cell)
-        .unwrap_or_else(|| "-".to_string())
-}
-
-pub(super) fn md_opt_num(value: &Value, field: &str) -> String {
-    match value.get(field) {
-        Some(Value::Number(n)) => {
-            // Integers (incl. large ones that would lose precision as f64) render
-            // exactly via as_i64; non-integers fall back to 2dp, and whole-number
-            // floats (e.g. 3.0) still render without a trailing ".00".
-            if let Some(i) = n.as_i64() {
-                format!("{i}")
-            } else if let Some(f) = n.as_f64() {
-                if f.fract().abs() < f64::EPSILON {
-                    format!("{}", f as i64)
-                } else {
-                    format!("{f:.2}")
-                }
-            } else {
-                "-".to_string()
-            }
-        }
-        _ => "-".to_string(),
-    }
-}
-
 fn append_host_admission_markdown(lines: &mut Vec<String>, value: &Value) {
     let Some(admission) = value.get("host_admission").and_then(Value::as_object) else {
         return;
@@ -270,81 +224,6 @@ fn append_host_admission_markdown(lines: &mut Vec<String>, value: &Value) {
         receipt_value("allowed"),
         receipt_value("reason_code"),
     ));
-}
-
-/// Render the `profiles` action as a table of configured dispatch profiles.
-///
-/// #1182 checkpoint 4 (codex review round 2): tachi#1173 item 2 slimmed the
-/// JSON default to `name`/`backend`/`model`/`role` rows with no `mbit_card`,
-/// but this renderer used to unconditionally read `stage`/`mbit_card.stats`/
-/// `strong_against` — on the new slim default those columns silently
-/// rendered `-` for every row and dropped `model` from view entirely, a
-/// human-facing UX regression no test exercised end-to-end. Mirror the same
-/// verbose/slim split the JSON response uses: `value["verbose"]` (echoed by
-/// `dispatch_profiles_json_for_server`) selects which table shape to render.
-pub(super) fn render_profiles_markdown(title: &str, action: &str, value: &Value) -> String {
-    let mut lines = vec![format!("## {title}"), format!("action: `{action}`")];
-    lines.push(String::new());
-
-    let verbose = value
-        .get("verbose")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    if !verbose {
-        lines.push("| name | backend | model | role |".to_string());
-        lines.push("| --- | --- | --- | --- |".to_string());
-        if let Some(profiles) = value.get("dispatch_profiles").and_then(Value::as_array) {
-            for profile in profiles {
-                let name = md_opt_str(profile, "name");
-                let backend = md_opt_str(profile, "backend");
-                let model = md_opt_str(profile, "model");
-                let role = md_opt_str(profile, "role");
-                lines.push(format!("| {name} | {backend} | {model} | {role} |"));
-            }
-        }
-        return lines.join("\n");
-    }
-
-    lines.push(
-        "| name | role | stage | backend | cost | precision | speed | strong_against |".to_string(),
-    );
-    lines.push("| --- | --- | --- | --- | --- | --- | --- | --- |".to_string());
-    if let Some(profiles) = value.get("dispatch_profiles").and_then(Value::as_array) {
-        for profile in profiles {
-            let name = md_opt_str(profile, "name");
-            let role = md_opt_str(profile, "role");
-            let stage = md_opt_str(profile, "stage");
-            let backend = md_opt_str(profile, "backend");
-            let null_stats = Value::Null;
-            let stats = profile
-                .get("mbit_card")
-                .and_then(|card| card.get("stats"))
-                .unwrap_or(&null_stats);
-            let cost = md_opt_num(stats, "cost");
-            let precision = md_opt_num(stats, "precision");
-            let speed = md_opt_num(stats, "speed");
-            let strong_against = profile
-                .get("mbit_card")
-                .and_then(|card| card.get("strong_against"))
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .filter(|text| !text.is_empty())
-                .map(|text| md_table_cell(&text))
-                .unwrap_or_else(|| "-".to_string());
-            lines.push(format!(
-                "| {name} | {role} | {stage} | {backend} | {cost} | {precision} | {speed} | {strong_against} |"
-            ));
-        }
-    }
-
-    lines.join("\n")
 }
 
 pub(super) fn append_known_field(lines: &mut Vec<String>, value: &Value, field: &str) {

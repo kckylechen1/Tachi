@@ -548,8 +548,9 @@ fn xai_and_zai_are_recognized_provider_env_names() {
     // literal on disk). That only works end-to-end if this name is in the
     // provider-key filter that gates which unlocked-vault secrets get
     // injected into the lane subprocess env
-    // (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
-    let names = provider_api_key_env_names();
+    // (`load_unlocked_provider_env_secrets` -> `admitted_env_secret_names`,
+    // #1680/D3).
+    let names = admitted_env_secret_names();
     assert!(
         names.contains("XAI_API_KEY"),
         "XAI_API_KEY must be a recognized provider env name so an unlocked-vault \
@@ -575,7 +576,7 @@ fn zhipuai_is_a_recognized_provider_env_name() {
     // different value than `ZAI_API_KEY`. Without `ZHIPUAI_API_KEY` in the
     // provider-key filter, the GLM lane subprocess never receives its
     // vault secret and `{env:ZHIPUAI_API_KEY}` resolves to nothing.
-    let names = provider_api_key_env_names();
+    let names = admitted_env_secret_names();
     assert!(
         names.contains("ZHIPUAI_API_KEY"),
         "ZHIPUAI_API_KEY must be a recognized provider env name so an unlocked-vault \
@@ -590,8 +591,9 @@ fn kimi_is_a_recognized_provider_env_name() {
     // "收权" can never blank it (no literal on disk). That only works
     // end-to-end if this name is in the provider-key filter that gates
     // which unlocked-vault secrets get injected into the lane subprocess
-    // env (`load_unlocked_provider_env_secrets` -> `provider_api_key_env_names`).
-    let names = provider_api_key_env_names();
+    // env (`load_unlocked_provider_env_secrets` -> `admitted_env_secret_names`,
+    // #1680/D3).
+    let names = admitted_env_secret_names();
     assert!(
         names.contains("KIMI_API_KEY"),
         "KIMI_API_KEY must be a recognized provider env name so an unlocked-vault \
@@ -603,4 +605,74 @@ fn kimi_is_a_recognized_provider_env_name() {
         names.contains("MOONSHOT_API_KEY"),
         "MOONSHOT_API_KEY alias must be admitted by the provider-key filter"
     );
+}
+
+/// #1680/D3 env-injection regression, codex NEEDS-FIXES BUG-3: the legacy
+/// comparison set below is a **hardcoded literal**, copied by hand from
+/// `git show 6800f09d:crates/tachi-server/src/status_ops/status_health/api_keys.rs`
+/// (the frozen base commit this whole PR branches from) — every primary key
+/// and every alias in that pre-#1680 `API_KEY_DEFS`, flattened. It is
+/// deliberately NOT derived from `HEAD`'s `API_KEY_DEFS` (that would let a
+/// regression prove itself correct by re-deriving its own expected answer
+/// from the same registry it just changed).
+///
+/// `admitted_env_secret_names()` (the surface that gates lane env injection,
+/// providers-doctor admission, and the plaintext secret scanner) is asserted
+/// to equal that frozen legacy set **plus exactly one new name**:
+/// `GOOGLE_SEARCH_API_KEY`. That growth is an intended, explicit consequence
+/// of this PR (#1680/D3: `GOOGLE_SEARCH_API_KEY` becomes its own independent
+/// SearchApi registry entry instead of being unreachable outside intake's
+/// old alias table) — not an accidental widening. If lane env injection ever
+/// admits anything beyond that one explicit addition, this test goes red.
+#[test]
+fn admitted_env_secret_names_matches_frozen_base_legacy_set_plus_google_search() {
+    let legacy_set_at_6800f09d: HashSet<String> = [
+        "VOYAGE_API_KEY",
+        "VOYAGE_RERANK_API_KEY",
+        "SILICONFLOW_API_KEY",
+        "EXTRACT_API_KEY",
+        "SUMMARY_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "DISTILL_API_KEY",
+        "REASONING_API_KEY",
+        "ZAI_API_KEY",
+        "BIGMODEL_API_KEY",
+        "XAI_API_KEY",
+        "GROK_API_KEY",
+        "ZHIPUAI_API_KEY",
+        "KIMI_API_KEY",
+        "MOONSHOT_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "EXA_API_KEY",
+        "TAVILY_API_KEY",
+        "MINIMAX_API_KEY",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(
+        legacy_set_at_6800f09d.len(),
+        22,
+        "the hardcoded legacy literal itself must have 22 unique names — a \
+         miscount here would silently weaken this discriminator"
+    );
+
+    let mut expected_admitted_set = legacy_set_at_6800f09d.clone();
+    expected_admitted_set.insert("GOOGLE_SEARCH_API_KEY".to_string());
+
+    assert_eq!(
+        admitted_env_secret_names(),
+        expected_admitted_set,
+        "env-injection admitted set must grow by exactly GOOGLE_SEARCH_API_KEY \
+         over the frozen pre-#1680 base — no other name may appear or vanish"
+    );
+
+    // And the narrowed materialization view must be a strict subset that
+    // drops at least the SearchApi names — never equal to the admitted set,
+    // or the split accomplished nothing.
+    assert!(model_provider_env_names().is_subset(&admitted_env_secret_names()));
+    assert!(model_provider_env_names().len() < admitted_env_secret_names().len());
 }

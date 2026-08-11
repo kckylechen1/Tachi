@@ -19,13 +19,13 @@ async fn tachi_task_cycle_status_reports_missing_spec_contract() {
     );
     write_intake_flow(flow_id, &issue);
 
-    let mut params = task_params("cycle_status");
+    let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await
-        .expect("cycle_status should report drift");
-    let parsed: Value = serde_json::from_str(&raw).expect("cycle_status JSON");
+        .expect("status cycle should report drift");
+    let parsed = cycle_view(&raw);
 
     assert_eq!(parsed["stage"], json!("intake"));
     assert!(parsed["spec_drift"].as_array().is_some_and(|drift| {

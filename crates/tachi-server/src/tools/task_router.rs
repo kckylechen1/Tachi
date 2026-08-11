@@ -14,9 +14,7 @@ pub(super) async fn handle_tachi_task_facade(
     let action = params.action.as_str().to_string();
     reject_delegate_task_action(server, &action)?;
     let raw = match params.action {
-        TachiTaskAction::Briefing | TachiTaskAction::DocIndex => {
-            return handle_tachi_feature_briefing(server, &params).await
-        }
+        TachiTaskAction::Brief => return handle_tachi_feature_briefing(server, &params).await,
         TachiTaskAction::Complete => {
             let dispatch_defaults = params
                 .dispatch_id
@@ -141,33 +139,31 @@ pub(super) async fn handle_tachi_task_facade(
             serde_json::to_string(&crate::claims_ops::handle_task_handoff(server, &params)?)
                 .map_err(|err| err.to_string())
         }
-        TachiTaskAction::Status => handle_tachi_task_status(server, &params).await,
-        // codex review round 2 (#1182 checkpoint 2): the issue #1173 escape
-        // hatch is "verbose=true OR action='profile'" — two independent ways
-        // to get the full card. `profiles` (the listing) is the one item 2
-        // names as needing to slim; `profile`/`card` (singular-sounding
-        // aliases of the same underlying listing call, pre-existing before
-        // #1173) are the promised on-demand full-card fetch and must default
-        // to full unless the caller explicitly asks for the slim shape via
-        // verbose=false.
-        TachiTaskAction::Profiles => {
-            serde_json::to_string(&crate::dispatch_profile::dispatch_profiles_json_for_server(
-                server,
-                params.verbose.unwrap_or(false),
-            )?)
-            .map_err(|e| format!("serialize dispatch profiles: {e}"))
-        }
-        TachiTaskAction::Profile | TachiTaskAction::Card => {
-            serde_json::to_string(&crate::dispatch_profile::dispatch_profiles_json_for_server(
-                server,
-                params.verbose.unwrap_or(true),
-            )?)
-            .map_err(|e| format!("serialize dispatch profiles: {e}"))
+        TachiTaskAction::Status => {
+            // #1712 C1b-1: dispatch_id keeps the original flat status
+            // snapshot, including its exact field order and optional ACPX /
+            // result branches. Any supplied dispatch_id wins over lifecycle
+            // selectors so an invalid id preserves the old lookup error
+            // rather than silently falling through to the cycle view.
+            if params.dispatch_id.is_some()
+                || (params.flow_id.is_none()
+                    && params.issue_ref.is_none()
+                    && params.pr_ref.is_none())
+            {
+                handle_tachi_task_status(server, &params).await
+            } else {
+                let cycle_raw =
+                    crate::task_lifecycle::handle_task_cycle_status(server, &params).await?;
+                let cycle: serde_json::Value = serde_json::from_str(&cycle_raw)
+                    .map_err(|err| format!("parse lifecycle status response: {err}"))?;
+                serde_json::to_string(&serde_json::json!({
+                    "status": "ok",
+                    "cycle": cycle,
+                }))
+                .map_err(|err| format!("serialize status cycle response: {err}"))
+            }
         }
         TachiTaskAction::Intake => crate::task_lifecycle::handle_task_intake(server, &params).await,
-        TachiTaskAction::CycleStatus => {
-            crate::task_lifecycle::handle_task_cycle_status(server, &params).await
-        }
         TachiTaskAction::Adjudicate => {
             let adjudication = params
                 .adjudication
@@ -184,48 +180,10 @@ pub(super) async fn handle_tachi_task_facade(
             );
             serde_json::to_string(&result).map_err(|e| format!("serialize adjudicate result: {e}"))
         }
-        TachiTaskAction::BuildReferences | TachiTaskAction::CloseLoop => {
-            let workflow_params = TachiWorkflowParams {
-                action: action.clone(),
-                issue_ref: params.issue_ref.clone(),
-                pr_ref: params.pr_ref.clone(),
-                doc_paths: params.doc_paths.clone(),
-                spec_paths: params.spec_paths.clone(),
-                related_issues: params.related_issues.clone(),
-                post_comment: None,
-                flow_id: params.flow_id.clone(),
-                notes: params.notes.clone(),
-                wiki_title: params.wiki_title.clone(),
-                wiki_text: params.wiki_text.clone(),
-                wiki_path: params.wiki_path.clone(),
-                wiki_topic: params.wiki_topic.clone(),
-                wiki_summary: params.wiki_summary.clone(),
-                wiki_category: params.wiki_category.clone(),
-                wiki_keywords: params.wiki_keywords.clone(),
-                wiki_entities: params.wiki_entities.clone(),
-                wiki_importance: params.wiki_importance,
-                wiki_scope: params.wiki_scope.clone(),
-                wiki_domain: params.wiki_domain.clone(),
-                project: params.project.clone(),
-                force: params.force,
-            };
-            let result = crate::workflow_closure::handle_workflow(server, workflow_params).await?;
-            if action == "close_loop" {
-                if let Some(flow_id) = params
-                    .flow_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|id| !id.is_empty())
-                {
-                    crate::task_lifecycle::mark_task_close_loop(flow_id, &result)?;
-                }
-            }
-            Ok(result)
-        } // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched above
-          // (#919 concern) — a new variant fails to compile here until it is
-          // explicitly routed, instead of silently returning "Invalid action" for
-          // a value that already deserialized successfully.
-    }?;
+    }?; // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched above
+        // (#919 concern) — a new variant fails to compile here until it is
+        // explicitly routed, instead of silently returning "Invalid action" for
+        // a value that already deserialized successfully.
     if action == "complete" && crate::facade_memory_ops::wants_full_format(params.format.as_deref())
     {
         return Ok(raw);
@@ -248,7 +206,7 @@ pub(super) async fn handle_tachi_task_facade(
 fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<(), String> {
     if !tachi_hub::facade_action_allowed("tachi_task", Some(action), server.active_tool_profile()) {
         return Err(format!(
-            "tachi_task(action='{action}') is not available to the active tool profile; delegate workers may use 'complete', 'status', 'board', 'briefing', or 'doc_index'."
+            "tachi_task(action='{action}') is not available to the active tool profile; delegate workers may use 'complete', 'status', 'board', or 'brief'."
         ));
     }
     Ok(())

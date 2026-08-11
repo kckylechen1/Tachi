@@ -70,7 +70,6 @@ pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // (`promote_issue`).
     // Facade coordination tools
     "tachi_handoff",
-    "tachi_workflow",
     "tachi_orchestrator",
     "tachi_agents",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)

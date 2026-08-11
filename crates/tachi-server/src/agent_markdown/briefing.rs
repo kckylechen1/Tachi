@@ -34,7 +34,7 @@ pub(crate) fn format_briefing(
         );
     }
     out.push(
-        "Layer authority: [AUTHORITY: docs/specs > guide/SOP > wiki > memory/eval]. This compatibility briefing shows memory/wiki/evidence; use `tachi_task(action='briefing')` for feature-scoped canonical docs/specs."
+        "Layer authority: [AUTHORITY: docs/specs > guide/SOP > wiki > memory/eval]. This compatibility briefing shows memory/wiki/evidence; use `tachi_task(action='brief')` for feature-scoped canonical docs/specs."
             .to_string(),
     );
 

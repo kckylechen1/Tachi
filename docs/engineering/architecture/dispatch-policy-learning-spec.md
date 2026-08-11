@@ -47,8 +47,8 @@ invent calls that are not exposed yet.
 
 | Capability | Public surface | Status |
 |---|---|---|
-| feature intake and board | `tachi_task(action="intake"|"briefing")` | implemented |
-| profile/card listing | `tachi_task(action="profiles"|"profile"|"card")` | implemented |
+| feature intake and board | `tachi_task(action="intake"|"brief")` | implemented |
+| operator profile/admission diagnostics | `tachi card list [--json]` / `tachi card show <profile-id> [--json]` | implemented; local operator-only, not launch approval |
 | route recommendation | `tachi_tune(action="route_simulate")` | implemented |
 | route policy replay | `tachi_tune(action="route_simulate")` | implemented |
 | route policy proposals | `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` (admin-only since #1426) | implemented |
@@ -58,7 +58,7 @@ invent calls that are not exposed yet.
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
 | skill bundle/loadout | `tachi_skill(action="bundle"|"loadout")` | implemented |
 | PR gate preview | `tachi_gh(action="pr_status")` | implemented |
-| release and closure | `tachi_gh(action="release_note")` / `tachi_task(action="close_loop")` | implemented |
+| release and closure | `tachi_gh(action="release_note")` / `tachi_gh(action="close_loop")` | implemented |
 
 Do not add new public facades such as `tachi_mbit`, `tachi_policy`, or
 `tachi_router` while an existing domain facade can carry the workflow. Internal
@@ -197,9 +197,9 @@ deterministic MBIT/risk fit rather than pretending the policy is learned.
 Every substantial policy-learning slice should be able to pass this workflow:
 
 1. `tachi_task(action="intake", issue_ref=...)`
-2. `tachi_task(action="briefing", flow_id=...)`
-3. `tachi_task(action="cycle_status", flow_id=...)`
-4. `tachi_task(action="profiles")` / `tachi_skill(action="loadout")` as needed
+2. `tachi_task(action="brief", flow_id=...)`
+3. `tachi_task(action="status", flow_id=...)` (the cycle view is nested under `status.cycle`)
+4. Operator-only static diagnostics (`tachi card list/show`) and `tachi_skill(action="loadout")` are separate surfaces when needed; the model-facing Task facade does not inspect profile/card projections.
 6. launch the host harness's native subagent with the frozen packet; use the
    admin/operator external staffing exception only when a proven boundary
    requirement exceeds host-native guarantees
@@ -207,11 +207,11 @@ Every substantial policy-learning slice should be able to pass this workflow:
 8. leader verification and `tachi_verify`
 9. submit evidence and independently adjudicate the outcome; legacy explicit
    Tachi runs may still use `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
-10. rerun `tachi_task(action="cycle_status", flow_id=...)` before PR handoff
+10. rerun `tachi_task(action="status", flow_id=...)` before PR handoff
 11. `tachi_gh(action="link_pr", flow_id=..., pr_ref=...)`
 12. `tachi_gh(action="pr_status", flow_id=..., pr_ref=...)`
 13. `tachi_gh(action="release_note", flow_id=...)`
-14. `tachi_task(action="close_loop", flow_id=...)`
+14. `tachi_gh(action="close_loop", flow_id=...)`
 
 The UX matrix is not just a checklist. It is a product test for whether Tachi
 can guide an agent from issue to durable closure without relying on chat memory.
@@ -220,7 +220,7 @@ can guide an agent from issue to durable closure without relying on chat memory.
 
 As of 2026-06-28, the baseline includes:
 
-- feature-scoped `tachi_task(action="briefing")`;
+- feature-scoped `tachi_task(action="brief")`;
 - built-in dispatch profiles and MBIT-like profile cards;
 - profile recommendation with deterministic risk classification;
 - live eval performance matrix consumption by recommendation;
@@ -246,11 +246,11 @@ As of 2026-06-28, the baseline includes:
   weakness markers and skill demotion targets, and merged weak-against signals
   affect route recommendation scoring;
 - credentialed `opencode_builder` profile;
-- feature lifecycle: `tachi_task` owns `intake` / `cycle_status` /
-  `build_references` / `close_loop`; `tachi_gh` owns `link_pr` /
-  `pr_status` / `release_note` / `pr_handoff`;
+- feature lifecycle: `tachi_task` owns `intake` / `status` (cycle view);
+  `tachi_gh` owns `close_loop` (including its dry-run reference/promotion
+  preview) plus `link_pr` / `pr_status` / `release_note` / `pr_handoff`;
 - feature briefing, intake instructions, issue automation plans, and GitHub
-  handoff text route flow/issue/PR-backed work through read-only `cycle_status`
+  handoff text route flow/issue/PR-backed work through read-only `status` cycle views
   before PR handoff, release notes, or close-loop;
 - `dispatch(profile=...)` records flow-visible dispatch ids and compact dispatch
   card artifacts when `flow_id` is valid;

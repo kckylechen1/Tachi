@@ -123,7 +123,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
         })
         .expect("seed briefing fixtures");
 
-    let mut params = task_params("briefing");
+    let mut params = task_params("brief");
     params.format = Some("json".to_string());
     params.task = Some(
         "FeatureBriefingNeedle implement docs/engineering/architecture/subagent-eval-system.md"

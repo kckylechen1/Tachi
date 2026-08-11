@@ -442,7 +442,7 @@ async fn close_loop_attaches_pattern_refs_and_records_hit_feedback() {
     .await;
 
     let response = server
-        .tachi_workflow(Parameters(TachiWorkflowParams {
+        .tachi_gh(Parameters(TachiGhParams {
             action: "close_loop".to_string(),
             issue_ref: Some("kckylechen1/tachi#250".to_string()),
             pr_ref: None,
@@ -467,6 +467,7 @@ async fn close_loop_attaches_pattern_refs_and_records_hit_feedback() {
             wiki_domain: None,
             project: None,
             force: true,
+            ..Default::default()
         }))
         .await
         .expect("close_loop with pattern refs");

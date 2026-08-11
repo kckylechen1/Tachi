@@ -188,7 +188,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_staff"
             | "tachi_orchestrator"
             | "tachi_verify"
-            | "tachi_workflow"
             | "tachi_gh"
             // #757 Cut3-S1 round-2 (review fixup): `tachi_sandbox` folds
             // `sandbox_set_rule`/`sandbox_set_policy` (both destructive:true
@@ -237,17 +236,9 @@ fn describe_allowed_task_actions(allowed: &[&str]) -> String {
     let has = |action: &str| allowed.contains(&action);
     let mut clauses: Vec<String> = Vec::new();
 
-    let context: Vec<&str> = ["briefing", "doc_index", "cycle_status"]
-        .into_iter()
-        .filter(|a| has(a))
-        .collect();
+    let context: Vec<&str> = ["brief", "status"].into_iter().filter(|a| has(a)).collect();
     if !context.is_empty() {
         clauses.push(format!("Use {} for context", context.join("/")));
-    }
-
-    let advisory: Vec<&str> = ["profile", "card"].into_iter().filter(|a| has(a)).collect();
-    if !advisory.is_empty() {
-        clauses.push(format!("{} for advisory evidence", advisory.join("/")));
     }
 
     let ledger_core: Vec<&str> = ["complete", "adjudicate", "board"]
@@ -407,7 +398,7 @@ fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
         cwd.insert(
             "description".to_string(),
             serde_json::Value::String(
-                "[action=briefing|doc_index] Workspace root used to resolve relative canonical document paths."
+                "[action=brief] Workspace root used to resolve relative canonical document paths."
                     .to_string(),
             ),
         );
@@ -1276,13 +1267,13 @@ mod tests {
         ] {
             assert!(!standard_properties.contains_key(hidden), "{hidden}");
         }
-        // #1319-C2: `cwd` survives as a briefing/doc_index field (relative
+        // #1319-C2: `cwd` survives as a brief field (relative
         // doc path resolution) — it must stay visible on the standard tool.
         assert!(standard_properties.contains_key("cwd"));
         assert!(standard_properties["cwd"]["description"]
             .as_str()
             .unwrap_or_default()
-            .contains("action=briefing"));
+            .contains("action=brief"));
         assert!(!standard[0]
             .description
             .as_deref()
@@ -1380,15 +1371,15 @@ mod tests {
     }
 
     #[test]
-    fn projected_tools_list_never_teaches_retired_c1a_actions() {
-        // [C1a review round 1] The enum/schema/census discriminators (see
+    fn projected_tools_list_never_teaches_retired_task_actions() {
+        // The enum/schema/census discriminators (see
         // `f0_task_primary_does_not_advertise_gh_lifecycle` and the
         // facade_tests schema census) only ever checked the `action` enum.
         // They missed free-text tool descriptions, which is exactly how
-        // #1683 C1a's retired tachi_task actions kept getting taught to the
+        // Retired tachi_task actions must never be taught to the
         // model after the enum was pruned (F1: `narrow_gated_action_schemas`
         // rewrote the non-admin description but still said "Use
-        // briefing/doc_index/plan ... recommend for advisory ... merge only
+        // brief/status/plan ... recommend for advisory ... merge only
         // for..."). This walks the same projection `list_tools` actually
         // serves (`project_tool_definitions`) across profiles.
         //
@@ -1424,14 +1415,14 @@ mod tests {
             for tool in &projected {
                 let description = tool.description.as_deref().unwrap_or_default();
                 let scoped_tokens: &[&str] = if tool.name.as_ref() == "tachi_task" {
-                    tachi_params::TACHI_TASK_RETIRED_C1A_ACTIONS
+                    tachi_params::TACHI_TASK_RETIRED_ACTIONS
                 } else {
                     CROSS_TOOL_UNAMBIGUOUS_TOKENS
                 };
                 for retired in scoped_tokens {
                     assert!(
                         !leaks_retired_token(description, retired),
-                        "profile {:?} tool '{}' description still teaches retired C1a action {retired:?}: {description}",
+                        "profile {:?} tool '{}' description still teaches retired task action {retired:?}: {description}",
                         profile.map(tachi_hub::ToolProfile::as_str),
                         tool.name
                     );
@@ -1442,14 +1433,14 @@ mod tests {
 
     #[test]
     fn projected_task_description_never_names_an_action_outside_its_own_enum() {
-        // [C1a review round 2] `narrow_gated_action_schemas` used to filter
+        // `narrow_gated_action_schemas` used to filter
         // the advertised `action` enum down to the profile's real allow-list
         // (240-246 of this file) and then paste a SEPARATE hand-written
         // sentence naming actions for the description — one sentence shared
         // by every non-admin profile, regardless of what that profile's
         // filtered enum actually contained. Delegate's enum was
-        // complete/status/board/briefing/doc_index, but the shared sentence
-        // still taught cycle_status/profile/card/adjudicate/claim/heartbeat/
+        // complete/status/board/brief, but the shared sentence
+        // still taught profile/card/adjudicate/claim/heartbeat/
         // handoff/release — a discoverable-but-not-callable trap. This test
         // makes that class of drift structurally impossible to reintroduce:
         // for every non-admin profile, every `TachiTaskAction` wire token

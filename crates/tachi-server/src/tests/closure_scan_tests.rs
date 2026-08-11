@@ -1,5 +1,5 @@
 use super::make_server_with_temp_home;
-use crate::tool_params::TachiWorkflowParams;
+use crate::tool_params::TachiGhParams;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
@@ -107,7 +107,7 @@ async fn close_loop_drafts_wiki_from_result_when_missing() {
     .unwrap();
 
     let resp = server
-        .tachi_workflow(Parameters(TachiWorkflowParams {
+        .tachi_gh(Parameters(TachiGhParams {
             action: "close_loop".to_string(),
             issue_ref: Some("owner/repo#1".to_string()),
             pr_ref: None,
@@ -131,6 +131,7 @@ async fn close_loop_drafts_wiki_from_result_when_missing() {
             post_comment: Some(false),
             flow_id: Some(flow_id.to_string()),
             notes: None,
+            ..Default::default()
         }))
         .await
         .expect("close_loop should draft and succeed");
@@ -157,7 +158,7 @@ async fn close_loop_drafts_wiki_from_notes_when_result_missing() {
     // No result.md — notes must be enough.
 
     let resp = server
-        .tachi_workflow(Parameters(TachiWorkflowParams {
+        .tachi_gh(Parameters(TachiGhParams {
             action: "close_loop".to_string(),
             issue_ref: Some("owner/repo#42".to_string()),
             pr_ref: None,
@@ -183,6 +184,7 @@ async fn close_loop_drafts_wiki_from_notes_when_result_missing() {
                 "# Notes-sourced lesson\nShipped the renderer fix; no credential paths touched."
                     .to_string(),
             ),
+            ..Default::default()
         }))
         .await
         .expect("close_loop should draft from notes");
@@ -201,7 +203,7 @@ async fn close_loop_drafts_wiki_from_notes_when_result_missing() {
 async fn close_loop_missing_draft_returns_repair_template() {
     let (server, _home) = make_server_with_temp_home();
     let err = server
-        .tachi_workflow(Parameters(TachiWorkflowParams {
+        .tachi_gh(Parameters(TachiGhParams {
             action: "close_loop".to_string(),
             issue_ref: Some("owner/repo#99".to_string()),
             pr_ref: None,
@@ -224,6 +226,7 @@ async fn close_loop_missing_draft_returns_repair_template() {
             post_comment: Some(false),
             flow_id: None,
             notes: None,
+            ..Default::default()
         }))
         .await
         .expect_err("close_loop without draft sources must fail");

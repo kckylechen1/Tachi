@@ -172,7 +172,7 @@ to the correct facade, then deleting duplicate action aliases.
 | `tachi_task` tuning actions | **DONE under #1426:** `route_simulate`/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
 | `tachi_memory` tuning actions | **DONE under #1426:** `recall_simulate`/`recall_proposals`/`review_recall_proposal`/`apply_recall_proposals` are gone from `TACHI_MEMORY_ACTIONS`, the action schema, and the router; the handlers moved to `tune_ops/recall_*`. | `tachi_tune(action='recall_simulate'\|'recall_proposals'\|'recall_review'\|'recall_apply')`, admin-only. | Extracted. | — |
 | `tachi_save` shorthand | Standard allow-list includes it at `patterns.rs:130`. | `tachi_memory(action="save")`. | Fold candidate, keep only if dogfood proves value. | Dogfood decision after Batch A. |
-| `tachi_briefing` shorthand | Standard allow-list includes it at `patterns.rs:128`; separate briefing also exists in `tachi_memory` and `tachi_task`. | `tachi_memory(action="briefing")`. | Fold candidate. | Dogfood decision after action-level profile design. |
+| `tachi_briefing` shorthand | Standard allow-list includes it at `patterns.rs:128`; separate briefing also exists in `tachi_memory` and the feature-scoped `tachi_task(action="brief")`. | `tachi_memory(action="briefing")`. | Fold candidate. | Dogfood decision after action-level profile design. |
 
 ### Batch E: Admin Quarantine, Not Immediate Deletion
 

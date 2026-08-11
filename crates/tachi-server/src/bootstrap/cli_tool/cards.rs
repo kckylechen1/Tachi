@@ -1,424 +1,326 @@
-use crate::tool_params::TachiTaskParams;
-use rmcp::handler::server::wrapper::Parameters;
+use crate::dispatch_profile::{DispatchProfileDef, DISPATCH_PROFILES};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use tachi_bootstrap::cli::CardAction;
+use tachi_dispatch::{
+    compile_effective_contract, profile_resolved_model, ContractInputs, PermissionProfile,
+    SkillRequest, PROVIDER_QUALIFICATIONS,
+};
 
 use super::super::print_pretty_json;
-use super::tool_dispatch::dispatch_cli_tool;
 
+/// Local operator-only diagnostics for static dispatch profiles.
+///
+/// This command intentionally does not call `tachi_task` or the server's
+/// profile/card JSON builders. It reads the static profile registry, compiles
+/// the default workspace authority, and reports host admission as diagnostics;
+/// it never approves or launches a dispatch.
 pub(super) async fn run_card_command(
     action: CardAction,
-    db_path: &PathBuf,
-    project_db_path: Option<&PathBuf>,
-    app_home: &PathBuf,
+    _db_path: &PathBuf,
+    _project_db_path: Option<&PathBuf>,
+    _app_home: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let profiles = load_card_profiles(db_path, project_db_path, app_home).await?;
     match action {
         CardAction::List { json } => {
+            let profiles = operator_profile_list_json()?;
             if json {
-                print_pretty_json(&card_list_json(&profiles))
+                print_pretty_json(&profiles)
             } else {
-                print_card_list(&profiles)
+                print_operator_profile_list(&profiles)
             }
         }
         CardAction::Show { id, json } => {
-            let card = find_card_profile(&profiles, &id)
-                .ok_or_else(|| format!("unknown Card/profile '{id}'"))?;
+            let profile = find_static_profile(&id)
+                .ok_or_else(|| format!("unknown operator profile '{id}'"))?;
+            let detail = operator_profile_detail(profile)?;
             if json {
-                print_pretty_json(&card_show_json(card))
+                print_pretty_json(&json!({
+                    "schema_version": "tachi.operator_profile.v1",
+                    "profile": detail,
+                }))
             } else {
-                print_card_show(card)
+                print_operator_profile_detail(&detail)
             }
         }
     }
 }
 
-async fn load_card_profiles(
-    db_path: &PathBuf,
-    project_db_path: Option<&PathBuf>,
-    app_home: &PathBuf,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let mut args = serde_json::Map::new();
-    args.insert("action".into(), json!("profiles"));
-    // tachi#1173 item 2 slimmed the default `tachi_task(action='profiles')`
-    // shape to name/backend/model/role; `tachi card list`/`tachi card show`
-    // are full-card consumers (compact_card_json reads mbit_card, guidance,
-    // moves, evidence_contract, authority), so this CLI facade opts back into
-    // the verbose shape explicitly.
-    args.insert("verbose".into(), json!(true));
-    // tachi#1201 item 1: action='profiles' now defaults to a markdown
-    // response when `format` is omitted; this CLI facade parses the raw
-    // response as JSON below, so it must request the JSON shape explicitly.
-    args.insert("format".into(), json!("json"));
-    let body = dispatch_cli_tool(
-        "tachi_task",
-        args,
-        db_path,
-        project_db_path,
-        app_home,
-        |server, args_map| {
-            Box::pin(async move {
-                let params: TachiTaskParams =
-                    serde_json::from_value(serde_json::Value::Object(args_map))
-                        .map_err(|e| format!("invalid tachi_task args: {e}"))?;
-                server.tachi_task(Parameters(params)).await
-            })
-        },
-    )
-    .await?;
-    serde_json::from_str(&body)
-        .map_err(|e| format!("tachi_task profiles returned non-JSON output: {e}").into())
-}
-
-fn find_card_profile<'a>(profiles: &'a Value, id: &str) -> Option<&'a Value> {
+fn find_static_profile(id: &str) -> Option<&'static DispatchProfileDef> {
     let wanted = id.trim();
-    profiles
-        .get("dispatch_profiles")
-        .and_then(Value::as_array)?
+    DISPATCH_PROFILES
         .iter()
-        .find(|profile| profile.get("name").and_then(Value::as_str) == Some(wanted))
+        .find(|profile| profile.name == wanted)
 }
 
-fn card_list_json(profiles: &Value) -> Value {
-    let cards = profiles
-        .get("dispatch_profiles")
-        .and_then(Value::as_array)
-        .map(|rows| rows.iter().map(compact_card_json).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let mut output = profiles.clone();
-    if let Some(object) = output.as_object_mut() {
-        object.insert("schema_version".to_string(), json!("tachi.cards.list.v1"));
-        object.insert("cards".to_string(), Value::Array(cards));
-        output
-    } else {
-        json!({
-            "schema_version": "tachi.cards.list.v1",
-            "cards": cards,
-            "profiles": profiles,
-        })
-    }
+fn operator_profile_list_json() -> Result<Value, String> {
+    let profiles = DISPATCH_PROFILES
+        .iter()
+        .map(operator_profile_summary)
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "schema_version": "tachi.operator_profile.v1",
+        "profiles": profiles,
+    }))
 }
 
-fn card_show_json(profile: &Value) -> Value {
-    let compact = compact_card_json(profile);
-    let mut output = profile.clone();
-    if let Some(object) = output.as_object_mut() {
-        object.insert("schema_version".to_string(), json!("tachi.card.show.v1"));
-        object.insert("card".to_string(), compact);
-        output
-    } else {
-        json!({
-            "schema_version": "tachi.card.show.v1",
-            "card": compact,
-            "profile": profile,
-        })
-    }
-}
-
-fn compact_card_json(profile: &Value) -> Value {
-    let card = profile.get("mbit_card");
-    let name = profile.get("name").and_then(Value::as_str).unwrap_or("-");
-    let display_name = profile
-        .get("display_name")
-        .and_then(Value::as_str)
-        .unwrap_or(name);
-    let archetype = first_json_value(&[
-        card.and_then(|card| card.get("archetype")),
-        profile.get("card_archetype"),
-    ]);
-    let skill_loadout = first_json_value(&[
-        card.and_then(|card| card.get("skill_loadout")),
-        profile.get("skill_loadout"),
-    ]);
-    let evidence_contract = first_json_value(&[
-        card.and_then(|card| card.get("evidence_contract")),
-        profile.get("evidence_contract"),
-    ]);
-
+fn operator_profile_summary(profile: &DispatchProfileDef) -> Value {
     json!({
-        "id": name,
-        "profile_id": name,
-        "display_name": display_name,
-        "archetype": archetype,
-        "role": first_json_value(&[profile.get("role")]),
-        "stage": first_json_value(&[profile.get("stage")]),
-        "backend": first_json_value(&[profile.get("backend")]),
-        "host_adapter": first_json_value(&[profile.get("host_adapter")]),
-        "tool_profile": first_json_value(&[profile.get("tool_profile")]),
-        "authority": first_json_value(&[card.and_then(|card| card.get("authority"))]),
-        "guidance": first_json_value(&[card.and_then(|card| card.get("guidance"))]),
-        "moves": first_json_value(&[card.and_then(|card| card.get("moves"))]),
-        "skill_loadout": skill_loadout,
-        "evidence_contract": evidence_contract,
-        "strengths": first_json_value(&[
-            card.and_then(|card| card.get("strong_against")),
-            profile.get("strong_against"),
-        ]),
-        "weaknesses": first_json_value(&[
-            card.and_then(|card| card.get("weak_against")),
-            profile.get("weak_against"),
-        ]),
-        "evolution": first_json_value(&[card.and_then(|card| card.get("evolution"))]),
+        "id": profile.name,
+        "display_name": profile.display_name,
+        "backend": profile.backend,
+        "model": profile_resolved_model(profile),
+        "role": profile.role,
+        "stage": profile.stage,
+        "tool_profile": profile.tool_profile,
+        "github_read": profile.github_read,
+        "write_actions": profile.write_actions,
     })
 }
 
-fn first_json_value(values: &[Option<&Value>]) -> Value {
-    values
-        .iter()
-        .find_map(|value| value.as_ref().copied().filter(|value| !value.is_null()))
-        .cloned()
-        .unwrap_or(Value::Null)
+fn operator_profile_detail(profile: &DispatchProfileDef) -> Result<Value, String> {
+    let admission = crate::host_profile::admit_execution_level(None);
+    let workspace_authority_default = compile_operator_authority(profile)?;
+    Ok(json!({
+        "id": profile.name,
+        "display_name": profile.display_name,
+        "backend": profile.backend,
+        "model": profile_resolved_model(profile),
+        "role": profile.role,
+        "stage": profile.stage,
+        "tool_profile": profile.tool_profile,
+        "github_read": profile.github_read,
+        "write_actions": profile.write_actions,
+        "allowed_facades": profile.allowed_facades,
+        "allowed_mcp_servers": profile.allowed_mcp_servers,
+        "inject_tachi_mcp": profile.inject_tachi_mcp,
+        "inject_hub_mcps": profile.inject_hub_mcps,
+        "workspace_authority_default": workspace_authority_default,
+        "static_profile_admission": {
+            "profile_registered": true,
+            "reason_code": admission.reason_code,
+            "host_profile": admission.host_profile,
+            "host_profile_source": admission.profile_source,
+            "host_max_execution_level": admission.max_execution_level.map(|level| level.as_str()),
+        },
+    }))
 }
 
-fn print_card_list(profiles: &Value) -> Result<(), Box<dyn std::error::Error>> {
-    let rows = profiles
-        .get("dispatch_profiles")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            std::io::Error::other("tachi_task profiles response lacks dispatch_profiles array")
-        })?;
-    println!("Tachi Cards");
+/// Compile the static profile's default authority. Provider certification is a
+/// launch-time concern and is not needed for this diagnostic. If the real
+/// backend is shell-capable and lacks a certification receipt, repeat the pure
+/// authority compilation with a non-shell diagnostic backend; the profile
+/// ceiling and default are unchanged, while the operator output remains
+/// available without pretending to approve a launch.
+fn compile_operator_authority(profile: &DispatchProfileDef) -> Result<String, String> {
+    let skills: Vec<SkillRequest> = Vec::new();
+    let allowed_tools: Vec<String> = Vec::new();
+    let compile = |backend: &str| {
+        compile_effective_contract(&ContractInputs {
+            backend,
+            transport: "cli",
+            backend_version: None,
+            profile: Some(profile),
+            requested_sandbox: None,
+            permission_profile: PermissionProfile::Default,
+            allowed_tools: &allowed_tools,
+            skills: &skills,
+            mcp_write_actions: Some(profile.write_actions),
+            mcp_github_read: Some(profile.github_read),
+            qualifications: PROVIDER_QUALIFICATIONS,
+        })
+    };
+
+    match compile(profile.backend) {
+        Ok(contract) => Ok(contract.workspace_authority.as_str().to_string()),
+        Err(real_backend_error) => compile("operator-diagnostic")
+            .map(|contract| contract.workspace_authority.as_str().to_string())
+            .map_err(|diagnostic_error| {
+                format!(
+                    "compile static authority for '{}': real backend: {real_backend_error}; diagnostic backend: {diagnostic_error}",
+                    profile.name
+                )
+            }),
+    }
+}
+
+fn print_operator_profile_list(profiles: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    let rows = profiles["profiles"]
+        .as_array()
+        .ok_or_else(|| std::io::Error::other("operator profile list lacks profiles array"))?;
+    println!("Tachi Operator Profiles");
     println!(
-        "{:<22} {:<8} {:<18} {:<12} {:<12} {:<10}",
-        "id", "card", "role", "stage", "backend", "write"
+        "{:<22} {:<30} {:<12} {:<12} {:<12} {:<14}",
+        "id", "display_name", "backend", "role", "stage", "write_actions"
     );
-    for profile in rows {
-        let name = profile.get("name").and_then(Value::as_str).unwrap_or("-");
-        let archetype = profile
-            .get("card_archetype")
-            .and_then(Value::as_str)
-            .unwrap_or("-");
-        let role = profile.get("role").and_then(Value::as_str).unwrap_or("-");
-        let stage = profile.get("stage").and_then(Value::as_str).unwrap_or("-");
-        let backend = profile
-            .get("backend")
-            .and_then(Value::as_str)
-            .unwrap_or("-");
-        let write_code = profile
-            .get("mbit_card")
-            .and_then(|card| card.get("authority"))
-            .and_then(|authority| authority.get("write_code"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    for row in rows {
         println!(
-            "{:<22} {:<8} {:<18} {:<12} {:<12} {:<10}",
-            name, archetype, role, stage, backend, write_code
+            "{:<22} {:<30} {:<12} {:<12} {:<12} {:<14}",
+            display_value(row, "id"),
+            display_value(row, "display_name"),
+            display_value(row, "backend"),
+            display_value(row, "role"),
+            display_value(row, "stage"),
+            display_value(row, "write_actions"),
         );
     }
     Ok(())
 }
 
-fn print_card_show(profile: &Value) -> Result<(), Box<dyn std::error::Error>> {
-    let null = Value::Null;
-    let card = profile.get("mbit_card").unwrap_or(&null);
-    let name = profile.get("name").and_then(Value::as_str).unwrap_or("-");
-    let display_name = profile
-        .get("display_name")
-        .and_then(Value::as_str)
-        .unwrap_or(name);
-    println!("Tachi Card: {display_name}");
-    println!("id: {name}");
-    println!(
-        "card: {}",
-        card.get("archetype").and_then(Value::as_str).unwrap_or("-")
-    );
-    println!(
-        "role: {}",
-        profile.get("role").and_then(Value::as_str).unwrap_or("-")
-    );
-    println!(
-        "stage: {}",
-        profile.get("stage").and_then(Value::as_str).unwrap_or("-")
-    );
-    println!(
-        "backend: {}",
-        profile
-            .get("backend")
-            .and_then(Value::as_str)
-            .unwrap_or("-")
-    );
-    println!(
-        "authority: write_code={} merge={} github_write={}",
-        card.get("authority")
-            .and_then(|authority| authority.get("write_code"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        card.get("authority")
-            .and_then(|authority| authority.get("merge"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        card.get("authority")
-            .and_then(|authority| authority.get("github_write"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    );
-    println!(
-        "guidance: {}",
-        json_array_strings(
-            card.get("guidance")
-                .and_then(|guidance| guidance.get("superpowers"))
-        )
-    );
-    println!(
-        "moves: {}",
-        json_array_strings(card.get("moves").and_then(|moves| moves.get("waza")))
-    );
-    println!(
-        "evidence: {}",
-        json_array_strings(
-            card.get("evidence_contract")
-                .and_then(|contract| contract.get("required"))
-        )
-    );
+fn print_operator_profile_detail(profile: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Tachi Operator Profile");
+    for field in [
+        "id",
+        "display_name",
+        "backend",
+        "model",
+        "role",
+        "stage",
+        "tool_profile",
+        "github_read",
+        "write_actions",
+        "allowed_facades",
+        "allowed_mcp_servers",
+        "inject_tachi_mcp",
+        "inject_hub_mcps",
+        "workspace_authority_default",
+        "static_profile_admission",
+    ] {
+        println!("{field}: {}", profile.get(field).unwrap_or(&Value::Null));
+    }
     Ok(())
 }
 
-fn json_array_strings(value: Option<&Value>) -> String {
-    let items: Vec<&str> = value
-        .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    if items.is_empty() {
-        "-".to_string()
-    } else {
-        items.join(", ")
+fn display_value(value: &Value, field: &str) -> String {
+    match value.get(field) {
+        Some(Value::String(text)) => text.to_string(),
+        Some(Value::Bool(value)) => value.to_string(),
+        Some(Value::Null) | None => "-".to_string(),
+        Some(value) => value.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
-    /// tachi#1173 item 2 regression guard: `dispatch_profiles_json_for_server`
-    /// slimmed its default (`verbose=false`) shape to name/backend/model/role,
-    /// so `load_card_profiles` — a genuine full-card consumer
-    /// (`compact_card_json` below reads `mbit_card`/`skill_loadout`/
-    /// `evidence_contract`/`authority`) — must keep requesting the pre-#1173
-    /// verbose shape explicitly. This is RED if that `verbose: true` arg is
-    /// ever dropped (rows would come back slim and `card list`/`card show`
-    /// would silently render "-" for every card field), GREEN as shipped.
-    #[tokio::test]
-    async fn load_card_profiles_still_returns_full_mbit_cards() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let app_home = temp.path().join("home");
-        std::fs::create_dir_all(&app_home).expect("app_home dir");
-        let db_path = temp.path().join("global.db");
+    fn keys(value: &Value) -> BTreeSet<&str> {
+        value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect()
+    }
 
-        let profiles = load_card_profiles(&db_path, None, &app_home)
-            .await
-            .expect("load card profiles");
-
-        let rows = profiles
-            .get("dispatch_profiles")
-            .and_then(Value::as_array)
-            .expect("dispatch_profiles array");
-        assert!(!rows.is_empty(), "{profiles}");
+    #[test]
+    fn operator_list_and_detail_have_exact_amended_shape() {
+        let list = operator_profile_list_json().expect("operator list");
+        assert_eq!(list["schema_version"], "tachi.operator_profile.v1");
+        let rows = list["profiles"].as_array().expect("profiles");
+        assert_eq!(rows.len(), DISPATCH_PROFILES.len());
+        let summary_fields = BTreeSet::from([
+            "id",
+            "display_name",
+            "backend",
+            "model",
+            "role",
+            "stage",
+            "tool_profile",
+            "github_read",
+            "write_actions",
+        ]);
         for row in rows {
+            assert_eq!(keys(row), summary_fields);
+        }
+
+        let detail = operator_profile_detail(&DISPATCH_PROFILES[0]).expect("operator detail");
+        let detail_fields = BTreeSet::from([
+            "id",
+            "display_name",
+            "backend",
+            "model",
+            "role",
+            "stage",
+            "tool_profile",
+            "github_read",
+            "write_actions",
+            "allowed_facades",
+            "allowed_mcp_servers",
+            "inject_tachi_mcp",
+            "inject_hub_mcps",
+            "workspace_authority_default",
+            "static_profile_admission",
+        ]);
+        assert_eq!(keys(&detail), detail_fields);
+        assert_eq!(
+            keys(&detail["static_profile_admission"]),
+            BTreeSet::from([
+                "profile_registered",
+                "reason_code",
+                "host_profile",
+                "host_profile_source",
+                "host_max_execution_level",
+            ])
+        );
+        assert_eq!(
+            detail["static_profile_admission"]["profile_registered"],
+            true
+        );
+        assert!(matches!(
+            detail["workspace_authority_default"].as_str(),
+            Some("read-only") | Some("workspace-write") | Some("danger-full-access")
+        ));
+    }
+
+    #[test]
+    fn operator_projection_has_no_secret_or_card_overlay_fields() {
+        let list = operator_profile_list_json().expect("operator list");
+        let detail = operator_profile_detail(
+            find_static_profile("opencode_builder").expect("static profile"),
+        )
+        .expect("operator detail");
+        let serialized = format!("{list}{detail}");
+        for forbidden in [
+            "credential_profiles",
+            "mbit_card",
+            "archetype",
+            "stats",
+            "personality",
+            "guidance",
+            "moves",
+            "skill_loadout",
+            "strong_against",
+            "weak_against",
+            "evolution",
+            "dispatch_profile_card_overlays",
+            "TACHI_",
+            "secret",
+        ] {
             assert!(
-                row.get("mbit_card").is_some_and(Value::is_object),
-                "tachi card CLI needs the full mbit_card, got: {row}"
+                !serialized.contains(forbidden),
+                "operator projection leaked forbidden token {forbidden}: {serialized}"
             );
-            assert!(
-                row.get("skill_loadout").is_some(),
-                "tachi card CLI needs skill_loadout, got: {row}"
-            );
+        }
+        for profile in DISPATCH_PROFILES {
+            for credential_profile in profile.credential_profiles {
+                assert!(
+                    !serialized.contains(credential_profile),
+                    "operator projection leaked credential profile {credential_profile}: {serialized}"
+                );
+            }
         }
     }
 
-    fn sample_profile() -> Value {
-        json!({
-            "name": "codex_55_review",
-            "display_name": "Codex 5.5 Review",
-            "card_archetype": "raven",
-            "role": "reviewer",
-            "stage": "review",
-            "backend": "codex",
-            "tool_profile": "delegate",
-            "weak_against": ["direct_merge"],
-            "skill_loadout": {
-                "common_skills": ["skill:superpowers-requesting-code-review"]
-            },
-            "evidence_contract": {
-                "required": ["findings", "verification"]
-            },
-            "mbit_card": {
-                "archetype": "raven",
-                "authority": {
-                    "write_code": false,
-                    "merge": false,
-                    "github_write": false
-                },
-                "guidance": {
-                    "superpowers": ["skill:superpowers-requesting-code-review"]
-                },
-                "moves": {
-                    "waza": ["skill:waza-check"],
-                    "external": []
-                },
-                "strong_against": ["review"],
-                "weak_against": ["direct_merge"],
-                "evolution": {
-                    "status": "baseline"
-                }
-            }
-        })
-    }
-
     #[test]
-    fn card_list_json_adds_stable_cards_array_without_dropping_profiles() {
-        let profiles = json!({
-            "dispatch_profiles": [sample_profile()],
-            "projection_namespace": "dispatch_profile_card_overlays"
-        });
-
-        let rendered = card_list_json(&profiles);
-
-        assert_eq!(rendered["schema_version"], json!("tachi.cards.list.v1"));
-        assert_eq!(
-            rendered["dispatch_profiles"][0]["name"],
-            json!("codex_55_review")
-        );
-        assert_eq!(rendered["cards"][0]["profile_id"], json!("codex_55_review"));
-        assert_eq!(rendered["cards"][0]["archetype"], json!("raven"));
-        assert_eq!(
-            rendered["cards"][0]["moves"]["waza"][0],
-            json!("skill:waza-check")
-        );
-    }
-
-    #[test]
-    fn card_show_json_adds_compact_card_alias() {
-        let rendered = card_show_json(&sample_profile());
-
-        assert_eq!(rendered["schema_version"], json!("tachi.card.show.v1"));
-        assert_eq!(rendered["name"], json!("codex_55_review"));
-        assert_eq!(rendered["card"]["id"], json!("codex_55_review"));
-        assert_eq!(rendered["card"]["authority"]["merge"], json!(false));
-        assert_eq!(
-            rendered["card"]["evidence_contract"]["required"][0],
-            json!("findings")
-        );
-    }
-
-    #[test]
-    fn compact_card_json_preserves_host_adapter() {
-        let profile = json!({
-            "name": "opencode_builder",
-            "display_name": "OpenCode Credentialed Builder",
-            "backend": "opencode",
-            "host_adapter": "opencode",
-            "role": "executor",
-            "stage": "execute",
-            "mbit_card": {
-                "archetype": "scv",
-                "authority": {"write_code": true}
-            }
-        });
-
-        let rendered = compact_card_json(&profile);
-
-        assert_eq!(rendered["backend"], json!("opencode"));
-        assert_eq!(rendered["host_adapter"], json!("opencode"));
+    fn operator_projection_resolves_static_model_and_authority() {
+        let summary =
+            operator_profile_summary(find_static_profile("glm_impl").expect("static GLM profile"));
+        assert!(summary["model"].as_str().is_some());
+        let detail =
+            operator_profile_detail(find_static_profile("glm_impl").expect("static GLM profile"))
+                .expect("operator detail");
+        assert_eq!(detail["workspace_authority_default"], "workspace-write");
     }
 }
