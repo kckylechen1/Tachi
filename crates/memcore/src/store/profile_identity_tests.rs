@@ -340,7 +340,10 @@ fn portable_opens_full_store_and_migrates_as_full() {
         table_exists(&conn, "rem_source_claims"),
         "the portable v28 migration must have run as well"
     );
-    assert_eq!(user_version(&conn), 30);
+    assert_eq!(
+        user_version(&conn),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
+    );
     let sentinels = marked_sentinels(&conn);
     for key in crate::db::migrations::MIGRATION_SENTINEL_KEYS {
         assert!(sentinels.contains(*key), "sentinel {key} was not marked");
