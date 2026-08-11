@@ -1,0 +1,25 @@
+{
+  "why": "`max_output_tokens` is the canonical name and `max_tokens` is the wire name; getting that rename wrong silently caps generation at the provider's default. `stop` and `seed` ride along.",
+  "request": {
+    "target": {"kind": "resolved", "target": {"deployment_id": "dep-openai-compat-1", "endpoint": "https://provider.test/v1/chat/completions", "provider_model_id": "test-model-1"}},
+    "messages": [{"role": "user", "content": {"kind": "text", "text": "hello"}}],
+    "sampling": {"temperature": 0.2, "top_p": 0.9, "max_output_tokens": 1024, "stop": ["\n\n", "END"], "seed": 42},
+    "data_policy": {"prohibit_training_on_input": true, "prohibit_retention": true},
+    "admitted": {"caller_ref": "uid:501"}
+  },
+  "expected": {
+    "method": "POST",
+    "url": "https://provider.test/v1/chat/completions",
+    "headers": [["content-type", "application/json"]],
+    "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body": {
+      "model": "test-model-1",
+      "messages": [{"role": "user", "content": "hello"}],
+      "temperature": 0.2,
+      "top_p": 0.9,
+      "max_tokens": 1024,
+      "stop": ["\n\n", "END"],
+      "seed": 42
+    }
+  }
+}

@@ -95,13 +95,13 @@ mod wire;
 mod tests;
 
 pub use canonical::{
-    AdmittedRefs, BudgetConstraint, CanonicalInvocationRequest, CanonicalInvocationRequestParts,
-    CanonicalMessage, CancellationContext, ContentPart, DataPolicyConstraint, DeadlineContext,
-    EndpointUrl, IdempotencyKey, InvocationTarget, MessageContent, MessageRole, ModelAliasRef,
-    RequestError, RequiredCapabilities, ResolvedWireTarget, ResolvedWireTargetParts, ResponseFormat,
-    SamplingParams, StreamSelection, ToolChoice, ToolDeclaration, MAX_CONTENT_PARTS, MAX_MESSAGES,
-    MAX_MESSAGE_CONTENT_BYTES, MAX_STOP_SEQUENCES, MAX_TOOLS, MAX_TOOL_SCHEMA_BYTES,
-    MAX_TOTAL_CONTENT_BYTES,
+    AdmittedRefs, BudgetConstraint, CancellationContext, CanonicalInvocationRequest,
+    CanonicalInvocationRequestParts, CanonicalMessage, ContentPart, DataPolicyConstraint,
+    DeadlineContext, EndpointUrl, IdempotencyKey, InvocationTarget, MessageContent, MessageRole,
+    ModelAliasRef, RequestError, RequiredCapabilities, ResolvedWireTarget, ResolvedWireTargetParts,
+    ResponseFormat, SamplingParams, StreamSelection, ToolChoice, ToolDeclaration,
+    MAX_CONTENT_PARTS, MAX_MESSAGES, MAX_MESSAGE_CONTENT_BYTES, MAX_STOP_SEQUENCES, MAX_TOOLS,
+    MAX_TOOL_SCHEMA_BYTES, MAX_TOTAL_CONTENT_BYTES,
 };
 pub use disposition::{
     BeforeSendRefusal, BeforeSendRefusalKind, CancellationEvidence, CompletionKindV1,

@@ -1,0 +1,11 @@
+{
+  "why": "The credential is bad, and the advice is to try another one rather than to hammer the same key.",
+  "status": 401,
+  "headers": [],
+  "body": "{\"error\":{\"message\":\"Incorrect API key provided\",\"code\":\"invalid_api_key\"}}",
+  "expected": {
+    "outcome": "rejected",
+    "status": 401,
+    "classification": {"class": "auth_invalid", "advice": "retry_other_credential"}
+  }
+}

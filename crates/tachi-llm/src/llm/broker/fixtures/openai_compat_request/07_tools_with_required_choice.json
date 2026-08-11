@@ -1,0 +1,29 @@
+{
+  "why": "The tool envelope (`type: function`, `function: {...}`) and the named-tool choice shape. A parameters schema is a passthrough too.",
+  "request": {
+    "target": {"kind": "resolved", "target": {"deployment_id": "dep-openai-compat-1", "endpoint": "https://provider.test/v1/chat/completions", "provider_model_id": "test-model-1"}},
+    "messages": [{"role": "user", "content": {"kind": "text", "text": "find the thing"}}],
+    "tools": [
+      {"name": "search", "description": "Search the index", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}},
+      {"name": "fetch", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}}}
+    ],
+    "tool_choice": {"kind": "required", "tool": "search"},
+    "data_policy": {"prohibit_training_on_input": true, "prohibit_retention": true},
+    "admitted": {"caller_ref": "uid:501"}
+  },
+  "expected": {
+    "method": "POST",
+    "url": "https://provider.test/v1/chat/completions",
+    "headers": [["content-type", "application/json"]],
+    "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body": {
+      "model": "test-model-1",
+      "messages": [{"role": "user", "content": "find the thing"}],
+      "tools": [
+        {"type": "function", "function": {"name": "search", "description": "Search the index", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}}},
+        {"type": "function", "function": {"name": "fetch", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}}}}
+      ],
+      "tool_choice": {"type": "function", "function": {"name": "search"}}
+    }
+  }
+}

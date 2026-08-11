@@ -1,0 +1,29 @@
+{
+  "why": "Turn order and role spellings are the wire contract. A reordered or renamed role changes the question being asked.",
+  "request": {
+    "target": {"kind": "resolved", "target": {"deployment_id": "dep-openai-compat-1", "endpoint": "https://provider.test/v1/chat/completions", "provider_model_id": "test-model-1"}},
+    "messages": [
+      {"role": "system", "content": {"kind": "text", "text": "You are terse."}},
+      {"role": "user", "content": {"kind": "text", "text": "first"}},
+      {"role": "assistant", "content": {"kind": "text", "text": "ok"}},
+      {"role": "user", "content": {"kind": "text", "text": "second"}}
+    ],
+    "data_policy": {"prohibit_training_on_input": true, "prohibit_retention": true},
+    "admitted": {"caller_ref": "uid:501"}
+  },
+  "expected": {
+    "method": "POST",
+    "url": "https://provider.test/v1/chat/completions",
+    "headers": [["content-type", "application/json"]],
+    "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body": {
+      "model": "test-model-1",
+      "messages": [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "second"}
+      ]
+    }
+  }
+}

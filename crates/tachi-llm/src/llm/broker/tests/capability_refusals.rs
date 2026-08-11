@@ -280,8 +280,14 @@ fn a_capability_set_claiming_json_schema_without_structured_output_is_inconsiste
     };
     assert!(!bad.is_consistent());
     // ...and narrowing repairs it rather than propagating the contradiction.
-    assert!(OpenAiCompatWire::narrowed_to(bad).capabilities().is_consistent());
-    assert!(!OpenAiCompatWire::narrowed_to(bad).capabilities().json_schema);
+    assert!(OpenAiCompatWire::narrowed_to(bad)
+        .capabilities()
+        .is_consistent());
+    assert!(
+        !OpenAiCompatWire::narrowed_to(bad)
+            .capabilities()
+            .json_schema
+    );
 }
 
 #[test]

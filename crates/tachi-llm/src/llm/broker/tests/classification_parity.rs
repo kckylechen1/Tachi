@@ -45,7 +45,6 @@
 //! change the record.
 
 use super::*;
-use crate::ProviderInvocationFailureClass;
 
 // ---------------------------------------------------------------------------
 // The legacy oracle, transcribed
@@ -82,7 +81,10 @@ mod legacy {
     }
 
     /// Transcribed from `lane_calls::failure_class_for_status`.
-    pub fn failure_class_for_status(status: u16, resp_text: &str) -> ProviderInvocationFailureClass {
+    pub fn failure_class_for_status(
+        status: u16,
+        resp_text: &str,
+    ) -> ProviderInvocationFailureClass {
         match status {
             401 => ProviderInvocationFailureClass::AuthFailed,
             403 if is_retriable_billing_failure(resp_text) => {
@@ -164,7 +166,9 @@ const LANE_CALLS_SOURCE: &str = include_str!("../../chat_lanes/lane_calls.rs");
 /// `fn NAME(` through the next line that is exactly `}`.
 fn lane_calls_fn(name: &str) -> String {
     let opener = format!("fn {name}(");
-    let mut lines = LANE_CALLS_SOURCE.lines().skip_while(|l| !l.starts_with(&opener));
+    let mut lines = LANE_CALLS_SOURCE
+        .lines()
+        .skip_while(|l| !l.starts_with(&opener));
     let first = lines
         .next()
         .unwrap_or_else(|| panic!("lane_calls.rs no longer declares a top-level `fn {name}`"));
@@ -327,7 +331,8 @@ fn every_classification_fixture_agrees_with_the_legacy_decision_on_all_four_axes
         let status = fixture
             .pointer("/status")
             .and_then(Value::as_u64)
-            .unwrap_or_else(|| panic!("fixture {name} is missing /status")) as u16;
+            .unwrap_or_else(|| panic!("fixture {name} is missing /status"))
+            as u16;
         let body = fixture_str(fixture, name, "/body");
         let headers = fixture_headers(fixture);
         let excerpt = OpenAiCompatWire::body_excerpt(body.as_bytes());
@@ -430,7 +435,8 @@ fn the_corpus_covers_every_error_class_and_every_advice() {
         let status = fixture
             .pointer("/status")
             .and_then(Value::as_u64)
-            .unwrap_or_else(|| panic!("fixture {name} is missing /status")) as u16;
+            .unwrap_or_else(|| panic!("fixture {name} is missing /status"))
+            as u16;
         let body = fixture_str(&fixture, &name, "/body");
         let classified = adapter.classify_error(
             status,
@@ -516,7 +522,10 @@ fn a_billing_marker_only_reclassifies_a_403() {
     ];
     for (status, expected) in cases {
         let actual = adapter.classify_error(status, &ResponseHeaders::new(), billing_body);
-        assert_eq!(actual.class, expected, "status {status} with a billing body");
+        assert_eq!(
+            actual.class, expected,
+            "status {status} with a billing body"
+        );
         assert_eq!(
             actual.class.to_legacy_failure_class(),
             legacy::failure_class_for_status(status, billing_body),
@@ -537,7 +546,10 @@ fn an_http_date_retry_after_is_preserved_rather_than_dropped() {
 
     assert_eq!(legacy::retry_after_seconds(Some(date)), None);
     assert_eq!(
-        classified.retry_after.as_ref().and_then(RetryAfter::as_seconds),
+        classified
+            .retry_after
+            .as_ref()
+            .and_then(RetryAfter::as_seconds),
         None,
         "parity: neither side produces a delta-seconds value from an HTTP date"
     );
@@ -558,7 +570,10 @@ fn an_http_date_retry_after_is_preserved_rather_than_dropped() {
         let classified = adapter.classify_error(429, &headers, "");
         assert_eq!(classified.retry_after, expected, "Retry-After: {raw:?}");
         assert_eq!(
-            classified.retry_after.as_ref().and_then(RetryAfter::as_seconds),
+            classified
+                .retry_after
+                .as_ref()
+                .and_then(RetryAfter::as_seconds),
             legacy::retry_after_seconds(Some(raw)),
             "Retry-After: {raw:?} — the seconds the shipped lane would read"
         );

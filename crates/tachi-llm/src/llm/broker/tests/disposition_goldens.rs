@@ -152,7 +152,12 @@ fn every_disposition_variant_has_frozen_bytes() {
             "table row {:?} holds a disposition of a different kind",
             row.kind
         );
-        assert_golden(row.kind.as_str(), "disposition", &row.disposition, &row.golden);
+        assert_golden(
+            row.kind.as_str(),
+            "disposition",
+            &row.disposition,
+            &row.golden,
+        );
     }
 }
 
@@ -199,7 +204,10 @@ fn outcome_unknown_is_only_safe_when_the_provider_was_never_reached() {
             "phase {phase:?}: a retry after an unobservable outcome needs caller consent \
              unless the transport proved the request never landed"
         );
-        assert_eq!(disposition.provider_did_no_work(), phase == SendPhase::Connecting);
+        assert_eq!(
+            disposition.provider_did_no_work(),
+            phase == SendPhase::Connecting
+        );
     }
 
     // `Sending` is the trap: bytes were written, so the provider may hold a
@@ -264,7 +272,10 @@ fn completion_kind_projects_onto_the_frozen_receipt_status_without_widening_it()
         (CompletionKindV1::Complete, CompletionStatusV1::Complete),
         (CompletionKindV1::Truncated, CompletionStatusV1::Truncated),
         (CompletionKindV1::ToolCalls, CompletionStatusV1::Unknown),
-        (CompletionKindV1::ContentFiltered, CompletionStatusV1::Unknown),
+        (
+            CompletionKindV1::ContentFiltered,
+            CompletionStatusV1::Unknown,
+        ),
         (CompletionKindV1::Unknown, CompletionStatusV1::Unknown),
     ];
     let covered: Vec<CompletionKindV1> = expected.iter().map(|(kind, _)| *kind).collect();
@@ -464,9 +475,8 @@ fn a_provider_controlled_finish_reason_is_bounded_and_defanged() {
     assert!(kept.starts_with("stop"));
 
     // Control characters are the log-forging path, so they do not survive.
-    let forging = ProtocolViolation::empty_assistant_content(Some(
-        "stop\n[llm] fabricated log line\r\n",
-    ));
+    let forging =
+        ProtocolViolation::empty_assistant_content(Some("stop\n[llm] fabricated log line\r\n"));
     let ProtocolViolation::EmptyAssistantContent { finish_reason } = &forging else {
         panic!("constructor built the wrong variant");
     };
@@ -521,7 +531,11 @@ fn every_before_send_refusal_is_a_safe_terminal() {
             refusal: refusal.clone(),
         };
         assert!(disposition.provider_did_no_work(), "{refusal:?}");
-        assert_eq!(disposition.retry_posture(), RetryPosture::Safe, "{refusal:?}");
+        assert_eq!(
+            disposition.retry_posture(),
+            RetryPosture::Safe,
+            "{refusal:?}"
+        );
         assert!(disposition.fallback_eligible(), "{refusal:?}");
     }
 }
@@ -562,7 +576,10 @@ fn a_disposition_never_carries_provider_body_text() {
     // The finish reason is the one field that echoes the provider, and it is
     // the field the bound applies to — so it *is* present, deliberately, and
     // nothing else is.
-    assert!(rendered.contains(body_text), "sanity: this fixture uses the reason field");
+    assert!(
+        rendered.contains(body_text),
+        "sanity: this fixture uses the reason field"
+    );
 
     let hostile_body = r#"{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"secret":"LEAKED-BODY-FIELD"}"#;
     let hostile = OpenAiCompatWire::new()
@@ -575,7 +592,11 @@ fn a_disposition_never_carries_provider_body_text() {
     );
 
     let malformed = OpenAiCompatWire::new()
-        .parse_response(200, &ResponseHeaders::new(), b"not json at all LEAKED-BODY-FIELD")
+        .parse_response(
+            200,
+            &ResponseHeaders::new(),
+            b"not json at all LEAKED-BODY-FIELD",
+        )
         .disposition();
     let rendered = serde_json::to_string(&malformed).expect("serializes");
     assert!(

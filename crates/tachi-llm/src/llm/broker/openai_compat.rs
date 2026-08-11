@@ -273,7 +273,15 @@ fn response_format_value(format: &ResponseFormat) -> Option<Value> {
     }
 }
 
-fn sampling_fields(sampling: &SamplingParams) -> (Option<f32>, Option<f32>, Option<u32>, Option<&[String]>, Option<i64>) {
+fn sampling_fields(
+    sampling: &SamplingParams,
+) -> (
+    Option<f32>,
+    Option<f32>,
+    Option<u32>,
+    Option<&[String]>,
+    Option<i64>,
+) {
     (
         sampling.temperature,
         sampling.top_p,
@@ -302,7 +310,11 @@ fn completion_kind(finish_reason: Option<&str>) -> CompletionKindV1 {
 }
 
 fn parse_usage(usage: Option<&Value>) -> UsageObservationV1 {
-    let token = |key: &str| usage.and_then(|value| value.get(key)).and_then(Value::as_i64);
+    let token = |key: &str| {
+        usage
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_i64)
+    };
     let observation = UsageObservationV1::provider_authoritative(
         token("prompt_tokens"),
         token("completion_tokens"),
@@ -457,11 +469,7 @@ impl ProviderWire for OpenAiCompatWire {
         if !(200..300).contains(&status) {
             return WireOutcome::Rejected {
                 status,
-                classification: self.classify_error(
-                    status,
-                    headers,
-                    &Self::body_excerpt(body),
-                ),
+                classification: self.classify_error(status, headers, &Self::body_excerpt(body)),
             };
         }
 

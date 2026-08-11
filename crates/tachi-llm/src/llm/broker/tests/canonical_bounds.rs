@@ -10,7 +10,9 @@ use super::*;
 
 /// Round-trips parts through JSON and back, so the deserialize path runs the
 /// same validation the constructor does.
-fn deserialize(parts: &CanonicalInvocationRequestParts) -> Result<CanonicalInvocationRequest, String> {
+fn deserialize(
+    parts: &CanonicalInvocationRequestParts,
+) -> Result<CanonicalInvocationRequest, String> {
     // Parts is deserialize-only, so it is projected to JSON by hand here; using
     // the *validated* type's Serialize would beg the question by requiring a
     // valid request to test an invalid one.
@@ -121,7 +123,9 @@ fn the_total_content_cap_holds_even_when_every_message_is_legal() {
     let each = MAX_MESSAGE_CONTENT_BYTES;
     let count = MAX_TOTAL_CONTENT_BYTES / each + 1;
     let mut parts = minimal_parts();
-    parts.messages = (0..count).map(|_| user_message(&"x".repeat(each))).collect();
+    parts.messages = (0..count)
+        .map(|_| user_message(&"x".repeat(each)))
+        .collect();
     assert_refused_on_both_paths(
         parts,
         RequestError::TotalContentTooLarge {
@@ -212,7 +216,9 @@ fn an_oversized_tool_schema_is_refused() {
     let mut parts = minimal_parts();
     let padding = "x".repeat(MAX_TOOL_SCHEMA_BYTES);
     let schema = json!({"type": "object", "description": padding});
-    let bytes = serde_json::to_vec(&schema).expect("schema serializes").len();
+    let bytes = serde_json::to_vec(&schema)
+        .expect("schema serializes")
+        .len();
     parts.tools = vec![ToolDeclaration {
         name: "search".to_string(),
         description: None,

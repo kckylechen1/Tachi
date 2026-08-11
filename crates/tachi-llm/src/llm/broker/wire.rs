@@ -151,8 +151,7 @@ impl AuthMaterialKind {
     }
 
     /// Every variant, in declaration order.
-    pub const ALL: &'static [AuthMaterialKind] =
-        &[Self::None, Self::ApiKey, Self::BearerToken];
+    pub const ALL: &'static [AuthMaterialKind] = &[Self::None, Self::ApiKey, Self::BearerToken];
 }
 
 /// What an adapter is told about auth: a kind, and an opaque lease reference.
@@ -620,8 +619,17 @@ pub struct CanonicalAssistantMessage {
 impl CanonicalAssistantMessage {
     /// Whether the turn carried nothing usable at all — neither text nor a
     /// tool call. The legacy lane's "empty content" case.
+    ///
+    /// The text test **trims**, matching `lane_calls`'s
+    /// `.map(str::trim).filter(|s| !s.is_empty())`: a whitespace-only answer is
+    /// an empty answer on both sides. That is what keeps the empty-content
+    /// decision — the one the classification parity suite covers — unchanged
+    /// while the returned text itself stays untrimmed.
     pub fn is_empty(&self) -> bool {
-        self.text.as_deref().is_none_or(str::is_empty) && self.tool_calls.is_empty()
+        self.text
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+            && self.tool_calls.is_empty()
     }
 }
 

@@ -184,7 +184,10 @@ impl std::fmt::Display for RequestError {
                 write!(f, "{bytes} content bytes, cap {MAX_TOTAL_CONTENT_BYTES}")
             }
             Self::TooManyContentParts { index, len } => {
-                write!(f, "message {index} had {len} parts, cap {MAX_CONTENT_PARTS}")
+                write!(
+                    f,
+                    "message {index} had {len} parts, cap {MAX_CONTENT_PARTS}"
+                )
             }
             Self::TooManyTools { len } => write!(f, "{len} tools, cap {MAX_TOOLS}"),
             Self::ToolSchemaTooLarge { tool, bytes } => write!(

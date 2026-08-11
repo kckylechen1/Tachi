@@ -1,0 +1,13 @@
+{
+  "why": "A provider that sends no finish reason gets `unknown`, not `complete`. Defaulting to complete would report a possibly-cut-off answer as whole.",
+  "status": 200,
+  "headers": [],
+  "body": "{\"model\":\"test-model-1\",\"choices\":[{\"message\":{\"content\":\"partial thought\"}}]}",
+  "expected": {
+    "outcome": "completed",
+    "message": {"text": "partial thought"},
+    "completion": "unknown",
+    "usage": {"provenance": "unknown"},
+    "metadata": {"effective_model": "test-model-1"}
+  }
+}

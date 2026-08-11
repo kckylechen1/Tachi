@@ -1,0 +1,23 @@
+{
+  "why": "Tools declared but forbidden. Omitting `tool_choice` here would let the model call one, which is the opposite of what the caller asked for.",
+  "request": {
+    "target": {"kind": "resolved", "target": {"deployment_id": "dep-openai-compat-1", "endpoint": "https://provider.test/v1/chat/completions", "provider_model_id": "test-model-1"}},
+    "messages": [{"role": "user", "content": {"kind": "text", "text": "hello"}}],
+    "tools": [{"name": "search", "parameters": {"type": "object"}}],
+    "tool_choice": {"kind": "none"},
+    "data_policy": {"prohibit_training_on_input": true, "prohibit_retention": true},
+    "admitted": {"caller_ref": "uid:501"}
+  },
+  "expected": {
+    "method": "POST",
+    "url": "https://provider.test/v1/chat/completions",
+    "headers": [["content-type", "application/json"]],
+    "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body": {
+      "model": "test-model-1",
+      "messages": [{"role": "user", "content": "hello"}],
+      "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
+      "tool_choice": "none"
+    }
+  }
+}

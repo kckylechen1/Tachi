@@ -1,0 +1,13 @@
+{
+  "why": "A provider that reports prompt tokens only. The total is deliberately not derived — several providers bill a total that is not the sum — and the observation stays provider-authoritative because what it does report was reported.",
+  "status": 200,
+  "headers": [],
+  "body": "{\"model\":\"test-model-1\",\"choices\":[{\"message\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11}}",
+  "expected": {
+    "outcome": "completed",
+    "message": {"text": "hi"},
+    "completion": "complete",
+    "usage": {"prompt_tokens": 11, "provenance": "provider_authoritative"},
+    "metadata": {"effective_model": "test-model-1"}
+  }
+}
