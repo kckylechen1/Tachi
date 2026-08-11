@@ -1,15 +1,10 @@
 use crate::server_state::{DbScope, MemoryServer};
-use crate::utils::parse_env_bool;
 use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 use serde_json::json;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
 
-mod classify;
 mod gc;
 mod handlers;
 mod inbox;

@@ -61,7 +61,6 @@ fn expected_gc_keys(include_session_claims: bool) -> std::collections::BTreeSet<
 
 #[tokio::test]
 async fn memory_gc_prunes_expired_resolved_kanban_cards() {
-    std::env::set_var("KANBAN_CLASSIFY_ENABLED", "false");
     let server = make_server();
 
     let post = server

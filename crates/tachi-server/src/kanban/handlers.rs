@@ -1,4 +1,3 @@
-use super::classify::enrich_kanban_card_classification;
 use super::inbox::card_matches_inbox;
 use super::metadata::add_trimmed_str_to_metadata;
 use super::normalize::*;
@@ -116,37 +115,10 @@ pub(crate) async fn handle_post_card(
             .map_err(|e| format!("failed to save kanban card: {e}"))
     })?;
 
-    let classify_enabled = parse_env_bool("KANBAN_CLASSIFY_ENABLED").unwrap_or(false);
-    if classify_enabled {
-        let db_path = std::sync::Arc::new(server.global_db_path_buf());
-        let card_id_clone = card_id.clone();
-        let body_clone = body;
-        let title_clone = title;
-        let source_clone = entry.source.clone();
-        let metadata_clone = metadata.clone();
-        let expected_revision = entry.revision;
-        tokio::spawn(async move {
-            if let Err(e) = enrich_kanban_card_classification(
-                db_path,
-                card_id_clone,
-                body_clone,
-                title_clone,
-                source_clone,
-                metadata_clone,
-                expected_revision,
-            )
-            .await
-            {
-                eprintln!("[kanban] classification skipped for card: {e}");
-            }
-        });
-    }
-
     let mut resp = serde_json::Map::new();
     resp.insert("status".into(), json!("posted"));
     resp.insert("card_id".into(), json!(card_id));
     resp.insert("db".into(), json!("global"));
-    resp.insert("classification_enqueued".into(), json!(classify_enabled));
     serde_json::to_string(&serde_json::Value::Object(resp)).map_err(|e| format!("serialize: {e}"))
 }
 
