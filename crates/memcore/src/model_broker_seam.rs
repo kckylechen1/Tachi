@@ -121,6 +121,26 @@ pub enum SeamError {
     /// An abstaining outcome carried a fallback order. Nothing was chosen, so
     /// there is nothing to fall back *from*.
     AbstainCarriesFallbackOrder,
+    /// An abstaining outcome carried candidate evaluations that its
+    /// [`AbstainReason`] says were never evaluated — an empty admitted set, or
+    /// a request-level alias/policy failure that halts before candidates are
+    /// looked at. Listing them would claim a disposition the resolver never
+    /// reached.
+    AbstainCarriesUnevaluatedCandidates {
+        /// The reason whose semantics the candidate list contradicts.
+        reason: AbstainReason,
+    },
+    /// [`AbstainReason::NoEligibleCandidate`] on an empty candidate list. That
+    /// reason means "candidates were evaluated and every one was excluded"; an
+    /// empty admitted set is [`AbstainReason::EmptyCandidateSet`].
+    AbstainNoEligibleWithoutCandidates,
+    /// [`AbstainReason::NoEligibleCandidate`] alongside a candidate the same
+    /// outcome marks eligible. The reason and the list flatly disagree about
+    /// whether anything survived the filters.
+    AbstainNoEligibleWithEligibleCandidate {
+        /// A candidate the outcome marks eligible despite claiming none is.
+        deployment_id: String,
+    },
     /// A fallback entry named something other than an eligible, non-chosen
     /// candidate. The fallback chain becomes durable receipt provenance
     /// (#1682 discrimination 8), so it may only contain ids this resolution
@@ -152,6 +172,22 @@ impl std::fmt::Display for SeamError {
             Self::AbstainCarriesFallbackOrder => write!(
                 f,
                 "an abstaining resolution must not carry a fallback order"
+            ),
+            Self::AbstainCarriesUnevaluatedCandidates { reason } => write!(
+                f,
+                "abstain reason `{}` means no candidate was evaluated, so the outcome must not \
+                 list any",
+                reason.as_str()
+            ),
+            Self::AbstainNoEligibleWithoutCandidates => write!(
+                f,
+                "abstain reason `{}` requires evaluated candidates; an empty set is `{}`",
+                AbstainReason::NoEligibleCandidate.as_str(),
+                AbstainReason::EmptyCandidateSet.as_str()
+            ),
+            Self::AbstainNoEligibleWithEligibleCandidate { deployment_id } => write!(
+                f,
+                "candidate `{deployment_id}` is marked eligible by an outcome that claims none is"
             ),
             Self::FallbackEntryNotEligible { deployment_id } => write!(
                 f,
@@ -656,6 +692,29 @@ impl ExclusionReason {
 /// to exactly one binding. A consumer that receives
 /// [`AbstainReason::UnknownAlias`] has a typed, reportable fact; a consumer that
 /// received a silently substituted deployment would not.
+///
+/// **Each reason states where the resolution stopped, so each implies a
+/// candidate-list shape**, and [`ResolutionOutcome`] enforces the pairing —
+/// the reason and the list are two statements about one resolution, and an
+/// outcome that lets them disagree is a lie whichever half you believe:
+///
+/// | Reason | Implied `candidates` |
+/// |---|---|
+/// | `no_eligible_candidate` | non-empty, and none eligible |
+/// | `empty_candidate_set` | empty |
+/// | `unknown_alias` / `ambiguous_alias` / `policy_revision_mismatch` | empty |
+///
+/// The three request-level reasons take the empty shape because all three are
+/// decided *before* per-candidate evaluation: the resolver resolves the
+/// reference and asserts `stamped == recomputed` first, and only then filters.
+/// Listing candidates it never looked at would mean marking each one
+/// `eligible` — a disposition it never computed — and there is deliberately no
+/// exclusion axis meaning "never evaluated" (that is the gate's territory,
+/// #1675 PR2). Note this leaves no legal way to report an ambiguity discovered
+/// *after* filtering, which is intentional: the D5 ordering
+/// (`pin > health > price > deployment_id`) ends in a total lexicographic
+/// tiebreak, so a post-evaluation tie cannot occur. Ambiguity is necessarily an
+/// alias-set fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AbstainReason {
     /// The admitted candidate set was empty: an upstream gate cut everything,
@@ -907,7 +966,11 @@ impl Selection {
 /// - every fallback entry must be an eligible, non-chosen candidate (the chain
 ///   becomes durable receipt provenance, so it may not name anything this
 ///   resolution did not evaluate and admit);
-/// - an abstaining outcome carries neither `account_ref` nor `fallback_order`.
+/// - an abstaining outcome carries neither `account_ref` nor `fallback_order`;
+/// - an abstaining outcome's `candidates` matches what its [`AbstainReason`]
+///   says was evaluated — `no_eligible_candidate` needs a non-empty list with
+///   nothing eligible in it, and every other reason needs an empty one (see
+///   the table on [`AbstainReason`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "ResolutionOutcomeWire")]
 pub struct ResolutionOutcome {
@@ -953,9 +1016,12 @@ impl ResolutionOutcome {
     /// [`SeamError::FallbackOrderTooLong`], [`SeamError::EmptyField`],
     /// [`SeamError::ChosenNotEligible`], [`SeamError::AccountRefMismatch`],
     /// [`SeamError::FallbackEntryNotEligible`],
-    /// [`SeamError::AbstainCarriesAccountRef`], or
-    /// [`SeamError::AbstainCarriesFallbackOrder`] — see the type docs for the
-    /// consistency set each one guards.
+    /// [`SeamError::AbstainCarriesAccountRef`],
+    /// [`SeamError::AbstainCarriesFallbackOrder`],
+    /// [`SeamError::AbstainCarriesUnevaluatedCandidates`],
+    /// [`SeamError::AbstainNoEligibleWithoutCandidates`], or
+    /// [`SeamError::AbstainNoEligibleWithEligibleCandidate`] — see the type docs
+    /// for the consistency set each one guards.
     pub fn new(
         candidates: Vec<CandidateEvaluation>,
         selection: Selection,
@@ -1026,7 +1092,9 @@ impl ResolutionOutcome {
 /// `fallback_order` field itself regardless of what the selection is. An
 /// abstaining outcome carrying five entries is over the cap *and* carrying a
 /// fallback order it has no business carrying; reporting the cap keeps the
-/// bound's verdict from being masked by the shape rule.
+/// bound's verdict from being masked by the shape rule. Within the abstain arm
+/// the field-level rules (`account_ref`, `fallback_order`) likewise precede the
+/// reason-vs-candidates rules for the same reason.
 fn validate_outcome_consistency(
     candidates: &[CandidateEvaluation],
     selection: &Selection,
@@ -1065,12 +1133,39 @@ fn validate_outcome_consistency(
                 }
             }
         }
-        Selection::Abstain(_) => {
+        Selection::Abstain(reason) => {
             if account_ref.is_some() {
                 return Err(SeamError::AbstainCarriesAccountRef);
             }
             if !fallback_order.is_empty() {
                 return Err(SeamError::AbstainCarriesFallbackOrder);
+            }
+            // The reason and the candidate list are two statements about the
+            // same resolution; an outcome that lets them disagree is a lie
+            // whichever half you believe. Matched exhaustively so a new
+            // `AbstainReason` cannot be added without ruling on what candidate
+            // state it implies.
+            match reason {
+                AbstainReason::NoEligibleCandidate => {
+                    if candidates.is_empty() {
+                        return Err(SeamError::AbstainNoEligibleWithoutCandidates);
+                    }
+                    if let Some(candidate) = candidates.iter().find(|c| c.is_eligible()) {
+                        return Err(SeamError::AbstainNoEligibleWithEligibleCandidate {
+                            deployment_id: candidate.deployment_id.clone(),
+                        });
+                    }
+                }
+                AbstainReason::EmptyCandidateSet
+                | AbstainReason::UnknownAlias
+                | AbstainReason::AmbiguousAlias
+                | AbstainReason::PolicyRevisionMismatch => {
+                    if !candidates.is_empty() {
+                        return Err(SeamError::AbstainCarriesUnevaluatedCandidates {
+                            reason: *reason,
+                        });
+                    }
+                }
             }
         }
     }
@@ -1624,6 +1719,18 @@ mod tests {
 
     const ABSTAIN_OUTCOME_GOLDEN: &str = concat!(
         r#"{"candidates":[],"selection":{"kind":"abstain","value":"empty_candidate_set"},"#,
+        r#""revisions":{"catalog_revision":"cat-rev-1","#,
+        r#""health_observed_at":"2026-08-11T00:00:00Z","policy_revision":"policy-rev-1"},"#,
+        r#""account_ref":null,"budget_estimate":{"estimated_prompt_tokens":null,"#,
+        r#""estimated_completion_tokens":null,"estimated_cost_usd":null,"#,
+        r#""pricing_snapshot_ref":null},"fallback_order":[]}"#
+    );
+
+    /// The other legal abstain shape: candidates were evaluated and every one
+    /// was excluded. Pins `CandidateEvaluation`'s field names too.
+    const NO_ELIGIBLE_OUTCOME_GOLDEN: &str = concat!(
+        r#"{"candidates":[{"deployment_id":"dep-a","exclusion":"stale_catalog"}],"#,
+        r#""selection":{"kind":"abstain","value":"no_eligible_candidate"},"#,
         r#""revisions":{"catalog_revision":"cat-rev-1","#,
         r#""health_observed_at":"2026-08-11T00:00:00Z","policy_revision":"policy-rev-1"},"#,
         r#""account_ref":null,"budget_estimate":{"estimated_prompt_tokens":null,"#,
@@ -2273,15 +2380,121 @@ mod tests {
         assert_eq!(err, SeamError::AbstainCarriesFallbackOrder);
     }
 
-    #[test]
-    fn resolution_outcome_rejects_blank_candidate_ids() {
-        let err = ResolutionOutcome::new(
-            vec![CandidateEvaluation::eligible("  ")],
-            Selection::Abstain(AbstainReason::NoEligibleCandidate),
+    /// Build an abstaining outcome with an arbitrary reason/candidate pairing,
+    /// so the legal and illegal combinations are stated the same way.
+    fn abstain_outcome(
+        reason: AbstainReason,
+        candidates: Vec<CandidateEvaluation>,
+    ) -> Result<ResolutionOutcome, SeamError> {
+        ResolutionOutcome::new(
+            candidates,
+            Selection::Abstain(reason),
             sample_revisions(),
             None,
             BudgetEstimate::default(),
             Vec::new(),
+        )
+    }
+
+    #[test]
+    fn abstain_reason_and_candidate_list_must_agree() {
+        let excluded = || {
+            vec![CandidateEvaluation::excluded(
+                "dep-a",
+                ExclusionReason::StaleCatalog,
+            )]
+        };
+
+        // --- The two legal shapes, from the two golden payloads. ---
+        let empty_set = abstain_outcome(AbstainReason::EmptyCandidateSet, vec![])
+            .expect("an empty admitted set is the empty_candidate_set shape");
+        assert_eq!(
+            serde_json::to_string(&empty_set).unwrap(),
+            ABSTAIN_OUTCOME_GOLDEN
+        );
+        let no_eligible = abstain_outcome(AbstainReason::NoEligibleCandidate, excluded())
+            .expect("evaluated-and-all-excluded is the no_eligible_candidate shape");
+        assert_eq!(
+            serde_json::to_string(&no_eligible).unwrap(),
+            NO_ELIGIBLE_OUTCOME_GOLDEN
+        );
+        assert_eq!(
+            serde_json::from_str::<ResolutionOutcome>(NO_ELIGIBLE_OUTCOME_GOLDEN).unwrap(),
+            no_eligible
+        );
+
+        // --- `no_eligible_candidate` cannot be claimed over an empty list ---
+        assert_eq!(
+            abstain_outcome(AbstainReason::NoEligibleCandidate, vec![]).unwrap_err(),
+            SeamError::AbstainNoEligibleWithoutCandidates
+        );
+        let mut value: serde_json::Value =
+            serde_json::from_str(NO_ELIGIBLE_OUTCOME_GOLDEN).expect("golden parses");
+        value["candidates"] = serde_json::json!([]);
+        assert!(
+            serde_json::from_str::<ResolutionOutcome>(&value.to_string()).is_err(),
+            "deserialize must not mint `no_eligible_candidate` over an empty candidate list"
+        );
+
+        // --- ...nor while marking a candidate eligible ---
+        let mixed = vec![
+            CandidateEvaluation::excluded("dep-a", ExclusionReason::StaleCatalog),
+            CandidateEvaluation::eligible("dep-b"),
+        ];
+        assert_eq!(
+            abstain_outcome(AbstainReason::NoEligibleCandidate, mixed).unwrap_err(),
+            SeamError::AbstainNoEligibleWithEligibleCandidate {
+                deployment_id: "dep-b".to_string()
+            }
+        );
+        let mut value: serde_json::Value =
+            serde_json::from_str(NO_ELIGIBLE_OUTCOME_GOLDEN).expect("golden parses");
+        value["candidates"] = serde_json::json!([{"deployment_id": "dep-a", "exclusion": null}]);
+        assert!(
+            serde_json::from_str::<ResolutionOutcome>(&value.to_string()).is_err(),
+            "deserialize must not mint `no_eligible_candidate` beside an eligible candidate"
+        );
+
+        // --- every other reason halts before evaluation, so it may list none ---
+        for reason in [
+            AbstainReason::EmptyCandidateSet,
+            AbstainReason::UnknownAlias,
+            AbstainReason::AmbiguousAlias,
+            AbstainReason::PolicyRevisionMismatch,
+        ] {
+            assert!(
+                abstain_outcome(reason, vec![]).is_ok(),
+                "{} with no candidates is the legal shape",
+                reason.as_str()
+            );
+            assert_eq!(
+                abstain_outcome(reason, excluded()).unwrap_err(),
+                SeamError::AbstainCarriesUnevaluatedCandidates { reason },
+                "{} must not carry candidates it never evaluated",
+                reason.as_str()
+            );
+
+            let mut value: serde_json::Value =
+                serde_json::from_str(NO_ELIGIBLE_OUTCOME_GOLDEN).expect("golden parses");
+            value["selection"]["value"] = serde_json::Value::String(reason.as_str().to_string());
+            assert!(
+                serde_json::from_str::<ResolutionOutcome>(&value.to_string()).is_err(),
+                "deserialize must not mint `{}` beside an evaluated candidate list",
+                reason.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_outcome_rejects_blank_candidate_ids() {
+        // Excluded, not eligible: the blank id is then the *only* thing wrong
+        // with this outcome, so the assertion cannot pass on another rule.
+        let err = abstain_outcome(
+            AbstainReason::NoEligibleCandidate,
+            vec![CandidateEvaluation::excluded(
+                "  ",
+                ExclusionReason::StaleCatalog,
+            )],
         )
         .unwrap_err();
         assert_eq!(
