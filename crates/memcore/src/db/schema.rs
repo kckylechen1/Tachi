@@ -881,6 +881,7 @@ pub(crate) fn install_harness_session_attachments_schema(
         "CREATE TABLE IF NOT EXISTS harness_session_attachments (
             attachment_id TEXT PRIMARY KEY NOT NULL,
             host_identity TEXT NOT NULL CHECK (length(trim(host_identity)) > 0),
+            identity_attribution_basis TEXT NOT NULL CHECK (identity_attribution_basis IN ('trusted_local_host_declared', 'verified')),
             protocol_version TEXT NOT NULL CHECK (length(trim(protocol_version)) > 0),
             adapter_connection_identity TEXT NOT NULL CHECK (length(trim(adapter_connection_identity)) > 0),
             remote_session_id TEXT NOT NULL CHECK (length(trim(remote_session_id)) > 0),
@@ -942,6 +943,7 @@ pub(crate) fn validate_harness_session_attachments_schema(
     const REQUIRED_COLUMNS: &[(&str, &str, bool, i64)] = &[
         ("attachment_id", "TEXT", true, 1),
         ("host_identity", "TEXT", true, 0),
+        ("identity_attribution_basis", "TEXT", true, 0),
         ("protocol_version", "TEXT", true, 0),
         ("adapter_connection_identity", "TEXT", true, 0),
         ("remote_session_id", "TEXT", true, 0),
@@ -994,6 +996,7 @@ pub(crate) fn validate_harness_session_attachments_schema(
     let normalized = normalize_schema_sql(&table_sql);
     for clause in [
         "CHECK (state IN ('attached', 'reconnect_failed', 'unknown'))",
+        "CHECK (identity_attribution_basis IN ('trusted_local_host_declared', 'verified'))",
         "UNIQUE (idempotency_key)",
         "UNIQUE (host_identity, protocol_version, adapter_connection_identity, remote_session_id)",
     ] {

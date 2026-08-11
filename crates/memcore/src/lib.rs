@@ -134,8 +134,9 @@ pub use db::harness_session_attachments::{
     HarnessSessionAttachment, HarnessSessionAttachmentAdmission,
     HarnessSessionAttachmentAuthorization, HarnessSessionAttachmentCapabilities,
     HarnessSessionAttachmentReceipt, HarnessSessionAttachmentSelector,
-    HarnessSessionAttachmentState, NewHarnessSessionAttachment, ACP_CAPABILITY_CLASSES,
-    ACP_SESSION_CAPABILITIES, ACP_TOOL_PROFILES,
+    HarnessSessionAttachmentState, HarnessSessionHostAdmission, NewHarnessSessionAttachment,
+    ACP_CAPABILITY_CLASSES, ACP_SESSION_CAPABILITIES, ACP_TOOL_PROFILES,
+    TRUSTED_LOCAL_HOST_DECLARED_BASIS,
 };
 #[cfg(feature = "admin")]
 pub use db::mirror_eval::{

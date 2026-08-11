@@ -8,7 +8,8 @@ use crate::tool_params::TachiAgentEvalParams;
 use memcore::{
     attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
     HarnessSessionAttachmentAdmission, HarnessSessionAttachmentCapabilities,
-    HarnessSessionAttachmentSelector, NewHarnessSessionAttachment,
+    HarnessSessionAttachmentSelector, HarnessSessionHostAdmission, NewHarnessSessionAttachment,
+    TRUSTED_LOCAL_HOST_DECLARED_BASIS,
 };
 use serde_json::{json, Value};
 
@@ -71,20 +72,53 @@ fn capabilities(params: &TachiAgentEvalParams) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+fn current_host_admission(
+    server: &MemoryServer,
+    requested_host_identity: Option<String>,
+    requested_receipt_ref: Option<String>,
+) -> Result<(HarnessSessionHostAdmission, String), String> {
+    let (host_identity, connection_id, admission_state) = server
+        .work_claim_connection()
+        .ok_or_else(|| "current host admission is unavailable".to_string())?;
+    let host_identity = host_identity
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "current host admission has no host identity".to_string())?;
+    if !matches!(admission_state.as_str(), "self_asserted" | "verified") {
+        return Err("current host admission is not active".to_string());
+    }
+    let requested_host = required(requested_host_identity, "host_identity")?;
+    if requested_host != host_identity {
+        return Err("host_identity does not match the current host connection".to_string());
+    }
+    let receipt_ref = required(requested_receipt_ref, "admission_receipt_ref")?;
+    Ok((
+        HarnessSessionHostAdmission {
+            host_identity,
+            connection_id,
+        },
+        receipt_ref,
+    ))
+}
+
+fn require_negotiated_v1(protocol_version: Option<i64>) -> Result<(), String> {
+    if protocol_version == Some(1) {
+        Ok(())
+    } else {
+        Err("ACP negotiated protocol_version must be exactly 1".to_string())
+    }
+}
+
 fn attach_input(
     params: &TachiAgentEvalParams,
+    host_identity: &str,
+    admission_receipt_ref: &str,
     policy_digest: String,
     descriptor_digest: String,
 ) -> Result<NewHarnessSessionAttachment, String> {
-    let protocol_version = params
-        .protocol_version
-        .ok_or_else(|| "protocol_version is required".to_string())?;
-    if protocol_version < 0 {
-        return Err("protocol_version must be non-negative".to_string());
-    }
     Ok(NewHarnessSessionAttachment {
-        host_identity: required(params.host_identity.clone(), "host_identity")?,
-        protocol_version: protocol_version.to_string(),
+        host_identity: host_identity.to_string(),
+        identity_attribution_basis: TRUSTED_LOCAL_HOST_DECLARED_BASIS.to_string(),
+        protocol_version: "1".to_string(),
         adapter_connection_identity: required(
             params.adapter_connection_identity.clone(),
             "adapter_connection_identity",
@@ -102,10 +136,7 @@ fn attach_input(
         policy_digest,
         descriptor_digest,
         idempotency_key: required(params.idempotency_key.clone(), "idempotency_key")?,
-        admission_receipt_ref: required(
-            params.admission_receipt_ref.clone(),
-            "admission_receipt_ref",
-        )?,
+        admission_receipt_ref: admission_receipt_ref.to_string(),
     })
 }
 
@@ -113,6 +144,12 @@ pub(crate) fn handle_attach_session(
     server: &MemoryServer,
     params: TachiAgentEvalParams,
 ) -> Result<String, String> {
+    require_negotiated_v1(params.protocol_version)?;
+    let (host, admission_receipt_ref) = current_host_admission(
+        server,
+        params.host_identity.clone(),
+        params.admission_receipt_ref.clone(),
+    )?;
     let agent_identity_id = required(params.agent_identity_id.clone(), "agent_identity_id")?;
     let tool_profile = canonical_name(params.tool_profile.clone(), "tool_profile")?;
     let capability_class = canonical_name(params.capability_class.clone(), "capability_class")?;
@@ -129,13 +166,21 @@ pub(crate) fn handle_attach_session(
         project_descriptors(&tool_profile, &capability_class, &agent_identity_id)?;
     let mut input = attach_input(
         &params,
+        &host.host_identity,
+        &admission_receipt_ref,
         authorization.policy_digest.clone(),
         descriptor_digest.clone(),
     )?;
     input.policy_digest = authorization.policy_digest.clone();
     input.descriptor_digest = descriptor_digest.clone();
     let receipt = server.with_global_store(|store| {
-        attach_harness_session(store.connection_mut(), &input).map_err(|error| error.to_string())
+        attach_harness_session(
+            store.connection_mut(),
+            &input,
+            &host,
+            crate::claims_ops::CLAIM_TTL_SECONDS,
+        )
+        .map_err(|error| error.to_string())
     })?;
     let admission = match receipt.admission {
         HarnessSessionAttachmentAdmission::Created => "created",
@@ -147,8 +192,9 @@ pub(crate) fn handle_attach_session(
         "admission": admission,
         "attachment_id": receipt.attachment.attachment_id,
         "state": receipt.attachment.state.as_str(),
-        "binding": {
-            "host_identity": receipt.attachment.host_identity,
+            "binding": {
+                "host_identity": receipt.attachment.host_identity,
+                "identity_attribution_basis": receipt.attachment.identity_attribution_basis,
             "agent_identity_id": receipt.attachment.agent_identity_id,
             "work_claim_id": receipt.attachment.work_claim_id,
             "expected_transition_revision": receipt.attachment.expected_transition_version,
@@ -192,21 +238,21 @@ pub(crate) fn handle_get_attachment(
     server: &MemoryServer,
     params: TachiAgentEvalParams,
 ) -> Result<String, String> {
+    require_negotiated_v1(params.protocol_version)?;
+    let (host, admission_receipt_ref) = current_host_admission(
+        server,
+        params.host_identity.clone(),
+        params.admission_receipt_ref.clone(),
+    )?;
     let selector = if let Some(attachment_id) = params.attachment_id.clone() {
         HarnessSessionAttachmentSelector::AttachmentId(required(
             Some(attachment_id),
             "attachment_id",
         )?)
     } else {
-        let protocol_version = params
-            .protocol_version
-            .ok_or_else(|| "protocol_version is required for natural-key lookup".to_string())?;
-        if protocol_version < 0 {
-            return Err("protocol_version must be non-negative".to_string());
-        }
         HarnessSessionAttachmentSelector::NaturalKey {
-            host_identity: required(params.host_identity.clone(), "host_identity")?,
-            protocol_version: protocol_version.to_string(),
+            host_identity: host.host_identity.clone(),
+            protocol_version: "1".to_string(),
             adapter_connection_identity: required(
                 params.adapter_connection_identity.clone(),
                 "adapter_connection_identity",
@@ -215,8 +261,14 @@ pub(crate) fn handle_get_attachment(
         }
     };
     let attachment = server.with_global_store_read(|store| {
-        get_harness_session_attachment(store.connection(), &selector)
-            .map_err(|error| error.to_string())
+        get_harness_session_attachment(
+            store.connection(),
+            &selector,
+            &host,
+            &admission_receipt_ref,
+            crate::claims_ops::CLAIM_TTL_SECONDS,
+        )
+        .map_err(|error| error.to_string())
     })?;
     let Some(attachment) = attachment else {
         return Err("ACP attachment was not found".to_string());
@@ -248,6 +300,7 @@ pub(crate) fn handle_get_attachment(
         "state": attachment.state.as_str(),
         "binding": {
             "host_identity": attachment.host_identity,
+            "identity_attribution_basis": attachment.identity_attribution_basis,
             "agent_identity_id": attachment.agent_identity_id,
             "work_claim_id": attachment.work_claim_id,
             "expected_transition_revision": attachment.expected_transition_version,
@@ -285,12 +338,25 @@ mod tests {
             "acp-attachment-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
-        MemoryServer::new(db_path, None).expect("test memory server")
+        let server = MemoryServer::new(db_path, None).expect("test memory server");
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::coordinate()));
+        server
     }
 
     fn seed_valid_admission(server: &MemoryServer) {
         server
             .with_global_store(|store| {
+                insert_agent_identity(
+                    store.connection(),
+                    &AgentIdentity {
+                        agent_identity_id: "host-1".to_string(),
+                        display_name: None,
+                        seat: None,
+                        capability_json: None,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
                 insert_agent_identity(
                     store.connection(),
                     &AgentIdentity {
@@ -308,8 +374,8 @@ mod tests {
                 record_unverified_admission(
                     store.connection(),
                     "admission-1",
-                    "agent-1",
                     "host-1",
+                    "connection-1",
                     UnverifiedAdmissionState::SelfAsserted,
                 )
                 .map_err(|error| error.to_string())?;
@@ -318,7 +384,7 @@ mod tests {
                     &NewWorkClaim {
                         claim_id: "claim-1".to_string(),
                         agent_identity_id: "agent-1".to_string(),
-                        session_client: Some("host-1".to_string()),
+                        session_client: Some("connection-1".to_string()),
                         issue_ref: None,
                         flow_id: None,
                         dispatch_id: None,
@@ -336,6 +402,11 @@ mod tests {
                 Ok(())
             })
             .expect("seed valid ACP attachment admission");
+        server.set_work_claim_connection(
+            Some("host-1".to_string()),
+            "connection-1".to_string(),
+            "self_asserted".to_string(),
+        );
     }
 
     fn attachment_params(action: &str, idempotency_key: &str) -> TachiAgentEvalParams {
@@ -382,6 +453,7 @@ mod tests {
                         "SELECT COALESCE(json_group_array(json_object(
                             'attachment_id', attachment_id,
                             'host_identity', host_identity,
+                            'identity_attribution_basis', identity_attribution_basis,
                             'protocol_version', protocol_version,
                             'adapter_connection_identity', adapter_connection_identity,
                             'remote_session_id', remote_session_id,
@@ -483,6 +555,10 @@ mod tests {
         assert!(!stored.contains("TACHI_PROFILE"));
         assert!(!stored.contains("api_key"));
         assert_eq!(first["state"], "attached");
+        assert_eq!(
+            first["binding"]["identity_attribution_basis"],
+            TRUSTED_LOCAL_HOST_DECLARED_BASIS
+        );
     }
 
     #[tokio::test]
@@ -702,5 +778,182 @@ mod tests {
             assert_eq!(entry["value"], "<redacted>");
         }
         assert_eq!(stored_rows(&server), before);
+    }
+
+    #[tokio::test]
+    async fn host_runtime_binding_version_and_foreign_host_are_fail_closed() {
+        let server = test_server();
+        seed_valid_admission(&server);
+
+        for version in [0, 2] {
+            let mut params = attachment_params("attach_session", &format!("idem-v{version}"));
+            params.protocol_version = Some(version);
+            let error = crate::agent_eval::handle_agent_eval(&server, params)
+                .await
+                .expect_err("unstable ACP version must refuse before insert");
+            assert!(error.contains("exactly 1"), "{error}");
+            assert_eq!(row_count(&server), 0);
+        }
+
+        let mut mismatched_host = attachment_params("attach_session", "idem-host-mismatch");
+        mismatched_host.host_identity = Some("request-only-host".to_string());
+        let error = crate::agent_eval::handle_agent_eval(&server, mismatched_host)
+            .await
+            .expect_err("request-only host identity must not authorize attachment");
+        assert!(error.contains("current host connection"), "{error}");
+        assert_eq!(row_count(&server), 0);
+
+        let created: Value = serde_json::from_str(
+            &crate::agent_eval::handle_agent_eval(
+                &server,
+                attachment_params("attach_session", "idem-foreign-host"),
+            )
+            .await
+            .expect("valid attachment"),
+        )
+        .unwrap();
+        for version in [0, 2] {
+            let mut get = attachment_params("get_attachment", &format!("unused-v{version}"));
+            get.protocol_version = Some(version);
+            get.attachment_id = None;
+            let error = crate::agent_eval::handle_agent_eval(&server, get)
+                .await
+                .expect_err("unstable ACP natural-key version must refuse");
+            assert!(error.contains("exactly 1"), "{error}");
+        }
+        let before = stored_rows(&server);
+        server
+            .with_global_store(|store| {
+                insert_agent_identity(
+                    store.connection(),
+                    &AgentIdentity {
+                        agent_identity_id: "host-2".to_string(),
+                        display_name: None,
+                        seat: None,
+                        capability_json: None,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                record_unverified_admission(
+                    store.connection(),
+                    "admission-2",
+                    "host-2",
+                    "connection-2",
+                    UnverifiedAdmissionState::SelfAsserted,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("seed second host admission");
+        server.set_work_claim_connection(
+            Some("host-2".to_string()),
+            "connection-2".to_string(),
+            "self_asserted".to_string(),
+        );
+
+        let mut foreign_id = attachment_params("get_attachment", "unused");
+        foreign_id.attachment_id = created["attachment_id"].as_str().map(str::to_string);
+        foreign_id.host_identity = Some("host-2".to_string());
+        foreign_id.admission_receipt_ref = Some("admission-2".to_string());
+        let error = crate::agent_eval::handle_agent_eval(&server, foreign_id)
+            .await
+            .expect_err("foreign host must not learn an attachment by id");
+        assert_eq!(error, "ACP attachment was not found");
+        assert_eq!(stored_rows(&server), before);
+
+        let mut foreign_natural = attachment_params("get_attachment", "unused-natural");
+        foreign_natural.host_identity = Some("host-2".to_string());
+        foreign_natural.admission_receipt_ref = Some("admission-2".to_string());
+        let error = crate::agent_eval::handle_agent_eval(&server, foreign_natural)
+            .await
+            .expect_err("foreign host must not learn an attachment by natural key");
+        assert_eq!(error, "ACP attachment was not found");
+        assert_eq!(stored_rows(&server), before);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_and_lease_equivalence_classes_refuse_attach_replay_and_get() {
+        for (field, value, expected) in [
+            ("heartbeat_at", "2000-01-01T00:00:00Z", "heartbeat is stale"),
+            ("heartbeat_at", "not-a-timestamp", "heartbeat is stale"),
+            (
+                "lease_expires_at",
+                "2000-01-01T00:00:00Z",
+                "lease is expired",
+            ),
+            (
+                "lease_expires_at",
+                "not-a-timestamp",
+                "lease is missing or malformed",
+            ),
+        ] {
+            let server = test_server();
+            seed_valid_admission(&server);
+            server
+                .with_global_store(|store| {
+                    store
+                        .connection()
+                        .execute(
+                            &format!(
+                                "UPDATE session_claims SET {field} = ?1 WHERE claim_id = 'claim-1'"
+                            ),
+                            [value],
+                        )
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                })
+                .expect("mutate claim freshness fixture");
+            let error = crate::agent_eval::handle_agent_eval(
+                &server,
+                attachment_params("attach_session", &format!("idem-{field}-{value}")),
+            )
+            .await
+            .expect_err("stale or malformed claim must refuse attach");
+            assert!(error.contains(expected), "expected {expected} in {error}");
+            assert_eq!(row_count(&server), 0);
+
+            let server = test_server();
+            seed_valid_admission(&server);
+            let created: Value = serde_json::from_str(
+                &crate::agent_eval::handle_agent_eval(
+                    &server,
+                    attachment_params("attach_session", &format!("idem-replay-{field}")),
+                )
+                .await
+                .expect("fresh claim attaches"),
+            )
+            .unwrap();
+            let before = stored_rows(&server);
+            server
+                .with_global_store(|store| {
+                    store
+                        .connection()
+                        .execute(
+                            &format!(
+                                "UPDATE session_claims SET {field} = ?1 WHERE claim_id = 'claim-1'"
+                            ),
+                            [value],
+                        )
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                })
+                .expect("mutate claim freshness fixture");
+            let error = crate::agent_eval::handle_agent_eval(
+                &server,
+                attachment_params("attach_session", &format!("idem-replay-{field}")),
+            )
+            .await
+            .expect_err("stale or malformed claim must refuse exact replay");
+            assert!(error.contains(expected), "expected {expected} in {error}");
+            assert_eq!(stored_rows(&server), before);
+
+            let mut get = attachment_params("get_attachment", "unused");
+            get.attachment_id = created["attachment_id"].as_str().map(str::to_string);
+            let error = crate::agent_eval::handle_agent_eval(&server, get)
+                .await
+                .expect_err("stale or malformed claim must refuse get");
+            assert!(error.contains(expected), "expected {expected} in {error}");
+            assert_eq!(stored_rows(&server), before);
+        }
     }
 }

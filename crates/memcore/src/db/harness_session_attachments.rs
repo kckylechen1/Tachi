@@ -11,7 +11,23 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::db::normalize_utc_iso_or_now;
+use crate::db::session_claims::{get_claim, is_claim_stale};
 use crate::error::MemoryError;
+
+/// The only identity-attribution tier this v1 writer may persist.  The host
+/// admission is local and self-asserted; it is not a cryptographic or remote
+/// verification claim.
+pub const TRUSTED_LOCAL_HOST_DECLARED_BASIS: &str = "trusted_local_host_declared";
+
+/// The runtime evidence for the current trusted local host connection.  The
+/// request may name a receipt reference, but it may not choose this identity
+/// or connection: both are read from the live server runtime and checked
+/// against the durable admission row in the same attachment transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessSessionHostAdmission {
+    pub host_identity: String,
+    pub connection_id: String,
+}
 
 /// Closed lifecycle capability vocabulary accepted from an ACP host.
 pub const ACP_SESSION_CAPABILITIES: &[&str] = &[
@@ -147,6 +163,7 @@ impl HarnessSessionAttachmentCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewHarnessSessionAttachment {
     pub host_identity: String,
+    pub identity_attribution_basis: String,
     pub protocol_version: String,
     pub adapter_connection_identity: String,
     pub remote_session_id: String,
@@ -168,6 +185,7 @@ pub struct NewHarnessSessionAttachment {
 pub struct HarnessSessionAttachment {
     pub attachment_id: String,
     pub host_identity: String,
+    pub identity_attribution_basis: String,
     pub protocol_version: String,
     pub adapter_connection_identity: String,
     pub remote_session_id: String,
@@ -210,18 +228,18 @@ pub enum HarnessSessionAttachmentSelector {
     },
 }
 
-const SELECT_COLUMNS: &str = "attachment_id, host_identity, protocol_version, \
-    adapter_connection_identity, remote_session_id, work_claim_id, \
+const SELECT_COLUMNS: &str = "attachment_id, host_identity, identity_attribution_basis, \
+    protocol_version, adapter_connection_identity, remote_session_id, work_claim_id, \
     expected_transition_version, agent_identity_id, contract_digest, \
     capabilities_json, tool_profile, capability_class, policy_digest, \
     descriptor_digest, idempotency_key, admission_receipt_ref, state, \
     created_at, updated_at";
 
 fn row_to_attachment(row: &rusqlite::Row<'_>) -> Result<HarnessSessionAttachment, rusqlite::Error> {
-    let state_raw: String = row.get(16)?;
+    let state_raw: String = row.get(17)?;
     let state = HarnessSessionAttachmentState::parse(&state_raw).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
-            16,
+            17,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -232,23 +250,24 @@ fn row_to_attachment(row: &rusqlite::Row<'_>) -> Result<HarnessSessionAttachment
     Ok(HarnessSessionAttachment {
         attachment_id: row.get(0)?,
         host_identity: row.get(1)?,
-        protocol_version: row.get(2)?,
-        adapter_connection_identity: row.get(3)?,
-        remote_session_id: row.get(4)?,
-        work_claim_id: row.get(5)?,
-        expected_transition_version: row.get(6)?,
-        agent_identity_id: row.get(7)?,
-        contract_digest: row.get(8)?,
-        capabilities_json: row.get(9)?,
-        tool_profile: row.get(10)?,
-        capability_class: row.get(11)?,
-        policy_digest: row.get(12)?,
-        descriptor_digest: row.get(13)?,
-        idempotency_key: row.get(14)?,
-        admission_receipt_ref: row.get(15)?,
+        identity_attribution_basis: row.get(2)?,
+        protocol_version: row.get(3)?,
+        adapter_connection_identity: row.get(4)?,
+        remote_session_id: row.get(5)?,
+        work_claim_id: row.get(6)?,
+        expected_transition_version: row.get(7)?,
+        agent_identity_id: row.get(8)?,
+        contract_digest: row.get(9)?,
+        capabilities_json: row.get(10)?,
+        tool_profile: row.get(11)?,
+        capability_class: row.get(12)?,
+        policy_digest: row.get(13)?,
+        descriptor_digest: row.get(14)?,
+        idempotency_key: row.get(15)?,
+        admission_receipt_ref: row.get(16)?,
         state,
-        created_at: row.get(17)?,
-        updated_at: row.get(18)?,
+        created_at: row.get(18)?,
+        updated_at: row.get(19)?,
     })
 }
 
@@ -449,6 +468,10 @@ pub fn authorize_harness_session_attachment(
 fn validate_new_attachment(input: &NewHarnessSessionAttachment) -> Result<(), MemoryError> {
     for (field, value) in [
         ("host_identity", input.host_identity.as_str()),
+        (
+            "identity_attribution_basis",
+            input.identity_attribution_basis.as_str(),
+        ),
         ("protocol_version", input.protocol_version.as_str()),
         (
             "adapter_connection_identity",
@@ -471,6 +494,17 @@ fn validate_new_attachment(input: &NewHarnessSessionAttachment) -> Result<(), Me
     ] {
         require_non_empty(value, field)?;
     }
+    if input.identity_attribution_basis != TRUSTED_LOCAL_HOST_DECLARED_BASIS {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "identity attribution basis '{}' is not writable by the trusted-local attachment admission writer",
+            input.identity_attribution_basis
+        )));
+    }
+    if input.protocol_version != "1" {
+        return Err(MemoryError::InvalidArg(
+            "ACP negotiated protocol_version must be exactly 1".to_string(),
+        ));
+    }
     if input.expected_transition_version < 0 {
         return Err(MemoryError::InvalidArg(
             "expected_transition_version must be non-negative".to_string(),
@@ -490,6 +524,7 @@ fn validate_new_attachment(input: &NewHarnessSessionAttachment) -> Result<(), Me
 
 fn same_binding(row: &HarnessSessionAttachment, input: &NewHarnessSessionAttachment) -> bool {
     row.host_identity == input.host_identity
+        && row.identity_attribution_basis == input.identity_attribution_basis
         && row.protocol_version == input.protocol_version
         && row.adapter_connection_identity == input.adapter_connection_identity
         && row.remote_session_id == input.remote_session_id
@@ -541,22 +576,25 @@ fn find_by_natural_key(
         .optional()?)
 }
 
-fn verify_admission_and_claim(
-    tx: &Transaction<'_>,
-    input: &NewHarnessSessionAttachment,
-) -> Result<HarnessSessionAttachmentAuthorization, MemoryError> {
+fn verify_host_admission(
+    conn: &Connection,
+    host: &HarnessSessionHostAdmission,
+    admission_receipt_ref: &str,
+    claim_id: &str,
+    worker_identity_id: &str,
+) -> Result<(), MemoryError> {
     // The admission reference may be either the durable admission id or the
     // connection id exposed by a host. In both forms the receipt must resolve
-    // to the exact host connection and identity; an unavailable/rejected row
-    // never reaches the attachment INSERT below.
-    let admission: Option<(String, String, String)> = tx
+    // to the exact *current host* connection and identity; it never authorizes
+    // the distinct worker that holds the WorkClaim.
+    let admission: Option<(String, String, String)> = conn
         .query_row(
             "SELECT agent_identity_id, connection_id, state
              FROM identity_admissions
              WHERE (admission_id = ?1 OR connection_id = ?1)
              ORDER BY CASE WHEN admission_id = ?1 THEN 0 ELSE 1 END
              LIMIT 1",
-            params![input.admission_receipt_ref],
+            params![admission_receipt_ref],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
@@ -565,70 +603,119 @@ fn verify_admission_and_claim(
             "ACP attachment admission receipt is missing".to_string(),
         ));
     };
-    if connection_id != input.host_identity
-        || admitted_identity != input.agent_identity_id
+    if admitted_identity != host.host_identity
+        || connection_id != host.connection_id
         || !matches!(state.as_str(), "self_asserted" | "verified")
+        || host.host_identity == worker_identity_id
     {
         return Err(MemoryError::WorkClaimTransitionRefused {
             reason: crate::error::WorkClaimTransitionReason::HolderMismatch,
-            claim_id: input.work_claim_id.clone(),
+            claim_id: claim_id.to_string(),
             holder_identity_id: admitted_identity,
-            caller_identity_id: input.agent_identity_id.clone(),
+            caller_identity_id: host.host_identity.clone(),
         });
     }
+    Ok(())
+}
 
-    // As in the read-only preflight above, preserve missing-row versus SQL
-    // NULL so a stored null grant fails closed with the typed refusal.
-    let capability_json: Option<Option<String>> = tx
+fn load_capability_json(
+    conn: &Connection,
+    agent_identity_id: &str,
+) -> Result<Option<String>, MemoryError> {
+    // Preserve missing-row versus SQL NULL so a stored null grant fails closed
+    // with the typed refusal rather than exposing rusqlite's raw NULL error.
+    let capability_json: Option<Option<String>> = conn
         .query_row(
             "SELECT capability_json FROM agent_identities WHERE agent_identity_id = ?1",
-            params![input.agent_identity_id],
+            params![agent_identity_id],
             |row| row.get::<_, Option<String>>(0),
         )
         .optional()?;
     let Some(capability_json) = capability_json else {
         return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "unknown agent identity {}",
-            input.agent_identity_id
+            "unknown agent identity {agent_identity_id}"
         )));
     };
+    Ok(capability_json)
+}
 
-    let claim: Option<(String, String, i64)> = tx
-        .query_row(
-            "SELECT agent_identity_id, state, transition_version
-             FROM session_claims WHERE claim_id = ?1",
-            params![input.work_claim_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    let Some((claim_identity, state, transition_version)) = claim else {
-        return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "WorkClaim {} is unavailable",
-            input.work_claim_id
-        )));
-    };
-    if claim_identity != input.agent_identity_id {
+fn verify_claim_fresh(
+    conn: &Connection,
+    claim_id: &str,
+    worker_identity_id: &str,
+    expected_transition_version: i64,
+    ttl_seconds: i64,
+) -> Result<(), MemoryError> {
+    let claim = get_claim(conn, claim_id)?.ok_or_else(|| {
+        MemoryError::WorkClaimIncompatibleState(format!("WorkClaim {claim_id} is unavailable"))
+    })?;
+    let claim_identity = claim.agent_identity_id.clone().unwrap_or_default();
+    if claim_identity != worker_identity_id {
         return Err(MemoryError::WorkClaimTransitionRefused {
             reason: crate::error::WorkClaimTransitionReason::HolderMismatch,
-            claim_id: input.work_claim_id.clone(),
+            claim_id: claim_id.to_string(),
             holder_identity_id: claim_identity,
-            caller_identity_id: input.agent_identity_id.clone(),
+            caller_identity_id: worker_identity_id.to_string(),
         });
     }
-    if state != "active" {
+    if claim.state.as_str() != "active" {
         return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "WorkClaim {} is {state}, not active",
-            input.work_claim_id
+            "WorkClaim {claim_id} is {}, not active",
+            claim.state.as_str()
         )));
     }
-    if transition_version != input.expected_transition_version {
+    let now = chrono::Utc::now();
+    if is_claim_stale(&claim, now, ttl_seconds) {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "WorkClaim {claim_id} heartbeat is stale or malformed"
+        )));
+    }
+    let lease_raw = claim.lease_expires_at.as_deref().ok_or_else(|| {
+        MemoryError::WorkClaimIncompatibleState(format!(
+            "WorkClaim {claim_id} lease is missing or malformed"
+        ))
+    })?;
+    let lease = chrono::DateTime::parse_from_rfc3339(lease_raw).map_err(|_| {
+        MemoryError::WorkClaimIncompatibleState(format!(
+            "WorkClaim {claim_id} lease is missing or malformed"
+        ))
+    })?;
+    if lease.with_timezone(&chrono::Utc) <= now {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "WorkClaim {claim_id} lease is expired"
+        )));
+    }
+    if claim.transition_version != expected_transition_version {
         return Err(MemoryError::WorkClaimConflict(format!(
-            "WorkClaim {} transition revision is {}, expected {}",
-            input.work_claim_id, transition_version, input.expected_transition_version
+            "WorkClaim {claim_id} transition revision is {}, expected {expected_transition_version}",
+            claim.transition_version
         )));
     }
+    Ok(())
+}
+
+fn verify_admission_and_claim(
+    tx: &Transaction<'_>,
+    input: &NewHarnessSessionAttachment,
+    host: &HarnessSessionHostAdmission,
+    ttl_seconds: i64,
+) -> Result<HarnessSessionAttachmentAuthorization, MemoryError> {
+    verify_host_admission(
+        tx,
+        host,
+        &input.admission_receipt_ref,
+        &input.work_claim_id,
+        &input.agent_identity_id,
+    )?;
+    verify_claim_fresh(
+        tx,
+        &input.work_claim_id,
+        &input.agent_identity_id,
+        input.expected_transition_version,
+        ttl_seconds,
+    )?;
     let authorization = authorization_from_capability_json(
-        capability_json.as_deref(),
+        load_capability_json(tx, &input.agent_identity_id)?.as_deref(),
         &input.agent_identity_id,
         &input.tool_profile,
         &input.capability_class,
@@ -642,6 +729,49 @@ fn verify_admission_and_claim(
     Ok(authorization)
 }
 
+fn verify_existing_attachment(
+    conn: &Connection,
+    attachment: &HarnessSessionAttachment,
+    host: &HarnessSessionHostAdmission,
+    admission_receipt_ref: &str,
+    ttl_seconds: i64,
+) -> Result<(), MemoryError> {
+    if attachment.identity_attribution_basis != TRUSTED_LOCAL_HOST_DECLARED_BASIS
+        || attachment.host_identity != host.host_identity
+        || attachment.admission_receipt_ref != admission_receipt_ref
+    {
+        return Err(MemoryError::WorkClaimIncompatibleState(
+            "ACP attachment is not bound to the current host admission".to_string(),
+        ));
+    }
+    verify_host_admission(
+        conn,
+        host,
+        &attachment.admission_receipt_ref,
+        &attachment.work_claim_id,
+        &attachment.agent_identity_id,
+    )?;
+    verify_claim_fresh(
+        conn,
+        &attachment.work_claim_id,
+        &attachment.agent_identity_id,
+        attachment.expected_transition_version,
+        ttl_seconds,
+    )?;
+    let authorization = authorization_from_capability_json(
+        load_capability_json(conn, &attachment.agent_identity_id)?.as_deref(),
+        &attachment.agent_identity_id,
+        &attachment.tool_profile,
+        &attachment.capability_class,
+    )?;
+    if authorization.policy_digest != attachment.policy_digest {
+        return Err(MemoryError::WorkClaimConflict(
+            "ACP attachment descriptor policy drifted; refusing projection".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Admit an attachment atomically. Every refusal above the INSERT occurs in
 /// this transaction, so missing/stale/rejected/unavailable evidence leaves no
 /// attachment row behind. Exact replay returns the original row without
@@ -649,8 +779,15 @@ fn verify_admission_and_claim(
 pub fn attach_harness_session(
     conn: &mut Connection,
     input: &NewHarnessSessionAttachment,
+    host: &HarnessSessionHostAdmission,
+    ttl_seconds: i64,
 ) -> Result<HarnessSessionAttachmentReceipt, MemoryError> {
     validate_new_attachment(input)?;
+    if ttl_seconds < 0 {
+        return Err(MemoryError::InvalidArg(
+            "WorkClaim freshness TTL must be non-negative".to_string(),
+        ));
+    }
     // Serialize natural-key/idempotency writers.  A deferred transaction lets
     // two writers both observe "no row" and turns the loser into a raw UNIQUE
     // error; IMMEDIATE makes the second writer re-read the committed row and
@@ -668,7 +805,7 @@ pub fn attach_harness_session(
         // An idempotency key is not an admission grant: exact replay still
         // revalidates the current admission, identity policy, and exact active
         // WorkClaim revision before returning the immutable prior receipt.
-        verify_admission_and_claim(&tx, input)?;
+        verify_admission_and_claim(&tx, input, host, ttl_seconds)?;
         tx.commit()?;
         return Ok(HarnessSessionAttachmentReceipt {
             attachment: existing,
@@ -679,7 +816,7 @@ pub fn attach_harness_session(
     // New attachments derive policy from durable identity/claim evidence in
     // the same write transaction before either a natural-key conflict or an
     // INSERT can disclose or mutate attachment state.
-    verify_admission_and_claim(&tx, input)?;
+    verify_admission_and_claim(&tx, input, host, ttl_seconds)?;
 
     if let Some(existing) = find_by_natural_key(&tx, input)? {
         return Err(MemoryError::WorkClaimConflict(format!(
@@ -692,17 +829,18 @@ pub fn attach_harness_session(
     let attachment_id = format!("attachment-{}", uuid::Uuid::new_v4());
     tx.execute(
         "INSERT INTO harness_session_attachments (
-            attachment_id, host_identity, protocol_version,
+            attachment_id, host_identity, identity_attribution_basis, protocol_version,
             adapter_connection_identity, remote_session_id, work_claim_id,
             expected_transition_version, agent_identity_id, contract_digest,
             capabilities_json, tool_profile, capability_class, policy_digest,
             descriptor_digest, idempotency_key, admission_receipt_ref, state,
             created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                   ?13, ?14, ?15, ?16, 'attached', ?17, ?17)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                   ?14, ?15, ?16, ?17, 'attached', ?18, ?18)",
         params![
             attachment_id,
             input.host_identity,
+            input.identity_attribution_basis,
             input.protocol_version,
             input.adapter_connection_identity,
             input.remote_session_id,
@@ -739,7 +877,20 @@ pub fn attach_harness_session(
 pub fn get_harness_session_attachment(
     conn: &Connection,
     selector: &HarnessSessionAttachmentSelector,
+    host: &HarnessSessionHostAdmission,
+    admission_receipt_ref: &str,
+    ttl_seconds: i64,
 ) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
+    if let HarnessSessionAttachmentSelector::NaturalKey {
+        protocol_version, ..
+    } = selector
+    {
+        if protocol_version != "1" {
+            return Err(MemoryError::InvalidArg(
+                "ACP negotiated protocol_version must be exactly 1".to_string(),
+            ));
+        }
+    }
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM harness_session_attachments WHERE {}",
         match selector {
@@ -772,7 +923,19 @@ pub fn get_harness_session_attachment(
             )
             .optional()?,
     };
-    Ok(result)
+    let Some(attachment) = result else {
+        return Ok(None);
+    };
+    // A foreign host must receive the same not-found shape as an absent row;
+    // do not reveal even the reason that a durable id exists.  Freshness and
+    // current-admission failures for the rightful host remain typed refusals.
+    if attachment.host_identity != host.host_identity
+        || attachment.admission_receipt_ref != admission_receipt_ref
+    {
+        return Ok(None);
+    }
+    verify_existing_attachment(conn, &attachment, host, admission_receipt_ref, ttl_seconds)?;
+    Ok(Some(attachment))
 }
 
 #[cfg(test)]
@@ -784,6 +947,17 @@ mod tests {
     };
 
     fn seed(conn: &mut Connection) -> NewHarnessSessionAttachment {
+        insert_agent_identity(
+            conn,
+            &AgentIdentity {
+                agent_identity_id: "host-1".into(),
+                display_name: None,
+                seat: None,
+                capability_json: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
         insert_agent_identity(
             conn,
             &AgentIdentity {
@@ -801,7 +975,7 @@ mod tests {
         conn.execute(
             "INSERT INTO identity_admissions
              (admission_id, agent_identity_id, connection_id, state, created_at)
-             VALUES ('admission-1', 'agent-1', 'host-1', 'self_asserted', '2026-01-01T00:00:00Z')",
+             VALUES ('admission-1', 'host-1', 'connection-1', 'self_asserted', '2026-01-01T00:00:00Z')",
             [],
         )
         .unwrap();
@@ -810,7 +984,7 @@ mod tests {
             &NewWorkClaim {
                 claim_id: "claim-1".into(),
                 agent_identity_id: "agent-1".into(),
-                session_client: Some("host-1".into()),
+                session_client: Some("connection-1".into()),
                 issue_ref: None,
                 flow_id: None,
                 dispatch_id: None,
@@ -827,6 +1001,7 @@ mod tests {
         .unwrap();
         let mut input = NewHarnessSessionAttachment {
             host_identity: "host-1".into(),
+            identity_attribution_basis: TRUSTED_LOCAL_HOST_DECLARED_BASIS.into(),
             protocol_version: "1".into(),
             adapter_connection_identity: "adapter-1".into(),
             remote_session_id: "remote-1".into(),
@@ -858,6 +1033,20 @@ mod tests {
         input
     }
 
+    fn host() -> HarnessSessionHostAdmission {
+        HarnessSessionHostAdmission {
+            host_identity: "host-1".into(),
+            connection_id: "connection-1".into(),
+        }
+    }
+
+    fn attach(
+        conn: &mut Connection,
+        input: &NewHarnessSessionAttachment,
+    ) -> Result<HarnessSessionAttachmentReceipt, MemoryError> {
+        attach_harness_session(conn, input, &host(), 30 * 60)
+    }
+
     fn setup() -> Connection {
         crate::db::enable_simple_auto_extension().unwrap();
         let conn = Connection::open_in_memory().unwrap();
@@ -870,6 +1059,7 @@ mod tests {
             "SELECT json_object(
                 'attachment_id', attachment_id,
                 'host_identity', host_identity,
+                'identity_attribution_basis', identity_attribution_basis,
                 'protocol_version', protocol_version,
                 'adapter_connection_identity', adapter_connection_identity,
                 'remote_session_id', remote_session_id,
@@ -899,7 +1089,7 @@ mod tests {
     fn exact_replay_is_byte_stable_and_does_not_add_a_row() {
         let mut conn = setup();
         let input = seed(&mut conn);
-        let first = attach_harness_session(&mut conn, &input).unwrap();
+        let first = attach(&mut conn, &input).unwrap();
         let before = (
             conn.query_row(
                 "SELECT COUNT(*) FROM harness_session_attachments",
@@ -909,7 +1099,7 @@ mod tests {
             .unwrap(),
             attachment_row_bytes(&conn),
         );
-        let replay = attach_harness_session(&mut conn, &input).unwrap();
+        let replay = attach(&mut conn, &input).unwrap();
         let after = (
             conn.query_row(
                 "SELECT COUNT(*) FROM harness_session_attachments",
@@ -934,11 +1124,11 @@ mod tests {
     fn changed_binding_conflicts_without_mutating_original_row() {
         let mut conn = setup();
         let input = seed(&mut conn);
-        let first = attach_harness_session(&mut conn, &input).unwrap();
+        let first = attach(&mut conn, &input).unwrap();
         let before = attachment_row_bytes(&conn);
         let mut changed = input.clone();
         changed.remote_session_id = "remote-2".into();
-        let error = attach_harness_session(&mut conn, &changed).unwrap_err();
+        let error = attach(&mut conn, &changed).unwrap_err();
         assert!(matches!(error, MemoryError::WorkClaimConflict(_)));
         let after = attachment_row_bytes(&conn);
         assert_eq!(before, after);
@@ -949,7 +1139,7 @@ mod tests {
     fn replay_revalidates_released_claim_after_initial_attachment() {
         let mut conn = setup();
         let input = seed(&mut conn);
-        attach_harness_session(&mut conn, &input).unwrap();
+        attach(&mut conn, &input).unwrap();
         let before = attachment_row_bytes(&conn);
         conn.execute_batch(
             "UPDATE session_claims
@@ -958,7 +1148,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = attach_harness_session(&mut conn, &input).unwrap_err();
+        let error = attach(&mut conn, &input).unwrap_err();
         assert!(error.to_string().contains("not active"), "{error}");
         assert_eq!(before, attachment_row_bytes(&conn));
     }
@@ -967,7 +1157,7 @@ mod tests {
     fn replay_revalidates_revoked_identity_grant_after_initial_attachment() {
         let mut conn = setup();
         let input = seed(&mut conn);
-        attach_harness_session(&mut conn, &input).unwrap();
+        attach(&mut conn, &input).unwrap();
         let before = attachment_row_bytes(&conn);
         conn.execute(
             "UPDATE agent_identities
@@ -977,7 +1167,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = attach_harness_session(&mut conn, &input).unwrap_err();
+        let error = attach(&mut conn, &input).unwrap_err();
         assert!(
             error.to_string().contains("no ACP capability grant"),
             "{error}"
@@ -990,7 +1180,7 @@ mod tests {
         let mut conn = setup();
         let mut input = seed(&mut conn);
         input.expected_transition_version = 1;
-        let error = attach_harness_session(&mut conn, &input).unwrap_err();
+        let error = attach(&mut conn, &input).unwrap_err();
         assert!(matches!(error, MemoryError::WorkClaimConflict(_)));
         let count: i64 = conn
             .query_row(
@@ -1013,7 +1203,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = attach_harness_session(&mut conn, &input).unwrap_err();
+        let error = attach(&mut conn, &input).unwrap_err();
         assert!(error.to_string().contains("policy digest"));
         let count: i64 = conn
             .query_row(
@@ -1023,6 +1213,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn reserved_identity_attribution_tiers_are_not_writable_by_this_leaf() {
+        let mut conn = setup();
+        let mut input = seed(&mut conn);
+        for basis in ["verified", "reserved", "remote_verified"] {
+            input.identity_attribution_basis = basis.to_string();
+            let error = attach(&mut conn, &input).expect_err("reserved basis must refuse");
+            assert!(error.to_string().contains("not writable"), "{error}");
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM harness_session_attachments",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn non_v1_protocol_versions_refuse_before_any_attachment_write() {
+        for version in ["0", "2"] {
+            let mut conn = setup();
+            let mut input = seed(&mut conn);
+            input.protocol_version = version.to_string();
+            let error = attach(&mut conn, &input).expect_err("unstable protocol must refuse");
+            assert!(error.to_string().contains("exactly 1"), "{error}");
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM harness_session_attachments",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0
+            );
+        }
     }
 
     #[test]

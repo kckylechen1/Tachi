@@ -23,21 +23,21 @@
       },
       "coordinate": {
         "max_visible_tools": 38,
-        "max_total_input_schema_bytes": 128808,
-        "max_total_tool_definition_bytes": 146722,
-        "rationale": "Exact live observed census for coordinate; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 130928,
+        "max_total_tool_definition_bytes": 148842,
+        "rationale": "Exact live observed census for coordinate; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); #1733 trusted-local ACP attachment fields are pinned after the final schema; any further regrowth requires explicit adjudication."
       },
       "operate": {
         "max_visible_tools": 50,
-        "max_total_input_schema_bytes": 124356,
-        "max_total_tool_definition_bytes": 143380,
-        "rationale": "Exact live observed census for operate; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 126476,
+        "max_total_tool_definition_bytes": 145500,
+        "rationale": "Exact live observed census for operate; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); #1733 trusted-local ACP attachment fields are pinned after the final schema; any further regrowth requires explicit adjudication."
       },
       "admin": {
         "max_visible_tools": 102,
-        "max_total_input_schema_bytes": 186563,
-        "max_total_tool_definition_bytes": 223818,
-        "rationale": "Exact live observed census for admin; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 188683,
+        "max_total_tool_definition_bytes": 225938,
+        "rationale": "Exact live observed census for admin; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); #1733 trusted-local ACP attachment fields are pinned after the final schema; any further regrowth requires explicit adjudication."
       }
     },
     "surfaces": {
@@ -213,8 +213,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 186563,
-        "total_tool_definition_bytes": 223818,
+        "total_input_schema_bytes": 188683,
+        "total_tool_definition_bytes": 225938,
         "visible_tool_count": 102,
         "visible_tools": [
           "archive_memory",
@@ -322,8 +322,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 128808,
-        "total_tool_definition_bytes": 146722,
+        "total_input_schema_bytes": 130928,
+        "total_tool_definition_bytes": 148842,
         "visible_tool_count": 38,
         "visible_tools": [
           "extract_facts",
@@ -385,8 +385,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 124356,
-        "total_tool_definition_bytes": 143380,
+        "total_input_schema_bytes": 126476,
+        "total_tool_definition_bytes": 145500,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
@@ -576,17 +576,31 @@
       "comparisons": {
         "admin": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 11801,
-            "property_count": 8,
+            "input_schema_bytes": 13921,
+            "property_count": 22,
             "property_names": [
               "action",
+              "adapter_connection_identity",
               "adjudicate",
+              "admission_receipt_ref",
+              "agent_identity_id",
+              "attachment_id",
+              "capability_class",
+              "contract_digest",
+              "expected_transition_revision",
               "fixture_path",
               "get",
+              "host_identity",
+              "idempotency_key",
               "limit",
               "observe",
               "projection",
-              "register"
+              "protocol_version",
+              "register",
+              "remote_session_id",
+              "session_capabilities",
+              "tool_profile",
+              "work_claim_id"
             ]
           },
           "tachi_orchestrator": {
@@ -710,17 +724,31 @@
         },
         "coordinate": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 11801,
-            "property_count": 8,
+            "input_schema_bytes": 13921,
+            "property_count": 22,
             "property_names": [
               "action",
+              "adapter_connection_identity",
               "adjudicate",
+              "admission_receipt_ref",
+              "agent_identity_id",
+              "attachment_id",
+              "capability_class",
+              "contract_digest",
+              "expected_transition_revision",
               "fixture_path",
               "get",
+              "host_identity",
+              "idempotency_key",
               "limit",
               "observe",
               "projection",
-              "register"
+              "protocol_version",
+              "register",
+              "remote_session_id",
+              "session_capabilities",
+              "tool_profile",
+              "work_claim_id"
             ]
           },
           "tachi_orchestrator": {

@@ -129,6 +129,32 @@ async fn call_tool_via_stdio_proxy(
     }
 }
 
+async fn list_tools_via_stdio_proxy(
+    proxy: StdioProxyServer,
+) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+    let request =
+        rmcp::model::ClientRequest::ListToolsRequest(rmcp::model::ListToolsRequest::default());
+    let (transport, mut receiver) =
+        rmcp::transport::OneshotTransport::<rmcp::service::RoleServer>::new(
+            rmcp::model::ClientJsonRpcMessage::request(request, rmcp::model::RequestId::Number(1)),
+        );
+    let service = rmcp::service::serve_directly(proxy, transport, None);
+    let message = tokio::time::timeout(std::time::Duration::from_secs(30), receiver.recv())
+        .await
+        .expect("proxied list timed out")
+        .expect("proxied list should yield one response");
+    let quit_reason = service.waiting().await.expect("wait for proxy service");
+    assert!(matches!(quit_reason, rmcp::service::QuitReason::Closed));
+    match message {
+        rmcp::model::ServerJsonRpcMessage::Response(response) => match response.result {
+            rmcp::model::ServerResult::ListToolsResult(result) => Ok(result),
+            other => panic!("expected ListToolsResult, got {other:?}"),
+        },
+        rmcp::model::ServerJsonRpcMessage::Error(error) => Err(error.error),
+        other => panic!("expected list response or error, got {other:?}"),
+    }
+}
+
 fn memory_text_count(db_path: &Path, text: &str) -> i64 {
     rusqlite::Connection::open(db_path)
         .expect("open db")
@@ -227,6 +253,108 @@ fn seed_identity_db(tachi_home: &Path, project_name: &str) {
     std::fs::create_dir_all(db_path.parent().expect("identity db parent"))
         .expect("identity db parent");
     std::fs::write(db_path, project_name.as_bytes()).expect("identity db fixture");
+}
+
+#[test]
+fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::coordinate()));
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let delegate_proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
+            tool_profile: Some(tachi_hub::ToolProfile::delegate()),
+            daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
+            app_home: tachi_home.clone(),
+            global_db_path: global.clone(),
+            project_db_path: None,
+            client_project: None,
+        };
+        let listed = list_tools_via_stdio_proxy(delegate_proxy.clone()).await;
+        assert!(
+            listed.is_ok(),
+            "profile-bound tools/list should succeed: {listed:?}"
+        );
+        assert!(
+            !listed
+                .as_ref()
+                .unwrap()
+                .tools
+                .iter()
+                .any(|tool| tool.name.as_ref() == "tachi_agent_eval"),
+            "delegate profile must remain bound during tools/list"
+        );
+
+        let delegate_get = call_tool_via_stdio_proxy(
+            delegate_proxy.clone(),
+            "tachi_agent_eval",
+            serde_json::Map::from_iter([(
+                "action".to_string(),
+                serde_json::json!("get_attachment"),
+            )]),
+        )
+        .await
+        .expect("delegate profile refusal should be an MCP error result");
+        assert!(delegate_get.is_error.unwrap_or(false));
+        assert!(
+            first_text(&delegate_get).contains("tool not found"),
+            "delegate must not reach the attachment handler: {delegate_get:?}"
+        );
+
+        // Changing launch configuration after construction is not a profile
+        // redeclaration. The connection keeps the parsed delegate profile;
+        // it must not widen when a later call observes a broader environment.
+        let _profile_env = EnvRestore::set("TACHI_PROFILE", "admin");
+        let listed_after_redeclare = list_tools_via_stdio_proxy(delegate_proxy.clone()).await;
+        assert!(listed_after_redeclare.is_ok());
+        assert!(
+            !listed_after_redeclare
+                .as_ref()
+                .unwrap()
+                .tools
+                .iter()
+                .any(|tool| tool.name.as_ref() == "tachi_agent_eval"),
+            "mid-session profile widening must be ignored"
+        );
+
+        for action in ["attach_session", "get_attachment"] {
+            let proxy = StdioProxyServer {
+                adapter_started_at: chrono::Utc::now(),
+                tool_profile: Some(tachi_hub::ToolProfile::observe()),
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: None,
+                client_project: None,
+            };
+            let result = call_tool_via_stdio_proxy(
+                proxy,
+                "tachi_agent_eval",
+                serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
+            )
+            .await
+            .expect("profile-denied call should return an MCP error result");
+            assert!(result.is_error.unwrap_or(false));
+            assert!(
+                first_text(&result).contains("ToolProfile 'observe'"),
+                "profile must be bound at initialize before the attachment handler: {result:?}"
+            );
+        }
+        (ct, daemon_task)
+    });
+    rt.block_on(async {
+        ct.cancel();
+        daemon_task.await.expect("daemon task");
+    });
 }
 
 fn write_repo_project_manifest(tachi_home: &Path, db_paths: &[&Path]) {
@@ -338,6 +466,7 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -421,6 +550,7 @@ fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -497,6 +627,7 @@ fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -570,6 +701,7 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -678,6 +810,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
         let daemon = std::sync::Arc::new(std::sync::RwLock::new(daemon));
         let bound_proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon: daemon.clone(),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -686,6 +819,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
         };
         let other_proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon,
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -782,6 +916,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -934,6 +1069,7 @@ fn stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot() {
         };
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon: std::sync::Arc::new(std::sync::RwLock::new(stale_cached)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -1037,6 +1173,7 @@ fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
         };
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon: std::sync::Arc::new(std::sync::RwLock::new(cached_but_dead)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -1103,6 +1240,7 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),

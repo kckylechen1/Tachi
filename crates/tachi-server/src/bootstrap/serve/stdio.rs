@@ -104,8 +104,18 @@ pub(super) async fn serve_stdio_proxy(
     project_db_path: Option<PathBuf>,
     client_project: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let tool_profile = match std::env::var("TACHI_PROFILE") {
+        Ok(raw) => Some(tachi_hub::parse_tool_profile(&raw).ok_or_else(|| {
+            format!(
+                "unknown stdio-proxy TACHI_PROFILE '{raw}'; refusing to widen the MCP connection"
+            )
+        })?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(Box::new(error)),
+    };
     let proxy = StdioProxyServer {
         adapter_started_at: chrono::Utc::now(),
+        tool_profile,
         daemon: std::sync::Arc::new(std::sync::RwLock::new(info)),
         app_home,
         global_db_path,
@@ -410,6 +420,9 @@ struct StdioProxyServer {
     // `runtime_info` as `adapter_started_at` — distinct from
     // `daemon_identity_as_of` (tachi#1222), which is re-derived on every call.
     adapter_started_at: chrono::DateTime<chrono::Utc>,
+    /// Parsed once before MCP initialize; every daemon `tools/list` and
+    /// `tools/call` for this stdio connection reuses this immutable profile.
+    tool_profile: Option<tachi_hub::ToolProfile>,
     // Shared + refreshable so a daemon restart (new ephemeral port) or death is
     // self-healed at call time instead of stranding the adapter on a dead URL.
     daemon: std::sync::Arc<std::sync::RwLock<crate::cli_client::DaemonInfo>>,
@@ -558,15 +571,25 @@ impl rmcp::ServerHandler for StdioProxyServer {
     {
         async move {
             let current = self.current_daemon();
-            match crate::cli_client::list_daemon_tools(&current, request.clone()).await {
+            match crate::cli_client::list_daemon_tools_with_profile(
+                &current,
+                request.clone(),
+                self.tool_profile,
+            )
+            .await
+            {
                 Ok(result) => Ok(result),
                 // BeforeDispatch = the request never reached the daemon; safe to
                 // re-resolve and retry (list_tools is read-only regardless).
                 Err(err) if err.allows_in_process_fallback() => {
                     match self.refresh_daemon(&current.url).await {
-                        Some(fresh) => crate::cli_client::list_daemon_tools(&fresh, request)
-                            .await
-                            .map_err(daemon_error_data),
+                        Some(fresh) => crate::cli_client::list_daemon_tools_with_profile(
+                            &fresh,
+                            request,
+                            self.tool_profile,
+                        )
+                        .await
+                        .map_err(daemon_error_data),
                         None => Err(daemon_error_data(err)),
                     }
                 }
@@ -587,10 +610,11 @@ impl rmcp::ServerHandler for StdioProxyServer {
             }
             let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
             let current = self.current_daemon();
-            match crate::cli_client::call_daemon_tool_raw(
+            match crate::cli_client::call_daemon_tool_raw_with_profile(
                 &current,
                 request.clone(),
                 self.client_project.as_deref(),
+                self.tool_profile,
             )
             .await
             {
@@ -601,10 +625,11 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 // as-is to avoid replaying a possibly-applied write.
                 Err(err) if err.allows_in_process_fallback() => {
                     match self.refresh_daemon(&current.url).await {
-                        Some(fresh) => crate::cli_client::call_daemon_tool_raw(
+                        Some(fresh) => crate::cli_client::call_daemon_tool_raw_with_profile(
                             &fresh,
                             request,
                             self.client_project.as_deref(),
+                            self.tool_profile,
                         )
                         .await
                         .map_err(daemon_error_data),
