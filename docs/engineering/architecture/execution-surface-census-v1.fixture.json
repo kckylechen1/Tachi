@@ -3,7 +3,7 @@
   "issue": 1317,
   "observation": {
     "date": "2026-08-11",
-    "revision": "cce74fc99f904367b6e382a075db5859cd4cb3e2",
+    "revision": "da8ecbfc06eff0ba9cd2ef969323cf0a368334ce",
     "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
   },
   "provisional_budgets": {
@@ -23,21 +23,21 @@
       },
       "coordinate": {
         "max_visible_tools": 38,
-        "max_total_input_schema_bytes": 126864,
-        "max_total_tool_definition_bytes": 144778,
-        "rationale": "Exact live observed census for coordinate; #1687 C1c pin re-based on the explicitly adjudicated #1675 PR1 eval-ledger schema growth (tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B); any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 128808,
+        "max_total_tool_definition_bytes": 146722,
+        "rationale": "Exact live observed census for coordinate; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); any further regrowth requires explicit adjudication."
       },
       "operate": {
         "max_visible_tools": 50,
-        "max_total_input_schema_bytes": 122412,
-        "max_total_tool_definition_bytes": 141436,
-        "rationale": "Exact live observed census for operate; #1687 C1c pin re-based on the explicitly adjudicated #1675 PR1 eval-ledger schema growth (tachi_agent_eval.rubric +2352 B); any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 124356,
+        "max_total_tool_definition_bytes": 143380,
+        "rationale": "Exact live observed census for operate; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); any further regrowth requires explicit adjudication."
       },
       "admin": {
         "max_visible_tools": 102,
-        "max_total_input_schema_bytes": 184619,
-        "max_total_tool_definition_bytes": 221874,
-        "rationale": "Exact live observed census for admin; #1687 C1c pin re-based on the explicitly adjudicated #1675 PR1 eval-ledger schema growth (tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B); any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 186563,
+        "max_total_tool_definition_bytes": 223818,
+        "rationale": "Exact live observed census for admin; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); any further regrowth requires explicit adjudication."
       }
     },
     "surfaces": {
@@ -213,8 +213,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 184619,
-        "total_tool_definition_bytes": 221874,
+        "total_input_schema_bytes": 186563,
+        "total_tool_definition_bytes": 223818,
         "visible_tool_count": 102,
         "visible_tools": [
           "archive_memory",
@@ -322,8 +322,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 126864,
-        "total_tool_definition_bytes": 144778,
+        "total_input_schema_bytes": 128808,
+        "total_tool_definition_bytes": 146722,
         "visible_tool_count": 38,
         "visible_tools": [
           "extract_facts",
@@ -385,8 +385,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 122412,
-        "total_tool_definition_bytes": 141436,
+        "total_input_schema_bytes": 124356,
+        "total_tool_definition_bytes": 143380,
         "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
@@ -576,8 +576,8 @@
       "comparisons": {
         "admin": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 9857,
-            "property_count": 7,
+            "input_schema_bytes": 11801,
+            "property_count": 8,
             "property_names": [
               "action",
               "adjudicate",
@@ -585,6 +585,7 @@
               "get",
               "limit",
               "observe",
+              "projection",
               "register"
             ]
           },
@@ -709,8 +710,8 @@
         },
         "coordinate": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 9857,
-            "property_count": 7,
+            "input_schema_bytes": 11801,
+            "property_count": 8,
             "property_names": [
               "action",
               "adjudicate",
@@ -718,6 +719,7 @@
               "get",
               "limit",
               "observe",
+              "projection",
               "register"
             ]
           },

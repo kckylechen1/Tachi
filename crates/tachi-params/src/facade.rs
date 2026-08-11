@@ -557,8 +557,9 @@ pub use action_inventory::{
 mod orchestration;
 pub use orchestration::{
     EvalRubricParams, MirrorEvalAdjudicateParams, MirrorEvalGetParams, MirrorEvalObserveParams,
-    MirrorEvalRegisterParams, TachiAgentEvalParams, TachiAgentsParams, TachiBoardParams,
-    TachiOrchestratorParams, TachiStaffParams, TachiVerifyCheckItem, TachiVerifyParams,
+    MirrorEvalRegisterParams, RouteProjectionParams, TachiAgentEvalParams, TachiAgentsParams,
+    TachiBoardParams, TachiOrchestratorParams, TachiStaffParams, TachiVerifyCheckItem,
+    TachiVerifyParams,
 };
 
 #[cfg(test)]

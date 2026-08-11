@@ -69,6 +69,8 @@ async fn aggregate_live_filters_auto_synthesized_watchdog_rows() {
             observe: None,
             adjudicate: None,
             get: None,
+            // tachi#1675 PR2: route_projection payload, unused here.
+            projection: None,
         }))
         .await
         .expect("aggregate_live should succeed");
@@ -241,6 +243,8 @@ async fn aggregate_live_uses_harness_native_mirror_eval_without_owning_lifecycle
             observe: None,
             adjudicate: None,
             get: None,
+            // tachi#1675 PR2: route_projection payload, unused here.
+            projection: None,
         }))
         .await
         .expect("aggregate_live should succeed");

@@ -89,6 +89,14 @@ pub use db::dispatch_outcomes::{
     outcome_exists_for_dispatch, upsert_outcome, upsert_outcome_reconciling_terminal_placeholder,
     DispatchOutcomeRow, NewDispatchOutcome, OutcomeEvidenceClass,
 };
+/// tachi#1675 PR2 (design D1): the ONE spine-tagged evidence row every
+/// routing/quality reader joins through. Read-only surface.
+#[cfg(feature = "admin")]
+pub use db::eval_projection::{
+    list_dispatch_eval_observations, list_eval_observations, list_mirror_eval_observations,
+    EvalAdjudicationFacts, EvalObservation, EvalRouteFacts, EvalSpine, ProfileAttributionBasis,
+    OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
+};
 #[cfg(feature = "admin")]
 pub use db::exec_env::{
     find_active_exec_env_by_path, get_exec_env, insert_exec_env, list_exec_envs, reclaim_exec_env,

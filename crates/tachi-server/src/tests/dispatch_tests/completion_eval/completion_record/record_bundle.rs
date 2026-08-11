@@ -234,6 +234,8 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             observe: None,
             adjudicate: None,
             get: None,
+            // tachi#1675 PR2: route_projection payload, unused here.
+            projection: None,
         }))
         .await
         .expect("aggregate_live should succeed");
@@ -282,6 +284,8 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             observe: None,
             adjudicate: None,
             get: None,
+            // tachi#1675 PR2: route_projection payload, unused here.
+            projection: None,
         }))
         .await
         .expect("telemetry alias should succeed");
