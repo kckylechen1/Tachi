@@ -282,10 +282,11 @@ pub struct TachiOrchestratorParams {
 
 // ─── Facade: agent eval harness ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct TachiAgentEvalParams {
     /// aggregate | aggregate_live | telemetry | perf | register | observe |
-    /// adjudicate | get | route_projection. aggregate replays a local JSONL
+    /// adjudicate | get | route_projection | attach_session | get_attachment.
+    /// aggregate replays a local JSONL
     /// fixture only when TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set.
     /// register/observe/adjudicate/get (#1066) are the mirror eval intake for
     /// harness-native subagents — work Tachi did not dispatch and only
@@ -328,6 +329,62 @@ pub struct TachiAgentEvalParams {
     /// unclassified task over the default window.
     #[serde(default)]
     pub projection: Option<RouteProjectionParams>,
+
+    // #1733 generic host-owned ACP attachment admission. These fields remain
+    // flat for compatibility with the existing single-facade parameter
+    // contract; action-specific presence is enforced by the server handler.
+    #[serde(default)]
+    #[schemars(
+        description = "[action=attach_session|get_attachment] Admitted host connection identity."
+    )]
+    pub host_identity: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=attach_session] Stable admitted AgentIdentity id.")]
+    pub agent_identity_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=attach_session|get_attachment] Existing WorkClaim id.")]
+    pub work_claim_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=attach_session] Exact WorkClaim transition revision (compare-and-swap)."
+    )]
+    pub expected_transition_revision: Option<i64>,
+    #[serde(default)]
+    #[schemars(description = "[action=attach_session|get_attachment] ACP protocol version.")]
+    pub protocol_version: Option<i64>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=attach_session|get_attachment] Opaque adapter-owned connection identity."
+    )]
+    pub adapter_connection_identity: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=attach_session|get_attachment] Opaque remote ACP session id."
+    )]
+    pub remote_session_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=attach_session] Frozen assignment/contract digest.")]
+    pub contract_digest: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=attach_session] Closed ACP session capabilities: observe, wait, prompt, cancel, resume, load, events, artifacts."
+    )]
+    pub session_capabilities: Vec<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=attach_session] Requested policy tool profile.")]
+    pub tool_profile: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=attach_session] Requested policy capability class.")]
+    pub capability_class: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=attach_session] Attachment idempotency key.")]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=attach_session] Durable admission receipt reference.")]
+    pub admission_receipt_ref: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=get_attachment] Stable attachment id.")]
+    pub attachment_id: Option<String>,
 }
 
 /// tachi#1675 PR2 `route_projection`: what task the projection is being

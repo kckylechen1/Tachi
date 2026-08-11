@@ -30,6 +30,8 @@ pub mod foundry_jobs;
 mod gc_candidates;
 mod graph;
 #[cfg(feature = "admin")]
+pub mod harness_session_attachments;
+#[cfg(feature = "admin")]
 mod hub_db;
 mod memory_crud;
 pub mod migrations;
@@ -116,6 +118,15 @@ pub use graph::{
     get_superseded_ids, graph_expand, graph_expand_limited, invalidate_observation,
     list_observations_for_edge, remove_edge, ConfirmedContradictionOutcome, EdgeAuthority,
     EdgeObservation, EdgeProvenance,
+};
+#[cfg(feature = "admin")]
+pub use harness_session_attachments::{
+    attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
+    HarnessSessionAttachment, HarnessSessionAttachmentAdmission,
+    HarnessSessionAttachmentAuthorization, HarnessSessionAttachmentCapabilities,
+    HarnessSessionAttachmentReceipt, HarnessSessionAttachmentSelector,
+    HarnessSessionAttachmentState, NewHarnessSessionAttachment, ACP_CAPABILITY_CLASSES,
+    ACP_SESSION_CAPABILITIES, ACP_TOOL_PROFILES,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{

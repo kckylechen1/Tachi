@@ -5,6 +5,7 @@ use crate::tool_params::TachiAgentEvalParams;
 use serde_json::Value;
 use std::path::Path;
 
+mod attachment;
 mod fixture;
 mod live;
 mod mirror;
@@ -76,6 +77,8 @@ pub(crate) async fn handle_agent_eval(
             params.projection.unwrap_or_default(),
             params.limit,
         ),
+        "attach_session" => self::attachment::handle_attach_session(_server, params),
+        "get_attachment" => self::attachment::handle_get_attachment(_server, params),
         "aggregate" => {
             if !eval_fixture_replay_allowed() {
                 return Err(format!(
@@ -159,7 +162,8 @@ pub(crate) async fn handle_agent_eval(
         }
         _ => Err(format!(
             "Invalid eval action '{}'. Use aggregate, aggregate_live, telemetry, perf, \
-             register, observe, adjudicate, get, or route_projection.",
+             register, observe, adjudicate, get, route_projection, attach_session, or \
+             get_attachment.",
             params.action
         )),
     }

@@ -129,6 +129,15 @@ pub use db::foundry_jobs::{
     InsertFoundryJobResult, JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
 #[cfg(feature = "admin")]
+pub use db::harness_session_attachments::{
+    attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
+    HarnessSessionAttachment, HarnessSessionAttachmentAdmission,
+    HarnessSessionAttachmentAuthorization, HarnessSessionAttachmentCapabilities,
+    HarnessSessionAttachmentReceipt, HarnessSessionAttachmentSelector,
+    HarnessSessionAttachmentState, NewHarnessSessionAttachment, ACP_CAPABILITY_CLASSES,
+    ACP_SESSION_CAPABILITIES, ACP_TOOL_PROFILES,
+};
+#[cfg(feature = "admin")]
 pub use db::mirror_eval::{
     append_mirror_eval_adjudication, get_mirror_eval_run_view, get_observation, get_run_by_id,
     get_run_by_native_child_id, list_adjudications_for_run, record_mirror_eval_observation,
