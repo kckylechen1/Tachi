@@ -502,9 +502,10 @@ impl ProviderWire for OpenAiCompatWire {
 
         if message.is_empty() {
             return WireOutcome::ProtocolViolation {
-                violation: ProtocolViolation::EmptyAssistantContent {
-                    finish_reason: finish_reason.map(str::to_string),
-                },
+                // Constructor, not the struct literal: it bounds and sanitizes
+                // the one provider-controlled string in the violation
+                // vocabulary.
+                violation: ProtocolViolation::empty_assistant_content(finish_reason),
             };
         }
 

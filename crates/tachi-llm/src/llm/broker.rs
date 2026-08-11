@@ -106,7 +106,7 @@ pub use canonical::{
 pub use disposition::{
     BeforeSendRefusal, BeforeSendRefusalKind, CancellationEvidence, CompletionKindV1,
     InvocationDispositionKind, InvocationDispositionV1, ProtocolViolation, ProtocolViolationKind,
-    RetryPosture, SendPhase, UnsupportedCapability,
+    RetryPosture, SendPhase, UnsupportedCapability, MAX_FINISH_REASON_CHARS,
 };
 pub use stream::{
     CanonicalStreamEvent, CanonicalStreamEventKind, StreamDecodeError, StreamDecodeErrorKind,

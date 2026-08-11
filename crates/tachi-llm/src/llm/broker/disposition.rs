@@ -256,7 +256,12 @@ pub enum ProtocolViolation {
     /// that the provider *answered* rather than hiding it in a generic error.
     #[serde(rename = "empty_assistant_content")]
     EmptyAssistantContent {
-        /// The provider's own `finish_reason`, when it sent one.
+        /// The provider's own `finish_reason`, when it sent one — bounded to
+        /// [`MAX_FINISH_REASON_CHARS`]. Build it with
+        /// [`ProtocolViolation::empty_assistant_content`] rather than by hand:
+        /// this is the only provider-controlled string in the whole violation
+        /// vocabulary (every other detail is `&'static str`), so it is the only
+        /// place an unbounded response body can reach a durable disposition.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<String>,
     },
@@ -268,7 +273,28 @@ pub enum ProtocolViolation {
     },
 }
 
+/// The most `finish_reason` characters a violation retains.
+///
+/// Every real value is a short enum-like token (`stop`, `length`,
+/// `tool_calls`, `content_filter`), so this is generous for the honest case and
+/// still a bound for the hostile one. It has to be a bound: the disposition is
+/// durable, and a provider that answers with a megabyte-long `finish_reason`
+/// must not be able to choose how much of this process's storage it consumes.
+pub const MAX_FINISH_REASON_CHARS: usize = 64;
+
 impl ProtocolViolation {
+    /// The empty-content violation, with the provider's `finish_reason`
+    /// bounded and control characters stripped.
+    ///
+    /// The bounding lives here, not at each call site, so a second adapter
+    /// cannot reintroduce the unbounded path by constructing the variant
+    /// directly with what it read off the wire.
+    pub fn empty_assistant_content(finish_reason: Option<&str>) -> Self {
+        Self::EmptyAssistantContent {
+            finish_reason: finish_reason.map(bounded_provider_token),
+        }
+    }
+
     /// The fieldless tag for this violation.
     pub fn kind(&self) -> ProtocolViolationKind {
         match self {
@@ -278,6 +304,19 @@ impl ProtocolViolation {
             Self::StreamDecode { .. } => ProtocolViolationKind::StreamDecode,
         }
     }
+}
+
+/// Bounds and sanitizes one short provider-controlled token.
+///
+/// Control characters are replaced rather than dropped: a `finish_reason` of
+/// `"stop\n[llm] fabricated log line"` must not be able to forge a log record
+/// downstream, and replacing keeps the length honest while removing the
+/// framing character that does the forging.
+fn bounded_provider_token(raw: &str) -> String {
+    raw.chars()
+        .take(MAX_FINISH_REASON_CHARS)
+        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+        .collect()
 }
 
 /// The fieldless tag vocabulary of [`ProtocolViolation`].
