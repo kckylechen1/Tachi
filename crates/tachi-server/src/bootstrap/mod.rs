@@ -14,6 +14,7 @@ mod env_cmd;
 mod eval_cli;
 mod harness_cli;
 mod injection_surface_cli;
+mod instruction_drift_sentinel;
 mod instruction_manifest;
 mod manifest_cli;
 mod migrate_cli;

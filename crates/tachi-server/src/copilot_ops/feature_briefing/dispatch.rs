@@ -152,8 +152,11 @@ mod tests {
             })
             .unwrap();
 
-        let params: TachiTaskParams = serde_json::from_value(json!({"action": "briefing"}))
-            .expect("minimal task params parse");
+        // #1687 C1c retired the `briefing` wire token; `brief` is the only
+        // accepted spelling for the feature-briefing action, and normalized
+        // aliases are rejected outright — so this fixture must use `brief`.
+        let params: TachiTaskParams =
+            serde_json::from_value(json!({"action": "brief"})).expect("minimal task params parse");
         let recommendation = feature_dispatch_recommendation(&server, &params, "fix a bug");
         assert_eq!(
             recommendation.get("available"),

@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 mod acp_transport;
 mod board_first;
 mod completion_eval;
-mod profiles_action;
 mod prompt_credentials_board;
 mod recommend_policy;
 mod signature_evidence;
@@ -67,7 +66,6 @@ fn task_params(action: &str) -> TachiTaskParams {
         path_prefix: None,
         top_k: None,
         doc_paths: Vec::new(),
-        related_issues: Vec::new(),
         spec_paths: Vec::new(),
         include_global: false,
         compact: None,
@@ -136,18 +134,6 @@ fn task_params(action: &str) -> TachiTaskParams {
         branch: None,
         merge_policy: None,
         allow_umbrella_close: false,
-        wiki_title: None,
-        wiki_text: None,
-        wiki_path: None,
-        wiki_topic: None,
-        wiki_summary: None,
-        wiki_category: None,
-        wiki_keywords: Vec::new(),
-        wiki_entities: Vec::new(),
-        wiki_importance: None,
-        wiki_scope: None,
-        wiki_domain: None,
-        force: false,
         agent_identity_id: None,
         claim_role: None,
         claim_mode: None,

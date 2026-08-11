@@ -55,7 +55,10 @@ fn plaintext_provider_secret_warnings(path: &Path, rel_path: &str) -> Vec<Doctor
         return Vec::new();
     };
 
-    let provider_keys = crate::provider_config::provider_env_keys();
+    // #1680/D3: the plaintext scanner must flag every provider-key class
+    // (a plaintext SearchApi key on disk is still a leak), not just the
+    // narrowed ModelApi materialization allowlist.
+    let provider_keys = crate::provider_config::admitted_provider_env_keys();
     contents
         .lines()
         .enumerate()

@@ -19,13 +19,13 @@ async fn tachi_task_cycle_status_can_locate_local_flow_by_issue_ref() {
     );
     write_intake_flow(flow_id, &issue);
 
-    let mut params = task_params("cycle_status");
+    let mut params = task_params("status");
     params.issue_ref = Some("kckylechen1/tachi#440".to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await
-        .expect("cycle_status should find local flow");
-    let parsed: Value = serde_json::from_str(&raw).expect("cycle_status JSON");
+        .expect("status should find local flow");
+    let parsed = cycle_view(&raw);
 
     assert_eq!(parsed["flow_id"], json!(flow_id));
     assert_eq!(parsed["issue_ref"], json!("kckylechen1/tachi#440"));

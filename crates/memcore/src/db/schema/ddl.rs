@@ -1413,6 +1413,36 @@ pub(super) const MEMORY_OUTBOX_STATE_CHECK_CLAUSE: &str =
     "CHECK (state IN ('pending', 'in_flight', 'acknowledged', 'rejected', 'conflicted', \
      'quarantined'))";
 
+/// Durable destination-side readback receipts for the portable outbox apply
+/// boundary (#1718, #1630 A4).  The ledger is deliberately separate from the
+/// source-side `memory_outbox_events` table: a destination may receive an
+/// envelope from a different store and must retain only the immutable binding
+/// it actually read back after applying it.
+pub(super) const MEMORY_OUTBOX_DESTINATION_APPLY_V30_SQL: &str = r#"
+        CREATE TABLE IF NOT EXISTS memory_outbox_destination_apply_receipts (
+            event_id                         TEXT PRIMARY KEY NOT NULL,
+            object_id                        TEXT NOT NULL,
+            source_store                     TEXT NOT NULL,
+            source_partition                 TEXT NOT NULL,
+            source_revision                  INTEGER NOT NULL,
+            source_payload_digest            TEXT NOT NULL,
+            destination_store                TEXT NOT NULL,
+            destination_partition            TEXT NOT NULL,
+            destination_object_revision      INTEGER NOT NULL,
+            destination_payload_digest       TEXT NOT NULL,
+            application                      TEXT NOT NULL CHECK (application = 'applied')
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_outbox_destination_apply_object
+            ON memory_outbox_destination_apply_receipts(object_id, event_id);
+"#;
+
+/// The exact CHECK clause `MEMORY_OUTBOX_DESTINATION_APPLY_V30_SQL` installs
+/// on the durable receipt ledger.  Schema validation compares this in
+/// whitespace-normalized form so a recreated table cannot widen the closed
+/// application vocabulary silently.
+pub(super) const MEMORY_OUTBOX_DESTINATION_APPLY_APPLICATION_CHECK_CLAUSE: &str =
+    "CHECK (application = 'applied')";
+
 /// Historical v25 DDL for the sampled, content-free recall impression ledger
 /// (tachi#1447). It exists only so the versioned migration sequence can build
 /// the same v25 shape before v26 upgrades it; new databases end at

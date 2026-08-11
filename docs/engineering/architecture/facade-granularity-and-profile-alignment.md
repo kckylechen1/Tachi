@@ -18,9 +18,9 @@ It answers three questions raised during a facade review:
 
 ## TL;DR
 
-- Facades are the right idea, but several are **overloaded**. `tachi_task` carries **24 actions**
+- Facades are the right idea, but several are **overloaded**. `tachi_task` carries **10 actions**
   (28 before the 4 PR-lifecycle duplicates were removed to `tachi_gh` in #757);
-  `tachi_memory` and `tachi_gh` carry **16 each**.
+  `tachi_memory` carries **21** actions and `tachi_gh` carries **19**.
 - Neither extreme (flatten to 100+ tools, or keep stuffing mega-facades) is correct. The fix is
   **re-slicing facades along agent cognitive domains**, keeping each facade at roughly **7±2 actions**.
 - The `ToolProfile` bundle system (`observe/remember/coordinate/operate/admin`) is **largely dead**:
@@ -35,9 +35,9 @@ It answers three questions raised during a facade review:
 
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
-| `tachi_task` | 17 | Lifecycle still bundled; PR duplication resolved (#757), route tuning extracted (#1426), and 6 planning-band actions retired (#1683 C1a) |
+| `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
 | `tachi_memory` | 21 | Overloaded — `recall_*` tuning extracted (#1426); the #757 fold added delete/gc/doctor_scan/ingest/ingest_source |
-| `tachi_gh` | 16 | Duplicates task's PR lifecycle |
+| `tachi_gh` | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
 | `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
 | `tachi_skill` | 5 | Healthy |
 | `tachi_wiki` / `tachi_verify` | 4 / 4 | Healthy |
@@ -53,8 +53,9 @@ It answers three questions raised during a facade review:
 2. **`merge` was semantically split, then resolved (#1683 C1a).** `tachi_task(merge)` used to mean
    local worktree merge, distinct from `tachi_gh(safe_merge)`'s GitHub PR merge — same word, different
    machine. `tachi_task(merge)` is retired; `tachi_gh(safe_merge)` is now the only `merge` on either facade.
-3. **`briefing` appears in three places** — `tachi_briefing` (standalone), `tachi_memory(briefing)`,
-   `tachi_task(briefing)`. `save` is duplicated across `tachi_save` and `tachi_memory(save)`.
+3. **Briefing still appears in three surfaces** — `tachi_briefing` (standalone),
+   `tachi_memory(briefing)`, and the feature-scoped `tachi_task(brief)`. `save` is duplicated
+   across `tachi_save` and `tachi_memory(save)`.
 4. **Self-tuning actions were interleaved with execution (resolved #1426).** Eight of the nine —
    `route_simulate` / `proposals` / `review_proposal` / `apply_proposals` (task side) and
    `recall_simulate` / `recall_proposals` / `review_recall_proposal` / `apply_recall_proposals`
@@ -76,14 +77,18 @@ The design rule:
 Today's facades are sliced by *backend module* (the `task` module → one facade). They should be sliced
 by the **agent's mental task**.
 
+> **Superseded by #1713.** The proposal below to introduce a separate `tachi_flow` lifecycle facade is
+> retained only as historical analysis. #1713 relocated closure to the existing Coordinate-tier
+> `tachi_gh(action='close_loop')`, removed `tachi_workflow`, and kept lifecycle status on `tachi_task`.
+
 ```diagram
 Now                            Proposed
-tachi_task (24) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
-                     ├──▶ tachi_flow    lifecycle: intake/cycle_status/close_loop (3)
+tachi_task (10) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
+                     ├──▶ tachi_gh      lifecycle closure: close_loop (1) [#1713]
                      ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
                      └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
 
-tachi_memory (16) ───┬──▶ tachi_memory  daily: search/get/save/ask/checkpoint/alerts (~7)
+tachi_memory (21) ───┬──▶ tachi_memory  daily: search/get/save/ask/checkpoint/alerts (~7)
                      └──▶ tachi_tune    recall_simulate/recall_proposals/recall_review/recall_apply (DONE #1426)
 ```
 
@@ -113,7 +118,7 @@ someone hand-types `--profile observe+coordinate`. That is dead design.
 
 `ToolProfile` trims by **tool name** via glob matching
 ([`profiles/matching.rs#L77-L112`](../../../crates/tachi-server/src/profiles/matching.rs)).
-But a facade packs many capabilities behind one name (`tachi_task` = 24 actions), so a profile can
+But a facade packs many capabilities behind one name (`tachi_task` = 10 actions), so a profile can
 only allow or deny the *entire* `tachi_task` — it cannot deny just `dispatch`.
 
 ## 4. Case study: the `delegate`/worker surface proves the mismatch

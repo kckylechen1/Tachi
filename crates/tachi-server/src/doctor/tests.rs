@@ -881,6 +881,30 @@ IGNORED_API_KEY=not-a-provider-secret
     assert!(!warnings[0].remediation.contains(secret_value));
 }
 
+/// #1680/D3 scanner regression: the plaintext scanner must keep flagging a
+/// SearchApi-class name (not just ModelApi), because it consumes
+/// `admitted_provider_env_keys()` (all classes), never the narrowed LLM
+/// materialization allowlist. A regression that pointed the scanner at
+/// `provider_config::provider_env_keys()` (ModelApi-only) would silently stop
+/// detecting a leaked Tavily/Exa/Google-Search key.
+#[test]
+fn project_secret_file_warnings_detects_plaintext_search_api_secret() {
+    let dir = tempdir().unwrap();
+    let secret_value = "test_plaintext_search_provider_key_123456";
+    fs::write(
+        dir.path().join(".env"),
+        format!("TAVILY_API_KEY={secret_value}\n"),
+    )
+    .unwrap();
+
+    let warnings = project_secret_file_warnings(Some(dir.path()));
+
+    assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+    assert_eq!(warnings[0].code, "plaintext_provider_secret");
+    assert!(warnings[0].message.contains("TAVILY_API_KEY"));
+    assert!(!warnings[0].message.contains(secret_value));
+}
+
 #[test]
 fn project_secret_file_warnings_detects_generated_provider_env_values() {
     let dir = tempdir().unwrap();

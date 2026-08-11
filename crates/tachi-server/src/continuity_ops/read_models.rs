@@ -568,7 +568,7 @@ pub(super) fn host_lifecycle_contract() -> Value {
             },
             {
                 "phase": "before_prompt",
-                "tool": "tachi_event.context + tachi_task.cycle_status when flow_id/issue_ref/pr_ref exists",
+                "tool": "tachi_event.context + tachi_task.status (nested cycle view) when flow_id/issue_ref/pr_ref exists",
                 "writes": false,
                 "purpose": "attach compact memory, linked docs/specs, unresolved criteria, and host instruction packet"
             },
@@ -586,7 +586,7 @@ pub(super) fn host_lifecycle_contract() -> Value {
             },
             {
                 "phase": "before_stop",
-                "tool": "cycle_status + verification ledger read model",
+                "tool": "status cycle view + verification ledger read model",
                 "writes": false,
                 "purpose": "allow stop or return one bounded continuation directive when required criteria remain"
             },

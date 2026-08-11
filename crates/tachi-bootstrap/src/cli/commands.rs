@@ -194,16 +194,15 @@ pub enum Commands {
         #[command(subcommand)]
         action: InjectionSurfaceAction,
     },
-    /// Inspect Tachikoma Cards projected from dispatch profiles.
+    /// Inspect static operator profile/admission diagnostics (no DB access).
     Card {
         #[command(subcommand)]
         action: CardAction,
     },
-    /// Sync/list typed dispatch-ledger cards (`~/.agents/dispatch-ledger/cards/*.md`,
-    /// leader-authored model/harness/seat/crew playbooks — see `tachi#1202`) as read-only
-    /// `/cards/<seat>` mirror rows in the GLOBAL memory DB. Distinct from the
-    /// singular `Card` command above, which projects Tachikoma dispatch-profile
-    /// cards (`tachi_task(action='profiles')`) and is unrelated data.
+    /// Sync/list plural dispatch-ledger cards (`~/.agents/dispatch-ledger/cards/*.md`)
+    /// as read-only `/cards/<seat>` mirror rows in the GLOBAL memory DB. This
+    /// ledger surface is distinct from singular `tachi card`, which is a
+    /// local operator-only static profile/admission diagnostic and reads no DB.
     Cards {
         #[command(subcommand)]
         action: CardsAction,
