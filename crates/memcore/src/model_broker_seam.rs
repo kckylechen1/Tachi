@@ -1020,12 +1020,25 @@ impl ResolutionOutcome {
 /// The consistency set every [`ResolutionOutcome`] construction path runs —
 /// constructor and `Deserialize` alike. Factored out so it is impossible for
 /// one path to hold a weaker rule set than the other.
+///
+/// Rule order is load-bearing where two rules can both apply: the
+/// [`FALLBACK_ORDER_CAP`] bound is checked **first**, because it constrains the
+/// `fallback_order` field itself regardless of what the selection is. An
+/// abstaining outcome carrying five entries is over the cap *and* carrying a
+/// fallback order it has no business carrying; reporting the cap keeps the
+/// bound's verdict from being masked by the shape rule.
 fn validate_outcome_consistency(
     candidates: &[CandidateEvaluation],
     selection: &Selection,
     account_ref: Option<&str>,
     fallback_order: &[String],
 ) -> Result<(), SeamError> {
+    if fallback_order.len() > FALLBACK_ORDER_CAP {
+        return Err(SeamError::FallbackOrderTooLong {
+            len: fallback_order.len(),
+        });
+    }
+
     let mut eligible_ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for candidate in candidates {
         require_non_empty(&candidate.deployment_id, "candidate deployment_id")?;
@@ -2075,26 +2088,63 @@ mod tests {
 
     #[test]
     fn resolution_outcome_deserialize_enforces_fallback_cap() {
-        let mut value = chosen_outcome_value();
-        value["fallback_order"] = serde_json::json!(["b", "c", "d", "e", "f"]);
+        // Every fallback entry here is an eligible, non-chosen candidate, so
+        // the cap is the *only* rule that can reject this outcome. A payload
+        // that also trips another rule would let this test pass green while the
+        // cap itself was unenforced — which is exactly what happened when the
+        // cap check went missing from the constructor.
+        let over_cap: Vec<String> = ["dep-b", "dep-c", "dep-d", "dep-e", "dep-f"]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        assert_eq!(over_cap.len(), FALLBACK_ORDER_CAP + 1);
+        let mut candidates = vec![CandidateEvaluation::eligible("dep-a")];
+        candidates.extend(
+            over_cap
+                .iter()
+                .map(|id| CandidateEvaluation::eligible(id.as_str())),
+        );
+
+        let err = ResolutionOutcome::new(
+            candidates.clone(),
+            Selection::Chosen(sample_deployment("dep-a", "acct-1")),
+            sample_revisions(),
+            Some("acct-1".to_string()),
+            BudgetEstimate::default(),
+            over_cap.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(err, SeamError::FallbackOrderTooLong { len: 5 });
+
+        // The deserialize path refuses the same payload. Built from a legal
+        // four-entry outcome and pushed over the cap in JSON, so the object is
+        // otherwise entirely consistent.
+        let legal = ResolutionOutcome::new(
+            candidates,
+            Selection::Chosen(sample_deployment("dep-a", "acct-1")),
+            sample_revisions(),
+            Some("acct-1".to_string()),
+            BudgetEstimate::default(),
+            over_cap[..FALLBACK_ORDER_CAP].to_vec(),
+        )
+        .expect("four eligible fallback entries are within the cap");
+        let mut value = serde_json::to_value(&legal).expect("serialize");
+        value["fallback_order"] = serde_json::to_value(&over_cap).expect("serialize");
         assert!(
             serde_json::from_str::<ResolutionOutcome>(&value.to_string()).is_err(),
             "an over-cap fallback order must not survive deserialization"
         );
-        // Same rule from the constructor side.
+
+        // Precedence, pinned: the cap bounds the field itself, so it is
+        // reported ahead of the selection-shaped rules rather than being
+        // masked by them.
         let err = ResolutionOutcome::new(
             vec![],
             Selection::Abstain(AbstainReason::EmptyCandidateSet),
             sample_revisions(),
             None,
             BudgetEstimate::default(),
-            vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-                "d".to_string(),
-                "e".to_string(),
-            ],
+            over_cap,
         )
         .unwrap_err();
         assert_eq!(err, SeamError::FallbackOrderTooLong { len: 5 });
