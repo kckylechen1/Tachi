@@ -158,6 +158,10 @@ impl CustodyKind {
 
 /// Default `provider_accounts.status`.
 pub const ACCOUNT_STATUS_ACTIVE: &str = "active";
+/// `provider_accounts.status` after retirement. The row and its whole event
+/// history stay: the credential existed, and an operator asking "what happened
+/// to the account we merged away" needs the answer to survive the merge.
+pub const ACCOUNT_STATUS_RETIRED: &str = "retired";
 /// Default `provider_accounts.refresh_authority` — nobody refreshes this
 /// credential on Tachi's behalf. #1684's broker is what changes it.
 pub const REFRESH_AUTHORITY_NONE: &str = "none";
@@ -179,6 +183,18 @@ pub const EVENT_KIND_FINGERPRINT_REKEYED: &str = "fingerprint_rekeyed";
 /// The custody pointer moved (pool restructured, entry renamed) while
 /// `auth_ref` stayed the same.
 pub const EVENT_KIND_CUSTODY_UPDATED: &str = "custody_updated";
+/// The account was retired: it is no longer a place a credential is looked up.
+pub const EVENT_KIND_ACCOUNT_RETIRED: &str = "account_retired";
+/// The account's identity was collapsed into another account by an explicitly
+/// confirmed reconcile merge. Written on **both** sides — the source records
+/// where it went, the target records what it absorbed — because a merge read
+/// from only one end is unreadable history.
+pub const EVENT_KIND_ACCOUNT_MERGED: &str = "account_merged";
+/// A reconcile plan was applied and changed nothing: same digest, same
+/// preconditions, same state (#1680 D4's idempotent replay). Recorded rather
+/// than silent so "we re-ran reconcile and it agreed with the world" is a fact
+/// in the audit log instead of an absence someone has to infer.
+pub const EVENT_KIND_PLAN_NOOP: &str = "plan_noop";
 
 /// Scheme prefix of an `auth_ref`. Versioned so a second custody addressing
 /// scheme can coexist with `va1:` handles already stored.

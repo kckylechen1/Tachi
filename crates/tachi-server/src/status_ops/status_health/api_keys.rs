@@ -58,9 +58,9 @@ pub(crate) struct ApiKeyDef {
     pub(crate) class: KeyClass,
     /// Canonical family id for the underlying account/vendor (e.g.
     /// "deepseek", "anthropic", "google"), independent of which of this
-    /// entry's env-var names holds the secret. Not yet consumed in this PR;
-    /// it is the vocabulary #1680/D5's account registry keys off of.
-    #[allow(dead_code)]
+    /// entry's env-var names holds the secret. This is the vocabulary
+    /// #1680 D2's `fp1` and D5's account rows are keyed by; reconcile reads
+    /// it through `status_health::provider_kind_for_env_name`.
     pub(crate) provider_kind: &'static str,
     /// `Some` only for the 3 families `auth_probe` already probes today.
     #[allow(dead_code)]

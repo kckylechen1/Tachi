@@ -166,7 +166,7 @@ fn discover_env_values(env_home: &Path, cwd: &Path) -> Vec<(PathBuf, String, Str
         .collect()
 }
 
-fn env_source_paths(env_home: &Path, cwd: &Path) -> Vec<PathBuf> {
+pub(super) fn env_source_paths(env_home: &Path, cwd: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
         env_home.join(".secrets").join("master.env"),
         env_home.join(".tachi").join("config.env"),
@@ -186,10 +186,21 @@ fn env_source_paths(env_home: &Path, cwd: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn parse_env_file(path: &Path) -> Vec<(PathBuf, String, String)> {
+pub(super) fn parse_env_file(path: &Path) -> Vec<(PathBuf, String, String)> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
+    parse_env_content(path, &raw)
+}
+
+/// Parse env-file text the caller already holds, attributing it to `path`.
+///
+/// Split out of [`parse_env_file`] for the one caller that must *bind* what it
+/// read: `reconcile` hashes the source bytes into the plan, and re-opening the
+/// path to parse it would mean the digest and the actions can come from two
+/// different versions of the file. This function opens nothing — `path` is a
+/// label here, not a source.
+pub(super) fn parse_env_content(path: &Path, raw: &str) -> Vec<(PathBuf, String, String)> {
     raw.lines()
         .filter_map(|raw_line| {
             let line = raw_line.trim();
@@ -344,18 +355,13 @@ fn is_config_name(name: &str) -> bool {
 /// now also covering every other aliased registry entry (e.g.
 /// `XAI_API_KEY`/`GROK_API_KEY`), which the old two-entry table never did.
 fn alias_family(name: &str) -> Option<String> {
-    let defs = crate::status_ops::status_health::API_KEY_DEFS;
-    let def = defs
-        .iter()
-        .find(|def| def.key == name)
-        .or_else(|| defs.iter().find(|def| def.aliases.contains(&name)))?;
-    if def.aliases.is_empty() {
+    let family = crate::status_ops::status_health::family_env_names_for_env_name(name)?;
+    // One name means the entry has no aliases, so there is no family to flag
+    // as an advisory merge candidate.
+    if family.len() < 2 {
         return None;
     }
-    let mut stems: Vec<String> = std::iter::once(def.key)
-        .chain(def.aliases.iter().copied())
-        .map(alias_family_stem)
-        .collect();
+    let mut stems: Vec<String> = family.into_iter().map(alias_family_stem).collect();
     stems.sort_unstable_by(|a, b| b.cmp(a));
     Some(stems.join("/"))
 }
@@ -1068,6 +1074,30 @@ mod tests {
 
         assert_eq!(candidate(&rows, "DOUBLE_QUOTED").fingerprint, unquoted);
         assert_eq!(candidate(&rows, "SINGLE_QUOTED").fingerprint, unquoted);
+    }
+
+    /// `parse_env_content` parses the bytes handed to it and opens nothing.
+    ///
+    /// That is what lets `reconcile` bind a source digest honestly: it hashes
+    /// the bytes once and parses *those* bytes, so the actions in a plan and
+    /// the SHA the plan carries can never describe two different versions of
+    /// the file. The on-disk contents here disagree with the caller's bytes on
+    /// purpose — if this function ever re-read the path, the assertion below
+    /// would see the disk.
+    #[test]
+    fn vault_intake_parse_env_content_uses_the_callers_bytes_and_never_reopens_the_path() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(".env");
+        write_file(&path, "ON_DISK_API_KEY=from-disk\n");
+
+        let parsed = parse_env_content(&path, "IN_HAND_API_KEY=from-hand\n");
+
+        let pairs: Vec<(&str, &str)> = parsed
+            .iter()
+            .map(|(_, name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(pairs, vec![("IN_HAND_API_KEY", "from-hand")]);
+        assert_eq!(parsed[0].0, path, "the path stays the attribution label");
     }
 
     #[test]

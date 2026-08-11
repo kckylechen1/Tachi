@@ -28,7 +28,7 @@ use crate::error::MemoryError;
 use crate::vault::accounts::{
     names_rotation_pool_member, AccountClass, AccountCustody, AuthMode, CustodyKind,
     CustodyResolution, NewProviderAccount, NewProviderAccountEvent, ProviderAccount,
-    ProviderAccountAlias, ProviderAccountEvent, EVENT_KIND_ACCOUNT_CREATED,
+    ProviderAccountAlias, ProviderAccountEvent, ACCOUNT_STATUS_RETIRED, EVENT_KIND_ACCOUNT_CREATED,
 };
 
 use super::common::now_utc_iso;
@@ -185,6 +185,59 @@ pub fn list_provider_accounts(conn: &Connection) -> Result<Vec<ProviderAccount>,
         .query_map([], account_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
     rows.into_iter().map(|row| row.parse()).collect()
+}
+
+/// Scheme prefix of a rotation-pool membership digest.
+pub const POOL_MEMBERS_DIGEST_SCHEME: &str = "vp1";
+
+/// Domain label, so a pool digest can never be confused with — or replayed as
+/// — any other SHA-256 this crate computes.
+const POOL_MEMBERS_DIGEST_DOMAIN: &[u8] = b"tachi.pool-binding.v1";
+
+/// A digest over a rotation pool's current membership: every
+/// `vault_entries` row that is a member of `prefix`, with its index, name and
+/// `updated_at`.
+///
+/// This is the value a plan binds instead of one timestamp per member
+/// ([`crate::vault::apply::VaultPoolBinding`] explains why: member indices are
+/// custody layout and a plan is a public surface). Computed here rather than in
+/// the plan builder so plan time and apply time are provably the same function
+/// — a second implementation on the verifying side is how a precondition
+/// quietly stops meaning what the planner meant.
+///
+/// Contains no secret material: names and timestamps only.
+pub fn vault_pool_members_digest(conn: &Connection, prefix: &str) -> Result<String, MemoryError> {
+    use sha2::{Digest, Sha256};
+
+    let mut stmt = conn.prepare("SELECT name, updated_at FROM vault_entries")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut members: Vec<(usize, String, String)> = Vec::new();
+    for row in rows {
+        let (name, updated_at) = row?;
+        if let Some(index) = crate::vault::api_key_pool_member_index(&name, prefix) {
+            members.push((index, name, updated_at));
+        }
+    }
+    members.sort();
+
+    let mut hasher = Sha256::new();
+    hasher.update(POOL_MEMBERS_DIGEST_DOMAIN);
+    hasher.update(prefix.as_bytes());
+    for (index, name, updated_at) in &members {
+        hasher.update([0u8]);
+        hasher.update(index.to_string().as_bytes());
+        hasher.update([0u8]);
+        hasher.update(name.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(updated_at.as_bytes());
+    }
+    Ok(format!(
+        "{POOL_MEMBERS_DIGEST_SCHEME}:{:x}",
+        hasher.finalize()
+    ))
 }
 
 /// Observe an env-var name for an account: insert it, or move `last_seen` (and
@@ -426,6 +479,102 @@ pub fn record_account_fingerprint(
     let event_id = append_provider_account_event(conn, &event)?;
 
     Ok(FingerprintUpdate::Advanced {
+        revision: next_revision,
+        event_id,
+    })
+}
+
+/// What [`retire_provider_account`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountRetirement {
+    /// The account moved to `retired`: revision advanced, event appended.
+    Retired { revision: i64, event_id: i64 },
+    /// The account was already retired, so nothing moved. Retiring twice is an
+    /// honest no-op, not a second event's worth of noise — the same rule
+    /// [`retire_provider_account_alias`] follows.
+    AlreadyRetired { revision: i64 },
+}
+
+/// Retire an account: the named state transition this module's doc note
+/// promised in place of a delete.
+///
+/// The row, its aliases and its whole event history stay. What changes is the
+/// claim: a retired account is no longer somewhere a credential is looked up.
+/// The only caller today is an explicitly confirmed merge (#1680 D4), which is
+/// why `event_kind` is a parameter rather than fixed — the audit line an
+/// operator needs is "merged into X", not a generic retirement.
+///
+/// Compare-and-swap on the revision that was read, for the reason
+/// [`record_account_fingerprint`] documents at length: two writers that both
+/// read revision *n* would both publish *n+1* and one would vanish. As there,
+/// `expected_revision` is the caller's bound precondition and `None` leaves
+/// only the swap on the revision this call itself read — which is what apply
+/// passes, because apply verified the binding once at the top of its
+/// transaction and a plan is allowed to touch one account more than once.
+pub fn retire_provider_account(
+    conn: &Connection,
+    account_id: &str,
+    expected_revision: Option<i64>,
+    event_kind: &str,
+    plan_digest: Option<&str>,
+    evidence: &str,
+) -> Result<AccountRetirement, MemoryError> {
+    let current: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT status, revision FROM provider_accounts WHERE account_id = ?1",
+            params![account_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (status, current_revision) = current.ok_or_else(|| {
+        MemoryError::NotFound(format!(
+            "provider account '{account_id}' does not exist, so it cannot be retired"
+        ))
+    })?;
+
+    if let Some(expected) = expected_revision {
+        if expected != current_revision {
+            return Err(MemoryError::ProviderAccountRevisionConflict(format!(
+                "provider account '{account_id}' is at revision {current_revision}, but the \
+                 caller planned against revision {expected}"
+            )));
+        }
+    }
+
+    if status == ACCOUNT_STATUS_RETIRED {
+        return Ok(AccountRetirement::AlreadyRetired {
+            revision: current_revision,
+        });
+    }
+
+    let next_revision = current_revision + 1;
+    let changed = conn.execute(
+        "UPDATE provider_accounts
+            SET status = ?2, revision = ?3, updated_at = ?4
+          WHERE account_id = ?1 AND revision = ?5",
+        params![
+            account_id,
+            ACCOUNT_STATUS_RETIRED,
+            next_revision,
+            now_utc_iso(),
+            current_revision
+        ],
+    )?;
+    if changed != 1 {
+        return Err(MemoryError::ProviderAccountRevisionConflict(format!(
+            "provider account '{account_id}' moved off revision {current_revision} while it was \
+             being retired"
+        )));
+    }
+
+    let mut event =
+        NewProviderAccountEvent::new(account_id, next_revision, event_kind).with_evidence(evidence);
+    if let Some(digest) = plan_digest {
+        event = event.with_plan_digest(digest);
+    }
+    let event_id = append_provider_account_event(conn, &event)?;
+
+    Ok(AccountRetirement::Retired {
         revision: next_revision,
         event_id,
     })
