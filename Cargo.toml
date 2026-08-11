@@ -76,6 +76,30 @@ strip = true
 [profile.dev]
 debug = "line-tables-only"
 
+# Load-bearing, not a speed knob: `tachi-bootstrap` must be built with stack-slot
+# reuse on, or its clap tree cannot be constructed inside a 2 MiB test thread.
+#
+# `clap`'s derive emits `augment_subcommands`/`augment_args` as one straight-line
+# builder chain per enum, and every `.method()` in that chain consumes and
+# returns a `Command` (712 B) or an `Arg` (600 B) by value. At `opt-level = 0`
+# LLVM gives each of those temporaries its own stack slot instead of reusing one,
+# so a frame grows linearly with the number of builder calls in the enum:
+# `Commands::augment_subcommands` reserved 972 KiB and, nested inside it,
+# `VaultAction::augment_subcommands` another 924 KiB. `Cli::command()` therefore
+# needed ~2072 KiB of stack — 24 KiB past the 2 MiB libtest gives a test thread,
+# which is why every `cli::tests` case aborted the whole binary with
+# `has overflowed its stack`. The margin was one subcommand wide, so the crate
+# was going to cross it whatever landed next: `vault reconcile`'s nested enum
+# alone needs 95 KiB where `vault intake`'s needs 63 KiB.
+#
+# `opt-level = 1` reuses the slots: the same call needs ~179 KiB, and the
+# deepest real workload (`vault reconcile plan` parse) ~195 KiB. Release builds
+# were never affected. `cli_command_tree_builds_within_a_bounded_stack` in
+# crates/tachi-bootstrap/src/cli/tests.rs REDs if this override is removed or if
+# the tree ever grows back past ~1 MiB, so do not delete this without reading it.
+[profile.dev.package.tachi-bootstrap]
+opt-level = 1
+
 [workspace.dependencies]
 # `bundled` compiles the SQLite C amalgamation (libsqlite3-sys).
 # Kept bundled intentionally (see #833 decision: CI/release targets
