@@ -15,7 +15,7 @@ mod vault;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use api_keys::{collect_api_key_status_with_probe_cache, API_KEY_DEFS};
+pub(crate) use api_keys::{collect_api_key_status_with_probe_cache, KeyClass, API_KEY_DEFS};
 pub(crate) use inference::{
     apply_inferred_provider_failures, format_elapsed, infer_provider_from_failed_job,
 };
@@ -41,10 +41,41 @@ pub(crate) use vault::load_keychain_vault_api_key_values;
 // directly. Behavior is unchanged — each delegates to the existing internal
 // implementation.
 
-/// Stable internal API for `provider_config`: every provider API-key env-var
-/// name (primary keys plus aliases) recognized by the status layer, flattened
-/// into a set for secret-materialization lookups.
-pub(crate) fn provider_api_key_env_names() -> HashSet<String> {
+/// Stable internal API for `provider_config`'s LLM materialization allowlist:
+/// every `KeyClass::ModelApi` env-var name (primary keys plus aliases)
+/// recognized by the status layer, flattened into a set. #1680/D3: this is
+/// the *narrow* view — SearchApi (Exa/Tavily/Google Search) and any future
+/// Infra names are deliberately excluded, because this set gates which names
+/// are eligible to enter the LLM provider secret cache
+/// (`materialize_provider_secrets_from_durable_source`). Use
+/// [`admitted_env_secret_names`] for "is this name in Tachi's provider
+/// vocabulary at all" surfaces (lane env injection, providers-doctor
+/// admission, the plaintext secret scanner) — those must see every class.
+pub(crate) fn model_provider_env_names() -> HashSet<String> {
+    let mut names = HashSet::new();
+    for def in api_keys::API_KEY_DEFS {
+        if def.class != KeyClass::ModelApi {
+            continue;
+        }
+        names.insert(def.key.to_string());
+        for alias in def.aliases {
+            names.insert((*alias).to_string());
+        }
+    }
+    names
+}
+
+/// Stable internal API for the all-class "is this a name Tachi's provider
+/// registry recognizes" surfaces: lane env injection
+/// (`vault_ops::env::load_unlocked_provider_env_secrets`), providers-doctor
+/// admission, and the plaintext secret scanner. Unlike
+/// [`model_provider_env_names`], this includes every [`KeyClass`] — a
+/// Search/Infra key must still be recognized as an admitted provider secret
+/// name for those consumers (env injection must keep delivering rotated
+/// search keys to lane subprocesses; the scanner must still flag a plaintext
+/// search key on disk), it just must never reach the LLM materialization
+/// allowlist.
+pub(crate) fn admitted_env_secret_names() -> HashSet<String> {
     let mut names = HashSet::new();
     for def in api_keys::API_KEY_DEFS {
         names.insert(def.key.to_string());

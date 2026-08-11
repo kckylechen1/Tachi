@@ -923,7 +923,11 @@ pub(super) fn run_providers_doctor(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = resolve_opencode_config_path(opencode_config);
     let providers = load_provider_blocks(&config_path)?;
-    let admitted = crate::status_ops::status_health::provider_api_key_env_names();
+    // #1680/D3: doctor admission must see every provider-key class (a
+    // plaintext SearchApi key still needs to show `admitted=yes` so the
+    // report can flag it), not just the narrowed ModelApi materialization
+    // allowlist.
+    let admitted = crate::status_ops::status_health::admitted_env_secret_names();
     let env_values = collect_referenced_env_values(&providers);
     let lookup_names = collect_vault_lookup_names(&providers, &env_values.0)?;
     let now = chrono::Utc::now();

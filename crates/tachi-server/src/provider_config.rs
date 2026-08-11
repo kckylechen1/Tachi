@@ -15,8 +15,64 @@ pub use tachi_llm::{
 };
 use tachi_llm::{LlmClient, ProviderSecret, VaultSourceAvailability};
 
+/// #1680/D3: the LLM materialization allowlist — `ModelApi`-class names only.
+/// This is the compile-time allowlist consulted by
+/// `materialize_provider_secrets_from_durable_source`; it deliberately
+/// excludes SearchApi (Exa/Tavily/Google Search) so a Vault-stored search key
+/// can never enter the LLM provider cache through the env-name filter. The
+/// filter alone is insufficient against a Vault-stored search key entering
+/// through the *pool* seam (`resolve_vault_pools` loads every `*_API_KEY`
+/// pool, class-blind) — see [`filter_model_provider_pools`], which is the
+/// actual enforcement point.
 pub(crate) fn provider_env_keys() -> HashSet<String> {
-    crate::status_ops::status_health::provider_api_key_env_names()
+    crate::status_ops::status_health::model_provider_env_names()
+}
+
+/// #1680/D3: the all-class admitted-secret-name surface — lane env injection,
+/// providers-doctor admission, and the plaintext secret scanner all need to
+/// recognize every provider key class (not just ModelApi), so they must not
+/// share `provider_env_keys()`'s narrowed allowlist.
+pub(crate) fn admitted_provider_env_keys() -> HashSet<String> {
+    crate::status_ops::status_health::admitted_env_secret_names()
+}
+
+/// #1680/D3 (codex finding 1, the sharpest catch of the cross-vendor review):
+/// the env-name split alone cannot stop a Vault-stored search key from
+/// reaching the LLM provider cache, because `resolve_vault_pools` seeds its
+/// map from the *entire* loaded Vault pool set — Vault pool loading admits
+/// any standalone `*_API_KEY` entry regardless of class
+/// (`vault_ops::access::load_unlocked_api_key_secret_pools`). This is the
+/// seam that closes the gap: every pool handed to
+/// `materialize_provider_secrets_from_durable_source` is filtered down to
+/// `ModelApi`-class pool names before it reaches `tachi_llm`. `tachi-llm`'s
+/// signature and internals are untouched — the filter lives entirely on the
+/// tachi-server side of the existing closure seam.
+///
+/// codex NEEDS-FIXES BUG-1: a bare `allowed.contains(name)` check missed
+/// rotation-member-shaped pool keys. When a `*_API_KEY_N` name has no
+/// *configured* rotation row, `group_api_key_values_by_configured_rotations`
+/// (tachi-llm) does not fold it under its logical prefix — it stores the pool
+/// under the raw member name itself (e.g. `VOYAGE_API_KEY_2`), which never
+/// exact-matches `model_provider_env_names()`'s primary/alias names and would
+/// be wrongly dropped as if it were unregistered. Fix: reuse the exact same
+/// parsed-prefix primitive `doctor::secrets::is_provider_secret_name` already
+/// uses for this — `parse_rotation_member_name` — rather than hand-rolling a
+/// second parser. A member name is admitted iff its own name OR its parsed
+/// prefix is ModelApi-registered, so `VOYAGE_API_KEY_2` (prefix
+/// `VOYAGE_API_KEY`, ModelApi) survives while `TAVILY_API_KEY_2` (prefix
+/// `TAVILY_API_KEY`, SearchApi) is still rejected.
+pub(crate) fn filter_model_provider_pools(
+    pools: HashMap<String, Vec<ProviderSecret>>,
+) -> HashMap<String, Vec<ProviderSecret>> {
+    let allowed = provider_env_keys();
+    pools
+        .into_iter()
+        .filter(|(name, _)| {
+            allowed.contains(name)
+                || parse_rotation_member_name(name)
+                    .is_some_and(|(prefix, _)| allowed.contains(prefix))
+        })
+        .collect()
 }
 
 /// Load API keys from an unlocked in-process Vault session.
@@ -285,11 +341,12 @@ fn materialize_for_server_inner(
         server.llm.as_ref(),
         provider_env_keys(),
         || {
-            let resolved = resolve_vault_pools(Some(server), &global)?;
+            let (pools, availability) = resolve_vault_pools(Some(server), &global)?;
+            let pools = filter_model_provider_pools(pools);
             if let Some(hook) = after_vault_pools_resolved {
                 hook();
             }
-            Ok(resolved)
+            Ok((pools, availability))
         },
     )
     .map_err(format_provider_materialization_error)
@@ -308,7 +365,8 @@ pub fn materialize_standalone(
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
     tachi_llm::materialize_provider_secrets_from_durable_source(llm, provider_env_keys(), || {
-        resolve_vault_pools(None, global_db_path)
+        let (pools, availability) = resolve_vault_pools(None, global_db_path)?;
+        Ok((filter_model_provider_pools(pools), availability))
     })
     .map_err(format_provider_materialization_error)
 }
@@ -507,6 +565,228 @@ pub fn collect_config_env_values(resolved_home: Option<&Path>) -> HashMap<String
 mod tests {
     use super::*;
     use crate::test_support::EnvRestore;
+
+    /// #1680/D3 (codex finding 1, the sharpest catch of the cross-vendor
+    /// review): a Vault-stored search key must never reach the LLM provider
+    /// cache, even though Vault pool loading is class-blind and admits any
+    /// standalone `*_API_KEY` entry. This exercises the actual enforcement
+    /// seam — `filter_model_provider_pools`, which every production caller of
+    /// `materialize_provider_secrets_from_durable_source` routes its resolved
+    /// pools through before handing them to `tachi_llm` — rather than the
+    /// env-name allowlist alone, which #1680's frozen design explicitly
+    /// states is insufficient.
+    #[test]
+    fn filter_model_provider_pools_drops_search_keys_keeps_model_keys() {
+        let vault_pools = HashMap::from([
+            (
+                "TAVILY_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "TAVILY_API_KEY".to_string(),
+                    value: "tavily-secret".to_string(),
+                }],
+            ),
+            (
+                "EXA_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "EXA_API_KEY".to_string(),
+                    value: "exa-secret".to_string(),
+                }],
+            ),
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "DEEPSEEK_API_KEY".to_string(),
+                    value: "deepseek-secret".to_string(),
+                }],
+            ),
+        ]);
+
+        let filtered = filter_model_provider_pools(vault_pools);
+        // `ProviderSecret` deliberately does not implement `Debug` (secret-negative:
+        // no accidental leak surface via `{:?}`), so failure messages reference the
+        // pool's key names only, never the map/value contents.
+        let mut filtered_keys: Vec<&str> = filtered.keys().map(String::as_str).collect();
+        filtered_keys.sort_unstable();
+
+        assert!(
+            !filtered.contains_key("TAVILY_API_KEY"),
+            "a Vault-stored search key must not reach the LLM materialization pools: {filtered_keys:?}"
+        );
+        assert!(
+            !filtered.contains_key("EXA_API_KEY"),
+            "a Vault-stored search key must not reach the LLM materialization pools: {filtered_keys:?}"
+        );
+        assert!(
+            filtered.contains_key("DEEPSEEK_API_KEY"),
+            "a Vault-stored ModelApi key must still reach the LLM materialization pools: {filtered_keys:?}"
+        );
+    }
+
+    /// codex NEEDS-FIXES BUG-1: when a `*_API_KEY_N`-shaped name has no
+    /// *configured* rotation row, `group_api_key_values_by_configured_rotations`
+    /// (tachi-llm) does not fold it under its logical prefix — it stores the
+    /// pool under the raw member name itself (e.g. `VOYAGE_API_KEY_2`). A
+    /// bare exact-name lookup against `model_provider_env_names()` would
+    /// never match that raw member name and would wrongly drop a real
+    /// ModelApi credential. `filter_model_provider_pools` must also try the
+    /// name's parsed rotation prefix (the same primitive
+    /// `doctor::secrets::is_provider_secret_name` already uses for this
+    /// exact purpose).
+    #[test]
+    fn filter_model_provider_pools_admits_model_rotation_member_rejects_search_rotation_member() {
+        let vault_pools = HashMap::from([
+            (
+                "VOYAGE_API_KEY_2".to_string(),
+                vec![ProviderSecret {
+                    key_id: "VOYAGE_API_KEY_2".to_string(),
+                    value: "voyage-member".to_string(),
+                }],
+            ),
+            (
+                "TAVILY_API_KEY_2".to_string(),
+                vec![ProviderSecret {
+                    key_id: "TAVILY_API_KEY_2".to_string(),
+                    value: "tavily-member".to_string(),
+                }],
+            ),
+        ]);
+
+        let filtered = filter_model_provider_pools(vault_pools);
+        let filtered_keys: Vec<&str> = filtered.keys().map(String::as_str).collect();
+
+        assert!(
+            filtered.contains_key("VOYAGE_API_KEY_2"),
+            "a rotation-member-shaped ModelApi pool key (no configured rotation \
+             row, so it arrives as its own standalone pool key) must still be \
+             admitted via its parsed prefix: {filtered_keys:?}"
+        );
+        assert!(
+            !filtered.contains_key("TAVILY_API_KEY_2"),
+            "a rotation-member-shaped SearchApi pool key must still be rejected \
+             via its parsed prefix: {filtered_keys:?}"
+        );
+    }
+
+    /// codex NEEDS-FIXES BUG-2 (lock/readable asymmetry): the filter must
+    /// treat a rotation-configured pool (loaded as a prefix-keyed pool with
+    /// multiple `ProviderSecret` members — what a readable Vault with a
+    /// configured rotation row produces) and the same underlying credential
+    /// arriving unshaped by rotation config (member name used directly as
+    /// the standalone pool key — exactly what
+    /// `group_api_key_values_by_configured_rotations` produces when no
+    /// `vault_setup_rotation` row is visible for that prefix, which a
+    /// locked/Keychain-fallback read can observe) identically. The visible
+    /// set after filtering must not depend on which loading path produced
+    /// the map — BUG-1's fix (parsed-prefix fallback) makes both shapes
+    /// agree; this pins that agreement so it can't silently regress.
+    #[test]
+    fn filter_model_provider_pools_is_symmetric_across_rotation_configured_and_unconfigured_shapes()
+    {
+        // Shape A: rotation configured — the vault pool loader groups both
+        // members under the logical prefix key.
+        let rotation_configured = HashMap::from([
+            (
+                "VOYAGE_API_KEY".to_string(),
+                vec![
+                    ProviderSecret {
+                        key_id: "VOYAGE_API_KEY_1".to_string(),
+                        value: "voyage-a".to_string(),
+                    },
+                    ProviderSecret {
+                        key_id: "VOYAGE_API_KEY_2".to_string(),
+                        value: "voyage-b".to_string(),
+                    },
+                ],
+            ),
+            (
+                "TAVILY_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "TAVILY_API_KEY_1".to_string(),
+                    value: "tavily-a".to_string(),
+                }],
+            ),
+        ]);
+        // Shape B: no rotation row configured for either prefix — the loader
+        // stores each member under its own raw name instead (the shape a
+        // locked/Keychain-fallback read, or a readable Vault with no
+        // `vault_setup_rotation` row, actually produces).
+        let rotation_unconfigured = HashMap::from([
+            (
+                "VOYAGE_API_KEY_2".to_string(),
+                vec![ProviderSecret {
+                    key_id: "VOYAGE_API_KEY_2".to_string(),
+                    value: "voyage-b".to_string(),
+                }],
+            ),
+            (
+                "TAVILY_API_KEY_2".to_string(),
+                vec![ProviderSecret {
+                    key_id: "TAVILY_API_KEY_2".to_string(),
+                    value: "tavily-b".to_string(),
+                }],
+            ),
+        ]);
+
+        let filtered_configured = filter_model_provider_pools(rotation_configured);
+        let filtered_unconfigured = filter_model_provider_pools(rotation_unconfigured);
+        let unconfigured_keys: Vec<&str> =
+            filtered_unconfigured.keys().map(String::as_str).collect();
+
+        assert!(filtered_configured.contains_key("VOYAGE_API_KEY"));
+        assert!(!filtered_configured.contains_key("TAVILY_API_KEY"));
+        assert!(
+            filtered_unconfigured.contains_key("VOYAGE_API_KEY_2"),
+            "a ModelApi rotation member surfaced as a standalone pool key (the \
+             unconfigured-rotation shape) must survive filtering identically to \
+             the configured shape: {unconfigured_keys:?}"
+        );
+        assert!(
+            !filtered_unconfigured.contains_key("TAVILY_API_KEY_2"),
+            "a SearchApi rotation member must be rejected in the unconfigured \
+             shape exactly as its prefix-keyed pool would be: {unconfigured_keys:?}"
+        );
+    }
+
+    /// #1680/D3: `provider_env_keys()` (the materialization allowlist) and
+    /// `admitted_provider_env_keys()` (the all-class admitted-secret-name
+    /// surface) must disagree on exactly the SearchApi names — that
+    /// divergence is the whole point of the split. A regression that
+    /// re-merges the two views would make this test start failing at the
+    /// `assert!(!...)` lines.
+    #[test]
+    fn model_and_admitted_provider_env_keys_diverge_on_search_api_names() {
+        let model_only = provider_env_keys();
+        let admitted = admitted_provider_env_keys();
+
+        assert!(model_only.contains("DEEPSEEK_API_KEY"));
+        assert!(admitted.contains("DEEPSEEK_API_KEY"));
+
+        assert!(
+            !model_only.contains("TAVILY_API_KEY"),
+            "materialization allowlist must not admit a SearchApi name"
+        );
+        assert!(
+            !model_only.contains("EXA_API_KEY"),
+            "materialization allowlist must not admit a SearchApi name"
+        );
+        assert!(
+            !model_only.contains("GOOGLE_SEARCH_API_KEY"),
+            "materialization allowlist must not admit a SearchApi name"
+        );
+
+        assert!(
+            admitted.contains("TAVILY_API_KEY"),
+            "the all-class admitted set must still recognize SearchApi names"
+        );
+        assert!(
+            admitted.contains("EXA_API_KEY"),
+            "the all-class admitted set must still recognize SearchApi names"
+        );
+        assert!(
+            admitted.contains("GOOGLE_SEARCH_API_KEY"),
+            "the all-class admitted set must still recognize SearchApi names"
+        );
+    }
 
     /// #1096 leaf-2a round-2 (codex B4-status): `resolved_home` is additive —
     /// `None` reproduces the exact pre-existing scan set (unchanged for every

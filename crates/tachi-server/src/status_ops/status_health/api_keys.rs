@@ -7,6 +7,46 @@ use super::types::{ProviderProbeCache, ProviderRotationGroupProbe};
 use super::vault::load_keychain_vault_api_key_values;
 use crate::status_ops::ApiKeyStatus;
 
+/// Registry-wide class of an admitted env-var-name secret. This is the
+/// compile-time security boundary #1680/D3 introduces: `ModelApi` keys are
+/// the only names eligible for the LLM provider materialization allowlist
+/// (`model_provider_env_names()`); every class is eligible for the broader
+/// "does this name belong to Tachi's provider vocabulary at all" surfaces
+/// (lane env injection, providers-doctor admission, the plaintext secret
+/// scanner — `admitted_env_secret_names()`). Widening which names are
+/// `ModelApi` is a code-review-gated change, never a DB write (D3: "the
+/// env-name admission surface stays compile-time").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyClass {
+    /// LLM / embedding / reranking provider credentials — eligible for LLM
+    /// provider-secret materialization.
+    ModelApi,
+    /// Web-search provider credentials (Exa, Tavily, Google Programmable
+    /// Search) — never materialized into the LLM provider cache.
+    SearchApi,
+    /// Reserved for non-provider infrastructure secrets. No current
+    /// `API_KEY_DEFS` entry uses this class; kept so the class vocabulary
+    /// does not need another compile-time change when one shows up.
+    #[allow(dead_code)]
+    Infra,
+}
+
+/// Data-only description of the documented, anti-SSRF-safe probe target for
+/// one provider family (#1680/D6 groundwork). This PR does not wire probing
+/// to these keys — it only records the same 3 hosts already hardcoded in
+/// `tachi_llm::llm::auth_probe::ProbeTarget` (DeepSeek, SiliconFlow, Zai) so a
+/// later PR can drive `auth_probe` from the registry instead of a duplicate
+/// hardcoded table. `endpoint` mirrors `auth_probe`'s own optionality: the
+/// Zai/BigModel family has two recognized hosts and no documented
+/// non-generating GET endpoint today, so its descriptor carries `None`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProbeDescriptor {
+    #[allow(dead_code)]
+    pub(crate) host: &'static str,
+    #[allow(dead_code)]
+    pub(crate) endpoint: Option<&'static str>,
+}
+
 pub(crate) struct ApiKeyDef {
     pub(crate) key: &'static str,
     pub(crate) label: &'static str,
@@ -14,6 +54,17 @@ pub(crate) struct ApiKeyDef {
     pub(crate) deprecated: bool,
     pub(crate) canonical_key: &'static str,
     pub(crate) aliases: &'static [&'static str],
+    /// ModelApi vs SearchApi vs Infra — see [`KeyClass`].
+    pub(crate) class: KeyClass,
+    /// Canonical family id for the underlying account/vendor (e.g.
+    /// "deepseek", "anthropic", "google"), independent of which of this
+    /// entry's env-var names holds the secret. Not yet consumed in this PR;
+    /// it is the vocabulary #1680/D5's account registry keys off of.
+    #[allow(dead_code)]
+    pub(crate) provider_kind: &'static str,
+    /// `Some` only for the 3 families `auth_probe` already probes today.
+    #[allow(dead_code)]
+    pub(crate) probe: Option<ProbeDescriptor>,
 }
 
 pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
@@ -24,6 +75,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "VOYAGE_API_KEY",
         aliases: &[],
+        class: KeyClass::ModelApi,
+        provider_kind: "voyage",
+        probe: None,
     },
     ApiKeyDef {
         key: "VOYAGE_RERANK_API_KEY",
@@ -32,6 +86,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "VOYAGE_RERANK_API_KEY",
         aliases: &["VOYAGE_API_KEY"],
+        class: KeyClass::ModelApi,
+        provider_kind: "voyage",
+        probe: None,
     },
     ApiKeyDef {
         key: "SILICONFLOW_API_KEY",
@@ -40,6 +97,12 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "SILICONFLOW_API_KEY",
         aliases: &["EXTRACT_API_KEY", "SUMMARY_API_KEY"],
+        class: KeyClass::ModelApi,
+        provider_kind: "siliconflow",
+        probe: Some(ProbeDescriptor {
+            host: "api.siliconflow.cn",
+            endpoint: Some("https://api.siliconflow.cn/v1/models"),
+        }),
     },
     ApiKeyDef {
         key: "DEEPSEEK_API_KEY",
@@ -48,6 +111,12 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "DEEPSEEK_API_KEY",
         aliases: &["DISTILL_API_KEY", "REASONING_API_KEY"],
+        class: KeyClass::ModelApi,
+        provider_kind: "deepseek",
+        probe: Some(ProbeDescriptor {
+            host: "api.deepseek.com",
+            endpoint: Some("https://api.deepseek.com/models"),
+        }),
     },
     ApiKeyDef {
         key: "DISTILL_API_KEY",
@@ -56,6 +125,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "DISTILL_API_KEY",
         aliases: &[],
+        class: KeyClass::ModelApi,
+        provider_kind: "deepseek",
+        probe: None,
     },
     ApiKeyDef {
         key: "ZAI_API_KEY",
@@ -64,11 +136,21 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "ZAI_API_KEY",
         aliases: &["BIGMODEL_API_KEY"],
+        class: KeyClass::ModelApi,
+        provider_kind: "zai",
+        // auth_probe recognizes two hosts for this family
+        // (open.bigmodel.cn, api.z.ai) with no documented non-generating GET
+        // endpoint for either; this descriptor picks the current primary
+        // domain (api.z.ai) as data only — no endpoint to probe yet.
+        probe: Some(ProbeDescriptor {
+            host: "api.z.ai",
+            endpoint: None,
+        }),
     },
     // #1355: the grok/xai opencode lane provider must be a recognized
     // provider-key name so an unlocked-vault xAI secret is injected into the
     // lane subprocess env (via `load_unlocked_provider_env_secrets`, gated by
-    // `provider_api_key_env_names()`). That lets `opencode.json`'s `xai`
+    // `admitted_env_secret_names()`, #1680/D3). That lets `opencode.json`'s `xai`
     // provider use `{env:XAI_API_KEY}` substitution — no literal secret on
     // disk for vault "收权" to blank. `GROK_API_KEY` is carried as an alias
     // (alternate ecosystem name, cf. GOOGLE/GEMINI) so whichever name the
@@ -82,12 +164,15 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "XAI_API_KEY",
         aliases: &["GROK_API_KEY"],
+        class: KeyClass::ModelApi,
+        provider_kind: "xai",
+        probe: None,
     },
     // #1355(b): the opencode `zhipuai-coding-plan` GLM lane provider must
     // also be a recognized provider-key name so an unlocked-vault ZHIPUAI
     // secret is injected into the lane subprocess env (via
     // `load_unlocked_provider_env_secrets`, gated by
-    // `provider_api_key_env_names()`). That lets `opencode.json`'s
+    // `admitted_env_secret_names()`, #1680/D3). That lets `opencode.json`'s
     // `zhipuai-coding-plan` provider use `{env:ZHIPUAI_API_KEY}`
     // substitution — no literal secret on disk for vault "收权" to blank.
     // This is deliberately separate from the `ZAI_API_KEY` entry above:
@@ -101,12 +186,15 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "ZHIPUAI_API_KEY",
         aliases: &[],
+        class: KeyClass::ModelApi,
+        provider_kind: "zhipuai",
+        probe: None,
     },
     // #1355 follow-up: the `kimi-for-coding`/K3 opencode lane provider must
     // also be a recognized provider-key name so an unlocked-vault Kimi
     // secret is injected into the lane subprocess env (via
     // `load_unlocked_provider_env_secrets`, gated by
-    // `provider_api_key_env_names()`). That lets the lane's provider config
+    // `admitted_env_secret_names()`, #1680/D3). That lets the lane's provider config
     // use `{env:KIMI_API_KEY}` substitution (or direct env read) — no
     // literal secret on disk for vault "收权" to blank. `MOONSHOT_API_KEY`
     // is carried as an alias (alternate ecosystem name — Moonshot AI is
@@ -121,6 +209,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "KIMI_API_KEY",
         aliases: &["MOONSHOT_API_KEY"],
+        class: KeyClass::ModelApi,
+        provider_kind: "kimi",
+        probe: None,
     },
     ApiKeyDef {
         key: "OPENAI_API_KEY",
@@ -129,6 +220,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "OPENAI_API_KEY",
         aliases: &[],
+        class: KeyClass::ModelApi,
+        provider_kind: "openai",
+        probe: None,
     },
     ApiKeyDef {
         key: "ANTHROPIC_API_KEY",
@@ -137,6 +231,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "ANTHROPIC_API_KEY",
         aliases: &[],
+        class: KeyClass::ModelApi,
+        provider_kind: "anthropic",
+        probe: None,
     },
     ApiKeyDef {
         key: "GOOGLE_API_KEY",
@@ -145,6 +242,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "GOOGLE_API_KEY",
         aliases: &["GEMINI_API_KEY"],
+        class: KeyClass::ModelApi,
+        provider_kind: "google",
+        probe: None,
     },
     ApiKeyDef {
         key: "EXA_API_KEY",
@@ -153,6 +253,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "EXA_API_KEY",
         aliases: &[],
+        class: KeyClass::SearchApi,
+        provider_kind: "exa",
+        probe: None,
     },
     ApiKeyDef {
         key: "TAVILY_API_KEY",
@@ -161,6 +264,29 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "TAVILY_API_KEY",
         aliases: &[],
+        class: KeyClass::SearchApi,
+        provider_kind: "tavily",
+        probe: None,
+    },
+    // #1680/D3: independent SearchApi entry — previously this name was not
+    // in `API_KEY_DEFS` at all, but was still manually folded into the
+    // "google/gemini" family by `intake::alias_family()` (a live
+    // discrimination-2 violation: a search-only credential grouped with
+    // model-provider accounts). Giving it its own registry row with no
+    // aliases makes it independent by construction: it is admitted (all
+    // classes are admitted-set members) but never enters the ModelApi
+    // materialization allowlist, and it no longer shares an intake alias
+    // family with GOOGLE_API_KEY/GEMINI_API_KEY.
+    ApiKeyDef {
+        key: "GOOGLE_SEARCH_API_KEY",
+        label: "Google Programmable Search",
+        required: false,
+        deprecated: false,
+        canonical_key: "GOOGLE_SEARCH_API_KEY",
+        aliases: &[],
+        class: KeyClass::SearchApi,
+        provider_kind: "google-search",
+        probe: None,
     },
     ApiKeyDef {
         key: "MINIMAX_API_KEY",
@@ -169,6 +295,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: true,
         canonical_key: "DEEPSEEK_API_KEY",
         aliases: &[],
+        class: KeyClass::ModelApi,
+        provider_kind: "deepseek",
+        probe: None,
     },
     ApiKeyDef {
         key: "REASONING_API_KEY",
@@ -177,6 +306,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         deprecated: false,
         canonical_key: "REASONING_API_KEY",
         aliases: &["ZAI_API_KEY", "BIGMODEL_API_KEY"],
+        class: KeyClass::ModelApi,
+        provider_kind: "zai",
+        probe: None,
     },
 ];
 
