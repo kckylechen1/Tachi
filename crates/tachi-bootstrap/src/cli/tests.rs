@@ -1224,3 +1224,65 @@ fn save_is_a_discoverable_visible_alias_of_remember() {
         "top-level --help should surface the `save` alias next to `remember`: {root_help}"
     );
 }
+
+/// The whole `tachi` clap tree must be constructible — and parseable — inside a
+/// small stack.
+///
+/// This is a tripwire for a failure mode that has already taken main down once:
+/// `clap`'s derive builds each enum's command tree as a single straight-line
+/// chain of by-value builder calls, so an unoptimized build gives every `Arg`
+/// (600 B) and `Command` (712 B) temporary its own stack slot. That made
+/// `Cli::command()` reserve ~2072 KiB, 24 KiB past the 2 MiB libtest hands a
+/// test thread, and *every* test in this module died with
+/// `has overflowed its stack` — naming whichever case happened to be scheduled
+/// first, never the cause. `[profile.dev.package.tachi-bootstrap] opt-level = 1`
+/// in the workspace `Cargo.toml` is what keeps it at ~195 KiB.
+///
+/// The bound is checked in a child process on purpose. A stack overflow is an
+/// abort, not a catchable panic, so measuring it in-process would reproduce
+/// exactly the unreadable failure this test exists to replace; here the parent
+/// gets a plain assertion naming the profile override to restore.
+#[test]
+fn cli_command_tree_builds_within_a_bounded_stack() {
+    /// 5x the ~195 KiB the tree needs today: loose enough not to red on
+    /// codegen drift, tight enough to fire long before the 2 MiB thread limit.
+    const STACK_BOUND: usize = 1024 * 1024;
+    const CHILD_MARKER: &str = "TACHI_CLI_STACK_BOUND_CHILD";
+
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        std::thread::Builder::new()
+            .stack_size(STACK_BOUND)
+            .spawn(|| {
+                // Both surfaces, because they walk the tree differently:
+                // `render_long_help` recurses over every subcommand, and a deep
+                // parse path exercises the nested `Subcommand` enums.
+                assert!(!Cli::command().render_long_help().to_string().is_empty());
+                Cli::try_parse_from(["tachi", "vault", "reconcile", "plan", "--out", "plan.json"])
+                    .expect("deep subcommand path should parse");
+            })
+            .expect("spawn bounded-stack thread")
+            .join()
+            .expect("bounded-stack thread should not panic");
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("current test executable");
+    let status = std::process::Command::new(&exe)
+        .args([
+            "--exact",
+            "cli::tests::cli_command_tree_builds_within_a_bounded_stack",
+            "--nocapture",
+        ])
+        .env(CHILD_MARKER, "1")
+        .status()
+        .expect("re-run this test as a child process");
+
+    assert!(
+        status.success(),
+        "building the clap tree overflowed a {STACK_BOUND}-byte stack (child: {status}). \
+         Either the CLI grew past the bound, or \
+         `[profile.dev.package.tachi-bootstrap] opt-level = 1` was dropped from the \
+         workspace Cargo.toml — without it clap's derive needs >2 MiB and every \
+         cli::tests case aborts the test binary."
+    );
+}
