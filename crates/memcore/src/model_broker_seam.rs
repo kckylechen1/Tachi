@@ -25,7 +25,7 @@
 //! pin / retry contexts) are all defined here, as memcore-owned data.
 //!
 //! The `module_has_no_external_tachi_crate_imports` test structurally pins
-//! this: the source text carries no `use tachi_…` line.
+//! this: the source text carries no import of a tachi-prefixed crate.
 //!
 //! # What is deliberately *not* here
 //!
