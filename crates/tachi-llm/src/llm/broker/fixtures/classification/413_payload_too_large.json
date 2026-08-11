@@ -1,0 +1,13 @@
+{
+  "why": "Too many prompt tokens. A different deployment with a bigger context might work, but the shipped tier does not retry it and neither does the broker's advice.",
+  "status": 413,
+  "headers": [],
+  "body": "{\"error\":{\"message\":\"This model's maximum context length is 8192 tokens\",\"code\":\"context_length_exceeded\"}}",
+  "expected": {
+    "class": "bad_request",
+    "advice": "do_not_retry",
+    "legacy_failure_class": "lane_outage",
+    "legacy_retry_intent": "no_retry",
+    "retry_after": null
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "why": "A 429 whose body mentions a quota. It stays a rate limit on both sides — the billing test is 403-only. Both project onto ProviderExhausted, so a status-only reading would call this a pass; the class axis is what distinguishes it.",
+  "status": 429,
+  "headers": [["retry-after", "60"]],
+  "body": "{\"error\":{\"message\":\"You have exceeded your quota exceeded threshold; check your billing dashboard\"}}",
+  "expected": {
+    "class": "rate_limited",
+    "advice": "retry_same_deployment",
+    "legacy_failure_class": "provider_exhausted",
+    "legacy_retry_intent": "retry_within_tier",
+    "retry_after": {"kind": "seconds", "value": 60}
+  }
+}
