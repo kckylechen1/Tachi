@@ -2,11 +2,15 @@
 //! projection (tachi#1675 PR2, design D6 phase 1).
 //!
 //! This extends the EXISTING facade rather than adding a tool (the #1066
-//! mirror precedent), and it runs in PARALLEL with the `/eval`-memory path:
-//! `tachi_orchestrator(recommend)` is deliberately untouched here — flipping
-//! its evidence input is PR4's explicitly versioned cutover, never a silent
-//! change. Every response on this path carries `evidence_source` so a
-//! consumer can tell which evidence base answered it.
+//! mirror precedent). Every response on this path carries `evidence_source` so
+//! a consumer can tell which evidence base answered it.
+//!
+//! **PR4 (design D6 phase 2) ended the parallel run**: the dispatch-profile
+//! `recommend` path now sources its evidence from this same ledger pipeline
+//! ([`resolve_route_evidence`]) instead of `/eval` memory entries, with an
+//! explicit `policy_version` bump on that surface. Both surfaces therefore
+//! read ONE evidence resolver — a second copy of the window/hard-gate/
+//! usability logic is exactly how the two answers would drift apart.
 //!
 //! This module owns only what needs the outside world:
 //! - the hard-gate candidate set, taken from the EXISTING risk classifier
@@ -20,7 +24,7 @@
 //!
 //! Every decision rule is in [`rules`], as a pure function of its inputs.
 
-mod rules;
+pub(crate) mod rules;
 
 /// tachi#1675 PR3: the same projection, run over a full ledger REPLAY instead
 /// of the incremental read, must produce the same answer — and a route-policy
@@ -37,51 +41,127 @@ use crate::tool_params::RouteProjectionParams;
 
 use self::rules::{ProjectionRow, TerminalCheck};
 
-pub(crate) fn handle_route_projection(
+/// One resolved ledger-evidence read: the rows, the hard-gate candidate set,
+/// the projection outcome, and every provenance fact a response has to
+/// declare.
+///
+/// Shared by `route_projection` and (since tachi#1675 PR4) the dispatch-profile
+/// `recommend` path, so the two surfaces cannot disagree about what the ledger
+/// says.
+pub(crate) struct LedgerRouteEvidence {
+    pub(crate) gates: EligibleCandidates,
+    pub(crate) rows: Vec<ProjectionRow>,
+    pub(crate) outcome: rules::ProjectionOutcome,
+    pub(crate) now: String,
+    pub(crate) since: String,
+    pub(crate) window_days: u32,
+    pub(crate) row_limit: usize,
+    /// The read hit its cap: the answer is over a capped slice of the window,
+    /// which a consumer has to see rather than mistake for a complete read.
+    pub(crate) rows_truncated: bool,
+    /// The LIVE route-policy revision, read in the SAME store checkout as the
+    /// rows. Reported, never applied to a row.
+    pub(crate) live_policy_source_revision: String,
+    /// The raw route-policy state rows the live revision was hashed from —
+    /// handed back so a caller that also needs the rule loadout builds it from
+    /// the SAME snapshot rather than opening a second, later read (the
+    /// tachi#1675 BUG-8 discipline).
+    pub(crate) route_policy_rows: Vec<memcore::db::StateRow>,
+    pub(crate) policy_revisions: memcore::PolicyRevisionCensus,
+    pub(crate) evidence_spans_other_revisions: bool,
+}
+
+impl LedgerRouteEvidence {
+    /// The usable (on-policy) rows, as the row shape the deterministic
+    /// candidate scorer consumes.
+    ///
+    /// Usability is decided by [`rules::classify_row`] — the SAME function the
+    /// projection scores with, not a second, looser reading of the rule. The
+    /// two fields are a lossy but non-inventive projection of a ledger row:
+    /// `completed` is the machine-resolved terminal outcome, and
+    /// `verification_present` is true because a usable row carries a
+    /// structured rubric from a `structural_cross_vendor` adjudication — a
+    /// strictly stronger verification fact than the `/eval` entry's
+    /// self-reported flag it replaces.
+    pub(crate) fn usable_route_eval_rows(&self) -> Vec<tachi_dispatch::RouteEvalRow> {
+        let task_type = self.query_task_type();
+        self.rows
+            .iter()
+            .filter(|row: &&ProjectionRow| {
+                matches!(
+                    rules::classify_row(
+                        row,
+                        &self.gates.eligible,
+                        &self.since,
+                        None,
+                        task_type.as_deref(),
+                    ),
+                    rules::RowDisposition::Usable
+                )
+            })
+            .map(|row| tachi_dispatch::RouteEvalRow {
+                profile: row.observation.profile.clone(),
+                completed: row
+                    .observation
+                    .terminal_outcome
+                    .as_deref()
+                    .is_some_and(|outcome| {
+                        matches!(
+                            outcome.trim().to_ascii_lowercase().as_str(),
+                            "completed" | "success" | "succeeded"
+                        )
+                    }),
+                verification_present: true,
+            })
+            .collect()
+    }
+
+    fn query_task_type(&self) -> Option<String> {
+        self.gates.task_type.clone()
+    }
+
+    /// The provenance block both surfaces publish, under the same key names.
+    pub(crate) fn policy_provenance_json(&self) -> Value {
+        json!({
+            "live_policy_source_revision": self.live_policy_source_revision,
+            "evidence_policy_revisions": self.policy_revisions.revisions,
+            "rows_without_policy_revision": self.policy_revisions.rows_without_revision,
+            "evidence_spans_other_revisions": self.evidence_spans_other_revisions,
+        })
+    }
+
+    pub(crate) fn window_json(&self) -> Value {
+        json!({
+            "since": self.since,
+            "until": Value::Null,
+            "days": self.window_days,
+        })
+    }
+}
+
+/// Read the ledger once and project it: hard gates, window, usability,
+/// decision, and the policy provenance that goes with them.
+///
+/// `window_days` is clamped here, so no caller can widen the window past the
+/// projection's own bound.
+pub(crate) fn resolve_route_evidence(
     server: &MemoryServer,
-    params: RouteProjectionParams,
-    limit: Option<usize>,
-) -> Result<String, String> {
-    // Same cap the other `tachi_agent_eval` read actions use — one bound for
-    // the whole facade, not a second one invented here. It also bounds the
-    // per-row `status.json` reads below.
-    let row_limit = super::capped_eval_limit(limit);
+    risk: &tachi_dispatch::DispatchRisk,
+    row_limit: usize,
+    window_days: u32,
+) -> Result<LedgerRouteEvidence, String> {
     let now = memcore::now_utc_iso();
-    let window_days = params
-        .window_days
-        .unwrap_or(rules::DEFAULT_WINDOW_DAYS)
-        .clamp(1, rules::MAX_WINDOW_DAYS);
+    let window_days = window_days.clamp(1, rules::MAX_WINDOW_DAYS);
     let since = rules::window_since(&now, window_days)
         .ok_or_else(|| format!("route_projection: cannot derive a window start from {now}"))?;
+    let gates = eligible_candidate_set(risk);
 
-    let task = params.task.unwrap_or_default();
-    let file_paths = params.file_paths.unwrap_or_default();
-    let risk_override = params
-        .risk
-        .as_deref()
-        .map(str::trim)
-        .filter(|risk| !risk.is_empty());
-    // The SAME classifier the recommendation path uses — not a second,
-    // drifting copy of the admission rules.
-    let risk = match params
-        .task_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|task_type| !task_type.is_empty())
-    {
-        Some(task_type) => {
-            tachi_dispatch::classify_dispatch_risk(&task, task_type, risk_override, &file_paths)
-        }
-        None => crate::dispatch_profile::classify_dispatch_risk(&task, risk_override, &file_paths),
-    };
-    let gates = eligible_candidate_set(&risk);
-
-    let (observations, live_policy_source_revision) = server.with_global_store_read(|store| {
+    let (observations, route_policy_rows) = server.with_global_store_read(|store| {
         let observations =
             memcore::list_eval_observations(store.connection(), &since, None, row_limit)
                 .map_err(|err| format!("route_projection: read eval ledger: {err}"))?;
-        // The LIVE route-policy revision, read in the SAME store checkout as
-        // the rows it is about to be compared against (the tachi#1675 BUG-8
+        // The LIVE route-policy state, read in the SAME store checkout as the
+        // rows it is about to be compared against (the tachi#1675 BUG-8
         // discipline): a hash taken from a separately-timed read could
         // describe a policy state that never coexisted with this evidence.
         // It is REPORTED, never applied — rows are always interpreted under
@@ -89,11 +169,10 @@ pub(crate) fn handle_route_projection(
         let route_policy_rows = store
             .list_state(crate::dispatch_profile::ROUTE_POLICY_RULE_NS)
             .map_err(|err| format!("route_projection: read live route policy: {err}"))?;
-        Ok((
-            observations,
-            crate::tune_ops::route_policy::route_policy_source_revision(&route_policy_rows),
-        ))
+        Ok((observations, route_policy_rows))
     })?;
+    let live_policy_source_revision =
+        crate::tune_ops::route_policy::route_policy_source_revision(&route_policy_rows);
     // A truncated read is a fact the consumer has to see: silently answering
     // from a capped slice of the window would be the projection overstating
     // what it looked at.
@@ -118,25 +197,75 @@ pub(crate) fn handle_route_projection(
         })
         .collect::<Vec<_>>();
 
-    let query_task_type = (!risk.task_type.trim().is_empty()).then(|| risk.task_type.clone());
     let outcome = rules::project(
         &rows,
         &gates.eligible,
         &since,
         None,
         &now,
-        query_task_type.as_deref(),
+        gates.task_type.as_deref(),
     );
+
+    Ok(LedgerRouteEvidence {
+        gates,
+        rows,
+        outcome,
+        now,
+        since,
+        window_days,
+        row_limit,
+        rows_truncated,
+        live_policy_source_revision,
+        route_policy_rows,
+        policy_revisions,
+        evidence_spans_other_revisions,
+    })
+}
+
+pub(crate) fn handle_route_projection(
+    server: &MemoryServer,
+    params: RouteProjectionParams,
+    limit: Option<usize>,
+) -> Result<String, String> {
+    // Same cap the other `tachi_agent_eval` read actions use — one bound for
+    // the whole facade, not a second one invented here. It also bounds the
+    // per-row `status.json` reads below.
+    let row_limit = super::capped_eval_limit(limit);
+    let window_days = params
+        .window_days
+        .unwrap_or(rules::DEFAULT_WINDOW_DAYS)
+        .clamp(1, rules::MAX_WINDOW_DAYS);
+
+    let task = params.task.unwrap_or_default();
+    let file_paths = params.file_paths.unwrap_or_default();
+    let risk_override = params
+        .risk
+        .as_deref()
+        .map(str::trim)
+        .filter(|risk| !risk.is_empty());
+    // The SAME classifier the recommendation path uses — not a second,
+    // drifting copy of the admission rules.
+    let risk = match params
+        .task_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|task_type| !task_type.is_empty())
+    {
+        Some(task_type) => {
+            tachi_dispatch::classify_dispatch_risk(&task, task_type, risk_override, &file_paths)
+        }
+        None => crate::dispatch_profile::classify_dispatch_risk(&task, risk_override, &file_paths),
+    };
+
+    let evidence = resolve_route_evidence(server, &risk, row_limit, window_days)?;
+    let gates = &evidence.gates;
+    let outcome = &evidence.outcome;
 
     let payload = json!({
         "evidence_source": rules::EVIDENCE_SOURCE,
         "policy_version": rules::POLICY_VERSION,
-        "generated_at": now,
-        "window": {
-            "since": since,
-            "until": Value::Null,
-            "days": window_days,
-        },
+        "generated_at": evidence.now,
+        "window": evidence.window_json(),
         "task": {
             "task_type": risk.task_type,
             "risk": risk.risk,
@@ -162,17 +291,12 @@ pub(crate) fn handle_route_projection(
         "excluded_rows": outcome.explained_exclusions_json(),
         "decision": outcome.decision.to_json(),
         "rows_considered": outcome.rows_considered,
-        "rows_limit": row_limit,
-        "rows_truncated": rows_truncated,
+        "rows_limit": evidence.row_limit,
+        "rows_truncated": evidence.rows_truncated,
         "usable_rows": outcome.usable_rows,
         "quality_only_rows": outcome.quality_only_rows,
         "n_min_usable_rows": rules::N_MIN_USABLE_ROWS,
-        "policy_provenance": {
-            "live_policy_source_revision": live_policy_source_revision,
-            "evidence_policy_revisions": policy_revisions.revisions,
-            "rows_without_policy_revision": policy_revisions.rows_without_revision,
-            "evidence_spans_other_revisions": evidence_spans_other_revisions,
-        },
+        "policy_provenance": evidence.policy_provenance_json(),
         "notes": [
             "latency is not_available for dispatch-spine rows: dispatch_outcomes has no \
              duration column (design D3 / codex finding 3); only mirror observations carry one",
@@ -192,10 +316,16 @@ pub(crate) fn handle_route_projection(
 /// The hard-gate result: which candidates the CURRENT admission rules allow,
 /// and why each removed one was removed.
 #[derive(Debug, Clone, Default)]
-struct EligibleCandidates {
-    eligible: Vec<String>,
-    excluded: Vec<(String, &'static str)>,
-    notes: Vec<String>,
+pub(crate) struct EligibleCandidates {
+    pub(crate) eligible: Vec<String>,
+    pub(crate) excluded: Vec<(String, &'static str)>,
+    pub(crate) notes: Vec<String>,
+    /// The task type the evidence is scoped to, carried alongside the gate so
+    /// every consumer of this gate scopes rows the same way. `None` when the
+    /// classifier produced no task type at all — never a fabricated default,
+    /// which would silently narrow the evidence base to a task type nobody
+    /// asked about.
+    pub(crate) task_type: Option<String>,
 }
 
 const REASON_BLOCKED: &str = "blocked_by_risk_classifier";
@@ -218,7 +348,7 @@ const REASON_NOT_REQUIRED: &str = "not_required_for_risk_class";
 /// restriction instead would admit profiles the classifier never authorized —
 /// at exactly the risk classes where the restriction exists — which is the
 /// one direction a hard gate must never fail in.
-fn eligible_candidate_set(risk: &tachi_dispatch::DispatchRisk) -> EligibleCandidates {
+pub(crate) fn eligible_candidate_set(risk: &tachi_dispatch::DispatchRisk) -> EligibleCandidates {
     let mut excluded = Vec::new();
     let mut notes = Vec::new();
     let mut after_block = Vec::new();
@@ -257,6 +387,7 @@ fn eligible_candidate_set(risk: &tachi_dispatch::DispatchRisk) -> EligibleCandid
         eligible,
         excluded,
         notes,
+        task_type: (!risk.task_type.trim().is_empty()).then(|| risk.task_type.clone()),
     }
 }
 
@@ -266,7 +397,7 @@ fn eligible_candidate_set(risk: &tachi_dispatch::DispatchRisk) -> EligibleCandid
 /// The mirror spine has no `status.json` by construction — Tachi never
 /// dispatched that work, so its observation row IS the terminal receipt and
 /// there is nothing to reconcile against.
-fn terminal_check_for(observation: &EvalObservation) -> TerminalCheck {
+pub(crate) fn terminal_check_for(observation: &EvalObservation) -> TerminalCheck {
     if observation.spine == EvalSpine::Mirror {
         return TerminalCheck::NotApplicable;
     }

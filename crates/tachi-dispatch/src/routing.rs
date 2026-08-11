@@ -17,6 +17,80 @@ pub struct DispatchRisk {
     pub blocked_profiles: Vec<String>,
 }
 
+/// The `/eval/YYYY-MM-DD` memory entries the recommendation scorer read until
+/// tachi#1675 PR4. Retired as a ROUTING evidence base by that cutover; the
+/// entries themselves remain readable human notes (`tachi_agent_eval`'s
+/// `aggregate_live`/`telemetry` still serve them).
+pub const ROUTE_EVIDENCE_SOURCE_LIVE_EVAL_MEMORY: &str = "live_eval_memory";
+
+/// The tachi#1675 decision-fact ledger (`route_recommendations` /
+/// `route_decisions` / `eval_rubric_scores` joined onto the canonical outcome
+/// and adjudication spines). The evidence base `recommend` sources from after
+/// PR4's flip, and the one `tachi_agent_eval(action='route_projection')`
+/// already declares.
+pub const ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER: &str = "decision_fact_ledger";
+
+/// Prefix of the skip reason for a route-policy rule whose EVIDENCE comes from
+/// an evidence base tachi#1675 PR4 retired as a routing input.
+///
+/// The rule row records the base its proposal was mined from (`evidence.source`
+/// — `build_route_policy_proposals` writes `live_memory_eval` there). After the
+/// flip, only a rule that declares the decision-fact ledger may move a routing
+/// score; every other declaration — and an ABSENT one — is refused. Allowlist,
+/// not blocklist: an undeclared rule is exactly the case a blocklist would let
+/// through, and the retired base must not re-enter routing through a row whose
+/// provenance nobody wrote down.
+pub const RETIRED_EVIDENCE_SOURCE_SKIP_REASON: &str = "retired_evidence_source";
+
+/// The zero-signal fallback reason of the legacy `/eval`-memory scorer. Kept
+/// ONLY for that path: the #1202 owner ruling
+/// (`docs/engineering/architecture/dispatch-lifecycle.md` §4.2) demoted MBIT to
+/// derived evidence, so a routing answer whose only stated ground is "the MBIT
+/// card fits" is exactly what design D7 forbids on the ledger path.
+pub const BASELINE_MBIT_FIT_REASON: &str = "baseline_mbit_fit";
+
+/// A candidate the ledger has no usable row about. Deliberately NOT a fit
+/// claim: it names the absence, and the projection's answer for the response
+/// as a whole is `abstain` (design D7).
+pub const NO_LEDGER_EVIDENCE_REASON: &str = "no_ledger_evidence";
+
+/// Which evidence base fed a scoring run (tachi#1675 PR4, design D6 phase 2).
+///
+/// Threaded rather than inferred: the evidence flip must be declared in the
+/// response and must change the zero-signal fallback reason, and both of those
+/// are decisions a caller makes, not something the scorer can guess from the
+/// rows it was handed (an empty row slice looks the same either way).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteEvidenceSource {
+    /// Pre-PR4: `/eval/YYYY-MM-DD` memory entries.
+    LiveEvalMemory,
+    /// Post-PR4: the decision-fact ledger.
+    DecisionFactLedger,
+}
+
+impl RouteEvidenceSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RouteEvidenceSource::LiveEvalMemory => ROUTE_EVIDENCE_SOURCE_LIVE_EVAL_MEMORY,
+            RouteEvidenceSource::DecisionFactLedger => ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
+        }
+    }
+
+    /// The reason recorded for a candidate that accumulated NO scoring signal
+    /// at all.
+    ///
+    /// This is the whole of design D7's in-scope half: on the ledger path the
+    /// no-evidence branch names the absence (`no_ledger_evidence`) and the
+    /// decision abstains; `baseline_mbit_fit` survives only on the legacy
+    /// `/eval`-memory path.
+    pub const fn no_signal_reason(self) -> &'static str {
+        match self {
+            RouteEvidenceSource::LiveEvalMemory => BASELINE_MBIT_FIT_REASON,
+            RouteEvidenceSource::DecisionFactLedger => NO_LEDGER_EVIDENCE_REASON,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProfileCandidate {
     pub profile: String,
@@ -300,6 +374,7 @@ pub fn recommend_dispatch_profile_candidates<W>(
     subagent_scores: &[RouteSubagentScore],
     performance_matrix: &[RoutePerformanceRow],
     route_policy_rules: &RoutePolicyRuleLoadout,
+    evidence_source: RouteEvidenceSource,
     mut weak_against_for_profile: W,
 ) -> Result<Vec<ProfileCandidate>, String>
 where
@@ -316,6 +391,7 @@ where
                 subagent_scores,
                 performance_matrix,
                 &weak_against,
+                evidence_source,
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -332,6 +408,7 @@ fn score_profile_candidate(
     subagent_scores: &[RouteSubagentScore],
     performance_matrix: &[RoutePerformanceRow],
     weak_against: &[String],
+    evidence_source: RouteEvidenceSource,
 ) -> ProfileCandidate {
     let mut score = 0.0;
     let mut reasons = Vec::new();
@@ -538,8 +615,13 @@ fn score_profile_candidate(
     if let Some(rate) = useful_rate {
         reasons.push(format!("live_useful_rate={rate:.2}"));
     }
+    // tachi#1675 PR4 (design D7): the no-signal fallback REASON belongs to the
+    // evidence base, not to the scorer. On the ledger path it must name the
+    // absence of usable rows — never a baseline MBIT fit, which the #1202
+    // ruling demoted to derived evidence and which the projection answers with
+    // `abstain` instead.
     if reasons.is_empty() {
-        reasons.push("baseline_mbit_fit".to_string());
+        reasons.push(evidence_source.no_signal_reason().to_string());
     }
 
     ProfileCandidate {
@@ -561,6 +643,15 @@ fn score_profile_candidate(
     }
 }
 
+/// The fallback chain for a recommendation: who to try if the primary is
+/// unavailable.
+///
+/// Every entry comes from `candidates`. tachi#1675 PR4 (BUG-2): the
+/// agent-affinity fill used to scan all of `DISPATCH_PROFILES`, so at high risk
+/// it could name a profile the risk classifier had blocked or excluded — an
+/// actionable output naming an inadmissible profile is the same hard-gate leak
+/// as naming one in `recommended_profile`, one field over. The caller hands in
+/// the gated candidate set; this function never widens it.
 pub fn build_profile_fallback_chain(
     primary: &DispatchProfileDef,
     candidates: &[ProfileCandidate],
@@ -579,7 +670,11 @@ pub fn build_profile_fallback_chain(
             break;
         }
         if let Some(profile) = DISPATCH_PROFILES.iter().find(|profile| {
-            profile_matches_agent(profile, agent) && !out.iter().any(|p| p == profile.name)
+            profile_matches_agent(profile, agent)
+                && candidates
+                    .iter()
+                    .any(|candidate| candidate.profile == profile.name)
+                && !out.iter().any(|p| p == profile.name)
         }) {
             out.push(profile.name.to_string());
         }
@@ -587,6 +682,14 @@ pub fn build_profile_fallback_chain(
     out
 }
 
+/// Build the `recommend` response.
+///
+/// `evidence_source` is threaded (tachi#1675 PR4) rather than assumed: it is
+/// declared verbatim in the payload as `evidence_source`, and it decides the
+/// wording of `evidence_note` — a note that says "used matching /eval
+/// evidence" after the ledger cutover would be the response lying about where
+/// its evidence came from.
+#[allow(clippy::too_many_arguments)]
 pub fn build_dispatch_recommendation_response(
     task: &str,
     risk: &DispatchRisk,
@@ -594,6 +697,7 @@ pub fn build_dispatch_recommendation_response(
     candidates: &[ProfileCandidate],
     route_policy_rules: &RoutePolicyRuleLoadout,
     row_count: usize,
+    evidence_source: RouteEvidenceSource,
     profile_payload: RecommendationProfilePayload,
 ) -> Result<Value, String> {
     let best = candidates
@@ -608,12 +712,25 @@ pub fn build_dispatch_recommendation_response(
         .iter()
         .map(|candidate| candidate.performance_samples)
         .sum::<u32>();
-    let evidence_note = if !route_policy_rules.applied.is_empty() {
-        "route_policy_weighted: recommendation used matching /eval evidence plus approved route-policy rules."
-    } else if live_matched_samples == 0 {
-        "low_sample_fallback: no matching live /eval profile/subagent evidence; deterministic MBIT/risk fit dominated."
-    } else {
-        "live_eval_weighted: recommendation used matching /eval profile/subagent evidence."
+    let evidence_note = match (evidence_source, route_policy_rules.applied.is_empty(), live_matched_samples) {
+        (RouteEvidenceSource::LiveEvalMemory, false, _) => {
+            "route_policy_weighted: recommendation used matching /eval evidence plus approved route-policy rules."
+        }
+        (RouteEvidenceSource::LiveEvalMemory, true, 0) => {
+            "low_sample_fallback: no matching live /eval profile/subagent evidence; deterministic MBIT/risk fit dominated."
+        }
+        (RouteEvidenceSource::LiveEvalMemory, true, _) => {
+            "live_eval_weighted: recommendation used matching /eval profile/subagent evidence."
+        }
+        (RouteEvidenceSource::DecisionFactLedger, false, _) => {
+            "route_policy_weighted: recommendation used usable decision-fact-ledger rows plus approved route-policy rules."
+        }
+        (RouteEvidenceSource::DecisionFactLedger, true, 0) => {
+            "no_ledger_evidence: no usable decision-fact-ledger row in window; `decision` abstains and the reported profile is deterministic admission/role fit only."
+        }
+        (RouteEvidenceSource::DecisionFactLedger, true, _) => {
+            "ledger_weighted: recommendation used usable decision-fact-ledger rows (terminal-reconciled, rubric-scored, independently adjudicated)."
+        }
     };
 
     Ok(json!({
@@ -639,6 +756,16 @@ pub fn build_dispatch_recommendation_response(
         "reason": &best.reasons,
         "route_explanation": &best.reasons,
         "evidence_note": evidence_note,
+        // tachi#1675 PR4: which evidence base answered. Declared on EVERY
+        // response, the same vocabulary
+        // `tachi_agent_eval(action='route_projection')` publishes, so a
+        // consumer never has to infer the cutover from the note prose.
+        "evidence_source": evidence_source.as_str(),
+        // Kept under its pre-cutover key for consumer compatibility. After the
+        // flip these are ledger counts: `row_count` is the ledger rows read in
+        // window and `matched_samples` the usable rows attributed to a
+        // candidate. `performance_matrix_hits` is structurally 0 on the ledger
+        // path — the ledger carries no performance-matrix aggregate.
         "live_eval": {
             "row_count": row_count,
             "matched_samples": live_matched_samples,
@@ -698,6 +825,16 @@ pub fn build_route_policy_rule_loadout(
             .map(str::to_string);
         let sample_count = route_policy_rule_sample_count(&value);
         let score_delta = value.get("score_delta").and_then(serde_json::Value::as_f64);
+        // Which evidence base this rule was mined from, as the rule row itself
+        // declares it (`build_route_policy_proposals` stamps
+        // `evidence.source`). `None` means the row declares nothing, which the
+        // gate below treats exactly like a retired declaration.
+        let evidence_source = value
+            .get("evidence")
+            .and_then(|evidence| evidence.get("evidence_source"))
+            .or_else(|| value.get("evidence").and_then(|e| e.get("source")))
+            .or_else(|| value.get("evidence_source"))
+            .and_then(serde_json::Value::as_str);
 
         let skip_reason = if status != "applied" {
             Some(format!("status_not_applied:{status}"))
@@ -729,6 +866,47 @@ pub fn build_route_policy_rule_loadout(
             Some(format!(
                 "blocked_by_risk_classifier:{}",
                 prefer_profile.as_deref().unwrap_or("missing")
+            ))
+        } else if !risk.required_profiles.is_empty()
+            && prefer_profile.as_deref().is_some_and(|profile| {
+                !risk
+                    .required_profiles
+                    .iter()
+                    .any(|required| required == profile)
+            })
+        {
+            // tachi#1675 PR4, BUG-2 (codex review finding 2): a `required`
+            // classification RESTRICTS the admissible set — at high/critical
+            // risk the classifier is naming who may run at all, not who gets a
+            // bonus. Skipping only `blocked` profiles here let a rule spend its
+            // +35 on a profile the hard gate had already removed, which is how
+            // an excluded profile could out-score a required one. Same reason
+            // string the projection's gate uses
+            // (`agent_eval::projection::REASON_NOT_REQUIRED`), so both halves
+            // of the gate speak one vocabulary.
+            Some(format!(
+                "not_required_for_risk_class:{}",
+                prefer_profile.as_deref().unwrap_or("missing")
+            ))
+        } else if evidence_source != Some(ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER) {
+            // tachi#1675 PR4, BUG-1: the LAST surviving `/eval` -> routing
+            // policy path. `tachi_tune(action='route_proposals')` still mines
+            // `/eval` memory, and an approved proposal still lands in
+            // `ROUTE_POLICY_RULE_NS` via `route_apply` — so without this gate
+            // the retired evidence base kept steering the flipped recommend
+            // surface through a +35 score bonus, one human approval removed.
+            // The refusal is here, at the moment policy enters the DECISION,
+            // rather than at proposal mint/apply: mint and apply keep their
+            // reviewable human-notes value (and their identity/CAS/drift
+            // discipline), while nothing they produce can score a route again
+            // until it is mined from the ledger.
+            //
+            // Evaluated last so a rule that also fails a structural filter
+            // still reports the more specific reason; a rule that clears every
+            // structural filter cannot apply on retired evidence.
+            Some(format!(
+                "{RETIRED_EVIDENCE_SOURCE_SKIP_REASON}:{}",
+                evidence_source.unwrap_or("undeclared")
             ))
         } else {
             None
@@ -1254,8 +1432,24 @@ mod tests {
             failed_eval_row(executor.name),
         ];
 
-        let executor_candidate = score_profile_candidate(executor, &risk, &rows, &[], &[], &[]);
-        let competitor_candidate = score_profile_candidate(competitor, &risk, &[], &[], &[], &[]);
+        let executor_candidate = score_profile_candidate(
+            executor,
+            &risk,
+            &rows,
+            &[],
+            &[],
+            &[],
+            RouteEvidenceSource::LiveEvalMemory,
+        );
+        let competitor_candidate = score_profile_candidate(
+            competitor,
+            &risk,
+            &[],
+            &[],
+            &[],
+            &[],
+            RouteEvidenceSource::LiveEvalMemory,
+        );
 
         assert_eq!(executor_candidate.failure_count, 3);
         assert!(
@@ -1263,6 +1457,98 @@ mod tests {
             "role-correct executor ({}) must stay above role-wrong competitor ({})",
             executor_candidate.score,
             competitor_candidate.score
+        );
+    }
+
+    /// tachi#1675 PR4 / design D7: on the ledger path a candidate with no
+    /// evidence says exactly that (`no_ledger_evidence`) and NEVER
+    /// `baseline_mbit_fit` — the #1202 ruling demoted MBIT to derived evidence,
+    /// so "the card fits" is not a routing ground. The legacy `/eval`-memory
+    /// path keeps its own fallback, which is why the source is threaded rather
+    /// than the string simply deleted.
+    ///
+    /// A risk with NO reasons and NO role-matching task type is the point: it
+    /// makes EVERY profile a zero-signal candidate, so the fallback is what is
+    /// under test rather than an incidental scoring path.
+    #[test]
+    fn the_ledger_path_never_falls_back_to_a_baseline_mbit_fit() {
+        let risk = DispatchRisk {
+            task_type: "unknown_request".to_string(),
+            risk: "medium".to_string(),
+            reasons: Vec::new(),
+            required_profiles: Vec::new(),
+            blocked_profiles: Vec::new(),
+        };
+        let loadout = RoutePolicyRuleLoadout {
+            namespace: ROUTE_POLICY_RULE_NS,
+            min_samples: MIN_ROUTE_POLICY_RULE_SAMPLES,
+            applied: Vec::new(),
+            skipped: Vec::new(),
+        };
+
+        let ledger = recommend_dispatch_profile_candidates(
+            &risk,
+            &[],
+            &[],
+            &[],
+            &loadout,
+            RouteEvidenceSource::DecisionFactLedger,
+            |_| Ok(Vec::new()),
+        )
+        .expect("ledger-sourced candidates");
+        assert!(
+            !ledger.is_empty(),
+            "the profile set must not be empty or this proves nothing"
+        );
+        for candidate in &ledger {
+            assert!(
+                !candidate
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == BASELINE_MBIT_FIT_REASON),
+                "{} reported a baseline MBIT fit on the ledger path: {:?}",
+                candidate.profile,
+                candidate.reasons
+            );
+            assert!(
+                candidate
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == NO_LEDGER_EVIDENCE_REASON),
+                "{} must name the absence of ledger evidence: {:?}",
+                candidate.profile,
+                candidate.reasons
+            );
+        }
+
+        // The legacy path is unchanged — the flip moved which evidence is
+        // read, it did not silently rewrite the old path's vocabulary.
+        let legacy = recommend_dispatch_profile_candidates(
+            &risk,
+            &[],
+            &[],
+            &[],
+            &loadout,
+            RouteEvidenceSource::LiveEvalMemory,
+            |_| Ok(Vec::new()),
+        )
+        .expect("memory-sourced candidates");
+        assert!(legacy.iter().all(|candidate| candidate
+            .reasons
+            .iter()
+            .any(|reason| reason == BASELINE_MBIT_FIT_REASON)));
+    }
+
+    /// The declared source is one vocabulary, not two spellings.
+    #[test]
+    fn evidence_sources_declare_stable_names() {
+        assert_eq!(
+            RouteEvidenceSource::DecisionFactLedger.as_str(),
+            "decision_fact_ledger"
+        );
+        assert_eq!(
+            RouteEvidenceSource::LiveEvalMemory.as_str(),
+            "live_eval_memory"
         );
     }
 
@@ -1283,9 +1569,24 @@ mod tests {
             verified_eval_row(executor.name),
         ];
 
-        let executor_candidate =
-            score_profile_candidate(executor, &risk, &executor_rows, &[], &[], &[]);
-        let explorer_candidate = score_profile_candidate(explorer, &risk, &[], &[], &[], &[]);
+        let executor_candidate = score_profile_candidate(
+            executor,
+            &risk,
+            &executor_rows,
+            &[],
+            &[],
+            &[],
+            RouteEvidenceSource::LiveEvalMemory,
+        );
+        let explorer_candidate = score_profile_candidate(
+            explorer,
+            &risk,
+            &[],
+            &[],
+            &[],
+            &[],
+            RouteEvidenceSource::LiveEvalMemory,
+        );
 
         assert!(
             explorer_candidate.score > executor_candidate.score,

@@ -8,7 +8,7 @@ use std::path::Path;
 mod fixture;
 mod live;
 mod mirror;
-mod projection;
+pub(crate) mod projection;
 
 pub(crate) use self::fixture::*;
 pub(crate) use self::live::*;
@@ -16,6 +16,17 @@ pub(crate) use tachi_dispatch::eval::{
     aggregate_performance_matrix, aggregate_scores, aggregate_subagent_scores,
     AgentPerformanceMatrixRow, CompletionStatus, EvalRow, SubagentEvalRow, TaskType,
 };
+
+/// What `/eval/YYYY-MM-DD` memory entries are FOR after tachi#1675 PR4's
+/// evidence cutover: readable notes about a day's runs, not the routing
+/// evidence base. Declared on every response that serves them so a consumer
+/// cannot keep reading them as routing truth by habit.
+pub(crate) const EVAL_MEMORY_EVIDENCE_ROLE: &str = "human_readable_notes";
+
+pub(crate) const EVAL_MEMORY_RETIREMENT_NOTE: &str =
+    "/eval memory entries are retained as human-readable notes; routing evidence moved to the \
+     decision-fact ledger (kckylechen1/tachi#1675 PR4) — read it via \
+     tachi_agent_eval(action='route_projection')";
 
 pub(crate) async fn handle_agent_eval(
     _server: &MemoryServer,
@@ -53,11 +64,13 @@ pub(crate) async fn handle_agent_eval(
             self::mirror::handle_get(_server, get)
         }
         // tachi#1675 PR2 (design D6 phase 1): the ledger-backed routing
-        // projection. It runs in PARALLEL with the `/eval`-memory path above
-        // — `tachi_orchestrator(recommend)` still sources from memory, and
-        // flipping it is PR4's explicitly versioned cutover. The payload is
-        // optional: with none, the projection answers for an unclassified
-        // task over the default window.
+        // projection — and since PR4 (phase 2) the CANONICAL routing evidence
+        // base: the dispatch-profile `recommend` path reads this same pipeline
+        // instead of `/eval` memory entries, under an explicit
+        // `policy_version` bump. The `/eval` actions below are retained as
+        // read-only human-readable notes (phase 3), never as routing evidence.
+        // The payload is optional: with none, the projection answers for an
+        // unclassified task over the default window.
         "route_projection" => self::projection::handle_route_projection(
             _server,
             params.projection.unwrap_or_default(),
@@ -87,6 +100,29 @@ pub(crate) async fn handle_agent_eval(
             }))
             .map_err(|e| format!("serialize aggregate: {e}"))
         }
+        // tachi#1675 PR4 (design D6 phase 3): `/eval/YYYY-MM-DD` memory
+        // entries are retired as ROUTING evidence — `recommend` no longer
+        // reads them — and retained as read-only human-readable notes. These
+        // two actions keep serving them unchanged (deleting a read surface
+        // that answers "what did the day's eval notes say" would destroy
+        // history, not retire a role), with the demotion declared in the
+        // payload so no consumer keeps treating them as the routing base.
+        //
+        // Two `/eval` readers remain: `dispatch_profile::cards` renders
+        // per-profile eval FEEDBACK on a card, and `tune_ops::route_policy`
+        // simulates and drafts route-policy PROPOSALS from it.
+        //
+        // The route-policy one WAS a routing input — human review and apply do
+        // not launder the evidence base, they only put a person between it and
+        // `ROUTE_POLICY_RULE_NS`, whose rules then bought a +35 score bonus on
+        // this very surface (codex review of PR4, BUG-1). It is now closed
+        // where policy enters the decision:
+        // `build_route_policy_rule_loadout` refuses any rule that does not
+        // declare `evidence.source = "decision_fact_ledger"`, so a rule mined
+        // from `/eval` is reviewable, applyable, audited — and inert. Mining
+        // proposals from the ledger instead is the follow-up that would make
+        // the chain live again; it is a feature, not a rider on this cutover.
+        // The card-feedback reader is display-only and feeds no route score.
         "aggregate_live" => {
             let rows = load_live_eval_rows(_server, capped_eval_limit(params.limit))?;
             let scores = aggregate_scores(&rows);
@@ -98,6 +134,9 @@ pub(crate) async fn handle_agent_eval(
                 "scores": scores,
                 "subagent_scores": subagent_scores,
                 "performance_matrix": performance_matrix,
+                "evidence_role": EVAL_MEMORY_EVIDENCE_ROLE,
+                "routing_evidence": false,
+                "note": EVAL_MEMORY_RETIREMENT_NOTE,
             }))
             .map_err(|e| format!("serialize aggregate_live: {e}"))
         }
@@ -112,6 +151,9 @@ pub(crate) async fn handle_agent_eval(
                 "scores": scores,
                 "subagent_scores": subagent_scores,
                 "performance_matrix": performance_matrix,
+                "evidence_role": EVAL_MEMORY_EVIDENCE_ROLE,
+                "routing_evidence": false,
+                "note": EVAL_MEMORY_RETIREMENT_NOTE,
             }))
             .map_err(|e| format!("serialize telemetry: {e}"))
         }
