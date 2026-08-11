@@ -31,21 +31,18 @@ pub(crate) enum KeyClass {
     Infra,
 }
 
-/// Data-only description of the documented, anti-SSRF-safe probe target for
-/// one provider family (#1680/D6 groundwork). This PR does not wire probing
-/// to these keys — it only records the same 3 hosts already hardcoded in
-/// `tachi_llm::llm::auth_probe::ProbeTarget` (DeepSeek, SiliconFlow, Zai) so a
-/// later PR can drive `auth_probe` from the registry instead of a duplicate
-/// hardcoded table. `endpoint` mirrors `auth_probe`'s own optionality: the
-/// Zai/BigModel family has two recognized hosts and no documented
-/// non-generating GET endpoint today, so its descriptor carries `None`.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ProbeDescriptor {
-    #[allow(dead_code)]
-    pub(crate) host: &'static str,
-    #[allow(dead_code)]
-    pub(crate) endpoint: Option<&'static str>,
-}
+/// The documented, anti-SSRF-safe probe target for one provider family.
+///
+/// #1680/D6: this used to be a second hardcoded copy of the host/endpoint
+/// strings that `tachi_llm`'s `auth_probe` already had. It is now the same
+/// table — the registry's rows reference `tachi_llm`'s compile-time
+/// descriptors. The direction is forced by the crate graph (`tachi-llm` must
+/// never depend on `tachi-server`) and is the right one anyway: the strings
+/// live next to the code that dials them, and what the registry contributes is
+/// the part it owns — *which env-var names* are probeable, and as which family.
+/// `status_health::auth_probe_descriptor_for_env_name` is that lookup;
+/// `registry_probe_targets_match_the_probe_table` pins the two against drift.
+pub(crate) type ProbeDescriptor = tachi_llm::ProviderProbeDescriptor;
 
 pub(crate) struct ApiKeyDef {
     pub(crate) key: &'static str,
@@ -62,9 +59,11 @@ pub(crate) struct ApiKeyDef {
     /// #1680 D2's `fp1` and D5's account rows are keyed by; reconcile reads
     /// it through `status_health::provider_kind_for_env_name`.
     pub(crate) provider_kind: &'static str,
-    /// `Some` only for the 3 families `auth_probe` already probes today.
-    #[allow(dead_code)]
-    pub(crate) probe: Option<ProbeDescriptor>,
+    /// `Some` only for the families `auth_probe` has an owner-verified,
+    /// non-generating probe target for. Read through
+    /// `status_health::auth_probe_descriptor_for_env_name`, which is what makes
+    /// the probe surface registry-driven rather than a second host list.
+    pub(crate) probe: Option<&'static ProbeDescriptor>,
 }
 
 pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
@@ -99,10 +98,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         aliases: &["EXTRACT_API_KEY", "SUMMARY_API_KEY"],
         class: KeyClass::ModelApi,
         provider_kind: "siliconflow",
-        probe: Some(ProbeDescriptor {
-            host: "api.siliconflow.cn",
-            endpoint: Some("https://api.siliconflow.cn/v1/models"),
-        }),
+        probe: Some(&tachi_llm::SILICONFLOW_AUTH_PROBE),
     },
     // #1680/D2: `REASONING_API_KEY` used to sit in this alias list as well,
     // which made it the one env-var name in the registry that resolved to two
@@ -128,10 +124,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         aliases: &["DISTILL_API_KEY"],
         class: KeyClass::ModelApi,
         provider_kind: "deepseek",
-        probe: Some(ProbeDescriptor {
-            host: "api.deepseek.com",
-            endpoint: Some("https://api.deepseek.com/models"),
-        }),
+        probe: Some(&tachi_llm::DEEPSEEK_AUTH_PROBE),
     },
     ApiKeyDef {
         key: "DISTILL_API_KEY",
@@ -155,12 +148,9 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         provider_kind: "zai",
         // auth_probe recognizes two hosts for this family
         // (open.bigmodel.cn, api.z.ai) with no documented non-generating GET
-        // endpoint for either; this descriptor picks the current primary
-        // domain (api.z.ai) as data only — no endpoint to probe yet.
-        probe: Some(ProbeDescriptor {
-            host: "api.z.ai",
-            endpoint: None,
-        }),
+        // endpoint for either; this names the current primary domain, whose
+        // descriptor carries `endpoint: None` — recognized, never probed.
+        probe: Some(&tachi_llm::ZAI_AUTH_PROBE),
     },
     // #1355: the grok/xai opencode lane provider must be a recognized
     // provider-key name so an unlocked-vault xAI secret is injected into the

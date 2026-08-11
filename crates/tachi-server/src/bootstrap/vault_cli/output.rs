@@ -211,6 +211,16 @@ pub(super) fn vault_get_output(
     ))
 }
 
+/// Turn one `tachi vault record-key-result` / `vault_record_key_result`
+/// report into the row its caller then persists.
+///
+/// #1680 D6: this function used to carry its own copy of the status ladder,
+/// cooldown arithmetic, and per-outcome field rules, which had already drifted
+/// from the LLM client's copy. It is now an adapter over the single writer,
+/// [`memcore::vault::health::record_key_outcome`]. The CLI/MCP wire contract
+/// (arguments in, `VaultKeyHealth` out) is unchanged; what the row now also
+/// carries is the evidence kind — `SelfReported`, because a caller told us
+/// this outcome rather than Tachi observing it.
 pub(super) fn build_key_health_result(
     store: &memcore::MemoryStore,
     logical_name: &str,
@@ -220,58 +230,28 @@ pub(super) fn build_key_health_result(
     retry_after_secs: Option<u64>,
     reason: Option<&str>,
 ) -> Result<memcore::vault::VaultKeyHealth, Box<dyn std::error::Error>> {
-    let now = chrono::Utc::now();
-    let mut health = store
+    use memcore::vault::health::{record_key_outcome, EvidenceKind, TypedOutcome};
+
+    let existing = store
         .vault_get_key_health(logical_name, key_id)
-        .map_err(|e| format!("vault_get_key_health: {e}"))?
-        .unwrap_or_else(|| memcore::vault::VaultKeyHealth {
-            logical_name: logical_name.to_string(),
-            key_id: key_id.to_string(),
-            ..memcore::vault::VaultKeyHealth::default()
-        });
-    let outcome = outcome.map(|value| value.to_ascii_lowercase());
-    health.last_attempt = Some(now.to_rfc3339());
-    health.updated_at = now.to_rfc3339();
-    if status_code == Some(429) || matches!(outcome.as_deref(), Some("rate_limited" | "cooldown")) {
-        let cooldown = retry_after_secs.unwrap_or(60).clamp(1, 3600);
-        health.status = "rate_limited".to_string();
-        health.cooldown_until =
-            Some((now + chrono::Duration::seconds(cooldown as i64)).to_rfc3339());
-        health.last_error = reason
+        .map_err(|e| format!("vault_get_key_health: {e}"))?;
+    let outcome = TypedOutcome::classify(status_code, outcome, retry_after_secs);
+    // The one reason default that is this channel's own: an unclassified
+    // report names the status code it came with.
+    let reason = match outcome {
+        TypedOutcome::Error => reason
             .map(str::to_string)
-            .or_else(|| Some(format!("rate limited; retry after {cooldown}s")));
-        health.error_count += 1;
-    } else if matches!(status_code, Some(401 | 403))
-        || matches!(outcome.as_deref(), Some("auth_failed"))
-    {
-        health.status = "auth_failed".to_string();
-        health.auth_failed = true;
-        health.cooldown_until = None;
-        health.last_error = reason
-            .map(str::to_string)
-            .or_else(|| Some("auth failure".to_string()));
-        health.error_count += 1;
-    } else if matches!(outcome.as_deref(), Some("exhausted")) {
-        health.status = "exhausted".to_string();
-        health.last_error = reason
-            .map(str::to_string)
-            .or_else(|| Some("key exhausted".to_string()));
-        health.error_count += 1;
-    } else if status_code.is_some_and(|code| (200..300).contains(&code))
-        || matches!(outcome.as_deref(), Some("success" | "ok"))
-    {
-        health.status = "ok".to_string();
-        health.auth_failed = false;
-        health.cooldown_until = None;
-        health.last_success = Some(now.to_rfc3339());
-        health.last_error = None;
-        health.error_count = 0;
-    } else {
-        health.status = "error".to_string();
-        health.last_error = reason
-            .map(str::to_string)
-            .or_else(|| status_code.map(|code| format!("provider returned HTTP {code}")));
-        health.error_count += 1;
-    }
-    Ok(health)
+            .or_else(|| status_code.map(|code| format!("provider returned HTTP {code}"))),
+        _ => reason.map(str::to_string),
+    };
+    Ok(record_key_outcome(
+        existing.as_ref(),
+        logical_name,
+        key_id,
+        outcome,
+        EvidenceKind::SelfReported,
+        reason.as_deref(),
+        chrono::Utc::now(),
+    )
+    .health)
 }

@@ -23,6 +23,12 @@ pub mod apply;
 /// admin feature — a failure no default-feature build can see.
 #[cfg(feature = "admin")]
 pub mod fingerprint;
+/// The single writer for [`VaultKeyHealth`] (tachi#1680 D6): one outcome
+/// vocabulary, one row transition, and the evidence kind that says whether an
+/// outcome was probed or self-reported. Every channel that used to build a
+/// health row by hand goes through it.
+#[cfg(feature = "admin")]
+pub mod health;
 
 use serde::{Deserialize, Serialize};
 

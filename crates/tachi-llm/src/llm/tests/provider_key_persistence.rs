@@ -297,3 +297,59 @@ async fn provider_key_health_reload_clears_local_cooldown_on_external_success() 
         .find(|status| status.logical_name == KEY)
         .is_some_and(|status| status.available_keys == 2));
 }
+
+/// #1680 disc-4, end to end through the client: an outcome names exactly one
+/// pool member. A 401, a 403, or a 429 reported for `..._2` must leave the
+/// sibling row `..._1` byte-identical — same status, same counters, same
+/// timestamps — and must never conjure a third row. The writer cannot express
+/// a member it was not handed, and this proves the client hands it the right
+/// one.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_member_outcome_never_reaches_its_sibling() {
+    const KEY: &str = "TACHI_TEST_ONLY_API_KEY_SIBLING_ISOLATION";
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+    let temp = tempfile::tempdir().expect("temp vault db");
+    let db_path = temp.path().join("vault.db");
+    let client = LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");
+    let sibling = format!("{KEY}_1");
+    let reported = format!("{KEY}_2");
+
+    let healthy = client.record_provider_key_result(KEY, &sibling, Some(200), None, None, None);
+    assert_eq!(healthy.status, HEALTH_OK);
+    let sibling_before = serde_json::to_string(&healthy).expect("serialize sibling row");
+
+    for (status_code, expected_status) in [
+        (401, HEALTH_AUTH_FAILED),
+        (403, HEALTH_AUTH_FAILED),
+        (429, HEALTH_RATE_LIMITED),
+    ] {
+        let hit = client.record_provider_key_result(
+            KEY,
+            &reported,
+            Some(status_code),
+            None,
+            Some(30),
+            Some("provider said so"),
+        );
+        assert_eq!(hit.logical_name, KEY);
+        assert_eq!(hit.key_id, reported);
+        assert_eq!(hit.status, expected_status, "HTTP {status_code}");
+
+        let members = client
+            .provider_health_memory_snapshot()
+            .remove(KEY)
+            .expect("pool health");
+        assert_eq!(
+            members.len(),
+            2,
+            "HTTP {status_code} for {reported} must not create a row for anyone else"
+        );
+        assert_eq!(
+            serde_json::to_string(members.get(&sibling).expect("sibling row")).expect("serialize"),
+            sibling_before,
+            "HTTP {status_code} for {reported} must leave {sibling} untouched"
+        );
+    }
+}

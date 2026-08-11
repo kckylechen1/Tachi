@@ -145,6 +145,27 @@ pub(crate) fn family_env_names_for_env_name(name: &str) -> Option<Vec<&'static s
     })
 }
 
+/// The documented authentication-probe target for an admitted env-var name,
+/// or `None` when the name is unknown to the registry or its family has no
+/// owner-verified, non-generating probe endpoint (#1680 D6).
+///
+/// This is the view that makes probing registry-driven: a caller holding a
+/// vault logical name asks the registry "may this be probed, and as what",
+/// and hands the answer to `tachi_llm`'s
+/// `LlmClient::probe_member_auth_and_record`. The *hosts* stay compile-time
+/// constants in `tachi_llm` — widening what a credential-bearing request may
+/// dial is a code change in the module that dials it, never a registry edit
+/// and never a DB write. What the registry decides is only which names are in
+/// scope, which is exactly the half it owns.
+///
+/// Alias names resolve through their family, so probing
+/// `EXTRACT_API_KEY` probes SiliconFlow, as it should.
+pub(crate) fn auth_probe_descriptor_for_env_name(
+    name: &str,
+) -> Option<&'static tachi_llm::ProviderProbeDescriptor> {
+    registry_def_for_env_name(name).and_then(|def| def.probe)
+}
+
 /// The single registry lookup the name-keyed views above share: primary-key
 /// match first (never shadowed by another entry that merely lists the name as
 /// an alias), then the alias tables.

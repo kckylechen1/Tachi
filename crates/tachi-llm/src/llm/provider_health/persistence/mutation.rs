@@ -11,32 +11,75 @@ impl super::super::super::LlmClient {
             .cloned()
     }
 
-    fn with_key_health(
+    /// The one place this client turns an outcome into a `vault_key_health`
+    /// row (#1680 D6). The row transition itself belongs to
+    /// [`memcore::vault::health::record_key_outcome`] — the single writer all
+    /// channels share; what stays here is the in-process bookkeeping only this
+    /// client has: the ephemeral `Instant` cooldown mirror, the availability
+    /// snapshot, and the debounced persist.
+    ///
+    /// `evidence` is never inferred: the invocation path and the caller-facing
+    /// `record_provider_key_result` are [`EvidenceKind::SelfReported`] (a
+    /// consumer of the key describing its own usage), while the auth probe —
+    /// a deliberate request Tachi made and read itself — is
+    /// [`EvidenceKind::Probed`].
+    pub(in crate::llm) fn apply_key_outcome(
         &self,
-        logical_name: &str,
-        key_id: &str,
-        mutator: impl FnOnce(&mut VaultKeyHealth),
-    ) {
+        selected: &SelectedProviderSecret,
+        outcome: TypedOutcome,
+        evidence: EvidenceKind,
+        reason: Option<&str>,
+    ) -> VaultKeyHealth {
         let now = Self::now_utc();
-        let now_utc = now.to_rfc3339();
         let mut state = self
             .provider_state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let persisted = {
-            let health = state.get_or_insert_health(logical_name, key_id);
-            mutator(health);
-            health.last_attempt = Some(now_utc.clone());
-            health.updated_at = now_utc;
-            health.clone()
-        };
-        state.set_health_snapshot(
-            logical_name,
-            key_id,
-            ProviderHealthSnapshot::from_health_parts(&persisted, Some(now), None),
+        let existing = state
+            .health
+            .get(&selected.logical_name)
+            .and_then(|members| members.get(&selected.key_id))
+            .cloned();
+        let write = memcore::vault::health::record_key_outcome(
+            existing.as_ref(),
+            &selected.logical_name,
+            &selected.key_id,
+            outcome,
+            evidence,
+            reason,
+            now,
+        );
+
+        if let Some(cooldown_until) = write.cooldown_until {
+            let seconds = (cooldown_until - now).num_seconds().max(0) as u64;
+            state.set_cooldown(
+                &selected.logical_name,
+                &selected.key_id,
+                Instant::now() + Duration::from_secs(seconds),
+            );
+        } else if write.clear_cooldown {
+            state.remove_cooldown(&selected.logical_name, &selected.key_id);
+        }
+
+        let persisted = write.health.clone();
+        // A non-destructive outcome must not drop a cooldown the row still
+        // carries: when this write did not set one, the snapshot keeps
+        // reading it off the row rather than asserting "no cooldown".
+        let snapshot_cooldown = write.cooldown_until.or_else(|| {
+            persisted
+                .cooldown_until
+                .as_deref()
+                .and_then(Self::parse_timestamp)
+        });
+        state.set_health_entry_with_snapshot(
+            selected.logical_name.clone(),
+            selected.key_id.clone(),
+            write.health,
+            ProviderHealthSnapshot::from_health_parts(&persisted, Some(now), snapshot_cooldown),
         );
         drop(state);
         self.persist_key_health(&persisted);
+        persisted
     }
 
     pub(in crate::llm) fn mark_secret_auth_failed(
@@ -44,43 +87,21 @@ impl super::super::super::LlmClient {
         selected: &SelectedProviderSecret,
         reason: Option<&str>,
     ) {
-        self.with_key_health(&selected.logical_name, &selected.key_id, |health| {
-            health.status = HEALTH_AUTH_FAILED.to_string();
-            health.auth_failed = true;
-            health.disabled = false;
-            health.cooldown_until = None;
-            health.last_error = reason.map(|value| value.to_string());
-            health.error_count += 1;
-        });
+        self.apply_key_outcome(
+            selected,
+            TypedOutcome::AuthFailed,
+            EvidenceKind::SelfReported,
+            reason,
+        );
     }
 
     pub(in crate::llm) fn mark_secret_success(&self, selected: &SelectedProviderSecret) {
-        let now = Self::now_utc();
-        let now_utc = now.to_rfc3339();
-        let mut state = self
-            .provider_state
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let persisted = {
-            let health = state.get_or_insert_health(&selected.logical_name, &selected.key_id);
-            health.status = HEALTH_OK.to_string();
-            health.auth_failed = false;
-            health.last_success = Some(now_utc.clone());
-            health.last_attempt = Some(now_utc.clone());
-            health.last_error = None;
-            health.error_count = 0;
-            health.cooldown_until = None;
-            health.updated_at = now_utc;
-            health.clone()
-        };
-        state.remove_cooldown(&selected.logical_name, &selected.key_id);
-        state.set_health_snapshot(
-            &selected.logical_name,
-            &selected.key_id,
-            ProviderHealthSnapshot::from_health_parts(&persisted, Some(now), None),
+        self.apply_key_outcome(
+            selected,
+            TypedOutcome::Success,
+            EvidenceKind::SelfReported,
+            None,
         );
-        drop(state);
-        self.persist_key_health(&persisted);
     }
 
     pub(in crate::llm) fn mark_secret_rate_limited(
@@ -88,39 +109,20 @@ impl super::super::super::LlmClient {
         selected: &SelectedProviderSecret,
         retry_after: Option<u64>,
     ) {
-        let now = Self::now_utc();
-        let cooldown = retry_after.unwrap_or(60).clamp(1, 3600);
-        let cooldown_until = now + chrono::Duration::seconds(cooldown as i64);
-        let now_utc = now.to_rfc3339();
-        let until = Instant::now() + Duration::from_secs(cooldown);
-        let mut state = self
-            .provider_state
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.set_cooldown(&selected.logical_name, &selected.key_id, until);
-        let persisted = {
-            let health = state.get_or_insert_health(&selected.logical_name, &selected.key_id);
-            health.status = HEALTH_RATE_LIMITED.to_string();
-            health.cooldown_until = Some(cooldown_until.to_rfc3339());
-            health.last_attempt = Some(now_utc.clone());
-            health.last_error = Some(format!("rate limited; retry after {cooldown}s"));
-            health.error_count += 1;
-            health.updated_at = now_utc;
-            health.clone()
-        };
-        state.set_health_snapshot(
-            &selected.logical_name,
-            &selected.key_id,
-            ProviderHealthSnapshot::from_health_parts(&persisted, Some(now), Some(cooldown_until)),
+        self.apply_key_outcome(
+            selected,
+            TypedOutcome::RateLimited {
+                retry_after_secs: retry_after,
+            },
+            EvidenceKind::SelfReported,
+            None,
         );
-        drop(state);
         tracing::warn!(
             "[provider] key {} for {} is rate-limited; cooling down for {}s",
             selected.key_id,
             selected.logical_name,
-            cooldown
+            memcore::vault::health::rate_limit_cooldown_secs(retry_after)
         );
-        self.persist_key_health(&persisted);
     }
 
     pub(in crate::llm) fn mark_secret_exhausted(
@@ -128,16 +130,12 @@ impl super::super::super::LlmClient {
         selected: &SelectedProviderSecret,
         reason: Option<&str>,
     ) {
-        self.with_key_health(&selected.logical_name, &selected.key_id, |health| {
-            health.status = HEALTH_EXHAUSTED.to_string();
-            health.auth_failed = false;
-            health.disabled = false;
-            health.cooldown_until = None;
-            health.last_error = reason
-                .map(str::to_string)
-                .or_else(|| Some("key exhausted".to_string()));
-            health.error_count += 1;
-        });
+        self.apply_key_outcome(
+            selected,
+            TypedOutcome::Exhausted,
+            EvidenceKind::SelfReported,
+            reason,
+        );
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -159,6 +157,12 @@ impl super::super::super::LlmClient {
         }
     }
 
+    /// Test scaffold, not a fourth writer (#1680 D6). The two `expire_*`
+    /// helpers forge a row *in the past* — an already-elapsed cooldown, an
+    /// auth failure older than the retry TTL — which is precisely the one
+    /// thing `record_key_outcome` cannot express: every write it makes is
+    /// stamped `now`. They stay hand-written for that reason, and they are
+    /// compiled out of production builds.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn expire_provider_key_cooldown_for_tests(&self, logical_name: &str, key_id: &str) {
@@ -243,29 +247,35 @@ impl super::super::super::LlmClient {
             key_id: key_id.to_string(),
             value: String::new(),
         };
-        let outcome = outcome.map(|value| value.to_ascii_lowercase());
-        if status_code == Some(429)
-            || matches!(outcome.as_deref(), Some("rate_limited" | "cooldown"))
-        {
-            self.mark_secret_rate_limited(&selected, retry_after);
-        } else if matches!(outcome.as_deref(), Some("exhausted")) {
-            self.mark_secret_exhausted(&selected, reason.or(Some("key exhausted")));
-        } else if matches!(status_code, Some(401 | 403))
-            || matches!(outcome.as_deref(), Some("auth_failed"))
-        {
-            self.mark_secret_auth_failed(&selected, reason.or(Some("auth failure")));
-        } else if status_code.is_some_and(|code| (200..300).contains(&code))
-            || matches!(outcome.as_deref(), Some("success" | "ok"))
-        {
-            self.mark_secret_success(&selected);
-        } else {
-            self.with_key_health(logical_name, key_id, |health| {
-                health.status = "error".to_string();
-                health.last_error = reason
-                    .map(str::to_string)
-                    .or_else(|| status_code.map(|code| format!("provider returned HTTP {code}")));
-                health.error_count += 1;
-            });
+        // #1680 D6: the status/outcome ladder this function used to carry is
+        // now `TypedOutcome::classify`, shared with the CLI/MCP channel that
+        // had drifted from it. The wire contract is unchanged; the outcome is
+        // recorded as self-reported because the caller, not Tachi, observed it.
+        let outcome = TypedOutcome::classify(status_code, outcome, retry_after);
+        let reason = match outcome {
+            // Rate-limit reports keep their generated "retry after Ns" text
+            // rather than the caller's free-text reason, as before.
+            TypedOutcome::RateLimited { .. } => None,
+            TypedOutcome::Error => reason
+                .map(str::to_string)
+                .or_else(|| status_code.map(|code| format!("provider returned HTTP {code}"))),
+            _ => reason.map(str::to_string),
+        };
+        match outcome {
+            TypedOutcome::RateLimited { retry_after_secs } => {
+                self.mark_secret_rate_limited(&selected, retry_after_secs)
+            }
+            TypedOutcome::Exhausted => self.mark_secret_exhausted(&selected, reason.as_deref()),
+            TypedOutcome::AuthFailed => self.mark_secret_auth_failed(&selected, reason.as_deref()),
+            TypedOutcome::Success => self.mark_secret_success(&selected),
+            TypedOutcome::Error | TypedOutcome::Unknown => {
+                self.apply_key_outcome(
+                    &selected,
+                    outcome,
+                    EvidenceKind::SelfReported,
+                    reason.as_deref(),
+                );
+            }
         }
         self.read_key_health_entry(logical_name, key_id)
             .unwrap_or_else(|| VaultKeyHealth {

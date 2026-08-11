@@ -745,3 +745,80 @@ fn search_keys_get_their_own_provider_kinds() {
     assert_eq!(provider_kind_for_env_name("EXA_API_KEY"), Some("exa"));
     assert_eq!(provider_kind_for_env_name("TAVILY_API_KEY"), Some("tavily"));
 }
+
+/// #1680 D6: there is one probe-target table, and it is `tachi_llm`'s. The
+/// registry's job is to say *which env-var names* may be probed and as which
+/// family; the hosts and endpoints themselves stay compile-time constants in
+/// the module that dials them, because that is the anti-SSRF boundary. This
+/// pins the two halves against the drift the duplicated table used to invite.
+#[test]
+fn registry_probe_targets_match_the_probe_table() {
+    for def in API_KEY_DEFS {
+        let Some(descriptor) = def.probe else {
+            continue;
+        };
+        assert_eq!(
+            descriptor.provider_kind, def.provider_kind,
+            "{} points at a {} probe target",
+            def.key, descriptor.provider_kind
+        );
+        assert!(
+            tachi_llm::AUTH_PROBE_DESCRIPTORS.contains(descriptor),
+            "{} points at a descriptor outside the probe table",
+            def.key
+        );
+        assert_eq!(
+            tachi_llm::auth_probe_descriptor_for_host(descriptor.host),
+            Some(descriptor),
+            "{} names a host the probe table does not admit",
+            def.key
+        );
+    }
+
+    // The other direction: a host the probe table is willing to dial that no
+    // registry entry can reach would be an unreachable exception to the
+    // admission boundary.
+    for descriptor in tachi_llm::AUTH_PROBE_DESCRIPTORS {
+        assert!(
+            API_KEY_DEFS
+                .iter()
+                .any(|def| def.provider_kind == descriptor.provider_kind),
+            "probe table host {} belongs to no registry family",
+            descriptor.host
+        );
+    }
+}
+
+/// The probe surface is per env-var name, alias names included, and it is
+/// closed: a name the registry does not recognize, or a family with no
+/// documented non-generating endpoint, is never probeable.
+#[test]
+fn auth_probe_targets_resolve_by_env_name_and_refuse_everything_else() {
+    assert_eq!(
+        auth_probe_descriptor_for_env_name("DEEPSEEK_API_KEY").and_then(|probe| probe.endpoint),
+        Some("https://api.deepseek.com/models")
+    );
+    // An alias is another name for the same account, so it probes the same
+    // family.
+    assert_eq!(
+        auth_probe_descriptor_for_env_name("EXTRACT_API_KEY"),
+        auth_probe_descriptor_for_env_name("SILICONFLOW_API_KEY")
+    );
+    assert_eq!(
+        auth_probe_descriptor_for_env_name("SILICONFLOW_API_KEY").map(|probe| probe.provider_kind),
+        Some("siliconflow")
+    );
+    // Recognized family, no documented probe: probeable-by-name, never dialed.
+    assert_eq!(
+        auth_probe_descriptor_for_env_name("ZAI_API_KEY").map(|probe| probe.endpoint),
+        Some(None)
+    );
+    // Search credentials and unknown names have no probe target at all.
+    assert_eq!(auth_probe_descriptor_for_env_name("EXA_API_KEY"), None);
+    assert_eq!(auth_probe_descriptor_for_env_name("TAVILY_API_KEY"), None);
+    assert_eq!(
+        auth_probe_descriptor_for_env_name("NOT_A_PROVIDER_KEY"),
+        None
+    );
+    assert_eq!(auth_probe_descriptor_for_env_name(""), None);
+}

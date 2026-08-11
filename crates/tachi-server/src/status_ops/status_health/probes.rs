@@ -318,7 +318,10 @@ pub(super) async fn run_rotation_group_probes(
         let mut keys = Vec::new();
         for key_id in &source.members {
             let (status, message) = match values.get(key_id) {
-                Some(value) => probe_rotation_member(&logical_name, key_id, value.clone()).await,
+                Some(value) => {
+                    probe_rotation_member(global_db_path, &logical_name, key_id, value.clone())
+                        .await
+                }
                 None => (
                     "unavailable".to_string(),
                     Some(
@@ -361,6 +364,7 @@ pub(super) async fn run_rotation_group_probes(
 }
 
 async fn probe_rotation_member(
+    global_db_path: &Path,
     logical_name: &str,
     key_id: &str,
     value: String,
@@ -376,7 +380,7 @@ async fn probe_rotation_member(
         logical_name,
         vec![tachi_llm::ProviderSecret {
             key_id: key_id.to_string(),
-            value,
+            value: value.clone(),
         }],
     );
 
@@ -445,17 +449,118 @@ async fn probe_rotation_member(
                 Err(_) => Err("timed out after 20s".to_string()),
             }
         }
+        // #1680 D6: every logical key without a hardcoded *generating* probe
+        // lane above used to stop here at "unsupported". It now asks the
+        // registry whether this key's family has a documented, non-generating
+        // authentication endpoint, and probes this member by name if it does.
         _ => {
-            return (
-                "unsupported".to_string(),
-                Some("No live probe lane is registered for this logical key".to_string()),
-            );
+            return probe_member_auth_from_registry(global_db_path, logical_name, key_id, value)
+                .await
         }
     };
 
     match result {
         Ok(message) => ("ok".to_string(), Some(message)),
         Err(err) => classify_provider_probe_error(err),
+    }
+}
+
+/// Probe one named pool member through the registry's probe descriptor
+/// (#1680 D6), recording the verdict as that member's health with
+/// `EvidenceKind::Probed`.
+///
+/// This is the generalization D6 asked for: the auth probe used to be
+/// reachable only as "probe whichever credential the reasoning lane would
+/// pick", and is now callable for any `(logical_name, key_id)` whose family
+/// the registry declares probeable. Which names are in scope is the
+/// registry's decision; which hosts may be dialed remains a compile-time
+/// constant in `tachi_llm`'s probe table.
+///
+/// The client is vault-DB-backed on purpose: the probe records health, so it
+/// must both read this member's existing row (a probe reports on one member,
+/// it does not rebuild it from nothing) and persist the result. It writes
+/// `vault_key_health` and nothing else — account rows are `reconcile apply`'s
+/// alone.
+async fn probe_member_auth_from_registry(
+    global_db_path: &Path,
+    logical_name: &str,
+    key_id: &str,
+    value: String,
+) -> (String, Option<String>) {
+    let unsupported = || {
+        (
+            "unsupported".to_string(),
+            Some("No live probe lane is registered for this logical key".to_string()),
+        )
+    };
+    let Some(descriptor) = super::auth_probe_descriptor_for_env_name(logical_name) else {
+        return unsupported();
+    };
+
+    let client = match tachi_llm::LlmClient::new_with_vault_db(Some(global_db_path)) {
+        Ok(client) => client,
+        Err(err) => return ("failed".to_string(), Some(err)),
+    };
+    if let Err(err) = client.clear_provider_secrets() {
+        return ("failed".to_string(), Some(err));
+    }
+    client.set_provider_secret_pool(
+        logical_name,
+        vec![tachi_llm::ProviderSecret {
+            key_id: key_id.to_string(),
+            value,
+        }],
+    );
+
+    let (result, _health) = client
+        .probe_member_auth_and_record(descriptor, logical_name, key_id)
+        .await;
+    // Messages name the class and the count, never a provider response body or
+    // a model id — the probe receipt is deliberately body-free.
+    match result.auth_class {
+        tachi_llm::ProviderAuthProbeClass::AuthOk => (
+            "ok".to_string(),
+            Some(match result.model_count {
+                Some(count) => format!("auth probe ok; {count} model(s) visible"),
+                None => "auth probe ok".to_string(),
+            }),
+        ),
+        tachi_llm::ProviderAuthProbeClass::AuthFailed => (
+            "auth_failed".to_string(),
+            Some("auth probe: provider rejected this credential (HTTP 401/403)".to_string()),
+        ),
+        tachi_llm::ProviderAuthProbeClass::RateLimited => (
+            "rate_limited".to_string(),
+            Some("auth probe: provider throttled this credential (HTTP 429)".to_string()),
+        ),
+        tachi_llm::ProviderAuthProbeClass::ProviderExhausted => (
+            "failed".to_string(),
+            Some(
+                "auth probe: provider reports this credential out of quota (HTTP 402)".to_string(),
+            ),
+        ),
+        // Inconclusive: a request went out and came back saying nothing about
+        // the credential. Reported as a failed probe, recorded as evidence that
+        // changes no part of the health binding.
+        tachi_llm::ProviderAuthProbeClass::Transient
+        | tachi_llm::ProviderAuthProbeClass::RedirectRefused
+        | tachi_llm::ProviderAuthProbeClass::MalformedResponse
+        | tachi_llm::ProviderAuthProbeClass::UnexpectedStatus => (
+            "failed".to_string(),
+            Some(format!(
+                "auth probe inconclusive: {}",
+                serde_json::to_value(result.auth_class)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string())
+            )),
+        ),
+        tachi_llm::ProviderAuthProbeClass::CredentialUnavailable => (
+            "unavailable".to_string(),
+            Some("auth probe: no key material for this member".to_string()),
+        ),
+        tachi_llm::ProviderAuthProbeClass::MalformedConfiguration
+        | tachi_llm::ProviderAuthProbeClass::UnsupportedNoDocumentedProbe => unsupported(),
     }
 }
 

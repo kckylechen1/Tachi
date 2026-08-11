@@ -15,6 +15,11 @@ mod helpers;
 mod provider_health;
 mod rerank;
 
+pub use auth_probe::{
+    auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind,
+    ProviderProbeDescriptor, AUTH_PROBE_DESCRIPTORS, DEEPSEEK_AUTH_PROBE, SILICONFLOW_AUTH_PROBE,
+    ZAI_AUTH_PROBE, ZAI_BIGMODEL_AUTH_PROBE,
+};
 pub use chat_lanes::ReasoningOutcome;
 pub(crate) use circuit_breaker::{CircuitBreakerRegistry, LaneOutageTracker};
 pub use provider_health::ProviderSecret;

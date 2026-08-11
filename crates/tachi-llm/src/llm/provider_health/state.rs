@@ -256,19 +256,11 @@ impl ProviderState {
             .entry(logical_name.to_string())
             .or_default()
             .entry(key_id.to_string())
-            .or_insert_with(|| VaultKeyHealth {
-                logical_name: logical_name.to_string(),
-                key_id: key_id.to_string(),
-                status: HEALTH_OK.to_string(),
-                cooldown_until: None,
-                last_success: None,
-                last_attempt: None,
-                last_error: None,
-                error_count: 0,
-                auth_failed: false,
-                disabled: false,
-                metadata: "{}".to_string(),
-                updated_at: Utc::now().to_rfc3339(),
+            // #1680 D6: the fresh-row shape (including `metadata`) belongs to
+            // the single writer, not to a literal repeated per construction
+            // site.
+            .or_insert_with(|| {
+                memcore::vault::health::new_key_health(logical_name, key_id, Utc::now())
             })
     }
 

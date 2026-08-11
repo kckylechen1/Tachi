@@ -11,13 +11,16 @@ mod runtime_files;
 mod test_support;
 
 pub use llm::{
-    CompletionStatusV1, Generated, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
+    auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind, CompletionStatusV1,
+    Generated, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
     PersistedModelInvocationReceiptV1, ProviderAuthProbeClass, ProviderAuthProbeFamily,
     ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
-    ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderSecret, ReasoningOutcome,
-    RerankConfig, RerankProviderKind, LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
+    ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderProbeDescriptor, ProviderSecret,
+    ReasoningOutcome, RerankConfig, RerankProviderKind, AUTH_PROBE_DESCRIPTORS,
+    DEEPSEEK_AUTH_PROBE, LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
     PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE, PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE,
     RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
+    SILICONFLOW_AUTH_PROBE, ZAI_AUTH_PROBE, ZAI_BIGMODEL_AUTH_PROBE,
 };
 /// Test-only entry: pre-resolved pools cannot report [`VaultSourceAvailability`],
 /// so production materialization must use the durable-source entry above.
