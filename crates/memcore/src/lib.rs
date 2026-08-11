@@ -94,8 +94,17 @@ pub use db::dispatch_outcomes::{
 #[cfg(feature = "admin")]
 pub use db::eval_projection::{
     list_dispatch_eval_observations, list_eval_observations, list_mirror_eval_observations,
-    EvalAdjudicationFacts, EvalObservation, EvalRouteFacts, EvalSpine, ProfileAttributionBasis,
-    OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
+    policy_revision_census, EvalAdjudicationFacts, EvalObservation, EvalRouteFacts, EvalSpine,
+    PolicyRevisionCensus, ProfileAttributionBasis, OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
+};
+/// tachi#1675 PR3 (design D6): the replay half of the same read surface —
+/// the ledger folded forward from its append-only judgment log rather than
+/// read as current state. Required to agree canonically with
+/// [`list_eval_observations`] over the same window.
+#[cfg(feature = "admin")]
+pub use db::eval_replay::{
+    canonical_eval_observations, eval_observations_digest, replay_eval_observations, EvalReplay,
+    REPLAY_ORDERING_BASIS,
 };
 #[cfg(feature = "admin")]
 pub use db::exec_env::{
@@ -138,9 +147,10 @@ pub use db::outbox::{
 pub use db::route_eval::{
     get_eval_rubric_score, get_route_decision_by_dispatch_id, get_route_recommendation,
     insert_eval_rubric_score, insert_route_decision_idempotent, insert_route_recommendation,
-    EvalRubricScoreRow, NewEvalRubricScore, NewRouteDecision, NewRouteRecommendation,
-    RouteDecisionRow, RouteRecommendationRow, ASSIGNMENT_MODES, RUBRIC_CONFIDENCE_VALUES,
-    RUBRIC_DIMENSION_VALUES, RUBRIC_INDEPENDENCE_BASIS_VALUES, RUBRIC_SUBJECT_KINDS,
+    list_eval_rubric_scores, list_route_decisions, EvalRubricScoreRow, NewEvalRubricScore,
+    NewRouteDecision, NewRouteRecommendation, RouteDecisionRow, RouteRecommendationRow,
+    ASSIGNMENT_MODES, RUBRIC_CONFIDENCE_VALUES, RUBRIC_DIMENSION_VALUES,
+    RUBRIC_INDEPENDENCE_BASIS_VALUES, RUBRIC_SUBJECT_KINDS,
 };
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]

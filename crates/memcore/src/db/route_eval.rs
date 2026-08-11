@@ -257,6 +257,24 @@ pub fn get_route_decision_by_dispatch_id(
         .optional()?)
 }
 
+/// Every acceptance-moment decision row, ordered by `dispatch_id` for a
+/// deterministic read.
+///
+/// Added for the replay reader (tachi#1675 PR3), which binds route facts in
+/// Rust from a batched read instead of through the incremental resolver's
+/// SQL `LEFT JOIN`. Unbounded by design: this table holds at most one row per
+/// dispatch that ever accepted (`UNIQUE(dispatch_id)`), which is the same
+/// order of magnitude the joined path already scans, and a full replay is
+/// defined over the whole ledger rather than a window of it.
+pub fn list_route_decisions(conn: &Connection) -> Result<Vec<RouteDecisionRow>, MemoryError> {
+    let sql = format!("SELECT {ROUTE_DECISION_COLUMNS} FROM route_decisions ORDER BY dispatch_id");
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement
+        .query_map([], row_to_decision)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 // ─── eval_rubric_scores ─────────────────────────────────────────────────────
 
 pub const RUBRIC_DIMENSION_VALUES: &[&str] = &["pass", "concern", "fail", "not_assessed"];
@@ -466,6 +484,29 @@ pub fn get_eval_rubric_score(
             row_to_rubric_score,
         )
         .optional()?)
+}
+
+/// Every rubric row for one spine, ordered by `adjudication_id` for a
+/// deterministic read.
+///
+/// Added for the replay reader (tachi#1675 PR3): the incremental resolver
+/// looks a rubric row up per authoritative adjudication event, while replay
+/// folds the whole judgment stream and needs the companion rows in one pass.
+/// `UNIQUE(subject_kind, adjudication_id)` means the returned rows are keyed
+/// one-to-one by `adjudication_id` within a spine.
+pub fn list_eval_rubric_scores(
+    conn: &Connection,
+    subject_kind: &str,
+) -> Result<Vec<EvalRubricScoreRow>, MemoryError> {
+    let sql = format!(
+        "SELECT {EVAL_RUBRIC_SCORE_COLUMNS} FROM eval_rubric_scores \
+         WHERE subject_kind = ?1 ORDER BY adjudication_id"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement
+        .query_map(params![subject_kind], row_to_rubric_score)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 #[cfg(test)]

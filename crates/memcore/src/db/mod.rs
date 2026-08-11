@@ -12,6 +12,11 @@ mod doctor_probe;
 /// spines (design D1). Read-only — it owns the join, never the policy.
 #[cfg(feature = "admin")]
 pub mod eval_projection;
+/// tachi#1675 PR3: full replay of the same ledger by folding the append-only
+/// judgment log, ordered by `insertion_seq`. Must agree canonically with
+/// `eval_projection`'s incremental read (design D6).
+#[cfg(feature = "admin")]
+pub mod eval_replay;
 mod event_ledger;
 #[cfg(feature = "admin")]
 pub mod exec_env;
@@ -213,9 +218,10 @@ pub use recall_cache::{
 pub use route_eval::{
     get_eval_rubric_score, get_route_decision_by_dispatch_id, get_route_recommendation,
     insert_eval_rubric_score, insert_route_decision_idempotent, insert_route_recommendation,
-    EvalRubricScoreRow, NewEvalRubricScore, NewRouteDecision, NewRouteRecommendation,
-    RouteDecisionRow, RouteRecommendationRow, ASSIGNMENT_MODES, RUBRIC_CONFIDENCE_VALUES,
-    RUBRIC_DIMENSION_VALUES, RUBRIC_INDEPENDENCE_BASIS_VALUES, RUBRIC_SUBJECT_KINDS,
+    list_eval_rubric_scores, list_route_decisions, EvalRubricScoreRow, NewEvalRubricScore,
+    NewRouteDecision, NewRouteRecommendation, RouteDecisionRow, RouteRecommendationRow,
+    ASSIGNMENT_MODES, RUBRIC_CONFIDENCE_VALUES, RUBRIC_DIMENSION_VALUES,
+    RUBRIC_INDEPENDENCE_BASIS_VALUES, RUBRIC_SUBJECT_KINDS,
 };
 #[cfg(feature = "admin")]
 pub use sandbox::{
