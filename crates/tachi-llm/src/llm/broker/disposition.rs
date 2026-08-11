@@ -268,8 +268,10 @@ pub enum ProtocolViolation {
     /// A stream decoder rejected the byte sequence.
     #[serde(rename = "stream_decode")]
     StreamDecode {
-        /// Which decode rule was broken.
-        kind: StreamDecodeErrorKind,
+        /// Which decode rule was broken. Named `rule` because the variant's
+        /// serde payload lives beside the internal `kind` tag — a field named
+        /// `kind` would collide with the tag itself.
+        rule: StreamDecodeErrorKind,
     },
 }
 

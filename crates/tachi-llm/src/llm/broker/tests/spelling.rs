@@ -238,7 +238,7 @@ fn payload_bearing_enum_tags_match_their_fieldless_kind() {
             finish_reason: None,
         },
         ProtocolViolation::StreamDecode {
-            kind: StreamDecodeErrorKind::IllegalSequence,
+            rule: StreamDecodeErrorKind::IllegalSequence,
         },
     ];
     assert_eq!(violations.len(), ProtocolViolationKind::ALL.len());
