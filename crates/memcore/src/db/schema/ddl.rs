@@ -1104,6 +1104,120 @@ pub(super) const BASE_SCHEMA_CHUNKS: &[(SchemaScope, &str)] = &[
             ON mirror_eval_adjudications(eval_run_id, created_at);
 "#,
     ),
+    // route_recommendations
+    (
+        SchemaScope::Product,
+        r#"
+        -- tachi#1675 PR1: decision-fact ledger, NOT a terminal ledger — zero
+        -- execution/terminal-state columns live here (design D1). Captures
+        -- the ONLY moment a routing candidate set exists in memory: one row
+        -- per `handle_dispatch_recommendation` call (Seam A), append-only,
+        -- never deduplicated (every consult is a new fact, even a repeat
+        -- consult with identical content). `candidates` is the full scored
+        -- candidate array (profile/agent/score/reasons/...) verbatim;
+        -- `policy_source_revision` is the content-bearing route-policy
+        -- snapshot hash (`route_policy_source_revision`, reused not
+        -- reinvented) so a later replay can tell whether the active policy
+        -- has since changed underneath this recommendation.
+        CREATE TABLE IF NOT EXISTS route_recommendations (
+            recommendation_id      TEXT PRIMARY KEY,
+            task_type               TEXT,
+            risk                    TEXT NOT NULL DEFAULT 'unknown',
+            candidates              TEXT NOT NULL DEFAULT '[]',
+            recommended_profile     TEXT,
+            policy_source_revision  TEXT,
+            rows_considered         INTEGER NOT NULL DEFAULT 0,
+            occurred_at             TEXT NOT NULL DEFAULT '',
+            recorded_at             TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_route_recommendations_recorded_at
+            ON route_recommendations(recorded_at);
+"#,
+    ),
+    // route_decisions
+    (
+        SchemaScope::Product,
+        r#"
+        -- tachi#1675 PR1: acceptance-moment decision fact (Seam B), keyed
+        -- UNIQUE on dispatch_id so a replayed acceptance is a zero-write
+        -- idempotent no-op (design D2) — status.json is written FIRST (the
+        -- canonical acceptance receipt) and this row follows in the same
+        -- code path; a crash between the two leaves no row, and the
+        -- projection's rule for a missing row is `assignment_mode :=
+        -- 'unadvised'`, the honest floor, never fabricated advice. This is
+        -- an acknowledged dual-write, not a transaction with status.json
+        -- (status.json is a filesystem atomic write, not a DB write).
+        -- `recommendation_id` is a nullable reference, not an enforced FK:
+        -- `staff_start` does not always consult `recommend` first, so
+        -- NULL-recommendation must stay legal (day-one reality, not an
+        -- aspiration). `work_claim_id` stays nullable until #1239 wires v21
+        -- claims through the dispatch lifecycle (spec correction 1).
+        CREATE TABLE IF NOT EXISTS route_decisions (
+            route_decision_id  TEXT PRIMARY KEY,
+            dispatch_id         TEXT NOT NULL,
+            recommendation_id   TEXT,
+            selected_profile    TEXT,
+            selected_model      TEXT,
+            assignment_mode     TEXT NOT NULL CHECK (assignment_mode IN ('advised', 'unadvised', 'user_forced', 'experiment')),
+            override_flag       INTEGER NOT NULL DEFAULT 0 CHECK (override_flag IN (0, 1)),
+            contract_hash       TEXT,
+            env_id              TEXT,
+            host_profile        TEXT,
+            work_claim_id       TEXT,
+            occurred_at         TEXT NOT NULL DEFAULT '',
+            recorded_at         TEXT NOT NULL DEFAULT '',
+            UNIQUE (dispatch_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_route_decisions_recommendation
+            ON route_decisions(recommendation_id);
+"#,
+    ),
+    // eval_rubric_scores
+    (
+        SchemaScope::Product,
+        r#"
+        -- tachi#1675 PR1: structured adjudication companion (design D3),
+        -- generic key (subject_kind, adjudication_id) serving BOTH the
+        -- dispatch spine (dispatch_adjudications) and the mirror spine
+        -- (mirror_eval_adjudications) without altering either table. A
+        -- rubric row is an OPTIONAL companion to the free-text `verdict`
+        -- that already exists on both adjudication tables — no rubric row
+        -- means `excluded_reason='unstructured_verdict'` at the projection
+        -- layer, not an error here. Six ordinal judged dimensions (closed
+        -- sets, never floats — floats invite averaging into a forbidden
+        -- one-dimensional reputation score). `independence_basis` is
+        -- computed by the writer at write time (design D5); `identity_bound`
+        -- is a reserved enum value never written in this phase. `rubric_hash`
+        -- pins the exact rubric_v1 code-constant definition a row was judged
+        -- against, so a later rubric revision cannot silently reinterpret an
+        -- old row. Append-only: no UPDATE/DELETE accessor exists — a
+        -- corrected judgment is a NEW adjudication event (new
+        -- adjudication_id) carrying its own NEW rubric row, never an edit of
+        -- an old one; UNIQUE(subject_kind, adjudication_id) enforces exactly
+        -- one rubric row per adjudication event at the schema level.
+        CREATE TABLE IF NOT EXISTS eval_rubric_scores (
+            rubric_score_id          TEXT PRIMARY KEY,
+            adjudication_id          TEXT NOT NULL,
+            subject_kind             TEXT NOT NULL CHECK (subject_kind IN ('dispatch', 'mirror')),
+            rubric_hash              TEXT NOT NULL,
+            contract_correctness     TEXT NOT NULL CHECK (contract_correctness IN ('pass', 'concern', 'fail', 'not_assessed')),
+            evidence_quality         TEXT NOT NULL CHECK (evidence_quality IN ('pass', 'concern', 'fail', 'not_assessed')),
+            safety                   TEXT NOT NULL CHECK (safety IN ('pass', 'concern', 'fail', 'not_assessed')),
+            scope_discipline         TEXT NOT NULL CHECK (scope_discipline IN ('pass', 'concern', 'fail', 'not_assessed')),
+            intervention_burden      TEXT NOT NULL CHECK (intervention_burden IN ('pass', 'concern', 'fail', 'not_assessed')),
+            completion_integrity     TEXT NOT NULL CHECK (completion_integrity IN ('pass', 'concern', 'fail', 'not_assessed')),
+            adjudication_confidence  TEXT NOT NULL CHECK (adjudication_confidence IN ('low', 'medium', 'high')),
+            adjudicator_actor        TEXT NOT NULL CHECK (length(trim(adjudicator_actor)) > 0),
+            adjudicator_vendor       TEXT NOT NULL DEFAULT 'unknown',
+            independence_basis       TEXT NOT NULL CHECK (independence_basis IN ('structural_cross_vendor', 'declared_only', 'self', 'identity_bound')),
+            occurred_at              TEXT NOT NULL DEFAULT '',
+            recorded_at              TEXT NOT NULL DEFAULT '',
+            UNIQUE (subject_kind, adjudication_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_rubric_scores_adjudication
+            ON eval_rubric_scores(subject_kind, adjudication_id);
+"#,
+    ),
     // session_claims
     (
         SchemaScope::Product,
@@ -2339,6 +2453,105 @@ pub(super) const BASE_SCHEMA_SQL_V28_GOLDEN: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_mirror_eval_adjudications_run
             ON mirror_eval_adjudications(eval_run_id, created_at);
 
+        -- tachi#1675 PR1: decision-fact ledger, NOT a terminal ledger — zero
+        -- execution/terminal-state columns live here (design D1). Captures
+        -- the ONLY moment a routing candidate set exists in memory: one row
+        -- per `handle_dispatch_recommendation` call (Seam A), append-only,
+        -- never deduplicated (every consult is a new fact, even a repeat
+        -- consult with identical content). `candidates` is the full scored
+        -- candidate array (profile/agent/score/reasons/...) verbatim;
+        -- `policy_source_revision` is the content-bearing route-policy
+        -- snapshot hash (`route_policy_source_revision`, reused not
+        -- reinvented) so a later replay can tell whether the active policy
+        -- has since changed underneath this recommendation.
+        CREATE TABLE IF NOT EXISTS route_recommendations (
+            recommendation_id      TEXT PRIMARY KEY,
+            task_type               TEXT,
+            risk                    TEXT NOT NULL DEFAULT 'unknown',
+            candidates              TEXT NOT NULL DEFAULT '[]',
+            recommended_profile     TEXT,
+            policy_source_revision  TEXT,
+            rows_considered         INTEGER NOT NULL DEFAULT 0,
+            occurred_at             TEXT NOT NULL DEFAULT '',
+            recorded_at             TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_route_recommendations_recorded_at
+            ON route_recommendations(recorded_at);
+
+        -- tachi#1675 PR1: acceptance-moment decision fact (Seam B), keyed
+        -- UNIQUE on dispatch_id so a replayed acceptance is a zero-write
+        -- idempotent no-op (design D2) — status.json is written FIRST (the
+        -- canonical acceptance receipt) and this row follows in the same
+        -- code path; a crash between the two leaves no row, and the
+        -- projection's rule for a missing row is `assignment_mode :=
+        -- 'unadvised'`, the honest floor, never fabricated advice. This is
+        -- an acknowledged dual-write, not a transaction with status.json
+        -- (status.json is a filesystem atomic write, not a DB write).
+        -- `recommendation_id` is a nullable reference, not an enforced FK:
+        -- `staff_start` does not always consult `recommend` first, so
+        -- NULL-recommendation must stay legal (day-one reality, not an
+        -- aspiration). `work_claim_id` stays nullable until #1239 wires v21
+        -- claims through the dispatch lifecycle (spec correction 1).
+        CREATE TABLE IF NOT EXISTS route_decisions (
+            route_decision_id  TEXT PRIMARY KEY,
+            dispatch_id         TEXT NOT NULL,
+            recommendation_id   TEXT,
+            selected_profile    TEXT,
+            selected_model      TEXT,
+            assignment_mode     TEXT NOT NULL CHECK (assignment_mode IN ('advised', 'unadvised', 'user_forced', 'experiment')),
+            override_flag       INTEGER NOT NULL DEFAULT 0 CHECK (override_flag IN (0, 1)),
+            contract_hash       TEXT,
+            env_id              TEXT,
+            host_profile        TEXT,
+            work_claim_id       TEXT,
+            occurred_at         TEXT NOT NULL DEFAULT '',
+            recorded_at         TEXT NOT NULL DEFAULT '',
+            UNIQUE (dispatch_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_route_decisions_recommendation
+            ON route_decisions(recommendation_id);
+
+        -- tachi#1675 PR1: structured adjudication companion (design D3),
+        -- generic key (subject_kind, adjudication_id) serving BOTH the
+        -- dispatch spine (dispatch_adjudications) and the mirror spine
+        -- (mirror_eval_adjudications) without altering either table. A
+        -- rubric row is an OPTIONAL companion to the free-text `verdict`
+        -- that already exists on both adjudication tables — no rubric row
+        -- means `excluded_reason='unstructured_verdict'` at the projection
+        -- layer, not an error here. Six ordinal judged dimensions (closed
+        -- sets, never floats — floats invite averaging into a forbidden
+        -- one-dimensional reputation score). `independence_basis` is
+        -- computed by the writer at write time (design D5); `identity_bound`
+        -- is a reserved enum value never written in this phase. `rubric_hash`
+        -- pins the exact rubric_v1 code-constant definition a row was judged
+        -- against, so a later rubric revision cannot silently reinterpret an
+        -- old row. Append-only: no UPDATE/DELETE accessor exists — a
+        -- corrected judgment is a NEW adjudication event (new
+        -- adjudication_id) carrying its own NEW rubric row, never an edit of
+        -- an old one; UNIQUE(subject_kind, adjudication_id) enforces exactly
+        -- one rubric row per adjudication event at the schema level.
+        CREATE TABLE IF NOT EXISTS eval_rubric_scores (
+            rubric_score_id          TEXT PRIMARY KEY,
+            adjudication_id          TEXT NOT NULL,
+            subject_kind             TEXT NOT NULL CHECK (subject_kind IN ('dispatch', 'mirror')),
+            rubric_hash              TEXT NOT NULL,
+            contract_correctness     TEXT NOT NULL CHECK (contract_correctness IN ('pass', 'concern', 'fail', 'not_assessed')),
+            evidence_quality         TEXT NOT NULL CHECK (evidence_quality IN ('pass', 'concern', 'fail', 'not_assessed')),
+            safety                   TEXT NOT NULL CHECK (safety IN ('pass', 'concern', 'fail', 'not_assessed')),
+            scope_discipline         TEXT NOT NULL CHECK (scope_discipline IN ('pass', 'concern', 'fail', 'not_assessed')),
+            intervention_burden      TEXT NOT NULL CHECK (intervention_burden IN ('pass', 'concern', 'fail', 'not_assessed')),
+            completion_integrity     TEXT NOT NULL CHECK (completion_integrity IN ('pass', 'concern', 'fail', 'not_assessed')),
+            adjudication_confidence  TEXT NOT NULL CHECK (adjudication_confidence IN ('low', 'medium', 'high')),
+            adjudicator_actor        TEXT NOT NULL CHECK (length(trim(adjudicator_actor)) > 0),
+            adjudicator_vendor       TEXT NOT NULL DEFAULT 'unknown',
+            independence_basis       TEXT NOT NULL CHECK (independence_basis IN ('structural_cross_vendor', 'declared_only', 'self', 'identity_bound')),
+            occurred_at              TEXT NOT NULL DEFAULT '',
+            recorded_at              TEXT NOT NULL DEFAULT '',
+            UNIQUE (subject_kind, adjudication_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_rubric_scores_adjudication
+            ON eval_rubric_scores(subject_kind, adjudication_id);
+
         -- Cross-session presence claims (#1001). Advisory "who's working on
         -- what" lease rows — NOT a mutual-exclusion lock. A session/dispatch
         -- registers a claim on an issue/lane when it starts touching it and
@@ -2564,6 +2777,10 @@ mod golden_tests {
             ("mirror_eval_runs", SchemaScope::Product),
             ("mirror_eval_observations", SchemaScope::Product),
             ("mirror_eval_adjudications", SchemaScope::Product),
+            // Product — tachi#1675 PR1 decision-fact ledger + rubric companion.
+            ("route_recommendations", SchemaScope::Product),
+            ("route_decisions", SchemaScope::Product),
+            ("eval_rubric_scores", SchemaScope::Product),
             ("session_claims", SchemaScope::Product),
             ("agent_identities", SchemaScope::Product),
             ("identity_admissions", SchemaScope::Product),

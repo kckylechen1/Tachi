@@ -34,6 +34,8 @@ pub mod open_context;
 pub mod outbox;
 mod recall_cache;
 #[cfg(feature = "admin")]
+pub mod route_eval;
+#[cfg(feature = "admin")]
 mod sandbox;
 mod schema;
 mod search_generation;
@@ -202,6 +204,14 @@ pub use outbox::{
 pub use recall_cache::{
     recall_cache_get, recall_cache_invalidate_all, recall_cache_purge_stale, recall_cache_put,
     recall_cache_record_hit, recall_cache_stats, RecallCacheHit, RecallCacheStats,
+};
+#[cfg(feature = "admin")]
+pub use route_eval::{
+    get_eval_rubric_score, get_route_decision_by_dispatch_id, get_route_recommendation,
+    insert_eval_rubric_score, insert_route_decision_idempotent, insert_route_recommendation,
+    EvalRubricScoreRow, NewEvalRubricScore, NewRouteDecision, NewRouteRecommendation,
+    RouteDecisionRow, RouteRecommendationRow, ASSIGNMENT_MODES, RUBRIC_CONFIDENCE_VALUES,
+    RUBRIC_DIMENSION_VALUES, RUBRIC_INDEPENDENCE_BASIS_VALUES, RUBRIC_SUBJECT_KINDS,
 };
 #[cfg(feature = "admin")]
 pub use sandbox::{

@@ -24,7 +24,13 @@ use tachi_dispatch::policy::{
 /// SHA-256 hex of the canonical identity payload. Used as the content-addressed
 /// half of the v3 proposal id and stored verbatim as `content_digest` so apply
 /// can re-validate the persisted row was not mutated after review.
-pub(super) fn content_digest_hex(identity_payload: &Value) -> String {
+///
+/// `pub(crate)` (widened from `pub(super)` by tachi#1675 PR1 Seam B): the
+/// dispatch acceptance path (`dispatch_ops::dispatch`) reuses this exact
+/// primitive to derive `route_decisions.contract_hash` from the compiled
+/// authority contract — same content-addressing rule, not a second hash
+/// scheme.
+pub(crate) fn content_digest_hex(identity_payload: &Value) -> String {
     // `serde_json` does not guarantee key order across rebuilds; serialize the
     // value through `route_policy_v3_identity_payload`'s canonical form first
     // so the hash is stable regardless of how the caller assembled the input.
@@ -120,7 +126,13 @@ fn is_v3_loadout_evolution_proposal(value: &Value) -> bool {
 /// includes each hard-state version as well as canonical value content: a
 /// third party writing the same JSON still advances the active configuration
 /// revision and must invalidate an approval made against the earlier state.
-pub(super) fn route_policy_source_revision(rows: &[memcore::db::StateRow]) -> String {
+///
+/// `pub(crate)` (widened from `pub(super)` by tachi#1675 PR1 Seam A):
+/// `dispatch_profile::routing::recommendation` reuses this exact primitive to
+/// stamp `route_recommendations.policy_source_revision` — the frozen design's
+/// D1/spec-correction-5 requirement that a recommendation row snapshot a
+/// *content-bearing* policy hash, not a reinvented one.
+pub(crate) fn route_policy_source_revision(rows: &[memcore::db::StateRow]) -> String {
     let mut snapshot = rows
         .iter()
         .map(|row| {

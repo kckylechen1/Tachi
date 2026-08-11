@@ -96,6 +96,8 @@ impl MemoryServer {
                     issue_ref: params.issue_ref,
                     pr_ref: params.pr_ref,
                     flow_id: params.flow_id,
+                    // tachi#1675 PR1 Seam B.
+                    recommendation_ref: params.recommendation_ref,
                 };
                 crate::staffing_ops::staff_start(self, request).await?
             }

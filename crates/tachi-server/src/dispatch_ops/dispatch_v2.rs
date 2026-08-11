@@ -290,6 +290,19 @@ pub(super) fn write_status_json(
                 "identity_receipt",
                 "resolved_completion",
                 "completion_recovery",
+                // tachi#1675 PR1 Seam B: `route_decision_id` is stamped ONCE,
+                // as a best-effort convenience copy of the `route_decisions`
+                // row's id, by `staffing_ops::staff_start` shortly after
+                // acceptance — never by this function itself. This
+                // preserve-if-absent list is what carries it forward through
+                // every later status.json rewrite (preflight failure,
+                // watchdog, completion). NO writer downstream of acceptance
+                // may ever explicitly `extra`-emit this key (including as
+                // `Value::Null`): this list only fills a key that is ABSENT
+                // from the new `obj`, so an explicit `null` would still
+                // overwrite (erase) the preserved value instead of being
+                // skipped — design D2 / codex finding 2.
+                "route_decision_id",
             ] {
                 if !obj.contains_key(key) {
                     if let Some(value) = previous.get(key) {

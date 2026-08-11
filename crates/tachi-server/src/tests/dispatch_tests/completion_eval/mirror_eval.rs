@@ -104,6 +104,9 @@ async fn adjudicate(
                 human_override: false,
                 evidence_ref: "run-evidence".to_string(),
                 event_key: Some(event_key.to_string()),
+                // tachi#1675 PR1 D3: no structured rubric block in this
+                // pre-existing wiring test — free-text-verdict path only.
+                rubric: None,
             }),
             ..agent_eval_params("adjudicate")
         }))
@@ -196,6 +199,10 @@ async fn mirror_eval_scrubs_secretish_free_text_fields() {
                 human_override: false,
                 evidence_ref: format!("token={secret}"),
                 event_key: Some("secret-scrub-event".to_string()),
+                // tachi#1675 PR1 D3: no structured rubric block in this
+                // pre-existing secret-scrubbing test — free-text-verdict
+                // path only.
+                rubric: None,
             }),
             ..agent_eval_params("adjudicate")
         }))
