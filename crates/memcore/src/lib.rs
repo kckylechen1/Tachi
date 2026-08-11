@@ -55,6 +55,7 @@ pub mod foundry;
 #[cfg(feature = "admin")]
 pub mod hub;
 pub mod kernel_policy;
+pub mod model_broker_seam;
 pub mod namespace;
 pub mod near_dup;
 pub mod noise;
@@ -188,6 +189,14 @@ pub use foundry::{
 #[cfg(feature = "admin")]
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use kernel_policy::{EmbedPolicy, KernelPolicy};
+pub use model_broker_seam::{
+    AccountAvailability, AccountSnapshot, BudgetContext, BudgetEstimate, CandidateEvaluation,
+    CatalogSnapshot, DeploymentBounds, DeploymentCapabilities, DeploymentCooldown, ExclusionReason,
+    HealthObservation, HealthSnapshot, InvocationErrorClass, ModelRef, ObservationEvidence,
+    OperationalResolver, PinContext, ResolutionOutcome, ResolutionRevisions, ResolvedDeployment,
+    ResolverInput, RetryAfter, RetryContext, SeamError, Selection, StaticFixtureResolver,
+    WireDialect, FALLBACK_ORDER_CAP,
+};
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
     is_handoff_entry, is_internal_only_row, is_kanban_entry, is_namespace_search_noise,
