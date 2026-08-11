@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 mod auth_probe;
+pub mod broker;
 mod chat_lanes;
 mod circuit_breaker;
 mod embedding;
