@@ -78,6 +78,17 @@ const PRODUCT_TABLES: &[&str] = &[
     "provider_account_aliases",
     "provider_account_events",
     "account_custody",
+    // tachi#1681 D1's six model-broker catalog tables. Listed in full for the
+    // same per-chunk reason as the provider-account group above: the failure
+    // mode this list guards is per-chunk, not per-family, and the frozen
+    // design's initial "four" was a cross-vendor-review-caught undercount —
+    // model_deployment_health's DDL moved into this same PR-A.
+    "model_deployments",
+    "model_deployment_events",
+    "model_aliases",
+    "model_alias_bindings",
+    "pricing_snapshots",
+    "model_deployment_health",
     "foundry_jobs",
     "exec_envs",
     "exec_env_resources",
