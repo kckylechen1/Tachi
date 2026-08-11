@@ -304,17 +304,7 @@ pub(crate) fn collect_recent_evals(
 }
 
 pub(crate) fn find_last_daily_report(app_home: &Path) -> Option<String> {
-    let reports_dir = app_home.join("reports").join("daily");
-    let entries = std::fs::read_dir(&reports_dir).ok()?;
-    let mut files: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
-        .filter_map(|e| e.file_name().to_str().map(String::from))
-        .collect();
-    files.sort();
-    files
-        .last()
-        .map(|f| reports_dir.join(f).display().to_string())
+    crate::daily_pipeline::validated_latest_daily_report(app_home)
 }
 
 pub(crate) fn read_distill_marker(app_home: &Path) -> Option<DistillMarkerStatus> {

@@ -129,8 +129,8 @@ This model reuses what already exists instead of creating a parallel system.
 - The runtime JSON view (`profile_json_for_server`) already emits an
   `mbit_card` object with a Poke/SCV/Raven `archetype`, `stats`,
   `skill_loadout`, `evidence_contract`, and an `evolution` projection.
-   - `tachi_task(action="profiles" | "profile" | "card")` already exposes this
-     JSON.
+   - The local operator-only `tachi card list/show` diagnostic exposes the
+     static profile fields; model-facing Task does not expose this JSON.
 
 2. **Superpowers and Waza are builtin skills.**
    - Stable IDs live in `crates/tachi-server/src/skill_policy.rs`.
@@ -566,7 +566,7 @@ carry the workflow.
 
 | Capability | Public surface | Status |
 |---|---|---|
-| list/show Cards | `tachi_task(action="profiles" \| "profile" \| "card")` | implemented |
+| operator list/show diagnostics | `tachi card list` / `tachi card show <id>` | implemented; operator-only |
 | read-only Card CLI convenience | `tachi card list` / `tachi card show <id>` | starter implemented |
 | skill discovery / loadout | `tachi_skill(action="discover" \| "bundle" \| "loadout")` | implemented |
 | upstream source status | `tachi skill-surface sources` | implemented |
@@ -577,7 +577,8 @@ carry the workflow.
 | Card evolution proposals | `tachi_tune(action="route_proposals" \| "route_apply")` (moved off `tachi_task` in #1426) | implemented |
 
 The first native CLI convenience layer is read-only (`tachi card list` and
-`tachi card show <id>`) and calls the same task facade. Future convenience
+`tachi card show <id>`) and reads the static dispatch registry/admission
+owners directly. Future convenience
 commands such as `tachi poke run` should follow the same rule. acpx support
 should also stay inside the existing dispatch path; do not add a broad public
 `tachi_acpx` facade for the MVP.

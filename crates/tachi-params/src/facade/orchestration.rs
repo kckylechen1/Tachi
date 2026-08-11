@@ -219,6 +219,16 @@ pub struct TachiStaffParams {
     /// Tachi flow id for feature-scoped briefing/dispatch/eval linkage. Start-only.
     #[serde(default)]
     pub flow_id: Option<String>,
+
+    /// tachi#1675 PR1 Seam B: the `recommendation_id` a prior
+    /// `tachi_dispatch(action='recommend')` call returned, when this start
+    /// was placed on that advice. Optional and start-only — absence is
+    /// itself evidence (`assignment_mode` records `unadvised`, never a
+    /// fabricated advisory). Not validated against a live
+    /// `route_recommendations` row here; the acceptance-time writer treats
+    /// a stale/unknown ref the same as any other reference id.
+    #[serde(default)]
+    pub recommendation_ref: Option<String>,
 }
 
 // ─── Facade: orchestrator (persistent TODO / handoff) ────────────────────────
@@ -275,10 +285,12 @@ pub struct TachiOrchestratorParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiAgentEvalParams {
     /// aggregate | aggregate_live | telemetry | perf | register | observe |
-    /// adjudicate | get. aggregate replays a local JSONL fixture only when
-    /// TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set. register/observe/adjudicate/get
-    /// (#1066) are the mirror eval intake for harness-native subagents — work
-    /// Tachi did not dispatch and only observes.
+    /// adjudicate | get | route_projection. aggregate replays a local JSONL
+    /// fixture only when TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set.
+    /// register/observe/adjudicate/get (#1066) are the mirror eval intake for
+    /// harness-native subagents — work Tachi did not dispatch and only
+    /// observes. route_projection (#1675) is the ledger-backed routing
+    /// projection that runs in parallel with the `/eval`-memory path.
     pub action: String,
     #[serde(default)]
     pub fixture_path: Option<String>,
@@ -307,6 +319,47 @@ pub struct TachiAgentEvalParams {
     /// `native_child_id`.
     #[serde(default)]
     pub get: Option<MirrorEvalGetParams>,
+
+    /// action=route_projection payload (tachi#1675 PR2 / design D6 phase 1):
+    /// the ledger-backed routing projection. It runs in PARALLEL with the
+    /// `/eval`-memory path — `recommend` is untouched — and every response
+    /// declares `evidence_source` so a consumer can tell the two apart. The
+    /// payload is optional: with no payload the projection answers for an
+    /// unclassified task over the default window.
+    #[serde(default)]
+    pub projection: Option<RouteProjectionParams>,
+}
+
+/// tachi#1675 PR2 `route_projection`: what task the projection is being
+/// asked about, and how far back to look. The candidate set itself is NOT a
+/// parameter — it comes from the existing admission/required/blocked risk
+/// classifier, which prunes before any scoring so a historical score can
+/// never resurrect a candidate the current rules removed.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
+pub struct RouteProjectionParams {
+    /// Free-text task description, classified exactly the way
+    /// `tachi_orchestrator(recommend)` classifies it.
+    #[serde(default)]
+    pub task: Option<String>,
+
+    /// Explicit task type (e.g. `fix_request`), when the caller already knows
+    /// it. Omitted, it is derived from `task`.
+    #[serde(default)]
+    pub task_type: Option<String>,
+
+    /// Risk override (`low`/`medium`/`high`/`critical`), same semantics as
+    /// the recommendation path.
+    #[serde(default)]
+    pub risk: Option<String>,
+
+    /// Files in scope, used by the risk classifier.
+    #[serde(default)]
+    pub file_paths: Option<Vec<String>>,
+
+    /// Evidence window in days (default 30, capped at 365). Rows older than
+    /// the window are counted as excluded, never silently dropped.
+    #[serde(default)]
+    pub window_days: Option<u32>,
 }
 
 /// #1066 `register`: records the parent contract, execution origin,
@@ -460,6 +513,48 @@ pub struct MirrorEvalAdjudicateParams {
     /// callers do not need to invent one).
     #[serde(default)]
     pub event_key: Option<String>,
+
+    /// tachi#1675 PR1 D3: optional structured rubric block. When present, an
+    /// `eval_rubric_scores` row is written alongside the free-text verdict
+    /// above (the rubric is a companion, never a replacement — the verdict
+    /// stays the #1035 CHECK-constraint backbone). Omitted entirely, no
+    /// rubric row is written and this event's `excluded_reason` at the
+    /// projection layer is `unstructured_verdict`.
+    #[serde(default)]
+    pub rubric: Option<EvalRubricParams>,
+}
+
+/// tachi#1675 PR1 D3: structured judgment alongside the free-text `verdict`.
+/// Six ordinal dimensions (closed vocabulary `pass`/`concern`/`fail`/
+/// `not_assessed` — never a float; floats invite averaging into the
+/// forbidden one-dimensional reputation score) plus a confidence label.
+/// `adjudicator_vendor` is optional — when omitted the writer derives it from
+/// this same call's `verifier_model` (the existing cross-model-independence
+/// primitive); `adjudicator_actor` is not a separate field here — it is the
+/// enclosing call's own `actor`, the same identity `dispatch_adjudications`/
+/// `mirror_eval_adjudications` already record as the adjudicating actor.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
+pub struct EvalRubricParams {
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub contract_correctness: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub evidence_quality: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub safety: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub scope_discipline: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub intervention_burden: String,
+    /// `pass` | `concern` | `fail` | `not_assessed`.
+    pub completion_integrity: String,
+    /// `low` | `medium` | `high`.
+    pub adjudication_confidence: String,
+    /// The adjudicator's OWN vendor/lineage identity. Optional — falls back
+    /// to `lineage_of(verifier_model)` (this call's existing field) when
+    /// omitted, so a caller that already sets `verifier_model` does not have
+    /// to restate it.
+    #[serde(default)]
+    pub adjudicator_vendor: Option<String>,
 }
 
 /// #1066 `get`: resolve a run by `eval_run_id` or `native_child_id`.

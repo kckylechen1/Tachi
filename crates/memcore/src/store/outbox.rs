@@ -31,6 +31,8 @@
 //! through narrow handles — today
 //! [`crate::store::immutable_supersession::ImmutableSupersessionTransaction::enqueue_outbox_event`].
 
+use std::time::Duration;
+
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -411,31 +413,45 @@ impl MemoryStore {
         db::list_outbox_events_by_state(&self.conn, state, limit)
     }
 
-    /// The six #1643 health fields, from one consistent snapshot.
+    /// The consumer-neutral health snapshot from one consistent SQLite
+    /// snapshot. This compatibility wrapper uses the named provisional
+    /// [`db::outbox::DEFAULT_OUTBOX_HEALTH_STALE_AFTER`] bound; callers with an
+    /// operational lease should use [`Self::outbox_health_with_stale_after`]
+    /// so the threshold is explicit and deterministic.
     ///
     /// `local_store_status` and `pending_count`/`oldest_pending_at` are
     /// straightforward local facts. The other three need to be read with their
     /// derivation in mind, because **this leaf contains no remote**:
     ///
-    /// * `remote_sync_status` is computed entirely from the local state
-    ///   distribution (see [`db::RemoteSyncStatus`] for the precedence rules). It
-    ///   describes what the local queue implies, never what any remote did.
-    ///   With no sync loop wired up, a store rests at
-    ///   [`db::RemoteSyncStatus::Idle`] or [`db::RemoteSyncStatus::Backlogged`]
-    ///   forever — that is the honest report, and A2 is what changes it.
-    /// * `last_successful_sync` is the newest `state_changed_at` among
-    ///   `acknowledged` events, i.e. when a caller last *told this store* an
-    ///   event was accepted. It is `None` until something reports an
-    ///   acknowledgment.
+    /// * `remote_sync_status` is explicitly
+    ///   [`db::RemoteSyncStatus::Unconfigured`]: this crate has no transport,
+    ///   so local terminal rows cannot be presented as remote success.
+    /// * `last_successful_sync` is preserved for the host-owned remote health
+    ///   seam, but is always `None` here: this crate has no transport, and a
+    ///   local `acknowledged` row is not evidence of remote synchronization.
     /// * `last_error_class` is the class of the most recently changed event
     ///   still in a failure state. Non-failure transitions clear the column,
     ///   so it never reports a class the outbox has moved past.
     ///
-    /// `oldest_pending_at` and `last_successful_sync` are `MIN`/`MAX` taken
-    /// **lexically**, which is chronologically correct only because every
-    /// writer stamps canonical UTC-ISO (tachi#1432).
+    /// Timestamps are compared as RFC3339 instants, so supported legacy offset
+    /// and precision forms cannot invert the extrema.
     pub fn outbox_health(&self) -> Result<db::OutboxHealth, MemoryError> {
-        db::read_outbox_health(&self.conn)
+        self.outbox_health_with_stale_after(db::outbox::DEFAULT_OUTBOX_HEALTH_STALE_AFTER)
+    }
+
+    /// Read health using an explicit lease staleness bound.
+    ///
+    /// `stale_lease_count` is the number of currently `in_flight` rows whose
+    /// lease stamp is at or before `now - stale_after`. `Duration::ZERO` is a
+    /// valid immediate boundary: every currently held lease is eligible, so it
+    /// is unsuitable for proving pre-expiry refusal or post-takeover
+    /// one-shot exclusion. Use a small positive bound for that proof. The
+    /// entire report is derived from one SQLite snapshot.
+    pub fn outbox_health_with_stale_after(
+        &self,
+        stale_after: Duration,
+    ) -> Result<db::OutboxHealth, MemoryError> {
+        db::read_outbox_health(&self.conn, stale_after)
     }
 
     /// Move one event through the frozen state machine, returning the stored
@@ -921,7 +937,7 @@ mod tests {
 
         let empty = store.outbox_health().expect("health");
         assert_eq!(empty.local_store_status, db::LocalStoreStatus::Healthy);
-        assert_eq!(empty.remote_sync_status, db::RemoteSyncStatus::Idle);
+        assert_eq!(empty.remote_sync_status, db::RemoteSyncStatus::Unconfigured);
         assert_eq!(empty.pending_count, 0);
         assert_eq!(empty.oldest_pending_at, None);
         assert_eq!(empty.last_successful_sync, None);
@@ -938,8 +954,8 @@ mod tests {
         assert_eq!(queued.pending_count, 2);
         assert_eq!(
             queued.remote_sync_status,
-            db::RemoteSyncStatus::Backlogged { pending_count: 2 },
-            "with no sync loop running, a committed mutation rests as backlog"
+            db::RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
         assert_eq!(
             queued.oldest_pending_at.as_deref(),
@@ -951,18 +967,17 @@ mod tests {
             .expect("in_flight");
         assert_eq!(
             store.outbox_health().expect("health").remote_sync_status,
-            db::RemoteSyncStatus::InFlight { in_flight_count: 1 },
-            "live work outranks the remaining backlog"
+            db::RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
 
-        let acknowledged = store
+        store
             .transition_outbox_event("evt-health-1", OutboxState::Acknowledged, None)
             .expect("acknowledged");
         let synced = store.outbox_health().expect("health");
         assert_eq!(
-            synced.last_successful_sync.as_deref(),
-            Some(acknowledged.state_changed_at.as_str()),
-            "the stamp is when a caller reported acceptance, not when a remote confirmed"
+            synced.last_successful_sync, None,
+            "a local acknowledgement cannot fabricate remote success"
         );
         assert_eq!(synced.pending_count, 1);
 
@@ -981,7 +996,7 @@ mod tests {
             },
             "quarantine is a local-store condition, not a remote one"
         );
-        assert_eq!(held.remote_sync_status, db::RemoteSyncStatus::Drained);
+        assert_eq!(held.remote_sync_status, db::RemoteSyncStatus::Unconfigured);
         assert_eq!(held.pending_count, 0);
         assert_eq!(held.oldest_pending_at, None);
         assert_eq!(held.last_error_class.as_deref(), Some("operator_hold"));

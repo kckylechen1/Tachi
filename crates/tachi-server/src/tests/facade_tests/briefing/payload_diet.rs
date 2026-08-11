@@ -10,7 +10,7 @@ fn compact_json_params(query: &str) -> TachiMemoryParams {
 }
 
 /// Builds a `tachi_task` facade params value (`TachiTaskParams`) for
-/// `action='briefing'` with only the fields the FIX-3 test below cares about
+/// `action='brief'` with only the fields the FIX-3 test below cares about
 /// set; every other field has `#[serde(default)]` and comes back empty/`None`.
 fn task_briefing_params(
     action: &str,
@@ -71,7 +71,7 @@ async fn task_briefing_omitted_compact_differs_from_explicit_false() {
 
     let omitted_body = crate::copilot_ops::handle_tachi_feature_briefing(
         &server,
-        &task_briefing_params("briefing", &query, None, None),
+        &task_briefing_params("brief", &query, None, None),
     )
     .await
     .expect("omitted-compact task briefing should serialize");
@@ -83,7 +83,7 @@ async fn task_briefing_omitted_compact_differs_from_explicit_false() {
 
     let explicit_false_body = crate::copilot_ops::handle_tachi_feature_briefing(
         &server,
-        &task_briefing_params("briefing", &query, None, Some(false)),
+        &task_briefing_params("brief", &query, None, Some(false)),
     )
     .await
     .expect("explicit compact=false task briefing should serialize");

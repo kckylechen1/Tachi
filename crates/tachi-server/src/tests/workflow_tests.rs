@@ -1,13 +1,13 @@
 use super::make_server;
-use crate::tool_params::{GetMemoryParams, TachiWorkflowParams};
+use crate::tool_params::{GetMemoryParams, TachiGhParams};
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
 #[tokio::test]
-async fn workflow_close_loop_writes_wiki_with_references() {
+async fn tachi_gh_close_loop_writes_wiki_with_references() {
     let server = make_server();
     let resp = server
-        .tachi_workflow(Parameters(TachiWorkflowParams {
+        .tachi_gh(Parameters(TachiGhParams {
             action: "close_loop".to_string(),
             issue_ref: Some("kckylechen1/tachi#150".to_string()),
             pr_ref: None,
@@ -31,6 +31,7 @@ async fn workflow_close_loop_writes_wiki_with_references() {
             wiki_domain: None,
             project: None,
             force: true,
+            ..Default::default()
         }))
         .await
         .expect("close_loop");

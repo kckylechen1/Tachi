@@ -39,6 +39,9 @@
 //! daemon, so a `StoreProfile::PortableKernel` database carries the outbox and
 //! a portable build can drive it.
 
+use std::time::Duration;
+
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::error::MemoryError;
@@ -170,6 +173,13 @@ pub const MAX_OUTBOX_CLASS_BYTES: usize = 64;
 /// Length of the lowercase-hex SHA-256 `payload_digest` this table stores.
 pub const OUTBOX_PAYLOAD_DIGEST_HEX_LEN: usize = 64;
 
+/// Provisional compatibility default for [`read_outbox_health`]'s lease
+/// staleness view. Callers that need deterministic behavior should use
+/// `MemoryStore::outbox_health_with_stale_after` and provide their own bound;
+/// this named value exists only to preserve the pre-#1665 zero-argument
+/// `outbox_health()` surface while a host chooses its operational lease.
+pub const DEFAULT_OUTBOX_HEALTH_STALE_AFTER: Duration = Duration::from_secs(300);
+
 /// One `memory_outbox_events` row, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OutboxEventRow {
@@ -216,6 +226,25 @@ pub struct NewOutboxEvent {
     /// Lowercase hex SHA-256, computed by the store layer from the payload as
     /// it was actually stored.
     pub payload_digest: String,
+}
+
+/// One durable destination-side apply receipt row (#1718).  This lower-layer
+/// row deliberately carries the storage token `application = 'applied'` only:
+/// a duplicate call returns the same immutable row and the store layer marks
+/// the *returned* receipt as `duplicate` without rewriting the ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutboxDestinationApplyReceiptRow {
+    pub event_id: String,
+    pub object_id: String,
+    pub source_store: String,
+    pub source_partition: String,
+    pub source_revision: i64,
+    pub source_payload_digest: String,
+    pub destination_store: String,
+    pub destination_partition: String,
+    pub destination_object_revision: i64,
+    pub destination_payload_digest: String,
+    pub application: String,
 }
 
 const OUTBOX_SELECT_COLUMNS: &str = "event_id, object_id, object_class, authority_class, \
@@ -388,6 +417,144 @@ pub(crate) fn refuse_non_canonical_digest(value: &str) -> Result<(), MemoryError
         )));
     }
     Ok(())
+}
+
+/// Validate the immutable fields of a claimed source event before a
+/// destination transaction opens.  A destination apply has no source-side
+/// outbox row to consult, so this is the shared lower-layer class/digest law
+/// that keeps the portable boundary from accepting a caller-defined token or
+/// a malformed digest.
+pub(crate) fn validate_destination_event_binding(
+    event: &OutboxEventRow,
+) -> Result<(), MemoryError> {
+    refuse_blank("event_id", &event.event_id)?;
+    refuse_reserved_successor_suffix("event_id", &event.event_id)?;
+    refuse_blank("object_id", &event.object_id)?;
+    refuse_blank("source_store", &event.source_store)?;
+    refuse_blank("source_partition", &event.source_partition)?;
+    refuse_invalid_class("object_class", &event.object_class)?;
+    refuse_invalid_class("authority_class", &event.authority_class)?;
+    refuse_reserved_resolved_class("object_class", &event.object_class)?;
+    refuse_reserved_resolved_class("authority_class", &event.authority_class)?;
+    refuse_non_canonical_digest(&event.payload_digest)?;
+    if event.source_revision < 1 {
+        return Err(MemoryError::InvalidArg(
+            "outbox event source_revision must be positive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+const DESTINATION_APPLY_RECEIPT_SELECT_COLUMNS: &str =
+    "event_id, object_id, source_store, source_partition, source_revision, \
+     source_payload_digest, destination_store, destination_partition, \
+     destination_object_revision, destination_payload_digest, application";
+
+fn row_to_destination_apply_receipt(
+    row: &rusqlite::Row<'_>,
+) -> Result<OutboxDestinationApplyReceiptRow, rusqlite::Error> {
+    Ok(OutboxDestinationApplyReceiptRow {
+        event_id: row.get(0)?,
+        object_id: row.get(1)?,
+        source_store: row.get(2)?,
+        source_partition: row.get(3)?,
+        source_revision: row.get(4)?,
+        source_payload_digest: row.get(5)?,
+        destination_store: row.get(6)?,
+        destination_partition: row.get(7)?,
+        destination_object_revision: row.get(8)?,
+        destination_payload_digest: row.get(9)?,
+        application: row.get(10)?,
+    })
+}
+
+/// Read one durable destination receipt.  The row is validated by the store
+/// layer against the object before it can be returned as a duplicate or used
+/// as conflict evidence; this function only decodes the exact ledger shape.
+pub(crate) fn read_outbox_destination_apply_receipt(
+    conn: &Connection,
+    event_id: &str,
+) -> Result<Option<OutboxDestinationApplyReceiptRow>, MemoryError> {
+    conn.query_row(
+        &format!(
+            "SELECT {DESTINATION_APPLY_RECEIPT_SELECT_COLUMNS}
+             FROM memory_outbox_destination_apply_receipts WHERE event_id = ?1"
+        ),
+        params![event_id],
+        row_to_destination_apply_receipt,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Insert one kernel-stamped `applied` receipt inside the caller's immediate
+/// transaction and read it back.  The helper refuses any other application
+/// token so no generic public state path can mint a fake duplicate or conflict
+/// row.
+pub(crate) fn insert_outbox_destination_apply_receipt_within_tx(
+    tx: &Transaction<'_>,
+    receipt: &OutboxDestinationApplyReceiptRow,
+) -> Result<OutboxDestinationApplyReceiptRow, MemoryError> {
+    refuse_blank("destination receipt event_id", &receipt.event_id)?;
+    refuse_blank("destination receipt object_id", &receipt.object_id)?;
+    refuse_blank("destination receipt source_store", &receipt.source_store)?;
+    refuse_blank(
+        "destination receipt source_partition",
+        &receipt.source_partition,
+    )?;
+    refuse_blank(
+        "destination receipt destination_store",
+        &receipt.destination_store,
+    )?;
+    refuse_blank(
+        "destination receipt destination_partition",
+        &receipt.destination_partition,
+    )?;
+    if receipt.source_revision < 1 || receipt.destination_object_revision < 1 {
+        return Err(MemoryError::InvalidArg(
+            "destination receipt revisions must be positive".to_string(),
+        ));
+    }
+    refuse_non_canonical_digest(&receipt.source_payload_digest)?;
+    refuse_non_canonical_digest(&receipt.destination_payload_digest)?;
+    if receipt.application != "applied" {
+        return Err(MemoryError::InvalidArg(
+            "destination receipt application must be 'applied'".to_string(),
+        ));
+    }
+    if read_outbox_destination_apply_receipt(tx, &receipt.event_id)?.is_some() {
+        return Err(MemoryError::Duplicate(format!(
+            "destination apply receipt for event '{}' already exists",
+            receipt.event_id
+        )));
+    }
+
+    tx.execute(
+        &format!(
+            "INSERT INTO memory_outbox_destination_apply_receipts \
+             ({DESTINATION_APPLY_RECEIPT_SELECT_COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+        ),
+        params![
+            receipt.event_id,
+            receipt.object_id,
+            receipt.source_store,
+            receipt.source_partition,
+            receipt.source_revision,
+            receipt.source_payload_digest,
+            receipt.destination_store,
+            receipt.destination_partition,
+            receipt.destination_object_revision,
+            receipt.destination_payload_digest,
+            receipt.application,
+        ],
+    )?;
+    read_outbox_destination_apply_receipt(tx, &receipt.event_id)?.ok_or_else(|| {
+        MemoryError::Internal(format!(
+            "destination apply receipt '{}' vanished between insert and readback",
+            receipt.event_id
+        ))
+    })
 }
 
 /// Read the destination object's current revision from inside the enqueueing
@@ -687,9 +854,9 @@ pub(crate) fn read_outbox_event(
 ///
 /// Order is `created_at ASC, event_id ASC`: enqueue order, with the id as a
 /// total tie-break so two events stamped in the same millisecond still come
-/// back in a stable order across calls. Lexical ordering of `created_at` is
-/// chronological only because every writer here stamps canonical UTC-ISO
-/// (tachi#1432) — the same property the health read model depends on.
+/// back in a stable order across calls. Timestamp order is semantic rather
+/// than lexical so canonical and supported legacy RFC3339 forms cannot invert
+/// the queue.
 ///
 /// `limit` of 0 returns an empty vector rather than a refusal, matching SQL
 /// `LIMIT 0`.
@@ -698,16 +865,18 @@ pub(crate) fn list_outbox_events_by_state(
     state: OutboxState,
     limit: usize,
 ) -> Result<Vec<OutboxEventRow>, MemoryError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let mut stmt = conn.prepare(&format!(
         "SELECT {OUTBOX_SELECT_COLUMNS} FROM memory_outbox_events WHERE state = ?1 \
-         ORDER BY created_at ASC, event_id ASC LIMIT ?2"
+         "
     ))?;
-    let rows = stmt
-        .query_map(
-            params![state.as_str(), i64::try_from(limit).unwrap_or(i64::MAX)],
-            row_to_outbox_event,
-        )?
+    let mut rows = stmt
+        .query_map(params![state.as_str()], row_to_outbox_event)?
         .collect::<Result<Vec<_>, _>>()?;
+    sort_outbox_rows_by_created_at(&mut rows)?;
+    rows.truncate(limit);
     Ok(rows)
 }
 
@@ -729,6 +898,48 @@ pub(crate) struct ClaimedOutboxRow {
     pub previous_state: OutboxState,
     /// The `state_changed_at` this claim replaced.
     pub previous_state_changed_at: String,
+}
+
+/// Parse one persisted RFC3339 timestamp into an instant.
+///
+/// Outbox writers stamp canonical millisecond UTC strings, but a supported
+/// legacy database can still carry a numeric offset or a different fractional
+/// precision. Health and replay ordering therefore compare instants, never
+/// raw text. Invalid legacy data fails closed instead of being treated as an
+/// arbitrarily old or new lease.
+fn parse_outbox_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>, MemoryError> {
+    DateTime::parse_from_rfc3339(value.trim())
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| {
+            MemoryError::InvalidArg(format!(
+                "outbox {field} timestamp '{value}' is not a supported RFC3339 instant: {error}"
+            ))
+        })
+}
+
+fn canonical_outbox_timestamp(value: &str, field: &str) -> Result<String, MemoryError> {
+    Ok(parse_outbox_timestamp(value, field)?.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+/// Sort rows by the event's enqueue timestamp semantically, then by the
+/// caller-stable event id as the same-second FIFO tie-break. The timestamp
+/// keys are parsed before sorting so an invalid row is a typed read failure,
+/// not a panic from a comparator.
+fn sort_outbox_rows_by_created_at(rows: &mut Vec<OutboxEventRow>) -> Result<(), MemoryError> {
+    let mut keyed = rows
+        .drain(..)
+        .map(|row| {
+            let created_at = parse_outbox_timestamp(&row.created_at, "created_at")?;
+            Ok((created_at, row))
+        })
+        .collect::<Result<Vec<_>, MemoryError>>()?;
+    keyed.sort_by(|(left_at, left), (right_at, right)| {
+        left_at
+            .cmp(right_at)
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+    rows.extend(keyed.into_iter().map(|(_, row)| row));
+    Ok(())
 }
 
 /// Renew the lease on an event that is already `in_flight`.
@@ -794,11 +1005,13 @@ fn renew_outbox_claim_within_tx(
 /// must opt out of, because taking over another consumer's in-flight event is
 /// only safe if the caller can say how long a claim may live.
 ///
-/// The comparison is lexical on canonical UTC-ISO (tachi#1432), which is
-/// chronological **only** because every writer in this module stamps that one
-/// shape; the caller mints the cutoff with the same formatter. `<=` rather
-/// than `<` so a zero-length bound means "every in-flight event is
-/// reclaimable", which is the reading a caller passing zero intends.
+/// The comparison is semantic RFC3339 instant order, so a supported legacy
+/// offset/precision form cannot evade or prematurely trigger the bound. `<=`
+/// rather than `<` so a zero-length bound means "every in-flight event is
+/// immediately reclaimable", which is the reading a caller passing zero
+/// intends. A zero-length bound is therefore useful for an immediate probe but
+/// cannot prove expiry gating or the post-takeover refusal; those proofs need a
+/// small positive bound.
 ///
 /// Ordering and bounding are `list_outbox_events_by_state`'s: `created_at ASC,
 /// event_id ASC`, `LIMIT limit`, and `limit == 0` returns an empty batch
@@ -818,26 +1031,46 @@ pub(crate) fn claim_outbox_events_within_tx(
         return Ok(Vec::new());
     }
 
-    let candidates = {
+    let cutoff = reclaim_stamped_at_or_before
+        .map(|value| parse_outbox_timestamp(value, "claim cutoff"))
+        .transpose()?;
+    let mut candidates = {
         let mut stmt = tx.prepare(&format!(
             "SELECT {OUTBOX_SELECT_COLUMNS} FROM memory_outbox_events \
              WHERE state = ?1 \
-                OR (state = ?2 AND ?3 IS NOT NULL AND state_changed_at <= ?3) \
-             ORDER BY created_at ASC, event_id ASC LIMIT ?4"
+                OR state = ?2"
         ))?;
         let rows = stmt
             .query_map(
                 params![
                     OutboxState::Pending.as_str(),
-                    OutboxState::InFlight.as_str(),
-                    reclaim_stamped_at_or_before,
-                    i64::try_from(limit).unwrap_or(i64::MAX)
+                    OutboxState::InFlight.as_str()
                 ],
                 row_to_outbox_event,
             )?
             .collect::<Result<Vec<_>, _>>()?;
         rows
     };
+    sort_outbox_rows_by_created_at(&mut candidates)?;
+    let mut drainable = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        match candidate.state {
+            OutboxState::Pending => drainable.push(candidate),
+            OutboxState::InFlight => {
+                let Some(cutoff) = cutoff else {
+                    continue;
+                };
+                let claimed_at =
+                    parse_outbox_timestamp(&candidate.state_changed_at, "state_changed_at")?;
+                if claimed_at <= cutoff {
+                    drainable.push(candidate);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut candidates = drainable;
+    candidates.truncate(limit);
 
     let mut claimed = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -891,12 +1124,13 @@ pub enum LocalStoreStatus {
 /// transition out of `pending` is performed by a caller. So this status is
 /// derived *entirely* from the local state distribution and must be read as
 /// "what the local queue implies", never as evidence that a remote saw
-/// anything. Concretely: [`Self::Drained`] means callers reported every event
-/// terminal, and with no A2 sync loop wired up an installation will sit at
-/// [`Self::Idle`] or [`Self::Backlogged`] forever, which is the honest answer
-/// rather than a fabricated "healthy".
+/// anything. The #1665 health seam therefore emits [`Self::Unconfigured`]
+/// until a host-owned adapter supplies a configured remote status. The legacy
+/// queue-derived variants remain in the wire enum for source compatibility,
+/// but this kernel does not manufacture them.
 ///
-/// Derivation, first match wins:
+/// Legacy queue-derived precedence (for callers that still construct these
+/// variants themselves):
 ///
 /// 1. no rows at all -> [`Self::Idle`]
 /// 2. any `in_flight` -> [`Self::InFlight`]
@@ -914,6 +1148,10 @@ pub enum LocalStoreStatus {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteSyncStatus {
+    /// No remote transport is configured in this kernel. This is explicit so
+    /// an empty or locally drained outbox cannot serialize as a synchronized
+    /// success while the host-owned adapter is absent.
+    Unconfigured,
     /// The outbox has never held an event.
     Idle,
     /// At least one event is with a consumer awaiting an outcome.
@@ -932,24 +1170,40 @@ pub enum RemoteSyncStatus {
     Drained,
 }
 
-/// The six #1643 health fields, from one consistent snapshot.
+/// Consumer-neutral health snapshot from one consistent SQLite snapshot.
+///
+/// All six lifecycle counts are included even though some callers only need a
+/// backlog view. This makes the snapshot an inventory rather than a derived
+/// status that can hide terminal failures or quarantines. It intentionally
+/// carries no event ids, payloads, memory content, or product labels.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OutboxHealth {
     pub local_store_status: LocalStoreStatus,
     pub remote_sync_status: RemoteSyncStatus,
     /// Events in `pending`.
     pub pending_count: u64,
-    /// `MIN(created_at)` over `pending` events, or `None` when none are
-    /// pending. Chronologically correct because `created_at` is canonical
-    /// UTC-ISO, so the lexical minimum is the earliest instant.
+    /// Events in `in_flight`.
+    pub in_flight_count: u64,
+    /// Events in `acknowledged`.
+    pub acknowledged_count: u64,
+    /// Events in `rejected`.
+    pub rejected_count: u64,
+    /// Events in `conflicted`.
+    pub conflicted_count: u64,
+    /// Events in `quarantined`, including resolved conflict records.
+    pub quarantined_count: u64,
+    /// The semantically oldest `created_at` over `pending` events, rendered in
+    /// canonical UTC-ISO form, or `None` when none are pending.
     pub oldest_pending_at: Option<String>,
-    /// `MAX(state_changed_at)` over `acknowledged` events, or `None`.
+    /// The semantically oldest lease stamp over `in_flight` events, rendered
+    /// canonically, or `None` when none are in flight.
+    pub oldest_in_flight_at: Option<String>,
+    /// The most recent successful remote synchronization stamp, or `None`.
     ///
-    /// Read this as "when a caller last told this store an event was
-    /// accepted", not "when a remote last confirmed anything" — no remote
-    /// exists here, and the stamp is written by the local transition seam. It
-    /// is `None` on every store that has not had an acknowledgment reported,
-    /// which today is every store.
+    /// This kernel has no remote transport, so [`RemoteSyncStatus::Unconfigured`]
+    /// always pairs with `None`; a local `acknowledged` transition is not
+    /// evidence of remote success. A host-owned adapter may populate this
+    /// preserved field when it owns a configured remote status.
     pub last_successful_sync: Option<String>,
     /// The `last_error_class` of the most recently changed event that carries
     /// one, tie-broken by `event_id` descending for determinism. `None` when
@@ -969,21 +1223,10 @@ pub struct OutboxHealth {
     /// `quarantined_count` — a resolved conflict is not excluded from the
     /// table, only from the *degradation* signal.
     pub resolved_count: u64,
+    /// `in_flight` events whose lease stamp is at or before the explicit
+    /// stale-after cutoff used for this snapshot.
+    pub stale_lease_count: u64,
 }
-
-/// Raw column tuple read back for an outbox row (id, event fields, timestamps, error class).
-type OutboxRowColumns = (
-    i64,
-    i64,
-    i64,
-    i64,
-    i64,
-    i64,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
 
 /// The exact prefix that marks a `quarantined` row as a resolved conflict
 /// rather than a live durability problem (tachi#1644 review fix).
@@ -999,110 +1242,149 @@ type OutboxRowColumns = (
 /// resolved through `resolve_outbox_conflict`" and nothing a caller could
 /// spoof by naming their own quarantine reason similarly — an ordinary
 /// operator hold uses a caller-chosen class like `"operator_hold"`, which
-/// this prefix does not match. The health query uses `substr(...) = ?` rather
-/// than `LIKE` so SQLite wildcard handling cannot widen the namespace.
+/// this prefix does not match. Health uses the same exact prefix comparison
+/// in Rust, so SQLite wildcard handling cannot widen the namespace.
 ///
-/// Compute all seven health fields in one statement.
+/// Compute the health snapshot from one consistent SQLite read transaction.
 ///
-/// One statement, not several, because the fields are read together and must
-/// describe the same instant: two statements on a connection outside a
-/// transaction are two snapshots, and a concurrent writer between them could
-/// produce a `pending_count` of 0 next to an `oldest_pending_at` of some
-/// timestamp — a self-contradictory report. An aggregate query with no
-/// `GROUP BY` returns exactly one row even over an empty table, and the
-/// correlated subquery for `last_error_class` yields NULL when nothing
-/// matches, so the empty-outbox case needs no special path.
-pub(crate) fn read_outbox_health(conn: &Connection) -> Result<OutboxHealth, MemoryError> {
-    let (
+/// The rows are selected once, while the transaction holds one snapshot, and
+/// all extrema are then derived from parsed instants in Rust. SQLite's raw
+/// `MIN`/`MAX` on text is deliberately not used: canonical UTC strings sort
+/// lexically, but supported legacy offsets and precision forms do not.
+pub(crate) fn read_outbox_health(
+    conn: &Connection,
+    stale_after: Duration,
+) -> Result<OutboxHealth, MemoryError> {
+    let stale_after = chrono::Duration::from_std(stale_after).map_err(|_| {
+        MemoryError::InvalidArg(format!(
+            "outbox health staleness bound {stale_after:?} is too large to express as a timestamp offset"
+        ))
+    })?;
+    let stale_cutoff = Utc::now().checked_sub_signed(stale_after).ok_or_else(|| {
+        MemoryError::InvalidArg(format!(
+            "outbox health staleness bound {stale_after:?} moves the cutoff outside the representable timestamp range"
+        ))
+    })?;
+
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(
+        "SELECT event_id, state, created_at, state_changed_at, last_error_class \
+         FROM memory_outbox_events",
+    )?;
+    let raw_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut pending_count = 0_u64;
+    let mut in_flight_count = 0_u64;
+    let mut acknowledged_count = 0_u64;
+    let mut rejected_count = 0_u64;
+    let mut conflicted_count = 0_u64;
+    let mut quarantined_count = 0_u64;
+    let mut resolved_count = 0_u64;
+    let mut stale_lease_count = 0_u64;
+    let mut oldest_pending_at: Option<(DateTime<Utc>, String)> = None;
+    let mut oldest_in_flight_at: Option<(DateTime<Utc>, String)> = None;
+    let mut last_error_class: Option<(DateTime<Utc>, String, String)> = None;
+
+    for (event_id, state_raw, created_at_raw, state_changed_at_raw, error_class) in raw_rows {
+        let state = OutboxState::parse(&state_raw)?;
+        let created_at = parse_outbox_timestamp(&created_at_raw, "created_at")?;
+        let state_changed_at = parse_outbox_timestamp(&state_changed_at_raw, "state_changed_at")?;
+
+        match state {
+            OutboxState::Pending => {
+                pending_count += 1;
+                let candidate = (
+                    created_at,
+                    canonical_outbox_timestamp(&created_at_raw, "created_at")?,
+                );
+                if oldest_pending_at
+                    .as_ref()
+                    .is_none_or(|(oldest, _)| candidate.0 < *oldest)
+                {
+                    oldest_pending_at = Some(candidate);
+                }
+            }
+            OutboxState::InFlight => {
+                in_flight_count += 1;
+                if state_changed_at <= stale_cutoff {
+                    stale_lease_count += 1;
+                }
+                let candidate = (
+                    state_changed_at,
+                    canonical_outbox_timestamp(&state_changed_at_raw, "state_changed_at")?,
+                );
+                if oldest_in_flight_at
+                    .as_ref()
+                    .is_none_or(|(oldest, _)| candidate.0 < *oldest)
+                {
+                    oldest_in_flight_at = Some(candidate);
+                }
+            }
+            OutboxState::Acknowledged => acknowledged_count += 1,
+            OutboxState::Rejected => rejected_count += 1,
+            OutboxState::Conflicted => conflicted_count += 1,
+            OutboxState::Quarantined => {
+                quarantined_count += 1;
+                if error_class
+                    .as_deref()
+                    .is_some_and(|class| class.starts_with(OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX))
+                {
+                    resolved_count += 1;
+                }
+            }
+        }
+
+        if let Some(class) = error_class {
+            let candidate = (state_changed_at, event_id, class);
+            if last_error_class.as_ref().is_none_or(|latest| {
+                candidate.0 > latest.0 || (candidate.0 == latest.0 && candidate.1 > latest.1)
+            }) {
+                last_error_class = Some(candidate);
+            }
+        }
+    }
+    tx.commit()?;
+
+    let unresolved_quarantined_count = quarantined_count.saturating_sub(resolved_count);
+    let local_store_status = if unresolved_quarantined_count == 0 {
+        LocalStoreStatus::Healthy
+    } else {
+        LocalStoreStatus::Quarantined {
+            quarantined_count: unresolved_quarantined_count,
+        }
+    };
+
+    Ok(OutboxHealth {
+        local_store_status,
+        // There is no transport in this crate. Never derive a remote success
+        // shape from local terminal rows; the host adapter owns that claim.
+        remote_sync_status: RemoteSyncStatus::Unconfigured,
         pending_count,
         in_flight_count,
         acknowledged_count,
         rejected_count,
         conflicted_count,
         quarantined_count,
+        oldest_pending_at: oldest_pending_at.map(|(_, timestamp)| timestamp),
+        oldest_in_flight_at: oldest_in_flight_at.map(|(_, timestamp)| timestamp),
+        // There is no remote transport in this kernel. Preserve the field for
+        // the host-owned health seam, but never infer remote success from a
+        // locally acknowledged row.
+        last_successful_sync: None,
+        last_error_class: last_error_class.map(|(_, _, class)| class),
         resolved_count,
-        oldest_pending_at,
-        last_successful_sync,
-        last_error_class,
-    ): OutboxRowColumns = conn.query_row(
-        "SELECT
-             COALESCE(SUM(state = 'pending'), 0),
-             COALESCE(SUM(state = 'in_flight'), 0),
-             COALESCE(SUM(state = 'acknowledged'), 0),
-             COALESCE(SUM(state = 'rejected'), 0),
-             COALESCE(SUM(state = 'conflicted'), 0),
-             COALESCE(SUM(state = 'quarantined'
-                           AND NOT (substr(last_error_class, 1, length(?1)) = ?1)), 0),
-             COALESCE(SUM(state = 'quarantined'
-                           AND substr(last_error_class, 1, length(?1)) = ?1), 0),
-             MIN(CASE WHEN state = 'pending' THEN created_at END),
-             MAX(CASE WHEN state = 'acknowledged' THEN state_changed_at END),
-             (SELECT last_error_class FROM memory_outbox_events
-               WHERE last_error_class IS NOT NULL
-               ORDER BY state_changed_at DESC, event_id DESC LIMIT 1)
-         FROM memory_outbox_events",
-        params![OUTBOX_RESERVED_RESOLVED_CLASS_PREFIX],
-        |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-            ))
-        },
-    )?;
-
-    let count = |value: i64| u64::try_from(value).unwrap_or(0);
-    let pending_count = count(pending_count);
-    let in_flight_count = count(in_flight_count);
-    let acknowledged_count = count(acknowledged_count);
-    let rejected_count = count(rejected_count);
-    let conflicted_count = count(conflicted_count);
-    let quarantined_count = count(quarantined_count);
-    let resolved_count = count(resolved_count);
-    let total = pending_count
-        + in_flight_count
-        + acknowledged_count
-        + rejected_count
-        + conflicted_count
-        + quarantined_count
-        + resolved_count;
-
-    let local_store_status = if quarantined_count == 0 {
-        LocalStoreStatus::Healthy
-    } else {
-        LocalStoreStatus::Quarantined { quarantined_count }
-    };
-
-    let remote_sync_status = if total == 0 {
-        RemoteSyncStatus::Idle
-    } else if in_flight_count > 0 {
-        RemoteSyncStatus::InFlight { in_flight_count }
-    } else if pending_count > 0 {
-        RemoteSyncStatus::Backlogged { pending_count }
-    } else if rejected_count > 0 || conflicted_count > 0 {
-        RemoteSyncStatus::Failing {
-            rejected_count,
-            conflicted_count,
-        }
-    } else {
-        RemoteSyncStatus::Drained
-    };
-
-    Ok(OutboxHealth {
-        local_store_status,
-        remote_sync_status,
-        pending_count,
-        oldest_pending_at,
-        last_successful_sync,
-        last_error_class,
-        resolved_count,
+        stale_lease_count,
     })
 }
 
@@ -1698,9 +1980,9 @@ mod tests {
     #[test]
     fn health_of_an_empty_outbox_is_idle_and_healthy_with_no_stamps() {
         let conn = open_conn();
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(health.local_store_status, LocalStoreStatus::Healthy);
-        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Idle);
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
         assert_eq!(health.pending_count, 0);
         assert_eq!(health.oldest_pending_at, None);
         assert_eq!(health.last_successful_sync, None);
@@ -1723,7 +2005,7 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(health.pending_count, 2);
         assert_eq!(
             health.oldest_pending_at.as_deref(),
@@ -1731,8 +2013,8 @@ mod tests {
         );
         assert_eq!(
             health.remote_sync_status,
-            RemoteSyncStatus::Backlogged { pending_count: 2 },
-            "pending work outranks a historical failure"
+            RemoteSyncStatus::Unconfigured,
+            "the kernel has no configured remote transport"
         );
         assert_eq!(health.local_store_status, LocalStoreStatus::Healthy);
         assert_eq!(
@@ -1744,31 +2026,27 @@ mod tests {
     }
 
     #[test]
-    fn health_reports_in_flight_ahead_of_pending_and_acknowledged_stamps_the_last_sync() {
+    fn health_reports_in_flight_ahead_of_pending_without_fabricating_remote_success() {
         let mut conn = open_conn();
         seed_event(&mut conn, "evt-p", "obj-p");
         seed_event(&mut conn, "evt-q", "obj-q");
         transition(&mut conn, "evt-q", OutboxState::InFlight, None).unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
-        assert_eq!(
-            health.remote_sync_status,
-            RemoteSyncStatus::InFlight { in_flight_count: 1 }
-        );
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
         assert_eq!(health.pending_count, 1);
         assert_eq!(health.last_successful_sync, None);
 
-        let acknowledged = transition(&mut conn, "evt-q", OutboxState::Acknowledged, None).unwrap();
+        transition(&mut conn, "evt-q", OutboxState::Acknowledged, None).unwrap();
         transition(&mut conn, "evt-p", OutboxState::InFlight, None).unwrap();
-        let acknowledged_p =
-            transition(&mut conn, "evt-p", OutboxState::Acknowledged, None).unwrap();
-        let health = read_outbox_health(&conn).unwrap();
-        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Drained);
+        transition(&mut conn, "evt-p", OutboxState::Acknowledged, None).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
         assert_eq!(health.pending_count, 0);
-        let newest = acknowledged
-            .state_changed_at
-            .max(acknowledged_p.state_changed_at);
-        assert_eq!(health.last_successful_sync.as_deref(), Some(&*newest));
+        assert_eq!(
+            health.last_successful_sync, None,
+            "local acknowledgements do not prove remote synchronization"
+        );
         assert_eq!(health.last_error_class, None);
         assert_eq!(health.resolved_count, 0);
     }
@@ -1794,20 +2072,14 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(
             health.local_store_status,
             LocalStoreStatus::Quarantined {
                 quarantined_count: 1
             }
         );
-        assert_eq!(
-            health.remote_sync_status,
-            RemoteSyncStatus::Failing {
-                rejected_count: 1,
-                conflicted_count: 0
-            }
-        );
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
         assert_eq!(health.pending_count, 0);
         assert_eq!(health.oldest_pending_at, None);
         assert_eq!(
@@ -1828,7 +2100,7 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(
             health.local_store_status,
             LocalStoreStatus::Quarantined {
@@ -1878,7 +2150,7 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(
             health.local_store_status,
             LocalStoreStatus::Quarantined {
@@ -1905,7 +2177,7 @@ mod tests {
         )
         .unwrap();
 
-        let health = read_outbox_health(&conn).unwrap();
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
         assert_eq!(health.local_store_status, LocalStoreStatus::Healthy);
         assert_eq!(health.resolved_count, 1);
     }
@@ -1948,7 +2220,7 @@ mod tests {
 
         // Age one lease deterministically rather than by sleeping.
         conn.execute(
-            "UPDATE memory_outbox_events SET state_changed_at = '2020-01-01T00:00:00.000Z' \
+            "UPDATE memory_outbox_events SET state_changed_at = '2020-01-01T01:00:00+01:00' \
              WHERE event_id = 'evt-stale'",
             [],
         )
@@ -1962,7 +2234,7 @@ mod tests {
             OutboxState::InFlight,
             "a takeover is not a state change"
         );
-        assert_eq!(taken.previous_state_changed_at, "2020-01-01T00:00:00.000Z");
+        assert_eq!(taken.previous_state_changed_at, "2020-01-01T01:00:00+01:00");
         assert_eq!(taken.event.state, OutboxState::InFlight);
         assert!(
             taken.event.state_changed_at > taken.previous_state_changed_at,
@@ -2026,5 +2298,131 @@ mod tests {
         assert!(OutboxState::parse("shipped").is_err());
         assert!(OutboxState::parse("Pending").is_err());
         assert_eq!(OutboxState::parse("pending").unwrap(), OutboxState::Pending);
+    }
+
+    #[test]
+    fn health_orders_mixed_supported_timestamp_forms_semantically() {
+        let mut conn = open_conn();
+        seed_event(&mut conn, "evt-legacy-old", "obj-legacy-old");
+        seed_event(&mut conn, "evt-canonical-new", "obj-canonical-new");
+        conn.execute(
+            "UPDATE memory_outbox_events SET created_at = ?1 WHERE event_id = ?2",
+            params!["2026-01-01T01:00:00+01:00", "evt-legacy-old"],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE memory_outbox_events SET created_at = ?1 WHERE event_id = ?2",
+            params!["2026-01-01T00:30:00Z", "evt-canonical-new"],
+        )
+        .unwrap();
+
+        let health = read_outbox_health(&conn, DEFAULT_OUTBOX_HEALTH_STALE_AFTER).unwrap();
+        assert_eq!(
+            health.oldest_pending_at.as_deref(),
+            Some("2026-01-01T00:00:00.000Z"),
+            "the +01:00 legacy form is the older instant"
+        );
+    }
+
+    #[test]
+    fn health_inventory_counts_all_states_and_mixed_extrema_semantically() {
+        let mut conn = open_conn();
+        for (event_id, object_id) in [
+            ("evt-pending-old", "obj-pending-old"),
+            ("evt-pending-new", "obj-pending-new"),
+            ("evt-inflight-old", "obj-inflight-old"),
+            ("evt-inflight-new", "obj-inflight-new"),
+            ("evt-ack", "obj-ack"),
+            ("evt-rejected", "obj-rejected"),
+            ("evt-conflicted", "obj-conflicted"),
+            ("evt-quarantined", "obj-quarantined"),
+        ] {
+            seed_event(&mut conn, event_id, object_id);
+        }
+        transition(&mut conn, "evt-inflight-old", OutboxState::InFlight, None).unwrap();
+        transition(&mut conn, "evt-inflight-new", OutboxState::InFlight, None).unwrap();
+        transition(&mut conn, "evt-ack", OutboxState::InFlight, None).unwrap();
+        transition(&mut conn, "evt-ack", OutboxState::Acknowledged, None).unwrap();
+        transition(&mut conn, "evt-rejected", OutboxState::InFlight, None).unwrap();
+        transition(
+            &mut conn,
+            "evt-rejected",
+            OutboxState::Rejected,
+            Some("schema_refused"),
+        )
+        .unwrap();
+        transition(&mut conn, "evt-conflicted", OutboxState::InFlight, None).unwrap();
+        transition(
+            &mut conn,
+            "evt-conflicted",
+            OutboxState::Conflicted,
+            Some("divergent_revision"),
+        )
+        .unwrap();
+        transition(
+            &mut conn,
+            "evt-quarantined",
+            OutboxState::Quarantined,
+            Some("operator_hold"),
+        )
+        .unwrap();
+
+        // Deliberately mix supported offset and canonical forms. Raw text
+        // ordering would choose the 00:30 rows, while instant ordering must
+        // choose the 00:00 rows.
+        for (event_id, created_at, state_changed_at) in [
+            (
+                "evt-pending-old",
+                "2026-01-01T01:00:00+01:00",
+                "2026-01-01T01:00:00+01:00",
+            ),
+            (
+                "evt-pending-new",
+                "2026-01-01T00:30:00Z",
+                "2026-01-01T00:30:00Z",
+            ),
+            (
+                "evt-inflight-old",
+                "2026-01-01T02:00:00+02:00",
+                "2026-01-01T02:00:00+02:00",
+            ),
+            (
+                "evt-inflight-new",
+                "2026-01-01T00:30:00Z",
+                "2026-01-01T00:30:00Z",
+            ),
+        ] {
+            conn.execute(
+                "UPDATE memory_outbox_events SET created_at = ?1, state_changed_at = ?2 \
+                 WHERE event_id = ?3",
+                params![created_at, state_changed_at, event_id],
+            )
+            .unwrap();
+        }
+
+        let health = read_outbox_health(&conn, Duration::ZERO).unwrap();
+        assert_eq!(health.pending_count, 2);
+        assert_eq!(health.in_flight_count, 2);
+        assert_eq!(health.acknowledged_count, 1);
+        assert_eq!(health.rejected_count, 1);
+        assert_eq!(health.conflicted_count, 1);
+        assert_eq!(health.quarantined_count, 1);
+        assert_eq!(health.resolved_count, 0);
+        assert_eq!(health.stale_lease_count, 2);
+        assert_eq!(
+            health.oldest_pending_at.as_deref(),
+            Some("2026-01-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            health.oldest_in_flight_at.as_deref(),
+            Some("2026-01-01T00:00:00.000Z")
+        );
+        assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
+        assert_eq!(
+            health.local_store_status,
+            LocalStoreStatus::Quarantined {
+                quarantined_count: 1
+            }
+        );
     }
 }

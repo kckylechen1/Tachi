@@ -1,49 +1,6 @@
 use super::*;
 
 #[tokio::test]
-async fn tachi_task_facade_defaults_to_markdown_and_keeps_json_escape_hatch() {
-    let server = make_server();
-
-    // tachi#1201 item 1: action='profiles' (like recommend/profile/card) now
-    // defaults to markdown when format is omitted entirely.
-    let mut default_params = task_params("profiles");
-    default_params.format = None;
-    let default_body = server
-        .tachi_task(Parameters(default_params))
-        .await
-        .expect("default profiles should succeed");
-    assert!(
-        default_body.starts_with("## Tachi task profiles"),
-        "{default_body}"
-    );
-    assert!(
-        default_body.contains("| name | backend | model | role |"),
-        "{default_body}"
-    );
-    assert!(
-        serde_json::from_str::<Value>(&default_body).is_err(),
-        "action='profiles' with format omitted must default to markdown, not JSON: {default_body}"
-    );
-
-    let mut json_params = task_params("profiles");
-    json_params.format = Some("json".to_string());
-    let json_body = server
-        .tachi_task(Parameters(json_params))
-        .await
-        .expect("json profiles should succeed");
-    let parsed: Value = serde_json::from_str(&json_body).expect("json profiles JSON");
-    assert!(parsed["dispatch_profiles"].as_array().is_some());
-
-    let mut markdown_params = task_params("profiles");
-    markdown_params.format = Some("markdown".to_string());
-    let markdown = server
-        .tachi_task(Parameters(markdown_params))
-        .await
-        .expect("markdown profiles should succeed");
-    assert!(markdown.starts_with("## Tachi task profiles"), "{markdown}");
-}
-
-#[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn tachi_task_status_runs_acpx_status_control() {
     let (server, temp_home) = make_server_with_temp_home();

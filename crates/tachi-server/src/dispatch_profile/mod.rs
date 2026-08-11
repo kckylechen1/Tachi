@@ -4,9 +4,13 @@
 
 #[cfg(test)]
 use crate::agent_eval::CompletionStatus;
+// tachi#1675 PR4: `aggregate_subagent_scores` left with the recommendation
+// path's evidence flip — the decision-fact ledger has no subagent-role rollup
+// to aggregate. `load_live_eval_rows`/`aggregate_performance_matrix` stay for
+// the profile CARD surface (`cards::profile_eval_feedback_json`), which reads
+// `/eval` entries as human-readable feedback, not as routing evidence.
 use crate::agent_eval::{
-    aggregate_performance_matrix, aggregate_subagent_scores, load_live_eval_rows,
-    AgentPerformanceMatrixRow, EvalRow,
+    aggregate_performance_matrix, load_live_eval_rows, AgentPerformanceMatrixRow, EvalRow,
 };
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
@@ -14,22 +18,19 @@ use serde_json::{json, Value};
 pub(crate) use tachi_dispatch::DispatchProfileDef;
 pub(crate) use tachi_dispatch::{
     profile_uses_opencode_adapter, resolve_dispatch_profile, DispatchRisk, ResolvedDispatchProfile,
-    RoutePolicyRuleLoadout, RoutePolicyRuleRecord, RouteSimulationSummary,
-    DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
+    RoutePolicyRuleRecord, RouteSimulationSummary, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
+    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
 };
+// tachi#1675 BUG-8 follow-up: `RoutePolicyRuleLoadout` has no remaining
+// production reference in this crate (the last one, `policy::rules`, was
+// deleted — see the module doc on `dispatch_profile::policy`) — only
+// `dispatch_profile::tests::scoring` still names the bare type directly.
+#[cfg(test)]
+pub(crate) use tachi_dispatch::RoutePolicyRuleLoadout;
 
-/// tachi#1173 item 2: `verbose=false` returns one slim row per profile —
-/// name/backend/model/role — instead of the full mbit_card
-/// (stats/guidance/moves/personality/skill_loadout/evidence_contract) that a
-/// listing call doesn't need. `verbose=true` preserves the pre-#1173 full-card
-/// shape for callers that need it (e.g. the `tachi card` CLI).
-///
-/// Callers: `tachi_task(action='profiles')` (the listing) passes the
-/// caller's `verbose` straight through, defaulting to slim. Per #1182
-/// checkpoint 2, `action='profile'`/`action='card'` (the issue's "or
-/// action=profile" escape hatch) invert that default — they call this same
-/// function but default to `verbose=true` unless the caller explicitly asks
-/// for the slim shape.
+/// Server-side registry callers can request a slim or full dispatch-profile
+/// projection. The operator `tachi card` command does not use this model-facing
+/// JSON builder; it reads static profile/admission owners directly.
 pub(crate) fn dispatch_profiles_json_for_server(
     server: &MemoryServer,
     verbose: bool,
@@ -71,7 +72,11 @@ mod routing;
 #[cfg(test)]
 mod tests;
 
-use self::policy::*;
+// tachi#1675 BUG-8 follow-up: `self::policy::*` used to be the only path
+// bringing `load_route_policy_rule_loadout` into scope (a `pub(super)`
+// item, so not reachable via the named re-export below); with that function
+// deleted, `policy` has nothing left the named re-export at line 91 doesn't
+// already cover, so the glob import is gone rather than narrowed to nothing.
 use self::routing::*;
 
 #[cfg(test)]

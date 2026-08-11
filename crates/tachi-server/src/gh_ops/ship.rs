@@ -395,27 +395,43 @@ fn verify_cached_set(repo: &Path, files: &[String]) -> Result<(), String> {
     ))
 }
 
-fn git_commit_verbatim(repo: &Path, message: &str) -> Result<String, String> {
-    struct TempFileGuard(PathBuf);
+pub(in crate::gh_ops) struct TempFileGuard(PathBuf);
 
-    impl Drop for TempFileGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
     }
+}
 
-    let temp_path = commit_message_temp_path()?;
-    let _guard = TempFileGuard(temp_path.clone());
+/// Creates `path` exclusively and writes `message` into it, returning the
+/// delete-on-drop guard for that file.
+///
+/// The guard is armed **only after `create_new` wins the race**. Arming it
+/// before the open (the previous shape) made a caller that lost an
+/// `AlreadyExists` race delete the *winner's* in-flight file, so the winner's
+/// `git commit -F` then failed with `could not read log file ... No such file
+/// or directory`. A loser must never delete a file it did not create.
+pub(in crate::gh_ops) fn write_commit_message_file(
+    path: &Path,
+    message: &str,
+) -> Result<TempFileGuard, String> {
     let mut temp = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&temp_path)
+        .open(path)
         .map_err(|err| format!("create commit message tempfile: {err}"))?;
+    // Ours now: from here on every failure path must clean the file up.
+    let guard = TempFileGuard(path.to_path_buf());
     temp.write_all(message.as_bytes())
         .map_err(|err| format!("write commit message tempfile: {err}"))?;
     temp.flush()
         .map_err(|err| format!("flush commit message tempfile: {err}"))?;
-    drop(temp);
+    Ok(guard)
+}
+
+fn git_commit_verbatim(repo: &Path, message: &str) -> Result<String, String> {
+    let temp_path = commit_message_temp_path()?;
+    let _guard = write_commit_message_file(&temp_path, message)?;
     run_git_os(
         repo,
         vec![
@@ -429,13 +445,22 @@ fn git_commit_verbatim(repo: &Path, message: &str) -> Result<String, String> {
     Ok(sha.trim().to_string())
 }
 
-fn commit_message_temp_path() -> Result<PathBuf, String> {
+/// A per-call unique path for the commit-message tempfile.
+///
+/// `pid` separates processes; the process-wide counter separates *threads*,
+/// which the timestamp alone does not: `SystemTime::now()` is only
+/// microsecond-granular on macOS, so two concurrent ships could mint the exact
+/// same `pid-nanos` name and collide on `create_new`.
+pub(in crate::gh_ops) fn commit_message_temp_path() -> Result<PathBuf, String> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| format!("system clock before UNIX_EPOCH: {err}"))?
         .as_nanos();
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(std::env::temp_dir().join(format!(
-        "tachi-ship-commit-message-{}-{nanos}.txt",
+        "tachi-ship-commit-message-{}-{nanos}-{seq}.txt",
         std::process::id()
     )))
 }

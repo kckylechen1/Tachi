@@ -47,8 +47,8 @@ invent calls that are not exposed yet.
 
 | Capability | Public surface | Status |
 |---|---|---|
-| feature intake and board | `tachi_task(action="intake"|"briefing")` | implemented |
-| profile/card listing | `tachi_task(action="profiles"|"profile"|"card")` | implemented |
+| feature intake and board | `tachi_task(action="intake"|"brief")` | implemented |
+| operator profile/admission diagnostics | `tachi card list [--json]` / `tachi card show <profile-id> [--json]` | implemented; local operator-only, not launch approval |
 | route recommendation | `tachi_tune(action="route_simulate")` | implemented |
 | route policy replay | `tachi_tune(action="route_simulate")` | implemented |
 | route policy proposals | `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` (admin-only since #1426) | implemented |
@@ -58,7 +58,7 @@ invent calls that are not exposed yet.
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
 | skill bundle/loadout | `tachi_skill(action="bundle"|"loadout")` | implemented |
 | PR gate preview | `tachi_gh(action="pr_status")` | implemented |
-| release and closure | `tachi_gh(action="release_note")` / `tachi_task(action="close_loop")` | implemented |
+| release and closure | `tachi_gh(action="release_note")` / `tachi_gh(action="close_loop")` | implemented |
 
 Do not add new public facades such as `tachi_mbit`, `tachi_policy`, or
 `tachi_router` while an existing domain facade can carry the workflow. Internal
@@ -94,6 +94,17 @@ Legacy `agent` dispatch remains supported, but lifecycle agents should prefer
 
 ## MBIT Card
 
+> **Authority pointer (2026-08-10).** Owner ruling #1202 governs what an MBIT
+> card *is*: see `dispatch-lifecycle.md` §4.2 "Storage split — three layers,
+> never merged" (declaration / evidence / projection). MBIT and other
+> statistical summaries are **derived evidence and projection only** — never a
+> persisted second authority, and never a routing baseline in their own right.
+> This section, written later (2026-07-20), described MBIT as a first-class
+> routing input; where the two disagree, #1202 wins. Concretely, since
+> kckylechen1/tachi#1675 PR4 the routing evidence base is the decision-fact
+> ledger, and a candidate with no usable ledger row resolves to **abstain**,
+> never to a `baseline_mbit_fit`.
+
 MBIT means Model Behavior Identity Tag. It is the machine-usable card attached
 to a dispatch profile. It is allowed to be lightweight and memorable, but it is
 not cosmetic.
@@ -109,8 +120,11 @@ Each card should expose:
 - evolution rules or proposal hooks when enough eval evidence exists.
 
 MBIT data feeds route explanations, fallback chains, prompt envelope selection,
-scorecard display, and future policy evolution. A card that does not affect
-routing is not a valid MBIT card.
+and scorecard display — as a rendered projection over the reviewed declaration
+plus recorded evidence (#1202), not as an independent routing authority. It is
+not a scoring input to the route decision: routing evidence is the decision-fact
+ledger, and the absence of ledger evidence is answered with `abstain`, not with
+a card-fit score.
 
 ## Skill Loadout
 
@@ -197,9 +211,9 @@ deterministic MBIT/risk fit rather than pretending the policy is learned.
 Every substantial policy-learning slice should be able to pass this workflow:
 
 1. `tachi_task(action="intake", issue_ref=...)`
-2. `tachi_task(action="briefing", flow_id=...)`
-3. `tachi_task(action="cycle_status", flow_id=...)`
-4. `tachi_task(action="profiles")` / `tachi_skill(action="loadout")` as needed
+2. `tachi_task(action="brief", flow_id=...)`
+3. `tachi_task(action="status", flow_id=...)` (the cycle view is nested under `status.cycle`)
+4. Operator-only static diagnostics (`tachi card list/show`) and `tachi_skill(action="loadout")` are separate surfaces when needed; the model-facing Task facade does not inspect profile/card projections.
 6. launch the host harness's native subagent with the frozen packet; use the
    admin/operator external staffing exception only when a proven boundary
    requirement exceeds host-native guarantees
@@ -207,11 +221,11 @@ Every substantial policy-learning slice should be able to pass this workflow:
 8. leader verification and `tachi_verify`
 9. submit evidence and independently adjudicate the outcome; legacy explicit
    Tachi runs may still use `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
-10. rerun `tachi_task(action="cycle_status", flow_id=...)` before PR handoff
+10. rerun `tachi_task(action="status", flow_id=...)` before PR handoff
 11. `tachi_gh(action="link_pr", flow_id=..., pr_ref=...)`
 12. `tachi_gh(action="pr_status", flow_id=..., pr_ref=...)`
 13. `tachi_gh(action="release_note", flow_id=...)`
-14. `tachi_task(action="close_loop", flow_id=...)`
+14. `tachi_gh(action="close_loop", flow_id=...)`
 
 The UX matrix is not just a checklist. It is a product test for whether Tachi
 can guide an agent from issue to durable closure without relying on chat memory.
@@ -220,7 +234,7 @@ can guide an agent from issue to durable closure without relying on chat memory.
 
 As of 2026-06-28, the baseline includes:
 
-- feature-scoped `tachi_task(action="briefing")`;
+- feature-scoped `tachi_task(action="brief")`;
 - built-in dispatch profiles and MBIT-like profile cards;
 - profile recommendation with deterministic risk classification;
 - live eval performance matrix consumption by recommendation;
@@ -246,11 +260,11 @@ As of 2026-06-28, the baseline includes:
   weakness markers and skill demotion targets, and merged weak-against signals
   affect route recommendation scoring;
 - credentialed `opencode_builder` profile;
-- feature lifecycle: `tachi_task` owns `intake` / `cycle_status` /
-  `build_references` / `close_loop`; `tachi_gh` owns `link_pr` /
-  `pr_status` / `release_note` / `pr_handoff`;
+- feature lifecycle: `tachi_task` owns `intake` / `status` (cycle view);
+  `tachi_gh` owns `close_loop` (including its dry-run reference/promotion
+  preview) plus `link_pr` / `pr_status` / `release_note` / `pr_handoff`;
 - feature briefing, intake instructions, issue automation plans, and GitHub
-  handoff text route flow/issue/PR-backed work through read-only `cycle_status`
+  handoff text route flow/issue/PR-backed work through read-only `status` cycle views
   before PR handoff, release notes, or close-loop;
 - `dispatch(profile=...)` records flow-visible dispatch ids and compact dispatch
   card artifacts when `flow_id` is valid;
@@ -278,6 +292,16 @@ Implemented route-policy loader:
   explains applied/skipped rules under `route_policy_rules`.
 - Applied rules add explainable weight rather than hard-overriding routing, so
   high-risk tasks can still block fast/unsafe profiles.
+- Since the `kckylechen1/tachi#1675` PR4 cutover, that weight is gated twice.
+  A rule is honoured only if it declares `evidence.source =
+  "decision_fact_ledger"`; the proposal generator still mines `/eval` memory,
+  which the cutover retired as a routing evidence base, so every rule it mints
+  is skipped as `retired_evidence_source:live_memory_eval` — reviewable and
+  audited, but inert until the generator itself moves onto the ledger. And a
+  rule preferring a profile the risk classifier excluded (blocked, or outside
+  the required set at high/critical risk) is skipped rather than scored: hard
+  gates cut the candidate set before scoring, and no weight may resurrect a
+  candidate they removed.
 
 ## Non-Goals
 

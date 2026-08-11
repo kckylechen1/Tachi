@@ -60,25 +60,25 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_for_release_note() {
     .expect("merge github status");
     write_passed_verification(flow_id);
 
-    let mut params = task_params("cycle_status");
+    let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await
-        .expect("cycle_status should succeed");
-    let parsed: Value = serde_json::from_str(&raw).expect("cycle_status JSON");
+        .expect("status cycle should succeed");
+    let parsed = cycle_view(&raw);
 
     let next = parsed["next_action"].as_str().expect("next_action string");
     assert!(
         next.contains("tachi_gh(action='release_note'"),
         "ready PR without release_note must coach tachi_gh release_note, got: {next}"
     );
-    assert_no_deprecated_lifecycle_coaching("cycle_status.next_action", next);
+    assert_no_deprecated_lifecycle_coaching("status.cycle.next_action", next);
 
     let drift = serde_json::to_string(&parsed["spec_drift"]).expect("serialize drift");
-    assert_no_deprecated_lifecycle_coaching("cycle_status.spec_drift", &drift);
+    assert_no_deprecated_lifecycle_coaching("status.cycle.spec_drift", &drift);
     let full = serde_json::to_string(&parsed).expect("serialize full");
-    assert_no_deprecated_lifecycle_coaching("cycle_status full payload", &full);
+    assert_no_deprecated_lifecycle_coaching("status cycle full payload", &full);
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -100,17 +100,17 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_to_link_pr() {
     );
     write_intake_flow(flow_id, &issue);
 
-    let mut params = task_params("cycle_status");
+    let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await
-        .expect("cycle_status should succeed");
-    let parsed: Value = serde_json::from_str(&raw).expect("cycle_status JSON");
+        .expect("status cycle should succeed");
+    let parsed = cycle_view(&raw);
     let next = parsed["next_action"].as_str().expect("next_action string");
     assert!(
         next.contains("tachi_gh(action='pr_handoff'") && next.contains("tachi_gh(action='link_pr'"),
         "missing PR must coach tachi_gh pr_handoff+link_pr, got: {next}"
     );
-    assert_no_deprecated_lifecycle_coaching("cycle_status.next_action(link)", next);
+    assert_no_deprecated_lifecycle_coaching("status.cycle.next_action(link)", next);
 }

@@ -8,6 +8,15 @@ pub mod dispatch_adjudications;
 #[cfg(feature = "admin")]
 pub mod dispatch_outcomes;
 mod doctor_probe;
+/// tachi#1675 PR2: read-side unification of the dispatch and mirror eval
+/// spines (design D1). Read-only — it owns the join, never the policy.
+#[cfg(feature = "admin")]
+pub mod eval_projection;
+/// tachi#1675 PR3: full replay of the same ledger by folding the append-only
+/// judgment log, ordered by `insertion_seq`. Must agree canonically with
+/// `eval_projection`'s incremental read (design D6).
+#[cfg(feature = "admin")]
+pub mod eval_replay;
 mod event_ledger;
 #[cfg(feature = "admin")]
 pub mod exec_env;
@@ -33,6 +42,8 @@ pub mod open_context;
 // migration takes no `StoreProfile`.
 pub mod outbox;
 mod recall_cache;
+#[cfg(feature = "admin")]
+pub mod route_eval;
 #[cfg(feature = "admin")]
 mod sandbox;
 mod schema;
@@ -189,11 +200,13 @@ pub use open_context::{
 /// it announces — is enforced by `crate::store::outbox`, which owns the
 /// `BEGIN IMMEDIATE` boundary. See `outbox`'s module doc.
 pub(crate) use outbox::{
-    claim_outbox_events_within_tx, insert_outbox_event_within_tx,
-    insert_resolution_successor_event_within_tx, list_outbox_events_by_state, read_outbox_event,
+    claim_outbox_events_within_tx, insert_outbox_destination_apply_receipt_within_tx,
+    insert_outbox_event_within_tx, insert_resolution_successor_event_within_tx,
+    list_outbox_events_by_state, read_outbox_destination_apply_receipt, read_outbox_event,
     read_outbox_health, refuse_invalid_class, refuse_non_canonical_digest,
     refuse_reserved_resolved_class, transition_outbox_event_within_tx,
-    transition_outbox_resolved_conflict_within_tx, ClaimedOutboxRow,
+    transition_outbox_resolved_conflict_within_tx, validate_destination_event_binding,
+    ClaimedOutboxRow, OutboxDestinationApplyReceiptRow,
 };
 pub use outbox::{
     LocalStoreStatus, NewOutboxEvent, OutboxEventRow, OutboxHealth, OutboxState, RemoteSyncStatus,
@@ -202,6 +215,15 @@ pub use outbox::{
 pub use recall_cache::{
     recall_cache_get, recall_cache_invalidate_all, recall_cache_purge_stale, recall_cache_put,
     recall_cache_record_hit, recall_cache_stats, RecallCacheHit, RecallCacheStats,
+};
+#[cfg(feature = "admin")]
+pub use route_eval::{
+    get_eval_rubric_score, get_route_decision_by_dispatch_id, get_route_recommendation,
+    insert_eval_rubric_score, insert_route_decision_idempotent, insert_route_recommendation,
+    list_eval_rubric_scores, list_route_decisions, EvalRubricScoreRow, NewEvalRubricScore,
+    NewRouteDecision, NewRouteRecommendation, RouteDecisionRow, RouteRecommendationRow,
+    ASSIGNMENT_MODES, RUBRIC_CONFIDENCE_VALUES, RUBRIC_DIMENSION_VALUES,
+    RUBRIC_INDEPENDENCE_BASIS_VALUES, RUBRIC_SUBJECT_KINDS,
 };
 #[cfg(feature = "admin")]
 pub use sandbox::{

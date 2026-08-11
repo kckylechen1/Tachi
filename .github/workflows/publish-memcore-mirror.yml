@@ -1,0 +1,71 @@
+# Regenerate the public memcore mirror (github.com/kckylechen1/memcore) on
+# every merge that touches the kernel. Owner-ratified plan B (2026-08-10):
+# this monorepo is the single source; the mirror is a generated artifact
+# (#873 pattern). Consumers (zeroclaw #28/#50, Hypermem) git-dep the mirror.
+#
+# Requires secret MEMCORE_MIRROR_TOKEN: a fine-grained PAT with contents:write
+# on kckylechen1/memcore only.
+name: Publish memcore mirror
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/memcore/**"
+      - "crates/portable-kernel/**"
+      - "LICENSE"
+      - "scripts/publish_memcore_mirror.sh"
+      - ".github/workflows/publish-memcore-mirror.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-memcore-mirror
+  cancel-in-progress: false # publishes must serialize, never drop
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v5
+
+      - name: Generate mirror
+        run: bash scripts/publish_memcore_mirror.sh /tmp/memcore-mirror "$GITHUB_SHA"
+
+      - name: Sanity-build the mirror standalone
+        # The mirror must compile on its own before we publish it — a mirror
+        # that only builds inside the monorepo workspace is a broken artifact.
+        run: |
+          cd /tmp/memcore-mirror
+          cargo check --workspace --locked 2>/dev/null || cargo check --workspace
+          cargo check -p memcore --no-default-features
+
+      - name: Push to public mirror
+        env:
+          TOKEN: ${{ secrets.MEMCORE_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKEN" ]; then
+            echo "::error::MEMCORE_MIRROR_TOKEN is not configured; mirror not published"
+            exit 1
+          fi
+          # Append-only history: consumers pin revs, so published commits must
+          # stay reachable forever. Clone the mirror, swap the tree, commit on
+          # top only when content actually changed.
+          git clone -q --depth 1 \
+            "https://x-access-token:${TOKEN}@github.com/kckylechen1/memcore.git" /tmp/mirror-repo
+          cd /tmp/mirror-repo
+          git config user.name "memcore-mirror-bot"
+          git config user.email "noreply@users.noreply.github.com"
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R /tmp/memcore-mirror/. .
+          git add -A
+          if git diff --cached --quiet; then
+            echo "mirror already current; nothing to publish"
+          else
+            git commit -q -m "mirror: memcore + portable-kernel @ tachi ${GITHUB_SHA}"
+            git push -q origin main
+          fi

@@ -89,6 +89,23 @@ pub use db::dispatch_outcomes::{
     outcome_exists_for_dispatch, upsert_outcome, upsert_outcome_reconciling_terminal_placeholder,
     DispatchOutcomeRow, NewDispatchOutcome, OutcomeEvidenceClass,
 };
+/// tachi#1675 PR2 (design D1): the ONE spine-tagged evidence row every
+/// routing/quality reader joins through. Read-only surface.
+#[cfg(feature = "admin")]
+pub use db::eval_projection::{
+    list_dispatch_eval_observations, list_eval_observations, list_mirror_eval_observations,
+    policy_revision_census, EvalAdjudicationFacts, EvalObservation, EvalRouteFacts, EvalSpine,
+    PolicyRevisionCensus, ProfileAttributionBasis, OCCURRED_AT_BASIS_LEGACY_CREATED_AT,
+};
+/// tachi#1675 PR3 (design D6): the replay half of the same read surface —
+/// the ledger folded forward from its append-only judgment log rather than
+/// read as current state. Required to agree canonically with
+/// [`list_eval_observations`] over the same window.
+#[cfg(feature = "admin")]
+pub use db::eval_replay::{
+    canonical_eval_observations, eval_observations_digest, replay_eval_observations, EvalReplay,
+    REPLAY_ORDERING_BASIS,
+};
 #[cfg(feature = "admin")]
 pub use db::exec_env::{
     find_active_exec_env_by_path, get_exec_env, insert_exec_env, list_exec_envs, reclaim_exec_env,
@@ -124,7 +141,16 @@ pub use db::mirror_eval::{
 /// portable build can drive it.
 pub use db::outbox::{
     LocalStoreStatus, OutboxEventRow, OutboxHealth, OutboxState, RemoteSyncStatus,
-    MAX_OUTBOX_CLASS_BYTES,
+    DEFAULT_OUTBOX_HEALTH_STALE_AFTER, MAX_OUTBOX_CLASS_BYTES,
+};
+#[cfg(feature = "admin")]
+pub use db::route_eval::{
+    get_eval_rubric_score, get_route_decision_by_dispatch_id, get_route_recommendation,
+    insert_eval_rubric_score, insert_route_decision_idempotent, insert_route_recommendation,
+    list_eval_rubric_scores, list_route_decisions, EvalRubricScoreRow, NewEvalRubricScore,
+    NewRouteDecision, NewRouteRecommendation, RouteDecisionRow, RouteRecommendationRow,
+    ASSIGNMENT_MODES, RUBRIC_CONFIDENCE_VALUES, RUBRIC_DIMENSION_VALUES,
+    RUBRIC_INDEPENDENCE_BASIS_VALUES, RUBRIC_SUBJECT_KINDS,
 };
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]
@@ -203,6 +229,12 @@ pub use search::{
 /// tachi#1643 single-transaction commit boundary. Re-exported at the root for
 /// the same reason as the snapshot-import contract below.
 pub use store::outbox::{outbox_payload_digest, OutboxCommitReceipt, OutboxEventMeta};
+/// tachi#1718 portable destination-side outbox apply/readback boundary.
+pub use store::outbox_destination_apply::{
+    OutboxDestinationApplyApplication, OutboxDestinationApplyEnvelope,
+    OutboxDestinationApplyReceipt, OutboxDestinationApplyResult, OutboxDestinationConflictReason,
+    OutboxDestinationConflictReceipt, OutboxDestinationIdentity,
+};
 /// tachi#1644 outbox reconciliation protocol (#1630 A2). Ungated for the same
 /// reason A1 is: a host-owned sync loop drives this from a portable build,
 /// with no Tachi daemon in the picture.

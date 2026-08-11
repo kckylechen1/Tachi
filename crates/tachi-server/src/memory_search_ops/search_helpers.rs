@@ -394,7 +394,7 @@ pub(crate) fn resolve_effective_named_project(
 /// Centralized here rather than re-derived per surface because
 /// `project_only` is a targeted mode (today: `tachi_memory(action='briefing')`
 /// via `facade_memory_ops::briefing_ops::handle_memory_briefing`, and
-/// `tachi_task(action='briefing'|'doc_index')` via `copilot_ops::
+/// `tachi_task(action='brief')` via `copilot_ops::
 /// feature_briefing::handlers::handle_tachi_feature_briefing` — both route
 /// through here) whose whole point is to skip the ordinary error branch for
 /// the *inferred* case (no project named — fall back to workspace) while

@@ -392,6 +392,9 @@ fn census_used_by_actions_are_live_primary_actions() {
         "refine_issues",
         "merge",
         "ux_matrix",
+        "briefing",
+        "doc_index",
+        "cycle_status",
     ]
     .into_iter()
     .collect();
@@ -411,7 +414,7 @@ fn census_used_by_actions_are_live_primary_actions() {
             }
             if removed.contains(name) {
                 stale.push(format!(
-                    "{field}: used_by_actions contains REMOVED action '{name}' (#1319-C2/#1683-C1a)"
+                    "{field}: used_by_actions contains REMOVED action '{name}' (#1319-C2/#1683-C1a/#1712-C1b)"
                 ));
             }
         }

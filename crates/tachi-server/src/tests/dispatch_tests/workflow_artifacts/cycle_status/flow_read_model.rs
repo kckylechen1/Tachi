@@ -34,16 +34,21 @@ async fn tachi_task_cycle_status_reads_flow_artifacts_without_github() {
     .expect("merge github status");
     write_passed_verification(flow_id);
 
-    let mut params = task_params("cycle_status");
+    let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await
-        .expect("cycle_status should succeed");
-    let parsed: Value = serde_json::from_str(&raw).expect("cycle_status JSON");
+        .expect("status cycle should succeed");
+    let outer: Value = serde_json::from_str(&raw).expect("status response JSON");
+    assert_eq!(outer["status"], json!("ok"));
+    assert!(outer.get("flow_id").is_none());
+    assert!(outer.get("issue_ref").is_none());
+    assert!(outer.get("pr_ref").is_none());
+    let parsed = cycle_view(&raw);
 
     assert_eq!(parsed["ok"], json!(true));
-    assert_eq!(parsed["action"], json!("cycle_status"));
+    assert_eq!(parsed["action"], json!("status"));
     assert_eq!(parsed["flow_id"], json!(flow_id));
     assert_eq!(parsed["stage"], json!("verified"));
     assert_eq!(parsed["issue_ref"], json!("kckylechen1/tachi#438"));
@@ -51,6 +56,7 @@ async fn tachi_task_cycle_status_reads_flow_artifacts_without_github() {
     assert_eq!(parsed["github"]["merge_state"], json!("ready"));
     assert_eq!(parsed["verification"]["overall"], json!("passed"));
     assert_eq!(parsed["source"]["github_read"], json!(false));
+    assert_eq!(parsed["source"]["read_only"], json!(true));
     assert!(parsed["linked_docs"]
         .as_array()
         .is_some_and(|docs| docs.contains(&json!(

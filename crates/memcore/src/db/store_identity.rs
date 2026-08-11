@@ -52,6 +52,12 @@ use super::store_profile::{
     parse_stored_profile, StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
 };
 
+/// Kernel-reserved write-once partition stamp for destination-side outbox
+/// apply (#1718).  It lives beside the role/profile stamps so generic state
+/// writers cannot overwrite the destination partition after the first
+/// successful apply.
+pub(crate) const OUTBOX_DESTINATION_PARTITION_KEY: &str = "outbox_destination_partition";
+
 /// A store's resolved identity: what it says it is, not what a caller claimed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreIdentity {

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TachiGhParams {
-    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "issue_label", "issue_freshness_scan", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note", "handoff_draft", "handoff_publish", "handoff_repair"
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "issue_label", "issue_freshness_scan", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note", "close_loop", "handoff_draft", "handoff_publish", "handoff_repair".
     pub action: String,
     /// Repository in "owner/repo" format. Required for GitHub primitive actions; lifecycle actions may infer from issue_ref/pr_ref/flow_id.
     #[serde(default)]
@@ -47,16 +47,20 @@ pub struct TachiGhParams {
     /// Use confirm=false or dry_run=true for a preflight-only preview.
     #[serde(default)]
     pub confirm: bool,
-    /// Optional Tachi flow id; when provided, safe_merge persists status + event to .tachi/runs/<flow_id>/
+    /// Optional Tachi flow id; when provided, safe_merge persists status + event to .tachi/runs/<flow_id>/ and close_loop records the terminal lifecycle marker after a successful wiki write.
     #[serde(default)]
     pub flow_id: Option<String>,
+    /// Named project DB for action="close_loop" wiki scope and pattern
+    /// feedback. Omit for the daemon-bound workspace DB.
+    #[serde(default)]
+    pub project: Option<String>,
     /// Optional response shape for lifecycle actions: json (default) or markdown.
     #[serde(default)]
     pub format: Option<String>,
     /// Task summary used by pr_handoff lifecycle artifacts.
     #[serde(default)]
     pub task: Option<String>,
-    /// GitHub issue ref for lifecycle actions, e.g. owner/repo#123 or URL. Contract-mode ship emits `Refs <issue_ref>` in the generated PR body when set.
+    /// GitHub issue ref for lifecycle actions, e.g. owner/repo#123 or URL. close_loop requires this for a real closure; contract-mode ship emits `Refs <issue_ref>` in the generated PR body when set.
     #[serde(default)]
     pub issue_ref: Option<String>,
     /// GitHub PR ref, e.g. owner/repo#123 or URL. Accepted by PR actions including pr_read, pr_comment, pr_comments, pr_review_digest, safe_merge, and lifecycle actions.
@@ -124,18 +128,67 @@ pub struct TachiGhParams {
     /// this destructive local-disk op on the GitHub path).
     #[serde(default)]
     pub reclaim_worktree: Option<bool>,
-    /// Canonical docs to fold into action="release_note" lifecycle artifacts
-    /// (in addition to any docs recorded on the flow itself).
+    /// Canonical docs to fold into action="release_note" or action="close_loop"
+    /// lifecycle artifacts (in addition to any docs recorded on the flow itself).
     #[serde(default)]
     pub doc_paths: Vec<String>,
-    /// Canonical spec docs to fold into action="release_note" lifecycle artifacts
-    /// (in addition to any specs recorded on the flow itself).
+    /// Canonical spec docs to fold into action="release_note" or action="close_loop"
+    /// lifecycle artifacts (in addition to any specs recorded on the flow itself).
     #[serde(default)]
     pub spec_paths: Vec<String>,
-    /// PR title override for action="pr_handoff" lifecycle artifacts. Falls back
-    /// to the flow's automation-plan title, then the task summary, when unset.
+    /// Notes for action="pr_handoff" title fallback, or action="close_loop"
+    /// wiki drafting when result.md is unavailable.
     #[serde(default)]
     pub notes: Option<String>,
+    /// Related GitHub issue/PR references for action="close_loop".
+    #[serde(default)]
+    pub related_issues: Vec<String>,
+    /// Whether action="close_loop" posts write-back comments. Defaults to true
+    /// (best-effort; a GitHub outage does not fail the wiki closure).
+    #[serde(default)]
+    pub post_comment: Option<bool>,
+    /// Wiki closure title for action="close_loop". If omitted, the handler
+    /// drafts it from result.md or notes.
+    #[serde(default)]
+    pub wiki_title: Option<String>,
+    /// Wiki closure body for action="close_loop". If omitted, the handler
+    /// drafts it from result.md or notes.
+    #[serde(default)]
+    pub wiki_text: Option<String>,
+    /// Wiki closure path for action="close_loop", e.g. /wiki/... or /guide/....
+    #[serde(default)]
+    pub wiki_path: Option<String>,
+    /// Wiki closure topic label for action="close_loop".
+    #[serde(default)]
+    pub wiki_topic: Option<String>,
+    /// Wiki closure short summary for action="close_loop".
+    #[serde(default)]
+    pub wiki_summary: Option<String>,
+    /// Wiki closure category for action="close_loop".
+    #[serde(default)]
+    pub wiki_category: Option<String>,
+    /// Wiki closure keywords/tags for action="close_loop".
+    #[serde(default)]
+    pub wiki_keywords: Vec<String>,
+    /// Wiki closure named entities for action="close_loop".
+    #[serde(default)]
+    pub wiki_entities: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
+    #[schemars(schema_with = "super::coerce::opt_number_from_string_or_number_schema")]
+    /// Wiki closure importance 0.0-1.0 for action="close_loop".
+    pub wiki_importance: Option<f64>,
+    /// Wiki closure scope, global or project, for action="close_loop".
+    #[serde(default)]
+    pub wiki_scope: Option<String>,
+    /// Wiki closure area/domain tag for action="close_loop".
+    #[serde(default)]
+    pub wiki_domain: Option<String>,
+    /// Bypass wiki noise filtering for action="close_loop".
+    #[serde(default)]
+    pub force: bool,
     /// Label mode for action="issue_label": "add" (default) or "remove".
     #[serde(default)]
     pub label_mode: Option<String>,

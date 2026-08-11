@@ -86,12 +86,36 @@ pub(super) struct DensityBudget {
     pub(super) bytes: u64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ProjectionKind {
+    Exact,
+    CarrierAdapted,
+}
+
+impl ProjectionKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::CarrierAdapted => "carrier-adapted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct InstructionTargetDeclaration {
     carrier: Carrier,
     path: String,
     ownership_mode: OwnershipMode,
+    /// Exact projections must stay byte-identical to the source.
+    /// Carrier-adapted projections may diverge and skip parity checks.
+    #[serde(default = "default_projection_kind")]
+    projection: ProjectionKind,
+}
+
+fn default_projection_kind() -> ProjectionKind {
+    ProjectionKind::Exact
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -101,9 +125,16 @@ struct InstructionSurfaceDeclaration {
     source: String,
     audience: Audience,
     tier: Tier,
+    /// Adapter/renderer identity for the surface projection lane.
+    #[serde(default = "default_adapter_version")]
+    adapter_version: String,
     density_budget: DensityBudget,
     remediation_owner: String,
     targets: Vec<InstructionTargetDeclaration>,
+}
+
+fn default_adapter_version() -> String {
+    "v1".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -111,6 +142,10 @@ struct InstructionSurfaceDeclaration {
 struct InstructionManifestDocument {
     schema_version: String,
     root: String,
+    /// Paths under root that must be claimed by some surface source.
+    /// Unclaimed required paths are incomplete coverage, never clean.
+    #[serde(default)]
+    required_sources: Vec<String>,
     surfaces: Vec<InstructionSurfaceDeclaration>,
 }
 
@@ -121,6 +156,7 @@ pub(super) struct InstructionManifestStatus {
     pub(super) root: String,
     pub(super) manifest_hash: String,
     pub(super) status: String,
+    pub(super) required_sources: Vec<String>,
     pub(super) sources: Vec<InstructionSourceStatus>,
 }
 
@@ -131,12 +167,15 @@ pub(super) struct InstructionSourceStatus {
     pub(super) resolved_path: String,
     pub(super) audience: String,
     pub(super) tier: String,
+    pub(super) adapter_version: String,
     pub(super) density_budget: DensityBudget,
     pub(super) remediation_owner: String,
     pub(super) exists: bool,
     pub(super) status: String,
     pub(super) hash: Option<String>,
     pub(super) bytes: Option<u64>,
+    #[serde(skip)]
+    pub(super) content: Option<String>,
     pub(super) targets: Vec<InstructionTargetStatus>,
 }
 
@@ -146,10 +185,13 @@ pub(super) struct InstructionTargetStatus {
     pub(super) path: String,
     pub(super) resolved_path: String,
     pub(super) ownership_mode: String,
+    pub(super) projection: String,
     pub(super) exists: bool,
     pub(super) status: String,
     pub(super) hash: Option<String>,
     pub(super) bytes: Option<u64>,
+    #[serde(skip)]
+    pub(super) content: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +201,7 @@ struct DeclaredFileStatus {
     status: &'static str,
     hash: Option<String>,
     bytes: Option<u64>,
+    content: Option<String>,
 }
 
 /// Parse and read exactly the files declared by an instruction-surface manifest.
@@ -227,6 +270,11 @@ pub(super) fn scan_instruction_manifest(
         ));
     }
 
+    for required in &manifest.required_sources {
+        resolve_declared_path(&root, required, "required source")?;
+    }
+
+    manifest.required_sources.sort();
     manifest
         .surfaces
         .sort_by(|left, right| left.id.cmp(&right.id));
@@ -241,6 +289,7 @@ pub(super) fn scan_instruction_manifest(
                         .as_str()
                         .cmp(right.ownership_mode.as_str())
                 })
+                .then_with(|| left.projection.as_str().cmp(right.projection.as_str()))
         });
     }
     let canonical_manifest = serde_json::to_string(&manifest)
@@ -281,10 +330,12 @@ pub(super) fn scan_instruction_manifest(
                 path: target.path,
                 resolved_path: target_status.resolved_path.display().to_string(),
                 ownership_mode: target.ownership_mode.as_str().to_string(),
+                projection: target.projection.as_str().to_string(),
                 exists: target_status.exists,
                 status: target_status.status.to_string(),
                 hash: target_status.hash,
                 bytes: target_status.bytes,
+                content: target_status.content,
             });
         }
 
@@ -294,12 +345,14 @@ pub(super) fn scan_instruction_manifest(
             resolved_path: source_status.resolved_path.display().to_string(),
             audience: surface.audience.as_str().to_string(),
             tier: surface.tier.as_str().to_string(),
+            adapter_version: surface.adapter_version,
             density_budget: surface.density_budget,
             remediation_owner: surface.remediation_owner,
             exists: source_status.exists,
             status: source_status.status.to_string(),
             hash: source_status.hash,
             bytes: source_status.bytes,
+            content: source_status.content,
             targets,
         });
     }
@@ -322,6 +375,7 @@ pub(super) fn scan_instruction_manifest(
         } else {
             NON_CLEAN_STATUS.to_string()
         },
+        required_sources: manifest.required_sources,
         sources,
     })
 }
@@ -340,6 +394,18 @@ fn validate_manifest(manifest: &InstructionManifestDocument) -> Result<(), Strin
         return Err("instruction manifest root must be relative to the manifest".to_string());
     }
 
+    for required in &manifest.required_sources {
+        if required.trim().is_empty() {
+            return Err("required_sources entries must not be empty".to_string());
+        }
+        if Path::new(required).is_absolute() {
+            return Err(format!(
+                "required_sources entry '{}' must be relative to the declared root",
+                required
+            ));
+        }
+    }
+
     let mut ids = BTreeSet::new();
     for surface in &manifest.surfaces {
         if surface.id.trim().is_empty() {
@@ -351,6 +417,12 @@ fn validate_manifest(manifest: &InstructionManifestDocument) -> Result<(), Strin
         if surface.source.trim().is_empty() {
             return Err(format!(
                 "source path for surface '{}' must not be empty",
+                surface.id
+            ));
+        }
+        if surface.adapter_version.trim().is_empty() {
+            return Err(format!(
+                "adapter_version for surface '{}' must not be empty",
                 surface.id
             ));
         }
@@ -370,10 +442,11 @@ fn validate_manifest(manifest: &InstructionManifestDocument) -> Result<(), Strin
         let mut targets = BTreeSet::new();
         for target in &surface.targets {
             let key = format!(
-                "{}\u{1f}{}\u{1f}{}",
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}",
                 target.carrier.as_str(),
                 target.path,
-                target.ownership_mode.as_str()
+                target.ownership_mode.as_str(),
+                target.projection.as_str()
             );
             if !targets.insert(key) {
                 return Err(format!(
@@ -409,6 +482,7 @@ fn inspect_declared_file(
                 status: MISSING_STATUS,
                 hash: None,
                 bytes: None,
+                content: None,
             });
         }
         Err(error) => {
@@ -470,6 +544,7 @@ fn inspect_declared_file(
         status: CLEAN_STATUS,
         hash: Some(crate::utils::stable_hash(text)),
         bytes: Some(content.len() as u64),
+        content: Some(text.to_string()),
     })
 }
 
@@ -642,17 +717,29 @@ mod tests {
         json!({
             "schema_version": "tachi.instruction_surfaces.v1",
             "root": "..",
+            "required_sources": ["AGENTS.md", "CLAUDE.md"],
             "surfaces": [
                 {
                     "id": "z-private",
                     "source": "CLAUDE.md",
                     "audience": "carrier-private",
                     "tier": "expanded-manual",
+                    "adapter_version": "fixture-v1",
                     "density_budget": {"name": "provisional-expanded", "bytes": 4096},
                     "remediation_owner": "carrier-manual-owner",
                     "targets": [
-                        {"carrier": "claude", "path": "targets/claude/CLAUDE.md", "ownership_mode": "carrier-owned"},
-                        {"carrier": "codex", "path": "targets/codex/private.md", "ownership_mode": "source-owned"}
+                        {
+                            "carrier": "claude",
+                            "path": "targets/claude/CLAUDE.md",
+                            "ownership_mode": "carrier-owned",
+                            "projection": "carrier-adapted"
+                        },
+                        {
+                            "carrier": "codex",
+                            "path": "targets/codex/private.md",
+                            "ownership_mode": "source-owned",
+                            "projection": "exact"
+                        }
                     ]
                 },
                 {
@@ -660,10 +747,16 @@ mod tests {
                     "source": "AGENTS.md",
                     "audience": "public",
                     "tier": "compressed-adapter",
+                    "adapter_version": "fixture-v1",
                     "density_budget": {"name": "provisional-compressed", "bytes": 2048},
                     "remediation_owner": "repository-owner",
                     "targets": [
-                        {"carrier": "cursor", "path": "targets/cursor/AGENTS.md", "ownership_mode": "source-owned"}
+                        {
+                            "carrier": "cursor",
+                            "path": "targets/cursor/AGENTS.md",
+                            "ownership_mode": "source-owned",
+                            "projection": "exact"
+                        }
                     ]
                 }
             ]
@@ -702,11 +795,49 @@ mod tests {
         assert_eq!(value["status"], "clean");
         assert_eq!(value["sources"][0]["id"], "a-public");
         assert_eq!(value["sources"][1]["id"], "z-private");
+        assert_eq!(value["sources"][0]["adapter_version"], "fixture-v1");
         assert_eq!(value["sources"][1]["targets"][0]["carrier"], "claude");
+        assert_eq!(
+            value["sources"][1]["targets"][0]["projection"],
+            "carrier-adapted"
+        );
         assert_eq!(value["sources"][1]["targets"][1]["carrier"], "codex");
+        assert_eq!(value["sources"][1]["targets"][1]["projection"], "exact");
+        assert_eq!(value["required_sources"][0], "AGENTS.md");
         assert!(value["manifest_hash"].as_str().is_some());
         assert!(value["sources"][0]["hash"].as_str().is_some());
         assert!(value["sources"][0]["bytes"].as_u64().is_some());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn v1_manifest_defaults_missing_adapter_and_projection() {
+        let (root, manifest_path) = fixture("v1-compat");
+        std::fs::write(root.join("AGENTS.md"), "public\n").expect("source");
+        std::fs::write(root.join("CLAUDE.md"), "private\n").expect("source");
+        std::fs::create_dir_all(root.join("targets/claude")).expect("target dir");
+        std::fs::create_dir_all(root.join("targets/codex")).expect("target dir");
+        std::fs::create_dir_all(root.join("targets/cursor")).expect("target dir");
+        std::fs::write(root.join("targets/claude/CLAUDE.md"), "private\n").expect("target");
+        std::fs::write(root.join("targets/codex/private.md"), "private target\n").expect("target");
+        std::fs::write(root.join("targets/cursor/AGENTS.md"), "public target\n").expect("target");
+
+        let mut manifest = base_manifest();
+        manifest["surfaces"][0]
+            .as_object_mut()
+            .expect("surface object")
+            .remove("adapter_version");
+        manifest["surfaces"][0]["targets"][0]
+            .as_object_mut()
+            .expect("target object")
+            .remove("projection");
+        write_manifest(&manifest_path, &manifest);
+
+        let status = scan_instruction_manifest(&manifest_path).expect("v1-compatible manifest");
+        let value = serde_json::to_value(status).expect("status JSON");
+        assert_eq!(value["sources"][1]["adapter_version"], "v1");
+        assert_eq!(value["sources"][1]["targets"][0]["projection"], "exact");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -779,6 +910,15 @@ mod tests {
         write_manifest(&manifest_path, &manifest);
         let error = scan_instruction_manifest(&manifest_path).unwrap_err();
         assert!(error.contains("outside declared root"), "{error}");
+
+        manifest = base_manifest();
+        manifest["required_sources"] = json!(["../AGENTS.md"]);
+        write_manifest(&manifest_path, &manifest);
+        let error = scan_instruction_manifest(&manifest_path).unwrap_err();
+        assert!(
+            error.contains("required source") && error.contains("outside declared root"),
+            "{error}"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

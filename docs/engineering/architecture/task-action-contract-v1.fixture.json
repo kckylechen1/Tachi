@@ -1,0 +1,15 @@
+{
+  "schema_version": "task_action_contract.v1",
+  "active_examples": [
+    {"action": "intake", "task": "bind the issue to a flow", "issue_ref": "owner/repo#1"},
+    {"action": "claim", "agent_identity_id": "agent-1", "claim_role": "implementer", "claim_mode": "writable"},
+    {"action": "heartbeat", "claim_id": "claim-1", "transition_version": 1},
+    {"action": "handoff", "claim_id": "claim-1", "agent_identity_id": "agent-2"},
+    {"action": "release", "claim_id": "claim-1", "release_reason": "finished"},
+    {"action": "board", "state_filter": "all"},
+    {"action": "status", "dispatch_id": "dispatch-1"},
+    {"action": "complete", "task": "record the result", "agent": "codex", "outcome": "success"},
+    {"action": "adjudicate", "outcome_id": "outcome-1", "adjudication": {"verdict": "accepted", "adjudicator": "leader"}},
+    {"action": "brief", "task": "prepare the feature handoff"}
+  ]
+}

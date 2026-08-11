@@ -1,3 +1,11 @@
+use std::{
+    env,
+    path::Path,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
+
 use portable_kernel::{
     outbox_local_wins_successor_id, outbox_payload_digest, DanglingSupersession, LocalStoreStatus,
     MemoryEntry, MemoryError, MemoryStore, OutboxClaimKind, OutboxClaimRequest,
@@ -6,6 +14,7 @@ use portable_kernel::{
     PortableImportEntry, PortableImportReceipt, RemoteSyncStatus, ADMIN_SURFACE_ENABLED,
     IS_PORTABLE_BUILD, OUTBOX_LOCAL_WINS_RESOLVED_CLASS,
 };
+use tempfile::tempdir;
 
 #[test]
 fn portable_build_disables_admin_surface() {
@@ -223,6 +232,30 @@ fn outbox_meta(event_id: &str) -> OutboxEventMeta {
     }
 }
 
+const OUTBOX_CHILD_MODE_ENV: &str = "TACHI_PORTABLE_OUTBOX_CHILD_MODE";
+const OUTBOX_CHILD_PATH_ENV: &str = "TACHI_PORTABLE_OUTBOX_CHILD_PATH";
+
+fn run_outbox_child(test_name: &str, mode: &str, path: &Path) {
+    let status = Command::new(env::current_exe().expect("portable test executable"))
+        .arg("--exact")
+        .arg(test_name)
+        .arg("--nocapture")
+        .env(OUTBOX_CHILD_MODE_ENV, mode)
+        .env(OUTBOX_CHILD_PATH_ENV, path)
+        .status()
+        .expect("spawn real outbox crash child");
+    assert!(
+        status.success(),
+        "outbox crash child {mode} exited unsuccessfully: {status}"
+    );
+}
+
+fn child_outbox_path() -> Option<String> {
+    env::var(OUTBOX_CHILD_MODE_ENV)
+        .ok()
+        .map(|_| env::var(OUTBOX_CHILD_PATH_ENV).expect("child outbox path"))
+}
+
 /// tachi#1643: the durable outbox is PORTABLE surface, so the whole leaf —
 /// commit boundary, state machine, health read model — must be callable and
 /// resolve in a build that has genuinely disabled the admin feature. #1630's
@@ -239,8 +272,8 @@ fn portable_build_commit_with_outbox_event_is_atomic() {
     let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
     assert_eq!(
         store.outbox_health().expect("health").remote_sync_status,
-        RemoteSyncStatus::Idle,
-        "an untouched outbox has never held an event"
+        RemoteSyncStatus::Unconfigured,
+        "the portable kernel has no configured remote transport"
     );
 
     let receipt = store
@@ -289,6 +322,283 @@ fn portable_build_commit_with_outbox_event_is_atomic() {
     );
 }
 
+/// A real child process exits after the production atomic commit returns.
+/// The parent opens the same file from scratch and verifies both halves of the
+/// commit survived; no dropped-handle shortcut can prove this boundary.
+#[test]
+fn portable_outbox_subprocess_crash_after_commit_reopens_pending_and_object() {
+    if let Some(path) = child_outbox_path() {
+        assert_eq!(env::var(OUTBOX_CHILD_MODE_ENV).as_deref(), Ok("commit"));
+        let mut store = MemoryStore::open(&path).expect("child open file store");
+        store
+            .commit_with_outbox_event(
+                &smoke_entry("portable-crash-commit-object"),
+                &outbox_meta("portable-crash-commit-event"),
+            )
+            .expect("child local commit");
+        std::process::exit(0);
+    }
+
+    let directory = tempdir().expect("temporary outbox directory");
+    let path = directory.path().join("portable-crash-commit.sqlite");
+    run_outbox_child(
+        "portable_outbox_subprocess_crash_after_commit_reopens_pending_and_object",
+        "commit",
+        &path,
+    );
+
+    let path_string = path.to_string_lossy();
+    let store = MemoryStore::open(&path_string).expect("parent reopen file store");
+    let object = store
+        .get("portable-crash-commit-object")
+        .expect("reopen object")
+        .expect("the locally committed object survives the child crash");
+    assert_eq!(
+        object.text,
+        smoke_entry("portable-crash-commit-object").text
+    );
+    let event = store
+        .outbox_event("portable-crash-commit-event")
+        .expect("reopen event")
+        .expect("the pending event survives the child crash");
+    assert_eq!(event.state, OutboxState::Pending);
+
+    let health = store
+        .outbox_health_with_stale_after(Duration::from_secs(3600))
+        .expect("explicit-bound health after reopen");
+    assert_eq!(health.pending_count, 1);
+    assert_eq!(health.in_flight_count, 0);
+    assert_eq!(health.stale_lease_count, 0);
+    assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
+}
+
+/// A real child process exits after claiming and before reporting an outcome.
+/// Reopen proves the lease is inspectable, a positive bound refuses the fresh
+/// lease, expiry permits one takeover, and the immediately repeated claim is
+/// refused before the event reaches its terminal outcome.
+#[test]
+fn portable_outbox_subprocess_claim_crash_reopens_and_reclaims_once() {
+    let lease_bound = Duration::from_millis(250);
+    if let Some(path) = child_outbox_path() {
+        assert_eq!(env::var(OUTBOX_CHILD_MODE_ENV).as_deref(), Ok("claim"));
+        let mut store = MemoryStore::open(&path).expect("child open file store");
+        store
+            .commit_with_outbox_event(
+                &smoke_entry("portable-crash-claim-object"),
+                &outbox_meta("portable-crash-claim-event"),
+            )
+            .expect("child local commit");
+        let claimed = store
+            .claim_outbox_events(&OutboxClaimRequest::first_claims_only(8))
+            .expect("child claim");
+        assert_eq!(claimed.len(), 1);
+        assert!(
+            store
+                .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, lease_bound))
+                .expect("child pre-expiry bounded reclaim")
+                .is_empty(),
+            "the child must refuse to reclaim its own fresh lease before simulated process loss"
+        );
+        std::process::exit(0);
+    }
+
+    let directory = tempdir().expect("temporary outbox directory");
+    let path = directory.path().join("portable-crash-claim.sqlite");
+    run_outbox_child(
+        "portable_outbox_subprocess_claim_crash_reopens_and_reclaims_once",
+        "claim",
+        &path,
+    );
+
+    let path_string = path.to_string_lossy();
+    let mut store = MemoryStore::open(&path_string).expect("parent reopen file store");
+    let event = store
+        .outbox_event("portable-crash-claim-event")
+        .expect("reopen claimed event")
+        .expect("claimed event survives the child crash");
+    assert_eq!(event.state, OutboxState::InFlight);
+    assert!(
+        store
+            .get("portable-crash-claim-object")
+            .expect("reopen claimed object")
+            .is_some(),
+        "the source object remains locally readable while its event is leased"
+    );
+
+    let health_after_reopen = store
+        .outbox_health_with_stale_after(lease_bound)
+        .expect("explicit-bound health after reopen");
+    assert_eq!(health_after_reopen.pending_count, 0);
+    assert_eq!(health_after_reopen.in_flight_count, 1);
+    assert_eq!(
+        health_after_reopen.oldest_in_flight_at.as_deref(),
+        Some(event.state_changed_at.as_str())
+    );
+
+    let expiry_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let health = store
+            .outbox_health_with_stale_after(lease_bound)
+            .expect("poll lease expiry");
+        if health.stale_lease_count == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < expiry_deadline,
+            "the explicit lease bound did not expire before the test deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let reclaimed = store
+        .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, lease_bound))
+        .expect("post-bound reclaim");
+    assert_eq!(reclaimed.len(), 1);
+    assert!(matches!(
+        reclaimed[0].claim,
+        OutboxClaimKind::Reclaimed { .. }
+    ));
+    assert_eq!(reclaimed[0].event.state, OutboxState::InFlight);
+    assert!(
+        store
+            .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, lease_bound))
+            .expect("immediate duplicate bounded reclaim")
+            .is_empty(),
+        "the takeover renews the lease and must refuse an immediate duplicate claim"
+    );
+
+    let object_before_outcome = store
+        .get("portable-crash-claim-object")
+        .expect("object before outcome")
+        .expect("object before outcome present");
+    let first = store
+        .apply_outbox_outcome(
+            "portable-crash-claim-event",
+            &OutboxOutcome::Acknowledged,
+            &OutboxOutcomeEvidence::from_reporter("portable-child-peer"),
+        )
+        .expect("terminal outcome after reclaim");
+    let first_event = first.event.clone();
+    let object_revision = object_before_outcome.revision;
+    drop(store);
+    let mut restarted = MemoryStore::open(&path_string).expect("restart after terminal outcome");
+    let duplicate = restarted
+        .apply_outbox_outcome(
+            "portable-crash-claim-event",
+            &OutboxOutcome::Acknowledged,
+            &OutboxOutcomeEvidence::from_reporter("portable-child-peer"),
+        )
+        .expect("duplicate terminal outcome after reopen");
+    assert_eq!(first.application, OutboxOutcomeApplication::Applied);
+    assert_eq!(
+        duplicate.application,
+        OutboxOutcomeApplication::AlreadyApplied
+    );
+    assert_eq!(duplicate.event, first_event);
+    assert_eq!(
+        restarted
+            .get("portable-crash-claim-object")
+            .expect("object after outcome")
+            .expect("object after outcome present")
+            .revision,
+        object_revision,
+        "outbox replay must not rewrite the local memory revision"
+    );
+    assert!(
+        restarted
+            .claim_outbox_events(&OutboxClaimRequest::with_reclaim(8, lease_bound))
+            .expect("terminal event reclaim probe")
+            .is_empty(),
+        "a terminal event is never returned to pending or reclaimed"
+    );
+}
+
+/// Every state is counted exactly once through the public portable seams. The
+/// fixture also checks the aggregate serialization is content/private-id
+/// negative and that an explicit nonzero bound reports no fresh stale lease.
+#[test]
+fn portable_outbox_health_inventory_is_exact_and_content_free() {
+    let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+    for index in 0..6 {
+        store
+            .commit_with_outbox_event(
+                &smoke_entry(&format!("portable-health-object-{index}")),
+                &outbox_meta(&format!("portable-health-event-{index}")),
+            )
+            .expect("health fixture commit");
+    }
+
+    let claimed = store
+        .claim_outbox_events(&OutboxClaimRequest::first_claims_only(5))
+        .expect("claim five fixture events");
+    assert_eq!(claimed.len(), 5);
+    store
+        .apply_outbox_outcome(
+            "portable-health-event-0",
+            &OutboxOutcome::Acknowledged,
+            &OutboxOutcomeEvidence::from_reporter("portable-health-peer"),
+        )
+        .expect("acknowledge fixture event");
+    store
+        .apply_outbox_outcome(
+            "portable-health-event-1",
+            &OutboxOutcome::Rejected {
+                error_class: "schema_refused".into(),
+            },
+            &OutboxOutcomeEvidence::from_reporter("portable-health-peer"),
+        )
+        .expect("reject fixture event");
+    store
+        .apply_outbox_outcome(
+            "portable-health-event-2",
+            &OutboxOutcome::Conflicted {
+                error_class: "divergent_revision".into(),
+            },
+            &OutboxOutcomeEvidence::from_reporter("portable-health-peer"),
+        )
+        .expect("conflict fixture event");
+    store
+        .transition_outbox_event(
+            "portable-health-event-3",
+            OutboxState::Quarantined,
+            Some("operator_hold"),
+        )
+        .expect("quarantine fixture event");
+
+    let health = store
+        .outbox_health_with_stale_after(Duration::from_secs(3600))
+        .expect("explicit-bound health inventory");
+    assert_eq!(health.pending_count, 1);
+    assert_eq!(health.in_flight_count, 1);
+    assert_eq!(health.acknowledged_count, 1);
+    assert_eq!(health.rejected_count, 1);
+    assert_eq!(health.conflicted_count, 1);
+    assert_eq!(health.quarantined_count, 1);
+    assert_eq!(health.resolved_count, 0);
+    assert_eq!(health.stale_lease_count, 0);
+    assert!(health.oldest_pending_at.is_some());
+    assert!(health.oldest_in_flight_at.is_some());
+    assert_eq!(health.remote_sync_status, RemoteSyncStatus::Unconfigured);
+    assert_eq!(
+        health.local_store_status,
+        LocalStoreStatus::Quarantined {
+            quarantined_count: 1
+        }
+    );
+    let serialized = serde_json::to_string(&health).expect("serialize health");
+    for forbidden in [
+        "portable-health-event-",
+        "portable-health-object-",
+        "portable batch smoke",
+        "portable-health-peer",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "health serialization leaked forbidden content/private id: {forbidden}"
+        );
+    }
+}
+
 /// The typed state machine and the six health fields, over the portable API.
 #[test]
 fn portable_build_outbox_state_machine_and_health() {
@@ -312,8 +622,8 @@ fn portable_build_outbox_state_machine_and_health() {
     assert_eq!(backlog.pending_count, 1);
     assert_eq!(
         backlog.remote_sync_status,
-        RemoteSyncStatus::Backlogged { pending_count: 1 },
-        "no remote exists in this leaf, so a committed mutation rests as backlog"
+        RemoteSyncStatus::Unconfigured,
+        "no remote exists in this leaf, so the status is explicitly unconfigured"
     );
     assert!(
         backlog.oldest_pending_at.is_some(),
@@ -333,12 +643,12 @@ fn portable_build_outbox_state_machine_and_health() {
     assert_eq!(acknowledged.last_error_class, None);
 
     let drained = store.outbox_health().expect("health");
-    assert_eq!(drained.remote_sync_status, RemoteSyncStatus::Drained);
+    assert_eq!(drained.remote_sync_status, RemoteSyncStatus::Unconfigured);
     assert_eq!(drained.pending_count, 0);
     assert_eq!(drained.oldest_pending_at, None);
     assert_eq!(
-        drained.last_successful_sync.as_deref(),
-        Some(acknowledged.state_changed_at.as_str())
+        drained.last_successful_sync, None,
+        "a local acknowledgement cannot fabricate remote success"
     );
 
     // Quarantine is reachable from any state and requires its class; it is
