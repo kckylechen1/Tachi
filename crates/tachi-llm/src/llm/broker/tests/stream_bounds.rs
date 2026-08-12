@@ -12,12 +12,18 @@
 //!
 //! # The accumulators that are not the frame
 //!
-//! The frame ceiling is the obvious one and the corpus pins it. The two that a
-//! reviewer should insist on are the ones a per-frame bound does not cover: a
+//! The frame ceiling is the obvious one and the corpus pins it. The ones a
+//! reviewer should insist on are those a per-frame bound does not cover: a
 //! thousand well-formed frames each carrying a kilobyte of tool-call arguments
 //! are individually legal and jointly unbounded, and an index is
 //! provider-chosen, so a stream can open as many accumulators as it likes with
 //! every single frame inside every single limit.
+//!
+//! That question has to be asked of **each grammar's own bookkeeping**, not
+//! just of the shared driver's. The tool-call ceiling says nothing about
+//! Anthropic's content blocks, which a text-only stream opens and closes
+//! without ever touching a tool call — so the two decoders are exercised here,
+//! not one.
 
 use super::super::sse::MAX_FRAME_BYTES;
 use super::*;
@@ -120,6 +126,61 @@ fn one_turn_cannot_open_unbounded_tool_calls() {
         failure,
         Some(StreamDecodeErrorKind::EventTooLarge),
         "a turn must not be able to open unbounded tool calls"
+    );
+}
+
+/// One named Anthropic event frame.
+fn anthropic_frame(name: &str, payload: &Value) -> Vec<u8> {
+    format!("event: {name}\ndata: {payload}\n\n").into_bytes()
+}
+
+/// One complete Anthropic text block: opened, then closed.
+fn anthropic_text_block(index: u32) -> Vec<u8> {
+    let mut bytes = anthropic_frame(
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {"type": "text", "text": ""},
+        }),
+    );
+    bytes.extend(anthropic_frame(
+        "content_block_stop",
+        &json!({"type": "content_block_stop", "index": index}),
+    ));
+    bytes
+}
+
+#[test]
+fn one_message_cannot_open_unbounded_content_blocks() {
+    // The Anthropic grammar's own accumulator, which no ceiling in the shared
+    // driver covers: these blocks are text, so not one tool call is opened and
+    // the tool ceiling never fires. Every frame is tiny and legal, every block
+    // is closed politely, and the list they grow is scanned on every lookup —
+    // so without a ceiling this is unbounded retained memory *and* quadratic
+    // work, both chosen by the provider.
+    let mut decoder: Box<dyn WireStreamDecoder> = Box::new(AnthropicEventStreamDecoder::new());
+    decoder
+        .push_bytes(&anthropic_frame(
+            "message_start",
+            &json!({
+                "type": "message_start",
+                "message": {"id": "msg_1", "type": "message", "role": "assistant"},
+            }),
+        ))
+        .expect("the message opens legally");
+
+    let failure = push_until_failure(decoder.as_mut(), (0..4096u32).map(anthropic_text_block));
+    assert_eq!(
+        failure,
+        Some(StreamDecodeErrorKind::EventTooLarge),
+        "one message must not be able to open unbounded content blocks"
+    );
+    assert_eq!(
+        decoder
+            .terminal_disposition()
+            .map(|disposition| serde_json::to_value(disposition).expect("serializes")),
+        Some(decode_fault("event_too_large"))
     );
 }
 

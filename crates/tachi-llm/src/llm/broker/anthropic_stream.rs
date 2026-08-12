@@ -59,6 +59,22 @@ use super::stream_grammar::{
 use super::usage::UsageObservationV1;
 use super::wire::ProviderResponseMetadata;
 
+/// The most content blocks one message may open.
+///
+/// The tool-call ceiling in [`super::stream_grammar`] does not cover this, and
+/// that is the whole point of stating it separately: a text or thinking block
+/// opens no tool call, so a run of tiny, individually legal
+/// `content_block_start`/`content_block_stop` pairs passes every other limit
+/// while growing this list without bound — and since every event looks its
+/// block up by scanning the list, the work is quadratic in bytes the provider
+/// chose to send. Both halves are the provider's to choose, which is what
+/// makes it a ceiling and not a nicety.
+///
+/// Larger than the tool ceiling because a block is a far cheaper object than a
+/// reconstructed call, and because an interleaved-thinking turn legitimately
+/// opens many of them: a thought, a sentence, another thought, a tool call.
+const MAX_CONTENT_BLOCKS_PER_MESSAGE: usize = 1024;
+
 /// The event that ends an Anthropic stream.
 ///
 /// Named because it is read in two places — the dispatch table and the
@@ -281,6 +297,14 @@ impl AnthropicEventGrammar {
                 "a content block started after the generation ended",
             ));
         }
+        // Checked before anything is opened, so a refusal leaves no half-opened
+        // call behind it.
+        if self.blocks.len() >= MAX_CONTENT_BLOCKS_PER_MESSAGE {
+            return Err(decode_error(
+                StreamDecodeErrorKind::EventTooLarge,
+                "one message opened more content blocks than the decoder admits",
+            ));
+        }
         let index = block_index(value)?;
         if self.position(index).is_some() {
             return Err(decode_error(
@@ -499,7 +523,8 @@ impl AnthropicEventGrammar {
         Ok(events)
     }
 
-    /// Records a content block.
+    /// Records a content block. The list it grows is bounded by
+    /// [`MAX_CONTENT_BLOCKS_PER_MESSAGE`], checked where the block opens.
     fn track(&mut self, index: u32, kind: BlockKind) {
         self.blocks.push(TrackedBlock {
             index,
