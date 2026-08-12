@@ -231,6 +231,12 @@ fn the_transcribed_retry_phase_still_matches_the_lane_calls_source() {
     );
 
     // 5xx → retry within the tier, honouring `Retry-After` for the delay.
+    //
+    // The block runs through the actual sleep and `continue` on purpose: a
+    // pin that stopped at the delay computation would keep passing if the
+    // loop stopped actually sleeping and retrying — the operative half of
+    // "retry within the tier" is the `sleep(...).await; continue;`, not just
+    // the delay value it never uses.
     assert_lane_calls_block(
         "5xx retry",
         r#"            if status.is_server_error() {
@@ -244,7 +250,16 @@ fn the_transcribed_retry_phase_still_matches_the_lane_calls_source() {
                         Duration::from_secs(secs)
                     } else {
                         Self::retry_delay(attempt)
-                    };"#,
+                    };
+                    eprintln!(
+                        "[llm] API error {status} (attempt {}/{}); retrying after {}ms",
+                        attempt,
+                        max_attempts,
+                        delay.as_millis()
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }"#,
     );
 
     // Every other non-success status → return immediately, no retry at all.
@@ -263,6 +278,17 @@ fn the_transcribed_retry_phase_still_matches_the_lane_calls_source() {
         3,
         "the shipped retry budget changed; `RetryIntent::WithinTier` no longer \
          means what the parity fixtures assume"
+    );
+
+    // The constant assert above is not enough on its own: it would still pass
+    // if `call_lane_llm` stopped *passing* that constant to
+    // `call_provider_tier` and hard-coded a literal budget (2, say) at the
+    // call site instead. Pin the call site's own text so that swap goes red
+    // here rather than only showing up as a fixture with the wrong retry
+    // count.
+    assert_lane_calls_block(
+        "call_lane_llm passes the shared retry budget by name",
+        "                    &breaker_key,\n                    Self::MAX_ATTEMPTS,\n                    system,",
     );
 }
 
