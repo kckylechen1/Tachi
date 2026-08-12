@@ -53,6 +53,7 @@ impl Drop for EnvRestore {
 }
 
 mod auth_probe;
+mod catalog_import;
 mod chat_lanes;
 mod client_env;
 mod config_json;

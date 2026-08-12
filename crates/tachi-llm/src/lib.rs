@@ -10,6 +10,10 @@ mod runtime_files;
 #[cfg(test)]
 mod test_support;
 
+pub use llm::catalog_import::{
+    env_chat_lane_deployments, env_deployment_id, import_env_chat_lanes, EnvLaneDeployment,
+    ENV_CATALOG_PREFIX, ENV_CHAT_LANES,
+};
 pub use llm::{
     auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind, CompletionStatusV1,
     Generated, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
