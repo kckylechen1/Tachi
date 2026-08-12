@@ -822,3 +822,160 @@ fn auth_probe_targets_resolve_by_env_name_and_refuse_everything_else() {
     );
     assert_eq!(auth_probe_descriptor_for_env_name(""), None);
 }
+
+// ─── model lanes are a projection, not a mirror (tachi#1681 D7 PR-B, item 3) ──
+
+/// The mirror-is-dead discriminator. A hand-maintained JSON copy would keep
+/// reporting the compiled-in default no matter what the env chain resolved;
+/// the projection cannot.
+#[test]
+fn model_lanes_report_the_resolved_extract_lane_not_a_hardcoded_literal() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _model = EnvRestore::set("EXTRACT_MODEL", "Qwen/Qwen3.5-480B-status-projection");
+    let _base = EnvRestore::set("EXTRACT_BASE_URL", "https://status-projection.test/v1/chat");
+
+    let lanes = model_lanes_json();
+
+    assert_eq!(
+        lanes["extract"]["model"],
+        json!("Qwen/Qwen3.5-480B-status-projection"),
+        "status must report the model the env chain actually resolved"
+    );
+    assert_eq!(
+        lanes["extract"]["endpoint"],
+        json!("https://status-projection.test/v1/chat")
+    );
+    assert_eq!(
+        lanes["extract"]["catalog_source"],
+        json!("env"),
+        "and say where that came from"
+    );
+    assert_eq!(lanes["extract"]["deployment_id"], json!("env:extract"));
+    assert_eq!(
+        lanes["extract"]["keys"],
+        json!(["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"]),
+        "the key precedence chain keeps the shape its consumers read"
+    );
+}
+
+/// Status and catalog are one derivation, so they cannot disagree. Asserted
+/// against rows actually written to a store, not against the projection twice.
+#[test]
+fn model_lane_status_equals_the_catalog_rows_the_same_config_imports() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let config = tachi_llm::ProviderRuntimeConfig::from_env().expect("lanes resolve");
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+    memcore::db::init_schema(&conn).expect("schema");
+    tachi_llm::import_env_chat_lanes(&conn, &config, &memcore::db::now_utc_iso())
+        .expect("import succeeds");
+
+    let stored = memcore::db::model_catalog::list_model_deployments_by_source(
+        &conn,
+        memcore::catalog::CatalogSource::Env,
+    )
+    .expect("rows read");
+    assert_eq!(stored.len(), 4);
+
+    let lanes = model_lanes_json();
+    for lane in ["extract", "summary", "reasoning", "distill"] {
+        let row = stored
+            .iter()
+            .find(|row| row.deployment_id == format!("env:{lane}"))
+            .unwrap_or_else(|| panic!("catalog is missing lane {lane}"));
+
+        assert_eq!(
+            lanes[lane]["model"],
+            json!(row.provider_model_id),
+            "lane {lane}: status and catalog must report the same model"
+        );
+        assert_eq!(
+            lanes[lane]["endpoint"],
+            json!(row.endpoint_ref),
+            "lane {lane}: status and catalog must report the same endpoint"
+        );
+        assert_eq!(
+            lanes[lane]["deployment_id"],
+            json!(row.deployment_id),
+            "lane {lane}: status must name the catalog row it is projecting"
+        );
+        assert_eq!(
+            lanes[lane]["provider_account_ref"],
+            json!(row.provider_account_id),
+            "lane {lane}: status and catalog must agree on the account handle"
+        );
+    }
+}
+
+#[test]
+fn model_lanes_report_a_deliberate_embedding_swap_as_an_override() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _model = EnvRestore::set(tachi_llm::EMBEDDING_MODEL_ENV, "voyage-3-large");
+    let _dimension = EnvRestore::set(
+        tachi_llm::EMBEDDING_DIMENSION_ENV,
+        tachi_llm::STORED_INDEX_DIMENSION.to_string(),
+    );
+
+    let lanes = model_lanes_json();
+    assert_eq!(lanes["embedding"]["model"], json!("voyage-3-large"));
+    assert_eq!(lanes["embedding"]["model_source"], json!("env_override"));
+    assert_eq!(
+        lanes["embedding"]["expected_dimension"],
+        json!(tachi_llm::STORED_INDEX_DIMENSION)
+    );
+    assert_eq!(
+        lanes["embedding"]["deployment_id"],
+        json!("env:embedding"),
+        "the embedding lane is a catalog row like any other"
+    );
+    assert!(
+        lanes["embedding"]["config_error"].is_null(),
+        "a valid same-width swap is not an error"
+    );
+}
+
+#[test]
+fn model_lanes_report_a_refused_embedding_config_instead_of_a_plausible_model() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _model = EnvRestore::set(tachi_llm::EMBEDDING_MODEL_ENV, "some-2048-dim-model");
+    let _dimension = EnvRestore::set(tachi_llm::EMBEDDING_DIMENSION_ENV, "2048");
+
+    let lanes = model_lanes_json();
+    assert!(
+        lanes["embedding"]["config_error"]
+            .as_str()
+            .is_some_and(|err| err.contains("2048")),
+        "a refused embedding configuration must surface as an error: {}",
+        lanes["embedding"]
+    );
+    assert!(
+        lanes["embedding"]["model"].is_null(),
+        "status must not report a model it refused to configure — that is the mirror's habit \
+         this projection exists to end"
+    );
+}
+
+#[test]
+fn model_lanes_report_the_embedding_default_against_the_stored_index_width() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _model = EnvRestore::remove(tachi_llm::EMBEDDING_MODEL_ENV);
+    let _dimension = EnvRestore::remove(tachi_llm::EMBEDDING_DIMENSION_ENV);
+
+    let lanes = model_lanes_json();
+    assert_eq!(lanes["embedding"]["model"], json!("voyage-4"));
+    assert_eq!(lanes["embedding"]["model_source"], json!("default"));
+    assert_eq!(
+        lanes["embedding"]["expected_dimension"], lanes["embedding"]["stored_index_dimension"],
+        "an operator has to be able to see both numbers and that they agree"
+    );
+}
