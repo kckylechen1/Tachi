@@ -200,7 +200,7 @@ pub(super) fn transcript_chunks(fixture: &Value, name: &str) -> Vec<Vec<u8>> {
 fn decode_hex(hex: &str, name: &str) -> Vec<u8> {
     let digits: Vec<char> = hex.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        digits.len() % 2 == 0,
+        digits.len().is_multiple_of(2),
         "fixture {name}: a hex chunk has an odd number of digits"
     );
     digits
