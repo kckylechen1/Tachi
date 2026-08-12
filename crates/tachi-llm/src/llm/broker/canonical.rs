@@ -21,6 +21,26 @@
 //! unbounded canonical request would move a denial-of-service surface from the
 //! provider — who at least bills for it — to this process.
 //!
+//! # The one thing borrowed from the HTTP stack, and why it is not IO
+//!
+//! [`EndpointUrl::new`] calls `reqwest::Url::parse`. That is the whole of this
+//! layer's contact with the HTTP crate, and it is a *parser*: `reqwest::Url`
+//! is a re-export of the `url` crate's type, and `parse` turns a string into
+//! its components — scheme, host, port, path — without a socket, a DNS lookup,
+//! a client or a runtime. Nothing here can send.
+//!
+//! It is spelled `reqwest::Url` rather than `url::Url` only because `url` is
+//! already in the dependency graph as `reqwest`'s own dependency and this
+//! workspace has no direct edge onto it; adding one would be a dependency
+//! change for a type that is byte-identical either way. Should this crate ever
+//! gain a direct `url` dependency, this is a one-line rename with no
+//! behavioural component.
+//!
+//! The boundary is machine-checked rather than asserted: `tests::sans_io`
+//! sweeps every non-comment line of the adapter layer for client construction,
+//! socket types, `.await`, sleeps and process/file access, and separately pins
+//! that the *only* code line mentioning `reqwest` at all is the parse above.
+//!
 //! # No credential-shaped field exists here
 //!
 //! See the module-level two-gate note. This is the type-level half of it: a

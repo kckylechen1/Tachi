@@ -77,7 +77,11 @@
 //!   next slice.
 //! - **No executor, no cancellation state machine, no HTTP.** The disposition
 //!   vocabulary that the state machine will drive is frozen here
-//!   ([`InvocationDispositionV1`]); the machine that walks it is not.
+//!   ([`InvocationDispositionV1`]); the machine that walks it is not. "No
+//!   HTTP" means no client, no socket, no send and no wait — not "no mention
+//!   of the HTTP crate": [`EndpointUrl`] borrows its URL *parser* and nothing
+//!   else, which `tests::sans_io` states as an allowlist of exactly one line
+//!   rather than as a claim about a crate name.
 //! - **No gateway, no listener, no admission.** [`AdmittedRefs`] is the
 //!   recorded-never-authorizing shape those will fill in.
 //! - **No consumer cutover.** `chat_lanes::lane_calls` keeps serving all four

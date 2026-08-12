@@ -14,6 +14,7 @@
 //! | [`capability_refusals`] | each capability gate, one refusal at a time |
 //! | [`disposition_goldens`] | the disposition/usage vocabularies' serialized shape and their safety semantics |
 //! | [`two_gate`] | that no credential can be named, selected, or leaked |
+//! | [`sans_io`] | that the adapter layer contains no way to perform IO |
 //! | [`classification_parity`] | that the new classifier reproduces the legacy one, fixture for fixture |
 //! | [`openai_compat_goldens`] | canonical → wire bytes, and wire → canonical outcome |
 
@@ -28,6 +29,7 @@ mod capability_refusals;
 mod classification_parity;
 mod disposition_goldens;
 mod openai_compat_goldens;
+mod sans_io;
 mod spelling;
 mod two_gate;
 
