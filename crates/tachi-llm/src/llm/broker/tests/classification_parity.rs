@@ -29,7 +29,12 @@
 //!    leaf — so it is copied, not called).
 //! 2. [`the_transcribed_oracle_still_matches_the_lane_calls_source`] pins that
 //!    transcription against the **source text** of the original, so the oracle
-//!    cannot go stale while the suite stays green.
+//!    cannot go stale while the suite stays green. Its top-level functions
+//!    cover two of the four axes; the other two — retry phase and
+//!    `Retry-After` — live in branches inside `call_provider_tier`, and
+//!    [`the_transcribed_retry_phase_still_matches_the_lane_calls_source`] pins
+//!    those blocks too. A hand-written oracle for a live loop that nothing
+//!    pins is not a parity test, it is a second opinion.
 //! 3. The fixtures assert the new classifier against a **literal expected
 //!    answer** as well as against the oracle — a pure mirror test passes
 //!    happily when both sides are wrong in the same direction.
@@ -181,6 +186,114 @@ fn lane_calls_fn(name: &str) -> String {
         }
     }
     panic!("`fn {name}` in lane_calls.rs never closed at column zero");
+}
+
+/// Pins one *inner* block of `lane_calls.rs` — a stretch of source inside a
+/// method body.
+///
+/// [`lane_calls_fn`] can only reach top-level functions, and three of the four
+/// parity axes do not live in one: the retry phase and the `Retry-After` read
+/// are branches inside `call_provider_tier`. Without this, the transcription of
+/// those branches was a hand-written oracle pinned to nothing — the shipped
+/// loop could change and every parity test would stay green, which is exactly
+/// the drift the source-text leg exists to catch.
+///
+/// Exactly one occurrence is required: zero means the block moved or changed
+/// (the transcription must be re-derived), and more than one means the pin is
+/// ambiguous and could be satisfied by the wrong copy.
+#[track_caller]
+fn assert_lane_calls_block(what: &str, block: &str) {
+    let occurrences = LANE_CALLS_SOURCE.matches(block).count();
+    assert_eq!(
+        occurrences, 1,
+        "lane_calls.rs no longer contains exactly one copy of the {what} block \
+         ({occurrences} found).\n\nWhen this fails: the shipped retry loop \
+         changed. Re-derive `legacy::retry_intent` / `legacy::retry_after_seconds` \
+         and the fixture expectations from the new text — do not paste the new \
+         text in and move on, because the broker's copy may now disagree with \
+         it.\n\nExpected block:\n{block}"
+    );
+}
+
+#[test]
+fn the_transcribed_retry_phase_still_matches_the_lane_calls_source() {
+    // `legacy::retry_intent` claims to be "what `call_provider_tier`'s loop
+    // does next". That claim is a transcription of four branches and a header
+    // read, none of which are top-level functions, so each one is pinned to its
+    // source text here.
+
+    // The `Retry-After` read: delta-seconds only, HTTP-date dropped. This is
+    // the whole of the fourth parity axis on the legacy side.
+    assert_lane_calls_block(
+        "Retry-After read",
+        r#"            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());"#,
+    );
+
+    // 429 → retry within the tier, unconditionally, while attempts remain.
+    assert_lane_calls_block(
+        "429 retry",
+        r#"            if status.as_u16() == 429 {
+                last_class = ProviderInvocationFailureClass::ProviderExhausted;
+                self.mark_secret_rate_limited(&selected, retry_after);
+                last_err = format!(
+                    "API error {status}: {}",
+                    redact_provider_response(&resp_text)
+                );
+                if attempt < max_attempts {
+                    continue;
+                }"#,
+    );
+
+    // 401/403 → retry only if the *pool* still holds a usable key. This is the
+    // branch that makes `RetryOtherCredential` the right broker advice rather
+    // than `RetrySameDeployment`.
+    assert_lane_calls_block(
+        "401/403 arm",
+        "            if status.as_u16() == 401 || status.as_u16() == 403 {",
+    );
+    assert_lane_calls_block(
+        "401/403 pool re-check",
+        "                if attempt < max_attempts && self.has_usable_secret_readonly(&cfg.api_key_envs) {",
+    );
+
+    // 5xx → retry within the tier, honouring `Retry-After` for the delay.
+    assert_lane_calls_block(
+        "5xx retry",
+        r#"            if status.is_server_error() {
+                last_class = ProviderInvocationFailureClass::Transient;
+                last_err = format!(
+                    "API error {status}: {}",
+                    redact_provider_response(&resp_text)
+                );
+                if attempt < max_attempts {
+                    let delay = if let Some(secs) = retry_after {
+                        Duration::from_secs(secs)
+                    } else {
+                        Self::retry_delay(attempt)
+                    };"#,
+    );
+
+    // Every other non-success status → return immediately, no retry at all.
+    assert_lane_calls_block(
+        "non-success no-retry return",
+        r#"            if !status.is_success() {
+                return Err(ProviderTierFailure {
+                    class: ProviderInvocationFailureClass::LaneOutage,"#,
+    );
+
+    // And the retry budget those branches spend, read from the shipped
+    // constant rather than transcribed: a change from 3 to 1 would make the
+    // "retry within the tier" intents mean something materially different.
+    assert_eq!(
+        crate::llm::LlmClient::MAX_ATTEMPTS,
+        3,
+        "the shipped retry budget changed; `RetryIntent::WithinTier` no longer \
+         means what the parity fixtures assume"
+    );
 }
 
 #[test]
