@@ -101,9 +101,6 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     "doctor_scan",
     "ingest",
     "ingest_source",
-    // #1001: manual presence-claim backstop.
-    "claim",
-    "release",
     // #964: read-once agent-to-agent ephemeral notes.
     "sticky_leave",
     "sticky_check",
@@ -237,18 +234,47 @@ mod tests {
 
     #[test]
     fn f0_memory_and_verify_counts() {
-        // Merge of #1001 (claim, release) and #964 (sticky_leave,
-        // sticky_check) landed at 25. #1426 moves four recall-tuning actions
-        // to tachi_tune: 25 -> 21.
-        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 21);
+        // #1426 moved four recall-tuning actions to tachi_tune, and #1688
+        // removed the duplicate claim/release compatibility routes: 25 -> 19.
+        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 19);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
         assert_eq!(TachiVerifyAction::ALL.len(), 4);
     }
 
     #[test]
+    fn f1688_c2a1_memory_inventory_is_exactly_the_nineteen_survivors() {
+        assert_eq!(
+            TACHI_MEMORY_ACTIONS,
+            &[
+                "search",
+                "get",
+                "save",
+                "extract_facts",
+                "briefing",
+                "checkpoint",
+                "alerts",
+                "ask",
+                "consolidate",
+                "pattern_feedback",
+                "progress",
+                "readiness",
+                "delete",
+                "gc",
+                "doctor_scan",
+                "ingest",
+                "ingest_source",
+                "sticky_leave",
+                "sticky_check",
+            ],
+            "#1688 C2a-1 must pin the literal 19-action Memory inventory",
+        );
+    }
+
+    #[test]
     fn f0_tune_inventory_count() {
         // #1426: route tuning leaves tachi_task (27 -> 23) and recall tuning
-        // leaves tachi_memory (25 -> 21). The eight moved actions live only on
+        // leaves tachi_memory (25 -> 21); #1688 then removes claim/release
+        // (21 -> 19). The eight moved actions live only on
         // this admin/operator inventory; keep the count exact so the next
         // tuning action gets explicit review instead of quietly widening the
         // surface.

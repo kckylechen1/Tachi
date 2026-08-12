@@ -101,8 +101,9 @@ ExecEnv never creates, releases, or hands off an identity or claim.
 ## Lifecycle and board
 
 The canonical `tachi_task` surface exposes `claim`, `release`, `heartbeat`,
-`handoff`, and `board`. Legacy `tachi_memory` claim actions are compatibility
-aliases to the same engine. Board composition presents independent facts. It
+`handoff`, and `board`. The retired `tachi_memory` claim/release tokens are
+typed-rejected; callers use `tachi_task` for the WorkClaim lifecycle. Board
+composition presents independent facts. It
 reads GitHub live where available; otherwise it reports
 `github_state=unavailable` and never infers a terminal state from a cache.
 
@@ -113,8 +114,9 @@ ledgers; v1 does not add those columns to `session_claims`.
 
 Migration v21 is additive. It adds identity/admission records, augments
 `session_claims`, and augments `exec_envs`. Older binaries ignore the added
-fields; reverting code does not delete durable rows. Compatibility aliases are
-kept until callers have moved to `tachi_task`.
+fields; reverting code does not delete durable rows. The former Memory
+claim/release aliases are retired in #1688; historical rows remain readable,
+and the additive schema remains backward-readable.
 
 ## Required proof
 

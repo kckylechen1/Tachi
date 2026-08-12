@@ -24,6 +24,32 @@ fn tachi_memory_action_schema_declares_enum_values() {
     let value = serde_json::to_value(schema).expect("schema serializes");
     let action = &value["properties"]["action"];
 
+    assert_eq!(
+        action["enum"].as_array().expect("action enum"),
+        &vec![
+            json!("search"),
+            json!("get"),
+            json!("save"),
+            json!("extract_facts"),
+            json!("briefing"),
+            json!("checkpoint"),
+            json!("alerts"),
+            json!("ask"),
+            json!("consolidate"),
+            json!("pattern_feedback"),
+            json!("progress"),
+            json!("readiness"),
+            json!("delete"),
+            json!("gc"),
+            json!("doctor_scan"),
+            json!("ingest"),
+            json!("ingest_source"),
+            json!("sticky_leave"),
+            json!("sticky_check"),
+        ],
+        "#1688 C2a-1 must pin the literal 19-action Memory schema",
+    );
+
     assert_eq!(action["type"], json!("string"));
     assert!(action["enum"]
         .as_array()
