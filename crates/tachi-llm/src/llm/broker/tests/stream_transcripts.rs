@@ -255,7 +255,7 @@ fn every_transcript() -> Vec<(String, String, Value)> {
 fn every_transcript_decodes_to_its_golden() {
     let fixtures = every_transcript();
     assert!(
-        fixtures.len() >= 38,
+        fixtures.len() >= 47,
         "the transcript corpus shrank to {} fixtures",
         fixtures.len()
     );

@@ -29,6 +29,29 @@
 //! byte stream, not whether those bytes turned into text the caller has already
 //! acted on — and the difference is load-bearing: one is retry-forbidden, the
 //! other is retry-on-caller-opt-in.
+//!
+//! # Streamed usage: what this layer promises the executor, exactly
+//!
+//! A `Usage` event is emitted when, and only when, the stream carried a usage
+//! report. **Absence is not an event.** A `delta` stream requested without
+//! `stream_options.include_usage` — which is what this dialect sends, pinned
+//! corpus-wide in `tests::openai_compat_goldens` — simply never produces one,
+//! and a decoder has nothing truthful to say about numbers it was never given.
+//!
+//! Turning that silence into an
+//! [`UsageObservationV1::unknown`](super::usage::UsageObservationV1::unknown)
+//! observation is the **executor's** job, and the split is deliberate rather
+//! than unfinished. This layer sees one stream and cannot tell "no usage was
+//! reported" from "usage has not arrived yet": a report may legally follow the
+//! end of the generation, so any `unknown` a decoder emitted on its own would
+//! land in front of the real numbers on every provider that reports late. The
+//! executor sees the whole invocation — the terminal disposition, the retry,
+//! the fallback, the receipt that has to record something about the spend —
+//! and is the layer that can say it once, at the end, truthfully.
+//!
+//! So the contract this slice hands over is: *streamed absence means no
+//! `Usage` event*, and an executor that records nothing when the stream said
+//! nothing is the bug this note exists to prevent.
 
 use serde_json::Value;
 
