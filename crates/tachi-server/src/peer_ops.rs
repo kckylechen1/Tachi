@@ -65,6 +65,7 @@
 
 use chrono::{DateTime, Utc};
 use memcore::MemoryStore;
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 
 use crate::claims_ops::{project_peer_presence, PeerPresenceProjection, CLAIM_TTL_SECONDS};
@@ -205,20 +206,38 @@ impl PeerPublicationRead {
             ));
         }
         let agent_identity_id = (*identities.iter().next().expect("one identity")).to_string();
-        let eligible = memcore::resolve_a2a_recipient_eligibility(&tx, &agent_identity_id)
+        // Automatic callbacks are live addressing, unlike direct A2A respond:
+        // the latter deliberately accepts historical locality evidence so an
+        // offline peer can receive mail at its next briefing. Here the newest
+        // admission row itself must still be local/current; a later unavailable
+        // row revokes callback eligibility without erasing that history.
+        let current_admission_state = tx
+            .query_row(
+                "SELECT state FROM identity_admissions
+                 WHERE agent_identity_id=?1
+                 ORDER BY created_at DESC,admission_id DESC LIMIT 1",
+                [&agent_identity_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {
                 format!(
-                    "target '{target}' AgentIdentity '{agent_identity_id}' lacks same-host admission"
+                    "target '{target}' AgentIdentity '{agent_identity_id}' lacks a current admission"
                 )
             })?;
+        if current_admission_state != "self_asserted" {
+            return Err(format!(
+                "target '{target}' AgentIdentity '{agent_identity_id}' current admission is '{current_admission_state}', not same-host available"
+            ));
+        }
         let dispatch_id = matching.iter().find_map(|claim| claim.dispatch_id.clone());
         drop(tx);
         let peer_publication_id =
             stable_peer_publication_id(target, &agent_identity_id, dispatch_id.as_deref());
         Ok(ResolvedPeerTarget {
             agent_identity_id,
-            identity_assurance: eligible.identity_assurance,
+            identity_assurance: current_admission_state,
             dispatch_id,
             peer_publication_id,
         })
@@ -1322,6 +1341,94 @@ mod tests {
         assert_eq!(envelope["status"], "unreachable");
         assert_eq!(envelope["errors"][0]["code"], "recipient_unresolved");
         assert!(envelope.get("turn_boundary_callback").is_none());
+    }
+
+    /// Break caught: historical local admission is enough for a direct A2A
+    /// response, but it must not keep an automatic peer callback alive after
+    /// the recipient's newer, current admission becomes unavailable.
+    #[test]
+    fn run_noun_requires_current_local_admission_for_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+
+        memcore::insert_claim(
+            memcore::MemoryStore::open(global_db.to_str().unwrap())
+                .unwrap()
+                .connection(),
+            &memcore::NewSessionClaim {
+                claim_id: "claim-current-admission".to_string(),
+                session_client: Some("codex".to_string()),
+                issue_ref: Some("org/repo#1751".to_string()),
+                flow_id: None,
+                dispatch_id: None,
+                branch: "leaf/1751".to_string(),
+                declared_file_scope: None,
+                created_at: Utc::now().to_rfc3339(),
+            },
+        )
+        .unwrap();
+        bind_run_claim_to_local_identity(&server, &global_db, "claim-current-admission");
+
+        let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+        memcore::record_unverified_admission(
+            store.connection(),
+            "admission-current-unavailable",
+            "agent.codex",
+            "connection-current-unavailable",
+            memcore::UnverifiedAdmissionState::Unavailable,
+        )
+        .unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE identity_admissions SET created_at='2098-08-13T00:00:00.000Z' WHERE admission_id='admission-current-unavailable'",
+                [],
+            )
+            .unwrap();
+
+        let query = || {
+            let body = handle_peer_query(
+                &server,
+                PeerQueryParams {
+                    target_session_client: Some("codex".to_string()),
+                    noun: "run".to_string(),
+                },
+            )
+            .unwrap();
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        };
+        let unavailable = query();
+        assert_eq!(unavailable["status"], "unreachable");
+        assert_eq!(unavailable["errors"][0]["code"], "recipient_unresolved");
+        assert!(
+            unavailable.get("turn_boundary_callback").is_none(),
+            "a later unavailable admission must suppress the automatic callback: {unavailable}"
+        );
+
+        memcore::record_unverified_admission(
+            store.connection(),
+            "admission-current-recovered",
+            "agent.codex",
+            "connection-current-recovered",
+            memcore::UnverifiedAdmissionState::SelfAsserted,
+        )
+        .unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE identity_admissions SET created_at='2099-08-13T00:00:00.000Z' WHERE admission_id='admission-current-recovered'",
+                [],
+            )
+            .unwrap();
+
+        let recovered = query();
+        assert_eq!(recovered["status"], "ok");
+        assert_eq!(
+            recovered["turn_boundary_callback"]["recipient_agent_identity_id"],
+            "agent.codex"
+        );
+        assert_eq!(recovered["recipient_identity_assurance"], "self_asserted");
     }
 
     #[test]
