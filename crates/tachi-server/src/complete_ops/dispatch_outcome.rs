@@ -802,22 +802,60 @@ mod tests {
     use std::{
         cell::RefCell,
         path::PathBuf,
-        sync::mpsc::{self, SyncSender},
+        sync::mpsc::{self, Receiver, Sender, SyncSender},
         thread,
         time::Duration,
     };
 
+    const SQLITE_BUSY_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+    enum SqliteBusyProbe {
+        Direct(SyncSender<()>),
+        Retry {
+            release: Sender<()>,
+            committed: Receiver<()>,
+            committed_before_return: bool,
+            callback_error: Option<&'static str>,
+        },
+    }
+
     thread_local! {
         /// The rusqlite callback has a function-pointer-only API. Keep the
-        /// per-test signal in the invoking thread instead of introducing
-        /// process-global mutable state or blocking inside SQLite's callback.
-        static SQLITE_BUSY_PROBE: RefCell<Option<SyncSender<()>>> = const { RefCell::new(None) };
+        /// per-test state in the invoking thread instead of introducing
+        /// process-global mutable state. Retry mode waits only for the exact
+        /// holder COMMIT acknowledgement and never re-enters SQLite.
+        static SQLITE_BUSY_PROBE: RefCell<Option<SqliteBusyProbe>> = const { RefCell::new(None) };
     }
 
     fn test_busy_handler(_attempt: i32) -> bool {
         SQLITE_BUSY_PROBE.with(|probe| {
-            if let Some(signal) = probe.borrow().as_ref() {
-                let _ = signal.try_send(());
+            let mut probe = probe.borrow_mut();
+            match probe.as_mut() {
+                Some(SqliteBusyProbe::Direct(signal)) => {
+                    let _ = signal.try_send(());
+                }
+                Some(SqliteBusyProbe::Retry {
+                    release,
+                    committed,
+                    committed_before_return,
+                    callback_error,
+                }) if !*committed_before_return => {
+                    if release.send(()).is_err() {
+                        *callback_error = Some("retry holder release channel disconnected");
+                    } else {
+                        match committed.recv_timeout(SQLITE_BUSY_COMMIT_ACK_TIMEOUT) {
+                            Ok(()) => *committed_before_return = true,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                *callback_error =
+                                    Some("retry holder COMMIT acknowledgement timed out");
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                *callback_error = Some("retry holder COMMIT channel disconnected");
+                            }
+                        }
+                    }
+                }
+                Some(SqliteBusyProbe::Retry { .. }) | None => {}
             }
         });
         false
@@ -845,9 +883,12 @@ mod tests {
         }
     }
 
-    fn install_busy_handler(server: &MemoryServer, signal: SyncSender<()>) -> BusyHandlerScope<'_> {
+    fn install_busy_handler(
+        server: &MemoryServer,
+        busy_probe: SqliteBusyProbe,
+    ) -> BusyHandlerScope<'_> {
         let scope = BusyHandlerScope { server };
-        let previous = SQLITE_BUSY_PROBE.with(|probe| probe.borrow_mut().replace(signal));
+        let previous = SQLITE_BUSY_PROBE.with(|probe| probe.borrow_mut().replace(busy_probe));
         if previous.is_some() {
             SQLITE_BUSY_PROBE.with(|probe| {
                 probe.borrow_mut().take();
@@ -921,9 +962,10 @@ mod tests {
 
     fn hold_immediate_lock_until_released(
         db_path: PathBuf,
-    ) -> (SyncSender<()>, thread::JoinHandle<()>) {
+    ) -> (Sender<()>, Receiver<()>, thread::JoinHandle<()>) {
         let (locked_tx, locked_rx) = mpsc::sync_channel(0);
-        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::channel();
+        let (committed_tx, committed_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
             let conn = rusqlite::Connection::open(db_path).expect("open lock connection");
             conn.execute_batch("BEGIN IMMEDIATE")
@@ -931,9 +973,10 @@ mod tests {
             locked_tx.send(()).expect("signal write lock");
             release_rx.recv().expect("wait to release write lock");
             conn.execute_batch("COMMIT").expect("release write lock");
+            let _ = committed_tx.send(());
         });
         locked_rx.recv().expect("wait for write lock");
-        (release_tx, handle)
+        (release_tx, committed_rx, handle)
     }
 
     fn pre_retry_completion_status(server: &MemoryServer, dispatch_id: &str) -> Value {
@@ -984,9 +1027,10 @@ mod tests {
         // The direct writer must encounter a real SQLite BUSY callback. The
         // callback only signals; the outer test releases the holder after the
         // operation returns, so COMMIT completion is not scheduler-driven.
-        let (red_release, red_holder) = hold_immediate_lock_until_released(db_path.clone());
+        let (red_release, _red_committed, red_holder) =
+            hold_immediate_lock_until_released(db_path.clone());
         let (red_busy_tx, red_busy_rx) = mpsc::sync_channel(1);
-        let _red_busy_probe = install_busy_handler(&server, red_busy_tx);
+        let _red_busy_probe = install_busy_handler(&server, SqliteBusyProbe::Direct(red_busy_tx));
         let red_status = pre_retry_completion_status(&server, "dispatch-lock-release");
         red_busy_rx
             .recv_timeout(Duration::from_secs(3))
@@ -1001,16 +1045,16 @@ mod tests {
         );
         drop(_red_busy_probe);
 
-        let (release_lock, holder) = hold_immediate_lock_until_released(db_path);
-        let (busy_tx, busy_rx) = mpsc::sync_channel(1);
-        let _busy_probe = install_busy_handler(&server, busy_tx);
-        let release_on_busy = thread::spawn(move || {
-            busy_rx
-                .recv_timeout(Duration::from_secs(3))
-                .expect("retrying writer must observe SQLite BUSY");
-            release_lock.send(()).expect("release retry lock holder");
-            holder.join().expect("retry lock holder should commit");
-        });
+        let (release_lock, committed, holder) = hold_immediate_lock_until_released(db_path);
+        let _busy_probe = install_busy_handler(
+            &server,
+            SqliteBusyProbe::Retry {
+                release: release_lock,
+                committed,
+                committed_before_return: false,
+                callback_error: None,
+            },
+        );
         let status = record_complete_outcome(
             &server,
             &params,
@@ -1022,9 +1066,26 @@ mod tests {
             true,
             &["github delivery already durable".to_string()],
         );
-        release_on_busy
-            .join()
-            .expect("BUSY release helper should join");
+        let (committed_before_return, callback_error) = SQLITE_BUSY_PROBE.with(|probe| {
+            let probe = probe.borrow();
+            match probe.as_ref() {
+                Some(SqliteBusyProbe::Retry {
+                    committed_before_return,
+                    callback_error,
+                    ..
+                }) => (*committed_before_return, *callback_error),
+                _ => panic!("retry SQLite BUSY probe was not installed"),
+            }
+        });
+        holder.join().expect("retry lock holder should commit");
+        assert!(
+            callback_error.is_none(),
+            "retry BUSY callback must complete holder release: {callback_error:?}"
+        );
+        assert!(
+            committed_before_return,
+            "retry BUSY callback must observe holder COMMIT before returning"
+        );
         eprintln!("GREEN retrying completion status: {status}");
 
         assert_eq!(
@@ -1062,7 +1123,7 @@ mod tests {
                     .map_err(|error| error.to_string())
             })
             .expect("shorten test busy timeout");
-        let (release_lock, holder) = hold_immediate_lock_until_released(db_path);
+        let (release_lock, _committed, holder) = hold_immediate_lock_until_released(db_path);
         let status = record_complete_outcome(
             &server,
             &base_params(),
