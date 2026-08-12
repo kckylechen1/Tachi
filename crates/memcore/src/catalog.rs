@@ -1,0 +1,640 @@
+//! Model-broker catalog row types (tachi#1681 D1/D7).
+//!
+//! The typed half of the six tables PR-A added to `db::schema::ddl`; their SQL
+//! lives in [`crate::db::model_catalog`]. The split mirrors the one #1680
+//! already uses for provider accounts (`vault::accounts` holds the types,
+//! `db::vault_accounts` holds the SQL) — a reader looking for "what is a
+//! deployment" and a reader looking for "how is it written" go to different
+//! files on purpose.
+//!
+//! `admin`-gated for the same reason `vault::accounts` is: all six tables are
+//! `SchemaScope::Product`, so a `portable-kernel` build (which resolves
+//! `memcore` with `default-features = false`) has neither the tables nor any
+//! business owning operator-surface types.
+//!
+//! # What the type system carries here, and why
+//!
+//! - **Pricing immutability is a constructor property** (D1, review finding
+//!   3 + discrimination 10). [`PricingSnapshot`] keeps `snapshot_id` and
+//!   `pricing_data` private and offers no setter: the only way to obtain one
+//!   is [`PricingSnapshot::mint`], which *computes* the id from the data. A
+//!   caller cannot change the prices of an existing snapshot, so "catalog
+//!   updates never rewrite historical invocation facts" cannot be forgotten —
+//!   there is no code shape in which it would be forgotten.
+//! - **Health is a different type in a different table.** There is no health
+//!   field on [`ModelDeployment`]; the four authorities (#1681 D4) stay
+//!   separate by table boundary, the way `account_custody` split custody off
+//!   the account row (ddl.rs:776-782).
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::canonical_digest::canonical_json_digest_hex;
+use crate::error::MemoryError;
+use crate::vault::health::EvidenceKind;
+
+/// Scheme prefix for a content-addressed pricing snapshot id. Versioned so a
+/// future canonicalization change can coexist with `ps1:` ids already stored.
+pub const PRICING_SNAPSHOT_SCHEME: &str = "ps1";
+
+pub const DEPLOYMENT_STATUS_ACTIVE: &str = "active";
+pub const DEPLOYMENT_STATUS_RETIRED: &str = "retired";
+
+pub const ALIAS_STATUS_ACTIVE: &str = "active";
+pub const ALIAS_STATUS_RETIRED: &str = "retired";
+
+// ─── Closed vocabularies ─────────────────────────────────────────────────────
+
+/// Where a catalog row came from. Closed because "which rows did the env
+/// chains produce" is a query the #1685 cutover has to be able to ask
+/// exactly, and a free-text column cannot answer it exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogSource {
+    /// Imported from the live env precedence chains (#1681 D3's compatibility
+    /// window). These rows describe what `ProviderRuntimeConfig::from_env`
+    /// resolved; they are read-only truth *about* env, never a second place
+    /// routing is decided from.
+    Env,
+    /// Fetched from a provider's own model-listing API.
+    ProviderApi,
+    /// Entered by a reviewed operator plan.
+    Manual,
+}
+
+impl CatalogSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::ProviderApi => "provider_api",
+            Self::Manual => "manual",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "env" => Some(Self::Env),
+            "provider_api" => Some(Self::ProviderApi),
+            "manual" => Some(Self::Manual),
+            _ => None,
+        }
+    }
+}
+
+/// The wire protocol a deployment speaks. Closed on purpose: an unknown
+/// protocol is a refusal, not a row that silently sits in the catalog looking
+/// callable. New variants are added when a caller is added, not speculatively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolKind {
+    /// `POST {endpoint}` with an OpenAI chat-completions body — every one of
+    /// the four chat lanes.
+    OpenAiChatCompletions,
+    /// `POST {base}/v1/embeddings` with a Voyage body.
+    VoyageEmbeddings,
+}
+
+impl ProtocolKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiChatCompletions => "openai_chat_completions",
+            Self::VoyageEmbeddings => "voyage_embeddings",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "openai_chat_completions" => Some(Self::OpenAiChatCompletions),
+            "voyage_embeddings" => Some(Self::VoyageEmbeddings),
+            _ => None,
+        }
+    }
+}
+
+/// What a deployment can do. Serialized into the `capabilities` JSON column.
+///
+/// `embeddings` carries the **output dimension** rather than a bare flag
+/// (#1681 D3's guarded escape hatch): changing the embedding model changes
+/// vector dimensionality and silently corrupts comparability with the stored
+/// index, so a deployment that claims the embeddings capability is required
+/// by the type to say at what width. A bare `bool` here is exactly the
+/// footgun the escape hatch exists to close.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeploymentCapabilities {
+    pub chat: bool,
+    pub tools: bool,
+    pub streaming: bool,
+    pub structured_output: bool,
+    pub media: bool,
+    pub rerank: bool,
+    pub embeddings: Option<EmbeddingsCapability>,
+}
+
+/// The embeddings capability and the width it emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingsCapability {
+    /// Vectors this deployment returns, in dimensions. The escape-hatch gate
+    /// compares this against the dimension the stored index was built at.
+    pub dimension: u32,
+}
+
+/// Attachment limits, serialized into the `attachment_bounds` JSON column.
+/// Empty for every row PR-B writes; the type exists so the column has one
+/// shape rather than whatever each future writer invents.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AttachmentBounds {
+    pub max_attachment_bytes: Option<i64>,
+    pub max_attachment_count: Option<u32>,
+    pub accepted_media_types: Vec<String>,
+}
+
+// ─── model_deployments ───────────────────────────────────────────────────────
+
+/// One concrete deployment of a model behind a provider account.
+///
+/// Public-safe metadata only, by the same rule as [`crate::vault::accounts::ProviderAccount`]:
+/// this row is a serialized operator surface, so nothing that could carry key
+/// material or Vault layout belongs on it. `endpoint_ref` is a documented
+/// provider URL, `provider_account_id` an opaque account handle,
+/// `source_refs` env-var *names*.
+///
+/// Deliberately no health field — see the module note and #1681 D4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelDeployment {
+    pub deployment_id: String,
+    /// References `provider_accounts.account_id` (#1680) by convention, the
+    /// way every other cross-table reference in this schema does.
+    pub provider_account_id: String,
+    pub endpoint_ref: Option<String>,
+    pub protocol_kind: ProtocolKind,
+    pub provider_model_id: String,
+    pub effective_version: Option<String>,
+    pub capabilities: DeploymentCapabilities,
+    pub context_window: Option<i64>,
+    pub max_output: Option<i64>,
+    pub attachment_bounds: AttachmentBounds,
+    pub region: Option<String>,
+    pub data_policy: Option<String>,
+    /// Live-catalog pointer at `pricing_snapshots.snapshot_id`. A completed
+    /// invocation's cost is frozen by copying the id onto the outcome row at
+    /// write time (#1681 D6), never by dereferencing this after the fact.
+    pub pricing_snapshot_ref: Option<String>,
+    pub catalog_source: CatalogSource,
+    pub fetched_at: String,
+    pub effective_at: String,
+    /// When this row stops being authoritative. `None` = no declared
+    /// expiry (an env-chain row is re-resolved every process start, so it
+    /// cannot go stale behind the operator's back).
+    pub expires_at: Option<String>,
+    pub status: String,
+    pub revision: i64,
+    pub source_refs: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// The caller-supplied half of a deployment row.
+///
+/// Separate from [`ModelDeployment`] for the reason `NewProviderAccount` is
+/// separate from `ProviderAccount`: `revision`, `created_at` and `updated_at`
+/// are the store's, and a caller that could pass its own `revision` could
+/// rewind the counter every later slice binds its preconditions to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewModelDeployment {
+    pub deployment_id: String,
+    pub provider_account_id: String,
+    pub endpoint_ref: Option<String>,
+    pub protocol_kind: ProtocolKind,
+    pub provider_model_id: String,
+    pub effective_version: Option<String>,
+    pub capabilities: DeploymentCapabilities,
+    pub context_window: Option<i64>,
+    pub max_output: Option<i64>,
+    pub attachment_bounds: AttachmentBounds,
+    pub region: Option<String>,
+    pub data_policy: Option<String>,
+    pub pricing_snapshot_ref: Option<String>,
+    pub catalog_source: CatalogSource,
+    pub fetched_at: String,
+    pub effective_at: String,
+    pub expires_at: Option<String>,
+    pub status: String,
+    pub source_refs: Vec<String>,
+}
+
+impl NewModelDeployment {
+    /// The common case: an active deployment whose `fetched_at` and
+    /// `effective_at` are the same observation instant.
+    pub fn observed(
+        deployment_id: impl Into<String>,
+        provider_account_id: impl Into<String>,
+        protocol_kind: ProtocolKind,
+        provider_model_id: impl Into<String>,
+        catalog_source: CatalogSource,
+        observed_at: impl Into<String>,
+    ) -> Self {
+        let observed_at = observed_at.into();
+        Self {
+            deployment_id: deployment_id.into(),
+            provider_account_id: provider_account_id.into(),
+            endpoint_ref: None,
+            protocol_kind,
+            provider_model_id: provider_model_id.into(),
+            effective_version: None,
+            capabilities: DeploymentCapabilities::default(),
+            context_window: None,
+            max_output: None,
+            attachment_bounds: AttachmentBounds::default(),
+            region: None,
+            data_policy: None,
+            pricing_snapshot_ref: None,
+            catalog_source,
+            fetched_at: observed_at.clone(),
+            effective_at: observed_at,
+            expires_at: None,
+            status: DEPLOYMENT_STATUS_ACTIVE.to_string(),
+            source_refs: Vec::new(),
+        }
+    }
+
+    pub fn with_endpoint_ref(mut self, endpoint_ref: impl Into<String>) -> Self {
+        self.endpoint_ref = Some(endpoint_ref.into());
+        self
+    }
+
+    pub fn with_capabilities(mut self, capabilities: DeploymentCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    pub fn with_source_refs(mut self, source_refs: Vec<String>) -> Self {
+        self.source_refs = source_refs;
+        self
+    }
+
+    pub fn with_expires_at(mut self, expires_at: impl Into<String>) -> Self {
+        self.expires_at = Some(expires_at.into());
+        self
+    }
+
+    /// The fields that make a re-import a *change* rather than a no-op.
+    ///
+    /// Compared by [`crate::db::model_catalog::upsert_model_deployment`] to
+    /// decide between `Unchanged` and `Advanced`. `fetched_at` is excluded on
+    /// purpose: re-observing the same deployment a second later is not a
+    /// catalog change, and treating it as one would turn every process start
+    /// into a revision bump and an event row.
+    pub(crate) fn identity_payload(&self) -> Value {
+        json!({
+            "provider_account_id": self.provider_account_id,
+            "endpoint_ref": self.endpoint_ref,
+            "protocol_kind": self.protocol_kind.as_str(),
+            "provider_model_id": self.provider_model_id,
+            "effective_version": self.effective_version,
+            "capabilities": self.capabilities,
+            "context_window": self.context_window,
+            "max_output": self.max_output,
+            "attachment_bounds": self.attachment_bounds,
+            "region": self.region,
+            "data_policy": self.data_policy,
+            "pricing_snapshot_ref": self.pricing_snapshot_ref,
+            "catalog_source": self.catalog_source.as_str(),
+            "expires_at": self.expires_at,
+            "status": self.status,
+            "source_refs": self.source_refs,
+        })
+    }
+
+    /// Content digest of everything that distinguishes this deployment from a
+    /// different one, used as the change detector on re-import.
+    pub fn content_digest(&self) -> String {
+        canonical_json_digest_hex(&self.identity_payload())
+    }
+}
+
+impl ModelDeployment {
+    /// The same digest [`NewModelDeployment::content_digest`] computes, over
+    /// the stored row — so "did the env chains move" is one comparison, not a
+    /// field-by-field walk a future field can be forgotten from.
+    pub fn content_digest(&self) -> String {
+        canonical_json_digest_hex(&json!({
+            "provider_account_id": self.provider_account_id,
+            "endpoint_ref": self.endpoint_ref,
+            "protocol_kind": self.protocol_kind.as_str(),
+            "provider_model_id": self.provider_model_id,
+            "effective_version": self.effective_version,
+            "capabilities": self.capabilities,
+            "context_window": self.context_window,
+            "max_output": self.max_output,
+            "attachment_bounds": self.attachment_bounds,
+            "region": self.region,
+            "data_policy": self.data_policy,
+            "pricing_snapshot_ref": self.pricing_snapshot_ref,
+            "catalog_source": self.catalog_source.as_str(),
+            "expires_at": self.expires_at,
+            "status": self.status,
+            "source_refs": self.source_refs,
+        }))
+    }
+}
+
+// ─── model_deployment_events ─────────────────────────────────────────────────
+
+/// What a deployment event says happened. A closed vocabulary because
+/// [`fold`] folds on it; an unrecognized kind is surfaced in the projection
+/// rather than silently skipped (see [`fold::CatalogProjection`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentEventKind {
+    /// The row was created — the first event every deployment has.
+    DeploymentImported,
+    /// A re-import found different content and advanced the revision.
+    DeploymentUpdated,
+    /// The deployment left `active`.
+    DeploymentRetired,
+}
+
+impl DeploymentEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeploymentImported => "deployment_imported",
+            Self::DeploymentUpdated => "deployment_updated",
+            Self::DeploymentRetired => "deployment_retired",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "deployment_imported" => Some(Self::DeploymentImported),
+            "deployment_updated" => Some(Self::DeploymentUpdated),
+            "deployment_retired" => Some(Self::DeploymentRetired),
+            _ => None,
+        }
+    }
+}
+
+/// One append-only deployment audit row, shaped like `ProviderAccountEvent`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelDeploymentEvent {
+    pub id: i64,
+    pub deployment_id: String,
+    /// The deployment revision this event produced.
+    pub revision: i64,
+    /// Free-form at the row level so an event written by a newer build is
+    /// still readable; [`DeploymentEventKind::parse`] is where it becomes
+    /// typed, and the fold reports what it could not type.
+    pub event_kind: String,
+    pub plan_digest: Option<String>,
+    /// JSON. Public-safe by the same rule as the deployment row: digests,
+    /// names and counts, never key material or provider error text.
+    pub evidence: String,
+    pub created_at: String,
+}
+
+/// The caller-supplied half of an event row (`id` and `created_at` are the
+/// store's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewModelDeploymentEvent {
+    pub deployment_id: String,
+    pub revision: i64,
+    pub event_kind: String,
+    pub plan_digest: Option<String>,
+    pub evidence: String,
+}
+
+impl NewModelDeploymentEvent {
+    pub fn new(
+        deployment_id: impl Into<String>,
+        revision: i64,
+        event_kind: DeploymentEventKind,
+    ) -> Self {
+        Self {
+            deployment_id: deployment_id.into(),
+            revision,
+            event_kind: event_kind.as_str().to_string(),
+            plan_digest: None,
+            evidence: "{}".to_string(),
+        }
+    }
+
+    pub fn with_plan_digest(mut self, plan_digest: impl Into<String>) -> Self {
+        self.plan_digest = Some(plan_digest.into());
+        self
+    }
+
+    pub fn with_evidence(mut self, evidence: impl Into<String>) -> Self {
+        self.evidence = evidence.into();
+        self
+    }
+}
+
+// ─── model_aliases + model_alias_bindings ────────────────────────────────────
+
+/// A stable `ModelRef` alias (`reasoning.high`, `coding.review`).
+///
+/// PR-B reads these; the reviewed plan/apply write path is #1681 D2 / PR-D.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelAlias {
+    pub alias_name: String,
+    /// JSON object of binding conditions candidate deployments must satisfy.
+    pub required_capabilities: String,
+    /// JSON object of data/region/budget constraints.
+    pub constraints: String,
+    pub status: String,
+    pub revision: i64,
+    /// Canonical-JSON content digest of the alias set, the
+    /// `route_policy_source_revision` mechanism reused rather than reinvented.
+    pub policy_digest: Option<String>,
+    pub source_refs: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One alias → deployment candidacy, in priority order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelAliasBinding {
+    pub alias_name: String,
+    pub deployment_id: String,
+    pub priority: i64,
+    pub retired: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+// ─── pricing_snapshots ───────────────────────────────────────────────────────
+
+/// A content-addressed price sheet: `snapshot_id` **is** the digest of the
+/// prices (#1681 D1, discrimination 10).
+///
+/// Both identity-bearing fields are private and there is no setter. That is
+/// the whole mechanism: re-importing an unchanged sheet dedupes onto the same
+/// id, any price change necessarily mints a new one, and no code path exists
+/// that could edit the prices under an id somebody already recorded on a
+/// historical outcome row. Immutability is a property of the constructor and
+/// the primary key, not a discipline a future writer has to remember.
+///
+/// `Serialize` but deliberately **not** `Deserialize`: a derived
+/// `Deserialize` would hand any caller a back door that sets `snapshot_id`
+/// and `pricing_data` independently — exactly the "prices changed under an id
+/// somebody already recorded" state the private fields exist to make
+/// unrepresentable. Reading one back out of the store goes through
+/// [`PricingSnapshot::from_stored`], which re-derives the id and refuses a
+/// mismatch.
+///
+/// Both halves of that are compile-time, following the receipt-field
+/// precedent (`tachi-llm` `types.rs:142-218`) rather than resting on review
+/// catching it. Prices cannot be edited under an existing id:
+///
+/// ```compile_fail
+/// use memcore::catalog::PricingSnapshot;
+/// let mut snapshot = PricingSnapshot::mint(
+///     "deepseek",
+///     serde_json::json!({"input": "0.14"}),
+///     None,
+///     "2026-08-11T00:00:00.000Z",
+/// );
+/// // error[E0616]: field `pricing_data` of struct `PricingSnapshot` is private
+/// snapshot.pricing_data = serde_json::json!({"input": "999.00"});
+/// ```
+///
+/// …and a snapshot cannot be conjured from JSON, which would set the id and
+/// the prices independently:
+///
+/// ```compile_fail
+/// use memcore::catalog::PricingSnapshot;
+/// // error[E0277]: the trait bound `PricingSnapshot: Deserialize<'_>` is not satisfied
+/// let _: PricingSnapshot = serde_json::from_str(
+///     r#"{"snapshot_id":"ps1:0","provider_kind":"deepseek","pricing_data":{},
+///         "catalog_source":null,"fetched_at":"","created_at":""}"#,
+/// )
+/// .unwrap();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PricingSnapshot {
+    snapshot_id: String,
+    provider_kind: String,
+    pricing_data: Value,
+    pub catalog_source: Option<CatalogSource>,
+    pub fetched_at: String,
+    pub created_at: String,
+}
+
+impl PricingSnapshot {
+    /// Mint a snapshot from prices. The id is computed, never accepted.
+    ///
+    /// `fetched_at`/`created_at` are deliberately **outside** the digest: the
+    /// same price sheet observed an hour later is the same prices, and
+    /// letting the clock into the id would mint a new snapshot on every
+    /// refresh — turning the dedupe property into noise and the immutability
+    /// property into an accident.
+    pub fn mint(
+        provider_kind: impl Into<String>,
+        pricing_data: Value,
+        catalog_source: Option<CatalogSource>,
+        observed_at: impl Into<String>,
+    ) -> Self {
+        let provider_kind = provider_kind.into();
+        let observed_at = observed_at.into();
+        let snapshot_id = Self::compute_id(&provider_kind, &pricing_data);
+        Self {
+            snapshot_id,
+            provider_kind,
+            pricing_data,
+            catalog_source,
+            fetched_at: observed_at.clone(),
+            created_at: observed_at,
+        }
+    }
+
+    /// Rebuild a snapshot read back out of the store, **verifying** that the
+    /// stored id still equals the digest of the stored prices.
+    ///
+    /// A mismatch is a refusal, not a repair: it means something wrote prices
+    /// under an id that historical outcome rows already point at, which is
+    /// precisely the rewrite the content-addressed key exists to make
+    /// impossible. Silently returning the row would let the corrupted cost
+    /// travel onward.
+    pub fn from_stored(
+        snapshot_id: impl Into<String>,
+        provider_kind: impl Into<String>,
+        pricing_data: Value,
+        catalog_source: Option<CatalogSource>,
+        fetched_at: impl Into<String>,
+        created_at: impl Into<String>,
+    ) -> Result<Self, MemoryError> {
+        let snapshot_id = snapshot_id.into();
+        let provider_kind = provider_kind.into();
+        let recomputed = Self::compute_id(&provider_kind, &pricing_data);
+        if recomputed != snapshot_id {
+            return Err(MemoryError::InvalidArg(format!(
+                "pricing snapshot '{snapshot_id}' does not match the digest of its own prices \
+                 ({recomputed}): a content-addressed snapshot was rewritten in place"
+            )));
+        }
+        Ok(Self {
+            snapshot_id,
+            provider_kind,
+            pricing_data,
+            catalog_source,
+            fetched_at: fetched_at.into(),
+            created_at: created_at.into(),
+        })
+    }
+
+    fn compute_id(provider_kind: &str, pricing_data: &Value) -> String {
+        format!(
+            "{PRICING_SNAPSHOT_SCHEME}:{}",
+            canonical_json_digest_hex(&json!({
+                "provider_kind": provider_kind,
+                "pricing_data": pricing_data,
+            }))
+        )
+    }
+
+    pub fn snapshot_id(&self) -> &str {
+        &self.snapshot_id
+    }
+
+    pub fn provider_kind(&self) -> &str {
+        &self.provider_kind
+    }
+
+    pub fn pricing_data(&self) -> &Value {
+        &self.pricing_data
+    }
+}
+
+// ─── model_deployment_health ─────────────────────────────────────────────────
+
+/// Deployment-level operational health (#1681 D4) — the *type*; the single
+/// writer `record_deployment_outcome` is PR-C's.
+///
+/// One of four authorities that are never merged into one score. 401/403
+/// never reach this table: an auth failure says nothing about the deployment,
+/// and the discriminating test for that lives with the catalog store.
+///
+/// No serde derive: `EvidenceKind` (#1680 D6) carries none, and inventing a
+/// serialization for it here would fork that vocabulary's wire form away from
+/// its owner. Health reaches a status surface through a projection, not by
+/// serializing the row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelDeploymentHealth {
+    pub deployment_id: String,
+    pub state: String,
+    pub cooldown_until: Option<String>,
+    pub last_success_at: Option<String>,
+    pub last_attempt_at: Option<String>,
+    pub last_error: Option<String>,
+    pub error_count: i64,
+    /// Whether the row was produced by Tachi's own probe or reported by a
+    /// consumer — the #1680 D6 vocabulary, reused verbatim.
+    pub evidence_kind: Option<EvidenceKind>,
+    pub observed_at: String,
+    pub metadata: String,
+    pub updated_at: String,
+}
+
+#[cfg(test)]
+mod tests;

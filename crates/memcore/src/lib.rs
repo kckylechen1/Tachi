@@ -47,6 +47,11 @@ const _: () = assert!(
 
 #[cfg(feature = "admin")]
 pub mod agent_profile;
+pub mod canonical_digest;
+/// Model-broker catalog row types (tachi#1681). `admin`-gated because all
+/// six catalog tables are `SchemaScope::Product`.
+#[cfg(feature = "admin")]
+pub mod catalog;
 pub mod db;
 pub mod embed_config;
 pub mod error;
@@ -75,6 +80,18 @@ pub mod vector_backfill;
 pub use agent_profile::{
     AgentProfileIdentity, AgentProfilePack, AgentProfileRule, AgentProfileSource,
     RenderedAgentProfile, AGENT_PROFILE_PACK_SCHEMA_VERSION,
+};
+pub use canonical_digest::{canonical_json, canonical_json_digest_hex, canonical_json_eq};
+/// tachi#1681 model-broker catalog: the row types the six catalog tables
+/// carry, re-exported at the root so the env-import and status projection
+/// reach them without importing the internal `catalog::` module layout.
+#[cfg(feature = "admin")]
+pub use catalog::{
+    AttachmentBounds, CatalogSource, DeploymentCapabilities, DeploymentEventKind,
+    EmbeddingsCapability, ModelAlias, ModelAliasBinding, ModelDeployment, ModelDeploymentEvent,
+    ModelDeploymentHealth, NewModelDeployment, NewModelDeploymentEvent, PricingSnapshot,
+    ProtocolKind, ALIAS_STATUS_ACTIVE, ALIAS_STATUS_RETIRED, DEPLOYMENT_STATUS_ACTIVE,
+    DEPLOYMENT_STATUS_RETIRED, PRICING_SNAPSHOT_SCHEME,
 };
 #[cfg(feature = "admin")]
 pub use db::dispatch_adjudications::{
