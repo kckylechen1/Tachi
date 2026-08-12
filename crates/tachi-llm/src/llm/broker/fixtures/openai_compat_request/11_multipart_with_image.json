@@ -17,6 +17,7 @@
     "url": "https://provider.test/v1/chat/completions",
     "headers": [["content-type", "application/json"]],
     "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body_bytes": "{\"model\":\"test-model-1\",\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"what is in this image?\",\"type\":\"text\"},{\"image_url\":{\"detail\":\"high\",\"url\":\"https://provider.test/cat.png\"},\"type\":\"image_url\"},{\"image_url\":{\"url\":\"https://provider.test/dog.png\"},\"type\":\"image_url\"}]}]}",
     "body": {
       "model": "test-model-1",
       "messages": [

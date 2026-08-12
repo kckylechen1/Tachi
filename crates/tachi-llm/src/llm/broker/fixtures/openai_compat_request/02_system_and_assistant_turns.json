@@ -16,6 +16,7 @@
     "url": "https://provider.test/v1/chat/completions",
     "headers": [["content-type", "application/json"]],
     "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body_bytes": "{\"model\":\"test-model-1\",\"messages\":[{\"role\":\"system\",\"content\":\"You are terse.\"},{\"role\":\"user\",\"content\":\"first\"},{\"role\":\"assistant\",\"content\":\"ok\"},{\"role\":\"user\",\"content\":\"second\"}]}",
     "body": {
       "model": "test-model-1",
       "messages": [

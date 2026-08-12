@@ -12,6 +12,7 @@
     "url": "https://provider.test/v1/chat/completions",
     "headers": [["content-type", "application/json"]],
     "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body_bytes": "{\"model\":\"test-model-1\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"temperature\":0.2,\"top_p\":0.9,\"max_tokens\":1024,\"stop\":[\"\\n\\n\",\"END\"],\"seed\":42}",
     "body": {
       "model": "test-model-1",
       "messages": [{"role": "user", "content": "hello"}],

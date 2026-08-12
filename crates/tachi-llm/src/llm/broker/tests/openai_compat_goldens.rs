@@ -11,6 +11,22 @@
 //! side effects all live in the executor and need their own fault-injection
 //! suite. A green matrix here is not coverage of the invocation path.
 //!
+//! # A request golden is a byte pin, not a shape pin
+//!
+//! Each request fixture carries both `expected.body_bytes` — the exact string
+//! the adapter must emit — and `expected.body`, the same document written
+//! readably. The bytes are what a provider signs, caches, rate-limits and
+//! logs, so key order, spacing and escaping are part of the contract; parsing
+//! the emitted body into a `Value` before comparing (which is what this suite
+//! used to do) is blind to all three. The two halves are asserted against each
+//! other as well, so the readable one cannot quietly stop describing the real
+//! one.
+//!
+//! Note the visible consequence: `serde_json::Value` maps are sorted, so a
+//! body's nested passthrough objects come out alphabetically while the
+//! top-level fields follow the struct's declaration order. That asymmetry is
+//! real, it is what goes on the wire, and a shape comparison hid it.
+//!
 //! # The fixtures are data, and each says why it exists
 //!
 //! Every fixture carries a `why`, because a golden whose motivation is lost
@@ -40,19 +56,26 @@ const RESPONSES: &str = "openai_compat_response";
 ///
 /// [`WireHttpRequest`] is not `Serialize` on purpose — its fields are private
 /// so nothing can staple a header on after the adapter built it — so the
-/// comparison shape is built here from its accessors.
+/// comparison shape is built here.
+///
+/// It is built from `golden_parts()`, which destructures the struct
+/// exhaustively, rather than from the accessors: a hand-written projection can
+/// silently omit a field that was added later, and a field that reaches the
+/// provider but no golden is a wire change nobody reviewed. With the
+/// destructuring, adding a field breaks this file's compilation instead.
 fn project(built: &WireHttpRequest) -> Value {
+    let (method, url, headers, auth_placement, body) = built.golden_parts();
     json!({
-        "method": built.method().as_str(),
-        "url": built.url(),
-        "headers": built
-            .headers()
+        "method": method.as_str(),
+        "url": url,
+        "headers": headers
             .iter()
             .map(|header| json!([header.name(), header.value()]))
             .collect::<Vec<_>>(),
-        "auth_placement": serde_json::to_value(built.auth_placement())
+        "auth_placement": serde_json::to_value(auth_placement)
             .expect("an auth placement serializes"),
-        "body": serde_json::from_slice::<Value>(built.body())
+        "body_bytes": std::str::from_utf8(body).expect("the adapter must emit UTF-8 bytes"),
+        "body": serde_json::from_slice::<Value>(body)
             .expect("the adapter must emit a JSON body"),
     })
 }
@@ -84,6 +107,30 @@ fn every_request_fixture_builds_the_expected_wire_bytes() {
         let built = adapter
             .build_request(&request, api_key_lease())
             .unwrap_or_else(|refusal| panic!("fixture {name}: adapter refused: {refusal:?}"));
+
+        // The byte pin. `expected.body` is the readable shape; `body_bytes` is
+        // what actually goes on the wire, compared as a string so key order,
+        // whitespace and escape bytes are all pinned. A `Value` comparison
+        // sees none of those: a body reordered, pretty-printed, or with `/`
+        // escaped to `\/` is a different request to every provider that
+        // signs, caches or logs it, and identical to `serde_json::from_slice`.
+        let expected_bytes = fixture_str(fixture, name, "/expected/body_bytes");
+        let actual_bytes = built
+            .body_utf8()
+            .unwrap_or_else(|| panic!("fixture {name}: the adapter emitted non-UTF-8 bytes"));
+        assert_eq!(
+            actual_bytes, expected_bytes,
+            "{name}: the wire bytes drifted from their golden"
+        );
+
+        // ...and the readable shape must agree with the bytes, so the two
+        // halves of the golden cannot drift apart.
+        assert_eq!(
+            &serde_json::from_str::<Value>(expected_bytes)
+                .unwrap_or_else(|err| panic!("fixture {name}: body_bytes is not JSON: {err}")),
+            fixture_value(fixture, name, "/expected/body"),
+            "{name}: the fixture's body_bytes and body describe different requests"
+        );
 
         assert_eq!(
             &project(&built),

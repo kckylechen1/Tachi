@@ -16,6 +16,7 @@
     "url": "https://provider.test/v1/chat/completions",
     "headers": [["content-type", "application/json"]],
     "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body_bytes": "{\"model\":\"test-model-1\",\"messages\":[{\"role\":\"user\",\"content\":\"find the thing\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search\",\"description\":\"Search the index\",\"parameters\":{\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"fetch\",\"parameters\":{\"properties\":{\"url\":{\"type\":\"string\"}},\"type\":\"object\"}}}],\"tool_choice\":{\"function\":{\"name\":\"search\"},\"type\":\"function\"}}",
     "body": {
       "model": "test-model-1",
       "messages": [{"role": "user", "content": "find the thing"}],

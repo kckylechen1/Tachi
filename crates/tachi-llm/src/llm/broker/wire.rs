@@ -398,6 +398,26 @@ impl WireHttpRequest {
     pub fn body_utf8(&self) -> Option<&str> {
         std::str::from_utf8(&self.body).ok()
     }
+
+    /// Every field, destructured exhaustively, for the golden projection.
+    ///
+    /// The point is the `let Self { .. }` below: it names every field, so
+    /// adding one to `WireHttpRequest` stops this from compiling until the
+    /// projection that feeds the request goldens is updated too. Without it,
+    /// a new field — a second body, a query string, a signing hint — could be
+    /// added, sent to providers, and never appear in a single golden, because
+    /// the projection is hand-written and would simply not mention it.
+    #[cfg(test)]
+    pub(crate) fn golden_parts(&self) -> (HttpMethod, &str, &[WireHeader], &AuthPlacement, &[u8]) {
+        let Self {
+            method,
+            url,
+            headers,
+            auth_placement,
+            body,
+        } = self;
+        (*method, url, headers, auth_placement, body)
+    }
 }
 
 /// A read-only, case-insensitive view of a provider's response headers.

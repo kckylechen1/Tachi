@@ -40,6 +40,7 @@
     "url": "https://provider.test/v1/chat/completions",
     "headers": [["content-type", "application/json"]],
     "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body_bytes": "{\"model\":\"test-model-1\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"response_format\":{\"json_schema\":{\"name\":\"verdict_v2\",\"schema\":{\"$defs\":{\"finding\":{\"properties\":{\"evidence\":{\"properties\":{\"quote\":{\"type\":\"string\"}},\"type\":\"object\"},\"file\":{\"type\":\"string\"},\"line\":{\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"file\",\"line\"],\"type\":\"object\"}},\"additionalProperties\":false,\"properties\":{\"findings\":{\"items\":{\"$ref\":\"#/$defs/finding\"},\"type\":\"array\"},\"verdict\":{\"enum\":[\"ok\",\"concern\",\"bug\"],\"type\":\"string\"}},\"required\":[\"verdict\",\"findings\"],\"type\":\"object\",\"x-tachi-unknown-extension\":{\"kept\":true,\"note\":\"the adapter has no idea what this is\"}},\"strict\":true},\"type\":\"json_schema\"}}",
     "body": {
       "model": "test-model-1",
       "messages": [{"role": "user", "content": "hello"}],
