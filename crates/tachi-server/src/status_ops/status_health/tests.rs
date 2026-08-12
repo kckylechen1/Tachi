@@ -871,15 +871,21 @@ fn model_lane_status_equals_the_catalog_rows_the_same_config_imports() {
     let config = tachi_llm::ProviderRuntimeConfig::from_env().expect("lanes resolve");
     let embedding = tachi_llm::EmbeddingConfig::from_env().expect("embedding config resolves");
     let observed_at = memcore::db::now_utc_iso();
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
-    memcore::db::init_schema(&conn).expect("schema");
-    tachi_llm::import_env_chat_lanes(&conn, &config, &observed_at).expect("import succeeds");
+    // Open through the real store front door, not a bare `Connection` +
+    // `init_schema`: `MemoryStore::open_in_memory` registers the `simple` FTS
+    // tokenizer auto-extension before the schema (which creates FTS tables
+    // that depend on it) runs. A raw connection skips that registration and
+    // panics with "no such tokenizer: simple" the moment schema init tries to
+    // create those tables.
+    let store = memcore::MemoryStore::open_in_memory().expect("in-memory store");
+    let conn = store.connection();
+    tachi_llm::import_env_chat_lanes(conn, &config, &observed_at).expect("import succeeds");
     // The embedding lane is imported into the same store and compared the same
     // way. Comparing only the four chat lanes left the embedding half of the
     // projection — the one carrying the dimension declaration the #1681 D3
     // escape hatch turns on — free to drift out of the status surface unseen.
     tachi_llm::import_env_embedding_lane(
-        &conn,
+        conn,
         &embedding,
         &tachi_llm::voyage_embeddings_endpoint(),
         &observed_at,
@@ -887,7 +893,7 @@ fn model_lane_status_equals_the_catalog_rows_the_same_config_imports() {
     .expect("embedding import succeeds");
 
     let stored = memcore::db::model_catalog::list_model_deployments_by_source(
-        &conn,
+        conn,
         memcore::catalog::CatalogSource::Env,
     )
     .expect("rows read");
