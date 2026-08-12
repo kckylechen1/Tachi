@@ -25,7 +25,7 @@
 //! without ever touching a tool call — so the two decoders are exercised here,
 //! not one.
 
-use super::super::sse::MAX_FRAME_BYTES;
+use super::super::sse::{SseFramer, MAX_FRAME_BYTES};
 use super::*;
 
 /// One SSE data frame carrying a JSON payload.
@@ -216,6 +216,82 @@ fn the_frame_ceiling_counts_every_field_of_the_frame() {
             .terminal_disposition()
             .map(|disposition| serde_json::to_value(disposition).expect("serializes")),
         Some(decode_fault("event_too_large"))
+    );
+}
+
+#[test]
+fn a_multiline_data_frame_landing_exactly_on_the_ceiling_dispatches() {
+    // The regression this pins: a `data:` field is charged its own bytes for
+    // its first line, and `bytes + 1` for every line after — the `+ 1` is the
+    // `\n` [`SseFramer::consume_line`] actually inserts when it joins a
+    // second-or-later line onto the frame's stored `data` string. Charging
+    // that `+ 1` on the *first* line too (as if a joiner were about to be
+    // written before any bytes exist) bills the ceiling for a byte the frame
+    // never retains, so a multi-line payload sized to land exactly on
+    // `MAX_FRAME_BYTES` was rejected one byte early.
+    //
+    // Split roughly in half across two `data:` lines rather than one short
+    // line plus one line near `MAX_FRAME_BYTES` on its own: [`SseFramer::push`]
+    // also bounds the raw, unterminated line buffer by the same constant, and
+    // a near-ceiling single line would trip *that* check instead of the frame
+    // charge this fixture exists to pin — proving nothing about the miscount.
+    let half = MAX_FRAME_BYTES / 2;
+    let first_line = vec![b'a'; half];
+    // `+ (half + 1) == MAX_FRAME_BYTES` exactly: first line costs `half`,
+    // second line costs `second.len() + 1` for the joining `\n`.
+    let second_line = vec![b'b'; MAX_FRAME_BYTES - half - 1];
+    let mut bytes = b"data: ".to_vec();
+    bytes.extend(&first_line);
+    bytes.extend(b"\ndata: ");
+    bytes.extend(&second_line);
+    bytes.extend(b"\n\n");
+
+    let mut framer = SseFramer::new();
+    let (frames, error) = framer.push(&bytes);
+    assert_eq!(
+        error, None,
+        "a multi-line data payload landing exactly on the ceiling must dispatch, \
+         not fault"
+    );
+    assert_eq!(
+        frames.len(),
+        1,
+        "the blank line must close exactly one frame"
+    );
+    let data = frames[0]
+        .data
+        .as_ref()
+        .expect("the dispatched frame carried the joined data");
+    assert_eq!(
+        data.len(),
+        MAX_FRAME_BYTES,
+        "the joined payload (both lines plus the newline joining them) sits exactly \
+         at the ceiling"
+    );
+}
+
+#[test]
+fn a_multiline_data_frame_one_byte_over_the_ceiling_is_rejected() {
+    // The other side of the same fixture: one more byte on the second line —
+    // still a legal split across two lines, still nowhere near the per-line
+    // ceiling — and the frame ceiling must still catch it. A fix that merely
+    // stopped over-charging (and now under-charges, or charges by luck) would
+    // pass the first test and fail this one.
+    let half = MAX_FRAME_BYTES / 2;
+    let first_line = vec![b'a'; half];
+    let second_line = vec![b'b'; MAX_FRAME_BYTES - half];
+    let mut bytes = b"data: ".to_vec();
+    bytes.extend(&first_line);
+    bytes.extend(b"\ndata: ");
+    bytes.extend(&second_line);
+    bytes.extend(b"\n\n");
+
+    let mut framer = SseFramer::new();
+    let (_frames, error) = framer.push(&bytes);
+    assert_eq!(
+        error.map(|failure| failure.kind),
+        Some(StreamDecodeErrorKind::EventTooLarge),
+        "one byte over the ceiling, spread across a second data line, must still fault"
     );
 }
 

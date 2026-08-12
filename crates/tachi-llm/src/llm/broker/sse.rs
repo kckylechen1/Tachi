@@ -220,9 +220,15 @@ impl SseFramer {
         let value = raw_value.strip_prefix(' ').unwrap_or(raw_value);
         match name {
             "data" => {
-                // `+ 1` for the newline the grammar joins data lines with, so
-                // the ceiling counts the string this frame will actually hold.
-                self.charge(value.len().saturating_add(1))?;
+                // The first `data:` line of a frame costs exactly its own
+                // bytes; every line after it also costs the `\n` the grammar
+                // joins it with below. Charging `+ 1` unconditionally would
+                // bill a byte the frame never actually retains — the stored
+                // string only grows a leading newline from the *second* line
+                // onward — and a multi-line payload sized to land exactly on
+                // `MAX_FRAME_BYTES` would be rejected one byte early.
+                let joiner = if self.data.is_some() { 1 } else { 0 };
+                self.charge(value.len().saturating_add(joiner))?;
                 match &mut self.data {
                     Some(existing) => {
                         existing.push('\n');
