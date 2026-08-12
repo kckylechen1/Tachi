@@ -15,6 +15,7 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
         &server,
         TachiMemoryParams {
             action: "briefing".to_string(),
+            issue_ref: None,
             format: Some("json".to_string()),
             query: Some("BriefingDefaultWikiNeedle".to_string()),
             scope: None,

@@ -384,6 +384,7 @@ pub(crate) fn merge_into_for_project(
 fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
     TachiMemoryParams {
         action: "consolidate".to_string(),
+        issue_ref: None,
         format: None,
         query: None,
         scope: None,

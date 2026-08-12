@@ -146,6 +146,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
     }
     let params = TachiMemoryParams {
         action: "checkpoint".to_string(),
+        issue_ref: None,
         query: None,
         format: None,
         scope: Some("project".to_string()),

@@ -8,6 +8,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
         &server,
         TachiMemoryParams {
             action: "checkpoint".to_string(),
+            issue_ref: None,
             format: Some("markdown".to_string()),
             query: None,
             scope: Some("project".to_string()),

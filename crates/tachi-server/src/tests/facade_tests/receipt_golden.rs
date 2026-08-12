@@ -7,6 +7,7 @@ const MEMORY_SAVE_SENTINEL: &str = "ZX9-MEMORY-SAVE-SENTINEL";
 fn memory_save_params(text: String, path: &str, format: Option<&str>) -> TachiMemoryParams {
     TachiMemoryParams {
         action: "save".to_string(),
+        issue_ref: None,
         format: format.map(str::to_string),
         query: None,
         scope: Some("project".to_string()),
@@ -203,6 +204,7 @@ async fn g5_checkpoint_receipt_default_under_500_bytes() {
         &server,
         TachiMemoryParams {
             action: "checkpoint".to_string(),
+            issue_ref: None,
             format: Some("json".to_string()),
             query: None,
             scope: Some("project".to_string()),

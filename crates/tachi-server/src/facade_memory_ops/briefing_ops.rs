@@ -396,10 +396,11 @@ pub(crate) async fn handle_memory_briefing(
     let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
 
     // Presence 工位表 (#1001): read-only, failure-safe projection of live
-    // session claims. Work ownership is scoped through tachi_task, not the
-    // Memory facade, so this compatibility briefing has no claim selector.
+    // session claims. `issue_ref` only scopes these read-only collision
+    // warnings; WorkClaim ownership and mutation remain on tachi_task.
     // Single call point (Scope item 3) — see `claims_ops::presence_briefing_section`.
-    let presence_section = crate::claims_ops::presence_briefing_section(server, None);
+    let presence_section =
+        crate::claims_ops::presence_briefing_section(server, params.issue_ref.as_deref());
     let presence_board = presence_section["board"].clone();
     let presence_warnings: Vec<String> = presence_section["warnings"]
         .as_array()

@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 fn tachi_memory_params(action: &str) -> TachiMemoryParams {
     TachiMemoryParams {
         action: action.to_string(),
+        issue_ref: None,
         format: Some("markdown".to_string()),
         query: None,
         scope: None,

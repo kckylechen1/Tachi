@@ -61,6 +61,7 @@ async fn seed_projected_pattern(server: &MemoryServer, key: &str, text: &str) ->
 fn memory_params(action: &str) -> TachiMemoryParams {
     TachiMemoryParams {
         action: action.to_string(),
+        issue_ref: None,
         format: Some("json".to_string()),
         query: None,
         scope: None,

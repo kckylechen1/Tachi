@@ -65,6 +65,7 @@ impl MemoryServer {
             .map(|name| format!("{name} current task recent decisions blockers next steps"));
         let params = TachiMemoryParams {
             action: "briefing".to_string(),
+            issue_ref: None,
             format: Some("markdown".to_string()),
             query,
             scope: None,

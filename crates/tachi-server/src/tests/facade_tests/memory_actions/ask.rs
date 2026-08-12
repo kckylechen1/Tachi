@@ -8,6 +8,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
         &server,
         TachiMemoryParams {
             action: "ask".to_string(),
+            issue_ref: None,
             format: Some("markdown".to_string()),
             query: Some("what did we implement".to_string()),
             scope: None,

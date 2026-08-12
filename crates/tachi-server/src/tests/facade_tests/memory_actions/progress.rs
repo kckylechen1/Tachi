@@ -12,6 +12,7 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
         &server,
         TachiMemoryParams {
             action: "progress".to_string(),
+            issue_ref: None,
             format: Some("markdown".to_string()),
             query: None,
             scope: None,

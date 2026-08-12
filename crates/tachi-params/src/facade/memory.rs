@@ -590,6 +590,13 @@ pub struct TachiMemoryParams {
     #[schemars(description = "[action=ingest] Messages in the conversation turn.")]
     pub messages: Vec<Message>,
 
+    // --- read-only briefing scope ---
+    #[serde(default)]
+    #[schemars(
+        description = "[action=briefing] Optional GitHub issue to scope the read-only presence collision warnings."
+    )]
+    pub issue_ref: Option<String>,
+
     // --- sticky fields (#964) ---
     #[serde(default)]
     #[schemars(
