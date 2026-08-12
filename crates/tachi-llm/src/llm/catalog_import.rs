@@ -32,13 +32,16 @@
 //! import should decide on its own.
 
 use memcore::catalog::{
-    CatalogSource, DeploymentCapabilities, NewModelDeployment, ProtocolKind,
+    CatalogSource, DeploymentCapabilities, EmbeddingsCapability, NewModelDeployment, ProtocolKind,
     DEPLOYMENT_STATUS_ACTIVE,
 };
 use memcore::db::model_catalog::{upsert_model_deployment, DeploymentWrite};
 use memcore::error::MemoryError;
 use rusqlite::Connection;
 
+use super::embedding_config::{
+    EmbeddingConfig, EmbeddingModelSource, EMBEDDING_DIMENSION_ENV, EMBEDDING_MODEL_ENV,
+};
 use super::provider_health::{ChatLaneConfig, ProviderRuntimeConfig};
 
 /// Prefix every env-derived identifier carries, so "which rows did the env
@@ -50,6 +53,13 @@ pub const ENV_CATALOG_PREFIX: &str = "env:";
 /// Public and ordered because the status projection and the #1685 cutover
 /// both need a stable lane list that cannot drift from this module's output.
 pub const ENV_CHAT_LANES: [&str; 4] = ["extract", "summary", "reasoning", "distill"];
+
+/// The embedding lane's name. Not a chat lane — it speaks a different
+/// protocol, produces no receipts, and carries the dimension declaration the
+/// escape hatch gates on (#1681 D3) — so it is imported separately rather than
+/// smuggled into [`ENV_CHAT_LANES`] where a caller iterating chat lanes would
+/// silently pick it up.
+pub const ENV_EMBEDDING_LANE: &str = "embedding";
 
 /// The deployment id an env-imported lane row carries.
 pub fn env_deployment_id(lane: &str) -> String {
@@ -178,4 +188,66 @@ pub fn import_env_chat_lanes(
         .into_iter()
         .map(|lane| upsert_model_deployment(conn, &lane.deployment).map(|write| (lane.lane, write)))
         .collect()
+}
+
+/// Project the resolved embedding configuration into a catalog row.
+///
+/// This is where the catalog carries the **dimension declaration** #1681 D3
+/// requires: `capabilities.embeddings.dimension` is the width the configured
+/// model emits, as declared and already validated against the stored index by
+/// [`EmbeddingConfig::from_env`]. A bare capability flag would have left the
+/// catalog unable to answer the one question the escape hatch turns on.
+///
+/// Pure, like the chat-lane projection: `endpoint` and `observed_at` come from
+/// the caller (`voyage_embeddings_endpoint()` is the endpoint a request
+/// actually uses) rather than being re-derived here.
+pub fn env_embedding_deployment(
+    embedding: &EmbeddingConfig,
+    endpoint: &str,
+    observed_at: &str,
+) -> EnvLaneDeployment {
+    let mut source_refs = vec!["env_api_key:VOYAGE_API_KEY".to_string()];
+    if embedding.source == EmbeddingModelSource::EnvOverride {
+        // Provenance for a deliberate operator swap: the *name* of the
+        // variable that carried it, never its value.
+        source_refs.push(format!("env_model:{EMBEDDING_MODEL_ENV}"));
+        source_refs.push(format!("env_dimension:{EMBEDDING_DIMENSION_ENV}"));
+    }
+
+    let mut deployment = NewModelDeployment::observed(
+        env_deployment_id(ENV_EMBEDDING_LANE),
+        env_provider_account_id(endpoint),
+        ProtocolKind::VoyageEmbeddings,
+        embedding.model.clone(),
+        CatalogSource::Env,
+        observed_at,
+    )
+    .with_endpoint_ref(endpoint.to_string())
+    .with_capabilities(DeploymentCapabilities {
+        embeddings: Some(EmbeddingsCapability {
+            dimension: embedding.dimension,
+        }),
+        ..DeploymentCapabilities::default()
+    })
+    .with_source_refs(source_refs);
+    deployment.status = DEPLOYMENT_STATUS_ACTIVE.to_string();
+
+    EnvLaneDeployment {
+        lane: ENV_EMBEDDING_LANE,
+        deployment,
+    }
+}
+
+/// Write the embedding lane's row. Idempotent for the same reason
+/// [`import_env_chat_lanes`] is.
+pub fn import_env_embedding_lane(
+    conn: &Connection,
+    embedding: &EmbeddingConfig,
+    endpoint: &str,
+    observed_at: &str,
+) -> Result<DeploymentWrite, MemoryError> {
+    upsert_model_deployment(
+        conn,
+        &env_embedding_deployment(embedding, endpoint, observed_at).deployment,
+    )
 }

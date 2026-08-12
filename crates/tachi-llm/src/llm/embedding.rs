@@ -5,10 +5,22 @@
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
+use super::embedding_config::EmbeddingConfig;
+
 /// Voyage API base URL. Defaults to the public endpoint; `VOYAGE_BASE_URL`
 /// overrides it (same `*_BASE_URL` idiom as the chat lanes). This is the seam
 /// the recall fail-safe test (#926) uses to point embed/rerank at a local
 /// blackhole listener.
+/// The embeddings URL a request will actually go to.
+///
+/// Exposed (rather than leaving callers to rebuild `base + path`) so the
+/// catalog import and the status projection describe the *same* endpoint the
+/// request uses. A second copy of the default URL in a status blob is exactly
+/// the hand-maintained mirror #1681 D3 kills.
+pub fn voyage_embeddings_endpoint() -> String {
+    voyage_endpoint("/v1/embeddings")
+}
+
 pub(in crate::llm) fn voyage_endpoint(path: &str) -> String {
     let base = std::env::var("VOYAGE_BASE_URL")
         .ok()
@@ -18,9 +30,17 @@ pub(in crate::llm) fn voyage_endpoint(path: &str) -> String {
     format!("{base}{path}")
 }
 
+/// Parse a Voyage batch response.
+///
+/// `expected_dimension` is the width the *configured* model declares
+/// ([`super::embedding_config::EmbeddingConfig`]), not a constant: a response
+/// of the wrong width is the observable symptom of an embedding model whose
+/// declaration is wrong, and it has to be caught here — before the vectors
+/// reach a store that would happily write them at the wrong width.
 pub(super) fn parse_voyage_batch_embeddings(
     data: &[Value],
     expected_count: usize,
+    expected_dimension: usize,
 ) -> Result<Vec<Vec<f32>>, String> {
     if data.len() != expected_count {
         return Err(format!(
@@ -53,8 +73,11 @@ pub(super) fn parse_voyage_batch_embeddings(
             .filter_map(|v| v.as_f64().map(|f| f as f32))
             .collect();
 
-        if vec.len() != 1024 {
-            return Err(format!("Expected 1024-dim embedding, got {}", vec.len()));
+        if vec.len() != expected_dimension {
+            return Err(format!(
+                "Expected {expected_dimension}-dim embedding, got {}",
+                vec.len()
+            ));
         }
 
         embeddings.push(vec);
@@ -64,7 +87,8 @@ pub(super) fn parse_voyage_batch_embeddings(
 }
 
 impl super::LlmClient {
-    /// Call Voyage-4 embedding API and return 1024-dim f32 vector.
+    /// Call the configured Voyage embedding model and return one f32 vector at
+    /// the configured width.
     /// Convenience wrapper around embed_voyage_batch for single-item use.
     pub async fn embed_voyage(&self, text: &str, input_type: &str) -> Result<Vec<f32>, String> {
         let results = self
@@ -76,7 +100,8 @@ impl super::LlmClient {
             .ok_or_else(|| "Empty batch result".to_string())
     }
 
-    /// Batch call Voyage-4 embedding API. Returns one 1024-dim f32 vector per input text.
+    /// Batch call the configured Voyage embedding model. Returns one f32
+    /// vector per input text, at the configured width.
     /// Voyage supports up to 128 inputs per request; this method handles chunking internally.
     pub async fn embed_voyage_batch(
         &self,
@@ -87,11 +112,19 @@ impl super::LlmClient {
             return Ok(vec![]);
         }
 
+        // Resolved per call rather than cached on the client, for the same
+        // reason `voyage_endpoint()` above reads `VOYAGE_BASE_URL` per call:
+        // two env reads next to an HTTPS request cost nothing, and a cached
+        // resolution would make the config a function of when the process
+        // happened to build its client. Fails closed — a mis-declared
+        // embedding model never reaches the wire (#1681 D3).
+        let embedding = EmbeddingConfig::from_env()?;
+
         const VOYAGE_MAX_BATCH: usize = 128;
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(VOYAGE_MAX_BATCH) {
             let body = json!({
-                "model": "voyage-4",
+                "model": embedding.model,
                 "input": chunk,
                 "input_type": input_type
             });
@@ -194,7 +227,11 @@ impl super::LlmClient {
             let data = json["data"]
                 .as_array()
                 .ok_or("Invalid Voyage batch response: missing data array")?;
-            all_embeddings.extend(parse_voyage_batch_embeddings(data, chunk.len())?);
+            all_embeddings.extend(parse_voyage_batch_embeddings(
+                data,
+                chunk.len(),
+                embedding.dimension as usize,
+            )?);
         }
 
         Ok(all_embeddings)

@@ -15,6 +15,10 @@ pub mod catalog_import;
 mod chat_lanes;
 mod circuit_breaker;
 mod embedding;
+/// tachi#1681 D3: the guarded escape hatch for the embedding model —
+/// an override must declare its output dimension, and a declaration that
+/// disagrees with the stored index is refused at resolution.
+pub mod embedding_config;
 mod helpers;
 mod provider_health;
 mod rerank;
@@ -26,6 +30,7 @@ pub use auth_probe::{
 };
 pub use chat_lanes::ReasoningOutcome;
 pub(crate) use circuit_breaker::{CircuitBreakerRegistry, LaneOutageTracker};
+pub use embedding::voyage_embeddings_endpoint;
 pub use provider_health::ProviderSecret;
 pub use provider_health::{
     ChatLaneConfig, CompletionStatusV1, Generated, LaneFallbackConfig, ModelEngineKindV1,

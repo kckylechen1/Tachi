@@ -11,9 +11,15 @@ mod runtime_files;
 mod test_support;
 
 pub use llm::catalog_import::{
-    env_chat_lane_deployments, env_deployment_id, import_env_chat_lanes, EnvLaneDeployment,
-    ENV_CATALOG_PREFIX, ENV_CHAT_LANES,
+    env_chat_lane_deployments, env_deployment_id, env_embedding_deployment, import_env_chat_lanes,
+    import_env_embedding_lane, EnvLaneDeployment, ENV_CATALOG_PREFIX, ENV_CHAT_LANES,
+    ENV_EMBEDDING_LANE,
 };
+pub use llm::embedding_config::{
+    EmbeddingConfig, EmbeddingModelSource, DEFAULT_EMBEDDING_DIMENSION, DEFAULT_EMBEDDING_MODEL,
+    EMBEDDING_DIMENSION_ENV, EMBEDDING_MODEL_ENV, STORED_INDEX_DIMENSION,
+};
+pub use llm::voyage_embeddings_endpoint;
 pub use llm::{
     auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind, CompletionStatusV1,
     Generated, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
