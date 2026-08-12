@@ -741,6 +741,17 @@ fn the_declared_divergences_are_still_divergent() {
          broker re-sends never'. If the budget is no longer three, the \
          divergence has changed shape and this record is stale."
     );
+    // The value check above is not enough by itself — same gap as the retry-
+    // phase test: it would still pass if `call_lane_llm` stopped feeding
+    // `Self::MAX_ATTEMPTS` into `call_provider_tier` and passed a literal
+    // budget instead, leaving the empty-content branch above retrying a
+    // number of times D1's "three times" no longer describes. Bind D1's "3"
+    // to the same call-site sentinel the retry-phase test above pins, rather
+    // than inventing a second one.
+    assert_lane_calls_block(
+        "call_lane_llm passes the shared retry budget by name",
+        "                    &breaker_key,\n                    Self::MAX_ATTEMPTS,\n                    system,",
+    );
 
     // ---- D2: the body excerpt bound -------------------------------------
     // `classify_error` takes a bounded prefix by trait contract, because a
