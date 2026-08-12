@@ -69,12 +69,12 @@
 //!
 //! # What is deliberately not here (slice boundaries)
 //!
-//! - **No stream decoder implementation.** [`WireStreamDecoder`] is defined,
-//!   with the explicit terminal inputs the golden corpus needs (`finish`,
-//!   `on_transport_error`, `on_cancel`); the OpenAI-compat adapter returns a
-//!   typed [`StreamDecoderUnavailable`] rather than panicking. SSE/NDJSON
-//!   decoding, tool-call reconstruction and the transcript fixtures are the
-//!   next slice.
+//! - **No NDJSON decoder.** The SSE grammars land in slice-2
+//!   ([`OpenAiCompatStreamDecoder`] and the Anthropic event grammar); an
+//!   Ollama-shaped deployment streams NDJSON, which is a third grammar with its
+//!   own transcript family and is not implemented here. What *is* pinned is
+//!   that feeding NDJSON to an SSE decoder is a typed refusal rather than a
+//!   silent misread.
 //! - **No executor, no cancellation state machine, no HTTP.** The disposition
 //!   vocabulary that the state machine will drive is frozen here
 //!   ([`InvocationDispositionV1`]); the machine that walks it is not. "No
@@ -91,7 +91,10 @@
 mod canonical;
 mod disposition;
 mod openai_compat;
+mod openai_stream;
+mod sse;
 mod stream;
+mod stream_grammar;
 mod usage;
 mod wire;
 
@@ -126,3 +129,4 @@ pub use wire::{
 };
 
 pub use openai_compat::{OpenAiCompatWire, OPENAI_COMPAT_DIALECT};
+pub use openai_stream::OpenAiCompatStreamDecoder;

@@ -300,7 +300,13 @@ fn sampling_fields(
 // Response parsing
 // ---------------------------------------------------------------------------
 
-fn completion_kind(finish_reason: Option<&str>) -> CompletionKindV1 {
+/// The dialect's finish-reason vocabulary, mapped once.
+///
+/// `pub(super)` so the streaming decoder calls it instead of transcribing it:
+/// the streamed `finish_reason` and the non-streamed one are the same field
+/// with the same meanings, and two copies of "which reasons mean truncated"
+/// would drift the first time a provider adds one.
+pub(super) fn completion_kind(finish_reason: Option<&str>) -> CompletionKindV1 {
     match finish_reason {
         Some("stop") => CompletionKindV1::Complete,
         Some("length") => CompletionKindV1::Truncated,
@@ -310,7 +316,13 @@ fn completion_kind(finish_reason: Option<&str>) -> CompletionKindV1 {
     }
 }
 
-fn parse_usage(usage: Option<&Value>) -> UsageObservationV1 {
+/// The dialect's usage block, read once.
+///
+/// `pub(super)` for the same reason as [`completion_kind`]: a streamed usage
+/// report is the same object in the same shape, and a second reader of it would
+/// be a second place for the "unreadable is unobserved" rule below to be
+/// forgotten.
+pub(super) fn parse_usage(usage: Option<&Value>) -> UsageObservationV1 {
     // `as_u64`, not `as_i64`: a negative token count is not a small number of
     // tokens, it is a number this process could not read, and a provider that
     // sends `-1` must not get it stamped `provider_authoritative` in a durable
@@ -563,7 +575,8 @@ impl ProviderWire for OpenAiCompatWire {
     }
 }
 
-fn non_blank(value: Option<&Value>) -> Option<String> {
+/// A trimmed, non-empty string field, or nothing.
+pub(super) fn non_blank(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
         .map(str::trim)
