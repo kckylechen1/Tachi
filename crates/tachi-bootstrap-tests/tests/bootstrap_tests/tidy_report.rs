@@ -2,8 +2,7 @@ use super::*;
 
 #[test]
 fn tidy_report_scans_memory_dbs_and_suggests_scope() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-report-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-report-{}", uuid::Uuid::new_v4()));
     let git_root = root.join("repo");
     let global_db = root.join(".tachi").join("global").join("memory.db");
     let project_db = git_root.join(".tachi").join("memory.db");
@@ -44,7 +43,7 @@ fn tidy_report_scans_memory_dbs_and_suggests_scope() {
         store.upsert(&entry).expect("seed db");
     }
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), Some(&git_root))
+    let report = api::build_tidy_report(std::slice::from_ref(&root), Some(&git_root))
         .expect("tidy report should build");
 
     assert_eq!(report.total_databases, 4);
@@ -130,8 +129,7 @@ fn tidy_report_scans_memory_dbs_and_suggests_scope() {
 #[cfg(unix)]
 #[test]
 fn tidy_report_counts_physical_db_once_across_path_symlink_and_hardlink() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-identity-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-identity-{}", uuid::Uuid::new_v4()));
     let agents = root.join(".openclaw/core/extensions/tachi/data/agents");
     let real_db = agents.join("real/memory.db");
     let symlink_db = agents.join("symlink/memory.db");
@@ -148,7 +146,7 @@ fn tidy_report_counts_physical_db_once_across_path_symlink_and_hardlink() {
     std::os::unix::fs::symlink(&real_db, &symlink_db).expect("create DB symlink");
     std::fs::hard_link(&real_db, &hardlink_db).expect("create DB hard link");
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None)
+    let report = api::build_tidy_report(std::slice::from_ref(&root), None)
         .expect("identity-aware tidy report");
     assert_eq!(report.total_databases, 1, "physical DBs, not path aliases");
     assert_eq!(report.total_aliases, 3);
@@ -162,27 +160,24 @@ fn tidy_report_counts_physical_db_once_across_path_symlink_and_hardlink() {
     assert_eq!(report.physical_stores.len(), 1);
     assert_eq!(report.physical_stores[0].aliases.len(), 3);
 
-    let doctor = crate::doctor::scan(
-        std::slice::from_ref(&root),
-        &root.join("quarantine"),
-        crate::doctor::ScanOptions::default(),
-    );
-    assert_eq!(doctor.summary.total_databases, report.total_databases);
-    assert_eq!(doctor.summary.total_memories, report.total_memories);
-    assert_eq!(doctor.summary.total_aliases, report.total_aliases);
-    assert_eq!(doctor.summary.resolved_aliases, report.resolved_aliases);
-    assert_eq!(doctor.summary.unresolved_paths, report.unresolved_paths);
-    assert_eq!(doctor.summary.path_appearances, report.path_appearances);
+    let doctor =
+        api::scan_doctor_inventory_counts(std::slice::from_ref(&root), &root.join("quarantine"));
+    assert_eq!(doctor.total_databases, report.total_databases);
+    assert_eq!(doctor.total_memories, report.total_memories);
+    assert_eq!(doctor.total_aliases, report.total_aliases);
+    assert_eq!(doctor.resolved_aliases, report.resolved_aliases);
+    assert_eq!(doctor.unresolved_paths, report.unresolved_paths);
+    assert_eq!(doctor.path_appearances, report.path_appearances);
 
     let target = root.join(".tachi/global/memory.db");
     let archive = root.join(".tachi/archive/test");
-    let plan = crate::bootstrap::build_migration_plan(&report, &target, &archive, &root);
+    let plan = api::build_migration_plan(&report, &target, &archive, &root);
     assert_eq!(
         plan.len(),
         1,
         "aliases must not duplicate migration sources"
     );
-    let self_plan = crate::bootstrap::build_migration_plan(&report, &symlink_db, &archive, &root);
+    let self_plan = api::build_migration_plan(&report, &symlink_db, &archive, &root);
     assert!(
         self_plan.is_empty(),
         "an alias of the target must never be planned as a migration source"
@@ -208,7 +203,7 @@ fn tidy_report_counts_physical_db_once_across_path_symlink_and_hardlink() {
 #[cfg(unix)]
 #[test]
 fn tidy_report_does_not_count_unresolved_paths_as_aliases() {
-    let root = crate::utils::test_fixture_path(format!(
+    let root = test_fixture_path(format!(
         "tachi-tidy-unresolved-count-{}",
         uuid::Uuid::new_v4()
     ));
@@ -216,7 +211,7 @@ fn tidy_report_does_not_count_unresolved_paths_as_aliases() {
     std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(root.join("missing.sqlite"), &broken).unwrap();
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
+    let report = api::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
     assert_eq!(report.total_databases, 0);
     assert_eq!(report.total_aliases, 0);
     assert_eq!(report.resolved_aliases, 0);
@@ -236,8 +231,7 @@ fn tidy_report_does_not_count_unresolved_paths_as_aliases() {
 #[cfg(unix)]
 #[test]
 fn tidy_report_reads_committed_wal_while_writer_owns_database() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-live-wal-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-live-wal-{}", uuid::Uuid::new_v4()));
     let db = root.join(".tachi/global/memory.db");
     std::fs::create_dir_all(db.parent().unwrap()).expect("create DB parent");
     let mut store = MemoryStore::open(db.to_str().unwrap()).expect("open live DB");
@@ -258,7 +252,7 @@ fn tidy_report_reads_committed_wal_while_writer_owns_database() {
         .execute_batch("BEGIN IMMEDIATE")
         .expect("hold writable ownership");
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None)
+    let report = api::build_tidy_report(std::slice::from_ref(&root), None)
         .expect("read-only inventory must coexist with writer");
     assert_eq!(report.total_databases, 1);
     assert_eq!(report.total_memories, 1);
@@ -272,10 +266,7 @@ fn tidy_report_reads_committed_wal_while_writer_owns_database() {
 #[cfg(unix)]
 #[test]
 fn tidy_report_prefers_hardlink_alias_with_active_wal_sidecars() {
-    let root = crate::utils::test_fixture_path(format!(
-        "tachi-tidy-hardlink-wal-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = test_fixture_path(format!("tachi-tidy-hardlink-wal-{}", uuid::Uuid::new_v4()));
     let agents = root.join(".openclaw/core/extensions/tachi/data/agents");
     let hardlink = agents.join("a-hardlink/memory.db");
     let live = agents.join("z-live/memory.db");
@@ -293,7 +284,7 @@ fn tidy_report_prefers_hardlink_alias_with_active_wal_sidecars() {
         .unwrap();
     assert!(live.with_file_name("memory.db-wal").exists());
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
+    let report = api::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
     assert_eq!(report.total_databases, 1);
     assert_eq!(
         report.total_memories, 2,
@@ -305,7 +296,7 @@ fn tidy_report_prefers_hardlink_alias_with_active_wal_sidecars() {
     );
     assert_eq!(
         report.physical_stores[0].open_path_basis,
-        crate::physical_db_identity::OpenPathBasis::WalAndShmVisible
+        api::OpenPathBasis::WalAndShmVisible
     );
     assert!(report.physical_stores[0]
         .sidecar_paths
@@ -321,7 +312,7 @@ fn tidy_report_prefers_hardlink_alias_with_active_wal_sidecars() {
 #[cfg(unix)]
 #[test]
 fn tidy_report_refuses_mutation_authority_for_multiple_live_hardlink_sidecars() {
-    let root = crate::utils::test_fixture_path(format!(
+    let root = test_fixture_path(format!(
         "tachi-tidy-ambiguous-sidecars-{}",
         uuid::Uuid::new_v4()
     ));
@@ -345,18 +336,18 @@ fn tidy_report_refuses_mutation_authority_for_multiple_live_hardlink_sidecars() 
     std::fs::copy(&first_wal, second.with_file_name("memory.db-wal")).unwrap();
     std::fs::copy(&first_shm, second.with_file_name("memory.db-shm")).unwrap();
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
+    let report = api::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
     assert_eq!(report.total_databases, 1);
     assert_eq!(report.physical_stores[0].sidecar_paths.len(), 2);
     assert_eq!(
         report.physical_stores[0].mutation_state,
-        crate::physical_db_identity::PhysicalStoreMutationState::AmbiguousPhysicalStore
+        api::PhysicalStoreMutationState::AmbiguousPhysicalStore
     );
     assert!(
-        crate::bootstrap::authorized_migration_sources(&report).is_empty(),
+        api::authorized_migration_sources(&report).is_empty(),
         "multiple live sidecar owners must not mint a migration authority"
     );
-    let plan = crate::bootstrap::build_migration_plan(
+    let plan = api::build_migration_plan(
         &report,
         &root.join(".tachi/global/memory.db"),
         &root.join(".tachi/archive/ambiguous"),
@@ -373,18 +364,17 @@ fn tidy_report_refuses_mutation_authority_for_multiple_live_hardlink_sidecars() 
 
 #[test]
 fn tidy_report_preserves_open_error_and_adds_typed_failure() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-corrupt-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-corrupt-{}", uuid::Uuid::new_v4()));
     let db = root.join(".tachi/global/memory.db");
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
     std::fs::write(&db, b"not a sqlite database").unwrap();
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
+    let report = api::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
     assert_eq!(report.total_databases, 1);
     assert_eq!(report.databases[0].status, "open_error");
     assert_eq!(
         report.databases[0].open_failure_kind,
-        Some(crate::physical_db_identity::InventoryFailureKind::NotDatabase)
+        Some(api::InventoryFailureKind::NotDatabase)
     );
 
     let _ = std::fs::remove_dir_all(&root);

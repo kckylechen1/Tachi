@@ -84,6 +84,9 @@ mod agent_eval;
 mod agent_markdown;
 mod agent_registry;
 mod bootstrap;
+#[cfg(feature = "bootstrap-test-api")]
+#[doc(hidden)]
+pub mod bootstrap_test_api;
 mod build_broker;
 pub mod build_info;
 mod build_info_core;

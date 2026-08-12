@@ -7,14 +7,16 @@ mod report;
 
 pub(super) use command::run_tidy_command;
 
-// Test-only surface: `bootstrap/mod.rs` re-exports these under `#[cfg(test)]`
-// for `crate::bootstrap::*` callers in unit tests.
-#[cfg(test)]
+// Feature-gated test surface: `bootstrap/mod.rs` forwards these only when the
+// external bootstrap test crate explicitly enables `bootstrap-test-api`.
+#[cfg(feature = "bootstrap-test-api")]
 pub(crate) use apply::execute_tidy_apply;
-#[cfg(test)]
+#[cfg(feature = "bootstrap-test-api")]
+pub use migration::MigrationConfig;
+#[cfg(feature = "bootstrap-test-api")]
 pub(crate) use migration::{
     authorized_migration_sources, build_migration_plan, execute_tidy_migrations,
-    force_boundary_failure_after_archive_stage, update_manifest_after_migration, MigrationConfig,
+    force_boundary_failure_after_archive_stage, update_manifest_after_migration,
 };
-#[cfg(test)]
+#[cfg(feature = "bootstrap-test-api")]
 pub(crate) use report::build_tidy_report;

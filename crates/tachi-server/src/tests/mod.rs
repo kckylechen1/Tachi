@@ -847,7 +847,6 @@ fn make_skill_capability(
     }
 }
 
-mod bootstrap_tests;
 mod chain_skills_tests;
 mod claims_tests;
 mod closure_scan_tests;
