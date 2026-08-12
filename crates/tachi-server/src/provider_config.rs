@@ -555,19 +555,48 @@ pub(crate) struct EnvCatalogImport {
 ///
 /// `upsert_model_deployment` compares content digests, so a restart that
 /// resolves the same chains reports `Unchanged` for every row and appends no
-/// events. One transaction wraps the whole import so a mid-way store failure
-/// cannot leave a half-described catalog; a *refusable* config (userinfo in a
-/// base URL) never gets that far, because the projection is built in full
-/// before the first write.
+/// events. One transaction wraps the whole write so a mid-way store failure
+/// cannot leave a half-described catalog.
+///
+/// # Refusal precedes every write, not just the ones after it
+///
+/// Every lane's projection — the four chat lanes *and* the embedding lane —
+/// is built before any connection is opened. `env_chat_lane_deployments` and
+/// `env_embedding_deployment` are pure functions with no store access; their
+/// only failure mode is a credential-bearing endpoint
+/// (`CatalogImportError::EndpointCarriesUserinfo`). Building all five here,
+/// before `with_global_store` is even called, means a userinfo-carrying
+/// `VOYAGE_BASE_URL` is refused with zero write calls having happened at
+/// all — not "refused after the four chat rows were written into a
+/// transaction that then rolled back." A prior revision built the embedding
+/// projection *inside* the transaction, after the chat lanes had already
+/// been upserted into it; correctness leaned on `unchecked_transaction`'s
+/// rollback-on-drop to erase those writes, which is invisible from the
+/// caller's `Result` but not equivalent to the writes never having been
+/// issued.
 pub(crate) fn import_env_catalog_deployments(
     server: &MemoryServer,
 ) -> Result<EnvCatalogImport, String> {
-    use memcore::db::model_catalog::DeploymentWrite;
+    use memcore::db::model_catalog::{upsert_model_deployment, DeploymentWrite};
 
     let config = server.llm.runtime_config();
     let embedding = tachi_llm::EmbeddingConfig::from_env();
     let embeddings_endpoint = tachi_llm::voyage_embeddings_endpoint();
     let observed_at = memcore::db::now_utc_iso();
+
+    let chat_deployments = tachi_llm::env_chat_lane_deployments(&config, &observed_at)
+        .map_err(|err| err.to_string())?;
+    let mut embedding_deployment = None;
+    let mut embedding_refused = None;
+    match &embedding {
+        Ok(resolved) => {
+            embedding_deployment = Some(
+                tachi_llm::env_embedding_deployment(resolved, &embeddings_endpoint, &observed_at)
+                    .map_err(|err| err.to_string())?,
+            );
+        }
+        Err(err) => embedding_refused = Some(err.clone()),
+    }
 
     server.with_global_store(|store| {
         let conn = store.connection();
@@ -575,32 +604,27 @@ pub(crate) fn import_env_catalog_deployments(
             .unchecked_transaction()
             .map_err(|e| format!("open catalog import transaction: {e}"))?;
 
-        let mut summary = EnvCatalogImport::default();
+        let mut summary = EnvCatalogImport {
+            embedding_refused,
+            ..EnvCatalogImport::default()
+        };
 
-        let chat_writes = tachi_llm::import_env_chat_lanes(&transaction, &config, &observed_at)
-            .map_err(|err| err.to_string())?;
-        for (_lane, write) in &chat_writes {
+        for lane in &chat_deployments {
+            let write = upsert_model_deployment(&transaction, &lane.deployment)
+                .map_err(|e| e.to_string())?;
             summary.rows += 1;
             if !matches!(write, DeploymentWrite::Unchanged { .. }) {
                 summary.changed += 1;
             }
         }
 
-        match &embedding {
-            Ok(embedding) => {
-                let write = tachi_llm::import_env_embedding_lane(
-                    &transaction,
-                    embedding,
-                    &embeddings_endpoint,
-                    &observed_at,
-                )
-                .map_err(|err| err.to_string())?;
-                summary.rows += 1;
-                if !matches!(write, DeploymentWrite::Unchanged { .. }) {
-                    summary.changed += 1;
-                }
+        if let Some(row) = &embedding_deployment {
+            let write = upsert_model_deployment(&transaction, &row.deployment)
+                .map_err(|e| e.to_string())?;
+            summary.rows += 1;
+            if !matches!(write, DeploymentWrite::Unchanged { .. }) {
+                summary.changed += 1;
             }
-            Err(err) => summary.embedding_refused = Some(err.clone()),
         }
 
         transaction
@@ -872,6 +896,96 @@ mod catalog_import_tests {
             "not even the clean lanes may land: {} row(s)",
             stored.len()
         );
+    }
+
+    /// The mirror of the test above, with the credential on the *embedding*
+    /// endpoint instead of a chat lane: the four clean chat lanes must not
+    /// land either, and — the part a bare "is the store empty" assertion
+    /// cannot tell apart from "wrote then rolled back" — no event may have
+    /// been appended along the way. `upsert_model_deployment` appends an
+    /// event on every create/change and only on those; if the four chat rows
+    /// had actually been upserted into the transaction (as a prior revision
+    /// did, before the embedding endpoint's userinfo check ran), each would
+    /// append a `Create` event to the same in-transaction event log this read
+    /// inspects after rollback. Rollback erases the *rows*; it does not
+    /// retroactively make the write calls not have happened. Zero events is
+    /// therefore evidence about the write path, not just about final state.
+    #[test]
+    fn a_userinfo_embedding_endpoint_writes_no_chat_rows_or_events_either() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _embedding_env = default_embedding_env();
+        let _voyage_base = EnvRestore::set(
+            "VOYAGE_BASE_URL",
+            "https://svc-account:sk-live-SECRET@voyage.internal/v1",
+        );
+        let server = server_running_injected_config();
+
+        let err = import_env_catalog_deployments(&server)
+            .expect_err("a userinfo embedding endpoint must refuse the whole import");
+        assert!(!err.contains("sk-live-SECRET"), "{err}");
+        assert!(
+            err.contains("embedding"),
+            "the refusal must name the embedding lane: {err}"
+        );
+
+        let stored = server
+            .with_global_store_read(|store| {
+                list_model_deployments_by_source(store.connection(), CatalogSource::Env)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("rows read");
+        assert!(
+            stored.is_empty(),
+            "the four clean chat lanes must not land either: {} row(s)",
+            stored.len()
+        );
+
+        let events = server
+            .with_global_store_read(|store| {
+                list_all_model_deployment_events(store.connection()).map_err(|e| e.to_string())
+            })
+            .expect("events read");
+        assert!(
+            events.is_empty(),
+            "no chat-lane upsert may have run at all, so none may have appended an \
+             event: {} event(s)",
+            events.len()
+        );
+    }
+
+    /// The strongest form of the claim: the embedding refusal must be
+    /// decidable with **no connection in scope at all**, not merely "decided
+    /// early in a transaction that then gets rolled back". This test builds
+    /// no `MemoryServer`, opens no store, and calls exactly the two pure
+    /// projections `import_env_catalog_deployments` calls before it ever asks
+    /// for one — `env_chat_lane_deployments` (which takes no connection) and
+    /// `env_embedding_deployment` (likewise). Getting the refusal back here,
+    /// with literally nothing to write to in scope, is proof by construction
+    /// that no write is reachable before this check runs — a property a
+    /// black-box "is the store empty afterward" assertion cannot distinguish
+    /// from "wrote, then a transaction rolled the writes back."
+    #[test]
+    fn the_embedding_refusal_is_decidable_with_no_connection_in_scope() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _embedding_env = default_embedding_env();
+
+        let config = injected_config();
+        let observed_at = memcore::db::now_utc_iso();
+
+        let chat_deployments = tachi_llm::env_chat_lane_deployments(&config, &observed_at)
+            .expect("the four injected chat lanes carry no userinfo");
+        assert_eq!(chat_deployments.len(), 4, "all four lanes projected");
+
+        let embedding = tachi_llm::EmbeddingConfig::from_env()
+            .expect("the default embedding configuration must resolve");
+        let poisoned_endpoint = "https://svc-account:sk-live-SECRET@voyage.internal/v1";
+        let err = tachi_llm::env_embedding_deployment(&embedding, poisoned_endpoint, &observed_at)
+            .expect_err("a userinfo embedding endpoint must refuse");
+        assert!(!err.to_string().contains("sk-live-SECRET"), "{err}");
     }
 }
 
