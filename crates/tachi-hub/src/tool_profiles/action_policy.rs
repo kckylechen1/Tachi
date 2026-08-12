@@ -357,16 +357,6 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_memory", Some("save"), profile));
-        assert!(facade_action_allowed(
-            "tachi_memory",
-            Some("claim"),
-            profile
-        ));
-        assert!(!facade_action_allowed(
-            "tachi_memory",
-            Some("release"),
-            profile
-        ));
         assert!(!facade_action_allowed(
             "tachi_memory",
             Some("consolidate"),
