@@ -52,6 +52,20 @@
 //! So the contract this slice hands over is: *streamed absence means no
 //! `Usage` event*, and an executor that records nothing when the stream said
 //! nothing is the bug this note exists to prevent.
+//!
+//! # What this contract does not yet resolve
+//!
+//! Anthropic's grammar hands the executor *two* `Usage` events per turn — an
+//! input-token-only report at `message_start`, an output-token-only report at
+//! `message_delta` (see the module note and `message_delta` on
+//! [`super::anthropic_stream::AnthropicEventGrammar`]) — emitted separately
+//! rather than merged into one observation. Whether the executor should
+//! overwrite the first with the second, merge them field-by-field, or
+//! dedupe/reconcile by provenance is exactly the whole-invocation judgment
+//! this layer defers upward, and it is unresolved *on purpose*: it is the
+//! executor slice's decision to make, not a gap in this one. Stated here so
+//! it is picked up deliberately when that slice lands, instead of being
+//! rediscovered as a bug against a decoder that was never going to answer it.
 
 use serde_json::Value;
 

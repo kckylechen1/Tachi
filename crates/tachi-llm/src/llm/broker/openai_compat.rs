@@ -49,9 +49,13 @@
 //! request field several OpenAI-compatible servers reject outright, so adding
 //! it is a wire change with its own golden and its own per-deployment question
 //! (#1681's catalog), not a side effect of landing a decoder. The consequence
-//! is honest and visible: a streamed invocation reports usage only when the
-//! provider volunteers it, and `UsageObservationV1::unknown` — not zeros — when
-//! it does not.
+//! is honest and visible: this decoder reports usage only when the provider
+//! volunteers it and emits no `Usage` event at all when it does not — the
+//! decoder cannot tell "no usage was reported" from "usage has not arrived
+//! yet" (see the contract in [`super::stream_grammar`]). Turning that silence
+//! into an `UsageObservationV1::unknown` observation is the **executor's**
+//! job, done once the invocation reaches its terminal disposition, not this
+//! decoder's.
 
 use serde::Serialize;
 use serde_json::Value;
