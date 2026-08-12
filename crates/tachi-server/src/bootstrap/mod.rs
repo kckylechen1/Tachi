@@ -25,6 +25,7 @@ mod serve;
 mod setup;
 pub(crate) mod setup_wizard;
 mod skill_surface_cli;
+mod sticky_cutover_cli;
 mod tidy;
 mod vault_sync;
 // Crate-visible so the Wiki search integration tests can drive

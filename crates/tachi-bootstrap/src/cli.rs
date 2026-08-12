@@ -84,10 +84,12 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+mod a2a_actions;
 mod commands;
 mod maintenance_actions;
 mod vault_actions;
 
+pub use a2a_actions::{A2aAction, StickyCutoverAction};
 pub use commands::{Commands, RecallCoverageArgs};
 pub use maintenance_actions::{
     BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DedupeAction, DistillAction,

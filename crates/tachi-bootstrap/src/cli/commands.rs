@@ -1,8 +1,8 @@
 use super::{
-    BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DistillAction, EnvAction,
-    EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction,
-    ManifestAction, McpAction, PokeAction, RepairAction, RescueAction, SkillSurfaceAction,
-    VaultAction, WatcherAction, WikiAction, WorktreeAction,
+    A2aAction, BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DistillAction,
+    EnvAction, EvalAction, FoundryAction, HarnessAction, HostAction, HubAction,
+    InjectionSurfaceAction, ManifestAction, McpAction, PokeAction, RepairAction, RescueAction,
+    SkillSurfaceAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -34,6 +34,11 @@ pub struct RecallCoverageArgs {
 pub enum Commands {
     /// Start MCP Server (default when no subcommand is provided)
     Serve,
+    /// Same-host AgentIdentity envelope administration.
+    A2a {
+        #[command(subcommand)]
+        action: A2aAction,
+    },
     /// Search memories
     Search {
         query: String,
