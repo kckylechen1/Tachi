@@ -1,3 +1,5 @@
+#[cfg(feature = "admin")]
+pub mod a2a;
 mod agent_state;
 pub mod anchor;
 mod audit;

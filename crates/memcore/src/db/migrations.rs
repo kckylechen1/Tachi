@@ -54,6 +54,7 @@
 //! - v29: `memory_outbox_events` durable outbox for outbound memory mutations
 //!   (#1643 / #1630 A1).
 //! - v30: destination-side outbox apply/readback receipts (#1718).
+//! - v31: Product-only local A2A envelope and delivery-receipt ledger (#1751).
 //!   Both are NEW TABLE migrations, so a bump is unavoidable: the v22 and v28
 //!   precedents both state why a table may not arrive through idempotent init
 //!   DDL — a stamped-older database would silently acquire a new write surface
@@ -101,7 +102,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 30;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 31;
 
 mod basic;
 mod cross_db;
@@ -182,6 +183,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v28_wiki_recovery_ledgers",
     "v29_memory_outbox",
     "v30_memory_outbox_destination_apply",
+    "v31_a2a_mailbox",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -218,6 +220,7 @@ pub struct MigrationReport {
     pub wiki_recovery_schema_objects_created: usize,
     pub memory_outbox_schema_objects_created: usize,
     pub memory_outbox_destination_apply_schema_objects_created: usize,
+    pub a2a_mailbox_schema_objects_created: usize,
 }
 
 #[cfg(test)]
@@ -319,7 +322,16 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
     crate::db::schema::validate_typo_fallback_attribution_schema(conn)?;
     crate::db::schema::validate_wiki_recovery_ledgers_schema(conn)?;
     crate::db::schema::validate_memory_outbox_schema(conn)?;
-    crate::db::schema::validate_memory_outbox_destination_apply_schema(conn)
+    crate::db::schema::validate_memory_outbox_destination_apply_schema(conn)?;
+    let product_schema: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM main.sqlite_schema WHERE type='table' AND name='identity_admissions'",
+        [],
+        |row| row.get(0),
+    )?;
+    if product_schema > 0 {
+        crate::db::schema::validate_a2a_mailbox_schema(conn)?;
+    }
+    Ok(())
 }
 
 /// #1119 typed schema-migration gate. Runs at the DB-open funnel
@@ -707,6 +719,11 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v30_memory_outbox_destination_apply,
     )?
     .unwrap_or(0);
+    report.a2a_mailbox_schema_objects_created =
+        apply_versioned_migration(conn, "v31_a2a_mailbox", |conn| {
+            migrate_v31_a2a_mailbox(conn, profile)
+        })?
+        .unwrap_or(0);
 
     Ok(report)
 }
@@ -758,6 +775,15 @@ fn migrate_v30_memory_outbox_destination_apply(conn: &Connection) -> Result<usiz
     crate::db::schema::install_memory_outbox_destination_apply_schema(conn)?;
     crate::db::schema::validate_memory_outbox_destination_apply_schema(conn)?;
     Ok(2)
+}
+
+fn migrate_v31_a2a_mailbox(conn: &Connection, profile: StoreProfile) -> Result<usize, MemoryError> {
+    if !profile.includes_product() {
+        return Ok(0);
+    }
+    crate::db::schema::install_a2a_mailbox_schema(conn)?;
+    crate::db::schema::validate_a2a_mailbox_schema(conn)?;
+    Ok(5)
 }
 
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
@@ -1498,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn private_fresh_init_installs_v25_through_v30_migrations_once() {
+    fn private_fresh_init_installs_v25_through_v31_migrations_once() {
         let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open in-memory");
@@ -1520,11 +1546,13 @@ mod tests {
         assert_eq!(sentinel_version("v28_wiki_recovery_ledgers"), 1);
         assert_eq!(sentinel_version("v29_memory_outbox"), 1);
         assert_eq!(sentinel_version("v30_memory_outbox_destination_apply"), 1);
+        assert_eq!(sentinel_version("v31_a2a_mailbox"), 1);
         crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
         crate::db::schema::validate_typo_fallback_attribution_schema(&conn).unwrap();
         crate::db::schema::validate_wiki_recovery_ledgers_schema(&conn).unwrap();
         crate::db::schema::validate_memory_outbox_schema(&conn).unwrap();
         crate::db::schema::validate_memory_outbox_destination_apply_schema(&conn).unwrap();
+        crate::db::schema::validate_a2a_mailbox_schema(&conn).unwrap();
 
         init_schema(&conn).expect("valid current private schema reopens idempotently");
         assert_eq!(
@@ -1556,6 +1584,11 @@ mod tests {
             sentinel_version("v30_memory_outbox_destination_apply"),
             1,
             "v30 migration must run once"
+        );
+        assert_eq!(
+            sentinel_version("v31_a2a_mailbox"),
+            1,
+            "v31 migration must run once"
         );
     }
 
