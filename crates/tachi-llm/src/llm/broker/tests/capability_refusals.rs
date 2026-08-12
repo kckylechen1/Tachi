@@ -36,12 +36,16 @@ fn refusal(
 
 #[test]
 fn a_streaming_request_is_refused_not_silently_downgraded() {
-    // The dialect ships with `streaming: false` in this slice, so the plain
-    // adapter must already refuse.
+    // Slice-2 changed which deployments refuse, not what a refusal means. The
+    // dialect now streams, so the refusal has to come from a deployment that
+    // does not — and it must still be a refusal, never a whole body handed to
+    // a caller who asked for a stream and has no way to notice it did not get
+    // one.
+    let no_stream = adapter_without(|caps| caps.streaming = false);
     let mut parts = minimal_parts();
     parts.stream = StreamSelection::Enabled;
     assert_eq!(
-        refusal(&OpenAiCompatWire::new(), parts.clone()),
+        refusal(&no_stream, parts.clone()),
         BeforeSendRefusal::UnsupportedCapability {
             missing: vec![UnsupportedCapability::Streaming],
         }
@@ -50,43 +54,82 @@ fn a_streaming_request_is_refused_not_silently_downgraded() {
     // And the same request without the stream flag must succeed — otherwise
     // the test above would pass for an adapter that refuses everything.
     let ok_parts = minimal_parts();
-    assert!(OpenAiCompatWire::new()
+    assert!(no_stream
         .build_request(
             &CanonicalInvocationRequest::new(ok_parts).expect("valid"),
             api_key_lease()
         )
         .is_ok());
 
-    // The body must never carry `stream` on the refused path — there is no
-    // "refuse but send anyway" branch. Belt two is the decoder:
+    // Belt two: a deployment that may not stream cannot obtain a decoder
+    // either, so there is no path that gets one by going around the capability
+    // gate. The reason is `DialectDoesNotStream` and not `NotImplementedYet`,
+    // which would now be false — the grammar exists, this deployment is simply
+    // not allowed it.
     assert!(matches!(
-        OpenAiCompatWire::new().new_stream_decoder(),
+        no_stream.new_stream_decoder(),
         Err(StreamDecoderUnavailable {
-            reason: StreamDecoderUnavailableReason::NotImplementedYet,
+            reason: StreamDecoderUnavailableReason::DialectDoesNotStream,
             dialect: "openai_compat",
         })
     ));
 }
 
 #[test]
-fn a_declared_streaming_capability_cannot_widen_the_dialect() {
-    // A catalog row (or a careless test) claiming the deployment streams must
-    // not be able to talk this adapter into emitting `stream: true` while the
-    // decoder does not exist. Narrowing is an intersection, never a union.
+fn the_streaming_dialect_builds_a_streaming_request_and_hands_back_a_decoder() {
+    // The other half of the flip, asserted so "streaming: true" cannot be a
+    // capability the dialect claims without implementing: the built body must
+    // actually say `stream: true`, and the decoder must actually exist.
+    let adapter = OpenAiCompatWire::new();
+    assert!(adapter.capabilities().streaming);
+
+    let mut parts = minimal_parts();
+    parts.stream = StreamSelection::Enabled;
+    let built = adapter
+        .build_request(
+            &CanonicalInvocationRequest::new(parts).expect("valid"),
+            api_key_lease(),
+        )
+        .expect("a streaming dialect must build a streaming request");
+    assert!(
+        built
+            .body_utf8()
+            .expect("body is UTF-8")
+            .contains("\"stream\":true"),
+        "a stream: enabled request must reach the provider as one"
+    );
+    assert!(adapter.new_stream_decoder().is_ok());
+}
+
+#[test]
+fn a_declared_capability_cannot_widen_the_dialect() {
+    // A catalog row (or a careless test) claiming a capability this dialect
+    // does not implement must not be able to talk the adapter into using it.
+    // Narrowing is an intersection, never a union — asserted on `embeddings`,
+    // which this chat dialect genuinely cannot do, because asserting it on a
+    // capability that is now implemented would prove nothing.
     let optimistic = WireCapabilities {
-        streaming: true,
+        embeddings: true,
         ..full_capabilities()
     };
     let adapter = OpenAiCompatWire::narrowed_to(optimistic);
     assert!(
-        !adapter.capabilities().streaming,
+        !adapter.capabilities().embeddings,
         "narrowed_to must intersect with the dialect ceiling, not adopt the claim"
     );
 
+    // ...and the intersection still narrows downward on streaming: a
+    // deployment that declares it cannot stream does not get to stream just
+    // because the dialect can.
+    let restricted = OpenAiCompatWire::narrowed_to(WireCapabilities {
+        streaming: false,
+        ..full_capabilities()
+    });
+    assert!(!restricted.capabilities().streaming);
     let mut parts = minimal_parts();
     parts.stream = StreamSelection::Enabled;
     assert_eq!(
-        refusal(&adapter, parts),
+        refusal(&restricted, parts),
         BeforeSendRefusal::UnsupportedCapability {
             missing: vec![UnsupportedCapability::Streaming],
         }
@@ -201,6 +244,7 @@ fn every_missing_capability_is_reported_at_once() {
     // per round trip pays an admission and a resolution for each.
     let adapter = adapter_without(|caps| {
         caps.tools = false;
+        caps.streaming = false;
         caps.structured_output = false;
         caps.json_schema = false;
         caps.media = false;
@@ -297,7 +341,8 @@ fn refusals_carry_no_provider_or_request_content() {
     let mut parts = minimal_parts();
     parts.messages = vec![user_message("secret prompt text nobody should log")];
     parts.stream = StreamSelection::Enabled;
-    let rendered = format!("{:?}", refusal(&OpenAiCompatWire::new(), parts));
+    let no_stream = adapter_without(|caps| caps.streaming = false);
+    let rendered = format!("{:?}", refusal(&no_stream, parts));
     for forbidden in ["secret prompt", "provider.test", "lease-fixture"] {
         assert!(
             !rendered.contains(forbidden),

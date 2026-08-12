@@ -27,16 +27,31 @@
 //!    so the empty-content decision, which is the part the parity suite
 //!    covers, is unchanged.
 //!
-//! # Streaming is refused, not silently downgraded
+//! # Streaming is implemented, and a deployment can still be without it
 //!
-//! The dialect's declared capability ceiling has `streaming: false` in this
-//! slice, because the decoder is the next slice. So a `stream: enabled`
-//! request is refused before send with
-//! [`UnsupportedCapability::Streaming`](super::UnsupportedCapability), and
-//! [`ProviderWire::new_stream_decoder`] answers with a typed
-//! [`StreamDecoderUnavailable`] rather than panicking. Two belts, because the
-//! failure mode they guard against — answering a streaming request with a
-//! whole body and letting the caller believe it streamed — is silent.
+//! Slice-1 declared `streaming: false` because there was no decoder; slice-2
+//! lands [`OpenAiCompatStreamDecoder`] and the ceiling says so. The flip is one
+//! change, not two: the capability bit and the decoder must move together, or
+//! the dialect is either refusing what it can do or promising what it cannot.
+//!
+//! What did **not** change is the law underneath. A deployment whose catalog
+//! entry says it cannot stream still narrows the adapter
+//! ([`OpenAiCompatWire::narrowed_to`] intersects, never unions), and a
+//! `stream: enabled` request against it is still refused before send with
+//! [`UnsupportedCapability::Streaming`](super::UnsupportedCapability) rather
+//! than quietly answered with a whole body. The failure mode that rule exists
+//! for — the caller believes it streamed and cannot tell that it did not — is
+//! silent, so it is guarded structurally rather than by remembering.
+//!
+//! # What streaming here does not include
+//!
+//! `stream_options: {"include_usage": true}` is **not** sent. It is an extra
+//! request field several OpenAI-compatible servers reject outright, so adding
+//! it is a wire change with its own golden and its own per-deployment question
+//! (#1681's catalog), not a side effect of landing a decoder. The consequence
+//! is honest and visible: a streamed invocation reports usage only when the
+//! provider volunteers it, and `UsageObservationV1::unknown` — not zeros — when
+//! it does not.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -46,6 +61,7 @@ use super::canonical::{
     ToolChoice, ToolDeclaration,
 };
 use super::disposition::{BeforeSendRefusal, CompletionKindV1, ProtocolViolation};
+use super::openai_stream::OpenAiCompatStreamDecoder;
 use super::stream::{StreamDecoderUnavailable, StreamDecoderUnavailableReason, WireStreamDecoder};
 use super::usage::UsageObservationV1;
 use super::wire::{
@@ -72,10 +88,11 @@ const DIALECT_CEILING: WireCapabilities = WireCapabilities {
     chat: true,
     embeddings: false,
     tools: true,
-    // Slice-1: the decoder is not implemented, so the dialect declares that it
-    // cannot stream. Flipping this to `true` is the same change as landing the
-    // decoder, on purpose.
-    streaming: false,
+    // Slice-2: `new_stream_decoder` hands back a real decoder, so the dialect
+    // says it streams. The bit and the decoder move in the same change on
+    // purpose — a ceiling that disagrees with what the code can do is wrong in
+    // whichever direction it disagrees.
+    streaming: true,
     structured_output: true,
     json_schema: true,
     media: true,
@@ -540,12 +557,18 @@ impl ProviderWire for OpenAiCompatWire {
     }
 
     fn new_stream_decoder(&self) -> Result<Box<dyn WireStreamDecoder>, StreamDecoderUnavailable> {
-        // Typed, not `todo!()`. A panic here would take the daemon down on a
-        // request shape the caller is allowed to ask for.
-        Err(StreamDecoderUnavailable {
-            reason: StreamDecoderUnavailableReason::NotImplementedYet,
-            dialect: OPENAI_COMPAT_DIALECT,
-        })
+        // A deployment narrowed to `streaming: false` gets the typed
+        // unavailable rather than a decoder it was told it may not use. The
+        // reason is `DialectDoesNotStream` — for *this* deployment it does
+        // not — and never `NotImplementedYet`, which would now be a lie: the
+        // grammar is implemented, this deployment is just not allowed it.
+        if !self.capabilities.streaming {
+            return Err(StreamDecoderUnavailable {
+                reason: StreamDecoderUnavailableReason::DialectDoesNotStream,
+                dialect: OPENAI_COMPAT_DIALECT,
+            });
+        }
+        Ok(Box::new(OpenAiCompatStreamDecoder::new()))
     }
 
     fn classify_error(

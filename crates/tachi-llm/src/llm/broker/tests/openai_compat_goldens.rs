@@ -225,8 +225,11 @@ fn the_response_corpus_reaches_every_outcome_and_every_completion_kind() {
             "no response fixture produces violation {kind:?}"
         );
     }
-    // StreamDecode is the one violation this slice cannot reach: the decoder
-    // is the next slice, and there is no code path that fabricates one.
+    // StreamDecode is the one violation the *non-streaming* path must never
+    // reach. The decoder exists now and produces it (see the transcript
+    // corpus), which is exactly why this assertion is worth more than it was:
+    // a whole-body parse that started reporting stream-decode faults would be
+    // misattributing its own failures to a decoder that never ran.
     assert!(!violations.contains(&ProtocolViolationKind::StreamDecode));
 }
 
@@ -250,9 +253,28 @@ fn no_built_body_carries_the_shipped_lanes_enable_thinking_patch() {
             !body.contains("enable_thinking"),
             "{name}: the dialect grew a per-deployment body quirk"
         );
+        // The `stream` field is present exactly when the caller asked for it.
+        // Both directions matter and each is a real bug in one direction: a
+        // non-streaming request that carries `stream` gets an SSE body the
+        // caller cannot read, and a streaming request that omits it gets a
+        // whole body the caller believes was streamed.
+        match request.stream() {
+            StreamSelection::Disabled => assert!(
+                !body.contains("\"stream\""),
+                "{name}: a non-streaming request must not mention stream at all"
+            ),
+            StreamSelection::Enabled => assert!(
+                body.contains("\"stream\":true"),
+                "{name}: a streaming request must reach the provider as one"
+            ),
+        }
+        // `stream_options` is deliberately never sent — see the dialect's
+        // module note. It is an extra field several compatible servers reject,
+        // so it is a wire change with its own golden, not a side effect of
+        // landing a decoder.
         assert!(
-            !body.contains("\"stream\""),
-            "{name}: a non-streaming request must not mention stream at all"
+            !body.contains("stream_options"),
+            "{name}: the dialect grew a streaming body option nobody reviewed"
         );
     }
 }

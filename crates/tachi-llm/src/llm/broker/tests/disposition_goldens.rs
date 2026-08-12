@@ -642,19 +642,27 @@ fn every_before_send_refusal_is_a_safe_terminal() {
 #[test]
 fn a_stream_decoder_that_is_unavailable_becomes_a_refusal_not_a_downgrade() {
     // The silent-degradation guard, stated as a disposition: a caller who asked
-    // to stream and got a whole body has no way to notice.
-    let unavailable = StreamDecoderUnavailable {
-        reason: StreamDecoderUnavailableReason::NotImplementedYet,
-        dialect: OPENAI_COMPAT_DIALECT,
-    };
-    let refusal = unavailable.into_refusal();
-    assert_eq!(
-        refusal,
-        BeforeSendRefusal::UnsupportedCapability {
-            missing: vec![UnsupportedCapability::Streaming],
-        }
-    );
-    assert!(InvocationDispositionV1::RefusedBeforeSend { refusal }.fallback_eligible());
+    // to stream and got a whole body has no way to notice. Asserted for *both*
+    // reasons, because the projection must not depend on which one it was —
+    // and because slice-2 made them structurally different: the shipped dialect
+    // now answers `DialectDoesNotStream` for a deployment narrowed away from
+    // streaming, while `NotImplementedYet` remains the honest answer for a
+    // grammar this Broker has not written yet (the NDJSON family).
+    for reason in StreamDecoderUnavailableReason::ALL.iter().copied() {
+        let unavailable = StreamDecoderUnavailable {
+            reason,
+            dialect: OPENAI_COMPAT_DIALECT,
+        };
+        let refusal = unavailable.into_refusal();
+        assert_eq!(
+            refusal,
+            BeforeSendRefusal::UnsupportedCapability {
+                missing: vec![UnsupportedCapability::Streaming],
+            },
+            "{reason:?} must still refuse rather than downgrade"
+        );
+        assert!(InvocationDispositionV1::RefusedBeforeSend { refusal }.fallback_eligible());
+    }
 }
 
 #[test]
