@@ -3,9 +3,24 @@ use super::*;
 #[tokio::test]
 async fn memory_briefing_keeps_issue_scoped_presence_collision_warnings() {
     let claimed_server = make_server();
-    let briefing_server =
-        crate::server_state::MemoryServer::new(claimed_server.global_db_path_buf(), None)
-            .expect("second server handle");
+    let claimed_global_db = claimed_server.global_db_path_buf();
+    let claimed_home = claimed_server.tachi_home_dir();
+    let briefing_server = crate::server_state::MemoryServer::new_with_home_for_test(
+        claimed_global_db.clone(),
+        claimed_server.project_db_path_buf(),
+        claimed_home.clone(),
+    )
+    .expect("second server handle");
+    assert_eq!(
+        briefing_server.global_db_path_buf(),
+        claimed_global_db,
+        "briefing server must reuse the isolated fixture database"
+    );
+    assert_eq!(
+        briefing_server.tachi_home_dir(),
+        claimed_home,
+        "briefing server must reuse the claimed server's isolated fixture home"
+    );
 
     claimed_server.set_session_identity(Some("seat-with-claim".to_string()), None, None);
     crate::claims_ops::auto_register_or_heartbeat_claim(
