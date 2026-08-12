@@ -164,9 +164,6 @@ fn advice_for(intent: legacy::RetryIntent) -> RetryAdvice {
 // Leg 2: the transcription is pinned to the original source text
 // ---------------------------------------------------------------------------
 
-/// The current text of `lane_calls.rs`, read at compile time.
-const LANE_CALLS_SOURCE: &str = include_str!("../../chat_lanes/lane_calls.rs");
-
 /// Extracts a top-level function's source text: from the line starting with
 /// `fn NAME(` through the next line that is exactly `}`.
 fn lane_calls_fn(name: &str) -> String {
@@ -186,33 +183,6 @@ fn lane_calls_fn(name: &str) -> String {
         }
     }
     panic!("`fn {name}` in lane_calls.rs never closed at column zero");
-}
-
-/// Pins one *inner* block of `lane_calls.rs` — a stretch of source inside a
-/// method body.
-///
-/// [`lane_calls_fn`] can only reach top-level functions, and three of the four
-/// parity axes do not live in one: the retry phase and the `Retry-After` read
-/// are branches inside `call_provider_tier`. Without this, the transcription of
-/// those branches was a hand-written oracle pinned to nothing — the shipped
-/// loop could change and every parity test would stay green, which is exactly
-/// the drift the source-text leg exists to catch.
-///
-/// Exactly one occurrence is required: zero means the block moved or changed
-/// (the transcription must be re-derived), and more than one means the pin is
-/// ambiguous and could be satisfied by the wrong copy.
-#[track_caller]
-fn assert_lane_calls_block(what: &str, block: &str) {
-    let occurrences = LANE_CALLS_SOURCE.matches(block).count();
-    assert_eq!(
-        occurrences, 1,
-        "lane_calls.rs no longer contains exactly one copy of the {what} block \
-         ({occurrences} found).\n\nWhen this fails: the shipped retry loop \
-         changed. Re-derive `legacy::retry_intent` / `legacy::retry_after_seconds` \
-         and the fixture expectations from the new text — do not paste the new \
-         text in and move on, because the broker's copy may now disagree with \
-         it.\n\nExpected block:\n{block}"
-    );
 }
 
 #[test]
@@ -724,6 +694,27 @@ fn the_declared_divergences_are_still_divergent() {
         legacy::RetryIntent::None,
         "the status-keyed oracle has no opinion on a 2xx; D1 lives in the body path"
     );
+    // ...and that is exactly why the status-keyed oracle cannot carry this
+    // divergence: the legacy side of D1 is a body-path branch. Pin it, or this
+    // test asserts one property of the broker and calls it a divergence.
+    assert_lane_calls_block(
+        "legacy empty-content retry",
+        r#"            if attempt < max_attempts {
+                eprintln!(
+                    "[llm] empty content (attempt {}/{}): {last_err}; retrying",
+                    attempt, max_attempts
+                );
+                tokio::time::sleep(Self::retry_delay(attempt)).await;
+                continue;
+            }"#,
+    );
+    assert_eq!(
+        crate::llm::LlmClient::MAX_ATTEMPTS,
+        3,
+        "D1 is 'legacy re-sends an empty completion up to three times, the \
+         broker re-sends never'. If the budget is no longer three, the \
+         divergence has changed shape and this record is stale."
+    );
 
     // ---- D2: the body excerpt bound -------------------------------------
     // `classify_error` takes a bounded prefix by trait contract, because a
@@ -790,5 +781,22 @@ fn the_declared_divergences_are_still_divergent() {
     assert!(
         matches!(blank, WireOutcome::ProtocolViolation { .. }),
         "a whitespace-only answer must still be empty on both sides: {blank:?}"
+    );
+
+    // The legacy side of D3: the shipped lane really does trim, and the same
+    // expression is where its emptiness test comes from — which is why the
+    // divergence is "the broker stops trimming the *returned text*" and not
+    // "the broker changed what counts as empty".
+    assert_lane_calls_block(
+        "legacy content trim",
+        r#"            let content = json["choices"].as_array().and_then(|choices| {
+                choices.iter().find_map(|choice| {
+                    choice["message"]["content"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                })
+            });"#,
     );
 }

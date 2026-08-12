@@ -191,6 +191,42 @@ fn fixture_headers(fixture: &Value) -> ResponseHeaders {
     ResponseHeaders::from_pairs(pairs)
 }
 
+// ---------------------------------------------------------------------------
+// Pinning the shipped lane's source text
+// ---------------------------------------------------------------------------
+
+/// The current text of `lane_calls.rs`, read at compile time.
+///
+/// The only place in the broker that reads another module's source, and
+/// deliberately so: `lane_calls`'s classification and retry decisions are
+/// private, and that file is out of scope for this leaf, so widening their
+/// visibility to test the copy would mean editing the file the leaf promised
+/// not to touch. It lives here rather than in one test module because both the
+/// parity suite and the dialect goldens have to pin legacy behaviour — a
+/// divergence asserted on only the new side is not a divergence test, it is a
+/// description of the new side.
+const LANE_CALLS_SOURCE: &str = include_str!("../chat_lanes/lane_calls.rs");
+
+/// Pins one block of `lane_calls.rs` — including the ones inside method
+/// bodies, which a top-level-function extractor cannot reach.
+///
+/// Exactly one occurrence is required: zero means the block moved or changed
+/// (the transcription must be re-derived), and more than one means the pin is
+/// ambiguous and could be satisfied by the wrong copy.
+#[track_caller]
+fn assert_lane_calls_block(what: &str, block: &str) {
+    let occurrences = LANE_CALLS_SOURCE.matches(block).count();
+    assert_eq!(
+        occurrences, 1,
+        "lane_calls.rs no longer contains exactly one copy of the {what} block \
+         ({occurrences} found).\n\nWhen this fails: the shipped lane changed. \
+         Re-derive the transcribed oracle and the expectations that depend on \
+         it from the new text — do not paste the new text in and move on, \
+         because the broker's copy may now disagree with it.\n\nExpected \
+         block:\n{block}"
+    );
+}
+
 /// Serializes a value and compares it against a golden, with a diff-friendly
 /// message.
 #[track_caller]

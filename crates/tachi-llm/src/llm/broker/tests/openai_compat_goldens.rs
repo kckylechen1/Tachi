@@ -297,6 +297,21 @@ fn the_finish_reason_comes_from_the_choice_that_was_actually_selected() {
         CompletionKindV1::Truncated,
         "the reported ending must belong to the returned text"
     );
+
+    // The other side of the divergence, pinned rather than described. The
+    // mismatch is the *pair*: the finish reason is read from `choices[0]`
+    // unconditionally, while the content is selected from the first non-blank
+    // choice. Asserting only the broker's behaviour would leave "the shipped
+    // lane does something else" as a comment, and a comment cannot fail.
+    assert_lane_calls_block(
+        "legacy finish_reason from choices[0]",
+        r#"            let finish_reason = json["choices"][0]["finish_reason"].as_str();"#,
+    );
+    assert_lane_calls_block(
+        "legacy first-non-blank choice selection",
+        r#"            let content = json["choices"].as_array().and_then(|choices| {
+                choices.iter().find_map(|choice| {"#,
+    );
 }
 
 #[test]
