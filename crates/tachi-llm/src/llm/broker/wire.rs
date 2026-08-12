@@ -85,13 +85,89 @@ impl HttpMethod {
 ///
 /// There is no secret variant, and that absence is the design: an adapter
 /// never holds material, so it cannot construct one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Why it cannot be built from outside this crate
+///
+/// The fields are private and there is no public constructor, so no
+/// out-of-crate caller can mint `authorization: Bearer <material>` and hand it
+/// to a request. That is the runtime half of the two-gate law: the type-level
+/// half says a caller cannot *name* a credential, this says a caller cannot
+/// *place* one either. `Deserialize` is deliberately not derived for the same
+/// reason — a derived one would let a JSON blob mint exactly the header the
+/// private fields exist to forbid.
+///
+/// This does not compile:
+///
+/// ```compile_fail
+/// use tachi_llm::llm::broker::WireHeader;
+///
+/// let _ = WireHeader {
+///     name: "authorization".to_string(),
+///     value: "Bearer sk-live-not-yours".to_string(),
+/// };
+/// ```
+///
+/// Reading one always does:
+///
+/// ```
+/// use tachi_llm::llm::broker::WireHeader;
+///
+/// fn spelling(header: &WireHeader) -> (&str, &str) {
+///     (header.name(), header.value())
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireHeader {
     /// Lowercase header name.
-    pub name: String,
+    name: String,
     /// Header value.
-    pub value: String,
+    value: String,
 }
+
+impl WireHeader {
+    /// Build a header, normalizing the name to lowercase.
+    ///
+    /// The single normalization point on purpose: the executor, the goldens
+    /// and any future signing step must agree on one spelling, and they only
+    /// do if there is one place that decides it.
+    pub(crate) fn new(name: impl AsRef<str>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.as_ref().to_ascii_lowercase(),
+            value: value.into(),
+        }
+    }
+
+    /// The lowercase header name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The header value, exactly as the adapter set it.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+/// Header names an adapter may never set for itself.
+///
+/// Each one carries a credential at some provider. The executor is the only
+/// holder of material, and it places it through [`AuthPlacement`]; an adapter
+/// that sets one of these is either forging an empty credential or embedding a
+/// real one it was never given. [`WireHttpRequest::new`] refuses both.
+///
+/// Every `AuthPlacement::Header { name, .. }` an adapter can declare must
+/// appear here — otherwise there would be a header the executor injects that
+/// an adapter could also set itself, which is precisely the collision this
+/// list exists to prevent. `reserved_auth_headers_cover_every_declared_placement`
+/// asserts that.
+pub(crate) const RESERVED_AUTH_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "api-key",
+    "x-api-key",
+    "x-goog-api-key",
+    "cookie",
+];
 
 /// Where the executor must inject the leased auth material.
 ///
@@ -212,6 +288,39 @@ impl<'a> AuthMaterialRef<'a> {
 /// Private fields with read-only accessors so no later caller can staple a
 /// header onto a request after the adapter built it (which is how a
 /// secret-free-by-construction guarantee usually dies).
+///
+/// # Building one is a crate-internal act
+///
+/// `WireHttpRequest::new` is `pub(crate)`: every adapter this process will
+/// ever run lives in this crate, so nothing outside it needs to build a wire
+/// request — and letting it would hand an out-of-crate caller the one shape
+/// that goes on the wire, headers and all. Combined with [`WireHeader`]'s
+/// private fields, `authorization` can reach a provider only through
+/// [`AuthPlacement`], i.e. only from the executor that holds the lease.
+///
+/// This does not compile:
+///
+/// ```compile_fail
+/// use tachi_llm::llm::broker::{AuthPlacement, HttpMethod, WireHttpRequest};
+///
+/// let _ = WireHttpRequest::new(
+///     HttpMethod::Post,
+///     "https://provider.test/v1/chat/completions",
+///     Vec::new(),
+///     AuthPlacement::None,
+///     Vec::new(),
+/// );
+/// ```
+///
+/// Reading one always does:
+///
+/// ```
+/// use tachi_llm::llm::broker::{HttpMethod, WireHttpRequest};
+///
+/// fn method_of(request: &WireHttpRequest) -> HttpMethod {
+///     request.method()
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireHttpRequest {
     method: HttpMethod,
@@ -222,28 +331,41 @@ pub struct WireHttpRequest {
 }
 
 impl WireHttpRequest {
-    /// Build a wire request. Header names are lowercased so the executor and
-    /// the goldens agree on one spelling.
-    pub fn new(
+    /// Build a wire request, refusing any adapter-set credential header.
+    ///
+    /// The refusal is typed rather than a `debug_assert` or a silent drop: an
+    /// adapter that reached for [`RESERVED_AUTH_HEADERS`] has a bug that must
+    /// be visible in release builds too, and "the request was never built" is
+    /// the only safe answer — dropping the header would send an
+    /// unauthenticated request, and keeping it would put an adapter-chosen
+    /// credential on the wire.
+    pub(crate) fn new(
         method: HttpMethod,
         url: impl Into<String>,
         headers: Vec<WireHeader>,
         auth_placement: AuthPlacement,
         body: Vec<u8>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, BeforeSendRefusal> {
+        let headers: Vec<WireHeader> = headers
+            .into_iter()
+            .map(|header| WireHeader::new(header.name, header.value))
+            .collect();
+        if headers
+            .iter()
+            .any(|header| RESERVED_AUTH_HEADERS.contains(&header.name.as_str()))
+        {
+            return Err(BeforeSendRefusal::UnrepresentableRequest {
+                detail: "adapter set a credential-bearing header; \
+                         auth reaches the wire only through AuthPlacement",
+            });
+        }
+        Ok(Self {
             method,
             url: url.into(),
-            headers: headers
-                .into_iter()
-                .map(|h| WireHeader {
-                    name: h.name.to_ascii_lowercase(),
-                    value: h.value,
-                })
-                .collect(),
+            headers,
             auth_placement,
             body,
-        }
+        })
     }
 
     /// The method.

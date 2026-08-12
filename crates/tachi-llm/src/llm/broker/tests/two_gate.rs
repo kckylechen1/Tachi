@@ -170,7 +170,7 @@ fn a_built_wire_request_carries_a_placement_not_a_header_value() {
         built
             .headers()
             .iter()
-            .all(|header| header.name != "authorization"),
+            .all(|header| header.name() != "authorization"),
         "the adapter set an authorization header itself — it has no material to \
          put in one, so any value there is either empty or forged"
     );
@@ -191,6 +191,98 @@ fn a_built_wire_request_carries_a_placement_not_a_header_value() {
         !rendered.to_ascii_lowercase().contains("bearer"),
         "the wire request body/headers mention a bearer scheme: {rendered}"
     );
+}
+
+#[test]
+fn a_credential_bearing_header_cannot_be_built_into_a_wire_request() {
+    // The compile-fail doctests on `WireHeader`/`WireHttpRequest` close the
+    // out-of-crate path. This closes the in-crate one: a second adapter,
+    // written next year in this same crate, must not be able to set
+    // `authorization` itself — either it forges an empty credential (and the
+    // request fails at the provider for a reason nobody can read off the
+    // disposition) or it embeds a real one it was never handed.
+    for reserved in super::super::wire::RESERVED_AUTH_HEADERS {
+        for spelling in [reserved.to_string(), reserved.to_ascii_uppercase()] {
+            let built = WireHttpRequest::new(
+                HttpMethod::Post,
+                TEST_ENDPOINT,
+                vec![WireHeader::new(&spelling, "Bearer sk-live-not-yours")],
+                AuthPlacement::None,
+                Vec::new(),
+            );
+            assert!(
+                matches!(built, Err(BeforeSendRefusal::UnrepresentableRequest { .. })),
+                "an adapter set {spelling:?} and the request was still built: {built:?}"
+            );
+        }
+    }
+
+    // The bar is a bound, not a ban on headers: an ordinary one still builds.
+    assert!(WireHttpRequest::new(
+        HttpMethod::Post,
+        TEST_ENDPOINT,
+        vec![WireHeader::new("content-type", "application/json")],
+        AuthPlacement::None,
+        Vec::new(),
+    )
+    .is_ok());
+}
+
+#[test]
+fn reserved_auth_headers_cover_every_declared_placement() {
+    // If a dialect could declare `AuthPlacement::Header { name: "x-key" }`
+    // while `x-key` were not reserved, the executor would inject there *and*
+    // an adapter could set it — the collision the reserved list exists to
+    // prevent, with a forged value racing a real one.
+    let adapter = OpenAiCompatWire::new();
+    let mut placements_seen = 0;
+    for kind in AuthMaterialKind::ALL.iter().copied() {
+        let Ok(built) =
+            adapter.build_request(&minimal_request(), AuthMaterialRef::leased(kind, "lease-x"))
+        else {
+            continue;
+        };
+        if let AuthPlacement::Header { name, .. } = built.auth_placement() {
+            placements_seen += 1;
+            assert!(
+                super::super::wire::RESERVED_AUTH_HEADERS.contains(name),
+                "the dialect places material in {name:?}, which no adapter is \
+                 forbidden from setting itself"
+            );
+        }
+    }
+    assert!(
+        placements_seen > 0,
+        "no placement was exercised — this test would pass for an adapter that \
+         refuses every lease kind"
+    );
+}
+
+#[test]
+fn an_endpoint_carrying_userinfo_is_refused_before_it_can_reach_the_wire() {
+    // A URL is the one wire field that ends up in logs, receipts and error
+    // strings. A credential in it is a credential in all of them — and one
+    // that passed neither gate.
+    for smuggled in [
+        "https://member:secret@provider.test/v1/chat/completions",
+        "https://member@provider.test/v1/chat/completions",
+        "http://:secret@provider.test/v1",
+    ] {
+        assert_eq!(
+            EndpointUrl::new(smuggled),
+            Err(RequestError::InvalidEndpoint {
+                reason: "URL carried userinfo credentials"
+            }),
+            "endpoint {smuggled:?} smuggled material past both gates"
+        );
+        // The deserialize path runs the same check, so a JSON body cannot
+        // mint what the constructor refused.
+        assert!(serde_json::from_value::<EndpointUrl>(json!(smuggled)).is_err());
+    }
+
+    // The same host without userinfo is fine — this is a userinfo rule, not a
+    // broken host parser.
+    assert!(EndpointUrl::new("https://provider.test/v1/chat/completions").is_ok());
 }
 
 #[test]

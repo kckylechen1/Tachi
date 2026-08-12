@@ -454,16 +454,13 @@ impl ProviderWire for OpenAiCompatWire {
             }
         })?;
 
-        Ok(WireHttpRequest::new(
+        WireHttpRequest::new(
             HttpMethod::Post,
             target.endpoint().as_str(),
-            vec![WireHeader {
-                name: "content-type".to_string(),
-                value: "application/json".to_string(),
-            }],
+            vec![WireHeader::new("content-type", "application/json")],
             auth_placement,
             body,
-        ))
+        )
     }
 
     fn parse_response(&self, status: u16, headers: &ResponseHeaders, body: &[u8]) -> WireOutcome {

@@ -48,7 +48,7 @@ fn project(built: &WireHttpRequest) -> Value {
         "headers": built
             .headers()
             .iter()
-            .map(|header| json!([header.name, header.value]))
+            .map(|header| json!([header.name(), header.value()]))
             .collect::<Vec<_>>(),
         "auth_placement": serde_json::to_value(built.auth_placement())
             .expect("an auth placement serializes"),
@@ -221,7 +221,7 @@ fn the_adapter_sets_exactly_one_header_and_lowercases_it() {
     let headers: Vec<(&str, &str)> = built
         .headers()
         .iter()
-        .map(|header| (header.name.as_str(), header.value.as_str()))
+        .map(|header| (header.name(), header.value()))
         .collect();
     assert_eq!(headers, vec![("content-type", "application/json")]);
 
@@ -229,16 +229,14 @@ fn the_adapter_sets_exactly_one_header_and_lowercases_it() {
     let shouted = WireHttpRequest::new(
         HttpMethod::Post,
         "https://provider.test/v1/chat/completions",
-        vec![WireHeader {
-            name: "X-Tachi-Trace".to_string(),
-            value: "abc".to_string(),
-        }],
+        vec![WireHeader::new("X-Tachi-Trace", "abc")],
         AuthPlacement::None,
         Vec::new(),
-    );
-    assert_eq!(shouted.headers()[0].name, "x-tachi-trace");
+    )
+    .expect("a trace header is not a credential header");
+    assert_eq!(shouted.headers()[0].name(), "x-tachi-trace");
     assert_eq!(
-        shouted.headers()[0].value,
+        shouted.headers()[0].value(),
         "abc",
         "only the name is normalized; a value is the caller's bytes"
     );

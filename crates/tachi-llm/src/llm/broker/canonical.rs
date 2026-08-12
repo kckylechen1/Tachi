@@ -307,6 +307,17 @@ impl TryFrom<String> for IdempotencyKey {
 /// slice. This type is the already-concrete end of that: validated at
 /// construction to be an absolute `http`/`https` URL with a host, so an
 /// adapter never has to decide whether the string it was handed is addressable.
+///
+/// # No userinfo, ever
+///
+/// `https://member:secret@provider.test/v1` is a *credential in a URL*, and
+/// the URL is the one field of a wire request that ends up in logs, receipts,
+/// error strings and health records. Accepting it would smuggle material past
+/// both gates — the caller never named a credential, the executor never leased
+/// one, and yet one would be sent — so a URL carrying a username or a password
+/// is refused at construction rather than redacted later. The refusal is loud
+/// on purpose: silently stripping the userinfo would send an unauthenticated
+/// request to an endpoint whose operator plainly expected one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct EndpointUrl(String);
@@ -329,6 +340,11 @@ impl EndpointUrl {
         if parsed.host_str().is_none_or(str::is_empty) {
             return Err(RequestError::InvalidEndpoint {
                 reason: "URL carried no host",
+            });
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(RequestError::InvalidEndpoint {
+                reason: "URL carried userinfo credentials",
             });
         }
         Ok(Self(raw.to_string()))
