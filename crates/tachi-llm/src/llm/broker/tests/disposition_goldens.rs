@@ -319,7 +319,7 @@ fn unknown_usage_is_absent_numbers_not_zeros() {
         &json!({"provenance": "unknown"}),
     );
     assert!(!unknown.has_any_number());
-    assert!(!unknown.provenance.is_billable_authority());
+    assert!(!unknown.provenance().is_billable_authority());
 
     let serialized = serde_json::to_value(&unknown).expect("usage serializes");
     for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
@@ -364,6 +364,61 @@ fn a_provider_reported_observation_keeps_its_numbers_and_its_authority() {
 }
 
 #[test]
+fn a_usage_observation_cannot_be_negative_or_self_contradictory() {
+    // Both invariants are about authority, and a spend ceiling is what reads
+    // them. Counts now arrive unsigned, so a caller cannot express a negative
+    // one at all; the holes were the deserialize path and the public fields.
+    for negative in [
+        json!({"prompt_tokens": -5, "provenance": "provider_authoritative"}),
+        json!({"completion_tokens": -1, "provenance": "estimated"}),
+        json!({"prompt_tokens": 3, "total_tokens": -1, "provenance": "provider_authoritative"}),
+    ] {
+        assert!(
+            serde_json::from_value::<UsageObservationV1>(negative.clone()).is_err(),
+            "a negative token count deserialized into an authoritative observation: {negative}"
+        );
+    }
+
+    // "Nothing usable was observed" plus a number is two contradictory claims
+    // in one durable record.
+    assert!(
+        serde_json::from_value::<UsageObservationV1>(
+            json!({"prompt_tokens": 900, "provenance": "unknown"})
+        )
+        .is_err(),
+        "an unknown observation carried a number"
+    );
+    // And the same lie backwards: a tier that claims authority over nothing.
+    assert!(
+        serde_json::from_value::<UsageObservationV1>(
+            json!({"provenance": "provider_authoritative"})
+        )
+        .is_err(),
+        "an observation with no numbers claimed provider authority"
+    );
+
+    // The constructor resolves that contradiction by demoting rather than by
+    // failing — a parse that observed nothing is a normal outcome, not a bug.
+    let nothing = UsageObservationV1::provider_authoritative(None, None, None);
+    assert_eq!(nothing, UsageObservationV1::unknown());
+    assert!(!nothing.provenance().is_billable_authority());
+
+    // Zero is a real observation and must not be confused with absent, so an
+    // honest report survives untouched and round-trips.
+    let honest = UsageObservationV1::provider_authoritative(Some(0), None, Some(7));
+    assert_eq!(honest.prompt_tokens(), Some(0));
+    assert_eq!(honest.completion_tokens(), None);
+    assert_eq!(
+        honest.provenance(),
+        UsageProvenanceV1::ProviderAuthoritative
+    );
+    let round_tripped: UsageObservationV1 =
+        serde_json::from_value(serde_json::to_value(&honest).expect("serializes"))
+            .expect("an honest observation round-trips");
+    assert_eq!(round_tripped, honest);
+}
+
+#[test]
 fn only_the_provider_reported_tier_may_be_billed_against() {
     let billable: Vec<UsageProvenanceV1> = UsageProvenanceV1::ALL
         .iter()
@@ -383,7 +438,7 @@ fn this_slice_computes_no_cost() {
     // would be a fabricated number in a durable receipt, so the structure
     // carries an opaque forward reference and abstains.
     let usage = UsageObservationV1::provider_authoritative(Some(10), Some(20), Some(30));
-    assert!(usage.pricing_snapshot_ref.is_none());
+    assert!(usage.pricing_snapshot_ref().is_none());
     let serialized = serde_json::to_value(&usage).expect("serializes");
     let keys: Vec<&str> = serialized
         .as_object()

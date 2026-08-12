@@ -362,6 +362,56 @@ fn the_finish_reason_comes_from_the_choice_that_was_actually_selected() {
 }
 
 #[test]
+fn an_unreadable_provider_usage_number_is_not_an_observation() {
+    // A provider that reports `-5` prompt tokens has not reported a small
+    // number of tokens; it has sent something this process cannot read. Kept
+    // and stamped `provider_authoritative`, it would sit in a durable receipt
+    // that a spend ceiling later reads as fact — and a negative offsets a real
+    // cost downward.
+    let adapter = OpenAiCompatWire::new();
+    let outcome = adapter.parse_response(
+        200,
+        &ResponseHeaders::new(),
+        br#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],
+             "usage":{"prompt_tokens":-5,"completion_tokens":7,"total_tokens":"lots"}}"#,
+    );
+    let usage = outcome
+        .usage()
+        .expect("a completion carries an observation");
+    assert_eq!(
+        usage.prompt_tokens(),
+        None,
+        "a negative count was recorded as an observation"
+    );
+    assert_eq!(
+        usage.total_tokens(),
+        None,
+        "a non-numeric count was recorded as an observation"
+    );
+    assert_eq!(
+        usage.completion_tokens(),
+        Some(7),
+        "the readable number in the same block must survive"
+    );
+    assert_eq!(usage.provenance(), UsageProvenanceV1::ProviderAuthoritative);
+
+    // When every number is unreadable, the answer is *unknown* — not an
+    // authoritative report of nothing, which is what a zeroed observation
+    // would claim.
+    let all_unreadable = adapter.parse_response(
+        200,
+        &ResponseHeaders::new(),
+        br#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],
+             "usage":{"prompt_tokens":-1,"completion_tokens":-2,"total_tokens":-3}}"#,
+    );
+    let usage = all_unreadable
+        .usage()
+        .expect("a completion carries an observation");
+    assert_eq!(usage, &UsageObservationV1::unknown());
+    assert!(!usage.provenance().is_billable_authority());
+}
+
+#[test]
 fn a_body_excerpt_is_bounded_and_survives_invalid_utf8() {
     // Classification reads a bounded prefix of untrusted bytes. Two properties:
     // it is bounded, and it does not panic on a body that is not UTF-8 (which

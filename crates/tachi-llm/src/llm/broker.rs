@@ -117,7 +117,7 @@ pub use stream::{
     StreamDecoderUnavailable, StreamDecoderUnavailableReason, StreamEof, ToolCallFragment,
     TransportErrorKind, WireStreamDecoder,
 };
-pub use usage::{UsageObservationV1, UsageProvenanceV1};
+pub use usage::{UsageError, UsageObservationV1, UsageObservationV1Parts, UsageProvenanceV1};
 pub use wire::{
     AuthMaterialKind, AuthMaterialRef, AuthPlacement, CanonicalAssistantMessage, HttpMethod,
     ProviderErrorClass, ProviderErrorClassification, ProviderResponseMetadata, ProviderWire,

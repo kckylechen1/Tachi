@@ -311,24 +311,24 @@ fn completion_kind(finish_reason: Option<&str>) -> CompletionKindV1 {
 }
 
 fn parse_usage(usage: Option<&Value>) -> UsageObservationV1 {
+    // `as_u64`, not `as_i64`: a negative token count is not a small number of
+    // tokens, it is a number this process could not read, and a provider that
+    // sends `-1` must not get it stamped `provider_authoritative` in a durable
+    // receipt where a spend ceiling will later read it as fact. Same for a
+    // float or a string — unreadable is unobserved.
     let token = |key: &str| {
         usage
             .and_then(|value| value.get(key))
-            .and_then(Value::as_i64)
+            .and_then(Value::as_u64)
     };
-    let observation = UsageObservationV1::provider_authoritative(
+    // The constructor demotes an all-unreadable observation to `unknown()`:
+    // claiming authority over three `None`s would let an unknown be mistaken
+    // for a report of nothing.
+    UsageObservationV1::provider_authoritative(
         token("prompt_tokens"),
         token("completion_tokens"),
         token("total_tokens"),
-    );
-    if observation.has_any_number() {
-        observation
-    } else {
-        // The provider sent no usage block, or an unreadable one. Claiming
-        // authority over three `None`s would let an unknown be mistaken for a
-        // report of nothing.
-        UsageObservationV1::unknown()
-    }
+    )
 }
 
 fn parse_tool_calls(choice: &Value) -> Vec<ToolCallV1> {
