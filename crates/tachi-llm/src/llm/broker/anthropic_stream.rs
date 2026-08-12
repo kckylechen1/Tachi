@@ -154,6 +154,52 @@ pub(super) struct AnthropicEventGrammar {
     completion: Option<CompletionKindV1>,
 }
 
+/// Validates a frame's payload for the event named `name`: a `data` field
+/// present, parseable as JSON, an object, and self-declaring the same `type`
+/// the SSE `event:` field already named.
+///
+/// Shared rather than inlined per call site because this grammar checks it
+/// twice — once for every ordinary frame, and once for the `message_stop`
+/// this grammar still accepts after the stream is already sealed (see the
+/// terminal branch of [`AnthropicEventGrammar::handle_frame`]). A malformed
+/// payload must fail the same way under either name, and a copy-pasted check
+/// is exactly how the two drift.
+fn validated_event_payload(frame: &SseFrame, name: &str) -> Result<Value, StreamDecodeError> {
+    let Some(data) = frame.data.as_deref() else {
+        return Err(decode_error(
+            StreamDecodeErrorKind::UnknownEventShape,
+            "an event carried no data field",
+        ));
+    };
+    let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
+        return Err(decode_error(
+            StreamDecodeErrorKind::MalformedFrame,
+            "an event payload was not the grammar's JSON serialization",
+        ));
+    };
+    if !value.is_object() {
+        return Err(decode_error(
+            StreamDecodeErrorKind::UnknownEventShape,
+            "an event payload parsed as JSON but was not an object",
+        ));
+    }
+    // The frame says what it is twice. Requiring the two to agree costs
+    // nothing and catches the case where a proxy rewrites one of them.
+    let Some(declared) = value.get("type").and_then(Value::as_str) else {
+        return Err(decode_error(
+            StreamDecodeErrorKind::UnknownEventShape,
+            "an event payload carried no type",
+        ));
+    };
+    if declared != name {
+        return Err(decode_error(
+            StreamDecodeErrorKind::UnknownEventShape,
+            "the SSE event name and the payload's own type disagree",
+        ));
+    }
+    Ok(value)
+}
+
 impl SseGrammar for AnthropicEventGrammar {
     fn handle_frame(
         &mut self,
@@ -166,16 +212,24 @@ impl SseGrammar for AnthropicEventGrammar {
             // closing a stream whose answer is already sealed, is the provider
             // closing politely — an `error` event is normally followed by
             // `message_stop` — and not trailing garbage. It answers nothing
-            // and cannot move the sealed disposition. The frame is dropped
-            // unread, so only its name is consulted; the payload/name
-            // agreement check below is about frames that still mean something.
-            if frame.event.as_deref() == Some(MESSAGE_STOP_EVENT) {
-                return Ok(Vec::new());
-            }
-            return Err(decode_error(
-                StreamDecodeErrorKind::IllegalSequence,
-                "a frame arrived after the stream's terminator",
-            ));
+            // and cannot move the sealed disposition.
+            //
+            // "Politely" still means an actual `message_stop`, not merely a
+            // frame that happens to be named one: it gets the exact same
+            // data/JSON/type discipline every other frame in this grammar
+            // gets, via the same validator, so a truncated proxy tail or a
+            // provider bug that mangles the closing frame cannot ride through
+            // silently just because the `event:` name matches. Anything named
+            // something else is unambiguously trailing garbage and stays
+            // `IllegalSequence` without inspecting its payload at all.
+            return if frame.event.as_deref() == Some(MESSAGE_STOP_EVENT) {
+                validated_event_payload(&frame, MESSAGE_STOP_EVENT).map(|_| Vec::new())
+            } else {
+                Err(decode_error(
+                    StreamDecodeErrorKind::IllegalSequence,
+                    "a frame arrived after the stream's terminator",
+                ))
+            };
         }
         let Some(name) = frame.event.as_deref() else {
             return Err(decode_error(
@@ -184,38 +238,7 @@ impl SseGrammar for AnthropicEventGrammar {
                  different grammar",
             ));
         };
-        let Some(data) = frame.data.as_deref() else {
-            return Err(decode_error(
-                StreamDecodeErrorKind::UnknownEventShape,
-                "an event carried no data field",
-            ));
-        };
-        let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
-            return Err(decode_error(
-                StreamDecodeErrorKind::MalformedFrame,
-                "an event payload was not the grammar's JSON serialization",
-            ));
-        };
-        if !value.is_object() {
-            return Err(decode_error(
-                StreamDecodeErrorKind::UnknownEventShape,
-                "an event payload parsed as JSON but was not an object",
-            ));
-        }
-        // The frame says what it is twice. Requiring the two to agree costs
-        // nothing and catches the case where a proxy rewrites one of them.
-        let Some(declared) = value.get("type").and_then(Value::as_str) else {
-            return Err(decode_error(
-                StreamDecodeErrorKind::UnknownEventShape,
-                "an event payload carried no type",
-            ));
-        };
-        if declared != name {
-            return Err(decode_error(
-                StreamDecodeErrorKind::UnknownEventShape,
-                "the SSE event name and the payload's own type disagree",
-            ));
-        }
+        let value = validated_event_payload(&frame, name)?;
 
         match name {
             "message_start" => self.message_start(lifecycle, &value),

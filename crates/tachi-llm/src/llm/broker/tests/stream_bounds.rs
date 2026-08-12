@@ -184,6 +184,134 @@ fn one_message_cannot_open_unbounded_content_blocks() {
     );
 }
 
+/// A frame carrying a raw (not necessarily JSON) `data:` payload.
+fn raw_data_frame(name: &str, data: &str) -> Vec<u8> {
+    format!("event: {name}\ndata: {data}\n\n").into_bytes()
+}
+
+/// A well-formed `error` event, sufficient to seal the stream's terminal
+/// disposition without opening or closing any content block.
+fn anthropic_error() -> Vec<u8> {
+    anthropic_frame(
+        "error",
+        &json!({"type": "error", "error": {"type": "overloaded_error", "message": "x"}}),
+    )
+}
+
+/// A well-formed `message_start`, opening the message before the `error`.
+fn anthropic_message_start() -> Vec<u8> {
+    anthropic_frame(
+        "message_start",
+        &json!({
+            "type": "message_start",
+            "message": {"id": "msg_1", "type": "message", "role": "assistant"},
+        }),
+    )
+}
+
+#[test]
+fn a_malformed_terminator_after_error_is_a_typed_violation_not_a_free_pass() {
+    // #1682/CP2 regression: once an `error` event has already sealed the
+    // terminal disposition, this grammar reads and drops a trailing
+    // `message_stop` rather than rejecting it as garbage — providers
+    // routinely close politely with one right after `error`. Before this
+    // fix, that exception checked only the SSE `event:` *name*: any frame
+    // merely named `message_stop` was waved through unread, data and all, so
+    // a truncated proxy tail or a corrupted closing frame decoded as a clean,
+    // silent completion instead of surfacing the corruption. Each malformed
+    // variant below must fail exactly the way the *same* data/JSON/type
+    // checks fail for an ordinary, non-terminal frame — and a genuine
+    // terminator must still be accepted and dropped, not turned into
+    // `IllegalSequence` trailing garbage.
+
+    // No `data:` field at all. The fault surfaces on the *next* call — see
+    // the module note on why a failure detected mid-chunk is stashed rather
+    // than returned from the push that found it.
+    let mut decoder = AnthropicEventStreamDecoder::new();
+    decoder
+        .push_bytes(&anthropic_message_start())
+        .expect("the message opens legally");
+    decoder
+        .push_bytes(&anthropic_error())
+        .expect("the error seals the terminal disposition");
+    assert!(decoder
+        .push_bytes(b"event: message_stop\n\n")
+        .expect("a stashed failure is not returned from the push that found it")
+        .is_empty());
+    assert_eq!(
+        decoder
+            .push_bytes(&[])
+            .expect_err("a data-free terminator must not be waved through")
+            .kind,
+        StreamDecodeErrorKind::UnknownEventShape,
+    );
+
+    // A `data:` field that is not valid JSON at all.
+    let mut decoder = AnthropicEventStreamDecoder::new();
+    decoder
+        .push_bytes(&anthropic_message_start())
+        .expect("the message opens legally");
+    decoder
+        .push_bytes(&anthropic_error())
+        .expect("the error seals the terminal disposition");
+    assert!(decoder
+        .push_bytes(&raw_data_frame("message_stop", "not json at all"))
+        .expect("a stashed failure is not returned from the push that found it")
+        .is_empty());
+    assert_eq!(
+        decoder
+            .push_bytes(&[])
+            .expect_err("an unparseable terminator payload must not be waved through")
+            .kind,
+        StreamDecodeErrorKind::MalformedFrame,
+    );
+
+    // A `data:` field that parses as JSON, but whose own `type` disagrees
+    // with the SSE event name — the same proxy-rewrite case the ordinary
+    // frame path already guards against.
+    let mut decoder = AnthropicEventStreamDecoder::new();
+    decoder
+        .push_bytes(&anthropic_message_start())
+        .expect("the message opens legally");
+    decoder
+        .push_bytes(&anthropic_error())
+        .expect("the error seals the terminal disposition");
+    assert!(decoder
+        .push_bytes(&anthropic_frame("message_stop", &json!({"type": "ping"})))
+        .expect("a stashed failure is not returned from the push that found it")
+        .is_empty());
+    assert_eq!(
+        decoder
+            .push_bytes(&[])
+            .expect_err(
+                "a terminator whose payload disagrees with its own name must not be \
+                 waved through"
+            )
+            .kind,
+        StreamDecodeErrorKind::UnknownEventShape,
+    );
+
+    // Control: a genuine, well-formed terminator after `error` is still read
+    // and dropped, exactly as before this fix.
+    let mut decoder = AnthropicEventStreamDecoder::new();
+    decoder
+        .push_bytes(&anthropic_message_start())
+        .expect("the message opens legally");
+    decoder
+        .push_bytes(&anthropic_error())
+        .expect("the error seals the terminal disposition");
+    assert_eq!(
+        decoder
+            .push_bytes(&anthropic_frame(
+                "message_stop",
+                &json!({"type": "message_stop"}),
+            ))
+            .expect("a well-formed message_stop after error is still read politely"),
+        Vec::new(),
+        "a genuine terminator after the disposition is already sealed answers nothing new"
+    );
+}
+
 #[test]
 fn the_frame_ceiling_counts_every_field_of_the_frame() {
     // The ceiling names the *frame*, and a frame is more than its data. Two
