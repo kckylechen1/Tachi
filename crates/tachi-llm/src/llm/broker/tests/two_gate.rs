@@ -286,6 +286,40 @@ fn an_endpoint_carrying_userinfo_is_refused_before_it_can_reach_the_wire() {
 }
 
 #[test]
+fn an_endpoint_carrying_a_credential_shaped_query_key_is_refused_before_it_can_reach_the_wire() {
+    // The query string is not a side channel around the userinfo rule: it
+    // reaches the exact same logs, receipts and error strings.
+    for smuggled in [
+        "https://provider.test/v1?api_key=sk-live-not-yours",
+        "https://provider.test/v1?apiKey=sk-live-not-yours",
+        "https://provider.test/v1?APIKEY=sk-live-not-yours",
+        "https://provider.test/v1?key=sk-live-not-yours",
+        "https://provider.test/v1?token=sk-live-not-yours",
+        "https://provider.test/v1?secret=sk-live-not-yours",
+        "https://provider.test/v1?access_token=sk-live-not-yours",
+        "https://provider.test/v1?bearer=sk-live-not-yours",
+        "https://provider.test/v1?Authorization=sk-live-not-yours",
+        "https://provider.test/v1?model=x&api_key=sk-live-not-yours",
+    ] {
+        assert_eq!(
+            EndpointUrl::new(smuggled),
+            Err(RequestError::InvalidEndpoint {
+                reason: "URL query string carried a credential-shaped key"
+            }),
+            "endpoint {smuggled:?} smuggled material past both gates via the query string"
+        );
+        // The deserialize path runs the same check, so a JSON body cannot
+        // mint what the constructor refused.
+        assert!(serde_json::from_value::<EndpointUrl>(json!(smuggled)).is_err());
+    }
+
+    // An ordinary query key is not a credential and must keep working — this
+    // is a credential-key rule, not a ban on query strings.
+    assert!(EndpointUrl::new("https://provider.test/v1?api-version=2024-06-01").is_ok());
+    assert!(EndpointUrl::new("https://provider.test/v1?model=gpt-4o-mini&stream=true").is_ok());
+}
+
+#[test]
 fn auth_material_ref_exposes_only_a_kind_and_an_opaque_reference() {
     let auth = AuthMaterialRef::leased(AuthMaterialKind::BearerToken, "lease-9");
     assert_eq!(auth.kind(), AuthMaterialKind::BearerToken);

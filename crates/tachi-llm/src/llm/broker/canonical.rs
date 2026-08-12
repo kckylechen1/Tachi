@@ -338,9 +338,34 @@ impl TryFrom<String> for IdempotencyKey {
 /// is refused at construction rather than redacted later. The refusal is loud
 /// on purpose: silently stripping the userinfo would send an unauthenticated
 /// request to an endpoint whose operator plainly expected one.
+///
+/// # No credential-shaped query key, either
+///
+/// Userinfo is not the only place a URL can smuggle a credential: a query
+/// string of `?api_key=sk-live-...` reaches the exact same logs, receipts and
+/// error strings userinfo does. A query key that exactly (case-insensitively)
+/// matches one of [`CREDENTIAL_SHAPED_QUERY_KEYS`] is refused the same way and
+/// for the same reason — loudly, not by stripping the pair and sending the
+/// rest. An ordinary query key such as `api-version` is a different string
+/// entirely and passes through untouched: this is a credential-key rule, not
+/// a ban on query strings.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct EndpointUrl(String);
+
+/// Query keys whose presence in an endpoint URL means "a credential is being
+/// smuggled in the query string", matched case-insensitively and against the
+/// whole key (never a substring, so `api-version` never collides with `key`).
+const CREDENTIAL_SHAPED_QUERY_KEYS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "key",
+    "token",
+    "secret",
+    "access_token",
+    "bearer",
+    "authorization",
+];
 
 impl EndpointUrl {
     /// Validate and wrap an endpoint URL.
@@ -365,6 +390,15 @@ impl EndpointUrl {
         if !parsed.username().is_empty() || parsed.password().is_some() {
             return Err(RequestError::InvalidEndpoint {
                 reason: "URL carried userinfo credentials",
+            });
+        }
+        if parsed.query_pairs().any(|(key, _)| {
+            CREDENTIAL_SHAPED_QUERY_KEYS
+                .iter()
+                .any(|needle| key.eq_ignore_ascii_case(needle))
+        }) {
+            return Err(RequestError::InvalidEndpoint {
+                reason: "URL query string carried a credential-shaped key",
             });
         }
         Ok(Self(raw.to_string()))
