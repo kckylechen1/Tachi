@@ -12,6 +12,45 @@ use crate::{
     MemoryEntry, MemoryStore,
 };
 
+#[cfg(feature = "test-support")]
+struct StartupOwnershipHook {
+    db_path: String,
+    before_lock: Option<Box<dyn FnOnce() + Send + 'static>>,
+    after_lock: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+#[cfg(feature = "test-support")]
+static STARTUP_OWNERSHIP_HOOK: std::sync::Mutex<Option<StartupOwnershipHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub struct StartupOwnershipHookGuard;
+
+#[cfg(feature = "test-support")]
+impl Drop for StartupOwnershipHookGuard {
+    fn drop(&mut self) {
+        *STARTUP_OWNERSHIP_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn take_startup_ownership_hook_for_tests(db_path: &str) -> Option<StartupOwnershipHook> {
+    let mut slot = STARTUP_OWNERSHIP_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let matches = slot
+        .as_ref()
+        .is_some_and(|candidate| candidate.db_path == db_path);
+    if matches {
+        slot.take()
+    } else {
+        None
+    }
+}
+
 #[cfg(unix)]
 fn has_stable_unix_file_identity(device: u64, inode: u64) -> bool {
     device != 0 && inode != 0
@@ -362,6 +401,25 @@ fn validate_read_only_backfill_compat_schema(
 }
 
 impl MemoryStore {
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn install_startup_ownership_hook_for_tests(
+        db_path: &str,
+        before_lock: impl FnOnce() + Send + 'static,
+        after_lock: impl FnOnce() + Send + 'static,
+    ) -> StartupOwnershipHookGuard {
+        let mut slot = STARTUP_OWNERSHIP_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(slot.is_none(), "startup ownership hook already installed");
+        *slot = Some(StartupOwnershipHook {
+            db_path: db_path.to_string(),
+            before_lock: Some(Box::new(before_lock)),
+            after_lock: Some(Box::new(after_lock)),
+        });
+        StartupOwnershipHookGuard
+    }
+
     /// Open (or create) a memory database at the given path.
     ///
     /// Uses the fail-closed default [`DbOpenContext`] (`OpenExisting + Deny`):
@@ -410,6 +468,60 @@ impl MemoryStore {
         Self::open_with_label_inner(db_path, UNKNOWN_DB_LABEL, false, ctx, Some(busy_timeout))
     }
 
+    /// Open a full-profile store and persist one provider-key health row while
+    /// retaining the same process startup ownership across both operations.
+    ///
+    /// SQLite auto-extension callbacks execute inside `Connection::open` and
+    /// may read the database.  A provider-health writer that released startup
+    /// ownership after open but before its upsert could therefore overlap the
+    /// next open in this process.  This narrow entry point closes exactly that
+    /// open-then-write gap; it is not a general write lock or retry wrapper.
+    #[cfg(feature = "admin")]
+    pub fn open_and_vault_upsert_key_health_with_context_and_busy_timeout(
+        db_path: &str,
+        ctx: &DbOpenContext,
+        busy_timeout: Duration,
+        health: &crate::vault::VaultKeyHealth,
+    ) -> Result<(), MemoryError> {
+        Self::with_open_store_and_busy_timeout(db_path, ctx, busy_timeout, |store| {
+            store.vault_upsert_key_health(health)
+        })
+    }
+
+    #[cfg(feature = "admin")]
+    fn with_open_store_and_busy_timeout<T>(
+        db_path: &str,
+        ctx: &DbOpenContext,
+        busy_timeout: Duration,
+        operation: impl FnOnce(&Self) -> Result<T, MemoryError>,
+    ) -> Result<T, MemoryError> {
+        Self::register_open_extensions()?;
+        #[cfg(feature = "test-support")]
+        let mut startup_hook = take_startup_ownership_hook_for_tests(db_path);
+        #[cfg(feature = "test-support")]
+        if let Some(before_lock) = startup_hook
+            .as_mut()
+            .and_then(|hook| hook.before_lock.take())
+        {
+            // The hook is one-shot and path-bound. Reaching this callback proves
+            // this exact open is about to contend for startup ownership.
+            before_lock();
+        }
+        let _startup_guard = db::acquire_startup_lock();
+        #[cfg(feature = "test-support")]
+        if let Some(after_lock) = startup_hook.and_then(|mut hook| hook.after_lock.take()) {
+            after_lock();
+        }
+        let store = Self::open_with_label_inner_while_startup_owned(
+            db_path,
+            UNKNOWN_DB_LABEL,
+            false,
+            ctx,
+            Some(busy_timeout),
+        )?;
+        operation(&store)
+    }
+
     /// Open (or create) with an explicit manifest label AND an explicit
     /// [`DbOpenContext`] — the entry point the deploy-time migrator and
     /// fresh-provisioning flows use to thread migration authority / open
@@ -429,10 +541,48 @@ impl MemoryStore {
         ctx: &DbOpenContext,
         busy_timeout: Option<Duration>,
     ) -> Result<Self, MemoryError> {
+        Self::register_open_extensions()?;
+        #[cfg(feature = "test-support")]
+        let mut startup_hook = take_startup_ownership_hook_for_tests(db_path);
+        #[cfg(feature = "test-support")]
+        if let Some(before_lock) = startup_hook
+            .as_mut()
+            .and_then(|hook| hook.before_lock.take())
+        {
+            before_lock();
+        }
+        let _startup_guard = db::acquire_startup_lock();
+        #[cfg(feature = "test-support")]
+        if let Some(after_lock) = startup_hook.and_then(|mut hook| hook.after_lock.take()) {
+            after_lock();
+        }
+        Self::open_with_label_inner_while_startup_owned(
+            db_path,
+            db_label,
+            path_validation,
+            ctx,
+            busy_timeout,
+        )
+    }
+
+    fn register_open_extensions() -> Result<(), MemoryError> {
         // Register extensions BEFORE opening the connection.
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
+        Ok(())
+    }
+
+    /// Open while the caller retains `db::acquire_startup_lock()` ownership.
+    /// Keeping this private prevents unrelated callers from bypassing the
+    /// process-wide startup boundary.
+    fn open_with_label_inner_while_startup_owned(
+        db_path: &str,
+        db_label: &str,
+        path_validation: bool,
+        ctx: &DbOpenContext,
+        busy_timeout: Option<Duration>,
+    ) -> Result<Self, MemoryError> {
         // Acquire the in-process startup lock BEFORE the #1132 rename-on-open
         // migration, not after (RESIDUAL-1). The migration's stat+rename+symlink
         // sequence and the `open_read_write` below (which CREATES the canonical
@@ -451,7 +601,6 @@ impl MemoryStore {
         // created canonical file. On kernels/filesystems/platforms without that
         // primitive it FAILS CLOSED (loud error) rather than degrading to a
         // plain rename, which would reopen the very clobber race it closes.
-        let _startup_guard = db::acquire_startup_lock();
         // A caller-owned busy budget covers the whole synchronous open path,
         // including schema initialization's explicit retry sleeps. Without
         // this guard a small per-operation SQLite timeout could still be
