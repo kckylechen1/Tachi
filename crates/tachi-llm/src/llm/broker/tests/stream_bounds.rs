@@ -19,6 +19,7 @@
 //! provider-chosen, so a stream can open as many accumulators as it likes with
 //! every single frame inside every single limit.
 
+use super::super::sse::MAX_FRAME_BYTES;
 use super::*;
 
 /// One SSE data frame carrying a JSON payload.
@@ -119,6 +120,41 @@ fn one_turn_cannot_open_unbounded_tool_calls() {
         failure,
         Some(StreamDecodeErrorKind::EventTooLarge),
         "a turn must not be able to open unbounded tool calls"
+    );
+}
+
+#[test]
+fn the_frame_ceiling_counts_every_field_of_the_frame() {
+    // The ceiling names the *frame*, and a frame is more than its data. Two
+    // retained fields, each comfortably inside every per-line check, that
+    // together pass the ceiling: a decoder charging only `data:` accepts this
+    // and holds roughly twice what the constant says it will. The corpus
+    // cannot state it — fixture 21 is one oversized *line*, which the per-line
+    // check catches on its own and which therefore proves nothing about
+    // whether the fields are counted together.
+    let half = MAX_FRAME_BYTES / 2 + 1024;
+    let mut bytes = b"event: ".to_vec();
+    bytes.extend(vec![b'e'; half]);
+    bytes.extend(b"\ndata: ");
+    bytes.extend(vec![b'd'; half]);
+    bytes.extend(b"\n\n");
+    assert!(
+        half < MAX_FRAME_BYTES,
+        "neither line may reach the ceiling on its own, or this test passes for the wrong reason"
+    );
+
+    let mut decoder = decoder();
+    let failure = push_until_failure(decoder.as_mut(), std::iter::once(bytes));
+    assert_eq!(
+        failure,
+        Some(StreamDecodeErrorKind::EventTooLarge),
+        "one frame's retained fields must be bounded together, not one at a time"
+    );
+    assert_eq!(
+        decoder
+            .terminal_disposition()
+            .map(|disposition| serde_json::to_value(disposition).expect("serializes")),
+        Some(decode_fault("event_too_large"))
     );
 }
 
