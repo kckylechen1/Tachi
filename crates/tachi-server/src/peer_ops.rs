@@ -1175,11 +1175,9 @@ mod tests {
 
     #[test]
     fn run_noun_without_target_is_target_required_not_noun_not_whitelisted() {
-        // On origin/main (no `run` variant) this same call returns `denied` /
-        // `noun_not_whitelisted` (the noun itself isn't parsed). Post-fix it
-        // parses fine and is denied for a DIFFERENT, more specific reason —
-        // a real behavioral flip through the actual `handle_peer_query` entry
-        // point, not a compile-time difference.
+        // Baseline-green preservation test: `run` without a target already
+        // returned this specific denial before the A2A callback work. It guards
+        // the existing entry-point behavior and is not counted as a RED proof.
         let dir = tempfile::tempdir().unwrap();
         let server = run_test_server(dir.path());
         let body = handle_peer_query(
