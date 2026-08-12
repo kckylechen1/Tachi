@@ -28,6 +28,28 @@
 //! A config that does not resolve surfaces as a `config_error` field rather
 //! than a plausible-looking default, keeping the rule the rerank half already
 //! followed: status must not lie about what is configured.
+//!
+//! # Which config, mirroring `provider_config::import_env_catalog_deployments`
+//!
+//! `provider_config.rs`'s production import reads the chat-lane config from
+//! `LlmClient::runtime_config()` — the config the *running client* holds —
+//! specifically so a process built from an injected/frozen config is
+//! described by its own config rather than by re-reading ambient env
+//! (`crate::provider_config`'s module doc). This file used to
+//! call `ProviderRuntimeConfig::from_env()` unconditionally, so a live daemon
+//! whose client was constructed from an injected config would have the
+//! catalog rows describe one config and status describe another — "library
+//! has one config, status renders another."
+//!
+//! [`model_lanes_json_for_running_client`] closes that gap for the one call
+//! site that actually has a running client to ask
+//! (`status_ops::runtime::runtime_observability_json`, which already holds
+//! `&MemoryServer`): it takes the same `ProviderRuntimeConfig` the import
+//! path reads, rather than resolving its own. [`model_lanes_json`] keeps its
+//! original zero-argument, env-reading behavior for its other two callers
+//! (`doctor_ops`'s MCP scan and `manifest_cli`'s standalone CLI report),
+//! neither of which has a live `LlmClient` to disagree with — env is the only
+//! config those two ever had, so nothing about their behavior changes.
 
 use std::path::Path;
 
@@ -55,7 +77,26 @@ pub(crate) fn provider_key_status_json(global_db_path: &Path) -> serde_json::Val
     json!(collect_api_key_status(global_db_path))
 }
 
+/// Env-sourced status projection. Unchanged signature and behavior: this
+/// stays the entry point for callers with no live `LlmClient` to read
+/// instead (`doctor_ops`'s MCP scan, `manifest_cli`'s standalone report).
 pub(crate) fn model_lanes_json() -> serde_json::Value {
+    model_lanes_json_from(None)
+}
+
+/// Status projection sourced from the *running client's* config, not env —
+/// the daemon `status` surface's call, which already holds `&MemoryServer`
+/// and can pass `server.llm.runtime_config()` straight through. See the
+/// module doc's "which config" section: this is what makes status agree with
+/// the `catalog_source='env'` rows `provider_config::import_env_catalog_deployments`
+/// writes from the same config.
+pub(crate) fn model_lanes_json_for_running_client(
+    config: &ProviderRuntimeConfig,
+) -> serde_json::Value {
+    model_lanes_json_from(Some(config))
+}
+
+fn model_lanes_json_from(config_override: Option<&ProviderRuntimeConfig>) -> serde_json::Value {
     let rerank_cfg = RerankConfig::from_env();
     let (rerank_provider, rerank_model, rerank_keys, local_endpoint, rerank_config_error) =
         match &rerank_cfg {
@@ -104,7 +145,7 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
         }
     };
 
-    let chat_lanes = chat_lane_projection();
+    let chat_lanes = chat_lane_projection(config_override);
     let lane = |name: &str, strategy: &str| -> Value {
         match &chat_lanes {
             Ok(lanes) => lanes
@@ -133,8 +174,17 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
 /// Resolve the four chat lanes and render each as the catalog row it would be
 /// imported as. Keyed by lane name so the caller can pair each with its
 /// strategy prose without re-deriving the order.
-fn chat_lane_projection() -> Result<std::collections::BTreeMap<String, Value>, String> {
-    let config = ProviderRuntimeConfig::from_env()?;
+///
+/// `config_override` is `Some` for the running-client call
+/// ([`model_lanes_json_for_running_client`]) and `None` for the env-reading
+/// call ([`model_lanes_json`]) — see the module doc's "which config" section.
+fn chat_lane_projection(
+    config_override: Option<&ProviderRuntimeConfig>,
+) -> Result<std::collections::BTreeMap<String, Value>, String> {
+    let config = match config_override {
+        Some(config) => config.clone(),
+        None => ProviderRuntimeConfig::from_env()?,
+    };
     let observed_at = memcore::db::now_utc_iso();
     // A refused projection (a lane whose base URL carries userinfo) is a
     // config error, reported the same way an unresolvable chain is. The error

@@ -860,15 +860,64 @@ fn model_lanes_report_the_resolved_extract_lane_not_a_hardcoded_literal() {
     );
 }
 
-/// Status and catalog are one derivation, so they cannot disagree. Asserted
-/// against rows actually written to a store, not against the projection twice.
+/// Status and catalog are one derivation, so they cannot disagree — and, per
+/// the module doc's "which config" section, that derivation must be the
+/// *running client's* config, not a fresh read of ambient env. The prior
+/// revision of this test called `ProviderRuntimeConfig::from_env()` for both
+/// the catalog import and (transitively, through the env-reading
+/// `model_lanes_json()`) the status side, so the two calls could only ever
+/// agree tautologically: it would have stayed green even if status had kept
+/// reading env after a daemon's client was built from an injected config.
+///
+/// This version builds the config the way `server_running_injected_config()`
+/// does in `provider_config.rs`'s tests — a `ProviderRuntimeConfig` literal,
+/// not `from_env()` — and poisons the ambient `EXTRACT_*` env on top of it,
+/// mirroring `provider_config`'s
+/// `the_import_projects_the_running_client_not_the_ambient_environment`. The
+/// import side takes the injected config explicitly (as production does, via
+/// `LlmClient::runtime_config()`); the status side goes through
+/// `model_lanes_json_for_running_client(&config)`, the same production entry
+/// point `status_ops::runtime` calls with `server.llm.runtime_config()`. If
+/// status ever regresses to reading env instead, `extract`'s reported model
+/// and endpoint would flip to the poisoned ambient values and the divergence
+/// assertion below would catch it — proving status follows the running
+/// client, not the environment.
 #[test]
-fn model_lane_status_equals_the_catalog_rows_the_same_config_imports() {
+fn model_lane_status_equals_the_catalog_rows_the_running_client_imports() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _ambient_model = EnvRestore::set("EXTRACT_MODEL", "__ambient-must-not-be-reported");
+    let _ambient_base = EnvRestore::set("EXTRACT_BASE_URL", "https://ambient.test/v1");
 
-    let config = tachi_llm::ProviderRuntimeConfig::from_env().expect("lanes resolve");
+    let config = tachi_llm::ProviderRuntimeConfig {
+        extract: tachi_llm::llm::ChatLaneConfig {
+            base_url: "https://injected-extract.test/v1/chat/completions".to_string(),
+            model: "injected/extract-model".to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+        },
+        summary: tachi_llm::llm::ChatLaneConfig {
+            base_url: "https://injected-summary.test/v1/chat/completions".to_string(),
+            model: "injected/summary-model".to_string(),
+            api_key_envs: vec!["SUMMARY_API_KEY"],
+        },
+        reasoning: tachi_llm::llm::ChatLaneConfig {
+            base_url: "https://injected-reasoning.test/v1/chat/completions".to_string(),
+            model: "injected/reasoning-model".to_string(),
+            api_key_envs: vec!["REASONING_API_KEY"],
+        },
+        distill: tachi_llm::llm::ChatLaneConfig {
+            base_url: "https://injected-distill.test/v1/chat/completions".to_string(),
+            model: "injected/distill-model".to_string(),
+            api_key_envs: vec!["DISTILL_API_KEY"],
+        },
+        rerank: tachi_llm::RerankConfig {
+            provider: tachi_llm::RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let _embedding_model = EnvRestore::remove(tachi_llm::EMBEDDING_MODEL_ENV);
+    let _embedding_dimension = EnvRestore::remove(tachi_llm::EMBEDDING_DIMENSION_ENV);
     let embedding = tachi_llm::EmbeddingConfig::from_env().expect("embedding config resolves");
     let observed_at = memcore::db::now_utc_iso();
     // Open through the real store front door, not a bare `Connection` +
@@ -899,7 +948,18 @@ fn model_lane_status_equals_the_catalog_rows_the_same_config_imports() {
     .expect("rows read");
     assert_eq!(stored.len(), 5, "four chat lanes plus the embedding lane");
 
-    let lanes = model_lanes_json();
+    let lanes = model_lanes_json_for_running_client(&config);
+    assert_eq!(
+        lanes["extract"]["model"],
+        json!("injected/extract-model"),
+        "status must report the running client's model, not the poisoned ambient EXTRACT_MODEL"
+    );
+    assert_eq!(
+        lanes["extract"]["endpoint"],
+        json!("https://injected-extract.test/v1/chat/completions"),
+        "status must report the running client's endpoint, not the poisoned ambient \
+         EXTRACT_BASE_URL"
+    );
     for lane in ["extract", "summary", "reasoning", "distill"] {
         let row = stored
             .iter()
