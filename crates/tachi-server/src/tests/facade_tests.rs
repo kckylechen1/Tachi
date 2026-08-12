@@ -179,13 +179,33 @@ async fn retired_memory_claim_release_are_rejected_without_mutating_workclaim_ro
         .expect("seed canonical and historical claim rows");
 
     let before = session_claim_snapshot(&server);
-    for action in ["claim", "release"] {
-        let mut params = tachi_memory_params(action);
-        params.format = Some("json".to_string());
-        params.flow_id = Some("flow-c2a1".to_string());
-        let error = crate::facade_memory_ops::handle_tachi_memory(&server, params)
-            .await
-            .expect_err("retired Memory claim/release must be rejected");
+    let legacy_payloads = [
+        serde_json::json!({
+            "action": "release",
+            "format": "json",
+            "claim_id": "c2a1-historical-presence",
+            "release_reason": "retired-memory-route"
+        }),
+        serde_json::json!({
+            "action": "claim",
+            "format": "json",
+            "issue_ref": "kckylechen1/tachi#1688",
+            "flow_id": "flow-c2a1",
+            "branch": "legacy/c2a1-new",
+            "declared_file_scope": ["crates/tachi-server/src/facade_memory_ops/mod.rs"]
+        }),
+    ];
+    let mut outcomes = Vec::new();
+    for payload in legacy_payloads {
+        let params: TachiMemoryParams =
+            serde_json::from_value(payload).expect("legacy Memory payload deserializes");
+        let action = params.action.clone();
+        let outcome = crate::facade_memory_ops::handle_tachi_memory(&server, params).await;
+        outcomes.push((action, outcome));
+    }
+
+    for (action, outcome) in outcomes {
+        let error = outcome.expect_err("retired Memory claim/release must be rejected");
         assert!(error.contains("tachi_task"), "{action} guidance: {error}");
         assert_eq!(
             session_claim_snapshot(&server),
