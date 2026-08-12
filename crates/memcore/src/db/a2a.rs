@@ -298,6 +298,19 @@ pub fn insert_a2a_envelope(
     conn: &mut Connection,
     request: &NewA2aEnvelope,
 ) -> Result<A2aInsertOutcome, MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let outcome = insert_a2a_envelope_in_tx(&tx, request)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// Insert one envelope and its initial delivery receipt inside a caller-owned
+/// transaction. This is crate-private so migration code can archive its frozen
+/// legacy source in the same commit without exposing a general transaction API.
+pub(crate) fn insert_a2a_envelope_in_tx(
+    tx: &Transaction<'_>,
+    request: &NewA2aEnvelope,
+) -> Result<A2aInsertOutcome, MemoryError> {
     for (field, value) in [
         ("envelope id", request.envelope_id.as_str()),
         (
@@ -326,9 +339,8 @@ pub fn insert_a2a_envelope(
         ));
     }
     let body_digest = format!("{:x}", Sha256::digest(request.body.as_bytes()));
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let issuer = resolve_current_issuer_admission(
-        &tx,
+        tx,
         &request.issuer_agent_identity_id,
         &request.issuer_connection_id,
     )?
@@ -337,12 +349,12 @@ pub fn insert_a2a_envelope(
             "a2a issuer is not bound to the exact current local connection".to_string(),
         )
     })?;
-    let recipient = resolve_a2a_recipient_eligibility(&tx, &request.recipient_agent_identity_id)?
+    let recipient = resolve_a2a_recipient_eligibility(tx, &request.recipient_agent_identity_id)?
         .ok_or_else(|| {
-        MemoryError::InvalidArg(
-            "a2a recipient lacks an eligible historical local admission".to_string(),
-        )
-    })?;
+            MemoryError::InvalidArg(
+                "a2a recipient lacks an eligible historical local admission".to_string(),
+            )
+        })?;
     let existing = tx
         .query_row(
             &format!("SELECT {ENVELOPE_COLUMNS} FROM a2a_envelopes WHERE issuer_agent_identity_id=?1 AND idempotency_key=?2"),
@@ -357,8 +369,7 @@ pub fn insert_a2a_envelope(
                 request.issuer_agent_identity_id, request.idempotency_key
             )));
         }
-        let receipt = read_received_receipt(&tx, &existing.envelope_id)?;
-        tx.commit()?;
+        let receipt = read_received_receipt(tx, &existing.envelope_id)?;
         return Ok(A2aInsertOutcome::Replay {
             envelope: existing,
             receipt,
@@ -407,9 +418,8 @@ pub fn insert_a2a_envelope(
             created_at,
         ],
     )?;
-    let envelope = read_envelope_by_id(&tx, &request.envelope_id)?;
-    let receipt = read_received_receipt(&tx, &request.envelope_id)?;
-    tx.commit()?;
+    let envelope = read_envelope_by_id(tx, &request.envelope_id)?;
+    let receipt = read_received_receipt(tx, &request.envelope_id)?;
     Ok(A2aInsertOutcome::Created { envelope, receipt })
 }
 
