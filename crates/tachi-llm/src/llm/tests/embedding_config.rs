@@ -30,11 +30,12 @@ fn unset_env_resolves_to_the_model_the_stored_index_was_built_with() {
     let _cleared = cleared_env();
 
     let config = EmbeddingConfig::from_env().expect("the default must always resolve");
-    assert_eq!(config.model, DEFAULT_EMBEDDING_MODEL);
-    assert_eq!(config.dimension, DEFAULT_EMBEDDING_DIMENSION);
-    assert_eq!(config.source, EmbeddingModelSource::Default);
+    assert_eq!(config.model(), DEFAULT_EMBEDDING_MODEL);
+    assert_eq!(config.dimension(), DEFAULT_EMBEDDING_DIMENSION);
+    assert_eq!(config.source(), EmbeddingModelSource::Default);
     assert_eq!(
-        config.dimension, STORED_INDEX_DIMENSION,
+        config.dimension(),
+        STORED_INDEX_DIMENSION,
         "the default configuration must agree with the index by construction, or every process \
          refuses to start"
     );
@@ -88,10 +89,10 @@ fn a_same_width_sibling_model_is_exactly_what_the_hatch_allows() {
     );
 
     let config = EmbeddingConfig::from_env().expect("a same-width swap must go through");
-    assert_eq!(config.model, "voyage-3-large");
-    assert_eq!(config.dimension, STORED_INDEX_DIMENSION);
+    assert_eq!(config.model(), "voyage-3-large");
+    assert_eq!(config.dimension(), STORED_INDEX_DIMENSION);
     assert_eq!(
-        config.source,
+        config.source(),
         EmbeddingModelSource::EnvOverride,
         "status has to be able to distinguish an operator's deliberate swap from the default"
     );
@@ -104,9 +105,9 @@ fn naming_the_default_model_explicitly_is_not_reported_as_an_override() {
     let _model = EnvRestore::set(EMBEDDING_MODEL_ENV, DEFAULT_EMBEDDING_MODEL);
 
     let config = EmbeddingConfig::from_env().expect("naming the default resolves to the default");
-    assert_eq!(config.model, DEFAULT_EMBEDDING_MODEL);
+    assert_eq!(config.model(), DEFAULT_EMBEDDING_MODEL);
     assert_eq!(
-        config.source,
+        config.source(),
         EmbeddingModelSource::Default,
         "reporting this as an override would make the status surface lie about operator intent"
     );
@@ -173,8 +174,8 @@ fn the_default_construction_seam_reads_no_environment() {
     let _dimension = EnvRestore::set(EMBEDDING_DIMENSION_ENV, "4096");
 
     let config = EmbeddingConfig::default_voyage();
-    assert_eq!(config.model, DEFAULT_EMBEDDING_MODEL);
-    assert_eq!(config.dimension, DEFAULT_EMBEDDING_DIMENSION);
+    assert_eq!(config.model(), DEFAULT_EMBEDDING_MODEL);
+    assert_eq!(config.dimension(), DEFAULT_EMBEDDING_DIMENSION);
 }
 
 // ─── the declaration reaches the catalog (#1681 D3: "catalog bounds carry a
@@ -215,11 +216,8 @@ fn the_embedding_catalog_row_declares_the_dimension_the_gate_turns_on() {
 
 #[test]
 fn an_operator_swap_is_visible_in_the_catalog_row_and_its_provenance() {
-    let swapped = EmbeddingConfig {
-        model: "voyage-3-large".to_string(),
-        dimension: STORED_INDEX_DIMENSION,
-        source: EmbeddingModelSource::EnvOverride,
-    };
+    let swapped = EmbeddingConfig::declared("voyage-3-large", STORED_INDEX_DIMENSION)
+        .expect("a same-width swap is a legal configuration");
     let row = crate::llm::catalog_import::env_embedding_deployment(
         &swapped,
         "https://api.voyageai.com/v1/embeddings",
@@ -253,11 +251,8 @@ fn swapping_the_embedding_model_is_a_catalog_change_not_a_no_op() {
     )
     .expect("a credential-free endpoint projects");
     let swapped_row = crate::llm::catalog_import::env_embedding_deployment(
-        &EmbeddingConfig {
-            model: "voyage-3-large".to_string(),
-            dimension: STORED_INDEX_DIMENSION,
-            source: EmbeddingModelSource::EnvOverride,
-        },
+        &EmbeddingConfig::declared("voyage-3-large", STORED_INDEX_DIMENSION)
+            .expect("a same-width swap is a legal configuration"),
         "https://api.voyageai.com/v1/embeddings",
         "2026-08-11T00:00:00.000Z",
     )
@@ -313,5 +308,63 @@ fn an_embedding_endpoint_carrying_userinfo_is_refused_like_a_chat_lane() {
     assert!(
         stored.is_empty(),
         "a refused embedding import must leave the catalog untouched"
+    );
+}
+
+// ─── the type is sealed: no hand-assembled mismatch ─────────────────────────
+
+#[test]
+fn the_fallible_constructor_refuses_what_from_env_would_have_refused() {
+    // The bypass this closes: with public fields, anyone could assemble a
+    // configuration that never met `validate_against_index` — including the
+    // catalog import, which would then have published a dimension declaration
+    // the process never agreed to. `declared` is the only other way in, and it
+    // runs the same gate.
+    let err = EmbeddingConfig::declared("some-2048-dim-model", 2048)
+        .expect_err("a width the stored index disagrees with must be refused");
+    assert!(err.contains("2048"), "{err}");
+    assert!(err.contains(&STORED_INDEX_DIMENSION.to_string()), "{err}");
+
+    let ok = EmbeddingConfig::declared("voyage-3-large", STORED_INDEX_DIMENSION)
+        .expect("a same-width sibling is exactly what the hatch allows");
+    assert_eq!(ok.model(), "voyage-3-large");
+    assert_eq!(ok.dimension(), STORED_INDEX_DIMENSION);
+}
+
+#[test]
+fn the_constructor_derives_source_rather_than_letting_a_caller_declare_it() {
+    // `source` is what status uses to tell an operator's deliberate swap from
+    // the default. A caller that could *say* "not an override" about a
+    // non-default model would make that surface lie, so the rule is derived
+    // from the model name — the same rule `from_env` applies.
+    let default_named = EmbeddingConfig::declared(DEFAULT_EMBEDDING_MODEL, STORED_INDEX_DIMENSION)
+        .expect("naming the default is legal");
+    assert_eq!(
+        default_named.source(),
+        EmbeddingModelSource::Default,
+        "naming the default is not an override, whichever constructor was used"
+    );
+
+    let swapped = EmbeddingConfig::declared("voyage-3-large", STORED_INDEX_DIMENSION)
+        .expect("a same-width swap is legal");
+    assert_eq!(swapped.source(), EmbeddingModelSource::EnvOverride);
+}
+
+#[test]
+fn from_env_and_declared_agree_on_the_same_inputs() {
+    // Two constructors are two chances to disagree. They must produce the same
+    // value for the same model/width, or the catalog row and the status
+    // surface can describe the same configuration differently.
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _cleared = cleared_env();
+    let _model = EnvRestore::set(EMBEDDING_MODEL_ENV, "voyage-3-large");
+    let _dimension = EnvRestore::set(
+        EMBEDDING_DIMENSION_ENV,
+        STORED_INDEX_DIMENSION.to_string().as_str(),
+    );
+
+    assert_eq!(
+        EmbeddingConfig::from_env().expect("resolves"),
+        EmbeddingConfig::declared("voyage-3-large", STORED_INDEX_DIMENSION).expect("declared"),
     );
 }

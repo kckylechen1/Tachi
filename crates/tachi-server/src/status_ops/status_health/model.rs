@@ -204,8 +204,8 @@ fn embedding_lane_json() -> Value {
     json!({
         "provider": "voyage",
         "model": row.provider_model_id,
-        "model_source": config.source.as_str(),
-        "expected_dimension": config.dimension,
+        "model_source": config.source().as_str(),
+        "expected_dimension": config.dimension(),
         "stored_index_dimension": EXPECTED_EMBEDDING_DIM,
         "endpoint": row.endpoint_ref,
         "deployment_id": row.deployment_id,

@@ -28,6 +28,6 @@ fn the_embedding_gate_and_the_status_expectation_are_the_same_width() {
 #[test]
 fn the_default_embedding_model_declares_the_stored_width() {
     let config = tachi_llm::EmbeddingConfig::default_voyage();
-    assert_eq!(config.dimension as usize, EXPECTED_EMBEDDING_DIM);
-    assert_eq!(config.model, tachi_llm::DEFAULT_EMBEDDING_MODEL);
+    assert_eq!(config.dimension() as usize, EXPECTED_EMBEDDING_DIM);
+    assert_eq!(config.model(), tachi_llm::DEFAULT_EMBEDDING_MODEL);
 }

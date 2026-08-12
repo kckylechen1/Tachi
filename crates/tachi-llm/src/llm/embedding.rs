@@ -124,7 +124,7 @@ impl super::LlmClient {
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(VOYAGE_MAX_BATCH) {
             let body = json!({
-                "model": embedding.model,
+                "model": embedding.model(),
                 "input": chunk,
                 "input_type": input_type
             });
@@ -230,7 +230,7 @@ impl super::LlmClient {
             all_embeddings.extend(parse_voyage_batch_embeddings(
                 data,
                 chunk.len(),
-                embedding.dimension as usize,
+                embedding.dimension() as usize,
             )?);
         }
 

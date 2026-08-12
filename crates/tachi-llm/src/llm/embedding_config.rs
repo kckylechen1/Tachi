@@ -61,29 +61,118 @@ impl EmbeddingModelSource {
             Self::EnvOverride => "env_override",
         }
     }
+
+    /// The one rule for deciding whether a model name is an override.
+    ///
+    /// Naming the built-in default is not an override — it resolves to the
+    /// same configuration — so `source` stays honest whichever constructor
+    /// produced it. Single-sourced here rather than re-derived per
+    /// constructor: two copies of this rule would let `from_env` and
+    /// [`EmbeddingConfig::declared`] disagree about the same model name.
+    fn for_model(model: &str) -> Self {
+        if model == DEFAULT_EMBEDDING_MODEL {
+            Self::Default
+        } else {
+            Self::EnvOverride
+        }
+    }
 }
 
 /// Resolved embedding configuration.
+///
+/// # Sealed by construction
+///
+/// The fields are private and there is no public struct literal, so **every**
+/// value of this type has passed [`Self::validate_against_index`] against
+/// [`STORED_INDEX_DIMENSION`]. That is the difference between a gate and a
+/// suggestion: with public fields, `from_env`'s refusal could be walked around
+/// by anyone assembling the struct by hand — including the catalog import,
+/// which would then have published a dimension declaration the process never
+/// agreed to. A width mismatch does not fail; it silently degrades every
+/// recall, which is precisely why the type has to make the mismatched value
+/// unrepresentable rather than merely discouraged.
+///
+/// The error code is pinned, not just the failure: a bare `compile_fail` would
+/// keep passing if this snippet later broke for some unrelated reason (a
+/// renamed import, a typo), quietly retiring the guarantee. `E0451` is
+/// specifically "field is private".
+///
+/// ```compile_fail,E0451
+/// use tachi_llm::{EmbeddingConfig, EmbeddingModelSource};
+/// // 512 disagrees with the stored index — and there is no way to say it.
+/// let smuggled = EmbeddingConfig {
+///     model: "voyage-3-lite".to_string(),
+///     dimension: 512,
+///     source: EmbeddingModelSource::EnvOverride,
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingConfig {
-    pub model: String,
+    model: String,
     /// The width this model emits, as declared. Never inferred from a
     /// response: inferring it would mean discovering the mismatch *after*
     /// writing vectors at the wrong width.
-    pub dimension: u32,
-    pub source: EmbeddingModelSource,
+    dimension: u32,
+    source: EmbeddingModelSource,
 }
+
+/// [`EmbeddingConfig::default_voyage`] is infallible, which is only honest
+/// while the built-in default agrees with the index it would be validated
+/// against. Checked at compile time rather than left to a test, because it is
+/// the one hole in "every `EmbeddingConfig` has passed the gate": moving
+/// [`STORED_INDEX_DIMENSION`] without moving [`DEFAULT_EMBEDDING_DIMENSION`]
+/// must not compile.
+const _: () = assert!(DEFAULT_EMBEDDING_DIMENSION == STORED_INDEX_DIMENSION);
 
 impl EmbeddingConfig {
     /// The built-in default, with no env read. The construction seam for
     /// callers that want deterministic config (tests, programmatic builders),
     /// mirroring `LlmClient::new_with_config`'s rationale.
+    ///
+    /// Infallible, and provably so: the const assertion above pins the default
+    /// width equal to the stored index width, so this constructor cannot mint
+    /// the mismatch [`Self::declared`] refuses.
     pub fn default_voyage() -> Self {
         Self {
             model: DEFAULT_EMBEDDING_MODEL.to_string(),
             dimension: DEFAULT_EMBEDDING_DIMENSION,
             source: EmbeddingModelSource::Default,
         }
+    }
+
+    /// Mint a configuration from already-known values, **through the same gate
+    /// `from_env` goes through**.
+    ///
+    /// The fallible construction seam for programmatic callers: a declared
+    /// width that disagrees with [`STORED_INDEX_DIMENSION`] is refused here
+    /// exactly as it is refused at process start. `source` is derived from the
+    /// model name by the single rule in [`EmbeddingModelSource::for_model`] —
+    /// a caller does not get to *say* a non-default model is not an override.
+    pub fn declared(model: impl Into<String>, dimension: u32) -> Result<Self, String> {
+        let model = model.into();
+        let source = EmbeddingModelSource::for_model(&model);
+        let config = Self {
+            model,
+            dimension,
+            source,
+        };
+        config.validate_against_index(STORED_INDEX_DIMENSION)?;
+        Ok(config)
+    }
+
+    /// The configured embedding model.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// The width that model emits, as declared and already validated.
+    pub fn dimension(&self) -> u32 {
+        self.dimension
+    }
+
+    /// Whether the model is the built-in default or a deliberate override.
+    pub fn source(&self) -> EmbeddingModelSource {
+        self.source
     }
 
     /// Resolve from env, **failing closed** on:
@@ -103,17 +192,10 @@ impl EmbeddingConfig {
             )?),
         };
 
-        let (model, source) = match model_override {
-            Some(model) if model != DEFAULT_EMBEDDING_MODEL => {
-                (model, EmbeddingModelSource::EnvOverride)
-            }
-            // Explicitly naming the default is not an override; it resolves to
-            // the same configuration, which keeps `source` honest.
-            Some(_) | None => (
-                DEFAULT_EMBEDDING_MODEL.to_string(),
-                EmbeddingModelSource::Default,
-            ),
-        };
+        // Explicitly naming the default is not an override; it resolves to the
+        // same configuration, which keeps `source` honest.
+        let model = model_override.unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_string());
+        let source = EmbeddingModelSource::for_model(&model);
 
         let dimension = match (source, declared_dimension) {
             (EmbeddingModelSource::EnvOverride, None) => {
@@ -128,13 +210,9 @@ impl EmbeddingConfig {
             (EmbeddingModelSource::Default, None) => DEFAULT_EMBEDDING_DIMENSION,
         };
 
-        let config = Self {
-            model,
-            dimension,
-            source,
-        };
-        config.validate_against_index(STORED_INDEX_DIMENSION)?;
-        Ok(config)
+        // The index check lives in `declared`, so env resolution and
+        // programmatic construction cannot end up with two versions of it.
+        Self::declared(model, dimension)
     }
 
     /// Refuse a configuration whose declared width does not match an index.

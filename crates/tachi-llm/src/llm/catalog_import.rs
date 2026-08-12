@@ -317,7 +317,7 @@ pub fn env_embedding_deployment(
         });
     }
     let mut source_refs = vec!["env_api_key:VOYAGE_API_KEY".to_string()];
-    if embedding.source == EmbeddingModelSource::EnvOverride {
+    if embedding.source() == EmbeddingModelSource::EnvOverride {
         // Provenance for a deliberate operator swap: the *name* of the
         // variable that carried it, never its value.
         source_refs.push(format!("env_model:{EMBEDDING_MODEL_ENV}"));
@@ -328,14 +328,14 @@ pub fn env_embedding_deployment(
         env_deployment_id(ENV_EMBEDDING_LANE),
         env_provider_account_id(endpoint),
         ProtocolKind::VoyageEmbeddings,
-        embedding.model.clone(),
+        embedding.model().to_string(),
         CatalogSource::Env,
         observed_at,
     )
     .with_endpoint_ref(endpoint.to_string())
     .with_capabilities(DeploymentCapabilities {
         embeddings: Some(EmbeddingsCapability {
-            dimension: embedding.dimension,
+            dimension: embedding.dimension(),
         }),
         ..DeploymentCapabilities::default()
     })
