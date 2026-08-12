@@ -491,28 +491,18 @@ impl ToolCallTracker {
                     ));
                 }
                 if let Some(id) = id {
-                    match &self.calls[position].id {
-                        Some(existing) if existing != id => {
-                            return Err(decode_error(
-                                StreamDecodeErrorKind::IllegalSequence,
-                                "a second call id arrived for an open tool call",
-                            ))
-                        }
-                        Some(_) => {}
-                        None => self.calls[position].id = Some(id.to_string()),
-                    }
+                    merge_identity(
+                        &mut self.calls[position].id,
+                        id,
+                        "a second call id arrived for an open tool call",
+                    )?;
                 }
                 if let Some(name) = name {
-                    match &self.calls[position].name {
-                        Some(existing) if existing != name => {
-                            return Err(decode_error(
-                                StreamDecodeErrorKind::IllegalSequence,
-                                "a second function name arrived for an open tool call",
-                            ))
-                        }
-                        Some(_) => {}
-                        None => self.calls[position].name = Some(name.to_string()),
-                    }
+                    merge_identity(
+                        &mut self.calls[position].name,
+                        name,
+                        "a second function name arrived for an open tool call",
+                    )?;
                 }
             }
         }
@@ -564,6 +554,26 @@ impl ToolCallTracker {
     fn position(&self, index: u32) -> Option<usize> {
         self.calls.iter().position(|call| call.index == index)
     }
+}
+
+/// Records one identity field of a call under reconstruction.
+///
+/// Seeing the same value again is normal — providers repeat the id on
+/// continuation fragments. Seeing a *different* one means two calls' fragments
+/// have been mixed together, which must never be resolved by picking one.
+fn merge_identity(
+    slot: &mut Option<String>,
+    seen: &str,
+    detail: &'static str,
+) -> Result<(), StreamDecodeError> {
+    if let Some(existing) = slot.as_deref() {
+        if existing == seen {
+            return Ok(());
+        }
+        return Err(decode_error(StreamDecodeErrorKind::IllegalSequence, detail));
+    }
+    *slot = Some(seen.to_string());
+    Ok(())
 }
 
 /// Whether what was reconstructed is a call at all.
