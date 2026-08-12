@@ -869,17 +869,29 @@ fn model_lane_status_equals_the_catalog_rows_the_same_config_imports() {
         .unwrap_or_else(|e| e.into_inner());
 
     let config = tachi_llm::ProviderRuntimeConfig::from_env().expect("lanes resolve");
+    let embedding = tachi_llm::EmbeddingConfig::from_env().expect("embedding config resolves");
+    let observed_at = memcore::db::now_utc_iso();
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
     memcore::db::init_schema(&conn).expect("schema");
-    tachi_llm::import_env_chat_lanes(&conn, &config, &memcore::db::now_utc_iso())
-        .expect("import succeeds");
+    tachi_llm::import_env_chat_lanes(&conn, &config, &observed_at).expect("import succeeds");
+    // The embedding lane is imported into the same store and compared the same
+    // way. Comparing only the four chat lanes left the embedding half of the
+    // projection — the one carrying the dimension declaration the #1681 D3
+    // escape hatch turns on — free to drift out of the status surface unseen.
+    tachi_llm::import_env_embedding_lane(
+        &conn,
+        &embedding,
+        &tachi_llm::voyage_embeddings_endpoint(),
+        &observed_at,
+    )
+    .expect("embedding import succeeds");
 
     let stored = memcore::db::model_catalog::list_model_deployments_by_source(
         &conn,
         memcore::catalog::CatalogSource::Env,
     )
     .expect("rows read");
-    assert_eq!(stored.len(), 4);
+    assert_eq!(stored.len(), 5, "four chat lanes plus the embedding lane");
 
     let lanes = model_lanes_json();
     for lane in ["extract", "summary", "reasoning", "distill"] {
@@ -909,6 +921,45 @@ fn model_lane_status_equals_the_catalog_rows_the_same_config_imports() {
             "lane {lane}: status and catalog must agree on the account handle"
         );
     }
+
+    let embedding_row = stored
+        .iter()
+        .find(|row| row.deployment_id == "env:embedding")
+        .expect("catalog is missing the embedding lane");
+    assert_eq!(
+        lanes["embedding"]["model"],
+        json!(embedding_row.provider_model_id),
+        "the embedding lane's model must be the one the catalog recorded"
+    );
+    assert_eq!(
+        lanes["embedding"]["endpoint"],
+        json!(embedding_row.endpoint_ref),
+        "and the endpoint a request actually uses"
+    );
+    assert_eq!(
+        lanes["embedding"]["deployment_id"],
+        json!(embedding_row.deployment_id)
+    );
+    assert_eq!(
+        lanes["embedding"]["provider_account_ref"],
+        json!(embedding_row.provider_account_id)
+    );
+    assert_eq!(
+        lanes["embedding"]["catalog_source"],
+        json!(embedding_row.catalog_source.as_str())
+    );
+    assert_eq!(
+        lanes["embedding"]["expected_dimension"],
+        json!(
+            embedding_row
+                .capabilities
+                .embeddings
+                .as_ref()
+                .expect("the embedding row declares a dimension")
+                .dimension
+        ),
+        "the width status reports and the width the catalog declares are one value"
+    );
 }
 
 #[test]

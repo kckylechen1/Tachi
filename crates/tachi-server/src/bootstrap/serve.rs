@@ -891,6 +891,35 @@ fn build_server_state(
         n => eprintln!("[provider] {n} provider key(s) ready for LLM/embed"),
     }
 
+    // #1681 D7 PR-B: record what the env chains resolved to as
+    // `catalog_source='env'` deployment rows. This is the serve path — daemon
+    // and stdio — which is where a long-lived process's resolved config is
+    // worth describing; CLI one-shots have already returned in
+    // `run_pre_serve_command` and deliberately do not import.
+    //
+    // Non-fatal, like the seeds above: the import is idempotent, so a boot
+    // that fails to record leaves the previous rows intact and the next boot
+    // re-attempts. A *refusal* (userinfo in a base URL) is the one case an
+    // operator has to act on, so it is logged at every boot rather than once.
+    match crate::provider_config::import_env_catalog_deployments(&server) {
+        Ok(summary) => {
+            if summary.changed > 0 {
+                eprintln!(
+                    "[catalog] env deployment rows: {} imported, {} changed",
+                    summary.rows, summary.changed
+                );
+            }
+            if let Some(reason) = summary.embedding_refused {
+                eprintln!(
+                    "[catalog] embedding deployment row not recorded (configuration refused): {reason}"
+                );
+            }
+        }
+        Err(err) => eprintln!(
+            "[catalog] env deployment import failed (previous rows kept, will retry next boot; boot continues): {err}"
+        ),
+    }
+
     let background_shutdown = tokio_util::sync::CancellationToken::new();
     let mut bg_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if embedded_mcp_facade() {
