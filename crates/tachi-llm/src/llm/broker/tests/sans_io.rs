@@ -34,24 +34,93 @@
 //! `reqwest` must be on the allowlist below, so a second borrow — a client, a
 //! header map, a body — has to come here and argue for itself.
 
+use std::fs;
+
 use super::*;
 
-/// The adapter layer's shipping source files.
+/// Broker-directory `.rs` files that are not shipped modules, and why each one
+/// is exempt from the adapter-layer scan.
 ///
-/// `tests.rs` and this tree are excluded: the fixture loader reads directories
-/// by design.
-const ADAPTER_SOURCES: &[(&str, &str)] = &[
-    ("broker.rs", include_str!("../../broker.rs")),
-    ("broker/canonical.rs", include_str!("../canonical.rs")),
-    ("broker/disposition.rs", include_str!("../disposition.rs")),
-    (
-        "broker/openai_compat.rs",
-        include_str!("../openai_compat.rs"),
-    ),
-    ("broker/stream.rs", include_str!("../stream.rs")),
-    ("broker/usage.rs", include_str!("../usage.rs")),
-    ("broker/wire.rs", include_str!("../wire.rs")),
-];
+/// This is the *only* hand-maintained list left: everything else is
+/// discovered from disk at test time, so a shipped module added to `broker/`
+/// after this test was written is scanned automatically rather than silently
+/// skipped because nobody updated a constant.
+const NON_SHIPPED_ALLOWLIST: &[(&str, &str)] = &[(
+    "broker/tests.rs",
+    "the test tree's own mod-glue file (`#[cfg(test)] mod tests;`), not a \
+     module that ships",
+)];
+
+/// Every `.rs` file directly under `src/llm/broker/`, recursively, except
+/// anything inside a directory literally named `tests` (the fixture loader
+/// reads directories by design, and the test tree is excluded on purpose —
+/// see the module doc). Returns paths relative to `src/llm/`, matching the
+/// spelling `ADAPTER_SOURCES` used to use (e.g. `"broker/canonical.rs"`).
+fn candidate_broker_files() -> Vec<String> {
+    let broker_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/llm/broker");
+    let base = broker_dir.parent().expect("broker/ has a parent (src/llm)");
+    let mut out = Vec::new();
+    walk_rs_files(&broker_dir, base, &mut out);
+    out
+}
+
+/// Recursion helper for [`candidate_broker_files`]: appends every `.rs` file
+/// under `dir` (paths relative to `base`) except files under a `tests`
+/// subdirectory.
+fn walk_rs_files(dir: &Path, base: &Path, out: &mut Vec<String>) {
+    let entries = fs::read_dir(dir).unwrap_or_else(|err| {
+        panic!("reading directory {}: {err}", dir.display());
+    });
+    for entry in entries {
+        let path = entry.expect("directory entry is readable").path();
+        if path.is_dir() {
+            if path.file_name().and_then(|n| n.to_str()) == Some("tests") {
+                continue;
+            }
+            walk_rs_files(&path, base, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(base)
+            .expect("walked path is under base")
+            .to_string_lossy()
+            .replace('\\', "/");
+        out.push(rel);
+    }
+}
+
+/// The adapter layer's shipping source files, read from disk at test time.
+///
+/// `broker.rs` is added by hand because it is the one shipped file *outside*
+/// `src/llm/broker/` (its sibling module declaration); everything under
+/// `src/llm/broker/` itself is discovered by [`candidate_broker_files`], minus
+/// [`NON_SHIPPED_ALLOWLIST`].
+fn adapter_sources() -> Vec<(String, String)> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut out = vec![{
+        let path = manifest_dir.join("src/llm/broker.rs");
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        ("broker.rs".to_string(), content)
+    }];
+
+    for rel in candidate_broker_files() {
+        if NON_SHIPPED_ALLOWLIST
+            .iter()
+            .any(|(exempt, _)| *exempt == rel)
+        {
+            continue;
+        }
+        let path = manifest_dir.join("src/llm").join(&rel);
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        out.push((rel, content));
+    }
+    out
+}
 
 /// Constructs that would give the adapter layer a way to perform IO, and why
 /// each one is disqualifying.
@@ -126,8 +195,9 @@ fn is_comment(line: &str) -> bool {
 
 #[test]
 fn the_adapter_layer_contains_no_io_construct() {
+    let sources = adapter_sources();
     let mut scanned_lines = 0;
-    for (file, source) in ADAPTER_SOURCES {
+    for (file, source) in &sources {
         for (index, line) in source.lines().enumerate() {
             scanned_lines += 1;
             if is_comment(line) {
@@ -152,13 +222,14 @@ fn the_adapter_layer_contains_no_io_construct() {
 #[test]
 fn the_adapter_layer_borrows_reqwest_for_parsing_and_nothing_else() {
     // The honest version of the "no reqwest" claim: not absent, *bounded*.
+    let sources = adapter_sources();
     let mut mentions = Vec::new();
-    for (file, source) in ADAPTER_SOURCES {
+    for (file, source) in &sources {
         for (index, line) in source.lines().enumerate() {
             if is_comment(line) || !line.contains("reqwest") {
                 continue;
             }
-            mentions.push((*file, index + 1, line.trim().to_string()));
+            mentions.push((file.as_str(), index + 1, line.trim().to_string()));
         }
     }
 
@@ -181,6 +252,36 @@ fn the_adapter_layer_borrows_reqwest_for_parsing_and_nothing_else() {
         REQWEST_ALLOWLIST.len(),
         mentions.len()
     );
+}
+
+#[test]
+fn every_broker_rs_file_is_scanned_or_explicitly_exempt() {
+    // The property the fs-enumeration exists for: a newly added shipped
+    // module cannot land in a gap between "the scan" and "the allowlist" —
+    // every `.rs` file this test finds on disk under `src/llm/broker/` is
+    // provably one or the other. Before this test, a new file that nobody
+    // added to a hand-written list would just never be scanned, silently.
+    let candidates = candidate_broker_files();
+    assert!(
+        candidates.len() >= 6,
+        "the walk found only {} candidate files — it is not actually reading \
+         the broker directory",
+        candidates.len()
+    );
+
+    let scanned = adapter_sources();
+    for rel in &candidates {
+        let is_scanned = scanned.iter().any(|(name, _)| name == rel);
+        let is_exempt = NON_SHIPPED_ALLOWLIST
+            .iter()
+            .any(|(exempt, _)| *exempt == rel.as_str());
+        assert!(
+            is_scanned || is_exempt,
+            "{rel} is on disk under src/llm/broker/ but is neither scanned for \
+             IO/reqwest nor in NON_SHIPPED_ALLOWLIST — a newly shipped module \
+             must be one or the other, never silently neither"
+        );
+    }
 }
 
 #[test]
