@@ -263,6 +263,9 @@ pub use vault_accounts::{
     vault_pool_members_digest, AccountRetirement, AliasObservation, FingerprintUpdate,
     POOL_MEMBERS_DIGEST_SCHEME,
 };
+#[cfg(all(feature = "admin", feature = "test-support"))]
+#[doc(hidden)]
+pub use vault_db::{install_vault_key_health_write_hook_for_tests, VaultKeyHealthWriteHookGuard};
 #[cfg(feature = "admin")]
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_entry_exists, vault_get_config, vault_get_entry,
