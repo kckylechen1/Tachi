@@ -1550,6 +1550,7 @@ pub(super) const A2A_ISSUER_ASSURANCE_CHECK_CLAUSE: &str =
     "CHECK (issuer_identity_assurance = 'self_asserted')";
 pub(super) const A2A_RECIPIENT_ASSURANCE_CHECK_CLAUSE: &str =
     "CHECK (recipient_identity_assurance = 'self_asserted')";
+pub(super) const A2A_BODY_DIGEST_CHECK_CLAUSE: &str = "CHECK (length(body_digest) = 64 AND body_digest = lower(body_digest) AND body_digest NOT GLOB '*[^0-9a-f]*')";
 pub(super) const A2A_ISSUER_TRUST_DOMAIN_CHECK_CLAUSE: &str =
     "CHECK (issuer_trust_domain = 'same_host')";
 pub(super) const A2A_RECIPIENT_TRUST_DOMAIN_CHECK_CLAUSE: &str =

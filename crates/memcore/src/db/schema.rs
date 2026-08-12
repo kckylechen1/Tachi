@@ -989,6 +989,7 @@ pub(crate) fn validate_a2a_mailbox_schema(conn: &Connection) -> Result<(), Memor
     let envelope_sql = normalize_schema_sql(&envelope_sql);
     for clause in [
         ddl::A2A_KIND_CHECK_CLAUSE,
+        ddl::A2A_BODY_DIGEST_CHECK_CLAUSE,
         ddl::A2A_ISSUER_ASSURANCE_CHECK_CLAUSE,
         ddl::A2A_RECIPIENT_ASSURANCE_CHECK_CLAUSE,
         ddl::A2A_ISSUER_TRUST_DOMAIN_CHECK_CLAUSE,
@@ -2253,6 +2254,11 @@ mod a2a_schema_tests {
                 "CHECK (length(recipient_identity_assurance) > 0)",
             ),
             (
+                "body digest",
+                ddl::A2A_BODY_DIGEST_CHECK_CLAUSE,
+                "CHECK (length(body_digest) > 0)",
+            ),
+            (
                 "issuer trust domain",
                 ddl::A2A_ISSUER_TRUST_DOMAIN_CHECK_CLAUSE,
                 "CHECK (length(issuer_trust_domain) > 0)",
@@ -2302,6 +2308,8 @@ mod a2a_schema_tests {
 
     #[test]
     fn current_stamp_with_recreated_widened_a2a_table_is_refused_not_repaired() {
+        let _ = libsimple::enable_auto_extension();
+        crate::db::register_sqlite_vec();
         let mut conn = Connection::open_in_memory().expect("current product fixture");
         init_schema(&conn).expect("build current product fixture");
         conn.execute_batch("DROP TABLE a2a_delivery_receipts; DROP TABLE a2a_envelopes;")
@@ -2321,6 +2329,37 @@ mod a2a_schema_tests {
             crate::db::StoreProfile::TachiFull,
         )
         .expect_err("current stamp must validate, not repair, widened mailbox DDL");
+        assert!(error.to_string().contains("incomplete v31 A2A mailbox"));
+    }
+
+    #[test]
+    fn current_stamp_with_weakened_body_digest_check_is_refused_not_repaired() {
+        let _ = libsimple::enable_auto_extension();
+        crate::db::register_sqlite_vec();
+        let mut conn = Connection::open_in_memory().expect("current product fixture");
+        init_schema(&conn).expect("build current product fixture");
+        conn.execute_batch("DROP TABLE a2a_delivery_receipts; DROP TABLE a2a_envelopes;")
+            .expect("remove canonical mailbox");
+        let mutant = ddl::A2A_MAILBOX_V31_SQL.replacen(
+            ddl::A2A_BODY_DIGEST_CHECK_CLAUSE,
+            "CHECK (length(body_digest) > 0)",
+            1,
+        );
+        assert_ne!(
+            mutant,
+            ddl::A2A_MAILBOX_V31_SQL,
+            "body digest CHECK mutation must alter the fixture"
+        );
+        conn.execute_batch(&mutant)
+            .expect("recreate mailbox with only the digest CHECK weakened");
+
+        let error = crate::db::migrations::run_data_migrations_with_profile(
+            &mut conn,
+            "global",
+            Path::new(":memory:"),
+            crate::db::StoreProfile::TachiFull,
+        )
+        .expect_err("current stamp must reject the weakened digest shape");
         assert!(error.to_string().contains("incomplete v31 A2A mailbox"));
     }
 }
