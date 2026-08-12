@@ -645,9 +645,10 @@ fn a_stream_decoder_that_is_unavailable_becomes_a_refusal_not_a_downgrade() {
     // to stream and got a whole body has no way to notice. Asserted for *both*
     // reasons, because the projection must not depend on which one it was —
     // and because slice-2 made them structurally different: the shipped dialect
-    // now answers `DialectDoesNotStream` for a deployment narrowed away from
-    // streaming, while `NotImplementedYet` remains the honest answer for a
-    // grammar this Broker has not written yet (the NDJSON family).
+    // now answers `DialectDoesNotStream` — nothing streams on the negotiated
+    // surface — for a deployment narrowed away from streaming, while
+    // `NotImplementedYet` remains the honest answer for a grammar this Broker
+    // has not written yet (the NDJSON family).
     for reason in StreamDecoderUnavailableReason::ALL.iter().copied() {
         let unavailable = StreamDecoderUnavailable {
             reason,

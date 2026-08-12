@@ -559,9 +559,10 @@ impl ProviderWire for OpenAiCompatWire {
     fn new_stream_decoder(&self) -> Result<Box<dyn WireStreamDecoder>, StreamDecoderUnavailable> {
         // A deployment narrowed to `streaming: false` gets the typed
         // unavailable rather than a decoder it was told it may not use. The
-        // reason is `DialectDoesNotStream` — for *this* deployment it does
-        // not — and never `NotImplementedYet`, which would now be a lie: the
-        // grammar is implemented, this deployment is just not allowed it.
+        // reason is `DialectDoesNotStream`, which is a statement about the
+        // negotiated surface — dialect ∩ deployment, and on this one nothing
+        // streams — and never `NotImplementedYet`, which would now be a lie:
+        // the grammar is implemented, this deployment is just not allowed it.
         if !self.capabilities.streaming {
             return Err(StreamDecoderUnavailable {
                 reason: StreamDecoderUnavailableReason::DialectDoesNotStream,

@@ -63,9 +63,11 @@ fn a_streaming_request_is_refused_not_silently_downgraded() {
 
     // Belt two: a deployment that may not stream cannot obtain a decoder
     // either, so there is no path that gets one by going around the capability
-    // gate. The reason is `DialectDoesNotStream` and not `NotImplementedYet`,
-    // which would now be false — the grammar exists, this deployment is simply
-    // not allowed it.
+    // gate. The reason is `DialectDoesNotStream`, which reads on the negotiated
+    // surface — what the dialect implements intersected with what this
+    // deployment admits, and on that surface nothing streams — and never
+    // `NotImplementedYet`, which would now be false: the grammar exists, this
+    // deployment is simply not allowed it.
     assert!(matches!(
         no_stream.new_stream_decoder(),
         Err(StreamDecoderUnavailable {
