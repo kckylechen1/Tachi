@@ -460,6 +460,24 @@ fn payload_bearing_variants_have_literal_instance_goldens() {
         },
         &json!({"index": 3}),
     );
+    // The other half of that distinction, pinned literally rather than just
+    // implied by the first golden: a provider that has announced an id which
+    // happens to be the empty string is a *seen* id, not an unseen one, and
+    // must serialize with the key present — `Option::is_none` is the skip
+    // condition, not `str::is_empty`. Without this golden, a change that
+    // skipped serialization on an empty id too (conflating "seen, empty"
+    // with "not seen") would still pass the `id: None` case above.
+    assert_golden(
+        "tool call fragment",
+        "id seen but empty",
+        &ToolCallFragment {
+            index: 3,
+            id: Some(String::new()),
+            name: None,
+            arguments_delta: String::new(),
+        },
+        &json!({"index": 3, "id": ""}),
+    );
 }
 
 #[test]
