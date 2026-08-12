@@ -7,7 +7,7 @@ use tachi_params::PeerQueryParams;
 #[tool_router(router = peer_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
-        description = "Read an advisory, structurally read-only publication from a same-host peer session (#1016 observe-only v1). Params: noun (exhaustively whitelisted — 'presence' reads the claims heartbeat board, optionally narrowed by target_session_client; 'run' resolves target_session_client [required] to its active claim's dispatch_id and returns that dispatch's status.json + a recent progress.jsonl tail — any other noun is denied). Identity is self-asserted-local (same_host_loopback_v1); this never writes and never blocks a peer's turn — 'run' answers include a turn_boundary_callback pointer to tachi_memory(action='sticky_leave') for an async reply since MCP cannot interrupt a live agent. Returns a peer-publication/v1 envelope."
+        description = "Read a read-only same-host peer publication (#1016). Nouns: 'presence' reads the claims board; 'run' requires target_session_client, resolves exactly one active locally admitted AgentIdentity plus dispatch, and returns status.json plus a safe progress tail; other nouns are denied. Missing, conflicting, stale, or unavailable identity returns recipient_unresolved without fallback. Successful run includes a stable peer_publication_id and teaches only tachi_a2a(action='respond', recipient_agent_identity_id=..., subject_ref='peer_publication:...'). Current admitted recipient identity is required before a callback is exposed. Advisory only: no peer interruption, work authority, or execution grant. Returns peer-publication/v1."
     )]
     pub(crate) async fn peer_query(
         &self,

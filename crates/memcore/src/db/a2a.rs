@@ -873,6 +873,71 @@ mod tests {
         assert_eq!(states, ["received", "accepted", "consumed"]);
     }
 
+    /// Structural discriminator for the storage slice integrated immediately
+    /// before briefing: 32 independent SQLite connections race the real
+    /// transaction API, and exactly one may receive the body.
+    #[test]
+    fn thirty_two_concurrent_briefing_consumers_have_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a2a-race.db");
+        let path = path.to_str().unwrap().to_string();
+        {
+            let mut seed = MemoryStore::open(&path).expect("seed product store");
+            for id in ["issuer", "recipient"] {
+                identity(
+                    &seed,
+                    id,
+                    &format!("admission-{id}"),
+                    UnverifiedAdmissionState::SelfAsserted,
+                );
+            }
+            insert_a2a_envelope(
+                seed.connection_mut(),
+                &envelope("envelope-race", "key-race", "recipient"),
+            )
+            .expect("seed response");
+        }
+
+        let stores = (0..32)
+            .map(|_| MemoryStore::open(&path).expect("open competing connection"))
+            .collect::<Vec<_>>();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(stores.len()));
+        let handles = stores
+            .into_iter()
+            .map(|mut store| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    consume_a2a_for_recipient(
+                        store.connection_mut(),
+                        "recipient",
+                        1,
+                        "2026-08-13T00:00:00Z",
+                    )
+                    .expect("competing consume")
+                    .len()
+                })
+            })
+            .collect::<Vec<_>>();
+        let delivered = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("consumer thread"))
+            .sum::<usize>();
+        assert_eq!(delivered, 1, "exactly one briefing may receive the body");
+
+        let verify = MemoryStore::open(&path).expect("verify store");
+        let status = list_a2a_status(verify.connection(), "recipient", 10).unwrap();
+        assert_eq!(status[0].current_state, "consumed");
+        assert_eq!(
+            status[0]
+                .receipts
+                .iter()
+                .map(|receipt| receipt.state.as_str())
+                .collect::<Vec<_>>(),
+            ["received", "accepted", "consumed"]
+        );
+    }
+
     #[test]
     fn expiry_is_once_and_injected_failure_rolls_back_both_sides() {
         let mut store = store();
