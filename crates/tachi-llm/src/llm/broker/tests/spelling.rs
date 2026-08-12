@@ -54,6 +54,46 @@ macro_rules! assert_spellings {
     }};
 }
 
+// ---------------------------------------------------------------------------
+// Compile-time exhaustiveness guards
+// ---------------------------------------------------------------------------
+//
+// Never called — these exist only to be *compiled*. A `match` with no
+// wildcard arm is exhaustive by construction, so the moment either enum
+// gains a variant this file stops compiling, before any test runs and before
+// anyone has to remember that `ALL`, a golden list, or a coverage assertion
+// needs a matching update. The runtime checks elsewhere in this module catch
+// the same drift, but only if someone runs the tests; this catches it at
+// `cargo check`.
+
+/// Forces a compile error the moment [`CanonicalStreamEventKind`] gains a
+/// variant this file has not been taught the golden spelling for.
+#[allow(dead_code)]
+fn _all_stream_event_kinds_enumerated(kind: CanonicalStreamEventKind) {
+    match kind {
+        CanonicalStreamEventKind::Started => (),
+        CanonicalStreamEventKind::TextDelta => (),
+        CanonicalStreamEventKind::ToolCallDelta => (),
+        CanonicalStreamEventKind::ToolCallCompleted => (),
+        CanonicalStreamEventKind::Usage => (),
+        CanonicalStreamEventKind::Completed => (),
+        CanonicalStreamEventKind::Failed => (),
+    }
+}
+
+/// The same guard for [`ProtocolViolationKind`], which had no compile-time
+/// exhaustiveness check before this leaf — only the runtime `assert_spellings!`
+/// coverage below.
+#[allow(dead_code)]
+fn _all_protocol_violation_kinds_enumerated(kind: ProtocolViolationKind) {
+    match kind {
+        ProtocolViolationKind::MalformedBody => (),
+        ProtocolViolationKind::SchemaViolation => (),
+        ProtocolViolationKind::EmptyAssistantContent => (),
+        ProtocolViolationKind::StreamDecode => (),
+    }
+}
+
 #[test]
 fn canonical_vocabulary_spellings_are_frozen() {
     assert_spellings!(MessageRole, &["system", "user", "assistant", "tool"]);
