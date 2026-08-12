@@ -20,7 +20,8 @@ It answers three questions raised during a facade review:
 
 - Facades are the right idea, but several are **overloaded**. `tachi_task` carries **10 actions**
   (28 before the 4 PR-lifecycle duplicates were removed to `tachi_gh` in #757);
-  `tachi_memory` carries **21** actions and `tachi_gh` carries **19**.
+  `tachi_memory` carries **19** actions and `tachi_gh` carries **19**; its former
+  claim/release aliases are retired in #1688 in favor of `tachi_task`.
 - Neither extreme (flatten to 100+ tools, or keep stuffing mega-facades) is correct. The fix is
   **re-slicing facades along agent cognitive domains**, keeping each facade at roughly **7±2 actions**.
 - The `ToolProfile` bundle system (`observe/remember/coordinate/operate/admin`) is **largely dead**:
@@ -36,7 +37,7 @@ It answers three questions raised during a facade review:
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
 | `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
-| `tachi_memory` | 21 | Overloaded — `recall_*` tuning extracted (#1426); the #757 fold added delete/gc/doctor_scan/ingest/ingest_source |
+| `tachi_memory` | 19 | Overloaded — `recall_*` tuning extracted (#1426); the #757 fold added delete/gc/doctor_scan/ingest/ingest_source; claim/release retired in #1688 |
 | `tachi_gh` | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
 | `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
 | `tachi_skill` | 5 | Healthy |
@@ -88,7 +89,7 @@ tachi_task (10) ─────┬──▶ tachi_task    execution core: comple
                      ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
                      └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
 
-tachi_memory (21) ───┬──▶ tachi_memory  daily: search/get/save/ask/checkpoint/alerts (~7)
+tachi_memory (19) ───┬──▶ tachi_memory  daily: search/get/save/ask/checkpoint/alerts (~7)
                      └──▶ tachi_tune    recall_simulate/recall_proposals/recall_review/recall_apply (DONE #1426)
 ```
 

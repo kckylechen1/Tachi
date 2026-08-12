@@ -264,8 +264,6 @@ pub(crate) fn facade_action_effect(
                 "gc",
                 "ingest",
                 "ingest_source",
-                "claim",
-                "release",
                 "sticky_leave",
                 "sticky_check",
             ],

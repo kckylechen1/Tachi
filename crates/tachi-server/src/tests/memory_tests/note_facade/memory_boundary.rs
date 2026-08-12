@@ -7,6 +7,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
     let saved = server
         .tachi_memory(Parameters(TachiMemoryParams {
             action: "save".to_string(),
+            issue_ref: None,
             format: Some("markdown".to_string()),
             query: None,
             scope: None,
@@ -65,12 +66,6 @@ async fn tachi_memory_save_with_title_stays_memory() {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
-            issue_ref: None,
-            branch: None,
-            declared_file_scope: Vec::new(),
-            claim_id: None,
-            dispatch_id: None,
-            release_reason: None,
             to: None,
             ttl_days: None,
             include_read: false,

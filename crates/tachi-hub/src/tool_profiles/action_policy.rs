@@ -191,7 +191,6 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "ask"
                 | "progress"
                 | "readiness"
-                | "claim"
                 | "sticky_leave"
                 | "sticky_check"
         ),
@@ -234,12 +233,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             // do not narrow a read-only action past its prior visibility.
             "search" | "get" | "briefing" | "alerts" | "ask" | "progress" | "readiness"
             | "doctor_scan" | "sticky_check" => Some(ToolBundle::Observe),
-            // #1001: claim/release are advisory presence bookkeeping, same
-            // worker-writable tier as save/checkpoint — a dispatched lane
-            // must be able to register/release its own presence claim.
-            "save" | "extract_facts" | "checkpoint" | "claim" | "release" | "sticky_leave" => {
-                Some(ToolBundle::Remember)
-            }
+            "save" | "extract_facts" | "checkpoint" | "sticky_leave" => Some(ToolBundle::Remember),
             "consolidate" | "pattern_feedback" => Some(ToolBundle::Operate),
             // #757-fold fail-safe fix (gpt-5.6-terra review): delete/gc/
             // ingest/ingest_source were standalone ADMIN-ONLY tools pre-fold
@@ -363,16 +357,6 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_memory", Some("save"), profile));
-        assert!(facade_action_allowed(
-            "tachi_memory",
-            Some("claim"),
-            profile
-        ));
-        assert!(!facade_action_allowed(
-            "tachi_memory",
-            Some("release"),
-            profile
-        ));
         assert!(!facade_action_allowed(
             "tachi_memory",
             Some("consolidate"),
@@ -571,14 +555,14 @@ mod tests {
     }
 
     #[test]
-    fn delegate_memory_release_denied_but_search_allowed() {
+    fn delegate_memory_claim_release_are_retired_but_search_allowed() {
         let profile = Some(ToolProfile::delegate());
         assert!(facade_action_allowed(
             "tachi_memory",
             Some("search"),
             profile
         ));
-        assert!(facade_action_allowed(
+        assert!(!facade_action_allowed(
             "tachi_memory",
             Some("claim"),
             profile
@@ -588,10 +572,10 @@ mod tests {
             Some("release"),
             profile
         ));
+        assert_eq!(facade_action_required_bundle("tachi_memory", "claim"), None);
         assert_eq!(
             facade_action_required_bundle("tachi_memory", "release"),
-            Some(ToolBundle::Remember),
-            "release keeps its Remember bundle outside the delegate allowlist"
+            None
         );
     }
 

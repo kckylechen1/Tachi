@@ -396,8 +396,8 @@ pub(crate) async fn handle_memory_briefing(
     let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
 
     // Presence 工位表 (#1001): read-only, failure-safe projection of live
-    // session claims + advisory collision warnings against any explicit
-    // issue_ref this briefing call was scoped to. Never fails briefing.
+    // session claims. `issue_ref` only scopes these read-only collision
+    // warnings; WorkClaim ownership and mutation remain on tachi_task.
     // Single call point (Scope item 3) — see `claims_ops::presence_briefing_section`.
     let presence_section =
         crate::claims_ops::presence_briefing_section(server, params.issue_ref.as_deref());

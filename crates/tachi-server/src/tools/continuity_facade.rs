@@ -65,6 +65,7 @@ impl MemoryServer {
             .map(|name| format!("{name} current task recent decisions blockers next steps"));
         let params = TachiMemoryParams {
             action: "briefing".to_string(),
+            issue_ref: None,
             format: Some("markdown".to_string()),
             query,
             scope: None,
@@ -123,12 +124,6 @@ impl MemoryServer {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
-            issue_ref: None,
-            branch: None,
-            declared_file_scope: Vec::new(),
-            claim_id: None,
-            dispatch_id: None,
-            release_reason: None,
             to: None,
             ttl_days: None,
             include_read: false,

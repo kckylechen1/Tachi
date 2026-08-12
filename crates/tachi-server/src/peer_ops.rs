@@ -166,9 +166,9 @@ impl PeerPublicationRead {
     /// transaction / snapshot-clock discipline as [`Self::read_presence`].
     ///
     /// Returns `Ok(None)` — never a fabricated id — when `target` has no live
-    /// claim, or its live claim(s) carry no `dispatch_id` (a claim made
-    /// through the manual `claim`/`release` facade actions, never through
-    /// `tachi_dispatch`, legitimately has none). The caller must present this
+    /// claim, or its live claim(s) carry no `dispatch_id` (for example, a
+    /// legacy presence row not created by a dispatched Task flow). The caller
+    /// must present this
     /// as `empty`, not `unavailable` (sol invariant 3: the source WAS read
     /// successfully, there is just nothing to report).
     fn resolve_active_dispatch_id(

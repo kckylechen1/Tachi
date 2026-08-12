@@ -61,6 +61,7 @@ async fn seed_projected_pattern(server: &MemoryServer, key: &str, text: &str) ->
 fn memory_params(action: &str) -> TachiMemoryParams {
     TachiMemoryParams {
         action: action.to_string(),
+        issue_ref: None,
         format: Some("json".to_string()),
         query: None,
         scope: None,
@@ -119,12 +120,6 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         turn_id: None,
         event_type: None,
         messages: Vec::new(),
-        issue_ref: None,
-        branch: None,
-        declared_file_scope: Vec::new(),
-        claim_id: None,
-        dispatch_id: None,
-        release_reason: None,
         to: None,
         ttl_days: None,
         include_read: false,

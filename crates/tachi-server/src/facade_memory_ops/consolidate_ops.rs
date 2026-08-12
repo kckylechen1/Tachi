@@ -384,6 +384,7 @@ pub(crate) fn merge_into_for_project(
 fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
     TachiMemoryParams {
         action: "consolidate".to_string(),
+        issue_ref: None,
         format: None,
         query: None,
         scope: None,
@@ -442,12 +443,6 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
         turn_id: None,
         event_type: None,
         messages: Vec::new(),
-        issue_ref: None,
-        branch: None,
-        declared_file_scope: Vec::new(),
-        claim_id: None,
-        dispatch_id: None,
-        release_reason: None,
         to: None,
         ttl_days: None,
         include_read: false,

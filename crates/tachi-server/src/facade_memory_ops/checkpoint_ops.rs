@@ -146,6 +146,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
     }
     let params = TachiMemoryParams {
         action: "checkpoint".to_string(),
+        issue_ref: None,
         query: None,
         format: None,
         scope: Some("project".to_string()),
@@ -204,12 +205,6 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         turn_id: None,
         event_type: None,
         messages: Vec::new(),
-        issue_ref: None,
-        branch: None,
-        declared_file_scope: Vec::new(),
-        claim_id: None,
-        dispatch_id: None,
-        release_reason: None,
         to: None,
         ttl_days: None,
         include_read: false,
