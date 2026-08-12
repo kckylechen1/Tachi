@@ -459,27 +459,119 @@ impl ResponseHeaders {
         }
         match raw.parse::<u64>() {
             Ok(seconds) => Some(RetryAfter::Seconds(seconds)),
-            Err(_) => Some(RetryAfter::At(raw.to_string())),
+            // Constructor, not the variant: the non-numeric form is a
+            // provider-controlled string that ends up in a durable
+            // disposition, so it is bounded and scrubbed on the way in.
+            Err(_) => Some(RetryAfter::at(raw)),
         }
     }
 }
+
+/// The most characters a non-numeric `Retry-After` retains.
+///
+/// The longest legal HTTP-date is 29 characters (`Sun, 06 Nov 1994 08:49:37
+/// GMT`), so this is generous for every honest value and still a bound for the
+/// hostile one — and a bound is required, because the directive is copied into
+/// [`InvocationDispositionV1::ProviderRejected`](super::InvocationDispositionV1)
+/// and stored.
+pub const MAX_RETRY_AFTER_CHARS: usize = 64;
 
 /// A `Retry-After` directive as read off the wire.
 ///
 /// The local counterpart of the seam's `RetryAfter`; spellings are identical
 /// on purpose so the two reconcile without a translation table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # The date form is bounded by construction
+///
+/// [`RetryAfter::At`] is `#[non_exhaustive]`: it holds whatever the provider
+/// wrote in a header, so it is built through [`RetryAfter::at`], which caps it
+/// at [`MAX_RETRY_AFTER_CHARS`] and replaces control characters. A provider
+/// that answers `Retry-After: <a megabyte>` — or one whose value carries a
+/// newline and a forged log line — must not get to choose how much of this
+/// process's storage it consumes, or what a downstream log appears to say.
+/// The deserialization path runs the same constructor, so a stored value
+/// cannot re-enter unbounded either.
+///
+/// This does not compile:
+///
+/// ```compile_fail
+/// use tachi_llm::llm::broker::RetryAfter;
+///
+/// let _ = RetryAfter::At("x".repeat(1_000_000));
+/// ```
+///
+/// These do:
+///
+/// ```
+/// use tachi_llm::llm::broker::{RetryAfter, MAX_RETRY_AFTER_CHARS};
+///
+/// assert_eq!(RetryAfter::Seconds(120).as_seconds(), Some(120));
+/// let bounded = RetryAfter::at("x".repeat(1_000_000));
+/// assert_eq!(bounded.as_seconds(), None);
+/// assert_eq!(bounded.as_date().map(str::len), Some(MAX_RETRY_AFTER_CHARS));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "value")]
 pub enum RetryAfter {
     /// `Retry-After: 120` — delta seconds.
     #[serde(rename = "seconds")]
     Seconds(u64),
-    /// `Retry-After: <HTTP-date>` — preserved as the received string.
+    /// `Retry-After: <HTTP-date>` — preserved as received, bounded and
+    /// scrubbed. Build it with [`RetryAfter::at`].
+    #[serde(rename = "at")]
+    #[non_exhaustive]
+    At(String),
+}
+
+/// The deserialization shadow of [`RetryAfter`].
+///
+/// One type so the two paths cannot drift: whatever comes off the wire or out
+/// of storage goes through the same bounding constructor a live provider
+/// response does.
+#[derive(Deserialize)]
+#[serde(tag = "kind", content = "value")]
+enum RetryAfterParts {
+    #[serde(rename = "seconds")]
+    Seconds(u64),
     #[serde(rename = "at")]
     At(String),
 }
 
+impl From<RetryAfterParts> for RetryAfter {
+    fn from(parts: RetryAfterParts) -> Self {
+        match parts {
+            RetryAfterParts::Seconds(seconds) => Self::Seconds(seconds),
+            RetryAfterParts::At(raw) => Self::at(raw),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RetryAfter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        RetryAfterParts::deserialize(deserializer).map(Self::from)
+    }
+}
+
 impl RetryAfter {
+    /// The non-numeric form, bounded and scrubbed.
+    pub fn at(raw: impl AsRef<str>) -> Self {
+        Self::At(super::disposition::bounded_provider_token(
+            raw.as_ref(),
+            MAX_RETRY_AFTER_CHARS,
+        ))
+    }
+
+    /// The directive as the provider wrote it, when it was not a number.
+    pub fn as_date(&self) -> Option<&str> {
+        match self {
+            Self::At(raw) => Some(raw),
+            Self::Seconds(_) => None,
+        }
+    }
+
     /// The delta-seconds form, when the provider used it.
     ///
     /// Exactly what the legacy lane's `retry-after` read produces, so the two

@@ -236,6 +236,37 @@ impl BeforeSendRefusalKind {
 /// correctly and saying no; a violation means the response cannot be trusted
 /// to mean anything, so it is never retried automatically (the same malformed
 /// answer is the likely outcome, at the same price).
+///
+/// # The one provider-controlled string is bounded by construction
+///
+/// [`ProtocolViolation::EmptyAssistantContent`] is `#[non_exhaustive]`, so it
+/// cannot be built with a struct literal from outside this crate: the only way
+/// in is [`ProtocolViolation::empty_assistant_content`], which caps and
+/// scrubs. Without that, the bound was advice — a caller (or a second adapter
+/// written against the public API) could put a megabyte of provider-chosen
+/// bytes, newlines and all, straight into a durable disposition.
+///
+/// This does not compile:
+///
+/// ```compile_fail
+/// use tachi_llm::llm::broker::ProtocolViolation;
+///
+/// let _ = ProtocolViolation::EmptyAssistantContent {
+///     finish_reason: Some("x".repeat(1_000_000)),
+/// };
+/// ```
+///
+/// The bounded path always does:
+///
+/// ```
+/// use tachi_llm::llm::broker::ProtocolViolation;
+///
+/// let violation = ProtocolViolation::empty_assistant_content(Some("stop"));
+/// assert_eq!(
+///     violation,
+///     ProtocolViolation::empty_assistant_content(Some("stop")),
+/// );
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProtocolViolation {
@@ -255,13 +286,15 @@ pub enum ProtocolViolation {
     /// treats this as a retriable lane fault; the disposition keeps the fact
     /// that the provider *answered* rather than hiding it in a generic error.
     #[serde(rename = "empty_assistant_content")]
+    #[non_exhaustive]
     EmptyAssistantContent {
         /// The provider's own `finish_reason`, when it sent one — bounded to
         /// [`MAX_FINISH_REASON_CHARS`]. Build it with
-        /// [`ProtocolViolation::empty_assistant_content`] rather than by hand:
-        /// this is the only provider-controlled string in the whole violation
-        /// vocabulary (every other detail is `&'static str`), so it is the only
-        /// place an unbounded response body can reach a durable disposition.
+        /// [`ProtocolViolation::empty_assistant_content`], which is the only
+        /// way in from outside this crate: this is the only
+        /// provider-controlled string in the whole violation vocabulary (every
+        /// other detail is `&'static str`), so it is the only place an
+        /// unbounded response body can reach a durable disposition.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<String>,
     },
@@ -293,7 +326,8 @@ impl ProtocolViolation {
     /// directly with what it read off the wire.
     pub fn empty_assistant_content(finish_reason: Option<&str>) -> Self {
         Self::EmptyAssistantContent {
-            finish_reason: finish_reason.map(bounded_provider_token),
+            finish_reason: finish_reason
+                .map(|raw| bounded_provider_token(raw, MAX_FINISH_REASON_CHARS)),
         }
     }
 
@@ -314,9 +348,14 @@ impl ProtocolViolation {
 /// `"stop\n[llm] fabricated log line"` must not be able to forge a log record
 /// downstream, and replacing keeps the length honest while removing the
 /// framing character that does the forging.
-fn bounded_provider_token(raw: &str) -> String {
+///
+/// Shared with [`RetryAfter::at`](super::wire::RetryAfter::at) rather than
+/// copied: `Retry-After` is the second provider-controlled string that reaches
+/// a durable disposition, and two implementations of "bound and scrub" drift
+/// the moment one of them is fixed.
+pub(super) fn bounded_provider_token(raw: &str, max_chars: usize) -> String {
     raw.chars()
-        .take(MAX_FINISH_REASON_CHARS)
+        .take(max_chars)
         .map(|c| if c.is_control() { '\u{fffd}' } else { c })
         .collect()
 }

@@ -502,6 +502,50 @@ fn a_provider_controlled_finish_reason_is_bounded_and_defanged() {
 }
 
 #[test]
+fn a_provider_controlled_retry_after_is_bounded_and_defanged_too() {
+    // The *second* provider-controlled string that reaches a durable
+    // disposition, and the one the first fix-round missed: a non-numeric
+    // `Retry-After` is copied out of a response header and persisted in
+    // `ProviderRejected`. Same threat, same treatment, same helper.
+    let hostile = format!("Tue,{}", "A".repeat(10_000));
+    let directive = ResponseHeaders::from_pairs([("Retry-After", hostile.as_str())])
+        .retry_after()
+        .expect("a non-numeric directive is still a directive");
+    let kept = directive.as_date().expect("the date form was preserved");
+    assert_eq!(
+        kept.chars().count(),
+        MAX_RETRY_AFTER_CHARS,
+        "an unbounded provider header reached a durable disposition"
+    );
+    assert_eq!(directive.as_seconds(), None);
+
+    // Control characters are the log-forging path here as well.
+    let forging = RetryAfter::at("Tue, 12 Aug 2026 09:00:00 GMT\n[llm] fabricated");
+    let kept = forging.as_date().expect("the date form was preserved");
+    assert!(
+        !kept.contains('\n') && !kept.contains('\r'),
+        "a newline survived into a retry directive: {kept:?}"
+    );
+
+    // Reading one back out of storage runs the same constructor, so a value
+    // stored before this bound existed cannot re-enter unbounded.
+    let stored = json!({"kind": "at", "value": "B".repeat(10_000)});
+    let restored: RetryAfter =
+        serde_json::from_value(stored).expect("a stored directive deserializes");
+    assert_eq!(
+        restored.as_date().map(|value| value.chars().count()),
+        Some(MAX_RETRY_AFTER_CHARS),
+        "the deserialize path skipped the bound the constructor applies"
+    );
+
+    // The honest value is untouched, and the numeric form is not a string at
+    // all so it needs no bound.
+    let honest = "Tue, 12 Aug 2026 09:00:00 GMT";
+    assert_eq!(RetryAfter::at(honest).as_date(), Some(honest));
+    assert_eq!(RetryAfter::Seconds(120).as_seconds(), Some(120));
+}
+
+#[test]
 fn every_before_send_refusal_is_a_safe_terminal() {
     // Nothing was sent, so nothing was spent: every refusal must be free to
     // retry and free to fall back. A refusal that reported otherwise would

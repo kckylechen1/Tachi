@@ -122,7 +122,7 @@ pub use wire::{
     AuthMaterialKind, AuthMaterialRef, AuthPlacement, CanonicalAssistantMessage, HttpMethod,
     ProviderErrorClass, ProviderErrorClassification, ProviderResponseMetadata, ProviderWire,
     ResponseHeaders, RetryAdvice, RetryAfter, ToolCallV1, WireCapabilities, WireHeader,
-    WireHttpRequest, WireOutcome,
+    WireHttpRequest, WireOutcome, MAX_RETRY_AFTER_CHARS,
 };
 
 pub use openai_compat::{OpenAiCompatWire, OPENAI_COMPAT_DIALECT};
