@@ -147,7 +147,7 @@ fn decoding_is_invariant_under_every_chunk_boundary() {
     }
 
     assert!(
-        transcripts >= 26,
+        transcripts >= 38,
         "only {transcripts} transcripts were fuzzed"
     );
     assert!(

@@ -41,8 +41,14 @@ use super::*;
 /// The `delta`-grammar corpus.
 const OPENAI_SSE_DIR: &str = "openai_compat_stream";
 
+/// The Anthropic event-grammar corpus.
+const ANTHROPIC_SSE_DIR: &str = "anthropic_stream";
+
 /// Every corpus directory, with the grammar each one speaks.
-pub(super) const STREAM_CORPORA: &[(&str, &str)] = &[(OPENAI_SSE_DIR, "openai_compat_sse")];
+pub(super) const STREAM_CORPORA: &[(&str, &str)] = &[
+    (OPENAI_SSE_DIR, "openai_compat_sse"),
+    (ANTHROPIC_SSE_DIR, "anthropic_sse"),
+];
 
 /// What a fixture does once its chunks are exhausted.
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +85,13 @@ pub(super) fn decoder_for(grammar: &str) -> Box<dyn WireStreamDecoder> {
         "openai_compat_sse" => OpenAiCompatWire::new()
             .new_stream_decoder()
             .expect("the OpenAI-compat dialect streams and must hand back a decoder"),
+        // Constructed directly, because there is no Anthropic `ProviderWire`
+        // yet: slice-2 builds this grammar to answer whether the canonical
+        // vocabulary is OpenAI-shaped, not to ship a second dialect. The
+        // request/response/classification halves are a later leaf, and saying
+        // so here is cheaper than letting a reader infer a dialect that is not
+        // there.
+        "anthropic_sse" => Box::new(AnthropicEventStreamDecoder::new()),
         other => panic!("fixture names a grammar this harness does not know: {other}"),
     }
 }
@@ -242,9 +255,13 @@ fn every_transcript() -> Vec<(String, String, Value)> {
 fn every_transcript_decodes_to_its_golden() {
     let fixtures = every_transcript();
     assert!(
-        fixtures.len() >= 26,
+        fixtures.len() >= 38,
         "the transcript corpus shrank to {} fixtures",
         fixtures.len()
+    );
+    assert!(
+        STREAM_CORPORA.len() >= 2,
+        "one grammar cannot answer whether the vocabulary is shaped around it"
     );
 
     for (name, grammar, fixture) in &fixtures {
@@ -401,4 +418,114 @@ fn the_corpus_reaches_every_canonical_stream_event() {
             "no transcript fixture produces {kind:?}"
         );
     }
+}
+
+/// One named fixture from a corpus.
+fn transcript_named(dir: &str, file: &str) -> Value {
+    load_fixtures(dir)
+        .into_iter()
+        .find(|(name, _)| name == file)
+        .unwrap_or_else(|| panic!("fixture {file} is missing from {dir}"))
+        .1
+}
+
+/// The tool-call story a decoded transcript tells, with everything
+/// provider-specific projected away.
+///
+/// Ids are dropped on purpose: they are the provider's own opaque handles and
+/// the two grammars will never agree on them. Everything else — the event
+/// sequence, the function name, the reassembled argument document, how the turn
+/// ended — is canonical, and must agree exactly.
+fn tool_story(events: &[Value]) -> Value {
+    let mut kinds: Vec<&str> = Vec::new();
+    let mut name: Option<String> = None;
+    let mut arguments = String::new();
+    let mut completion: Option<String> = None;
+    for event in events {
+        match event.get("event").and_then(Value::as_str) {
+            Some("tool_call_delta") => {
+                kinds.push("tool_call_delta");
+                assert_eq!(
+                    event.pointer("/fragment/index").and_then(Value::as_u64),
+                    Some(0),
+                    "both fixtures describe the turn's first tool call"
+                );
+                if let Some(seen) = event.pointer("/fragment/name").and_then(Value::as_str) {
+                    name = Some(seen.to_string());
+                }
+                if let Some(seen) = event
+                    .pointer("/fragment/arguments_delta")
+                    .and_then(Value::as_str)
+                {
+                    arguments.push_str(seen);
+                }
+            }
+            Some("tool_call_completed") => kinds.push("tool_call_completed"),
+            Some("completed") => {
+                kinds.push("completed");
+                completion = event
+                    .get("completion")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+    json!({
+        "kinds": kinds,
+        "name": name,
+        "arguments": arguments,
+        "completion": completion,
+    })
+}
+
+#[test]
+fn two_grammars_describe_the_same_turn_in_the_same_vocabulary() {
+    // The frozen design's actual question, asked directly. One turn — a model
+    // calling `search` with `{"q":"cats"}` — arrives as OpenAI `delta` chunks
+    // with identity and arguments packed into repeated deltas, and as Anthropic
+    // content blocks that open, accumulate and close explicitly. Different
+    // frames, different event names, different index numbering, different
+    // terminators. If the canonical vocabulary were shaped around one of them,
+    // the other's story would come out differently here.
+    let openai = transcript_named(
+        "openai_compat_stream",
+        "07_tool_call_reassembled_across_events.json",
+    );
+    let anthropic = transcript_named("anthropic_stream", "02_tool_use_after_a_text_block.json");
+
+    let openai = decode_transcript(
+        "openai_compat_sse",
+        &transcript_chunks(&openai, "openai tool call"),
+        transcript_terminal(&openai, "openai tool call"),
+    );
+    let anthropic = decode_transcript(
+        "anthropic_sse",
+        &transcript_chunks(&anthropic, "anthropic tool call"),
+        transcript_terminal(&anthropic, "anthropic tool call"),
+    );
+    assert_eq!(openai.error, None);
+    assert_eq!(anthropic.error, None);
+
+    let story = tool_story(&openai.events);
+    assert_eq!(
+        story,
+        tool_story(&anthropic.events),
+        "the two grammars tell different canonical stories about the same turn"
+    );
+    // ...and the story is not vacuous.
+    assert_eq!(
+        story,
+        json!({
+            "kinds": ["tool_call_delta", "tool_call_delta", "tool_call_delta",
+                      "tool_call_completed", "completed"],
+            "name": "search",
+            "arguments": "{\"q\":\"cats\"}",
+            "completion": "tool_calls",
+        })
+    );
+    assert_eq!(
+        openai.disposition, anthropic.disposition,
+        "the same turn must reach the same terminal disposition in both grammars"
+    );
 }

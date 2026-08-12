@@ -70,7 +70,7 @@
 //! # What is deliberately not here (slice boundaries)
 //!
 //! - **No NDJSON decoder.** The SSE grammars land in slice-2
-//!   ([`OpenAiCompatStreamDecoder`] and the Anthropic event grammar); an
+//!   ([`OpenAiCompatStreamDecoder`] and [`AnthropicEventStreamDecoder`]); an
 //!   Ollama-shaped deployment streams NDJSON, which is a third grammar with its
 //!   own transcript family and is not implemented here. What *is* pinned is
 //!   that feeding NDJSON to an SSE decoder is a typed refusal rather than a
@@ -88,6 +88,7 @@
 //!   lanes untouched. This module copies its *classification semantics* and
 //!   pins the copy with a parity test; it changes nothing there.
 
+mod anthropic_stream;
 mod canonical;
 mod disposition;
 mod openai_compat;
@@ -128,5 +129,6 @@ pub use wire::{
     WireHttpRequest, WireOutcome, MAX_RETRY_AFTER_CHARS,
 };
 
+pub use anthropic_stream::AnthropicEventStreamDecoder;
 pub use openai_compat::{OpenAiCompatWire, OPENAI_COMPAT_DIALECT};
 pub use openai_stream::OpenAiCompatStreamDecoder;

@@ -33,8 +33,10 @@
 use serde_json::Value;
 
 use super::disposition::{InvocationDispositionV1, ProtocolViolation, SendPhase};
+use super::sse::{SseFrame, SseFramer};
 use super::stream::{
-    CanonicalStreamEvent, StreamDecodeError, StreamDecodeErrorKind, ToolCallFragment,
+    CanonicalStreamEvent, StreamDecodeError, StreamDecodeErrorKind, StreamEof, ToolCallFragment,
+    TransportErrorKind, WireStreamDecoder,
 };
 
 /// The most argument bytes one tool call may accumulate across events.
@@ -58,6 +60,171 @@ pub(super) const MAX_TOOL_CALLS_PER_TURN: usize = 128;
 /// keeps it that way by construction rather than by review.
 pub(super) fn decode_error(kind: StreamDecodeErrorKind, detail: &'static str) -> StreamDecodeError {
     StreamDecodeError { kind, detail }
+}
+
+// ---------------------------------------------------------------------------
+// The SSE driver
+// ---------------------------------------------------------------------------
+
+/// One provider grammar, read from already-framed SSE events.
+///
+/// A grammar decides what an event *means*. It never sees bytes, never decides
+/// when a stream ended, and never chooses a disposition for a terminal input —
+/// those belong to [`SseDecoder`] and [`StreamLifecycle`], because they are the
+/// answers that must not depend on which provider was called.
+pub(super) trait SseGrammar: Send {
+    /// Applies one frame, emitting whatever canonical events it means.
+    fn handle_frame(
+        &mut self,
+        lifecycle: &mut StreamLifecycle,
+        frame: SseFrame,
+    ) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError>;
+
+    /// What to say when the body ended cleanly without this grammar's
+    /// terminator. Body-free and `&'static`, like every other detail.
+    fn unterminated_detail(&self) -> &'static str;
+}
+
+/// The half of a stream decoder that is the same for every SSE grammar.
+///
+/// # Why this is one type and not one per grammar
+///
+/// What lives here is the set of decisions a reviewer would have to re-check
+/// for every provider if it were copied: when a stream is unterminated, what a
+/// truncated body means, when a failure may be reported relative to the events
+/// that preceded it. Those are claims about billing and retry safety, and two
+/// copies of them would drift into two different answers to *"is it safe to
+/// re-send?"* — which is precisely the question the canonical vocabulary exists
+/// to make provider-independent.
+///
+/// # Why a failure can arrive one call late
+///
+/// [`WireStreamDecoder::push_bytes`] returns `Result<Vec<_>, _>`, so a chunk
+/// holding three good frames and then a broken one cannot return both.
+/// Returning the failure immediately would drop events that the same bytes,
+/// chunked differently, would have delivered — breaking the chunk-boundary
+/// invariance the design names for fuzzing. So a failure detected mid-chunk is
+/// **stashed**: the events that legitimately preceded it go out, the terminal
+/// disposition is sealed at once (so nothing ever reads a stale answer), and
+/// the failure is returned from the next call. At [`WireStreamDecoder::finish`]
+/// there is no next call, so it is returned directly — and what remains
+/// buffered at EOF is a function of the byte sequence alone, never of how it
+/// was chunked.
+#[derive(Debug, Default)]
+pub(super) struct SseDecoder<G> {
+    /// The transport layer.
+    framer: SseFramer,
+    /// Where the stream is in its life.
+    lifecycle: StreamLifecycle,
+    /// What the frames mean.
+    grammar: G,
+    /// A failure detected behind events that must be delivered first.
+    stashed: Option<StreamDecodeError>,
+}
+
+impl<G: Default> SseDecoder<G> {
+    /// A decoder with no bytes seen.
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<G> SseDecoder<G> {
+    /// Seals the disposition a failure produces and holds the failure.
+    fn stash(&mut self, error: StreamDecodeError) {
+        self.lifecycle.seal_decode_error(error.kind);
+        if self.stashed.is_none() {
+            self.stashed = Some(error);
+        }
+    }
+}
+
+impl<G: SseGrammar> WireStreamDecoder for SseDecoder<G> {
+    fn push_bytes(&mut self, chunk: &[u8]) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
+        if let Some(stashed) = self.stashed.clone() {
+            return Err(stashed);
+        }
+        if !chunk.is_empty() {
+            self.lifecycle.note_bytes();
+        }
+        let (frames, framing_error) = self.framer.push(chunk);
+        let mut events = Vec::new();
+        for frame in frames {
+            match self.grammar.handle_frame(&mut self.lifecycle, frame) {
+                Ok(mut produced) => events.append(&mut produced),
+                Err(error) => {
+                    self.stash(error);
+                    return Ok(events);
+                }
+            }
+        }
+        if let Some(error) = framing_error {
+            self.stash(error);
+        }
+        Ok(events)
+    }
+
+    fn finish(&mut self, eof: StreamEof) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
+        if let Some(stashed) = self.stashed.clone() {
+            return Err(stashed);
+        }
+        let clean = matches!(eof, StreamEof::Clean);
+        let (frame, framing_error) = self.framer.finish(clean);
+        let mut events = Vec::new();
+        if let Some(frame) = frame {
+            match self.grammar.handle_frame(&mut self.lifecycle, frame) {
+                Ok(mut produced) => events.append(&mut produced),
+                Err(error) => {
+                    self.stash(error.clone());
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(error) = framing_error {
+            self.stash(error.clone());
+            return Err(error);
+        }
+        if self.lifecycle.is_terminal() {
+            return Ok(events);
+        }
+        match eof {
+            StreamEof::Clean => {
+                // The body ended exactly where the transport said it would and
+                // the terminator never came: the provider broke its own
+                // grammar, which is a protocol fault and not a lost connection.
+                let error = decode_error(
+                    StreamDecodeErrorKind::UnterminatedStream,
+                    self.grammar.unterminated_detail(),
+                );
+                self.stash(error.clone());
+                Err(error)
+            }
+            StreamEof::Truncated => {
+                // Bytes are missing. Nothing here says the *generation* failed
+                // — only that this process stopped being able to watch it.
+                events.append(&mut self.lifecycle.on_observation_lost());
+                Ok(events)
+            }
+        }
+    }
+
+    fn on_transport_error(&mut self, _error: TransportErrorKind) -> Vec<CanonicalStreamEvent> {
+        // The transport's own kind — reset, timeout, TLS — deliberately does
+        // not change the answer. Every one of them leaves the same fact behind:
+        // the provider accepted the request and this process can no longer
+        // observe what it did with it. Mapping a reset to "failed" and a
+        // timeout to "unknown" would be a distinction the transport cannot
+        // actually support.
+        self.lifecycle.on_observation_lost()
+    }
+
+    fn on_cancel(&mut self) -> Vec<CanonicalStreamEvent> {
+        self.lifecycle.on_cancel()
+    }
+
+    fn terminal_disposition(&self) -> Option<InvocationDispositionV1> {
+        self.lifecycle.terminal()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +266,11 @@ impl StreamLifecycle {
     /// Records that output the caller can see was emitted.
     pub(super) fn note_visible_output(&mut self) {
         self.saw_visible_output = true;
+    }
+
+    /// Whether the stream has announced itself yet.
+    pub(super) fn started(&self) -> bool {
+        self.started
     }
 
     /// Marks the stream started, answering whether this was the first time.

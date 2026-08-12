@@ -11,7 +11,17 @@
 //!
 //! Those are two different ends, and conflating them is why a decoder either
 //! drops the usage block (ending at `finish_reason`) or reports success on a
-//! truncated body (ending at neither). [`StreamLifecycle`] keeps them apart.
+//! truncated body (ending at neither).
+//! [`StreamLifecycle`](super::stream_grammar::StreamLifecycle) keeps them
+//! apart.
+//!
+//! # What is here and what is not
+//!
+//! Only the meaning of a frame. Framing is [`super::sse`], and everything that
+//! must not vary between providers — terminal inputs, ceilings, tool-call
+//! reconstruction, when a failure may be reported — is
+//! [`super::stream_grammar`]. This module is the pluggable part, which is the
+//! claim the Anthropic grammar exists to test.
 //!
 //! # Two failure channels, and the rule for which is which
 //!
@@ -22,18 +32,6 @@
 //!   invocation failed.** An in-stream `error` object is the provider speaking
 //!   its own grammar correctly to report a failure; calling that a decode error
 //!   would blame the wrong party.
-//!
-//! # Why an error can arrive one call late
-//!
-//! `push_bytes` returns `Result<Vec<_>, _>`, so a chunk holding three good
-//! frames and then a broken one cannot return both. Dropping the three would
-//! make the observable event sequence depend on where the network split the
-//! bytes — the exact opposite of the chunk-boundary invariance this decoder is
-//! required to hold. So a failure detected mid-chunk is **stashed**: the events
-//! that legitimately preceded it are delivered, the terminal disposition is
-//! sealed immediately (so a caller reading it never sees a stale answer), and
-//! the error itself is returned from the next call, which the trait guarantees
-//! there will be — a decoder must be driven to a terminal input.
 //!
 //! # What a `[DONE]` seals
 //!
@@ -49,12 +47,14 @@ use serde_json::Value;
 
 use super::disposition::{CompletionKindV1, InvocationDispositionV1, ProtocolViolation};
 use super::openai_compat::{completion_kind, non_blank, parse_usage};
-use super::sse::{SseFrame, SseFramer};
+use super::sse::SseFrame;
 use super::stream::{
     CanonicalStreamEvent, StreamDecodeError, StreamDecodeErrorKind, StreamEof, ToolCallFragment,
     TransportErrorKind, WireStreamDecoder,
 };
-use super::stream_grammar::{decode_error, fragment, StreamLifecycle, ToolCallTracker};
+use super::stream_grammar::{
+    decode_error, fragment, SseDecoder, SseGrammar, StreamLifecycle, ToolCallTracker,
+};
 use super::wire::ProviderResponseMetadata;
 
 /// The frame that ends an OpenAI-compatible stream.
@@ -70,46 +70,57 @@ const MESSAGE_EVENT: &str = "message";
 
 /// Decodes an OpenAI-compatible `delta` stream into canonical events.
 #[derive(Debug, Default)]
-pub struct OpenAiCompatStreamDecoder {
-    /// The transport layer.
-    framer: SseFramer,
-    /// Where the stream is in its life.
-    lifecycle: StreamLifecycle,
-    /// Tool calls under reconstruction.
-    tools: ToolCallTracker,
-    /// The completion kind the generation ended with, once seen.
-    completion: Option<CompletionKindV1>,
-    /// A failure detected after events that must be delivered first.
-    stashed: Option<StreamDecodeError>,
-}
+pub struct OpenAiCompatStreamDecoder(SseDecoder<DeltaGrammar>);
 
 impl OpenAiCompatStreamDecoder {
     /// A decoder with no bytes seen.
     pub fn new() -> Self {
-        Self {
-            framer: SseFramer::new(),
-            lifecycle: StreamLifecycle::default(),
-            tools: ToolCallTracker::default(),
-            completion: None,
-            stashed: None,
-        }
+        Self(SseDecoder::new())
+    }
+}
+
+// Forwarding, deliberately: the shared driver owns the transport and the
+// terminal-input semantics, and this type exists so the dialect's decoder has a
+// name of its own in the public API.
+impl WireStreamDecoder for OpenAiCompatStreamDecoder {
+    fn push_bytes(&mut self, chunk: &[u8]) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
+        self.0.push_bytes(chunk)
     }
 
-    /// Seals the disposition a failure produces and holds the failure for the
-    /// next call. See the module note.
-    fn stash(&mut self, error: StreamDecodeError) {
-        self.lifecycle.seal_decode_error(error.kind);
-        if self.stashed.is_none() {
-            self.stashed = Some(error);
-        }
+    fn finish(&mut self, eof: StreamEof) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
+        self.0.finish(eof)
     }
 
-    /// Applies one frame.
+    fn on_transport_error(&mut self, error: TransportErrorKind) -> Vec<CanonicalStreamEvent> {
+        self.0.on_transport_error(error)
+    }
+
+    fn on_cancel(&mut self) -> Vec<CanonicalStreamEvent> {
+        self.0.on_cancel()
+    }
+
+    fn terminal_disposition(&self) -> Option<InvocationDispositionV1> {
+        self.0.terminal_disposition()
+    }
+}
+
+/// The `delta` grammar's own state: what it is reconstructing, and how the
+/// generation ended.
+#[derive(Debug, Default)]
+pub(super) struct DeltaGrammar {
+    /// Tool calls under reconstruction.
+    tools: ToolCallTracker,
+    /// The completion kind the generation ended with, once seen.
+    completion: Option<CompletionKindV1>,
+}
+
+impl SseGrammar for DeltaGrammar {
     fn handle_frame(
         &mut self,
+        lifecycle: &mut StreamLifecycle,
         frame: SseFrame,
     ) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
-        if self.lifecycle.is_terminal() {
+        if lifecycle.is_terminal() {
             return Err(decode_error(
                 StreamDecodeErrorKind::IllegalSequence,
                 "a frame arrived after the stream's terminator",
@@ -132,7 +143,7 @@ impl OpenAiCompatStreamDecoder {
         };
         let data = data.trim();
         if data == DONE_SENTINEL {
-            return self.terminate();
+            return self.terminate(lifecycle);
         }
 
         let Ok(value) = serde_json::from_str::<Value>(data) else {
@@ -149,7 +160,7 @@ impl OpenAiCompatStreamDecoder {
         };
 
         let mut events = Vec::new();
-        if self.lifecycle.mark_started() {
+        if lifecycle.mark_started() {
             events.push(CanonicalStreamEvent::Started {
                 metadata: metadata_of(&value),
             });
@@ -160,8 +171,7 @@ impl OpenAiCompatStreamDecoder {
             // grammar was spoken correctly — so it becomes the terminal event,
             // pointing at the field that carried it and carrying none of it.
             events.push(
-                self.lifecycle
-                    .fail_with(ProtocolViolation::SchemaViolation { pointer: "/error" }),
+                lifecycle.fail_with(ProtocolViolation::SchemaViolation { pointer: "/error" }),
             );
             return Ok(events);
         }
@@ -201,14 +211,21 @@ impl OpenAiCompatStreamDecoder {
             });
         }
         if let Some(choice) = choices.first() {
-            self.decode_choice(choice, &mut events)?;
+            self.decode_choice(lifecycle, choice, &mut events)?;
         }
         Ok(events)
     }
 
+    fn unterminated_detail(&self) -> &'static str {
+        "the body ended cleanly without the delta grammar's [DONE] terminator"
+    }
+}
+
+impl DeltaGrammar {
     /// Applies one `choices[]` entry.
     fn decode_choice(
         &mut self,
+        lifecycle: &mut StreamLifecycle,
         choice: &Value,
         events: &mut Vec<CanonicalStreamEvent>,
     ) -> Result<(), StreamDecodeError> {
@@ -239,13 +256,13 @@ impl OpenAiCompatStreamDecoder {
                 // a text event; emitting one would put a meaningless delta in
                 // front of every single response.
                 if !text.is_empty() {
-                    if self.lifecycle.generation_ended() {
+                    if lifecycle.generation_ended() {
                         return Err(decode_error(
                             StreamDecodeErrorKind::IllegalSequence,
                             "a content delta arrived after the generation ended",
                         ));
                     }
-                    self.lifecycle.note_visible_output();
+                    lifecycle.note_visible_output();
                     events.push(CanonicalStreamEvent::TextDelta {
                         text: text.to_string(),
                     });
@@ -260,7 +277,7 @@ impl OpenAiCompatStreamDecoder {
                     ));
                 };
                 for call in calls {
-                    if self.lifecycle.generation_ended() {
+                    if lifecycle.generation_ended() {
                         return Err(decode_error(
                             StreamDecodeErrorKind::IllegalSequence,
                             "a tool-call delta arrived after the generation ended",
@@ -269,7 +286,7 @@ impl OpenAiCompatStreamDecoder {
                     events.push(CanonicalStreamEvent::ToolCallDelta {
                         fragment: self.tool_fragment(call)?,
                     });
-                    self.lifecycle.note_visible_output();
+                    lifecycle.note_visible_output();
                 }
             }
         }
@@ -284,13 +301,13 @@ impl OpenAiCompatStreamDecoder {
                     "a finish_reason was present but was not a string",
                 ));
             };
-            if self.lifecycle.generation_ended() {
+            if lifecycle.generation_ended() {
                 return Err(decode_error(
                     StreamDecodeErrorKind::IllegalSequence,
                     "a second finish_reason arrived for one generation",
                 ));
             }
-            self.lifecycle.end_generation();
+            lifecycle.end_generation();
             // The same mapping the non-streaming path uses, called rather than
             // copied: two transcriptions of "which finish reasons mean
             // truncated" is one transcription too many.
@@ -353,7 +370,10 @@ impl OpenAiCompatStreamDecoder {
     }
 
     /// The terminator arrived.
-    fn terminate(&mut self) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
+    fn terminate(
+        &mut self,
+        lifecycle: &mut StreamLifecycle,
+    ) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
         let mut events = Vec::new();
         // A stream may terminate without ever sending `finish_reason`; the
         // calls it opened are still calls, so they are closed and validated
@@ -362,102 +382,9 @@ impl OpenAiCompatStreamDecoder {
             events.push(CanonicalStreamEvent::ToolCallCompleted { index });
         }
         let completion = self.completion.unwrap_or(CompletionKindV1::Unknown);
-        self.lifecycle
-            .seal(InvocationDispositionV1::Completed { completion });
+        lifecycle.seal(InvocationDispositionV1::Completed { completion });
         events.push(CanonicalStreamEvent::Completed { completion });
         Ok(events)
-    }
-}
-
-impl WireStreamDecoder for OpenAiCompatStreamDecoder {
-    fn push_bytes(&mut self, chunk: &[u8]) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
-        if let Some(stashed) = self.stashed.clone() {
-            return Err(stashed);
-        }
-        if !chunk.is_empty() {
-            self.lifecycle.note_bytes();
-        }
-        let (frames, framing_error) = self.framer.push(chunk);
-        let mut events = Vec::new();
-        for frame in frames {
-            match self.handle_frame(frame) {
-                Ok(mut produced) => events.append(&mut produced),
-                Err(error) => {
-                    self.stash(error);
-                    return Ok(events);
-                }
-            }
-        }
-        if let Some(error) = framing_error {
-            self.stash(error);
-        }
-        Ok(events)
-    }
-
-    fn finish(&mut self, eof: StreamEof) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
-        if let Some(stashed) = self.stashed.clone() {
-            return Err(stashed);
-        }
-        let clean = matches!(eof, StreamEof::Clean);
-        let (frame, framing_error) = self.framer.finish(clean);
-        let mut events = Vec::new();
-        if let Some(frame) = frame {
-            // This is the last call there will be, so a failure here is
-            // returned rather than stashed: there is no next call to carry it,
-            // and *which* bytes are left over at EOF is a function of the byte
-            // sequence alone, never of how it was chunked.
-            match self.handle_frame(frame) {
-                Ok(mut produced) => events.append(&mut produced),
-                Err(error) => {
-                    self.stash(error.clone());
-                    return Err(error);
-                }
-            }
-        }
-        if let Some(error) = framing_error {
-            self.stash(error.clone());
-            return Err(error);
-        }
-        if self.lifecycle.is_terminal() {
-            return Ok(events);
-        }
-        match eof {
-            StreamEof::Clean => {
-                // The body ended exactly where the transport said it would and
-                // the terminator never came: the provider broke its own
-                // grammar, which is a protocol fault and not a lost connection.
-                let error = decode_error(
-                    StreamDecodeErrorKind::UnterminatedStream,
-                    "the body ended cleanly without the grammar's terminator",
-                );
-                self.stash(error.clone());
-                Err(error)
-            }
-            StreamEof::Truncated => {
-                // Bytes are missing. Nothing here says the *generation* failed
-                // — only that this process stopped being able to watch it.
-                events.append(&mut self.lifecycle.on_observation_lost());
-                Ok(events)
-            }
-        }
-    }
-
-    fn on_transport_error(&mut self, _error: TransportErrorKind) -> Vec<CanonicalStreamEvent> {
-        // The transport's own kind — reset, timeout, TLS — deliberately does
-        // not change the answer. Every one of them leaves the same fact behind:
-        // the provider accepted the request and this process can no longer
-        // observe what it did with it. Mapping a reset to "failed" and a
-        // timeout to "unknown" would be a distinction the transport cannot
-        // actually support.
-        self.lifecycle.on_observation_lost()
-    }
-
-    fn on_cancel(&mut self) -> Vec<CanonicalStreamEvent> {
-        self.lifecycle.on_cancel()
-    }
-
-    fn terminal_disposition(&self) -> Option<InvocationDispositionV1> {
-        self.lifecycle.terminal()
     }
 }
 
