@@ -300,6 +300,169 @@ fn payload_bearing_enum_tags_match_their_fieldless_kind() {
 }
 
 #[test]
+fn payload_bearing_variants_have_literal_instance_goldens() {
+    // Tag parity (above) proves the *discriminant* is spelled right. It says
+    // nothing about the payload keys beside the tag: renaming
+    // `ProtocolViolation::StreamDecode`'s `rule` field to `decode_rule`, or
+    // `TextDelta`'s `text` to `delta`, keeps every tag assertion green while
+    // changing the bytes a consumer parses. So each payload-bearing variant is
+    // serialized once, as an instance, against a literal.
+    let violations = [
+        (
+            ProtocolViolation::MalformedBody {
+                detail: "response body was not valid JSON",
+            },
+            json!({"kind": "malformed_body", "detail": "response body was not valid JSON"}),
+        ),
+        (
+            ProtocolViolation::SchemaViolation {
+                pointer: "/choices",
+            },
+            json!({"kind": "schema_violation", "pointer": "/choices"}),
+        ),
+        (
+            ProtocolViolation::empty_assistant_content(Some("stop")),
+            json!({"kind": "empty_assistant_content", "finish_reason": "stop"}),
+        ),
+        (
+            ProtocolViolation::StreamDecode {
+                rule: StreamDecodeErrorKind::IllegalSequence,
+            },
+            json!({"kind": "stream_decode", "rule": "illegal_sequence"}),
+        ),
+    ];
+    assert_eq!(
+        violations.len(),
+        ProtocolViolationKind::ALL.len(),
+        "a violation variant has no instance golden"
+    );
+    for (violation, expected) in &violations {
+        assert_golden("violation", "instance", violation, expected);
+    }
+
+    // The stream event vocabulary is frozen before its decoder exists, which
+    // is exactly when a field rename is cheapest and least noticed. Every one
+    // of the seven, with a populated payload.
+    let events = [
+        (
+            CanonicalStreamEvent::Started { metadata: None },
+            json!({"event": "started"}),
+        ),
+        (
+            CanonicalStreamEvent::Started {
+                metadata: Some(ProviderResponseMetadata {
+                    effective_model: Some("test-model-1".to_string()),
+                    effective_version: None,
+                    provider_request_id: Some("req-1".to_string()),
+                }),
+            },
+            json!({
+                "event": "started",
+                "metadata": {
+                    "effective_model": "test-model-1",
+                    "provider_request_id": "req-1",
+                },
+            }),
+        ),
+        (
+            CanonicalStreamEvent::TextDelta {
+                text: "the answ".to_string(),
+            },
+            json!({"event": "text_delta", "text": "the answ"}),
+        ),
+        (
+            CanonicalStreamEvent::ToolCallDelta {
+                fragment: ToolCallFragment {
+                    index: 0,
+                    id: Some("call_1".to_string()),
+                    name: Some("search".to_string()),
+                    arguments_delta: "{\"q\":".to_string(),
+                },
+            },
+            json!({
+                "event": "tool_call_delta",
+                "fragment": {
+                    "index": 0,
+                    "id": "call_1",
+                    "name": "search",
+                    "arguments_delta": "{\"q\":",
+                },
+            }),
+        ),
+        (
+            CanonicalStreamEvent::ToolCallCompleted { index: 1 },
+            json!({"event": "tool_call_completed", "index": 1}),
+        ),
+        (
+            CanonicalStreamEvent::Usage {
+                usage: UsageObservationV1::provider_authoritative(Some(12), Some(34), Some(46)),
+            },
+            json!({
+                "event": "usage",
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 34,
+                    "total_tokens": 46,
+                    "provenance": "provider_authoritative",
+                },
+            }),
+        ),
+        (
+            CanonicalStreamEvent::Completed {
+                completion: CompletionKindV1::ToolCalls,
+            },
+            json!({"event": "completed", "completion": "tool_calls"}),
+        ),
+        (
+            CanonicalStreamEvent::Failed {
+                disposition: InvocationDispositionV1::ProtocolError {
+                    violation: ProtocolViolation::StreamDecode {
+                        rule: StreamDecodeErrorKind::UnterminatedStream,
+                    },
+                },
+            },
+            json!({
+                "event": "failed",
+                "disposition": {
+                    "disposition": "protocol_error",
+                    "violation": {"kind": "stream_decode", "rule": "unterminated_stream"},
+                },
+            }),
+        ),
+    ];
+    for (event, expected) in &events {
+        assert_golden("stream event", "instance", event, expected);
+    }
+
+    // Coverage, so a new variant cannot be added without a golden: the
+    // distinct kinds exercised above must be every kind there is, in
+    // declaration order.
+    let mut covered: Vec<CanonicalStreamEventKind> =
+        events.iter().map(|(event, _)| event.kind()).collect();
+    covered.dedup();
+    assert_eq!(
+        covered,
+        CanonicalStreamEventKind::ALL.to_vec(),
+        "the stream event goldens no longer cover every variant in order"
+    );
+
+    // A fragment on its own, because the decoder slice will build these
+    // incrementally and the absent-vs-empty distinction is load-bearing: an
+    // omitted `id` means "not seen yet", not "empty".
+    assert_golden(
+        "tool call fragment",
+        "nothing seen yet",
+        &ToolCallFragment {
+            index: 3,
+            id: None,
+            name: None,
+            arguments_delta: String::new(),
+        },
+        &json!({"index": 3}),
+    );
+}
+
+#[test]
 fn retry_after_keeps_the_seam_spelling() {
     // The seam (memcore) freezes this exact shape; the local copy must stay
     // byte-identical so the two reconcile without a translation table.
