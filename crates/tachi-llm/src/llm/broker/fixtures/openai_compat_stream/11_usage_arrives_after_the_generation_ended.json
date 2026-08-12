@@ -1,0 +1,58 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "`finish_reason` ends the generation, not the stream: the usage report comes after it and the terminator after that. A decoder that stopped at `finish_reason` would drop the only authoritative token counts the provider ever sends. The `\"usage\": null` on the earlier chunks — which every OpenAI stream carries — must produce nothing, or every response would report an observation nobody made.",
+  "chunks": [
+    {
+      "text": "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"test-model-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}],\"usage\":null}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3,\"total_tokens\":14}}\n\n"
+    },
+    {
+      "text": "data: [DONE]\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "test-model-1",
+          "provider_request_id": "chatcmpl-1"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "Hi"
+      },
+      {
+        "event": "usage",
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 3,
+          "total_tokens": 14,
+          "provenance": "provider_authoritative"
+        }
+      },
+      {
+        "event": "completed",
+        "completion": "complete"
+      }
+    ],
+    "error": null,
+    "terminal_disposition": {
+      "disposition": "completed",
+      "completion": "complete"
+    }
+  }
+}

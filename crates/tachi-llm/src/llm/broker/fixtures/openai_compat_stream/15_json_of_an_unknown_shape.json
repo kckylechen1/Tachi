@@ -1,0 +1,24 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "Valid JSON, valid framing, and not this grammar: no choices, no usage, no error. `unknown_event_shape` rather than `malformed_frame`, because the two are different accidents — one is bytes we could not parse, the other is a document we parsed and do not recognise.",
+  "chunks": [
+    {
+      "text": "data: {\"foo\":1}\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [],
+    "error": "unknown_event_shape",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "unknown_event_shape"
+      }
+    }
+  }
+}

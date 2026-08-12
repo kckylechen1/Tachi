@@ -1,0 +1,40 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "A complete JSON document of the wrong shape, which is a schema fault and not a truncation — the same distinction 10 makes from the other side. Collapsing the two would tell an operator to look for a dropped connection when the provider sent something whole and wrong.",
+  "chunks": [
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\\\"just a string\\\"\"}}]},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started"
+      },
+      {
+        "event": "tool_call_delta",
+        "fragment": {
+          "index": 0,
+          "id": "call_1",
+          "name": "search",
+          "arguments_delta": "\"just a string\""
+        }
+      }
+    ],
+    "error": "unknown_event_shape",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "unknown_event_shape"
+      }
+    }
+  }
+}

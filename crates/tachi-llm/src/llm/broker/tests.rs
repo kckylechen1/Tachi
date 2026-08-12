@@ -17,6 +17,7 @@
 //! | [`sans_io`] | that the adapter layer contains no way to perform IO |
 //! | [`classification_parity`] | that the new classifier reproduces the legacy one, fixture for fixture |
 //! | [`openai_compat_goldens`] | canonical → wire bytes, and wire → canonical outcome |
+//! | [`stream_transcripts`] | recorded provider stream bytes → canonical events, per grammar |
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +32,7 @@ mod disposition_goldens;
 mod openai_compat_goldens;
 mod sans_io;
 mod spelling;
+mod stream_transcripts;
 mod two_gate;
 
 // ---------------------------------------------------------------------------

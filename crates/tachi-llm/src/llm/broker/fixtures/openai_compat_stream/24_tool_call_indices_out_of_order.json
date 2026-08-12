@@ -1,0 +1,40 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "Out-of-order corruption, the expensive half: index 1 opens and then index 0 shows up. Indices are the calls' positions in the turn, so a lower one arriving later means fragments were reordered somewhere, and accepting it silently assembles a call that the model never asked for.",
+  "chunks": [
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"fetch\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started"
+      },
+      {
+        "event": "tool_call_delta",
+        "fragment": {
+          "index": 1,
+          "id": "call_2",
+          "name": "fetch",
+          "arguments_delta": "{}"
+        }
+      }
+    ],
+    "error": "illegal_sequence",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "illegal_sequence"
+      }
+    }
+  }
+}

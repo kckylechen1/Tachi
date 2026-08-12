@@ -1,0 +1,45 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "A grammar violation the other way: text after `finish_reason`. The generation is over, so this byte belongs to nothing, and appending it would let a confused proxy graft content onto an answer that had already ended.",
+  "chunks": [
+    {
+      "text": "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"test-model-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"and more\"},\"finish_reason\":null}]}\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "test-model-1",
+          "provider_request_id": "chatcmpl-1"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "Hi"
+      }
+    ],
+    "error": "illegal_sequence",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "illegal_sequence"
+      }
+    }
+  }
+}
