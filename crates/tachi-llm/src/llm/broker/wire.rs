@@ -416,7 +416,13 @@ impl WireHttpRequest {
             auth_placement,
             body,
         } = self;
-        (*method, url, headers, auth_placement, body)
+        (
+            *method,
+            url.as_str(),
+            headers.as_slice(),
+            auth_placement,
+            body.as_slice(),
+        )
     }
 }
 

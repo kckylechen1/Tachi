@@ -191,7 +191,12 @@ impl TryFrom<UsageObservationV1Parts> for UsageObservationV1 {
             || parts.total_tokens.is_some();
         match (parts.provenance, has_number) {
             (UsageProvenanceV1::Unknown, true) => Err(UsageError::UnknownProvenanceWithNumbers),
-            (UsageProvenanceV1::Unknown, false) => Ok(Self::unknown()),
+            // Lossless: an unknown observation can still name the pricing
+            // snapshot it *would* have been priced against.
+            (UsageProvenanceV1::Unknown, false) => Ok(Self {
+                pricing_snapshot_ref: parts.pricing_snapshot_ref,
+                ..Self::unknown()
+            }),
             (_, false) => Err(UsageError::NumberlessObservationClaimsAuthority),
             (provenance, true) => Ok(Self {
                 prompt_tokens: parts.prompt_tokens,
