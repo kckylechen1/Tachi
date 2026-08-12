@@ -59,6 +59,12 @@ use super::stream_grammar::{
 use super::usage::UsageObservationV1;
 use super::wire::ProviderResponseMetadata;
 
+/// The event that ends an Anthropic stream.
+///
+/// Named because it is read in two places — the dispatch table and the
+/// after-the-answer rule — and those two must mean the same event.
+const MESSAGE_STOP_EVENT: &str = "message_stop";
+
 /// Decodes an Anthropic event stream into canonical events.
 #[derive(Debug, Default)]
 pub struct AnthropicEventStreamDecoder(SseDecoder<AnthropicEventGrammar>);
@@ -139,6 +145,17 @@ impl SseGrammar for AnthropicEventGrammar {
         frame: SseFrame,
     ) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
         if lifecycle.is_terminal() {
+            // The same exception the delta grammar makes for `[DONE]`, which
+            // is why it is worth stating twice: this grammar's own terminator,
+            // closing a stream whose answer is already sealed, is the provider
+            // closing politely — an `error` event is normally followed by
+            // `message_stop` — and not trailing garbage. It answers nothing
+            // and cannot move the sealed disposition. The frame is dropped
+            // unread, so only its name is consulted; the payload/name
+            // agreement check below is about frames that still mean something.
+            if frame.event.as_deref() == Some(MESSAGE_STOP_EVENT) {
+                return Ok(Vec::new());
+            }
             return Err(decode_error(
                 StreamDecodeErrorKind::IllegalSequence,
                 "a frame arrived after the stream's terminator",
@@ -190,7 +207,7 @@ impl SseGrammar for AnthropicEventGrammar {
             "content_block_delta" => self.content_block_delta(lifecycle, &value),
             "content_block_stop" => self.content_block_stop(&value),
             "message_delta" => self.message_delta(lifecycle, &value),
-            "message_stop" => self.message_stop(lifecycle),
+            MESSAGE_STOP_EVENT => self.message_stop(lifecycle),
             // A keep-alive. It must cost nothing: a decoder that refused one
             // would fail on live traffic while every hand-written fixture
             // passed.

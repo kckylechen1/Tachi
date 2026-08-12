@@ -158,6 +158,50 @@ fn the_frame_ceiling_counts_every_field_of_the_frame() {
     );
 }
 
+#[test]
+fn a_stashed_failure_is_announced_once_and_then_stays_put() {
+    // The window fixtures 29 and 30 pin, carried past where a transcript can
+    // follow: a transcript ends at its terminal input, and the question here is
+    // what the *next* calls say. A decoder that announced the stash again would
+    // report one fault twice; one that cleared the `Err` on announcing it would
+    // make the failure visible or invisible depending on which call the caller
+    // happened to make first, which is the same bug as depending on where the
+    // network split the bytes.
+    let mut decoder = decoder();
+    let events = decoder
+        .push_bytes(b"data: {\"choices\":\"nope\"}\n\n")
+        .expect("a failure detected mid-chunk is stashed, not returned");
+    assert!(events.is_empty(), "the failing frame produced no events");
+
+    assert_eq!(
+        serde_json::to_value(decoder.on_cancel()).expect("serializes"),
+        json!([{"event": "failed", "disposition": decode_fault("unknown_event_shape")}]),
+        "an infallible terminal input has no Err to return, so it must announce \
+         the stash on the event channel"
+    );
+    assert!(decoder.on_cancel().is_empty(), "one fault, announced once");
+    assert!(
+        decoder
+            .on_transport_error(TransportErrorKind::ConnectionReset)
+            .is_empty(),
+        "and not announced again by the other terminal input either"
+    );
+    assert_eq!(
+        decoder
+            .push_bytes(&[])
+            .expect_err("the failure is still in hand for a caller that pushes")
+            .kind,
+        StreamDecodeErrorKind::UnknownEventShape
+    );
+    assert_eq!(
+        decoder
+            .finish(StreamEof::Clean)
+            .expect_err("and for one that finishes")
+            .kind,
+        StreamDecodeErrorKind::UnknownEventShape
+    );
+}
+
 /// A complete, clean stream, as bytes.
 fn clean_stream() -> Vec<u8> {
     let mut bytes = frame(&json!({

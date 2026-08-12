@@ -42,6 +42,14 @@
 //! they do **not** change the disposition. Turning a completed invocation into
 //! a failure because of trailing garbage would be a far worse bug than the one
 //! being reported.
+//!
+//! The rule is about *garbage* after the answer, and the terminator is not
+//! garbage. A stream sealed by something other than `[DONE]` — an in-stream
+//! `error` object, which real gateways follow with `data: [DONE]` — is a
+//! provider closing the stream it opened, so the terminator arriving there
+//! answers nothing, changes nothing and is not a fault. Reporting it would
+//! staple an `illegal_sequence` onto every provider-declared failure, which
+//! blames the decoder for a provider that behaved correctly.
 
 use serde_json::Value;
 
@@ -121,6 +129,18 @@ impl SseGrammar for DeltaGrammar {
         frame: SseFrame,
     ) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
         if lifecycle.is_terminal() {
+            // The one frame that is not "trailing garbage": this grammar's own
+            // terminator, closing a stream whose answer is already sealed.
+            // That is the ordinary shape of a provider-declared failure — real
+            // gateways send `{"error": …}` and then `data: [DONE]` — and
+            // calling it a decode fault would staple an `illegal_sequence`
+            // onto every in-stream error report, blaming the decoder for a
+            // provider that closed its stream politely. It answers nothing and
+            // changes nothing: the sealed disposition is first-writer-wins and
+            // stays exactly as it was.
+            if is_terminator(&frame) {
+                return Ok(Vec::new());
+            }
             return Err(decode_error(
                 StreamDecodeErrorKind::IllegalSequence,
                 "a frame arrived after the stream's terminator",
@@ -166,7 +186,21 @@ impl SseGrammar for DeltaGrammar {
             });
         }
 
-        if object.get("error").is_some_and(|error| !error.is_null()) {
+        if let Some(error) = object.get("error").filter(|error| !error.is_null()) {
+            // The split between the two failure channels is about *who* is at
+            // fault, and it turns on the shape: an error **object** is the
+            // provider speaking its own grammar correctly to report a failure,
+            // which is the event channel. A `false`, a string, a number or an
+            // array under `/error` is none of that — it is a shape this
+            // decoder does not know, and admitting it would let any
+            // wrong-typed field seal a stream as provider-declared failure and
+            // blame the provider for a document nobody can read.
+            if !error.is_object() {
+                return Err(decode_error(
+                    StreamDecodeErrorKind::UnknownEventShape,
+                    "an `error` field was present but was not an error object",
+                ));
+            }
             // The provider's own failure report. Not a decode error — the
             // grammar was spoken correctly — so it becomes the terminal event,
             // pointing at the field that carried it and carrying none of it.
@@ -386,6 +420,19 @@ impl DeltaGrammar {
         events.push(CanonicalStreamEvent::Completed { completion });
         Ok(events)
     }
+}
+
+/// Whether a frame is exactly this grammar's terminator.
+///
+/// Spelled once and read in two places, so "the frame that ends the stream"
+/// and "the frame that may follow the answer" cannot drift into two different
+/// notions of what `[DONE]` is.
+fn is_terminator(frame: &SseFrame) -> bool {
+    frame
+        .event
+        .as_deref()
+        .is_none_or(|name| name == MESSAGE_EVENT)
+        && frame.data.as_deref().map(str::trim) == Some(DONE_SENTINEL)
 }
 
 /// The provider-side identity a chunk announces, when it announces any.

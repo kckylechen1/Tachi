@@ -110,6 +110,20 @@ pub(super) trait SseGrammar: Send {
 /// there is no next call, so it is returned directly — and what remains
 /// buffered at EOF is a function of the byte sequence alone, never of how it
 /// was chunked.
+///
+/// # A stashed failure always comes out, on whichever channel is open
+///
+/// "The next call" is not always a call that can carry an `Err`.
+/// [`WireStreamDecoder::on_transport_error`] and
+/// [`WireStreamDecoder::on_cancel`] are infallible by contract, so if the
+/// executor's terminal input lands between the stash and the next
+/// `push_bytes`, there is nowhere for the `Err` to go — and returning nothing
+/// there is how a decode failure disappears depending on how the caller
+/// happened to sequence its calls, which is the same class of bug as
+/// depending on how the network chunked the bytes. So those two announce the
+/// stash on the *event* channel instead, as the `Failed` event carrying the
+/// disposition the stash already sealed, while the `Err` stays in hand for any
+/// later `push_bytes`/`finish`. Announced once, whichever way it goes out.
 #[derive(Debug, Default)]
 pub(super) struct SseDecoder<G> {
     /// The transport layer.
@@ -120,6 +134,8 @@ pub(super) struct SseDecoder<G> {
     grammar: G,
     /// A failure detected behind events that must be delivered first.
     stashed: Option<StreamDecodeError>,
+    /// Whether that failure has already been announced on the event channel.
+    stash_announced: bool,
 }
 
 impl<G: Default> SseDecoder<G> {
@@ -136,6 +152,24 @@ impl<G> SseDecoder<G> {
         if self.stashed.is_none() {
             self.stashed = Some(error);
         }
+    }
+
+    /// Puts a stashed failure out on the event channel, for the terminal
+    /// inputs that have no `Err` to return.
+    ///
+    /// The event carries the disposition the stash sealed, which is the honest
+    /// answer even when the caller's terminal input was a cancel: the decode
+    /// failure happened first and terminality is first-writer-wins, so this
+    /// stream ended as a protocol fault and not as a cancellation.
+    fn announce_stash(&mut self) -> Vec<CanonicalStreamEvent> {
+        if self.stashed.is_none() || self.stash_announced {
+            return Vec::new();
+        }
+        self.stash_announced = true;
+        self.lifecycle
+            .terminal()
+            .map(|disposition| vec![CanonicalStreamEvent::Failed { disposition }])
+            .unwrap_or_default()
     }
 }
 
@@ -209,6 +243,9 @@ impl<G: SseGrammar> WireStreamDecoder for SseDecoder<G> {
     }
 
     fn on_transport_error(&mut self, _error: TransportErrorKind) -> Vec<CanonicalStreamEvent> {
+        if self.stashed.is_some() {
+            return self.announce_stash();
+        }
         // The transport's own kind — reset, timeout, TLS — deliberately does
         // not change the answer. Every one of them leaves the same fact behind:
         // the provider accepted the request and this process can no longer
@@ -219,6 +256,9 @@ impl<G: SseGrammar> WireStreamDecoder for SseDecoder<G> {
     }
 
     fn on_cancel(&mut self) -> Vec<CanonicalStreamEvent> {
+        if self.stashed.is_some() {
+            return self.announce_stash();
+        }
         self.lifecycle.on_cancel()
     }
 
