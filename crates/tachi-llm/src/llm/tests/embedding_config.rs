@@ -189,7 +189,8 @@ fn the_embedding_catalog_row_declares_the_dimension_the_gate_turns_on() {
         &config,
         "https://api.voyageai.com/v1/embeddings",
         "2026-08-11T00:00:00.000Z",
-    );
+    )
+    .expect("a credential-free endpoint projects");
 
     assert_eq!(row.lane, crate::llm::catalog_import::ENV_EMBEDDING_LANE);
     assert_eq!(row.deployment.protocol_kind, ProtocolKind::VoyageEmbeddings);
@@ -223,7 +224,8 @@ fn an_operator_swap_is_visible_in_the_catalog_row_and_its_provenance() {
         &swapped,
         "https://api.voyageai.com/v1/embeddings",
         "2026-08-11T00:00:00.000Z",
-    );
+    )
+    .expect("a credential-free endpoint projects");
 
     assert_eq!(row.deployment.provider_model_id, "voyage-3-large");
     assert!(
@@ -248,7 +250,8 @@ fn swapping_the_embedding_model_is_a_catalog_change_not_a_no_op() {
         &EmbeddingConfig::default_voyage(),
         "https://api.voyageai.com/v1/embeddings",
         "2026-08-11T00:00:00.000Z",
-    );
+    )
+    .expect("a credential-free endpoint projects");
     let swapped_row = crate::llm::catalog_import::env_embedding_deployment(
         &EmbeddingConfig {
             model: "voyage-3-large".to_string(),
@@ -257,10 +260,58 @@ fn swapping_the_embedding_model_is_a_catalog_change_not_a_no_op() {
         },
         "https://api.voyageai.com/v1/embeddings",
         "2026-08-11T00:00:00.000Z",
-    );
+    )
+    .expect("a credential-free endpoint projects");
     assert_ne!(
         default_row.deployment.content_digest(),
         swapped_row.deployment.content_digest(),
         "a re-import after a swap must advance the row, not report Unchanged"
+    );
+}
+
+#[test]
+fn an_embedding_endpoint_carrying_userinfo_is_refused_like_a_chat_lane() {
+    // `VOYAGE_BASE_URL` is operator-supplied and reaches `endpoint_ref`
+    // verbatim, so the embedding lane needs the same door as the chat lanes —
+    // not a scrub, and not an exemption for being "just the embedding row".
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+    memcore::db::init_schema(&conn).expect("schema");
+
+    let refusal = crate::llm::catalog_import::import_env_embedding_lane(
+        &conn,
+        &EmbeddingConfig::default_voyage(),
+        "https://svc-account:sk-live-SECRET@voyage.proxy.internal/v1/embeddings",
+        "2026-08-11T00:00:00.000Z",
+    )
+    .expect_err("a userinfo-bearing embeddings endpoint must not import");
+
+    assert!(
+        matches!(
+            refusal,
+            crate::llm::catalog_import::CatalogImportError::EndpointCarriesUserinfo {
+                lane: "embedding"
+            }
+        ),
+        "expected a typed embedding-lane refusal, got {refusal:?}"
+    );
+    for rendering in [refusal.to_string(), format!("{refusal:?}")] {
+        assert!(
+            !rendering.contains("sk-live-SECRET"),
+            "the refusal repeated the credential: {rendering}"
+        );
+        assert!(
+            !rendering.contains("voyage.proxy.internal"),
+            "the refusal repeated the endpoint: {rendering}"
+        );
+    }
+
+    let stored = memcore::db::model_catalog::list_model_deployments_by_source(
+        &conn,
+        memcore::catalog::CatalogSource::Env,
+    )
+    .expect("rows read");
+    assert!(
+        stored.is_empty(),
+        "a refused embedding import must leave the catalog untouched"
     );
 }

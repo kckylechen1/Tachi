@@ -11,7 +11,8 @@ use rusqlite::Connection;
 
 use super::EnvRestore;
 use crate::llm::catalog_import::{
-    env_chat_lane_deployments, env_deployment_id, import_env_chat_lanes, ENV_CHAT_LANES,
+    env_chat_lane_deployments, env_deployment_id, import_env_chat_lanes, CatalogImportError,
+    ENV_CHAT_LANES,
 };
 use crate::llm::provider_health::ChatLaneConfig;
 use crate::llm::ProviderRuntimeConfig;
@@ -133,7 +134,7 @@ fn every_stored_row_matches_the_projection_by_content_digest() {
     let config = distinct_config();
     import_env_chat_lanes(&conn, &config, OBSERVED_AT).expect("import");
 
-    let projected = env_chat_lane_deployments(&config, OBSERVED_AT);
+    let projected = env_chat_lane_deployments(&config, OBSERVED_AT).expect("projection");
     let stored = list_model_deployments_by_source(&conn, CatalogSource::Env).expect("rows");
 
     for lane in projected {
@@ -236,7 +237,7 @@ fn the_projection_ignores_the_ambient_environment() {
     let _extract_base = EnvRestore::set("EXTRACT_BASE_URL", "https://must-not-see.test/v1");
 
     let config = distinct_config();
-    let projected = env_chat_lane_deployments(&config, OBSERVED_AT);
+    let projected = env_chat_lane_deployments(&config, OBSERVED_AT).expect("projection");
     let extract = projected
         .iter()
         .find(|lane| lane.lane == "extract")
@@ -253,49 +254,149 @@ fn the_projection_ignores_the_ambient_environment() {
 fn the_projection_is_a_pure_function_of_the_config() {
     let config = distinct_config();
     assert_eq!(
-        env_chat_lane_deployments(&config, OBSERVED_AT),
-        env_chat_lane_deployments(&config, OBSERVED_AT)
+        env_chat_lane_deployments(&config, OBSERVED_AT).expect("projection"),
+        env_chat_lane_deployments(&config, OBSERVED_AT).expect("projection")
     );
 }
 
 // ─── provenance is public-safe ───────────────────────────────────────────────
 
-#[test]
-fn a_base_url_carrying_userinfo_never_becomes_durable_provenance() {
-    // A `base_url` should never look like this. The rule that catalog rows are
-    // public-safe metadata (#1680, inherited here) is not allowed to depend on
-    // that never happening.
-    let mut config = distinct_config();
-    config.extract.base_url =
-        "https://svc-account:sk-live-SECRET@proxy.internal:8443/v1/chat".to_string();
+/// The secret string used by the refusal tests. Distinctive enough that a
+/// substring search over a whole error message, JSON blob or table dump is a
+/// real assertion rather than a coincidence.
+const SMUGGLED_SECRET: &str = "sk-live-SECRET";
+const SMUGGLED_USER: &str = "svc-account";
+const SMUGGLED_BASE_URL: &str = "https://svc-account:sk-live-SECRET@proxy.internal:8443/v1/chat";
 
-    let projected = env_chat_lane_deployments(&config, OBSERVED_AT);
+#[test]
+fn a_base_url_carrying_userinfo_is_refused_and_lands_nothing_in_the_catalog() {
+    // An earlier revision scrubbed userinfo out of the derived account handle
+    // and stored the raw URL in `endpoint_ref` — the credential survived in
+    // the same durable, operator-visible row the scrubbing existed to protect.
+    // The rule is refusal, and it has to hold for *every* field at once, which
+    // is only checkable by looking at what reached the store.
+    let conn = catalog_conn();
+    let mut config = distinct_config();
+    config.extract.base_url = SMUGGLED_BASE_URL.to_string();
+
+    let refusal = import_env_chat_lanes(&conn, &config, OBSERVED_AT)
+        .expect_err("a userinfo-bearing base_url must not import");
+    assert!(
+        matches!(
+            refusal,
+            CatalogImportError::EndpointCarriesUserinfo { lane: "extract" }
+        ),
+        "the refusal must be typed and name the offending lane: {refusal:?}"
+    );
+
+    // Not one row, not even the three clean lanes: a partially imported
+    // catalog would be a caller's problem to unwind, and the projection is
+    // built in full before the first write precisely so it never is.
+    let stored = list_model_deployments_by_source(&conn, CatalogSource::Env).expect("rows read");
+    assert!(
+        stored.is_empty(),
+        "a refused import must leave the catalog untouched, found {} row(s)",
+        stored.len()
+    );
+    let events =
+        memcore::db::model_catalog::list_all_model_deployment_events(&conn).expect("events read");
+    assert!(
+        events.is_empty(),
+        "nor may it append events: {} event(s)",
+        events.len()
+    );
+}
+
+#[test]
+fn a_refusal_never_repeats_the_credential_it_refused() {
+    // The refusal is logged by the daemon and rendered into status JSON, which
+    // is exactly the audience the credential must not reach. `Display` and
+    // `Debug` both count: a `{err:?}` in some future log line is one keystroke
+    // away.
+    let mut config = distinct_config();
+    config.extract.base_url = SMUGGLED_BASE_URL.to_string();
+
+    let refusal = env_chat_lane_deployments(&config, OBSERVED_AT)
+        .expect_err("a userinfo-bearing base_url must not project");
+    for rendering in [refusal.to_string(), format!("{refusal:?}")] {
+        assert!(
+            !rendering.contains(SMUGGLED_SECRET),
+            "the refusal repeated the password: {rendering}"
+        );
+        assert!(
+            !rendering.contains(SMUGGLED_USER),
+            "the refusal repeated the username: {rendering}"
+        );
+        assert!(
+            !rendering.contains("proxy.internal"),
+            "the refusal repeated the endpoint: {rendering}"
+        );
+        assert!(
+            rendering.contains("extract"),
+            "but it must still say which lane to fix: {rendering}"
+        );
+    }
+}
+
+#[test]
+fn every_chat_lane_is_gated_not_just_the_first() {
+    // A gate applied only where the loop happens to start is the classic
+    // half-fix. Each lane gets its own turn at carrying the credential.
+    for lane in ENV_CHAT_LANES {
+        let conn = catalog_conn();
+        let mut config = distinct_config();
+        match lane {
+            "extract" => config.extract.base_url = SMUGGLED_BASE_URL.to_string(),
+            "summary" => config.summary.base_url = SMUGGLED_BASE_URL.to_string(),
+            "reasoning" => config.reasoning.base_url = SMUGGLED_BASE_URL.to_string(),
+            "distill" => config.distill.base_url = SMUGGLED_BASE_URL.to_string(),
+            other => panic!("unknown lane {other}"),
+        }
+
+        let refusal = import_env_chat_lanes(&conn, &config, OBSERVED_AT)
+            .err()
+            .unwrap_or_else(|| panic!("lane {lane} carried userinfo and must be refused"));
+        assert!(
+            matches!(
+                refusal,
+                CatalogImportError::EndpointCarriesUserinfo { lane: refused } if refused == lane
+            ),
+            "lane {lane}: expected a userinfo refusal naming it, got {refusal:?}"
+        );
+
+        let stored =
+            list_model_deployments_by_source(&conn, CatalogSource::Env).expect("rows read");
+        assert!(
+            stored.is_empty(),
+            "lane {lane}: a refused import must leave the catalog untouched"
+        );
+    }
+}
+
+#[test]
+fn an_at_sign_outside_the_authority_is_not_a_credential() {
+    // Refusing every URL containing `@` would break scoped model paths. The
+    // gate reads the authority, the same substring the account handle is
+    // derived from.
+    let mut config = distinct_config();
+    config.extract.base_url = "https://api.siliconflow.cn/v1/@scope/chat/completions".to_string();
+
+    let projected = env_chat_lane_deployments(&config, OBSERVED_AT)
+        .expect("an `@` in the path is not userinfo");
     let extract = projected
         .iter()
         .find(|lane| lane.lane == "extract")
         .expect("extract lane");
-
     assert_eq!(
-        extract.deployment.provider_account_id, "env:proxy.internal:8443",
-        "the account handle must be the endpoint authority with userinfo stripped"
-    );
-    assert!(
-        !extract.deployment.provider_account_id.contains("SECRET"),
-        "credential material must never reach the account handle"
-    );
-    assert!(
-        !extract
-            .deployment
-            .provider_account_id
-            .contains("svc-account"),
-        "nor the user half of it"
+        extract.deployment.provider_account_id, "env:api.siliconflow.cn",
+        "the account handle is still the authority"
     );
 }
 
 #[test]
 fn source_refs_carry_env_var_names_and_nothing_else() {
     let config = distinct_config();
-    let projected = env_chat_lane_deployments(&config, OBSERVED_AT);
+    let projected = env_chat_lane_deployments(&config, OBSERVED_AT).expect("projection");
     for lane in projected {
         for source_ref in &lane.deployment.source_refs {
             assert!(

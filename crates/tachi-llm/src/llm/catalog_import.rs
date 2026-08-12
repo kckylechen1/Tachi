@@ -30,6 +30,27 @@
 //! Folding them into one deployment with two aliases is alias governance,
 //! which is #1681 D2's reviewed plan/apply path (PR-D), not something this
 //! import should decide on its own.
+//!
+//! # Public-safe by refusal, not by scrubbing
+//!
+//! Every row this module writes is durable, operator-visible provenance
+//! (#1680's rule for `ProviderAccount`, inherited here). A `base_url` carrying
+//! `https://user:pass@host/` therefore cannot be imported at all: the
+//! projection **fails loudly** with [`CatalogImportError::EndpointCarriesUserinfo`]
+//! before a single row is built, so nothing lands in the catalog and no caller
+//! is left holding a half-written import.
+//!
+//! An earlier revision scrubbed userinfo out of the derived account handle and
+//! called that enough. It was not — `endpoint_ref` still stored the raw URL, so
+//! the credential survived in the same durable row the scrubbing existed to
+//! protect. Refusing at the door is the only version of this rule that covers
+//! every field at once, and it matches the precedent set for endpoint URLs on
+//! the request path (#1682 slice-1's `EndpointUrl::new`), which likewise
+//! refuses rather than silently stripping: quietly removing the credential
+//! would send an unauthenticated request to an endpoint whose operator plainly
+//! expected one.
+
+use std::fmt;
 
 use memcore::catalog::{
     CatalogSource, DeploymentCapabilities, EmbeddingsCapability, NewModelDeployment, ProtocolKind,
@@ -66,6 +87,74 @@ pub fn env_deployment_id(lane: &str) -> String {
     format!("{ENV_CATALOG_PREFIX}{lane}")
 }
 
+/// Why an env resolution could not become catalog rows.
+///
+/// **Carries no endpoint, no URL and no secret material** — only the lane
+/// name. An import refusal is reported on status surfaces and in daemon logs,
+/// which is precisely the audience the credential must never reach, so the
+/// error value itself is metadata-only by construction rather than by every
+/// caller remembering to redact it.
+#[derive(Debug)]
+pub enum CatalogImportError {
+    /// A lane's configured endpoint carried `user:password@`. Refused before
+    /// any row is built — see the module note on refusal versus scrubbing.
+    EndpointCarriesUserinfo { lane: &'static str },
+    /// The catalog store rejected a write.
+    Store(MemoryError),
+}
+
+impl fmt::Display for CatalogImportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EndpointCarriesUserinfo { lane } => write!(
+                formatter,
+                "lane '{lane}': the configured endpoint carries userinfo credentials, and a \
+                 catalog deployment row is durable public-safe provenance. Refusing to import \
+                 this lane. Remove the credentials from the URL and supply them through the \
+                 lane's API key environment variable instead."
+            ),
+            Self::Store(err) => write!(formatter, "catalog store write failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for CatalogImportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::EndpointCarriesUserinfo { .. } => None,
+            Self::Store(err) => Some(err),
+        }
+    }
+}
+
+impl From<MemoryError> for CatalogImportError {
+    fn from(err: MemoryError) -> Self {
+        Self::Store(err)
+    }
+}
+
+/// Does this endpoint's authority carry a `user[:password]@` prefix?
+///
+/// Deliberately parsed the same way [`env_provider_account_id`] parses the
+/// authority — scheme off, first `/`, `?` or `#` ends it — so the gate and the
+/// derivation can never disagree about which substring is the authority. A
+/// later `@` in a path or query (`/v1/@scope/model`) is not userinfo and is
+/// not refused.
+fn endpoint_carries_userinfo(endpoint: &str) -> bool {
+    endpoint_authority(endpoint).contains('@')
+}
+
+fn endpoint_authority(endpoint: &str) -> &str {
+    let without_scheme = endpoint
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(endpoint);
+    without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme)
+}
+
 /// One lane's env resolution, as a catalog row.
 ///
 /// The lane name travels beside the row rather than being parsed back out of
@@ -84,10 +173,15 @@ pub struct EnvLaneDeployment {
 /// stamped here) so the projection is a pure function — which is what lets
 /// the discriminating test compare catalog contents against the config
 /// without a clock in the middle.
+///
+/// **All-or-nothing.** One lane carrying userinfo fails the whole projection,
+/// so a caller can never write three clean rows and then discover the fourth
+/// was refusable. That is what makes [`import_env_chat_lanes`] safe without a
+/// transaction of its own: the refusal happens before any row exists.
 pub fn env_chat_lane_deployments(
     config: &ProviderRuntimeConfig,
     observed_at: &str,
-) -> Vec<EnvLaneDeployment> {
+) -> Result<Vec<EnvLaneDeployment>, CatalogImportError> {
     let lanes: [(&'static str, &ChatLaneConfig); 4] = [
         ("extract", &config.extract),
         ("summary", &config.summary),
@@ -96,18 +190,23 @@ pub fn env_chat_lane_deployments(
     ];
     lanes
         .into_iter()
-        .map(|(lane, lane_config)| EnvLaneDeployment {
-            lane,
-            deployment: chat_lane_deployment(lane, lane_config, observed_at),
+        .map(|(lane, lane_config)| {
+            Ok(EnvLaneDeployment {
+                lane,
+                deployment: chat_lane_deployment(lane, lane_config, observed_at)?,
+            })
         })
         .collect()
 }
 
 fn chat_lane_deployment(
-    lane: &str,
+    lane: &'static str,
     lane_config: &ChatLaneConfig,
     observed_at: &str,
-) -> NewModelDeployment {
+) -> Result<NewModelDeployment, CatalogImportError> {
+    if endpoint_carries_userinfo(&lane_config.base_url) {
+        return Err(CatalogImportError::EndpointCarriesUserinfo { lane });
+    }
     let mut row = NewModelDeployment::observed(
         env_deployment_id(lane),
         env_provider_account_id(&lane_config.base_url),
@@ -133,7 +232,7 @@ fn chat_lane_deployment(
     // start, so it cannot go stale behind the operator's back the way a
     // fetched provider catalog can. Staleness is a property of rows whose
     // source is not re-read (#1681 D7 PR-B).
-    row
+    Ok(row)
 }
 
 /// The account handle an env-derived row references, until #1680's reconcile
@@ -144,20 +243,16 @@ fn chat_lane_deployment(
 /// names *key env vars*, and which of them won is a live-process fact, not a
 /// property of the resolved config.
 ///
-/// **Userinfo is stripped, not preserved.** A `base_url` should never carry
-/// `https://user:pass@host/`, but this row is a serialized public-safe
-/// surface (#1680's rule for `ProviderAccount`, inherited here), so the one
-/// place a credential could smuggle itself into durable operator-visible
-/// provenance is closed at the derivation rather than trusted not to happen.
+/// Userinfo is **refused upstream**, by [`endpoint_carries_userinfo`], before
+/// this function is ever reached with a credential-bearing URL. The strip
+/// below is therefore defence in depth, not the rule: it exists so a future
+/// caller that reaches the derivation without going through the gate — an
+/// accidentally reordered validation, a new entry point — still cannot mint a
+/// credential-bearing account handle. It is deliberately *not* sufficient on
+/// its own, which is the whole lesson of this file's first revision: stripping
+/// here left `endpoint_ref` holding the raw URL in the same durable row.
 fn env_provider_account_id(base_url: &str) -> String {
-    let without_scheme = base_url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(base_url);
-    let authority = without_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(without_scheme);
+    let authority = endpoint_authority(base_url);
     let host = authority
         .rsplit_once('@')
         .map(|(_userinfo, host)| host)
@@ -178,15 +273,21 @@ fn env_provider_account_id(base_url: &str) -> String {
 /// process start costs one comparison per lane and appends nothing.
 ///
 /// Opens no transaction of its own (the memcore accessors' rule), so a caller
-/// that wants all four lanes to land atomically wraps the call.
+/// that wants all four lanes to land atomically wraps the call. A refusable
+/// config needs no such wrapping: the projection is built (and can fail) in
+/// full before the first write.
 pub fn import_env_chat_lanes(
     conn: &Connection,
     config: &ProviderRuntimeConfig,
     observed_at: &str,
-) -> Result<Vec<(&'static str, DeploymentWrite)>, MemoryError> {
-    env_chat_lane_deployments(config, observed_at)
+) -> Result<Vec<(&'static str, DeploymentWrite)>, CatalogImportError> {
+    env_chat_lane_deployments(config, observed_at)?
         .into_iter()
-        .map(|lane| upsert_model_deployment(conn, &lane.deployment).map(|write| (lane.lane, write)))
+        .map(|lane| {
+            upsert_model_deployment(conn, &lane.deployment)
+                .map(|write| (lane.lane, write))
+                .map_err(CatalogImportError::from)
+        })
         .collect()
 }
 
@@ -201,11 +302,20 @@ pub fn import_env_chat_lanes(
 /// Pure, like the chat-lane projection: `endpoint` and `observed_at` come from
 /// the caller (`voyage_embeddings_endpoint()` is the endpoint a request
 /// actually uses) rather than being re-derived here.
+///
+/// Refuses a credential-bearing `endpoint` for the same reason the chat lanes
+/// do — `VOYAGE_BASE_URL` is operator-supplied and lands in `endpoint_ref`
+/// verbatim.
 pub fn env_embedding_deployment(
     embedding: &EmbeddingConfig,
     endpoint: &str,
     observed_at: &str,
-) -> EnvLaneDeployment {
+) -> Result<EnvLaneDeployment, CatalogImportError> {
+    if endpoint_carries_userinfo(endpoint) {
+        return Err(CatalogImportError::EndpointCarriesUserinfo {
+            lane: ENV_EMBEDDING_LANE,
+        });
+    }
     let mut source_refs = vec!["env_api_key:VOYAGE_API_KEY".to_string()];
     if embedding.source == EmbeddingModelSource::EnvOverride {
         // Provenance for a deliberate operator swap: the *name* of the
@@ -232,10 +342,10 @@ pub fn env_embedding_deployment(
     .with_source_refs(source_refs);
     deployment.status = DEPLOYMENT_STATUS_ACTIVE.to_string();
 
-    EnvLaneDeployment {
+    Ok(EnvLaneDeployment {
         lane: ENV_EMBEDDING_LANE,
         deployment,
-    }
+    })
 }
 
 /// Write the embedding lane's row. Idempotent for the same reason
@@ -245,9 +355,7 @@ pub fn import_env_embedding_lane(
     embedding: &EmbeddingConfig,
     endpoint: &str,
     observed_at: &str,
-) -> Result<DeploymentWrite, MemoryError> {
-    upsert_model_deployment(
-        conn,
-        &env_embedding_deployment(embedding, endpoint, observed_at).deployment,
-    )
+) -> Result<DeploymentWrite, CatalogImportError> {
+    let row = env_embedding_deployment(embedding, endpoint, observed_at)?;
+    upsert_model_deployment(conn, &row.deployment).map_err(CatalogImportError::from)
 }

@@ -136,7 +136,12 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
 fn chat_lane_projection() -> Result<std::collections::BTreeMap<String, Value>, String> {
     let config = ProviderRuntimeConfig::from_env()?;
     let observed_at = memcore::db::now_utc_iso();
-    Ok(env_chat_lane_deployments(&config, &observed_at)
+    // A refused projection (a lane whose base URL carries userinfo) is a
+    // config error, reported the same way an unresolvable chain is. The error
+    // is metadata-only by construction, so rendering it into status JSON
+    // cannot leak the credential that caused it.
+    let lanes = env_chat_lane_deployments(&config, &observed_at).map_err(|err| err.to_string())?;
+    Ok(lanes
         .into_iter()
         .map(|lane| {
             let strategy = match lane.lane {
@@ -180,7 +185,21 @@ fn embedding_lane_json() -> Value {
 
     let endpoint = voyage_embeddings_endpoint();
     let observed_at = memcore::db::now_utc_iso();
-    let row = env_embedding_deployment(&config, &endpoint, &observed_at).deployment;
+    let row = match env_embedding_deployment(&config, &endpoint, &observed_at) {
+        Ok(row) => row.deployment,
+        Err(err) => {
+            // `VOYAGE_BASE_URL` carrying userinfo is refused, not scrubbed —
+            // reported here exactly like a refused `EmbeddingConfig`, and with
+            // no `endpoint` field, because there is no publishable form of the
+            // endpoint that caused it.
+            return json!({
+                "provider": "voyage",
+                "config_error": err.to_string(),
+                "stored_index_dimension": EXPECTED_EMBEDDING_DIM,
+                "key": "VOYAGE_API_KEY",
+            });
+        }
+    };
 
     json!({
         "provider": "voyage",
