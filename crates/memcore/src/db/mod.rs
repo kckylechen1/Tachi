@@ -182,10 +182,11 @@ pub(crate) use memory_crud::{
 };
 #[cfg(feature = "admin")]
 pub use model_catalog::{
-    append_model_deployment_event, get_model_deployment, get_model_deployment_health,
-    get_pricing_snapshot, list_all_model_deployment_events, list_model_alias_bindings,
-    list_model_aliases, list_model_deployment_events, list_model_deployment_events_after,
-    list_model_deployments, list_model_deployments_by_source, retire_model_deployment,
+    advance_catalog_projection, append_model_deployment_event, get_model_deployment,
+    get_model_deployment_health, get_pricing_snapshot, list_all_model_deployment_events,
+    list_authoritative_deployments, list_model_alias_bindings, list_model_aliases,
+    list_model_deployment_events, list_model_deployment_events_after, list_model_deployments,
+    list_model_deployments_by_source, replay_catalog_projection, retire_model_deployment,
     upsert_model_deployment, upsert_pricing_snapshot, DeploymentWrite, PricingSnapshotWrite,
 };
 /// Public: see `open::ensure_reserved_reference_write_guard`'s doc comment.

@@ -29,11 +29,12 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::catalog::fold::CatalogProjection;
 use crate::catalog::{
-    AttachmentBounds, CatalogSource, DeploymentCapabilities, DeploymentEventKind, ModelAlias,
-    ModelAliasBinding, ModelDeployment, ModelDeploymentEvent, ModelDeploymentHealth,
-    NewModelDeployment, NewModelDeploymentEvent, PricingSnapshot, ProtocolKind,
-    DEPLOYMENT_STATUS_RETIRED,
+    partition_authoritative_at, AttachmentBounds, AuthoritativePartition, CatalogSource,
+    DeploymentCapabilities, DeploymentEventKind, ModelAlias, ModelAliasBinding, ModelDeployment,
+    ModelDeploymentEvent, ModelDeploymentHealth, NewModelDeployment, NewModelDeploymentEvent,
+    PricingSnapshot, ProtocolKind, DEPLOYMENT_STATUS_RETIRED,
 };
 use crate::error::MemoryError;
 use crate::vault::health::EvidenceKind;
@@ -635,4 +636,47 @@ pub fn get_model_deployment_health(
             },
         )
         .optional()?)
+}
+
+// ─── staleness at the store boundary ─────────────────────────────────────────
+
+/// Deployments that are usable as present-tense truth at `now`, plus typed
+/// reasons for every row that is not (tachi#1681 D7 PR-B).
+///
+/// The excluded half is returned rather than dropped because a resolver that
+/// silently gets a shorter list cannot explain an abstain (#1681 D5), and
+/// because "the catalog went quiet" and "everything in it expired" are very
+/// different operational states that a bare `Vec` renders identical.
+///
+/// Note what this is *not*: a SQL `WHERE expires_at > ?`. The comparison is
+/// done on parsed instants in [`ModelDeployment::freshness_at`], because
+/// `expires_at` can arrive from an import that rendered RFC3339 with a numeric
+/// offset — and SQLite's lexical string comparison would then call an expired
+/// row fresh.
+pub fn list_authoritative_deployments(
+    conn: &Connection,
+    now: &str,
+) -> Result<AuthoritativePartition, MemoryError> {
+    Ok(partition_authoritative_at(
+        list_model_deployments(conn)?,
+        now,
+    ))
+}
+
+/// Fold the whole catalog event log.
+pub fn replay_catalog_projection(conn: &Connection) -> Result<CatalogProjection, MemoryError> {
+    Ok(CatalogProjection::replay(
+        &list_all_model_deployment_events(conn)?,
+    ))
+}
+
+/// Advance an existing projection with whatever was appended since its
+/// watermark. The incremental half of the replay-equivalence property.
+pub fn advance_catalog_projection(
+    conn: &Connection,
+    projection: &mut CatalogProjection,
+) -> Result<(), MemoryError> {
+    let events = list_model_deployment_events_after(conn, projection.last_event_id())?;
+    projection.extend(&events);
+    Ok(())
 }

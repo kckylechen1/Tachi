@@ -10,8 +10,15 @@
 //!   The type-level half is in `catalog::tests`; here it is the store half —
 //!   re-importing an unchanged sheet dedupes instead of rewriting.
 //!
-//! Plus the property the env import (item 2) rests on: a re-import of
-//! unchanged content is a genuine no-op, not a revision bump and an event.
+//! - **Discrimination 12** — the catalog domain's own event fold, replayed in
+//!   full, equals the same fold advanced incrementally. Asserted against a log
+//!   this module's own writers produced, not a synthetic one (the synthetic
+//!   half is in `catalog::fold`'s unit tests).
+//!
+//! Plus the property the env import (item 2) rests on — a re-import of
+//! unchanged content is a genuine no-op, not a revision bump and an event —
+//! and the staleness rule (item 5): an expired row stays readable and stops
+//! being authoritative.
 
 use super::*;
 
@@ -463,4 +470,153 @@ fn a_deployments_pricing_pointer_is_a_pointer_and_nothing_more() {
     assert!(get_pricing_snapshot(&conn, newer.snapshot_id())
         .expect("read")
         .is_some());
+}
+
+// ─── discrimination 12, against a real event log ─────────────────────────────
+
+#[test]
+fn full_replay_of_the_stored_log_equals_incremental_advance() {
+    use crate::db::model_catalog::{advance_catalog_projection, replay_catalog_projection};
+
+    let conn = catalog_conn();
+
+    // A projection that has been following along since the beginning.
+    let mut incremental = crate::catalog::fold::CatalogProjection::empty();
+
+    upsert_model_deployment(&conn, &extract_lane()).expect("import extract");
+    advance_catalog_projection(&conn, &mut incremental).expect("advance 1");
+
+    let mut summary = extract_lane();
+    summary.deployment_id = "env:summary".to_string();
+    summary.provider_model_id = "Qwen/Qwen3.5-7B".to_string();
+    upsert_model_deployment(&conn, &summary).expect("import summary");
+
+    let mut moved = extract_lane();
+    moved.provider_model_id = "Qwen/Qwen3.5-72B".to_string();
+    upsert_model_deployment(&conn, &moved).expect("advance extract");
+    advance_catalog_projection(&conn, &mut incremental).expect("advance 2");
+
+    retire_model_deployment(&conn, "env:summary").expect("retire summary");
+    advance_catalog_projection(&conn, &mut incremental).expect("advance 3");
+    // A no-op advance: nothing was appended since the last watermark.
+    advance_catalog_projection(&conn, &mut incremental).expect("advance 4");
+
+    let full = replay_catalog_projection(&conn).expect("full replay");
+    assert_eq!(
+        full.digest(),
+        incremental.digest(),
+        "a daemon that has been folding events as they land and one that rebuilds from the log \
+         at startup must reach the same catalog state"
+    );
+    assert_eq!(full, incremental);
+
+    // And the fold says something a mutant could get wrong.
+    assert_eq!(full.get("env:extract").map(|fold| fold.revision), Some(2));
+    assert_eq!(full.get("env:summary").map(|fold| fold.retired), Some(true));
+    assert_eq!(full.deployments().len(), 2);
+}
+
+#[test]
+fn a_projection_rebuilt_mid_stream_catches_up_to_the_same_state() {
+    use crate::db::model_catalog::{advance_catalog_projection, replay_catalog_projection};
+
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+
+    // Follower A has been running the whole time.
+    let mut follower = crate::catalog::fold::CatalogProjection::empty();
+    advance_catalog_projection(&conn, &mut follower).expect("advance");
+
+    // Follower B restarts here and replays from scratch, then both keep going.
+    let mut restarted = replay_catalog_projection(&conn).expect("replay");
+    assert_eq!(follower.digest(), restarted.digest());
+
+    let mut moved = extract_lane();
+    moved.provider_model_id = "Qwen/Qwen3.5-72B".to_string();
+    upsert_model_deployment(&conn, &moved).expect("advance extract");
+    advance_catalog_projection(&conn, &mut follower).expect("advance A");
+    advance_catalog_projection(&conn, &mut restarted).expect("advance B");
+
+    assert_eq!(
+        follower.digest(),
+        restarted.digest(),
+        "a restart in the middle of a stream must not fork the projection"
+    );
+}
+
+// ─── staleness at the store boundary ─────────────────────────────────────────
+
+#[test]
+fn an_expired_row_is_still_listed_but_never_authoritative() {
+    use crate::catalog::NotAuthoritative;
+    use crate::db::model_catalog::list_authoritative_deployments;
+
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import the env row");
+
+    let mut fetched = NewModelDeployment::observed(
+        "provider:deepseek-chat",
+        "acct-deepseek",
+        ProtocolKind::OpenAiChatCompletions,
+        "deepseek-chat",
+        CatalogSource::ProviderApi,
+        "2026-08-10T00:00:00.000Z",
+    );
+    fetched.expires_at = Some("2026-08-11T00:00:00.000Z".to_string());
+    upsert_model_deployment(&conn, &fetched).expect("import the fetched row");
+
+    let now = "2026-08-11T06:00:00.000Z";
+    let (admitted, excluded) = list_authoritative_deployments(&conn, now).expect("partition");
+
+    assert_eq!(
+        admitted
+            .iter()
+            .map(|row| row.get().deployment_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["env:extract"],
+        "the env row has no declared expiry; the fetched one has passed its"
+    );
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0].0, "provider:deepseek-chat");
+    assert!(matches!(excluded[0].1, NotAuthoritative::Expired { .. }));
+
+    assert_eq!(
+        list_model_deployments(&conn).expect("all rows").len(),
+        2,
+        "staleness is not deletion — the row stays readable, it just stops speaking for the \
+         present"
+    );
+}
+
+#[test]
+fn an_expiry_written_with_a_numeric_offset_is_honoured_as_an_instant() {
+    // The store-level version of the lexical-comparison trap: SQLite would
+    // compare these two strings the wrong way round, so the freshness decision
+    // is deliberately not a `WHERE expires_at > ?` predicate.
+    use crate::db::model_catalog::list_authoritative_deployments;
+
+    let conn = catalog_conn();
+    let mut row = NewModelDeployment::observed(
+        "provider:withdrawn",
+        "acct-provider",
+        ProtocolKind::OpenAiChatCompletions,
+        "withdrawn-model",
+        CatalogSource::ProviderApi,
+        "2026-08-10T00:00:00.000Z",
+    );
+    row.expires_at = Some("2026-08-11T08:00:00+08:00".to_string());
+    upsert_model_deployment(&conn, &row).expect("import");
+
+    let now = "2026-08-11T00:30:00.000Z";
+    assert!(
+        now < "2026-08-11T08:00:00+08:00",
+        "precondition: sorts wrong"
+    );
+
+    let (admitted, excluded) = list_authoritative_deployments(&conn, now).expect("partition");
+    assert!(
+        admitted.is_empty(),
+        "the row expired half an hour ago in real time"
+    );
+    assert_eq!(excluded.len(), 1);
 }

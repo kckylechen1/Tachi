@@ -119,8 +119,8 @@ fn a_snapshot_whose_prices_were_rewritten_under_its_id_is_refused_on_read() {
         honest.provider_kind(),
         honest.pricing_data().clone(),
         honest.catalog_source,
-        &honest.fetched_at,
-        &honest.created_at,
+        honest.fetched_at.as_str(),
+        honest.created_at.as_str(),
     )
     .expect("an untampered snapshot round-trips");
 }
@@ -279,4 +279,151 @@ fn attachment_bounds_round_trip_from_the_empty_column_default() {
     let encoded = serde_json::to_string(&empty).expect("bounds encode");
     let decoded: AttachmentBounds = serde_json::from_str(&encoded).expect("and decode");
     assert_eq!(empty, decoded);
+}
+
+// ─── staleness (tachi#1681 D7 PR-B, item 5) ──────────────────────────────────
+
+fn stored(expires_at: Option<&str>, status: &str) -> ModelDeployment {
+    ModelDeployment {
+        deployment_id: "env:extract".to_string(),
+        provider_account_id: "env:api.siliconflow.cn".to_string(),
+        endpoint_ref: Some("https://api.siliconflow.cn/v1/chat/completions".to_string()),
+        protocol_kind: ProtocolKind::OpenAiChatCompletions,
+        provider_model_id: "Qwen/Qwen3.5-27B".to_string(),
+        effective_version: None,
+        capabilities: DeploymentCapabilities {
+            chat: true,
+            ..DeploymentCapabilities::default()
+        },
+        context_window: None,
+        max_output: None,
+        attachment_bounds: AttachmentBounds::default(),
+        region: None,
+        data_policy: None,
+        pricing_snapshot_ref: None,
+        catalog_source: CatalogSource::ProviderApi,
+        fetched_at: "2026-08-10T00:00:00.000Z".to_string(),
+        effective_at: "2026-08-10T00:00:00.000Z".to_string(),
+        expires_at: expires_at.map(str::to_string),
+        status: status.to_string(),
+        revision: 1,
+        source_refs: Vec::new(),
+        created_at: "2026-08-10T00:00:00.000Z".to_string(),
+        updated_at: "2026-08-10T00:00:00.000Z".to_string(),
+    }
+}
+
+#[test]
+fn a_row_with_no_declared_expiry_is_always_fresh() {
+    let row = stored(None, DEPLOYMENT_STATUS_ACTIVE);
+    assert_eq!(
+        row.freshness_at("2099-01-01T00:00:00.000Z")
+            .expect("no expiry parses"),
+        CatalogFreshness::Fresh
+    );
+    assert!(row
+        .into_authoritative_at("2099-01-01T00:00:00.000Z")
+        .is_ok());
+}
+
+#[test]
+fn a_row_past_its_expiry_is_stale_and_not_authoritative() {
+    let row = stored(Some("2026-08-11T00:00:00.000Z"), DEPLOYMENT_STATUS_ACTIVE);
+    assert_eq!(
+        row.freshness_at("2026-08-11T00:00:01.000Z")
+            .expect("parses"),
+        CatalogFreshness::Stale
+    );
+
+    let refusal = row
+        .into_authoritative_at("2026-08-11T00:00:01.000Z")
+        .expect_err("a stale row must not be usable as present-tense truth");
+    assert!(matches!(refusal, NotAuthoritative::Expired { .. }));
+    assert!(refusal.to_string().contains("expired"), "{refusal}");
+}
+
+#[test]
+fn expiry_is_compared_as_an_instant_not_as_a_string() {
+    // The discriminator that catches a lexical comparison. `+08:00` renders a
+    // moment that is EARLIER than the `Z` timestamp it sorts after:
+    //   expires_at 2026-08-11T08:00:00+08:00  ==  2026-08-11T00:00:00Z
+    //   now        2026-08-11T00:30:00.000Z
+    // So the row IS expired — but string-compared, "00:30…Z" < "08:00…+08:00"
+    // and a lexical implementation would call it fresh and keep routing to a
+    // deployment the provider has withdrawn.
+    let row = stored(Some("2026-08-11T08:00:00+08:00"), DEPLOYMENT_STATUS_ACTIVE);
+    let now = "2026-08-11T00:30:00.000Z";
+
+    assert!(
+        now < "2026-08-11T08:00:00+08:00",
+        "precondition: the two timestamps sort the wrong way as strings"
+    );
+    assert_eq!(
+        row.freshness_at(now).expect("both parse"),
+        CatalogFreshness::Stale,
+        "expiry must be decided on parsed instants; a string comparison gets this backwards"
+    );
+}
+
+#[test]
+fn the_instant_exactly_at_expiry_is_already_stale() {
+    let row = stored(Some("2026-08-11T00:00:00.000Z"), DEPLOYMENT_STATUS_ACTIVE);
+    assert_eq!(
+        row.freshness_at("2026-08-11T00:00:00.000Z")
+            .expect("parses"),
+        CatalogFreshness::Stale,
+        "`expires_at` is the first instant the row no longer speaks for"
+    );
+}
+
+#[test]
+fn a_retired_row_is_not_authoritative_even_while_fresh() {
+    let row = stored(None, DEPLOYMENT_STATUS_RETIRED);
+    let refusal = row
+        .into_authoritative_at("2026-08-11T00:00:00.000Z")
+        .expect_err("a retired deployment is not a candidate");
+    assert!(matches!(refusal, NotAuthoritative::Status { .. }));
+}
+
+#[test]
+fn an_unparseable_expiry_is_a_refusal_in_both_directions() {
+    let row = stored(Some("next tuesday"), DEPLOYMENT_STATUS_ACTIVE);
+    assert!(
+        row.freshness_at("2026-08-11T00:00:00.000Z").is_err(),
+        "unreadable freshness must not resolve to Fresh — that is fail-open — nor be silently \
+         treated as Stale, which would hide a corrupt row behind an ordinary-looking expiry"
+    );
+    let refusal = row
+        .into_authoritative_at("2026-08-11T00:00:00.000Z")
+        .expect_err("and it must not become authoritative");
+    assert!(matches!(
+        refusal,
+        NotAuthoritative::UnreadableTimestamp { .. }
+    ));
+}
+
+#[test]
+fn partitioning_reports_both_what_survived_and_why_the_rest_did_not() {
+    let mut fresh = stored(None, DEPLOYMENT_STATUS_ACTIVE);
+    fresh.deployment_id = "catalog:fresh".to_string();
+    let mut expired = stored(Some("2026-08-01T00:00:00.000Z"), DEPLOYMENT_STATUS_ACTIVE);
+    expired.deployment_id = "catalog:expired".to_string();
+    let mut retired = stored(None, DEPLOYMENT_STATUS_RETIRED);
+    retired.deployment_id = "catalog:retired".to_string();
+
+    let (admitted, excluded) =
+        partition_authoritative_at(vec![fresh, expired, retired], "2026-08-11T00:00:00.000Z");
+
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].get().deployment_id, "catalog:fresh");
+    assert_eq!(
+        excluded
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["catalog:expired", "catalog:retired"],
+        "a resolver that only sees survivors cannot explain an abstain (#1681 D5)"
+    );
+    assert!(matches!(excluded[0].1, NotAuthoritative::Expired { .. }));
+    assert!(matches!(excluded[1].1, NotAuthoritative::Status { .. }));
 }

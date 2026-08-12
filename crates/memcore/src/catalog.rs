@@ -21,10 +21,17 @@
 //!   caller cannot change the prices of an existing snapshot, so "catalog
 //!   updates never rewrite historical invocation facts" cannot be forgotten —
 //!   there is no code shape in which it would be forgotten.
+//! - **Staleness is not advisory** (D7 PR-B). An expired row is not just
+//!   flagged; [`AuthoritativeDeployment`] is the only type a truth-consuming
+//!   caller should accept, and its sole constructor refuses an expired or
+//!   retired row. Gates cut the set, they do not report beside it (the #1675
+//!   PR2 precedent).
 //! - **Health is a different type in a different table.** There is no health
 //!   field on [`ModelDeployment`]; the four authorities (#1681 D4) stay
 //!   separate by table boundary, the way `account_custody` split custody off
 //!   the account row (ddl.rs:776-782).
+
+pub mod fold;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -634,6 +641,140 @@ pub struct ModelDeploymentHealth {
     pub observed_at: String,
     pub metadata: String,
     pub updated_at: String,
+}
+
+// ─── staleness ───────────────────────────────────────────────────────────────
+
+/// Whether a catalog row is still speaking for the present (#1681 D7 PR-B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogFreshness {
+    Fresh,
+    /// `expires_at` has passed. The row is still readable — history is not
+    /// deleted — but it is no longer authoritative.
+    Stale,
+}
+
+impl ModelDeployment {
+    /// Fresh vs. stale at `now`.
+    ///
+    /// Both timestamps are **parsed** and compared as instants rather than
+    /// compared as strings: `now_utc_iso` happens to sort lexically, but
+    /// `expires_at` can arrive from an import that used a different RFC3339
+    /// rendering (offset form, second precision), and a string comparison
+    /// would then silently call an expired row fresh. An unparseable
+    /// `expires_at` is an error, never a shrug in either direction.
+    pub fn freshness_at(&self, now: &str) -> Result<CatalogFreshness, MemoryError> {
+        let Some(expires_at) = self.expires_at.as_deref() else {
+            return Ok(CatalogFreshness::Fresh);
+        };
+        let expires_at = parse_instant("expires_at", expires_at)?;
+        let now = parse_instant("now", now)?;
+        if now >= expires_at {
+            Ok(CatalogFreshness::Stale)
+        } else {
+            Ok(CatalogFreshness::Fresh)
+        }
+    }
+
+    /// Consume this row into the only type a truth-consuming caller should
+    /// accept, or refuse.
+    ///
+    /// Refuses when the row is retired or expired. This is the gate shape
+    /// #1675 PR2 established: the caller cannot hold an authoritative
+    /// deployment it did not pass through the gate, so "we forgot to check
+    /// staleness at this call site" is not expressible.
+    pub fn into_authoritative_at(
+        self,
+        now: &str,
+    ) -> Result<AuthoritativeDeployment, NotAuthoritative> {
+        if self.status != DEPLOYMENT_STATUS_ACTIVE {
+            return Err(NotAuthoritative::Status {
+                status: self.status,
+            });
+        }
+        match self.freshness_at(now) {
+            Ok(CatalogFreshness::Fresh) => Ok(AuthoritativeDeployment(self)),
+            Ok(CatalogFreshness::Stale) => Err(NotAuthoritative::Expired {
+                expires_at: self.expires_at.unwrap_or_default(),
+                now: now.to_string(),
+            }),
+            Err(err) => Err(NotAuthoritative::UnreadableTimestamp {
+                detail: err.to_string(),
+            }),
+        }
+    }
+}
+
+/// Why a deployment row is not usable as present-tense truth. Typed so the
+/// resolver (#1681 D5/PR-D) can report per-candidate exclusion reasons rather
+/// than a silently shorter list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotAuthoritative {
+    Status { status: String },
+    Expired { expires_at: String, now: String },
+    UnreadableTimestamp { detail: String },
+}
+
+impl std::fmt::Display for NotAuthoritative {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Status { status } => write!(f, "deployment status is '{status}', not active"),
+            Self::Expired { expires_at, now } => {
+                write!(f, "deployment expired at {expires_at} (now {now})")
+            }
+            Self::UnreadableTimestamp { detail } => {
+                write!(f, "deployment freshness is unreadable: {detail}")
+            }
+        }
+    }
+}
+
+/// A deployment row that was active and unexpired at a stated instant.
+///
+/// No public constructor and no `DerefMut`: the only way to obtain one is
+/// [`ModelDeployment::into_authoritative_at`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoritativeDeployment(ModelDeployment);
+
+impl AuthoritativeDeployment {
+    pub fn get(&self) -> &ModelDeployment {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> ModelDeployment {
+        self.0
+    }
+}
+
+/// The two halves of a freshness partition: what survived, and the typed
+/// reason each excluded `deployment_id` did not.
+pub type AuthoritativePartition = (
+    Vec<AuthoritativeDeployment>,
+    Vec<(String, NotAuthoritative)>,
+);
+
+/// Partition rows into the authoritative ones and the typed reasons the rest
+/// were cut. Both halves are returned because a resolver that reports only
+/// what survived cannot explain an abstain (#1681 D5).
+pub fn partition_authoritative_at(rows: Vec<ModelDeployment>, now: &str) -> AuthoritativePartition {
+    let mut admitted = Vec::new();
+    let mut excluded = Vec::new();
+    for row in rows {
+        let deployment_id = row.deployment_id.clone();
+        match row.into_authoritative_at(now) {
+            Ok(authoritative) => admitted.push(authoritative),
+            Err(reason) => excluded.push((deployment_id, reason)),
+        }
+    }
+    (admitted, excluded)
+}
+
+fn parse_instant(field: &str, raw: &str) -> Result<chrono::DateTime<chrono::Utc>, MemoryError> {
+    chrono::DateTime::parse_from_rfc3339(raw.trim())
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|err| {
+            MemoryError::InvalidArg(format!("catalog {field} '{raw}' is not RFC3339: {err}"))
+        })
 }
 
 #[cfg(test)]

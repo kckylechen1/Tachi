@@ -917,10 +917,8 @@ fn model_lanes_report_a_deliberate_embedding_swap_as_an_override() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let _model = EnvRestore::set(tachi_llm::EMBEDDING_MODEL_ENV, "voyage-3-large");
-    let _dimension = EnvRestore::set(
-        tachi_llm::EMBEDDING_DIMENSION_ENV,
-        tachi_llm::STORED_INDEX_DIMENSION.to_string(),
-    );
+    let stored_width = tachi_llm::STORED_INDEX_DIMENSION.to_string();
+    let _dimension = EnvRestore::set(tachi_llm::EMBEDDING_DIMENSION_ENV, &stored_width);
 
     let lanes = model_lanes_json();
     assert_eq!(lanes["embedding"]["model"], json!("voyage-3-large"));

@@ -87,11 +87,12 @@ pub use canonical_digest::{canonical_json, canonical_json_digest_hex, canonical_
 /// reach them without importing the internal `catalog::` module layout.
 #[cfg(feature = "admin")]
 pub use catalog::{
-    AttachmentBounds, CatalogSource, DeploymentCapabilities, DeploymentEventKind,
+    partition_authoritative_at, AttachmentBounds, AuthoritativeDeployment, AuthoritativePartition,
+    CatalogFreshness, CatalogSource, DeploymentCapabilities, DeploymentEventKind,
     EmbeddingsCapability, ModelAlias, ModelAliasBinding, ModelDeployment, ModelDeploymentEvent,
-    ModelDeploymentHealth, NewModelDeployment, NewModelDeploymentEvent, PricingSnapshot,
-    ProtocolKind, ALIAS_STATUS_ACTIVE, ALIAS_STATUS_RETIRED, DEPLOYMENT_STATUS_ACTIVE,
-    DEPLOYMENT_STATUS_RETIRED, PRICING_SNAPSHOT_SCHEME,
+    ModelDeploymentHealth, NewModelDeployment, NewModelDeploymentEvent, NotAuthoritative,
+    PricingSnapshot, ProtocolKind, ALIAS_STATUS_ACTIVE, ALIAS_STATUS_RETIRED,
+    DEPLOYMENT_STATUS_ACTIVE, DEPLOYMENT_STATUS_RETIRED, PRICING_SNAPSHOT_SCHEME,
 };
 #[cfg(feature = "admin")]
 pub use db::dispatch_adjudications::{
