@@ -35,6 +35,29 @@
 //! transcript complete under every chunking, and it doubles as an assertion
 //! that a terminal decoder answers stably rather than panicking when pushed
 //! again.
+//!
+//! # Why the terminal input is delivered even after a push has failed
+//!
+//! Which channel a stashed failure leaves on is part of the decoder's answer,
+//! and the corpus pins both halves of it: a stash closed by `finish` rides out
+//! as the `Err` and produces no event (fixtures 15, 22, 26 and a dozen more),
+//! while a stash closed by an *infallible* terminal input — a cancel, a dead
+//! transport — is announced as a `failed` event, because there is no `Err` for
+//! it to ride (fixtures 29 and 30). The canonical event sequence is therefore a
+//! function of the bytes **and the terminal input together**, never of the
+//! bytes alone.
+//!
+//! So the terminal input is delivered on every run, including the runs where a
+//! `push_bytes` already answered `Err`. Whether such a push exists is pure
+//! chunking: the failure is stashed at the byte that completes the broken
+//! frame, and whether one more read follows that byte is the network's
+//! business — `split_at` manufactures one from a cut on the last byte, and a
+//! cut on the end manufactures a zero-length one. A harness that stopped at the
+//! first `Err` would drop the transcript's terminal input on exactly those
+//! chunkings, then compare a run of *(bytes, cancel)* against a run of
+//! *(bytes)* and report the missing `failed` event as a decoder that lost a
+//! failure. The first failure still wins, because that is the one the decoder
+//! sealed.
 
 use super::*;
 
@@ -116,22 +139,23 @@ pub(super) fn decode_transcript(
         }
     }
 
-    if error.is_none() {
-        match terminal {
-            TerminalInput::Finish(eof) => match decoder.finish(eof) {
-                Ok(produced) => events.extend(produced.iter().map(serialize_event)),
-                Err(failure) => error = Some(failure.kind),
-            },
-            TerminalInput::Transport(kind) => {
-                let produced = decoder.on_transport_error(kind);
-                events.extend(produced.iter().map(serialize_event));
-            }
-            TerminalInput::Cancel => {
-                let produced = decoder.on_cancel();
-                events.extend(produced.iter().map(serialize_event));
-            }
-            TerminalInput::None => {}
+    // Unconditional. See the module note: the stream ended the way the fixture
+    // records, and a `push_bytes` that answered `Err` first is a fact about the
+    // chunking, not about how the stream ended.
+    match terminal {
+        TerminalInput::Finish(eof) => match decoder.finish(eof) {
+            Ok(produced) => events.extend(produced.iter().map(serialize_event)),
+            Err(failure) => error = error.or(Some(failure.kind)),
+        },
+        TerminalInput::Transport(kind) => {
+            let produced = decoder.on_transport_error(kind);
+            events.extend(produced.iter().map(serialize_event));
         }
+        TerminalInput::Cancel => {
+            let produced = decoder.on_cancel();
+            events.extend(produced.iter().map(serialize_event));
+        }
+        TerminalInput::None => {}
     }
 
     // The drain. See the module note: a failure detected behind delivered
