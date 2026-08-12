@@ -79,6 +79,7 @@
     clippy::useless_format
 )]
 
+mod a2a_ops;
 mod action_effect;
 mod agent_eval;
 mod agent_markdown;

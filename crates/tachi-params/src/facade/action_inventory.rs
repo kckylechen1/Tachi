@@ -133,6 +133,9 @@ pub const TACHI_EVENT_ACTIONS: &[&str] = &[
     "label_eval",
 ];
 
+/// Closed local advisory-mailbox actions (#1751).
+pub const TACHI_A2A_ACTIONS: &[&str] = &["respond", "status"];
+
 /// `tachi_wiki` facade actions. Single source for `facade::tachi_wiki_action_schema`
 /// and #1098's `action_effect` completeness test.
 pub const TACHI_WIKI_ACTIONS: &[&str] = &["search", "browse", "read", "write"];

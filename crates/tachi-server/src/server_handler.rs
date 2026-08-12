@@ -1183,7 +1183,8 @@ mod tests {
     /// router-sum listing has exactly one copy to keep in sync with
     /// `server_state/init.rs`.
     fn native_tools() -> Vec<rmcp::model::Tool> {
-        (MemoryServer::continuity_tool_router()
+        (MemoryServer::a2a_tool_router()
+            + MemoryServer::continuity_tool_router()
             + MemoryServer::component_tool_router()
             + MemoryServer::copilot_tool_router()
             + MemoryServer::dispatch_tool_router()

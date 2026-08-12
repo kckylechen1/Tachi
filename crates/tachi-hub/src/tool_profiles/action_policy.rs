@@ -25,6 +25,7 @@ fn is_gated_facade(tool_name: &str) -> bool {
             | "tachi_verify"
             | "tachi_gh"
             | "tachi_event"
+            | "tachi_a2a"
     )
 }
 
@@ -196,6 +197,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
         ),
         "tachi_skill" => matches!(action, "discover" | "run" | "bundle"),
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
+        "tachi_a2a" => matches!(action, "respond" | "status"),
         // Non-facade tools on the delegate list (no action concept): tool
         // visibility is enough, regardless of what's in the `action` arg.
         // `peer_query` (#1016 S1) is action-less (its selector is `noun`, gated
@@ -291,6 +293,11 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             "project" | "promote" | "label_eval" => Some(ToolBundle::Operate),
             _ => None,
         },
+        "tachi_a2a" => match action.as_str() {
+            "status" => Some(ToolBundle::Observe),
+            "respond" => Some(ToolBundle::Remember),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -298,6 +305,32 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f1751_a2a_profiles_split_status_from_respond_and_fail_closed() {
+        assert!(facade_action_allowed(
+            "tachi_a2a",
+            Some("status"),
+            Some(ToolProfile::observe())
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_a2a",
+            Some("respond"),
+            Some(ToolProfile::observe())
+        ));
+        for action in ["respond", "status"] {
+            assert!(facade_action_allowed(
+                "tachi_a2a",
+                Some(action),
+                Some(ToolProfile::delegate())
+            ));
+        }
+        assert!(!facade_action_allowed(
+            "tachi_a2a",
+            Some("send"),
+            Some(ToolProfile::delegate())
+        ));
+    }
 
     #[test]
     fn f3_delegate_denies_task_dispatch_allows_complete() {

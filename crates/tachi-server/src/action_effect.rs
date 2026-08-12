@@ -169,6 +169,7 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_skill",
     "tachi_verify",
     "tachi_staff",
+    "tachi_a2a",
     // #757 Cut3-S1: folded sandbox verb is mixed read/write (set_rule/
     // set_policy mutate) — invalidate like the legacy sandbox_set_* aliases
     // above, matching the whole-facade invalidation used for tachi_memory.
@@ -273,6 +274,7 @@ pub(crate) fn facade_action_effect(
             &["label_eval", "context"],
             &["emit", "project", "promote"],
         ),
+        "tachi_a2a" => (&["status"], &[], &["respond"]),
         "tachi_wiki" => (&["search", "browse", "read"], &[], &["write"]),
         "tachi_task" => (
             &["status", "board", "brief"],
@@ -623,6 +625,7 @@ mod tests {
         let task_actions = tachi_params::TachiTaskAction::primary_wire_strings();
         assert_all_classified("tachi_task", &task_actions);
         assert_all_classified("tachi_event", tachi_params::TACHI_EVENT_ACTIONS);
+        assert_all_classified("tachi_a2a", tachi_params::TACHI_A2A_ACTIONS);
         assert_all_classified("tachi_wiki", tachi_params::TACHI_WIKI_ACTIONS);
         assert_all_classified("tachi_staff", tachi_params::TACHI_STAFF_ACTIONS);
         // codex checkpoint 3: "Typed TachiVerifyAction::ALL exists in
