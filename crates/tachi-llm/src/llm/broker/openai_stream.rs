@@ -270,6 +270,23 @@ impl DeltaGrammar {
             ));
         };
 
+        // Which completion this delta belongs to. A chunk carrying more than
+        // one choice is refused above, but that refusal is worth nothing on
+        // its own: a provider answering `n > 1` sends each choice in a chunk
+        // of its own, every chunk passes the one-choice check, and the deltas
+        // of several independent completions arrive interleaved on one stream.
+        // Decoding those as *the* answer splices two generations into one
+        // sentence, and the caller has no way to see it happened. This decoder
+        // reads the first completion and refuses to guess about the rest.
+        if let Some(index) = choice.get("index").filter(|index| !index.is_null()) {
+            if index.as_u64() != Some(0) {
+                return Err(decode_error(
+                    StreamDecodeErrorKind::UnknownEventShape,
+                    "a streamed chunk carried a choice other than the first",
+                ));
+            }
+        }
+
         if let Some(delta) = choice.get("delta").filter(|delta| !delta.is_null()) {
             let Some(delta) = delta.as_object() else {
                 return Err(decode_error(

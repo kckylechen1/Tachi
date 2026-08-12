@@ -425,17 +425,29 @@ struct TrackedCall {
 pub(super) struct ToolCallTracker {
     /// Calls in the order they were opened.
     calls: Vec<TrackedCall>,
-    /// The highest index opened so far, for the ordering rule.
-    highest_opened: Option<u32>,
 }
 
 impl ToolCallTracker {
     /// Opens a call at `index`.
     ///
-    /// Indices must open in ascending order. A lower index appearing after a
-    /// higher one means fragments were reordered somewhere between the model
-    /// and here, and silently accepting that is how one call's arguments end up
-    /// stapled onto another call's name.
+    /// The canonical index is a **position in the assistant turn**, so the
+    /// indices a turn opens are exactly `0, 1, 2, …` and this checks it rather
+    /// than assuming it. Two different corruptions are caught by the one rule:
+    ///
+    /// - a lower index after a higher one means fragments were reordered
+    ///   somewhere between the model and here, and accepting it is how one
+    ///   call's arguments end up stapled onto another call's name;
+    /// - a first call opening at 3, or a jump from 0 to 2, means the canonical
+    ///   index is *not* the position — the caller is handed a turn whose only
+    ///   call claims to be the fourth, and nothing downstream can tell that
+    ///   from a turn with three calls whose fragments were dropped.
+    ///
+    /// The second is why this is a refusal and not a renumbering. The other
+    /// grammar in the corpus maps its own block index onto this position
+    /// (Anthropic's first tool call is block 1 whenever a sentence preceded
+    /// it), so accepting a sparse index here would make the same turn arrive
+    /// with different canonical indices depending on which provider answered —
+    /// exactly the provider leak the canonical vocabulary exists to prevent.
     pub(super) fn open(
         &mut self,
         index: u32,
@@ -448,10 +460,11 @@ impl ToolCallTracker {
                 "a tool call was opened twice at the same index",
             ));
         }
-        if self.highest_opened.is_some_and(|highest| index <= highest) {
+        if u64::from(index) != self.calls.len() as u64 {
             return Err(decode_error(
                 StreamDecodeErrorKind::IllegalSequence,
-                "tool call indices must open in ascending order",
+                "a tool call index is its position in the turn; \
+                 they open at 0 and rise by one",
             ));
         }
         if self.calls.len() >= MAX_TOOL_CALLS_PER_TURN {
@@ -460,7 +473,6 @@ impl ToolCallTracker {
                 "one assistant turn opened more tool calls than the decoder admits",
             ));
         }
-        self.highest_opened = Some(index);
         self.calls.push(TrackedCall {
             index,
             id: id.map(str::to_string),
