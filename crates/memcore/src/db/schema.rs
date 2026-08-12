@@ -914,7 +914,9 @@ pub(crate) fn validate_a2a_mailbox_schema(conn: &Connection) -> Result<(), Memor
         ("envelope_id", "TEXT", true, 1),
         ("kind", "TEXT", true, 0),
         ("issuer_agent_identity_id", "TEXT", true, 0),
+        ("issuer_admission_id", "TEXT", true, 0),
         ("recipient_agent_identity_id", "TEXT", true, 0),
+        ("recipient_admission_id", "TEXT", true, 0),
         ("subject_ref", "TEXT", true, 0),
         ("body", "TEXT", true, 0),
         ("body_digest", "TEXT", true, 0),
@@ -922,6 +924,8 @@ pub(crate) fn validate_a2a_mailbox_schema(conn: &Connection) -> Result<(), Memor
         ("recipient_identity_assurance", "TEXT", true, 0),
         ("issuer_trust_domain", "TEXT", true, 0),
         ("recipient_trust_domain", "TEXT", true, 0),
+        ("issuer_trust_basis", "TEXT", true, 0),
+        ("recipient_trust_basis", "TEXT", true, 0),
         ("idempotency_key", "TEXT", true, 0),
         ("created_at", "TEXT", true, 0),
         ("expires_at", "TEXT", true, 0),
@@ -934,8 +938,10 @@ pub(crate) fn validate_a2a_mailbox_schema(conn: &Connection) -> Result<(), Memor
         ("envelope_version", "INTEGER", true, 0),
         ("state", "TEXT", true, 0),
         ("actor_agent_identity_id", "TEXT", true, 0),
+        ("actor_admission_id", "TEXT", true, 0),
         ("identity_assurance", "TEXT", true, 0),
         ("trust_domain", "TEXT", true, 0),
+        ("trust_basis", "TEXT", true, 0),
         ("occurred_at", "TEXT", true, 0),
     ];
     let validate_columns = |table: &str,
@@ -980,14 +986,46 @@ pub(crate) fn validate_a2a_mailbox_schema(conn: &Connection) -> Result<(), Memor
         [],
         |row| row.get(0),
     )?;
-    if !normalize_schema_sql(&envelope_sql)
-        .contains(&normalize_schema_sql(ddl::A2A_ENVELOPE_STATE_CHECK_CLAUSE))
-        || !normalize_schema_sql(&receipt_sql)
-            .contains(&normalize_schema_sql(ddl::A2A_RECEIPT_STATE_CHECK_CLAUSE))
-    {
-        return Err(MemoryError::InvalidArg(
-            "incomplete v31 A2A mailbox: closed state CHECK constraint drifted".to_string(),
-        ));
+    let envelope_sql = normalize_schema_sql(&envelope_sql);
+    for clause in [
+        ddl::A2A_KIND_CHECK_CLAUSE,
+        ddl::A2A_ISSUER_ASSURANCE_CHECK_CLAUSE,
+        ddl::A2A_RECIPIENT_ASSURANCE_CHECK_CLAUSE,
+        ddl::A2A_ISSUER_TRUST_DOMAIN_CHECK_CLAUSE,
+        ddl::A2A_RECIPIENT_TRUST_DOMAIN_CHECK_CLAUSE,
+        ddl::A2A_ISSUER_TRUST_BASIS_CHECK_CLAUSE,
+        ddl::A2A_RECIPIENT_TRUST_BASIS_CHECK_CLAUSE,
+        ddl::A2A_EXPIRY_CHECK_CLAUSE,
+        ddl::A2A_IDEMPOTENCY_UNIQUE_CLAUSE,
+        ddl::A2A_ISSUER_IDENTITY_FK_CLAUSE,
+        ddl::A2A_ISSUER_ADMISSION_FK_CLAUSE,
+        ddl::A2A_RECIPIENT_IDENTITY_FK_CLAUSE,
+        ddl::A2A_RECIPIENT_ADMISSION_FK_CLAUSE,
+        ddl::A2A_ENVELOPE_STATE_CHECK_CLAUSE,
+    ] {
+        if !envelope_sql.contains(&normalize_schema_sql(clause)) {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v31 A2A mailbox: envelope constraint drifted: {clause}"
+            )));
+        }
+    }
+    let receipt_sql = normalize_schema_sql(&receipt_sql);
+    for clause in [
+        ddl::A2A_RECEIPT_STATE_CHECK_CLAUSE,
+        ddl::A2A_RECEIPT_ENVELOPE_FK_CLAUSE,
+        ddl::A2A_RECEIPT_ACTOR_IDENTITY_FK_CLAUSE,
+        ddl::A2A_RECEIPT_ACTOR_ADMISSION_FK_CLAUSE,
+        "CHECK (identity_assurance = 'self_asserted')",
+        "CHECK (trust_domain = 'same_host')",
+        "CHECK (trust_basis IN ('current_local_connection','historical_local_admission'))",
+        "UNIQUE (envelope_id, envelope_version)",
+        "UNIQUE (envelope_id, state)",
+    ] {
+        if !receipt_sql.contains(&normalize_schema_sql(clause)) {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v31 A2A mailbox: receipt constraint drifted: {clause}"
+            )));
+        }
     }
     Ok(())
 }
@@ -2177,6 +2215,113 @@ mod idless_identity_tests {
             .is_err(),
             "the active identity constraint must survive the enum rebuild"
         );
+    }
+}
+
+#[cfg(test)]
+mod a2a_schema_tests {
+    use super::*;
+
+    fn install(sql: &str) -> Connection {
+        let conn = Connection::open_in_memory().expect("raw in-memory schema fixture");
+        conn.execute_batch(sql).expect("install A2A schema fixture");
+        conn
+    }
+
+    #[test]
+    fn canonical_v31_a2a_schema_validates() {
+        let conn = install(ddl::A2A_MAILBOX_V31_SQL);
+        validate_a2a_mailbox_schema(&conn).expect("canonical v31 mailbox");
+    }
+
+    #[test]
+    fn widened_or_unbound_v31_a2a_constraints_are_refused() {
+        let mutations = [
+            (
+                "kind",
+                ddl::A2A_KIND_CHECK_CLAUSE,
+                "CHECK (length(kind) > 0)",
+            ),
+            (
+                "issuer assurance",
+                ddl::A2A_ISSUER_ASSURANCE_CHECK_CLAUSE,
+                "CHECK (length(issuer_identity_assurance) > 0)",
+            ),
+            (
+                "recipient assurance",
+                ddl::A2A_RECIPIENT_ASSURANCE_CHECK_CLAUSE,
+                "CHECK (length(recipient_identity_assurance) > 0)",
+            ),
+            (
+                "issuer trust domain",
+                ddl::A2A_ISSUER_TRUST_DOMAIN_CHECK_CLAUSE,
+                "CHECK (length(issuer_trust_domain) > 0)",
+            ),
+            (
+                "recipient trust basis",
+                ddl::A2A_RECIPIENT_TRUST_BASIS_CHECK_CLAUSE,
+                "CHECK (length(recipient_trust_basis) > 0)",
+            ),
+            (
+                "expiry ordering",
+                ddl::A2A_EXPIRY_CHECK_CLAUSE,
+                "CHECK (length(expires_at) > 0)",
+            ),
+            (
+                "idempotency unique",
+                ddl::A2A_IDEMPOTENCY_UNIQUE_CLAUSE,
+                "CHECK (length(idempotency_key) > 0)",
+            ),
+            (
+                "issuer admission foreign key",
+                ddl::A2A_ISSUER_ADMISSION_FK_CLAUSE,
+                "CHECK (length(issuer_admission_id) > 0)",
+            ),
+            (
+                "recipient admission foreign key",
+                ddl::A2A_RECIPIENT_ADMISSION_FK_CLAUSE,
+                "CHECK (length(recipient_admission_id) > 0)",
+            ),
+        ];
+        for (label, original, replacement) in mutations {
+            let mutant = ddl::A2A_MAILBOX_V31_SQL.replacen(original, replacement, 1);
+            assert_ne!(
+                mutant,
+                ddl::A2A_MAILBOX_V31_SQL,
+                "mutation missing: {label}"
+            );
+            let conn = install(&mutant);
+            let error = validate_a2a_mailbox_schema(&conn)
+                .expect_err(&format!("widened v31 constraint must fail: {label}"));
+            assert!(
+                error.to_string().contains("incomplete v31 A2A mailbox"),
+                "{label}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_stamp_with_recreated_widened_a2a_table_is_refused_not_repaired() {
+        let mut conn = Connection::open_in_memory().expect("current product fixture");
+        init_schema(&conn).expect("build current product fixture");
+        conn.execute_batch("DROP TABLE a2a_delivery_receipts; DROP TABLE a2a_envelopes;")
+            .expect("remove canonical mailbox");
+        let mutant = ddl::A2A_MAILBOX_V31_SQL.replacen(
+            ddl::A2A_KIND_CHECK_CLAUSE,
+            "CHECK (length(kind) > 0)",
+            1,
+        );
+        conn.execute_batch(&mutant)
+            .expect("recreate widened current-stamped mailbox");
+
+        let error = crate::db::migrations::run_data_migrations_with_profile(
+            &mut conn,
+            "global",
+            Path::new(":memory:"),
+            crate::db::StoreProfile::TachiFull,
+        )
+        .expect_err("current stamp must validate, not repair, widened mailbox DDL");
+        assert!(error.to_string().contains("incomplete v31 A2A mailbox"));
     }
 }
 

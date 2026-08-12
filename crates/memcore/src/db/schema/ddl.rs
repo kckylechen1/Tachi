@@ -1545,19 +1545,54 @@ pub(super) const MEMORY_OUTBOX_DESTINATION_APPLY_APPLICATION_CHECK_CLAUSE: &str 
 /// Product-only local advisory mailbox. Installed by the v31 migration so a
 /// stamped v30 store cannot acquire a new write surface outside migration
 /// authority. PortableKernel stores intentionally never execute this SQL.
+pub(super) const A2A_KIND_CHECK_CLAUSE: &str = "CHECK (kind = 'turn_response/v1')";
+pub(super) const A2A_ISSUER_ASSURANCE_CHECK_CLAUSE: &str =
+    "CHECK (issuer_identity_assurance = 'self_asserted')";
+pub(super) const A2A_RECIPIENT_ASSURANCE_CHECK_CLAUSE: &str =
+    "CHECK (recipient_identity_assurance = 'self_asserted')";
+pub(super) const A2A_ISSUER_TRUST_DOMAIN_CHECK_CLAUSE: &str =
+    "CHECK (issuer_trust_domain = 'same_host')";
+pub(super) const A2A_RECIPIENT_TRUST_DOMAIN_CHECK_CLAUSE: &str =
+    "CHECK (recipient_trust_domain = 'same_host')";
+pub(super) const A2A_ISSUER_TRUST_BASIS_CHECK_CLAUSE: &str =
+    "CHECK (issuer_trust_basis = 'current_local_connection')";
+pub(super) const A2A_RECIPIENT_TRUST_BASIS_CHECK_CLAUSE: &str =
+    "CHECK (recipient_trust_basis = 'historical_local_admission')";
+pub(super) const A2A_EXPIRY_CHECK_CLAUSE: &str = "CHECK (expires_at > created_at)";
+pub(super) const A2A_IDEMPOTENCY_UNIQUE_CLAUSE: &str =
+    "UNIQUE (issuer_agent_identity_id, idempotency_key)";
+pub(super) const A2A_ISSUER_IDENTITY_FK_CLAUSE: &str =
+    "FOREIGN KEY (issuer_agent_identity_id) REFERENCES agent_identities(agent_identity_id)";
+pub(super) const A2A_RECIPIENT_IDENTITY_FK_CLAUSE: &str =
+    "FOREIGN KEY (recipient_agent_identity_id) REFERENCES agent_identities(agent_identity_id)";
+pub(super) const A2A_ISSUER_ADMISSION_FK_CLAUSE: &str =
+    "FOREIGN KEY (issuer_admission_id) REFERENCES identity_admissions(admission_id)";
+pub(super) const A2A_RECIPIENT_ADMISSION_FK_CLAUSE: &str =
+    "FOREIGN KEY (recipient_admission_id) REFERENCES identity_admissions(admission_id)";
+pub(super) const A2A_RECEIPT_ENVELOPE_FK_CLAUSE: &str =
+    "FOREIGN KEY (envelope_id) REFERENCES a2a_envelopes(envelope_id)";
+pub(super) const A2A_RECEIPT_ACTOR_IDENTITY_FK_CLAUSE: &str =
+    "FOREIGN KEY (actor_agent_identity_id) REFERENCES agent_identities(agent_identity_id)";
+pub(super) const A2A_RECEIPT_ACTOR_ADMISSION_FK_CLAUSE: &str =
+    "FOREIGN KEY (actor_admission_id) REFERENCES identity_admissions(admission_id)";
+
 pub(super) const A2A_MAILBOX_V31_SQL: &str = r#"
         CREATE TABLE IF NOT EXISTS a2a_envelopes (
             envelope_id                    TEXT PRIMARY KEY NOT NULL,
             kind                           TEXT NOT NULL CHECK (kind = 'turn_response/v1'),
             issuer_agent_identity_id       TEXT NOT NULL,
+            issuer_admission_id             TEXT NOT NULL,
             recipient_agent_identity_id    TEXT NOT NULL,
+            recipient_admission_id          TEXT NOT NULL,
             subject_ref                    TEXT NOT NULL,
             body                           TEXT NOT NULL,
-            body_digest                    TEXT NOT NULL,
-            issuer_identity_assurance      TEXT NOT NULL CHECK (issuer_identity_assurance IN ('self_asserted','verified')),
-            recipient_identity_assurance   TEXT NOT NULL CHECK (recipient_identity_assurance IN ('self_asserted','verified')),
+            body_digest                    TEXT NOT NULL CHECK (length(body_digest) = 64 AND body_digest = lower(body_digest) AND body_digest NOT GLOB '*[^0-9a-f]*'),
+            issuer_identity_assurance      TEXT NOT NULL CHECK (issuer_identity_assurance = 'self_asserted'),
+            recipient_identity_assurance   TEXT NOT NULL CHECK (recipient_identity_assurance = 'self_asserted'),
             issuer_trust_domain            TEXT NOT NULL CHECK (issuer_trust_domain = 'same_host'),
             recipient_trust_domain         TEXT NOT NULL CHECK (recipient_trust_domain = 'same_host'),
+            issuer_trust_basis             TEXT NOT NULL CHECK (issuer_trust_basis = 'current_local_connection'),
+            recipient_trust_basis          TEXT NOT NULL CHECK (recipient_trust_basis = 'historical_local_admission'),
             idempotency_key                TEXT NOT NULL,
             created_at                     TEXT NOT NULL,
             expires_at                     TEXT NOT NULL,
@@ -1568,7 +1603,9 @@ pub(super) const A2A_MAILBOX_V31_SQL: &str = r#"
             CHECK (length(body) > 0),
             CHECK (expires_at > created_at),
             FOREIGN KEY (issuer_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
-            FOREIGN KEY (recipient_agent_identity_id) REFERENCES agent_identities(agent_identity_id)
+            FOREIGN KEY (issuer_admission_id) REFERENCES identity_admissions(admission_id),
+            FOREIGN KEY (recipient_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (recipient_admission_id) REFERENCES identity_admissions(admission_id)
         );
         CREATE INDEX IF NOT EXISTS idx_a2a_envelopes_recipient_state
             ON a2a_envelopes(recipient_agent_identity_id, current_state, expires_at, created_at, envelope_id);
@@ -1581,13 +1618,16 @@ pub(super) const A2A_MAILBOX_V31_SQL: &str = r#"
             envelope_version               INTEGER NOT NULL CHECK (envelope_version > 0),
             state                          TEXT NOT NULL CHECK (state IN ('received','accepted','consumed','expired')),
             actor_agent_identity_id        TEXT NOT NULL,
-            identity_assurance             TEXT NOT NULL CHECK (identity_assurance IN ('self_asserted','verified')),
+            actor_admission_id              TEXT NOT NULL,
+            identity_assurance             TEXT NOT NULL CHECK (identity_assurance = 'self_asserted'),
             trust_domain                   TEXT NOT NULL CHECK (trust_domain = 'same_host'),
+            trust_basis                    TEXT NOT NULL CHECK (trust_basis IN ('current_local_connection','historical_local_admission')),
             occurred_at                    TEXT NOT NULL,
             UNIQUE (envelope_id, envelope_version),
             UNIQUE (envelope_id, state),
             FOREIGN KEY (envelope_id) REFERENCES a2a_envelopes(envelope_id),
-            FOREIGN KEY (actor_agent_identity_id) REFERENCES agent_identities(agent_identity_id)
+            FOREIGN KEY (actor_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (actor_admission_id) REFERENCES identity_admissions(admission_id)
         );
         CREATE INDEX IF NOT EXISTS idx_a2a_receipts_envelope_version
             ON a2a_delivery_receipts(envelope_id, envelope_version);

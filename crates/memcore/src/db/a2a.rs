@@ -6,6 +6,7 @@
 //! admission is deliberately sufficient for offline advisory delivery.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use sha2::{Digest, Sha256};
 
 use crate::error::MemoryError;
 
@@ -19,20 +20,23 @@ pub const MAX_A2A_STORAGE_BATCH: usize = 100;
 pub struct A2aRecipientEligibility {
     pub agent_identity_id: String,
     pub admission_id: String,
+    pub connection_id: String,
     pub identity_assurance: String,
     pub trust_domain: String,
+    pub trust_basis: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewA2aEnvelope {
     pub envelope_id: String,
     pub issuer_agent_identity_id: String,
+    /// The server's current admitted connection. Storage resolves this exact
+    /// `(identity, connection)` pair to a local `self_asserted` admission.
+    pub issuer_connection_id: String,
     pub recipient_agent_identity_id: String,
     pub subject_ref: String,
+    /// Already scrubbed body. Storage, not the caller, owns its SHA-256.
     pub body: String,
-    pub body_digest: String,
-    pub issuer_identity_assurance: String,
-    pub recipient_identity_assurance: String,
     pub idempotency_key: String,
     pub created_at: String,
     pub expires_at: String,
@@ -43,7 +47,9 @@ pub struct A2aEnvelope {
     pub envelope_id: String,
     pub kind: String,
     pub issuer_agent_identity_id: String,
+    pub issuer_admission_id: String,
     pub recipient_agent_identity_id: String,
+    pub recipient_admission_id: String,
     pub subject_ref: String,
     pub body: String,
     pub body_digest: String,
@@ -51,6 +57,8 @@ pub struct A2aEnvelope {
     pub recipient_identity_assurance: String,
     pub issuer_trust_domain: String,
     pub recipient_trust_domain: String,
+    pub issuer_trust_basis: String,
+    pub recipient_trust_basis: String,
     pub idempotency_key: String,
     pub created_at: String,
     pub expires_at: String,
@@ -65,8 +73,10 @@ pub struct A2aDeliveryReceipt {
     pub envelope_version: i64,
     pub state: String,
     pub actor_agent_identity_id: String,
+    pub actor_admission_id: String,
     pub identity_assurance: String,
     pub trust_domain: String,
+    pub trust_basis: String,
     pub occurred_at: String,
 }
 
@@ -89,13 +99,19 @@ pub struct A2aStatusRow {
     pub envelope_id: String,
     pub kind: String,
     pub issuer_agent_identity_id: String,
+    pub issuer_admission_id: String,
     pub recipient_agent_identity_id: String,
+    pub recipient_admission_id: String,
     pub subject_ref: String,
     pub body_digest: String,
     pub created_at: String,
     pub expires_at: String,
     pub current_state: String,
     pub state_version: i64,
+    pub issuer_identity_assurance: String,
+    pub recipient_identity_assurance: String,
+    pub issuer_trust_basis: String,
+    pub recipient_trust_basis: String,
     pub receipts: Vec<A2aDeliveryReceipt>,
 }
 
@@ -106,16 +122,6 @@ fn refuse_blank(field: &str, value: &str) -> Result<(), MemoryError> {
         )));
     }
     Ok(())
-}
-
-fn validate_assurance(field: &str, assurance: &str) -> Result<(), MemoryError> {
-    if matches!(assurance, "self_asserted" | "verified") {
-        Ok(())
-    } else {
-        Err(MemoryError::InvalidArg(format!(
-            "a2a {field} assurance must be self_asserted or verified"
-        )))
-    }
 }
 
 fn validate_subject_ref(subject_ref: &str) -> Result<(), MemoryError> {
@@ -142,28 +148,30 @@ fn validate_limit(limit: usize) -> Result<i64, MemoryError> {
     Ok(limit as i64)
 }
 
-/// Resolve one exact historical same-host eligible admission. This does not
-/// claim current presence: unavailable/rejected-only identities return None,
-/// while an older self-asserted/verified row remains valid for offline inbox
-/// addressing exactly as the owner clarification requires.
+/// Resolve the newest historical admission that carries locality evidence
+/// under the current writer law. Only `self_asserted` can have been produced
+/// by `admit_agent_connection(local=true)`; `verified` currently proves
+/// identity but records no host locality and is therefore ineligible here.
 pub fn resolve_a2a_recipient_eligibility(
     conn: &Connection,
     agent_identity_id: &str,
 ) -> Result<Option<A2aRecipientEligibility>, MemoryError> {
     refuse_blank("recipient agent identity id", agent_identity_id)?;
     conn.query_row(
-        "SELECT a.agent_identity_id,ia.admission_id,ia.state
+        "SELECT a.agent_identity_id,ia.admission_id,ia.connection_id,ia.state
          FROM agent_identities a
          JOIN identity_admissions ia ON ia.agent_identity_id=a.agent_identity_id
-         WHERE a.agent_identity_id=?1 AND ia.state IN ('self_asserted','verified')
+         WHERE a.agent_identity_id=?1 AND ia.state='self_asserted'
          ORDER BY ia.created_at DESC, ia.admission_id DESC LIMIT 1",
         [agent_identity_id],
         |row| {
             Ok(A2aRecipientEligibility {
                 agent_identity_id: row.get(0)?,
                 admission_id: row.get(1)?,
-                identity_assurance: row.get(2)?,
+                connection_id: row.get(2)?,
+                identity_assurance: row.get(3)?,
                 trust_domain: A2A_SAME_HOST_TRUST_DOMAIN.to_string(),
+                trust_basis: "historical_local_admission".to_string(),
             })
         },
     )
@@ -171,22 +179,31 @@ pub fn resolve_a2a_recipient_eligibility(
     .map_err(Into::into)
 }
 
-fn assurance_is_historical(
+fn resolve_current_issuer_admission(
     conn: &Connection,
     agent_identity_id: &str,
-    assurance: &str,
-) -> Result<bool, MemoryError> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM agent_identities a
-             JOIN identity_admissions ia ON ia.agent_identity_id=a.agent_identity_id
-             WHERE a.agent_identity_id=?1 AND ia.state=?2
-               AND ia.state IN ('self_asserted','verified') LIMIT 1",
-            params![agent_identity_id, assurance],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
+    connection_id: &str,
+) -> Result<Option<A2aRecipientEligibility>, MemoryError> {
+    conn.query_row(
+        "SELECT a.agent_identity_id,ia.admission_id,ia.connection_id,ia.state
+         FROM agent_identities a
+         JOIN identity_admissions ia ON ia.agent_identity_id=a.agent_identity_id
+         WHERE a.agent_identity_id=?1 AND ia.connection_id=?2 AND ia.state='self_asserted'
+         ORDER BY ia.created_at DESC, ia.admission_id DESC LIMIT 1",
+        params![agent_identity_id, connection_id],
+        |row| {
+            Ok(A2aRecipientEligibility {
+                agent_identity_id: row.get(0)?,
+                admission_id: row.get(1)?,
+                connection_id: row.get(2)?,
+                identity_assurance: row.get(3)?,
+                trust_domain: A2A_SAME_HOST_TRUST_DOMAIN.to_string(),
+                trust_basis: "current_local_connection".to_string(),
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn row_to_envelope(row: &rusqlite::Row<'_>) -> rusqlite::Result<A2aEnvelope> {
@@ -194,23 +211,27 @@ fn row_to_envelope(row: &rusqlite::Row<'_>) -> rusqlite::Result<A2aEnvelope> {
         envelope_id: row.get(0)?,
         kind: row.get(1)?,
         issuer_agent_identity_id: row.get(2)?,
-        recipient_agent_identity_id: row.get(3)?,
-        subject_ref: row.get(4)?,
-        body: row.get(5)?,
-        body_digest: row.get(6)?,
-        issuer_identity_assurance: row.get(7)?,
-        recipient_identity_assurance: row.get(8)?,
-        issuer_trust_domain: row.get(9)?,
-        recipient_trust_domain: row.get(10)?,
-        idempotency_key: row.get(11)?,
-        created_at: row.get(12)?,
-        expires_at: row.get(13)?,
-        current_state: row.get(14)?,
-        state_version: row.get(15)?,
+        issuer_admission_id: row.get(3)?,
+        recipient_agent_identity_id: row.get(4)?,
+        recipient_admission_id: row.get(5)?,
+        subject_ref: row.get(6)?,
+        body: row.get(7)?,
+        body_digest: row.get(8)?,
+        issuer_identity_assurance: row.get(9)?,
+        recipient_identity_assurance: row.get(10)?,
+        issuer_trust_domain: row.get(11)?,
+        recipient_trust_domain: row.get(12)?,
+        issuer_trust_basis: row.get(13)?,
+        recipient_trust_basis: row.get(14)?,
+        idempotency_key: row.get(15)?,
+        created_at: row.get(16)?,
+        expires_at: row.get(17)?,
+        current_state: row.get(18)?,
+        state_version: row.get(19)?,
     })
 }
 
-const ENVELOPE_COLUMNS: &str = "envelope_id,kind,issuer_agent_identity_id,recipient_agent_identity_id,subject_ref,body,body_digest,issuer_identity_assurance,recipient_identity_assurance,issuer_trust_domain,recipient_trust_domain,idempotency_key,created_at,expires_at,current_state,state_version";
+const ENVELOPE_COLUMNS: &str = "envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,recipient_agent_identity_id,recipient_admission_id,subject_ref,body,body_digest,issuer_identity_assurance,recipient_identity_assurance,issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version";
 
 fn read_envelope_by_id(conn: &Connection, envelope_id: &str) -> Result<A2aEnvelope, MemoryError> {
     conn.query_row(
@@ -226,7 +247,7 @@ fn read_received_receipt(
     envelope_id: &str,
 ) -> Result<A2aDeliveryReceipt, MemoryError> {
     conn.query_row(
-        "SELECT receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,identity_assurance,trust_domain,occurred_at
+        "SELECT receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at
          FROM a2a_delivery_receipts WHERE envelope_id=?1 AND state='received'",
         [envelope_id],
         |row| {
@@ -236,9 +257,11 @@ fn read_received_receipt(
                 envelope_version: row.get(2)?,
                 state: row.get(3)?,
                 actor_agent_identity_id: row.get(4)?,
-                identity_assurance: row.get(5)?,
-                trust_domain: row.get(6)?,
-                occurred_at: row.get(7)?,
+                actor_admission_id: row.get(5)?,
+                identity_assurance: row.get(6)?,
+                trust_domain: row.get(7)?,
+                trust_basis: row.get(8)?,
+                occurred_at: row.get(9)?,
             })
         },
     )
@@ -248,6 +271,7 @@ fn read_received_receipt(
 fn payload_matches(
     existing: &A2aEnvelope,
     request: &NewA2aEnvelope,
+    body_digest: &str,
     created: &str,
     expires: &str,
 ) -> bool {
@@ -264,9 +288,7 @@ fn payload_matches(
         && existing.recipient_agent_identity_id == request.recipient_agent_identity_id
         && existing.subject_ref == request.subject_ref
         && existing.body == request.body
-        && existing.body_digest == request.body_digest
-        && existing.issuer_identity_assurance == request.issuer_identity_assurance
-        && existing.recipient_identity_assurance == request.recipient_identity_assurance
+        && existing.body_digest == body_digest
         && existing.issuer_trust_domain == A2A_SAME_HOST_TRUST_DOMAIN
         && existing.recipient_trust_domain == A2A_SAME_HOST_TRUST_DOMAIN
         && ttl_matches() == Some(true)
@@ -283,18 +305,19 @@ pub fn insert_a2a_envelope(
             request.issuer_agent_identity_id.as_str(),
         ),
         (
+            "issuer connection id",
+            request.issuer_connection_id.as_str(),
+        ),
+        (
             "recipient agent identity id",
             request.recipient_agent_identity_id.as_str(),
         ),
         ("body", request.body.as_str()),
-        ("body digest", request.body_digest.as_str()),
         ("idempotency key", request.idempotency_key.as_str()),
     ] {
         refuse_blank(field, value)?;
     }
     validate_subject_ref(&request.subject_ref)?;
-    validate_assurance("issuer", &request.issuer_identity_assurance)?;
-    validate_assurance("recipient", &request.recipient_identity_assurance)?;
     let created_at = normalize_utc_iso(&request.created_at)?;
     let expires_at = normalize_utc_iso(&request.expires_at)?;
     if expires_at <= created_at {
@@ -302,27 +325,24 @@ pub fn insert_a2a_envelope(
             "a2a expires_at must be after created_at".to_string(),
         ));
     }
-    if !assurance_is_historical(
-        conn,
-        &request.issuer_agent_identity_id,
-        &request.issuer_identity_assurance,
-    )? {
-        return Err(MemoryError::InvalidArg(
-            "a2a issuer assurance is not backed by an eligible admission".to_string(),
-        ));
-    }
-    if !assurance_is_historical(
-        conn,
-        &request.recipient_agent_identity_id,
-        &request.recipient_identity_assurance,
-    )? {
-        return Err(MemoryError::InvalidArg(
-            "a2a recipient assurance is not backed by an eligible historical same-host admission"
-                .to_string(),
-        ));
-    }
-
+    let body_digest = format!("{:x}", Sha256::digest(request.body.as_bytes()));
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let issuer = resolve_current_issuer_admission(
+        &tx,
+        &request.issuer_agent_identity_id,
+        &request.issuer_connection_id,
+    )?
+    .ok_or_else(|| {
+        MemoryError::InvalidArg(
+            "a2a issuer is not bound to the exact current local connection".to_string(),
+        )
+    })?;
+    let recipient = resolve_a2a_recipient_eligibility(&tx, &request.recipient_agent_identity_id)?
+        .ok_or_else(|| {
+        MemoryError::InvalidArg(
+            "a2a recipient lacks an eligible historical local admission".to_string(),
+        )
+    })?;
     let existing = tx
         .query_row(
             &format!("SELECT {ENVELOPE_COLUMNS} FROM a2a_envelopes WHERE issuer_agent_identity_id=?1 AND idempotency_key=?2"),
@@ -331,7 +351,7 @@ pub fn insert_a2a_envelope(
         )
         .optional()?;
     if let Some(existing) = existing {
-        if !payload_matches(&existing, request, &created_at, &expires_at) {
+        if !payload_matches(&existing, request, &body_digest, &created_at, &expires_at) {
             return Err(MemoryError::Duplicate(format!(
                 "a2a idempotency conflict for issuer '{}' and key '{}'",
                 request.issuer_agent_identity_id, request.idempotency_key
@@ -347,17 +367,23 @@ pub fn insert_a2a_envelope(
 
     tx.execute(
         "INSERT INTO a2a_envelopes
-         (envelope_id,kind,issuer_agent_identity_id,recipient_agent_identity_id,subject_ref,body,body_digest,issuer_identity_assurance,recipient_identity_assurance,issuer_trust_domain,recipient_trust_domain,idempotency_key,created_at,expires_at,current_state,state_version)
-         VALUES (?1,'turn_response/v1',?2,?3,?4,?5,?6,?7,?8,'same_host','same_host',?9,?10,?11,'received',1)",
+         (envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,recipient_agent_identity_id,recipient_admission_id,subject_ref,body,body_digest,issuer_identity_assurance,recipient_identity_assurance,issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version)
+         VALUES (?1,'turn_response/v1',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,'received',1)",
         params![
             request.envelope_id,
             request.issuer_agent_identity_id,
+            issuer.admission_id,
             request.recipient_agent_identity_id,
+            recipient.admission_id,
             request.subject_ref,
             request.body,
-            request.body_digest,
-            request.issuer_identity_assurance,
-            request.recipient_identity_assurance,
+            body_digest,
+            issuer.identity_assurance,
+            recipient.identity_assurance,
+            issuer.trust_domain,
+            recipient.trust_domain,
+            issuer.trust_basis,
+            recipient.trust_basis,
             request.idempotency_key,
             created_at,
             expires_at,
@@ -368,13 +394,16 @@ pub fn insert_a2a_envelope(
     let receipt_id = format!("{}:received:1", request.envelope_id);
     tx.execute(
         "INSERT INTO a2a_delivery_receipts
-         (receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,identity_assurance,trust_domain,occurred_at)
-         VALUES (?1,?2,1,'received',?3,?4,'same_host',?5)",
+         (receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at)
+         VALUES (?1,?2,1,'received',?3,?4,?5,?6,?7,?8)",
         params![
             receipt_id,
             request.envelope_id,
             request.issuer_agent_identity_id,
-            request.issuer_identity_assurance,
+            issuer.admission_id,
+            issuer.identity_assurance,
+            issuer.trust_domain,
+            issuer.trust_basis,
             created_at,
         ],
     )?;
@@ -392,8 +421,11 @@ pub fn list_a2a_status(
     refuse_blank("status actor agent identity id", actor_agent_identity_id)?;
     let limit = validate_limit(limit)?;
     let mut stmt = conn.prepare(
-        "SELECT e.envelope_id,e.kind,e.issuer_agent_identity_id,e.recipient_agent_identity_id,
-                e.subject_ref,e.body_digest,e.created_at,e.expires_at,e.current_state,e.state_version
+        "SELECT e.envelope_id,e.kind,e.issuer_agent_identity_id,e.issuer_admission_id,
+                e.recipient_agent_identity_id,e.recipient_admission_id,e.subject_ref,e.body_digest,
+                e.created_at,e.expires_at,e.current_state,e.state_version,
+                e.issuer_identity_assurance,e.recipient_identity_assurance,
+                e.issuer_trust_basis,e.recipient_trust_basis
          FROM a2a_envelopes e
          WHERE e.issuer_agent_identity_id=?1 OR e.recipient_agent_identity_id=?1
          ORDER BY e.created_at DESC,e.envelope_id DESC LIMIT ?2",
@@ -403,13 +435,19 @@ pub fn list_a2a_status(
             envelope_id: row.get(0)?,
             kind: row.get(1)?,
             issuer_agent_identity_id: row.get(2)?,
-            recipient_agent_identity_id: row.get(3)?,
-            subject_ref: row.get(4)?,
-            body_digest: row.get(5)?,
-            created_at: row.get(6)?,
-            expires_at: row.get(7)?,
-            current_state: row.get(8)?,
-            state_version: row.get(9)?,
+            issuer_admission_id: row.get(3)?,
+            recipient_agent_identity_id: row.get(4)?,
+            recipient_admission_id: row.get(5)?,
+            subject_ref: row.get(6)?,
+            body_digest: row.get(7)?,
+            created_at: row.get(8)?,
+            expires_at: row.get(9)?,
+            current_state: row.get(10)?,
+            state_version: row.get(11)?,
+            issuer_identity_assurance: row.get(12)?,
+            recipient_identity_assurance: row.get(13)?,
+            issuer_trust_basis: row.get(14)?,
+            recipient_trust_basis: row.get(15)?,
             receipts: Vec::new(),
         })
     })?;
@@ -417,7 +455,7 @@ pub fn list_a2a_status(
     drop(stmt);
     let mut receipt_stmt = conn.prepare(
         "SELECT receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,
-                identity_assurance,trust_domain,occurred_at
+                actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at
          FROM a2a_delivery_receipts WHERE envelope_id=?1 ORDER BY envelope_version",
     )?;
     for status in &mut rows {
@@ -429,9 +467,11 @@ pub fn list_a2a_status(
                     envelope_version: row.get(2)?,
                     state: row.get(3)?,
                     actor_agent_identity_id: row.get(4)?,
-                    identity_assurance: row.get(5)?,
-                    trust_domain: row.get(6)?,
-                    occurred_at: row.get(7)?,
+                    actor_admission_id: row.get(5)?,
+                    identity_assurance: row.get(6)?,
+                    trust_domain: row.get(7)?,
+                    trust_basis: row.get(8)?,
+                    occurred_at: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -444,22 +484,23 @@ fn append_transition_receipt(
     envelope: &A2aEnvelope,
     version: i64,
     state: &str,
-    actor_agent_identity_id: &str,
-    assurance: &str,
     occurred_at: &str,
 ) -> Result<(), MemoryError> {
     let receipt_id = format!("{}:{state}:{version}", envelope.envelope_id);
     tx.execute(
         "INSERT INTO a2a_delivery_receipts
-         (receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,identity_assurance,trust_domain,occurred_at)
-         VALUES (?1,?2,?3,?4,?5,?6,'same_host',?7)",
+         (receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![
             receipt_id,
             envelope.envelope_id,
             version,
             state,
-            actor_agent_identity_id,
-            assurance,
+            envelope.recipient_agent_identity_id,
+            envelope.recipient_admission_id,
+            envelope.recipient_identity_assurance,
+            envelope.recipient_trust_domain,
+            envelope.recipient_trust_basis,
             occurred_at,
         ],
     )?;
@@ -502,15 +543,7 @@ fn expire_a2a_for_recipient_in_tx(
                 envelope.envelope_id
             )));
         }
-        append_transition_receipt(
-            tx,
-            envelope,
-            next_version,
-            "expired",
-            recipient_agent_identity_id,
-            &envelope.recipient_identity_assurance,
-            now,
-        )?;
+        append_transition_receipt(tx, envelope, next_version, "expired", now)?;
     }
     Ok(envelopes.len())
 }
@@ -580,15 +613,7 @@ pub fn consume_a2a_for_recipient(
                 envelope.envelope_id
             )));
         }
-        append_transition_receipt(
-            &tx,
-            &envelope,
-            accepted_version,
-            "accepted",
-            recipient_agent_identity_id,
-            &envelope.recipient_identity_assurance,
-            &now,
-        )?;
+        append_transition_receipt(&tx, &envelope, accepted_version, "accepted", &now)?;
         #[cfg(test)]
         test_hooks::fail_after_accepted_receipt()?;
         let consumed_version = accepted_version + 1;
@@ -609,15 +634,7 @@ pub fn consume_a2a_for_recipient(
                 envelope.envelope_id
             )));
         }
-        append_transition_receipt(
-            &tx,
-            &envelope,
-            consumed_version,
-            "consumed",
-            recipient_agent_identity_id,
-            &envelope.recipient_identity_assurance,
-            &now,
-        )?;
+        append_transition_receipt(&tx, &envelope, consumed_version, "consumed", &now)?;
         consumed.push(read_envelope_by_id(&tx, &envelope.envelope_id)?);
     }
     tx.commit()?;
@@ -705,12 +722,10 @@ mod tests {
         NewA2aEnvelope {
             envelope_id: id.to_string(),
             issuer_agent_identity_id: "issuer".to_string(),
+            issuer_connection_id: "connection-admission-issuer".to_string(),
             recipient_agent_identity_id: recipient.to_string(),
             subject_ref: "peer_publication:publication-1".to_string(),
             body: "scrubbed response".to_string(),
-            body_digest: "digest-1".to_string(),
-            issuer_identity_assurance: "self_asserted".to_string(),
-            recipient_identity_assurance: "verified".to_string(),
             idempotency_key: key.to_string(),
             created_at: "2026-08-12T00:00:00Z".to_string(),
             expires_at: "2026-08-19T00:00:00Z".to_string(),
@@ -734,12 +749,11 @@ mod tests {
             )
             .expect("test-only trusted admission fixture");
 
-        let eligible = resolve_a2a_recipient_eligibility(store.connection(), "recipient")
-            .expect("eligibility")
-            .expect("eligible historical recipient");
-        assert_eq!(eligible.admission_id, "admission-verified");
-        assert_eq!(eligible.identity_assurance, "verified");
-        assert_eq!(eligible.trust_domain, "same_host");
+        assert!(
+            resolve_a2a_recipient_eligibility(store.connection(), "recipient")
+                .expect("verified has no local-host evidence")
+                .is_none()
+        );
 
         identity(
             &store,
@@ -769,18 +783,26 @@ mod tests {
             "admission-recipient",
             UnverifiedAdmissionState::SelfAsserted,
         );
-        let mut request = envelope("envelope-1", "key-1", "recipient");
-        request.recipient_identity_assurance = "self_asserted".to_string();
+        let request = envelope("envelope-1", "key-1", "recipient");
 
         let created = insert_a2a_envelope(store.connection_mut(), &request).expect("create");
-        assert!(matches!(created, A2aInsertOutcome::Created { .. }));
+        let A2aInsertOutcome::Created { envelope, .. } = created else {
+            panic!("first write must create")
+        };
+        assert_eq!(envelope.issuer_admission_id, "admission-issuer");
+        assert_eq!(envelope.recipient_admission_id, "admission-recipient");
+        assert_eq!(envelope.issuer_trust_basis, "current_local_connection");
+        assert_eq!(envelope.recipient_trust_basis, "historical_local_admission");
+        assert_eq!(
+            envelope.body_digest,
+            "a0419fbe76f0e3f9a8849ea930277d67ac51641c8fb94a0c1734379dce4f6189"
+        );
         let replay = insert_a2a_envelope(store.connection_mut(), &request).expect("replay");
         assert!(matches!(replay, A2aInsertOutcome::Replay { .. }));
 
         let mut conflict = request.clone();
         conflict.envelope_id = "envelope-2".to_string();
         conflict.body = "different".to_string();
-        conflict.body_digest = "digest-2".to_string();
         let error = insert_a2a_envelope(store.connection_mut(), &conflict).expect_err("conflict");
         assert!(error.to_string().contains("idempotency conflict"));
 
@@ -806,8 +828,7 @@ mod tests {
                 UnverifiedAdmissionState::SelfAsserted,
             );
         }
-        let mut request = envelope("envelope-1", "key-1", "recipient");
-        request.recipient_identity_assurance = "self_asserted".to_string();
+        let request = envelope("envelope-1", "key-1", "recipient");
         insert_a2a_envelope(store.connection_mut(), &request).expect("create");
 
         let issuer_status = list_a2a_status(store.connection(), "issuer", 10).unwrap();
@@ -864,7 +885,6 @@ mod tests {
             );
         }
         let mut expired = envelope("expired", "expired-key", "recipient");
-        expired.recipient_identity_assurance = "self_asserted".to_string();
         expired.expires_at = "2026-08-12T12:00:00Z".to_string();
         insert_a2a_envelope(store.connection_mut(), &expired).expect("insert expired candidate");
         assert_eq!(
@@ -889,8 +909,7 @@ mod tests {
         );
 
         test_hooks::arm_fail_after_envelope_insert();
-        let mut failed = envelope("failed", "failed-key", "recipient");
-        failed.recipient_identity_assurance = "self_asserted".to_string();
+        let failed = envelope("failed", "failed-key", "recipient");
         assert!(insert_a2a_envelope(store.connection_mut(), &failed).is_err());
         let failed_rows: i64 = store
             .connection()
@@ -902,8 +921,7 @@ mod tests {
             .unwrap();
         assert_eq!(failed_rows, 0);
 
-        let mut live = envelope("live", "live-key", "recipient");
-        live.recipient_identity_assurance = "self_asserted".to_string();
+        let live = envelope("live", "live-key", "recipient");
         insert_a2a_envelope(store.connection_mut(), &live).expect("insert live candidate");
         test_hooks::arm_fail_after_accepted_receipt();
         assert!(consume_a2a_for_recipient(
@@ -996,5 +1014,82 @@ mod tests {
         )
         .expect_err("current stamp with missing mailbox must refuse");
         assert!(error.to_string().contains("incomplete v31 A2A mailbox"));
+    }
+
+    #[test]
+    fn newest_local_admission_wins_and_verified_without_locality_never_upgrades_it() {
+        let mut store = store();
+        identity(
+            &store,
+            "issuer",
+            "admission-issuer",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        identity(
+            &store,
+            "recipient",
+            "admission-recipient-old",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        store
+            .connection()
+            .execute(
+                "UPDATE identity_admissions SET state='verified',created_at='2026-08-10T00:00:00.000Z' WHERE admission_id='admission-recipient-old'",
+                [],
+            )
+            .unwrap();
+        record_unverified_admission(
+            store.connection(),
+            "admission-recipient-new",
+            "recipient",
+            "connection-recipient-new",
+            UnverifiedAdmissionState::SelfAsserted,
+        )
+        .unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE identity_admissions SET created_at='2026-08-11T00:00:00.000Z' WHERE admission_id='admission-recipient-new'",
+                [],
+            )
+            .unwrap();
+
+        let result = insert_a2a_envelope(
+            store.connection_mut(),
+            &envelope("mixed-history", "mixed-history", "recipient"),
+        )
+        .unwrap();
+        let A2aInsertOutcome::Created { envelope, .. } = result else {
+            panic!("first insert")
+        };
+        assert_eq!(envelope.recipient_admission_id, "admission-recipient-new");
+        assert_eq!(envelope.recipient_identity_assurance, "self_asserted");
+    }
+
+    #[test]
+    fn issuer_must_bind_the_exact_current_local_connection() {
+        let mut store = store();
+        identity(
+            &store,
+            "issuer",
+            "admission-issuer",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        identity(
+            &store,
+            "recipient",
+            "admission-recipient",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        let mut request = envelope("wrong-connection", "wrong-connection", "recipient");
+        request.issuer_connection_id = "connection-not-current".to_string();
+        let error = insert_a2a_envelope(store.connection_mut(), &request)
+            .expect_err("unbound issuer connection");
+        assert!(error.to_string().contains("current local connection"));
+        let count: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM a2a_envelopes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
