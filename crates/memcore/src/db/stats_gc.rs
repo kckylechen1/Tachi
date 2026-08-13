@@ -35,191 +35,44 @@ fn gc_tables_at(
     profile: StoreProfile,
     as_of: &str,
 ) -> Result<serde_json::Value, MemoryError> {
-    let product = profile.includes_product();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-    // 1. access_history: retain latest N entries per (memory_id, event_kind),
-    //    delete rest.
-    //
-    //    tachi#1446: the partition includes `event_kind` deliberately. Display
-    //    events outnumber use events by construction — one display row per
-    //    returned row per search, versus one use row only when a caller-
-    //    initiated save named a memory's id — so a quota partitioned by
-    //    `memory_id` alone would spend the whole budget on display rows and
-    //    delete the rare use rows first. That failure is silent: the counters
-    //    keep reporting rows pruned, and the signal the ranking knob depends on
-    //    erodes with no error anywhere. Per-kind quotas make the retained
-    //    budget for each provenance independent of the other's volume, and
-    //    match the per-kind read cap in `memory_crud::access`'s
-    //    `ACCESS_TIMES_MAX_PER_MEMORY`.
-    let ah_sql = format!(
-        "DELETE FROM access_history
-         WHERE rowid IN (
-             SELECT rowid FROM (
-                 SELECT rowid,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY memory_id, event_kind
-                            ORDER BY accessed_at DESC
-                        ) AS rn
-                 FROM access_history
-             ) ranked
-             WHERE rn > {}
-         )",
-        cfg.access_history_keep_per_memory
-    );
-    let ah_deleted: usize = tx.execute(&ah_sql, [])?;
-
-    // 2. processed_events: delete older than N days
-    let pe_sql = format!(
-        "DELETE FROM processed_events
-         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
-        cfg.processed_events_max_days
-    );
-    let pe_deleted: usize = tx.execute(&pe_sql, [])?;
-
-    // 3. audit_log (PRODUCT): delete older than N days OR keep only latest M rows
-    let (al_deleted, al_cap_deleted) = if product {
-        let al_sql = format!(
-            "DELETE FROM audit_log
-         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
-            cfg.audit_log_max_days
-        );
-        let al_deleted: usize = tx.execute(&al_sql, [])?;
-        // Also cap at max_rows total
-        let al_cap_sql = format!(
-            "DELETE FROM audit_log WHERE id NOT IN (
-            SELECT id FROM audit_log ORDER BY id DESC LIMIT {}
-        )",
-            cfg.audit_log_max_rows
-        );
-        let al_cap_deleted: usize = tx.execute(&al_cap_sql, [])?;
-        (al_deleted, al_cap_deleted)
-    } else {
-        (0, 0)
-    };
-
-    // 4. agent_known_state (PRODUCT): delete older than N days
-    let aks_deleted: usize = if product {
-        let aks_sql = format!(
-            "DELETE FROM agent_known_state
-         WHERE synced_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
-            cfg.agent_known_state_max_days
-        );
-        tx.execute(&aks_sql, [])?
-    } else {
-        0
-    };
-
-    // 5. Orphaned access_history (memory was deleted but history remained)
-    let orphan_deleted: usize = tx.execute(
-        "DELETE FROM access_history WHERE memory_id NOT IN (SELECT id FROM memories)",
-        [],
+    // The operator preview and this historical store entrypoint intentionally
+    // share one source-derived registry. This caller excludes the separate
+    // CLI Kanban class; the canonical operator GC includes it explicitly.
+    let expected =
+        super::operator_maintenance::gc_candidate_facts(conn, cfg, profile, as_of, 0, false)?;
+    let outcome = super::operator_maintenance::apply_gc_candidate_facts(
+        conn,
+        cfg,
+        profile,
+        false,
+        as_of,
+        0,
+        false,
+        &expected,
+        |_tx, _source, _post| {
+            #[cfg(test)]
+            test_hooks::fail_after_a2a_body_scrub()?;
+            Ok(())
+        },
     )?;
-
-    // Reconcile query_diversity after pruning access_history rows. Candidate
-    // discovery deliberately does not approximate the retired-sticky
-    // classifier in SQL: normalize/classify every id against the canonical
-    // ordinary-writer guard in this same writer transaction, then mutate only
-    // the ids it admitted.
-    let diversity_candidate_ids = {
-        let mut stmt = tx.prepare("SELECT id FROM memories")?;
-        let ids = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids
+    let count = |class: &str| {
+        outcome
+            .source
+            .iter()
+            .find(|fact| fact.class == class)
+            .map_or(0, |fact| fact.count)
     };
-    let mut diversity_ordinary_ids = Vec::with_capacity(diversity_candidate_ids.len());
-    for id in diversity_candidate_ids {
-        match super::refuse_retired_sticky_row_within_tx(&tx, &id, "query-diversity reconciled") {
-            Ok(()) => diversity_ordinary_ids.push(id),
-            Err(MemoryError::InvalidArg(_)) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    let mut diversity_updated = 0usize;
-    for id in diversity_ordinary_ids {
-        diversity_updated += tx.execute(
-            "UPDATE memories
-             SET query_diversity = (
-                 SELECT COUNT(DISTINCT query_hash)
-                 FROM access_history
-                 WHERE memory_id = memories.id AND query_hash != ''
-             )
-             WHERE id = ?1",
-            [&id],
-        )?;
-    }
-
-    // 6. Orphaned agent_known_state (PRODUCT; memory was deleted but
-    //    known-state remained)
-    let orphan_aks_deleted: usize = if product {
-        tx.execute(
-            "DELETE FROM agent_known_state WHERE memory_id NOT IN (SELECT id FROM memories)",
-            [],
-        )?
-    } else {
-        0
-    };
-
-    // Recall impressions own their retention. Deleting groups cascades rows;
-    // access_history and query_diversity are intentionally untouched.
-    let impression_age_sql = format!(
-        "DELETE FROM recall_impression_groups
-         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
-        cfg.recall_impression_max_days
-    );
-    let impression_age_deleted = tx.execute(&impression_age_sql, [])?;
-    let impression_quota_sql = format!(
-        "DELETE FROM recall_impression_groups
-         WHERE group_id NOT IN (
-             SELECT group_id FROM recall_impression_groups
-             ORDER BY created_at DESC, group_id DESC LIMIT {}
-         )",
-        cfg.recall_impression_max_groups
-    );
-    let impression_quota_deleted = tx.execute(&impression_quota_sql, [])?;
-
-    // #1751 v32: body content is retained until the authoritative terminal
-    // receipt is at least 90 days old. The digest and every other envelope /
-    // receipt field remain immutable. A bounded subquery prevents one GC call
-    // from monopolizing the Product writer lock; later calls resume naturally.
-    const A2A_BODY_SCRUB_BATCH: i64 = 100;
-    let a2a_bodies_scrubbed = if product {
-        tx.execute(
-            "UPDATE a2a_envelopes SET body=NULL
-             WHERE envelope_id IN (
-                 SELECT e.envelope_id
-                   FROM a2a_envelopes e
-                   JOIN a2a_delivery_receipts r
-                     ON r.envelope_id=e.envelope_id
-                    AND r.state=e.current_state
-                    AND r.envelope_version=e.state_version
-                  WHERE e.body IS NOT NULL
-                    AND e.current_state IN ('consumed','expired')
-                    AND unixepoch(r.occurred_at, '+90 days') <= unixepoch(?1)
-                  ORDER BY r.occurred_at,e.envelope_id
-                  LIMIT ?2
-             )",
-            params![as_of, A2A_BODY_SCRUB_BATCH],
-        )?
-    } else {
-        0
-    };
-    #[cfg(test)]
-    test_hooks::fail_after_a2a_body_scrub()?;
-
-    tx.commit()?;
 
     Ok(serde_json::json!({
-        "access_history_pruned": ah_deleted,
-        "query_diversity_reconciled": diversity_updated,
-        "processed_events_pruned": pe_deleted,
-        "audit_log_pruned": al_deleted + al_cap_deleted,
-        "agent_known_state_pruned": aks_deleted,
-        "orphaned_access_history": orphan_deleted,
-        "orphaned_agent_known_state": orphan_aks_deleted,
-        "recall_impression_groups_pruned": impression_age_deleted + impression_quota_deleted,
-        "a2a_bodies_scrubbed": a2a_bodies_scrubbed,
+        "access_history_pruned": count("access_history_quota"),
+        "query_diversity_reconciled": count("query_diversity_reconcile"),
+        "processed_events_pruned": count("processed_events_age"),
+        "audit_log_pruned": count("audit_log_age_or_cap"),
+        "agent_known_state_pruned": count("agent_known_state_age"),
+        "orphaned_access_history": count("access_history_orphan"),
+        "orphaned_agent_known_state": count("agent_known_state_orphan"),
+        "recall_impression_groups_pruned": count("recall_impression_groups_age_or_quota"),
+        "a2a_bodies_scrubbed": count("a2a_terminal_body_scrub"),
     }))
 }
 

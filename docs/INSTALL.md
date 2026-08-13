@@ -506,9 +506,21 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 `save_memory`, `search_memory`, `get_memory`, `list_memories`, `archive_memory`, `memory_stats`, `remember`, `find_similar_memory`
 
 `get_memory` remains available in the full admin/backcompat catalog. Daily
-agent profiles should use `tachi_memory(action="get")` instead. Permanent
-deletion and garbage collection are folded into `tachi_memory(action="delete")`
-and `tachi_memory(action="gc")` (#757).
+agent profiles should use `tachi_memory(action="get")` instead. The canonical
+owners for permanent deletion and garbage collection are now the operator CLI:
+
+```bash
+tachi delete plan --db /path/to/tachi-memory.db --id <memory-id> --out delete-plan.json
+tachi delete apply --plan delete-plan.json --yes
+tachi gc plan --db /path/to/tachi-memory.db --out gc-plan.json
+tachi gc apply --plan gc-plan.json --yes
+```
+
+Both workflows are irreversible: their durable receipts are audit and
+reconciliation evidence, not backups, and there is no restore verb. The legacy
+`tachi_memory(action="delete"|"gc")` routes remain transitional and unchanged
+on this prerequisite leaf; final #1689 removes them together with the other
+retired Memory actions.
 
 ### Knowledge Graph & Domains
 
@@ -675,7 +687,11 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 `skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
 
-`tachi_doctor_scan` is folded into `tachi_memory(action="doctor_scan")` (#757).
+Default `tachi doctor` is the canonical read-only diagnostic owner. It does not
+write the manifest, database, sidecars, cache, or daily markers; `--fix` and
+`--run-daily` are explicit mutation intents. The legacy
+`tachi_memory(action="doctor_scan")` route remains transitional on this leaf
+and is removed by final #1689.
 
 ---
 

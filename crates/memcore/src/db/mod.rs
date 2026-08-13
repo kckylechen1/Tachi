@@ -42,6 +42,7 @@ pub mod open_context;
 // tachi#1643: NOT admin-gated. #1630's premise is a host-owned sync loop with
 // no Tachi daemon, so the outbox is portable surface — the same reason the v29
 // migration takes no `StoreProfile`.
+mod operator_maintenance;
 pub mod outbox;
 mod recall_cache;
 #[cfg(feature = "admin")]
@@ -198,6 +199,14 @@ pub(crate) use open::{
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
+};
+pub(crate) use operator_maintenance::{
+    apply_delete_candidate_facts, apply_gc_candidate_facts, delete_candidate_facts,
+    gc_candidate_facts,
+};
+pub use operator_maintenance::{
+    is_kanban_gc_candidate, DeleteMaintenanceOutcome, GcMaintenanceOutcome, MaintenanceClassFact,
+    OPERATOR_DELETE_CLASSES, OPERATOR_GC_CLASSES,
 };
 /// tachi#1643 durable outbox write/read seams. Crate-internal on purpose: they
 /// take a `Transaction`/`Connection`, and the invariant this leaf exists to

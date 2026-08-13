@@ -182,6 +182,10 @@ pub use db::{
 };
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+pub use db::{
+    DeleteMaintenanceOutcome, GcMaintenanceOutcome, MaintenanceClassFact, OPERATOR_DELETE_CLASSES,
+    OPERATOR_GC_CLASSES,
+};
 pub use embed_config::embed_raw_tier_enabled;
 pub use error::{
     MemoryError, OutboxOutcomeRefusal, ProviderPlanRefusal, WorkClaimTransitionReason,

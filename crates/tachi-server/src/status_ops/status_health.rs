@@ -206,8 +206,11 @@ pub(crate) async fn refresh_doctor_probe_cache(
 pub(crate) async fn collect_doctor_provider_key_report(
     global_db_path: &Path,
     probe_keys: bool,
+    strict_read_only: bool,
 ) -> (Vec<super::ApiKeyStatus>, Vec<ProviderProbeResult>) {
-    let keys = if probe_keys {
+    let keys = if strict_read_only {
+        api_keys::collect_api_key_status_immutable(global_db_path)
+    } else if probe_keys {
         api_keys::collect_api_key_status_with_value_compare(global_db_path)
     } else {
         api_keys::collect_api_key_status(global_db_path)

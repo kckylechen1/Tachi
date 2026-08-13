@@ -1,8 +1,8 @@
 use super::{
-    A2aAction, BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DistillAction,
-    EnvAction, EvalAction, FoundryAction, HarnessAction, HostAction, HubAction,
-    InjectionSurfaceAction, ManifestAction, McpAction, PokeAction, RepairAction, RescueAction,
-    SkillSurfaceAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
+    A2aAction, BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DeleteAction,
+    DistillAction, EnvAction, EvalAction, FoundryAction, GcAction, HarnessAction, HostAction,
+    HubAction, InjectionSurfaceAction, ManifestAction, McpAction, PokeAction, RepairAction,
+    RescueAction, SkillSurfaceAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -167,8 +167,16 @@ pub enum Commands {
         #[arg(long)]
         apply: bool,
     },
-    /// Run garbage collection
-    Gc,
+    /// Plan or apply irreversible garbage collection for one exact physical DB.
+    Gc {
+        #[command(subcommand)]
+        action: GcAction,
+    },
+    /// Plan or apply irreversible deletion of one exact memory id.
+    Delete {
+        #[command(subcommand)]
+        action: DeleteAction,
+    },
     /// Hub registry (list/show/bindings/stats/doctor) and capability management
     Hub {
         #[command(subcommand)]
