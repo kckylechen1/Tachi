@@ -5,11 +5,15 @@ use memcore::{MemoryEntry, MemoryStore};
 use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 const ADMITTED_ENRICHMENT_INTENT_WORKER: &str = "auto_ingest_enrichment_intent";
 const ADMITTED_ENRICHMENT_INTENT_VERSION: u8 = 1;
+const ADMITTED_ENRICHMENT_LEASE_SECS: i64 = 5 * 60;
+const ADMITTED_ENRICHMENT_HEARTBEAT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct AdmittedEnrichmentIntentV1 {
@@ -23,7 +27,8 @@ pub(crate) struct AdmittedEnrichmentIntentV1 {
     needs_embedding: bool,
     needs_summary: bool,
     needs_metadata: bool,
-    dispatch_runtime_id: Option<String>,
+    #[serde(default, alias = "dispatch_runtime_id")]
+    owner_token: Option<String>,
 }
 
 pub(crate) enum DurableEnrichmentDispatch {
@@ -66,6 +71,7 @@ pub(crate) struct EnrichmentItem {
     pub(crate) foundry_path_prefix: Option<String>,
     pub(crate) revision: i64,
     pub(crate) admitted_intent: Option<AdmittedEnrichmentIntentV1>,
+    admitted_lease_stop: Option<Arc<AtomicBool>>,
 }
 
 pub(crate) fn needs_metadata_enrichment(keywords: &[String], _entities: &[String]) -> bool {
@@ -187,6 +193,14 @@ pub(crate) fn build_enrichment_item(
         foundry_path_prefix,
         revision,
         admitted_intent: None,
+        admitted_lease_stop: None,
+    }
+}
+
+fn rollback_admitted_enrichment_intent(store: &mut MemoryStore, error: String) -> String {
+    match store.connection().execute_batch("ROLLBACK") {
+        Ok(()) => error,
+        Err(rollback) => format!("{error}; rollback admitted enrichment intent: {rollback}"),
     }
 }
 
@@ -238,81 +252,165 @@ impl MemoryServer {
             needs_embedding: item.needs_embedding,
             needs_summary: item.needs_summary,
             needs_metadata: item.needs_metadata,
-            dispatch_runtime_id: None,
+            owner_token: None,
         };
         let intent_hash = admitted_enrichment_intent_hash(&intent);
+        let stale_modifier = format!("-{ADMITTED_ENRICHMENT_LEASE_SECS} seconds");
         let action = |store: &mut MemoryStore| {
-            let entry = store
-                .get(&intent.entry_id)
-                .map_err(|error| format!("load admitted enrichment entry: {error}"))?
-                .ok_or_else(|| {
-                    "admitted enrichment entry disappeared before dispatch".to_string()
-                })?;
-            let bound_job = entry
-                .metadata
-                .get("admitted_job_id")
-                .and_then(serde_json::Value::as_str);
-            let bound_key = entry
-                .metadata
-                .get("admitted_idempotency_key")
-                .and_then(serde_json::Value::as_str);
-            if bound_job != Some(intent.job_id.as_str())
-                || bound_key != Some(intent.idempotency_key.as_str())
-                || entry.revision != intent.revision
-            {
-                return Err("admitted enrichment intent binding drift at mutation time".to_string());
-            }
-            if admitted_enrichment_is_terminal(&entry, &intent) {
-                store
-                    .connection()
-                    .execute(
-                        "DELETE FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
-                        rusqlite::params![intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
-                    )
-                    .map_err(|error| format!("retire terminal enrichment intent: {error}"))?;
-                return Ok(None);
-            }
-
-            let existing = store
+            store
                 .connection()
-                .query_row(
-                    "SELECT event_id FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
-                    rusqlite::params![intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(|error| format!("load admitted enrichment intent: {error}"))?;
-            let should_enqueue = match existing {
-                Some(payload) => {
-                    let existing: AdmittedEnrichmentIntentV1 = serde_json::from_str(&payload)
-                        .map_err(|error| format!("decode admitted enrichment intent: {error}"))?;
-                    let mut immutable_existing = existing.clone();
-                    immutable_existing.dispatch_runtime_id = None;
-                    if immutable_existing != intent {
-                        return Err(
-                            "admitted enrichment intent binding drift at mutation time".to_string()
-                        );
-                    }
-                    existing.dispatch_runtime_id.as_deref() != Some(runtime_id.as_str())
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(|error| format!("begin admitted enrichment intent claim: {error}"))?;
+            let result = (|| {
+                let entry = store
+                    .get(&intent.entry_id)
+                    .map_err(|error| format!("load admitted enrichment entry: {error}"))?
+                    .ok_or_else(|| {
+                        "admitted enrichment entry disappeared before dispatch".to_string()
+                    })?;
+                let bound_job = entry
+                    .metadata
+                    .get("admitted_job_id")
+                    .and_then(serde_json::Value::as_str);
+                let bound_key = entry
+                    .metadata
+                    .get("admitted_idempotency_key")
+                    .and_then(serde_json::Value::as_str);
+                if bound_job != Some(intent.job_id.as_str())
+                    || bound_key != Some(intent.idempotency_key.as_str())
+                    || entry.revision != intent.revision
+                {
+                    return Err(
+                        "admitted enrichment intent binding drift at mutation time".to_string()
+                    );
                 }
-                None => true,
-            };
-            if should_enqueue {
-                intent.dispatch_runtime_id = Some(runtime_id.clone());
-                let payload = serde_json::to_string(&intent)
-                    .map_err(|error| format!("serialize admitted enrichment intent: {error}"))?;
-                store
+
+                let existing = store
                     .connection()
-                    .execute(
-                        "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
-                         VALUES (?1, ?2, ?3, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')) \
-                         ON CONFLICT(event_hash, worker) DO UPDATE SET \
-                           event_id = excluded.event_id, created_at = excluded.created_at",
-                        rusqlite::params![intent_hash, payload, ADMITTED_ENRICHMENT_INTENT_WORKER,],
+                    .query_row(
+                        "SELECT event_id, \
+                                created_at = '' OR julianday(created_at) IS NULL OR \
+                                julianday(created_at) <= julianday('now', ?3) \
+                         FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+                        rusqlite::params![
+                            intent_hash,
+                            ADMITTED_ENRICHMENT_INTENT_WORKER,
+                            stale_modifier,
+                        ],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
                     )
-                    .map_err(|error| format!("persist admitted enrichment intent: {error}"))?;
+                    .optional()
+                    .map_err(|error| format!("load admitted enrichment intent: {error}"))?;
+
+                let terminal = admitted_enrichment_is_terminal(&entry, &intent);
+                let should_enqueue = match existing {
+                    Some((payload, expired)) => {
+                        let existing: AdmittedEnrichmentIntentV1 = serde_json::from_str(&payload)
+                            .map_err(|error| {
+                            format!("decode admitted enrichment intent: {error}")
+                        })?;
+                        let mut immutable_existing = existing.clone();
+                        immutable_existing.owner_token = None;
+                        if immutable_existing != intent {
+                            return Err(
+                                "admitted enrichment intent binding drift at mutation time"
+                                    .to_string(),
+                            );
+                        }
+                        let owner_is_live = existing.owner_token.is_some() && !expired;
+                        if terminal {
+                            if owner_is_live {
+                                false
+                            } else {
+                                store
+                                    .connection()
+                                    .execute(
+                                        "DELETE FROM processed_events \
+                                         WHERE event_hash = ?1 AND worker = ?2 AND event_id = ?3",
+                                        rusqlite::params![
+                                            intent_hash,
+                                            ADMITTED_ENRICHMENT_INTENT_WORKER,
+                                            payload,
+                                        ],
+                                    )
+                                    .map_err(|error| {
+                                        format!(
+                                            "retire expired terminal enrichment intent: {error}"
+                                        )
+                                    })?;
+                                return Ok(None);
+                            }
+                        } else if owner_is_live {
+                            false
+                        } else {
+                            intent.owner_token =
+                                Some(format!("{}:{}", runtime_id, uuid::Uuid::new_v4()));
+                            let claimed_payload =
+                                serde_json::to_string(&intent).map_err(|error| {
+                                    format!("serialize admitted enrichment intent claim: {error}")
+                                })?;
+                            let claimed = store
+                                .connection()
+                                .execute(
+                                    "UPDATE processed_events SET event_id = ?1, \
+                                       created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                                     WHERE event_hash = ?2 AND worker = ?3 AND event_id = ?4",
+                                    rusqlite::params![
+                                        claimed_payload,
+                                        intent_hash,
+                                        ADMITTED_ENRICHMENT_INTENT_WORKER,
+                                        payload,
+                                    ],
+                                )
+                                .map_err(|error| {
+                                    format!("claim admitted enrichment intent: {error}")
+                                })?;
+                            if claimed != 1 {
+                                return Err(
+                                    "admitted enrichment intent ownership changed during claim"
+                                        .to_string(),
+                                );
+                            }
+                            true
+                        }
+                    }
+                    None if terminal => return Ok(None),
+                    None => {
+                        intent.owner_token =
+                            Some(format!("{}:{}", runtime_id, uuid::Uuid::new_v4()));
+                        let claimed_payload = serde_json::to_string(&intent).map_err(|error| {
+                            format!("serialize admitted enrichment intent claim: {error}")
+                        })?;
+                        store
+                            .connection()
+                            .execute(
+                                "INSERT INTO processed_events \
+                                   (event_hash, event_id, worker, created_at) \
+                                 VALUES (?1, ?2, ?3, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                                rusqlite::params![
+                                    intent_hash,
+                                    claimed_payload,
+                                    ADMITTED_ENRICHMENT_INTENT_WORKER,
+                                ],
+                            )
+                            .map_err(|error| {
+                                format!("persist admitted enrichment intent: {error}")
+                            })?;
+                        true
+                    }
+                };
+                Ok(Some(should_enqueue))
+            })();
+            match result {
+                Ok(value) => {
+                    store
+                        .connection()
+                        .execute_batch("COMMIT")
+                        .map_err(|error| format!("commit admitted enrichment claim: {error}"))?;
+                    Ok(value)
+                }
+                Err(error) => Err(rollback_admitted_enrichment_intent(store, error)),
             }
-            Ok(Some(should_enqueue))
         };
         let pending = if let Some(project_name) = item.named_project.as_deref() {
             self.with_named_project_store(project_name, action)?
@@ -322,32 +420,116 @@ impl MemoryServer {
         let Some(should_enqueue) = pending else {
             return Ok(DurableEnrichmentDispatch::Completed);
         };
-        item.admitted_intent = Some(intent);
+        item.admitted_intent = Some(intent.clone());
+        if should_enqueue {
+            item.admitted_lease_stop = Some(self.start_admitted_enrichment_heartbeat(&intent)?);
+        }
         Ok(DurableEnrichmentDispatch::Pending {
             item: Box::new(item),
             should_enqueue,
         })
     }
 
-    pub(crate) fn mark_admitted_enrichment_pending(
+    fn start_admitted_enrichment_heartbeat(
         &self,
         intent: &AdmittedEnrichmentIntentV1,
-    ) -> Result<(), String> {
+    ) -> Result<Arc<AtomicBool>, String> {
+        if intent.owner_token.is_none() {
+            return Err("admitted enrichment heartbeat requires an owner token".to_string());
+        }
+        let payload = serde_json::to_string(intent)
+            .map_err(|error| format!("serialize admitted enrichment heartbeat: {error}"))?;
         let intent_hash = admitted_enrichment_intent_hash(intent);
+        let target_db = if intent.target_db == DbScope::Global.as_str() {
+            DbScope::Global
+        } else {
+            DbScope::Project
+        };
+        let named_project = intent.named_project.clone();
+        let entry_id = intent.entry_id.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let heartbeat_stop = Arc::clone(&stop);
+        let server = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(ADMITTED_ENRICHMENT_HEARTBEAT).await;
+                if heartbeat_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let action = |store: &mut MemoryStore| {
+                    store
+                        .connection()
+                        .execute(
+                            "UPDATE processed_events \
+                             SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                             WHERE event_hash = ?1 AND worker = ?2 AND event_id = ?3",
+                            rusqlite::params![
+                                intent_hash,
+                                ADMITTED_ENRICHMENT_INTENT_WORKER,
+                                payload,
+                            ],
+                        )
+                        .map_err(|error| format!("heartbeat admitted enrichment intent: {error}"))
+                };
+                let result = if let Some(project_name) = named_project.as_deref() {
+                    server.with_named_project_store(project_name, action)
+                } else {
+                    server.with_store_for_scope(target_db, action)
+                };
+                match result {
+                    Ok(1) => {}
+                    Ok(_) => {
+                        tracing::warn!(%entry_id, "admitted enrichment heartbeat lost ownership");
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, %entry_id, "admitted enrichment heartbeat failed");
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(stop)
+    }
+
+    pub(crate) fn mark_admitted_enrichment_pending(
+        &self,
+        item: &EnrichmentItem,
+    ) -> Result<(), String> {
+        let intent = item
+            .admitted_intent
+            .as_ref()
+            .ok_or_else(|| "admitted enrichment dispatch has no durable intent".to_string())?;
+        if let Some(stop) = item.admitted_lease_stop.as_ref() {
+            stop.store(true, Ordering::Release);
+        }
+        let intent_hash = admitted_enrichment_intent_hash(intent);
+        let owned_payload = serde_json::to_string(intent)
+            .map_err(|error| format!("serialize owned enrichment intent: {error}"))?;
         let action = |store: &mut MemoryStore| {
             let mut pending = intent.clone();
-            pending.dispatch_runtime_id = None;
+            pending.owner_token = None;
             let payload = serde_json::to_string(&pending)
                 .map_err(|error| format!("serialize pending enrichment intent: {error}"))?;
-            store
+            let released = store
                 .connection()
                 .execute(
-                    "UPDATE processed_events SET event_id = ?1 \
-                     WHERE event_hash = ?2 AND worker = ?3",
-                    rusqlite::params![payload, intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
+                    "UPDATE processed_events SET event_id = ?1, \
+                       created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                     WHERE event_hash = ?2 AND worker = ?3 AND event_id = ?4",
+                    rusqlite::params![
+                        payload,
+                        intent_hash,
+                        ADMITTED_ENRICHMENT_INTENT_WORKER,
+                        owned_payload,
+                    ],
                 )
-                .map(|_| ())
-                .map_err(|error| format!("release admitted enrichment dispatch: {error}"))
+                .map_err(|error| format!("release admitted enrichment dispatch: {error}"))?;
+            if released == 1 {
+                Ok(())
+            } else {
+                Err("admitted enrichment dispatch ownership changed before release".to_string())
+            }
         };
         if let Some(project_name) = intent.named_project.as_deref() {
             self.with_named_project_store(project_name, action)
@@ -367,7 +549,17 @@ impl MemoryServer {
         let Some(intent) = item.admitted_intent.as_ref() else {
             return;
         };
+        if let Some(stop) = item.admitted_lease_stop.as_ref() {
+            stop.store(true, Ordering::Release);
+        }
         let intent_hash = admitted_enrichment_intent_hash(intent);
+        let owned_payload = match serde_json::to_string(intent) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::error!(%error, entry_id = %intent.entry_id, "failed to serialize owned admitted enrichment intent");
+                return;
+            }
+        };
         let action = |store: &mut MemoryStore| {
             let terminal = store
                 .get(&intent.entry_id)
@@ -377,24 +569,33 @@ impl MemoryServer {
                 store
                     .connection()
                     .execute(
-                        "DELETE FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
-                        rusqlite::params![intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
+                        "DELETE FROM processed_events \
+                         WHERE event_hash = ?1 AND worker = ?2 AND event_id = ?3",
+                        rusqlite::params![
+                            intent_hash,
+                            ADMITTED_ENRICHMENT_INTENT_WORKER,
+                            owned_payload,
+                        ],
                     )
-                    .map(|_| ())
                     .map_err(|error| format!("retire admitted enrichment intent: {error}"))
             } else {
                 let mut pending = intent.clone();
-                pending.dispatch_runtime_id = None;
+                pending.owner_token = None;
                 let payload = serde_json::to_string(&pending)
                     .map_err(|error| format!("serialize retryable enrichment intent: {error}"))?;
                 store
                     .connection()
                     .execute(
-                        "UPDATE processed_events SET event_id = ?1 \
-                         WHERE event_hash = ?2 AND worker = ?3",
-                        rusqlite::params![payload, intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
+                        "UPDATE processed_events SET event_id = ?1, \
+                           created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                         WHERE event_hash = ?2 AND worker = ?3 AND event_id = ?4",
+                        rusqlite::params![
+                            payload,
+                            intent_hash,
+                            ADMITTED_ENRICHMENT_INTENT_WORKER,
+                            owned_payload,
+                        ],
                     )
-                    .map(|_| ())
                     .map_err(|error| format!("retain admitted enrichment intent: {error}"))
             }
         };
@@ -403,8 +604,14 @@ impl MemoryServer {
         } else {
             self.with_store_for_scope(item.target_db, action)
         };
-        if let Err(error) = result {
-            tracing::error!(%error, entry_id = %intent.entry_id, "failed to reconcile admitted enrichment intent");
+        match result {
+            Ok(1) => {}
+            Ok(_) => {
+                tracing::warn!(entry_id = %intent.entry_id, "admitted enrichment reconciliation lost ownership")
+            }
+            Err(error) => {
+                tracing::error!(%error, entry_id = %intent.entry_id, "failed to reconcile admitted enrichment intent");
+            }
         }
     }
 
@@ -604,6 +811,7 @@ impl MemoryServer {
                 foundry_path_prefix: None,
                 revision: candidate.revision,
                 admitted_intent: None,
+                admitted_lease_stop: None,
             };
             if self.enqueue_enrichment(item) {
                 queued += 1;

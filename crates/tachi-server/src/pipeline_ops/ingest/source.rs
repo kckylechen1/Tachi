@@ -370,9 +370,7 @@ async fn handle_ingest_source_with_admission(
                 let item = *item;
                 enrichment_pending = true;
                 if should_enqueue && !server.enqueue_enrichment(item.clone()) {
-                    if let Some(intent) = item.admitted_intent.as_ref() {
-                        server.mark_admitted_enrichment_pending(intent)?;
-                    }
+                    server.mark_admitted_enrichment_pending(&item)?;
                     let error = "admitted ingest enrichment enqueue unavailable".to_string();
                     let error = lease
                         .fail(
