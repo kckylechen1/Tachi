@@ -920,22 +920,7 @@ impl crate::MemoryStore {
         mutations: &[ValidatedReferenceMutation],
         policy: NearDuplicatePolicy,
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
-        if self.path_validation && !self.policy.path_validation_escape_hatch {
-            let allow_cross = entry
-                .metadata
-                .get("allow_cross_project")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if let Err(error) =
-                crate::path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
-            {
-                eprintln!(
-                    "warning: path-routing validation rejected write db_label={} path={} error={}",
-                    self.db_label, entry.path, error
-                );
-                return Err(MemoryError::InvalidArg(error.to_string()));
-            }
-        }
+        self.validate_write_path(entry)?;
 
         let db_label = self.db_label.clone();
         let vec_available = self.vec_available;
@@ -964,15 +949,7 @@ impl crate::MemoryStore {
         metadata_patch: &Map<String, Value>,
         mutations: &[ValidatedReferenceMutation],
     ) -> Result<InsertMemoryResult, MemoryError> {
-        if self.path_validation && !self.policy.path_validation_escape_hatch {
-            let allow_cross = entry
-                .metadata
-                .get("allow_cross_project")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            crate::path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
-                .map_err(|error| MemoryError::InvalidArg(error.to_string()))?;
-        }
+        self.validate_write_path(entry)?;
         let db_label = self.db_label.clone();
         let vec_available = self.vec_available;
         let authorization = self.reserved_reference_write.clone();

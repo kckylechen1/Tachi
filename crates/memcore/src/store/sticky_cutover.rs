@@ -4,6 +4,7 @@ mod tests {
         insert_agent_identity, record_unverified_admission, AgentIdentity, UnverifiedAdmissionState,
     };
     use crate::{MemoryEntry, MemoryError, MemoryStore};
+    use rusqlite::params;
 
     fn fixture_store() -> (tempfile::TempDir, String, MemoryStore) {
         let temp = tempfile::tempdir().expect("temp store");
@@ -92,6 +93,65 @@ mod tests {
         }
     }
 
+    /// Seed a row that could only have come from the retired producer. The
+    /// normal `MemoryStore` writers deliberately reject the legacy sticky path
+    /// and category, so cutover tests must construct pre-existing history via
+    /// this narrowly scoped, explicitly authorized raw fixture instead of
+    /// teaching a production seam to bypass the retirement guard.
+    fn seed_legacy_memory(store: &MemoryStore, entry: &MemoryEntry) {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize legacy memory fixture");
+        let valid_from = if entry.valid_from.trim().is_empty() {
+            entry.timestamp.as_str()
+        } else {
+            entry.valid_from.as_str()
+        };
+        let keywords = serde_json::to_string(&entry.keywords).expect("fixture keywords JSON");
+        let entities = serde_json::to_string(&entry.entities).expect("fixture entities JSON");
+        let metadata = serde_json::to_string(&entry.metadata).expect("fixture metadata JSON");
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories
+                    (id,path,summary,text,importance,timestamp,valid_from,valid_until,
+                     category,topic,keywords,entities,source,scope,archived,created_at,
+                     updated_at,access_count,last_access,revision,metadata,retention_policy,
+                     domain,recall_count,query_diversity,tier)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?6,
+                         ?6,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+                params![
+                    entry.id,
+                    entry.path,
+                    entry.summary,
+                    entry.text,
+                    entry.importance,
+                    entry.timestamp,
+                    valid_from,
+                    entry.valid_until,
+                    entry.category,
+                    entry.topic,
+                    keywords,
+                    entities,
+                    entry.source,
+                    entry.scope,
+                    entry.archived,
+                    entry.access_count,
+                    entry.last_access,
+                    entry.revision,
+                    metadata,
+                    entry.retention_policy,
+                    entry.domain,
+                    entry.recall_count,
+                    entry.query_diversity,
+                    entry.tier,
+                ],
+            )
+            .expect("insert legacy memory fixture");
+        crate::db::sync_memories_symbolic_fts(store.connection(), &entry.id)
+            .expect("sync legacy symbolic fixture");
+    }
+
     fn seed_matrix(store: &mut MemoryStore) {
         for mut entry in [
             sticky_entry("broadcast", None, "unread", "2026-08-12T00:00:00Z", 7),
@@ -132,13 +192,13 @@ mod tests {
                 }
                 _ => {}
             }
-            store.upsert(&entry).expect("seed sticky row");
+            seed_legacy_memory(store, &entry);
         }
 
         let mut corrupt = sticky_entry("corrupt", None, "unread", "2026-08-12T00:00:00Z", 7);
         corrupt.metadata = serde_json::json!({"sticky_id":"corrupt","status":"unread"});
         corrupt.archived = true;
-        store.upsert(&corrupt).expect("seed corrupt row");
+        seed_legacy_memory(store, &corrupt);
 
         let mut empty = sticky_entry("empty-fields", None, "unread", "2026-08-12T00:00:00Z", 7);
         empty.metadata["sticky"]["text"] = serde_json::json!("");
@@ -146,7 +206,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("created_at");
-        store.upsert(&empty).expect("seed empty/missing fields row");
+        seed_legacy_memory(store, &empty);
 
         store
             .set_state(
@@ -676,7 +736,7 @@ mod tests {
             "2026-08-12T00:00:00Z",
             7,
         );
-        store.upsert(&entry).expect("seed timestamp fixture");
+        seed_legacy_memory(&store, &entry);
         store
             .set_state(
                 "sticky_claim",
@@ -794,7 +854,7 @@ mod tests {
         );
         assert_eq!(entry.path, format!("/sticky/to/{PATH_SECRET}"));
         assert_eq!(entry.metadata["sticky"]["to"], PATH_SECRET);
-        store.upsert(&entry).expect("seed path secret row");
+        seed_legacy_memory(&store, &entry);
 
         let mut plan = store
             .plan_sticky_cutover_at(path.clone(), "2026-08-13T00:00:00Z", str::to_string)

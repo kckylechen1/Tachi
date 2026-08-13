@@ -1303,6 +1303,8 @@ mod tests {
 
     #[test]
     fn legacy_v30_product_store_migrates_both_tables_and_stamp() {
+        crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
+        crate::db::register_sqlite_vec();
         let mut connection = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&connection).expect("build current product fixture");
         connection
@@ -1340,6 +1342,8 @@ mod tests {
 
     #[test]
     fn current_product_stamp_missing_both_a2a_tables_is_refused_not_repaired() {
+        crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
+        crate::db::register_sqlite_vec();
         let mut connection = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&connection).expect("build current product fixture");
         connection
