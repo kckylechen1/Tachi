@@ -42,6 +42,11 @@
 /// Frozen in one place so #1682's request-path check and this crate's catalog
 /// check cannot diverge. Adding an entry tightens both at once, which is the
 /// entire point.
+///
+/// That is the intended end state and not yet the shipped one: #1682 slice-1
+/// still carries its own copy of this list on its branch. The crate-root doc
+/// on `memcore::catalog` states which merge owes the deletion; until then,
+/// anyone adding an entry here adds it there too.
 pub const CREDENTIAL_SHAPED_QUERY_KEYS: &[&str] = &[
     "api_key",
     "apikey",

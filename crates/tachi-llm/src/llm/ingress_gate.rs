@@ -27,12 +27,20 @@
 //! is complete. A gate that silently changed behaviour instead would have made
 //! that measurement impossible to take.
 //!
-//! # Why the map is bounded
+//! # Why the map is bounded, in both directions
 //!
 //! The key includes a caller-supplied string, so an unbounded map is an
 //! unbounded allocation driven by input. Past the cap, distinct references
 //! stop getting their own entry and are counted in `overflow` — the total
 //! stays truthful, which is what a counter is for, and the memory does not.
+//!
+//! A cap on the number of entries is only half of it: sixty-four entries of
+//! unbounded length is still unbounded, and that is what the first cut stored
+//! and logged (#1681 PR-D review, CP5). Every reference is therefore bounded
+//! and scrubbed on the way in, by the same rule and for the same two reasons
+//! as `broker::disposition`'s `MAX_FINISH_REASON_CHARS`: a caller must not get
+//! to choose how much of this process's memory it consumes, and must not get
+//! to put control characters into a log line and forge a second one.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -40,6 +48,39 @@ use std::sync::{Arc, RwLock};
 /// How many distinct (lane, reference) pairs get their own counter before the
 /// rest are folded into `overflow`.
 const DISTINCT_REFERENCE_CAP: usize = 64;
+
+/// The most characters of a caller-supplied reference the gate retains.
+///
+/// Sized like `MAX_FINISH_REASON_CHARS`, and for the same reason: every real
+/// model reference is a short token (`deepseek-reasoner`, `chat.premium`,
+/// `lane.summary`), so this is generous for the honest case and still a bound
+/// for the hostile one.
+const MAX_REFERENCE_CHARS: usize = 64;
+
+/// A caller-supplied reference, bounded and stripped of control characters.
+///
+/// Truncation is marked with `…` rather than silent, so a report that says
+/// `"aaaa…"` is not read as the whole reference. Two references that agree on
+/// their first [`MAX_REFERENCE_CHARS`] characters do land in one entry: their
+/// sightings are still counted, and a counter whose *totals* are exact while
+/// its per-key list is coarse is the same trade the entry cap already makes.
+fn bounded_reference(raw: &str) -> String {
+    let mut bounded: String = raw
+        .chars()
+        .take(MAX_REFERENCE_CHARS)
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if raw.chars().nth(MAX_REFERENCE_CHARS).is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
 
 /// What the gate decided about one call's model reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +97,8 @@ pub(crate) enum IngressDisposition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedReferenceReport {
     pub lane: &'static str,
+    /// The caller's reference as [`bounded_reference`] left it — never the raw
+    /// string. This is a status/log surface, and the caller controls the bytes.
     pub reference: String,
     pub count: u64,
     pub first_seen_at: String,
@@ -109,8 +152,12 @@ impl IngressReferenceGate {
             return IngressDisposition::LaneConfigured;
         }
 
+        // Bounded before it is stored *or* logged: the raw string is compared
+        // against the lane's model above and never travels past this line.
+        let reference = bounded_reference(reference);
+
         let mut state = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let key = (lane, reference.to_string());
+        let key = (lane, reference.clone());
         let known = state.entries.contains_key(&key);
         if !known && state.entries.len() >= DISTINCT_REFERENCE_CAP {
             state.overflow += 1;
@@ -226,6 +273,53 @@ mod tests {
         assert_eq!(snapshot[1].lane, "summary");
         assert_eq!(snapshot[1].count, 1);
         assert_eq!(gate.overflow(), 0);
+    }
+
+    #[test]
+    fn a_reference_is_bounded_in_length_before_it_is_stored_or_logged() {
+        let gate = IngressReferenceGate::new();
+        let huge = "m".repeat(50_000);
+        gate.observe("reasoning", Some(&huge), "deepseek-reasoner", NOW);
+
+        let snapshot = gate.snapshot();
+        let stored = &snapshot[0].reference;
+        assert!(
+            stored.chars().count() <= MAX_REFERENCE_CHARS + 1,
+            "a 50k-character override must not become a 50k-character map key \
+             or a 50k-character log line; stored {} characters",
+            stored.chars().count()
+        );
+        assert!(
+            stored.ends_with('…'),
+            "truncation is marked, so a report is not read as the whole \
+             reference: {stored}"
+        );
+        // Bounding the key does not lose the sighting: the count is what the
+        // #1685 cutover reads, and it stays exact.
+        assert_eq!(snapshot[0].count, 1);
+        assert_eq!(gate.overflow(), 0);
+    }
+
+    #[test]
+    fn control_characters_cannot_forge_a_second_log_line() {
+        let gate = IngressReferenceGate::new();
+        gate.observe(
+            "reasoning",
+            Some("chat.premium\n[llm] WARN everything is fine\u{0}"),
+            "deepseek-reasoner",
+            NOW,
+        );
+
+        let snapshot = gate.snapshot();
+        let stored = &snapshot[0].reference;
+        assert!(
+            !stored.contains('\n') && !stored.contains('\u{0}'),
+            "control characters are replaced, not carried: {stored:?}"
+        );
+        assert!(
+            stored.starts_with("chat.premium"),
+            "the readable part of the reference survives: {stored:?}"
+        );
     }
 
     #[test]
