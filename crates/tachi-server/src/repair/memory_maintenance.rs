@@ -295,6 +295,21 @@ fn receipt_path(plan_path: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn recovery_receipt_path(receipt_out: &Path, plan: &MaintenancePlan) -> PathBuf {
+    let target_scope = format!(
+        "{:x}",
+        Sha256::digest(plan.target_physical_identity.as_bytes())
+    );
+    receipt_out
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".tachi-maintenance-recovery-{}-{target_scope}",
+            plan.digest
+        ))
+}
+
 fn artifact_error(
     operation: &str,
     path: &Path,
@@ -311,11 +326,33 @@ fn artifact_error(
             "{operation} artifact atomic publish failed at {}: {error}",
             path.display()
         ),
+        super::receipt::PreparedArtifactError::RecoveryAlreadyExists => format!(
+            "{operation} artifact recovery path already exists for {}",
+            path.display()
+        ),
+        super::receipt::PreparedArtifactError::RecoveryPublish(error) => format!(
+            "{operation} artifact recovery-link publication failed for {}: {error}",
+            path.display()
+        ),
         super::receipt::PreparedArtifactError::ParentSync(error) => format!(
-            "{operation} artifact parent fsync failed at {}: {error}; public prepared evidence was retained",
+            "{operation} artifact parent fsync failed at {}: {error}; published prepared evidence was retained",
             path.display()
         ),
     }
+}
+
+fn publish_prepared_receipt(
+    path: &Path,
+    recovery: &Path,
+    bytes: &[u8],
+) -> Result<File, Box<dyn std::error::Error>> {
+    super::receipt::persist_prepared_artifact_with_recovery_bytes(
+        path,
+        recovery,
+        super::receipt::ReceiptKind::MemoryMaintenance,
+        bytes,
+    )
+    .map_err(|error| artifact_error("maintenance prepared receipt", path, error).into())
 }
 
 fn publish_artifact(
@@ -579,18 +616,29 @@ fn apply_common(
         return Err("maintenance plan operation does not match CLI command".into());
     }
     let receipt_out = receipt_path(plan_path);
+    let recovery_out = recovery_receipt_path(&receipt_out, &plan);
     if receipt_out == PathBuf::from(&plan.target_path) {
         return Err("maintenance receipt output must not be the target DB".into());
     }
     if receipt_out.exists() {
-        let (existing, _file, bytes) = open_receipt(&receipt_out, &plan)?;
-        if existing.phase == ReceiptPhase::Committed {
-            // A committed receipt is the replay authority. Return its exact
-            // bytes and perform no second mutation, but never authorize a
-            // different physical target under the old plan identity.
-            verify_committed_replay_target(&plan, &existing, app_home)?;
-            print!("{}", String::from_utf8(bytes)?);
-            return Ok(());
+        match open_receipt(&receipt_out, &plan) {
+            Ok((existing, _file, bytes)) if existing.phase == ReceiptPhase::Committed => {
+                // A committed receipt is the replay authority. Return its
+                // exact bytes and perform no second mutation, but never
+                // authorize a different physical target under the old plan
+                // identity.
+                verify_committed_replay_target(&plan, &existing, app_home)?;
+                if !recovery_out.exists() {
+                    print!("{}", String::from_utf8(bytes)?);
+                    return Ok(());
+                }
+            }
+            Ok(_) => {}
+            Err(_) if recovery_out.exists() => {
+                // The deterministic recovery inode is the only authority when
+                // the caller-visible name contains foreign or malformed data.
+            }
+            Err(error) => return Err(error),
         }
     }
 
@@ -599,8 +647,24 @@ fn apply_common(
     let mut store = MemoryStore::open_existing_read_write(&plan.target_path)?;
     verify_store_plan_identity(&store, &target, &plan)?;
 
-    let (existing_prepared, existing_prepared_file) = if receipt_out.exists() {
+    let (existing_prepared, existing_prepared_file) = if recovery_out.exists() {
+        let (receipt, file, _) = open_receipt(&recovery_out, &plan)?;
+        if receipt.phase != ReceiptPhase::Prepared {
+            return Err("maintenance recovery artifact is not a prepared receipt".into());
+        }
+        if !super::receipt::path_names_open_file(&recovery_out, &file)? {
+            return Err("maintenance recovery path changed while it was opened".into());
+        }
+        (Some(receipt), Some(file))
+    } else if receipt_out.exists() {
         let (receipt, file, _) = open_receipt(&receipt_out, &plan)?;
+        if receipt.phase == ReceiptPhase::Prepared {
+            return Err(format!(
+                "prepared maintenance receipt has no deterministic recovery link at {}",
+                recovery_out.display()
+            )
+            .into());
+        }
         (Some(receipt), Some(file))
     } else {
         (None, None)
@@ -650,6 +714,7 @@ fn apply_common(
                             prepare_or_validate_receipt(
                                 &plan,
                                 &receipt_out,
+                                &recovery_out,
                                 &apply_timestamp,
                                 source,
                                 post,
@@ -670,6 +735,7 @@ fn apply_common(
                         prepare_or_validate_receipt(
                             &plan,
                             &receipt_out,
+                            &recovery_out,
                             &apply_timestamp,
                             source,
                             post,
@@ -681,9 +747,14 @@ fn apply_common(
                 .map(|_| ()),
         };
         if let Err(error) = apply_result {
-            let evidence = if receipt_out.exists() {
+            let evidence = if recovery_out.exists() {
                 format!(
-                    "durable prepared receipt retained at {} for reconciliation",
+                    "durable prepared recovery receipt retained at {} for reconciliation",
+                    recovery_out.display()
+                )
+            } else if receipt_out.exists() {
+                format!(
+                    "public prepared artifact retained at {} without mutation authority",
                     receipt_out.display()
                 )
             } else {
@@ -707,6 +778,34 @@ fn apply_common(
 
     let prepared = prepared_receipt.ok_or("maintenance apply has no prepared receipt evidence")?;
     let prepared_file = prepared_file.ok_or("maintenance apply lost its prepared receipt inode")?;
+    if !super::receipt::path_names_open_file(&recovery_out, &prepared_file)? {
+        return Err(format!(
+            "{} recovery inode changed; reconciliation required and no receipt path was trusted",
+            plan.operation.label()
+        )
+        .into());
+    }
+    if !already_committed {
+        match super::receipt::path_names_open_file(&receipt_out, &prepared_file) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(format!(
+                    "{} DB committed after the public prepared receipt changed; stable recovery evidence retained at {} for reconciliation",
+                    plan.operation.label(),
+                    recovery_out.display()
+                )
+                .into())
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{} DB committed but the public prepared receipt could not be revalidated; stable recovery evidence retained at {} for reconciliation: {error}",
+                    plan.operation.label(),
+                    recovery_out.display()
+                )
+                .into())
+            }
+        }
+    }
     #[cfg(test)]
     if let Err(error) = fault_before_cache() {
         return Err(format!(
@@ -735,8 +834,9 @@ fn apply_common(
         )
         .into());
     }
-    if let Err(error) = super::receipt::finalize_prepared_receipt(
+    if let Err(error) = super::receipt::finalize_prepared_receipt_from_recovery(
         &receipt_out,
+        &recovery_out,
         super::receipt::ReceiptKind::MemoryMaintenance,
         &prepared_file,
         &committed_bytes,
@@ -755,6 +855,7 @@ fn apply_common(
 fn prepare_or_validate_receipt(
     plan: &MaintenancePlan,
     receipt_out: &Path,
+    recovery_out: &Path,
     apply_timestamp: &str,
     source: &[MaintenanceClassFact],
     post: &[MaintenanceClassFact],
@@ -789,7 +890,7 @@ fn prepare_or_validate_receipt(
             .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
         #[cfg(test)]
         fault_before_prepared_publish()?;
-        let file = publish_artifact("maintenance prepared receipt", receipt_out, &bytes)
+        let file = publish_prepared_receipt(receipt_out, recovery_out, &bytes)
             .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
         *prepared_file = Some(file);
         *prepared_receipt = Some(receipt);
@@ -803,21 +904,26 @@ fn prepare_or_validate_receipt(
             "maintenance apply lost its opened prepared receipt inode before commit".to_string(),
         )
     })?;
-    match super::receipt::path_names_open_file(receipt_out, prepared_file) {
+    match super::receipt::sync_and_validate_prepared_links(
+        receipt_out,
+        recovery_out,
+        prepared_file,
+    ) {
         Ok(true) => {}
         Ok(false) => {
             return Err(memcore::MemoryError::InvalidArg(format!(
-                "prepared receipt pathname {} no longer names the opened prepared inode before commit",
-                receipt_out.display()
+                "prepared receipt pathname pair no longer names the same opened inode before commit: {} and {}",
+                receipt_out.display(), recovery_out.display()
             )))
         }
         Err(error) => {
             return Err(memcore::MemoryError::InvalidArg(format!(
-                "prepared receipt pathname {} could not be revalidated against the opened inode before commit: {error}",
-                receipt_out.display()
+                "prepared receipt public/recovery inode durability could not be revalidated before commit: {error}"
             )))
         }
     }
+    #[cfg(test)]
+    fault_replace_public_after_precommit_check(receipt_out)?;
     Ok(())
 }
 
@@ -829,6 +935,7 @@ std::thread_local! {
     static FAIL_BEFORE_PREPARED_PUBLISH: Cell<bool> = const { Cell::new(false) };
     static FAIL_AFTER_PREPARED_PUBLISH: Cell<bool> = const { Cell::new(false) };
     static REPLACE_PREPARED_BEFORE_COMMIT: Cell<bool> = const { Cell::new(false) };
+    static REPLACE_PUBLIC_AFTER_PRECOMMIT_CHECK: Cell<bool> = const { Cell::new(false) };
     static FAIL_BEFORE_CACHE: Cell<bool> = const { Cell::new(false) };
     static FAIL_BEFORE_FINALIZE: Cell<bool> = const { Cell::new(false) };
     static DB_APPLY_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -877,6 +984,18 @@ fn fault_replace_prepared_path_before_commit(
     let retained = replaced_prepared_evidence_path(receipt_out);
     std::fs::rename(receipt_out, &retained)?;
     std::fs::write(receipt_out, b"FOREIGN-REPLACEMENT-EVIDENCE")?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn fault_replace_public_after_precommit_check(
+    receipt_out: &Path,
+) -> Result<(), memcore::MemoryError> {
+    if !REPLACE_PUBLIC_AFTER_PRECOMMIT_CHECK.with(|fault| fault.replace(false)) {
+        return Ok(());
+    }
+    std::fs::remove_file(receipt_out)?;
+    std::fs::write(receipt_out, b"FOREIGN-AFTER-CHECK-EVIDENCE")?;
     Ok(())
 }
 
@@ -1445,6 +1564,7 @@ mod tests {
     #[test]
     fn source_drift_and_precommit_failure_never_commit_unplanned_delete() {
         use crate::db_ownership::{set_ownership_inject_for_test, DbOwnership};
+        use std::os::unix::fs::MetadataExt;
 
         let drift = fixture();
         plan_delete(&drift);
@@ -1493,10 +1613,23 @@ mod tests {
         .expect_err("injected precommit failure must roll back");
         assert!(error.to_string().contains("rolled back"), "{error}");
         assert!(memory_exists(&precommit.db_path));
+        let precommit_plan: MaintenancePlan =
+            serde_json::from_slice(&std::fs::read(&precommit.plan_path).unwrap()).unwrap();
+        let public = receipt_path(&precommit.plan_path);
+        let recovery = recovery_receipt_path(&public, &precommit_plan);
         let receipt: MaintenanceReceipt =
-            serde_json::from_slice(&std::fs::read(receipt_path(&precommit.plan_path)).unwrap())
-                .unwrap();
+            serde_json::from_slice(&std::fs::read(&public).unwrap()).unwrap();
         assert_eq!(receipt.phase, ReceiptPhase::Prepared);
+        assert_eq!(
+            std::fs::read(&recovery).unwrap(),
+            std::fs::read(&public).unwrap()
+        );
+        let public_meta = std::fs::metadata(&public).unwrap();
+        let recovery_meta = std::fs::metadata(&recovery).unwrap();
+        assert_eq!(
+            (public_meta.dev(), public_meta.ino()),
+            (recovery_meta.dev(), recovery_meta.ino())
+        );
 
         let publish = fixture();
         plan_delete(&publish);
@@ -1513,6 +1646,32 @@ mod tests {
         assert!(error.to_string().contains("rolled back"), "{error}");
         assert!(memory_exists(&publish.db_path));
         assert!(!receipt_path(&publish.plan_path).exists());
+
+        let recovery_collision = fixture();
+        plan_delete(&recovery_collision);
+        let collision_plan: MaintenancePlan =
+            serde_json::from_slice(&std::fs::read(&recovery_collision.plan_path).unwrap()).unwrap();
+        let collision_public = receipt_path(&recovery_collision.plan_path);
+        let collision_recovery = recovery_receipt_path(&collision_public, &collision_plan);
+        super::super::receipt::inject_fault_before_recovery_link_for_test(true);
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        let error = run_delete(
+            DeleteAction::Apply {
+                plan: recovery_collision.plan_path.clone(),
+                yes: true,
+            },
+            &recovery_collision.app_home,
+        )
+        .expect_err("recovery-link publication failure must roll back");
+        assert!(error.to_string().contains("rolled back"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("injected recovery-link publication failure"),
+            "{error}"
+        );
+        assert!(memory_exists(&recovery_collision.db_path));
+        assert!(!collision_recovery.exists());
     }
 
     #[cfg(unix)]
@@ -1568,6 +1727,85 @@ mod tests {
             .unwrap();
             assert_eq!(retained.phase, ReceiptPhase::Prepared);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn postcheck_public_replacement_commits_once_then_replays_from_stable_recovery() {
+        use crate::db_ownership::{set_ownership_inject_for_test, DbOwnership};
+
+        let fixture = fixture();
+        plan_delete(&fixture);
+        let plan: MaintenancePlan =
+            serde_json::from_slice(&std::fs::read(&fixture.plan_path).unwrap()).unwrap();
+        let receipt_out = receipt_path(&fixture.plan_path);
+        let target_scope = format!(
+            "{:x}",
+            Sha256::digest(plan.target_physical_identity.as_bytes())
+        );
+        let recovery = receipt_out.parent().unwrap().join(format!(
+            ".tachi-maintenance-recovery-{}-{target_scope}",
+            plan.digest
+        ));
+
+        DB_APPLY_CALLS.with(|count| count.set(0));
+        REPLACE_PUBLIC_AFTER_PRECOMMIT_CHECK.with(|fault| fault.set(true));
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        let error = run_delete(
+            DeleteAction::Apply {
+                plan: fixture.plan_path.clone(),
+                yes: true,
+            },
+            &fixture.app_home,
+        )
+        .expect_err("postcheck replacement must return reconciliation, not success");
+
+        assert!(error.to_string().contains("DB committed"), "{error}");
+        assert!(error.to_string().contains("reconciliation"), "{error}");
+        assert_eq!(DB_APPLY_CALLS.with(Cell::get), 1);
+        assert!(!memory_exists(&fixture.db_path));
+        assert_eq!(
+            std::fs::read(&receipt_out).unwrap(),
+            b"FOREIGN-AFTER-CHECK-EVIDENCE"
+        );
+        let prepared_bytes = std::fs::read(&recovery).expect("stable recovery evidence");
+        let prepared: MaintenanceReceipt = serde_json::from_slice(&prepared_bytes).unwrap();
+        assert_eq!(prepared.phase, ReceiptPhase::Prepared);
+        let expected_committed = pretty_bytes(&prepared.committed().unwrap()).unwrap();
+
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        run_delete(
+            DeleteAction::Apply {
+                plan: fixture.plan_path.clone(),
+                yes: true,
+            },
+            &fixture.app_home,
+        )
+        .expect("replay must finalize from the stable recovery inode");
+        assert_eq!(DB_APPLY_CALLS.with(Cell::get), 1);
+        let committed_bytes = std::fs::read(&receipt_out).unwrap();
+        assert_eq!(
+            committed_bytes
+                .strip_suffix(b"\n")
+                .unwrap_or(&committed_bytes),
+            expected_committed
+        );
+        assert!(!recovery.exists());
+        assert!(fixture._dir.path().read_dir().unwrap().any(|entry| {
+            std::fs::read(entry.unwrap().path())
+                .is_ok_and(|bytes| bytes == b"FOREIGN-AFTER-CHECK-EVIDENCE")
+        }));
+
+        run_delete(
+            DeleteAction::Apply {
+                plan: fixture.plan_path.clone(),
+                yes: true,
+            },
+            &fixture.app_home,
+        )
+        .expect("committed replay must be byte-identical");
+        assert_eq!(std::fs::read(&receipt_out).unwrap(), committed_bytes);
+        assert_eq!(DB_APPLY_CALLS.with(Cell::get), 1);
     }
 
     #[cfg(unix)]

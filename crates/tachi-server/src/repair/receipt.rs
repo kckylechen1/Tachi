@@ -17,6 +17,7 @@ use std::cell::Cell;
 std::thread_local! {
     static FAULT_DURING_PREPARED_STAGE_WRITE: Cell<bool> = const { Cell::new(false) };
     static FAULT_BEFORE_PREPARED_PARENT_SYNC: Cell<bool> = const { Cell::new(false) };
+    static FAULT_BEFORE_RECOVERY_LINK: Cell<bool> = const { Cell::new(false) };
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,12 +45,19 @@ pub(super) fn inject_fault_before_prepared_parent_sync_for_test(enabled: bool) {
     FAULT_BEFORE_PREPARED_PARENT_SYNC.with(|fault| fault.set(enabled));
 }
 
-fn sync_receipt_parent(receipt_out: &Path) -> Result<(), std::io::Error> {
-    let parent = receipt_out
-        .parent()
+#[cfg(test)]
+pub(super) fn inject_fault_before_recovery_link_for_test(enabled: bool) {
+    FAULT_BEFORE_RECOVERY_LINK.with(|fault| fault.set(enabled));
+}
+
+fn receipt_parent(path: &Path) -> &Path {
+    path.parent()
         .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    File::open(parent)?.sync_all()
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn sync_receipt_parent(receipt_out: &Path) -> Result<(), std::io::Error> {
+    File::open(receipt_parent(receipt_out))?.sync_all()
 }
 
 fn sync_prepared_receipt_parent(receipt_out: &Path) -> Result<(), std::io::Error> {
@@ -68,7 +76,7 @@ fn write_staged_receipt(
     phase: &str,
     bytes: &[u8],
 ) -> Result<(PathBuf, File), std::io::Error> {
-    let parent = receipt_out.parent().unwrap_or_else(|| Path::new("."));
+    let parent = receipt_parent(receipt_out);
     let name = receipt_out
         .file_name()
         .map(|name| name.to_string_lossy())
@@ -121,6 +129,8 @@ pub(super) enum PreparedArtifactError {
     Stage(std::io::Error),
     AlreadyExists,
     Publish(std::io::Error),
+    RecoveryAlreadyExists,
+    RecoveryPublish(std::io::Error),
     ParentSync(std::io::Error),
 }
 
@@ -144,6 +154,61 @@ pub(super) fn persist_prepared_artifact_bytes(
         // Never unlink the public name after publication: a concurrent actor
         // could replace it between the check and unlink. The caller decides
         // whether a surrounding DB transaction must roll back.
+        let _ = fs::remove_file(&staged);
+        return Err(PreparedArtifactError::ParentSync(error));
+    }
+    if fs::remove_file(&staged).is_ok() {
+        let _ = sync_receipt_parent(output);
+    }
+    Ok(file)
+}
+
+/// Publishes one prepared inode under both a public name and a deterministic
+/// private recovery name. The file and both directory entries are durable
+/// before this returns, so a later public-name replacement cannot erase the
+/// commit-boundary evidence.
+pub(super) fn persist_prepared_artifact_with_recovery_bytes(
+    output: &Path,
+    recovery: &Path,
+    kind: ReceiptKind,
+    bytes: &[u8],
+) -> Result<File, PreparedArtifactError> {
+    if receipt_parent(output) != receipt_parent(recovery) {
+        return Err(PreparedArtifactError::RecoveryPublish(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "prepared receipt recovery path must share the public parent",
+        )));
+    }
+    let (staged, file) = write_staged_receipt(output, kind, "prepared", bytes)
+        .map_err(PreparedArtifactError::Stage)?;
+    if let Err(error) = fs::hard_link(&staged, output) {
+        let _ = fs::remove_file(&staged);
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(PreparedArtifactError::AlreadyExists);
+        }
+        return Err(PreparedArtifactError::Publish(error));
+    }
+    #[cfg(test)]
+    let recovery_link = if FAULT_BEFORE_RECOVERY_LINK.with(|fault| fault.replace(false)) {
+        Err(std::io::Error::other(
+            "injected recovery-link publication failure",
+        ))
+    } else {
+        fs::hard_link(&staged, recovery)
+    };
+    #[cfg(not(test))]
+    let recovery_link = fs::hard_link(&staged, recovery);
+    if let Err(error) = recovery_link {
+        // Never unlink the caller-visible public name after publication: a
+        // concurrent actor could replace it between a check and unlink. The
+        // surrounding DB callback returns an error and rolls back.
+        let _ = fs::remove_file(&staged);
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(PreparedArtifactError::RecoveryAlreadyExists);
+        }
+        return Err(PreparedArtifactError::RecoveryPublish(error));
+    }
+    if let Err(error) = sync_prepared_receipt_parent(output) {
         let _ = fs::remove_file(&staged);
         return Err(PreparedArtifactError::ParentSync(error));
     }
@@ -218,6 +283,23 @@ pub(super) fn path_names_open_file(_path: &Path, _file: &File) -> Result<bool, s
     Ok(false)
 }
 
+pub(super) fn sync_and_validate_prepared_links(
+    receipt_out: &Path,
+    recovery: &Path,
+    prepared_file: &File,
+) -> Result<bool, std::io::Error> {
+    if receipt_parent(receipt_out) != receipt_parent(recovery)
+        || !path_names_open_file(receipt_out, prepared_file)?
+        || !path_names_open_file(recovery, prepared_file)?
+    {
+        return Ok(false);
+    }
+    prepared_file.sync_all()?;
+    sync_receipt_parent(receipt_out)?;
+    Ok(path_names_open_file(receipt_out, prepared_file)?
+        && path_names_open_file(recovery, prepared_file)?)
+}
+
 /// Atomically replaces a public prepared artifact with committed bytes while
 /// preserving and proving every displaced inode. No object is unlinked after
 /// exchange, so concurrent pathname replacement cannot destroy foreign data.
@@ -266,4 +348,69 @@ pub(super) fn finalize_prepared_receipt(
         .into());
     }
     Ok(staged)
+}
+
+/// Finalizes committed bytes from a durable recovery inode. A displaced
+/// public object is retained byte-for-byte at the unique staging path. The
+/// deterministic recovery link is removed only after the committed public
+/// entry and any displaced entry have been fsynced.
+pub(super) fn finalize_prepared_receipt_from_recovery(
+    receipt_out: &Path,
+    recovery: &Path,
+    kind: ReceiptKind,
+    prepared_file: &File,
+    committed_bytes: &[u8],
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    if !path_names_open_file(recovery, prepared_file)? {
+        return Err(format!(
+            "prepared recovery path {} no longer names the opened prepared inode",
+            recovery.display()
+        )
+        .into());
+    }
+    let (staged, committed_file) =
+        write_staged_receipt(receipt_out, kind, "committed-publication", committed_bytes)?;
+    let displaced = if fs::symlink_metadata(receipt_out).is_ok() {
+        atomic_exchange_paths(&staged, receipt_out)?;
+        Some(staged.clone())
+    } else {
+        match fs::hard_link(&staged, receipt_out) {
+            Ok(()) => {
+                fs::remove_file(&staged)?;
+                None
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                atomic_exchange_paths(&staged, receipt_out)?;
+                Some(staged.clone())
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    if !path_names_open_file(receipt_out, &committed_file)? {
+        return Err(format!(
+            "committed receipt public path {} changed before durability; recovery evidence retained at {}",
+            receipt_out.display(),
+            recovery.display()
+        )
+        .into());
+    }
+    sync_receipt_parent(receipt_out)?;
+    if !path_names_open_file(receipt_out, &committed_file)? {
+        return Err(format!(
+            "committed receipt public path {} changed after durability; recovery evidence retained at {}",
+            receipt_out.display(),
+            recovery.display()
+        )
+        .into());
+    }
+    if !path_names_open_file(recovery, prepared_file)? {
+        return Err(format!(
+            "prepared recovery path {} changed after committed publication; no recovery object was removed",
+            recovery.display()
+        )
+        .into());
+    }
+    fs::remove_file(recovery)?;
+    sync_receipt_parent(receipt_out)?;
+    Ok(displaced)
 }

@@ -100,6 +100,14 @@ fn persist_prepared_receipt_before_commit(
                 "exact-dedupe prepared receipt could not be atomically published before commit at {}: {error}",
                 receipt_out.display()
             ),
+            super::receipt::PreparedArtifactError::RecoveryAlreadyExists => format!(
+                "exact-dedupe receipt protocol unexpectedly requested a recovery link at {}",
+                receipt_out.display()
+            ),
+            super::receipt::PreparedArtifactError::RecoveryPublish(error) => format!(
+                "exact-dedupe receipt protocol unexpectedly failed a recovery link at {}: {error}",
+                receipt_out.display()
+            ),
             super::receipt::PreparedArtifactError::ParentSync(error) => format!(
                 "exact-dedupe prepared receipt parent could not be synced durably before commit at {}: {error}; the public prepared artifact was retained conservatively",
                 receipt_out.display()
