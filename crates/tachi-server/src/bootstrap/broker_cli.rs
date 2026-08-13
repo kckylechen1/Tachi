@@ -81,13 +81,83 @@ fn lane_alias_name(lane: &str) -> String {
 /// Carries no rendered prose, for the reason `vault_cli::reconcile`'s artifact
 /// does not: a summary stored beside the digest is a lie surface — edit only
 /// the description and the digest still verifies while the operator approves a
-/// paragraph the plan does not implement.
+/// paragraph the plan does not implement. `deny_unknown_fields` is what makes
+/// that a rule rather than a wish: serde's default is to discard what it does
+/// not recognize, so without it a `"summary"` key parses clean, never enters
+/// the digest, and rides along beside a digest that still verifies. Every type
+/// underneath is `deny_unknown_fields` for the same reason (see
+/// `memcore::catalog::alias_plan`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AliasPlanArtifact {
     schema: String,
     generated_at: String,
     plan_digest: String,
     bound: BoundAliasPlan,
+}
+
+/// An artifact whose `plan_digest` has been checked against the plan it
+/// carries — the only thing in this module that can be rendered or applied.
+///
+/// # Why this is a type and not an ordering convention
+///
+/// The first cut verified the digest inside the store, at the end of the
+/// pipeline, and rendered the artifact on the way there: a tampered plan was
+/// printed to the operator under its *claimed* digest and only then refused
+/// (#1681 PR-D review, CLI blocker 3). Reordering two statements would have
+/// fixed that occurrence and nothing else — the next surface that wants to show
+/// a plan makes the same mistake, because nothing stops it.
+///
+/// So verification is the constructor. There are exactly two ways to obtain one
+/// of these: [`VerifiedPlanArtifact::minted`], where the digest is computed from
+/// the content and the two cannot disagree, and [`VerifiedPlanArtifact::read`],
+/// which recomputes it. `render_plan` takes this type, so "what the operator
+/// saw was digest-checked" is a fact about the signature.
+struct VerifiedPlanArtifact(AliasPlanArtifact);
+
+impl VerifiedPlanArtifact {
+    /// A plan this process just built: the digest is taken from the content
+    /// here, so it describes exactly what is in the artifact.
+    fn minted(bound: BoundAliasPlan, generated_at: String) -> Self {
+        Self(AliasPlanArtifact {
+            schema: PLAN_SCHEMA.to_string(),
+            generated_at,
+            plan_digest: alias_plan_digest(&bound),
+            bound,
+        })
+    }
+
+    /// A plan read back from disk: schema literal first, then the digest,
+    /// before any caller can look at the content.
+    ///
+    /// The store re-verifies the digest inside its write transaction and that
+    /// is not redundant — this check says "do not show the operator an
+    /// unverified plan", the store's says "do not write one", and neither is
+    /// the other's job.
+    fn read(raw: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let artifact: AliasPlanArtifact = serde_json::from_str(raw)?;
+        if artifact.schema != PLAN_SCHEMA {
+            return Err(format!(
+                "plan schema '{}' is not '{PLAN_SCHEMA}'; refusing to guess what it meant",
+                artifact.schema
+            )
+            .into());
+        }
+        let recomputed = alias_plan_digest(&artifact.bound);
+        if recomputed != artifact.plan_digest {
+            return Err(format!(
+                "plan was presented as '{}' but hashes to '{recomputed}'; refusing to render or \
+                 apply a plan whose content is not what its digest says",
+                artifact.plan_digest
+            )
+            .into());
+        }
+        Ok(Self(artifact))
+    }
+
+    fn artifact(&self) -> &AliasPlanArtifact {
+        &self.0
+    }
 }
 
 /// A note for the operator that is not an action. Advisories never enter the
@@ -105,6 +175,64 @@ struct PlanOutcome {
     advisories: Vec<Advisory>,
 }
 
+// ─── stdout ─────────────────────────────────────────────────────────────────
+
+/// Who the bytes on `stdout` are for.
+///
+/// `--json` promises a machine reader exactly one JSON document, so under
+/// [`OutputMode::Machine`] every human-facing line — progress notices, the
+/// rendered plan view — is either omitted or goes to stderr. One function per
+/// subcommand owns the whole of stdout, which is what makes "stdout parses as
+/// JSON" a property a test can assert rather than a convention every new
+/// `println!` gets a chance to break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    Machine,
+    Human,
+}
+
+impl From<bool> for OutputMode {
+    fn from(json: bool) -> Self {
+        if json {
+            Self::Machine
+        } else {
+            Self::Human
+        }
+    }
+}
+
+fn artifact_json(artifact: &AliasPlanArtifact) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(artifact)
+}
+
+fn alias_set_stdout(
+    rendered: &RenderedAliasSet,
+    mode: OutputMode,
+) -> Result<String, serde_json::Error> {
+    Ok(match mode {
+        OutputMode::Machine => format!("{}\n", serde_json::to_string_pretty(rendered)?),
+        OutputMode::Human => render_alias_set_text(rendered),
+    })
+}
+
+fn plan_stdout(
+    verified: &VerifiedPlanArtifact,
+    advisories: &[Advisory],
+    mode: OutputMode,
+) -> Result<String, serde_json::Error> {
+    Ok(match mode {
+        OutputMode::Machine => format!("{}\n", artifact_json(verified.artifact())?),
+        OutputMode::Human => render_plan(verified, advisories),
+    })
+}
+
+fn apply_stdout(report: &AliasApplyReport, mode: OutputMode) -> Result<String, serde_json::Error> {
+    Ok(match mode {
+        OutputMode::Machine => format!("{}\n", serde_json::to_string_pretty(report)?),
+        OutputMode::Human => render_apply(report),
+    })
+}
+
 // ─── CLI entry ──────────────────────────────────────────────────────────────
 
 pub(super) fn run_broker_command(
@@ -115,54 +243,43 @@ pub(super) fn run_broker_command(
         BrokerAction::Aliases { json } => {
             let store = open_cli_store_read_only(global_db_path)?;
             let rendered = render_alias_set(&store)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&rendered)?);
-            } else {
-                print!("{}", render_alias_set_text(&rendered));
-            }
+            print!("{}", alias_set_stdout(&rendered, json.into())?);
         }
         BrokerAction::Plan { json, out } => {
             let store = open_cli_store_read_only(global_db_path)?;
             let outcome = build_plan(&store)?;
-            let artifact = AliasPlanArtifact {
-                schema: PLAN_SCHEMA.to_string(),
-                generated_at: chrono::Utc::now().to_rfc3339(),
-                plan_digest: alias_plan_digest(&outcome.plan),
-                bound: outcome.plan,
-            };
-            if json {
-                println!("{}", serde_json::to_string_pretty(&artifact)?);
-            } else {
-                print!("{}", render_plan(&artifact, &outcome.advisories));
-            }
+            let verified =
+                VerifiedPlanArtifact::minted(outcome.plan, chrono::Utc::now().to_rfc3339());
+            print!(
+                "{}",
+                plan_stdout(&verified, &outcome.advisories, json.into())?
+            );
             if let Some(path) = out {
-                std::fs::write(&path, serde_json::to_string_pretty(&artifact)?)?;
-                println!("wrote alias plan to {}", path.display());
+                std::fs::write(&path, artifact_json(verified.artifact())?)?;
+                // A notice about the filesystem is not the document. It goes to
+                // stderr so `--json` stdout stays exactly one JSON value — a
+                // caller piping this into `jq` was parsing "wrote alias plan
+                // to …" as JSON before (#1681 PR-D review, CLI blocker 2).
+                eprintln!("wrote alias plan to {}", path.display());
             }
         }
         BrokerAction::Apply { plan, json } => {
             let raw = std::fs::read_to_string(&plan)?;
-            let artifact: AliasPlanArtifact = serde_json::from_str(&raw)?;
-            if artifact.schema != PLAN_SCHEMA {
-                return Err(format!(
-                    "plan schema '{}' is not '{PLAN_SCHEMA}'; refusing to guess what it meant",
-                    artifact.schema
-                )
-                .into());
-            }
+            // Schema and digest are checked by the constructor, before anything
+            // renders the content: an operator must never be shown a plan under
+            // a digest that does not describe it.
+            let verified = VerifiedPlanArtifact::read(&raw)?;
+            let mode = OutputMode::from(json);
             // Re-render from the digested content before applying: what the
             // operator sees at apply time is the plan itself, never a stored
             // description of it.
-            if !json {
-                print!("{}", render_plan(&artifact, &[]));
+            if mode == OutputMode::Human {
+                print!("{}", render_plan(&verified, &[]));
             }
             let mut store = open_cli_store(global_db_path)?;
+            let artifact = verified.artifact();
             let report = store.apply_model_alias_plan(&artifact.bound, &artifact.plan_digest)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", render_apply(&report));
-            }
+            print!("{}", apply_stdout(&report, mode)?);
         }
     }
     Ok(())
@@ -425,7 +542,10 @@ fn render_alias_set_text(set: &RenderedAliasSet) -> String {
     out
 }
 
-fn render_plan(artifact: &AliasPlanArtifact, advisories: &[Advisory]) -> String {
+/// The human view of a plan whose digest has already been checked — the type
+/// is the check, see [`VerifiedPlanArtifact`].
+fn render_plan(verified: &VerifiedPlanArtifact, advisories: &[Advisory]) -> String {
+    let artifact = verified.artifact();
     let mut out = String::new();
     out.push_str(&format!("PLAN\t{}\n", artifact.plan_digest));
     out.push_str(&format!(

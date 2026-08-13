@@ -35,10 +35,12 @@
 //!
 //! Every row this module writes is durable, operator-visible provenance
 //! (#1680's rule for `ProviderAccount`, inherited here). A `base_url` carrying
-//! `https://user:pass@host/` therefore cannot be imported at all: the
-//! projection **fails loudly** with [`CatalogImportError::EndpointCarriesUserinfo`]
-//! before a single row is built, so nothing lands in the catalog and no caller
-//! is left holding a half-written import.
+//! a credential — `https://user:pass@host/` in the authority, or a
+//! credential-shaped query key such as `?api_key=` — therefore cannot be
+//! imported at all: the projection **fails loudly** with
+//! [`CatalogImportError::EndpointCarriesCredential`] before a single row is
+//! built, so nothing lands in the catalog and no caller is left holding a
+//! half-written import.
 //!
 //! An earlier revision scrubbed userinfo out of the derived account handle and
 //! called that enough. It was not — `endpoint_ref` still stored the raw URL, so

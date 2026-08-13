@@ -564,7 +564,8 @@ pub(crate) struct EnvCatalogImport {
 /// is built before any connection is opened. `env_chat_lane_deployments` and
 /// `env_embedding_deployment` are pure functions with no store access; their
 /// only failure mode is a credential-bearing endpoint
-/// (`CatalogImportError::EndpointCarriesUserinfo`). Building all five here,
+/// (`CatalogImportError::EndpointCarriesCredential`, which covers userinfo in
+/// the authority and credential-shaped query keys alike). Building all five here,
 /// before `with_global_store` is even called, means a userinfo-carrying
 /// `VOYAGE_BASE_URL` is refused with zero write calls having happened at
 /// all — not "refused after the four chat rows were written into a

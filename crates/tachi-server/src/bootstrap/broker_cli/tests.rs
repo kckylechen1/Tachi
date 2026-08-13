@@ -230,14 +230,10 @@ fn the_rendered_plan_shows_what_was_digested_and_nothing_else() {
         "deepseek-reasoner",
     );
     let outcome = plan(&store);
-    let artifact = AliasPlanArtifact {
-        schema: PLAN_SCHEMA.to_string(),
-        generated_at: OBSERVED_AT.to_string(),
-        plan_digest: alias_plan_digest(&outcome.plan),
-        bound: outcome.plan.clone(),
-    };
+    let verified = VerifiedPlanArtifact::minted(outcome.plan.clone(), OBSERVED_AT.to_string());
+    let artifact = verified.artifact();
 
-    let rendered = render_plan(&artifact, &outcome.advisories);
+    let rendered = render_plan(&verified, &outcome.advisories);
     assert!(rendered.contains(&artifact.plan_digest));
     assert!(rendered.contains("ACTION\tdeclare_alias\tlane.reasoning"));
     assert!(rendered.contains("ACTION\tbind\tlane.reasoning\tenv:reasoning"));
@@ -283,6 +279,120 @@ fn the_rendered_view_carries_an_endpoint_authority_and_never_its_path() {
         advisory.detail
     );
     assert!(!advisory.detail.contains("api-version"));
+}
+
+// ─── the artifact contract: what a file may say, and when it may be shown ───
+
+/// One artifact's JSON, as `plan --out` would have written it.
+fn artifact_json_for(store: &MemoryStore) -> serde_json::Value {
+    let outcome = plan(store);
+    let verified = VerifiedPlanArtifact::minted(outcome.plan, OBSERVED_AT.to_string());
+    serde_json::to_value(verified.artifact()).expect("encode artifact")
+}
+
+fn seeded_store() -> MemoryStore {
+    let store = store();
+    seed_lane(
+        &store,
+        "reasoning",
+        "https://api.deepseek.com/chat/completions",
+        "deepseek-reasoner",
+    );
+    store
+}
+
+#[test]
+fn an_artifact_carrying_a_field_the_grammar_has_no_room_for_is_refused() {
+    let store = seeded_store();
+    let mut json = artifact_json_for(&store);
+    json.as_object_mut()
+        .expect("artifact is an object")
+        .insert("summary".to_string(), serde_json::json!("retires nothing"));
+
+    let refusal = VerifiedPlanArtifact::read(&json.to_string())
+        .err()
+        .expect("prose beside the digest is the lie surface the artifact has no field for");
+    assert!(
+        refusal.to_string().contains("summary"),
+        "the refusal must name the field it refused: {refusal}"
+    );
+}
+
+#[test]
+fn a_plan_whose_content_does_not_match_its_digest_is_refused_before_it_is_rendered() {
+    let store = seeded_store();
+    let mut json = artifact_json_for(&store);
+    // Re-point the first bind at another deployment, leaving the digest alone:
+    // the file now claims a digest that describes a plan it does not contain.
+    json["bound"]["actions"][1]["deployment_id"] = serde_json::json!("env:somewhere-else");
+
+    let refusal = VerifiedPlanArtifact::read(&json.to_string())
+        .err()
+        .expect("a tampered plan must not become renderable");
+    let message = refusal.to_string();
+    assert!(
+        message.contains("presented as") && message.contains("hashes to"),
+        "the refusal names both digests: {message}"
+    );
+    assert!(
+        !message.contains("env:somewhere-else"),
+        "the refusal is not a rendering of the plan it refused: {message}"
+    );
+}
+
+#[test]
+fn a_plan_from_another_schema_is_refused_rather_than_reinterpreted() {
+    let store = seeded_store();
+    let mut json = artifact_json_for(&store);
+    json["schema"] = serde_json::json!("tachi.model-alias-plan.v0");
+
+    assert!(
+        VerifiedPlanArtifact::read(&json.to_string()).is_err(),
+        "a plan from a build that meant something else by these fields is not ours to guess at"
+    );
+}
+
+#[test]
+fn a_plan_this_process_wrote_reads_back_verified() {
+    let store = seeded_store();
+    let json = artifact_json_for(&store).to_string();
+    let verified = VerifiedPlanArtifact::read(&json).expect("our own artifact round-trips");
+    assert_eq!(verified.artifact().schema, PLAN_SCHEMA);
+    assert!(!verified.artifact().bound.actions.is_empty());
+}
+
+#[test]
+fn machine_stdout_is_one_json_document_and_never_a_notice() {
+    let store = seeded_store();
+    let outcome = plan(&store);
+    let verified = VerifiedPlanArtifact::minted(outcome.plan, OBSERVED_AT.to_string());
+
+    // `plan --json`: the whole of stdout parses, which is the property that
+    // broke when the `--out` notice was printed to stdout beside it.
+    let stdout = plan_stdout(&verified, &outcome.advisories, OutputMode::Machine).expect("stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("machine stdout is exactly one JSON document");
+    assert_eq!(parsed["schema"], PLAN_SCHEMA);
+    assert!(
+        !stdout.contains("wrote alias plan"),
+        "a filesystem notice is not part of the document"
+    );
+
+    // `aliases --json` and `apply --json` answer to the same rule.
+    let view = render_alias_set(&store).expect("render");
+    let stdout = alias_set_stdout(&view, OutputMode::Machine).expect("stdout");
+    serde_json::from_str::<serde_json::Value>(&stdout).expect("alias view stdout is JSON");
+
+    let mut store = store;
+    let report = store
+        .apply_model_alias_plan(&verified.artifact().bound, &verified.artifact().plan_digest)
+        .expect("apply");
+    let stdout = apply_stdout(&report, OutputMode::Machine).expect("stdout");
+    serde_json::from_str::<serde_json::Value>(&stdout).expect("apply report stdout is JSON");
+
+    // And the human mode is still the human mode.
+    let human = apply_stdout(&report, OutputMode::Human).expect("stdout");
+    assert!(human.starts_with("APPLIED\t"));
 }
 
 #[test]
