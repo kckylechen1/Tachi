@@ -34,7 +34,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::catalog::fold::CatalogProjection;
-use crate::catalog::health::{is_stale_observation, record_deployment_outcome, DeploymentOutcome};
+use crate::catalog::health::{
+    is_auth_class_status, is_stale_observation, record_deployment_outcome, DeploymentOutcome,
+};
 use crate::catalog::{
     partition_authoritative_at, AttachmentBounds, AuthoritativePartition, CatalogSource,
     DeploymentCapabilities, DeploymentEventKind, ModelAlias, ModelAliasBinding, ModelDeployment,
@@ -682,6 +684,15 @@ pub enum DeploymentHealthSkip {
     /// outcome was observed rather than by the order the writes land — see
     /// [`crate::catalog::health::is_stale_observation`].
     StaleObservation,
+    /// The outcome carried an auth-class status (`401`/`403`), which belongs to
+    /// the credential and account authorities and never to this one (#1681 D4).
+    ///
+    /// The type face already makes such an outcome unconstructable
+    /// ([`crate::catalog::health::ServerErrorStatus`]), so in production this
+    /// arm is a second lock on a door that is already bolted — which is the
+    /// point: the first lock is a property of one module's constructors, and
+    /// this one is a property of the table's only writer.
+    AuthClassStatus,
 }
 
 /// What [`record_model_deployment_outcome`] did.
@@ -758,6 +769,17 @@ pub fn record_model_deployment_outcome(
     evidence: EvidenceKind,
     now: DateTime<Utc>,
 ) -> Result<DeploymentHealthWrite, MemoryError> {
+    // Before anything is opened: the status this outcome carries is re-checked
+    // against the authority boundary, independently of the type that carried
+    // it here. `DeploymentOutcome`'s sealed status carriers already make an
+    // auth-class value unconstructable; this is the same rule stated where the
+    // rows are actually written, so the guarantee does not rest on one
+    // module's constructors staying private forever.
+    if outcome.status().is_some_and(is_auth_class_status) {
+        return Ok(DeploymentHealthWrite::Skipped(
+            DeploymentHealthSkip::AuthClassStatus,
+        ));
+    }
     conn.execute_batch("SAVEPOINT record_model_deployment_outcome")?;
     let result = (|| -> Result<DeploymentHealthWrite, MemoryError> {
         let deployment_id = target.deployment_id();

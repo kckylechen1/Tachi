@@ -22,7 +22,9 @@
 
 use super::*;
 
-use crate::catalog::health::{DeploymentOutcome, RetryAfter};
+use crate::catalog::health::{
+    DeploymentOutcome, RetryAfter, ServerErrorStatus, UnusableResponseStatus,
+};
 use crate::catalog::{
     CatalogSource, DeploymentCapabilities, DeploymentEventKind, EmbeddingsCapability,
     ModelDeployment, NewModelDeployment, NewModelDeploymentEvent, PricingSnapshot, ProtocolKind,
@@ -582,10 +584,7 @@ fn a_health_write_folds_into_the_catalog_projection_the_same_way_twice() {
     record_model_deployment_outcome(
         &conn,
         &DeploymentOutcomeTarget::deployment("env:extract"),
-        DeploymentOutcome::ServerError {
-            status: 502,
-            retry_after: None,
-        },
+        server_error(502),
         EvidenceKind::Probed,
         instant(90),
     )
@@ -665,6 +664,14 @@ fn instant(seconds: i64) -> chrono::DateTime<chrono::Utc> {
 
 fn iso(instant: chrono::DateTime<chrono::Utc>) -> String {
     instant.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// A `5xx` outcome, built through the fallible constructor.
+fn server_error(status: u16) -> DeploymentOutcome {
+    DeploymentOutcome::ServerError {
+        status: ServerErrorStatus::new(status).expect("a 5xx status"),
+        retry_after: None,
+    }
 }
 
 /// The target an `env:extract` request produces — endpoint and model as
@@ -757,10 +764,7 @@ fn a_deployment_outcome_never_reaches_the_credential_authority() {
     for outcome in [
         DeploymentOutcome::Throttled { retry_after: None },
         DeploymentOutcome::Unreachable,
-        DeploymentOutcome::ServerError {
-            status: 503,
-            retry_after: None,
-        },
+        server_error(503),
         DeploymentOutcome::Served,
     ] {
         record_model_deployment_outcome(
@@ -893,6 +897,58 @@ fn break_the_event_append(conn: &Connection) {
          BEGIN SELECT RAISE(ABORT, 'injected append failure'); END",
     )
     .expect("install the failure injection");
+}
+
+#[test]
+fn the_store_door_refuses_an_auth_class_status_even_when_handed_one() {
+    // Defence in depth, and the reason the test-only unchecked constructors
+    // exist. In production `ServerErrorStatus::new(401)` returns `None` and the
+    // field is private, so this outcome cannot be built at all — which would
+    // leave the door's own re-check unreachable and therefore unproven. Here
+    // the seal is deliberately bypassed to prove the *second* lock holds on its
+    // own, because that is the lock that survives someone loosening the first.
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+
+    let smuggled = [
+        DeploymentOutcome::ServerError {
+            status: ServerErrorStatus::refused_for_tests(401),
+            retry_after: Some(RetryAfter::DeltaSeconds(30)),
+        },
+        DeploymentOutcome::UnusableResponse {
+            status: Some(UnusableResponseStatus::refused_for_tests(403)),
+        },
+    ];
+    for outcome in smuggled {
+        assert_eq!(
+            record_model_deployment_outcome(
+                &conn,
+                &extract_request(),
+                outcome,
+                EvidenceKind::SelfReported,
+                instant(0),
+            )
+            .expect("a refused outcome is a skip, not an error"),
+            DeploymentHealthWrite::Skipped(DeploymentHealthSkip::AuthClassStatus),
+            "{outcome:?} carries a status that belongs to the credential and account \
+             authorities; recording it here would cool down every sibling deployment sharing \
+             the rejected key"
+        );
+    }
+
+    assert!(
+        get_model_deployment_health(&conn, "env:extract")
+            .expect("read")
+            .is_none(),
+        "no row"
+    );
+    assert_eq!(
+        list_model_deployment_events(&conn, "env:extract")
+            .expect("events")
+            .len(),
+        1,
+        "and no event — only the import's"
+    );
 }
 
 #[test]

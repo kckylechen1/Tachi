@@ -23,6 +23,21 @@ fn iso(now: DateTime<Utc>) -> String {
     now.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+/// A `5xx` outcome, through the fallible constructor every caller must use.
+fn server_error(status: u16, retry_after: Option<RetryAfter>) -> DeploymentOutcome {
+    DeploymentOutcome::ServerError {
+        status: ServerErrorStatus::new(status).expect("a 5xx status"),
+        retry_after,
+    }
+}
+
+/// An unusable answer that carried a status.
+fn unusable_response(status: u16) -> DeploymentOutcome {
+    DeploymentOutcome::UnusableResponse {
+        status: Some(UnusableResponseStatus::new(status).expect("a non-auth status")),
+    }
+}
+
 fn record(
     existing: Option<&ModelDeploymentHealth>,
     outcome: DeploymentOutcome,
@@ -52,6 +67,70 @@ fn no_auth_class_status_can_become_a_deployment_outcome() {
             "HTTP {status} belongs to the credential and account authorities; a deployment that \
              served a request behind a revoked key is not itself unhealthy, and cooling it down \
              would take every sibling deployment sharing that key out of selection"
+        );
+    }
+}
+
+#[test]
+fn an_auth_class_status_cannot_be_written_down_as_any_outcome_at_all() {
+    // The hole the codex review found: `classify` refusing 401/403 protected
+    // only the callers that went through `classify`. A caller holding the
+    // status could still *construct* `ServerError { status: 401 }` or
+    // `UnusableResponse { status: Some(403) }` and hand it straight to the
+    // store door. Both status carriers are now sealed, so the refusal is a
+    // property of the vocabulary rather than of one code path through it.
+    //
+    // The compile-time half — that the private fields cannot be reached at
+    // all — is the `compile_fail` doctest on each carrier.
+    for status in AUTH_CLASS_STATUSES {
+        assert!(
+            ServerErrorStatus::new(status).is_none(),
+            "HTTP {status} must not be expressible as a server error"
+        );
+        assert!(
+            UnusableResponseStatus::new(status).is_none(),
+            "HTTP {status} must not be expressible as an unusable response"
+        );
+    }
+
+    // …and the carriers stay honest about their own class, so the seal cannot
+    // be widened into "any status is a server error".
+    assert!(ServerErrorStatus::new(429).is_none());
+    assert!(ServerErrorStatus::new(404).is_none());
+    assert_eq!(
+        ServerErrorStatus::new(500).map(ServerErrorStatus::get),
+        Some(500)
+    );
+    assert_eq!(
+        ServerErrorStatus::new(599).map(ServerErrorStatus::get),
+        Some(599)
+    );
+    assert_eq!(
+        UnusableResponseStatus::new(422).map(UnusableResponseStatus::get),
+        Some(422)
+    );
+}
+
+#[test]
+fn every_outcome_that_reports_a_status_reports_a_non_auth_one() {
+    // The property the store door re-checks, stated over the whole
+    // vocabulary: whatever a caller builds, `status()` can never hand back an
+    // auth-class number.
+    let outcomes = [
+        DeploymentOutcome::Served,
+        DeploymentOutcome::Throttled { retry_after: None },
+        DeploymentOutcome::Unreachable,
+        server_error(500, None),
+        server_error(599, Some(RetryAfter::DeltaSeconds(1))),
+        unusable_response(400),
+        unusable_response(404),
+        unusable_response(422),
+        DeploymentOutcome::UnusableResponse { status: None },
+    ];
+    for outcome in outcomes {
+        assert!(
+            !outcome.status().is_some_and(is_auth_class_status),
+            "{outcome:?} reported an auth-class status"
         );
     }
 }
@@ -93,7 +172,7 @@ fn transport_server_and_protocol_failures_are_all_this_authoritys_business() {
     assert_eq!(
         DeploymentOutcome::classify(ProviderResponseSignal::Status(503), None),
         Some(DeploymentOutcome::ServerError {
-            status: 503,
+            status: ServerErrorStatus::new(503).expect("503 is a server-error status"),
             retry_after: None
         })
     );
@@ -103,7 +182,9 @@ fn transport_server_and_protocol_failures_are_all_this_authoritys_business() {
     );
     assert_eq!(
         DeploymentOutcome::classify(ProviderResponseSignal::Status(404), None),
-        Some(DeploymentOutcome::UnusableResponse { status: Some(404) })
+        Some(DeploymentOutcome::UnusableResponse {
+            status: UnusableResponseStatus::new(404)
+        })
     );
     assert_eq!(
         DeploymentOutcome::classify(ProviderResponseSignal::Status(200), None),
@@ -274,14 +355,7 @@ fn a_server_error_arriving_mid_cooldown_does_not_shorten_it() {
         },
         now,
     );
-    let errored = record(
-        Some(&throttled.health),
-        DeploymentOutcome::ServerError {
-            status: 503,
-            retry_after: None,
-        },
-        at(8),
-    );
+    let errored = record(Some(&throttled.health), server_error(503, None), at(8));
 
     assert_eq!(
         errored.health.cooldown_until.as_deref(),
@@ -296,23 +370,13 @@ fn a_server_error_arriving_mid_cooldown_does_not_shorten_it() {
 #[test]
 fn a_server_error_honours_an_explicit_retry_after_but_invents_none() {
     let now = at(0);
-    let without = record(
-        None,
-        DeploymentOutcome::ServerError {
-            status: 500,
-            retry_after: None,
-        },
-        now,
-    );
+    let without = record(None, server_error(500, None), now);
     assert_eq!(without.health.cooldown_until, None);
     assert_eq!(without.health.state, DEPLOYMENT_HEALTH_STATE_ERROR);
 
     let with = record(
         None,
-        DeploymentOutcome::ServerError {
-            status: 503,
-            retry_after: Some(RetryAfter::DeltaSeconds(15)),
-        },
+        server_error(503, Some(RetryAfter::DeltaSeconds(15))),
         now,
     );
     assert_eq!(with.cooldown_until, Some(at(15)));
@@ -324,17 +388,10 @@ fn the_recorded_error_text_is_generated_never_provider_supplied() {
     // reach `last_error`; this pins what does reach it.
     let now = at(0);
     assert_eq!(
-        record(
-            None,
-            DeploymentOutcome::ServerError {
-                status: 503,
-                retry_after: None
-            },
-            now
-        )
-        .health
-        .last_error
-        .as_deref(),
+        record(None, server_error(503, None), now)
+            .health
+            .last_error
+            .as_deref(),
         Some("provider returned HTTP 503")
     );
     assert_eq!(
@@ -345,14 +402,10 @@ fn the_recorded_error_text_is_generated_never_provider_supplied() {
         Some("no response from the provider")
     );
     assert_eq!(
-        record(
-            None,
-            DeploymentOutcome::UnusableResponse { status: Some(422) },
-            now
-        )
-        .health
-        .last_error
-        .as_deref(),
+        record(None, unusable_response(422), now)
+            .health
+            .last_error
+            .as_deref(),
         Some("unusable response (HTTP 422)")
     );
     assert_eq!(
@@ -429,10 +482,7 @@ fn every_outcome_maps_to_exactly_one_event_kind_and_state() {
             DeploymentEventKind::HealthError,
         ),
         (
-            DeploymentOutcome::ServerError {
-                status: 500,
-                retry_after: None,
-            },
+            server_error(500, None),
             DEPLOYMENT_HEALTH_STATE_ERROR,
             DeploymentEventKind::HealthError,
         ),

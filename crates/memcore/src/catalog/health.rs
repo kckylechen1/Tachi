@@ -15,13 +15,22 @@
 //! separation is made **structural** here rather than left to review:
 //!
 //! 1. **An auth failure cannot be expressed as a deployment outcome.**
-//!    [`DeploymentOutcome`] has no auth variant. A caller holding a 401/403
-//!    cannot construct a value to pass in — not "is rejected at runtime",
-//!    *cannot be written down*. [`DeploymentOutcome::classify`] returns `None`
-//!    for those statuses for the same reason, so the classifier and the type
-//!    agree by construction. A 401/403 says something about the credential and
-//!    the account, and nothing whatsoever about the deployment; letting it land
-//!    here would cool down every sibling that shares a broken key.
+//!    [`DeploymentOutcome`] has no auth variant, and — the part an earlier
+//!    revision got wrong — the two variants that *do* carry a status carry it
+//!    as [`ServerErrorStatus`] / [`UnusableResponseStatus`], whose fields are
+//!    private and whose constructors refuse an auth-class status. A caller
+//!    holding a 401/403 cannot construct a value to pass in: not "is rejected
+//!    at runtime", *cannot be written down*. Naming the variant with a bare
+//!    `u16` was not enough — `ServerError { status: 401 }` was a legal value,
+//!    and passing it straight to the store door skipped
+//!    [`DeploymentOutcome::classify`] entirely.
+//!    `classify` returns `None` for those statuses for the same reason, so the
+//!    classifier and the type agree by construction, and the store door
+//!    ([`crate::db::model_catalog::record_model_deployment_outcome`]) re-checks
+//!    the status it is handed as a second, independent lock. A 401/403 says
+//!    something about the credential and the account, and nothing whatsoever
+//!    about the deployment; letting it land here would cool down every sibling
+//!    that shares a broken key.
 //! 2. **This writer's whole type face is deployment-shaped.** Inputs are a
 //!    deployment id, a [`DeploymentOutcome`], an [`EvidenceKind`] and an
 //!    instant; outputs are a [`ModelDeploymentHealth`] row and one
@@ -148,13 +157,109 @@ pub fn throttle_cooldown_secs(retry_after: Option<RetryAfter>, now: DateTime<Utc
     }
 }
 
+// ─── sealed status carriers ──────────────────────────────────────────────────
+
+/// The statuses that are the credential and account authorities' business and
+/// never the deployment's (#1681 D4). Named once so the type constructors, the
+/// classifier and the store door cannot drift apart on what "auth-class" means.
+pub const AUTH_CLASS_STATUSES: [u16; 2] = [401, 403];
+
+/// Whether a status belongs to the credential/account authorities rather than
+/// this one.
+pub fn is_auth_class_status(status: u16) -> bool {
+    AUTH_CLASS_STATUSES.contains(&status)
+}
+
+/// A `5xx` status, as carried by [`DeploymentOutcome::ServerError`].
+///
+/// A newtype with a **private** field rather than a bare `u16`, because that is
+/// the difference between "the classifier declines to produce an auth outcome"
+/// and "an auth outcome cannot exist". The only public way in is
+/// [`Self::new`], which accepts nothing outside `500..=599`:
+///
+/// ```
+/// use memcore::catalog::health::ServerErrorStatus;
+/// assert!(ServerErrorStatus::new(503).is_some());
+/// assert!(ServerErrorStatus::new(401).is_none());
+/// assert!(ServerErrorStatus::new(403).is_none());
+/// assert!(ServerErrorStatus::new(429).is_none());
+/// ```
+///
+/// And the field itself cannot be reached:
+///
+/// ```compile_fail
+/// use memcore::catalog::health::ServerErrorStatus;
+/// // The tuple field is private: a 401 cannot be written down as a server error.
+/// let smuggled = ServerErrorStatus(401);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ServerErrorStatus(u16);
+
+impl ServerErrorStatus {
+    /// `Some` only for `500..=599`.
+    pub fn new(status: u16) -> Option<Self> {
+        (500..600).contains(&status).then_some(Self(status))
+    }
+
+    pub fn get(self) -> u16 {
+        self.0
+    }
+
+    /// Build a status [`Self::new`] would refuse. **Test-only**, and it exists
+    /// for exactly one purpose: the store door's independent re-check of the
+    /// status it is handed is otherwise unreachable code that no test could
+    /// prove works. Defence in depth is only defence if the second lock is
+    /// exercised.
+    #[cfg(test)]
+    pub(crate) fn refused_for_tests(status: u16) -> Self {
+        Self(status)
+    }
+}
+
+/// The status carried by [`DeploymentOutcome::UnusableResponse`].
+///
+/// Same seal, different rule: an unusable answer can arrive with almost any
+/// status (`400`, `404`, `422`, a stray `3xx`), so the constructor refuses
+/// only the auth class — the one thing this authority must never record.
+///
+/// ```
+/// use memcore::catalog::health::UnusableResponseStatus;
+/// assert!(UnusableResponseStatus::new(422).is_some());
+/// assert!(UnusableResponseStatus::new(401).is_none());
+/// assert!(UnusableResponseStatus::new(403).is_none());
+/// ```
+///
+/// ```compile_fail
+/// use memcore::catalog::health::UnusableResponseStatus;
+/// let smuggled = UnusableResponseStatus(403);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnusableResponseStatus(u16);
+
+impl UnusableResponseStatus {
+    /// `Some` for any status that is not auth-class.
+    pub fn new(status: u16) -> Option<Self> {
+        (!is_auth_class_status(status)).then_some(Self(status))
+    }
+
+    pub fn get(self) -> u16 {
+        self.0
+    }
+
+    /// See [`ServerErrorStatus::refused_for_tests`].
+    #[cfg(test)]
+    pub(crate) fn refused_for_tests(status: u16) -> Self {
+        Self(status)
+    }
+}
+
 // ─── the outcome vocabulary ──────────────────────────────────────────────────
 
 /// What a lane observed, as far as the *deployment* authority is concerned.
 ///
 /// Note what has no variant: authentication. See the module header — that
-/// absence is the enforcement mechanism for #1681 D4's attribution rule, not a
-/// convenience.
+/// absence, plus the sealed status carriers below, is the enforcement mechanism
+/// for #1681 D4's attribution rule, not a convenience.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentOutcome {
     /// The deployment answered with a usable response.
@@ -169,13 +274,15 @@ pub enum DeploymentOutcome {
     /// provider's policy, whereas inventing a backoff for every 5xx would be
     /// selection policy, which is the resolver's (#1681 D5/PR-D) to own.
     ServerError {
-        status: u16,
+        status: ServerErrorStatus,
         retry_after: Option<RetryAfter>,
     },
     /// The deployment answered, and the answer was unusable: an unparseable
     /// body, an empty completion, or a refusal that is neither auth nor
     /// throttling (`400`, `404`, `422`).
-    UnusableResponse { status: Option<u16> },
+    UnusableResponse {
+        status: Option<UnusableResponseStatus>,
+    },
 }
 
 /// What a lane saw at the transport/HTTP boundary — the input
@@ -211,10 +318,10 @@ impl DeploymentOutcome {
         match signal {
             ProviderResponseSignal::NoResponse => Some(Self::Unreachable),
             ProviderResponseSignal::UnusableBody => Some(Self::UnusableResponse { status: None }),
-            ProviderResponseSignal::Status(401 | 403) => None,
+            ProviderResponseSignal::Status(status) if is_auth_class_status(status) => None,
             ProviderResponseSignal::Status(429 | 402) => Some(Self::Throttled { retry_after }),
             ProviderResponseSignal::Status(status) if (500..600).contains(&status) => {
-                Some(Self::ServerError {
+                ServerErrorStatus::new(status).map(|status| Self::ServerError {
                     status,
                     retry_after,
                 })
@@ -222,9 +329,11 @@ impl DeploymentOutcome {
             ProviderResponseSignal::Status(status) if (200..300).contains(&status) => {
                 Some(Self::Served)
             }
-            ProviderResponseSignal::Status(status) => Some(Self::UnusableResponse {
-                status: Some(status),
-            }),
+            ProviderResponseSignal::Status(status) => {
+                UnusableResponseStatus::new(status).map(|status| Self::UnusableResponse {
+                    status: Some(status),
+                })
+            }
         }
     }
 
@@ -267,8 +376,8 @@ impl DeploymentOutcome {
     /// writer never accepts.
     pub fn status(self) -> Option<u16> {
         match self {
-            Self::ServerError { status, .. } => Some(status),
-            Self::UnusableResponse { status } => status,
+            Self::ServerError { status, .. } => Some(status.get()),
+            Self::UnusableResponse { status } => status.map(UnusableResponseStatus::get),
             Self::Served | Self::Throttled { .. } | Self::Unreachable => None,
         }
     }
@@ -299,10 +408,12 @@ impl DeploymentOutcome {
                 cooldown_secs.unwrap_or(DEFAULT_THROTTLE_COOLDOWN_SECS)
             )),
             Self::Unreachable => Some("no response from the provider".to_string()),
-            Self::ServerError { status, .. } => Some(format!("provider returned HTTP {status}")),
+            Self::ServerError { status, .. } => {
+                Some(format!("provider returned HTTP {}", status.get()))
+            }
             Self::UnusableResponse {
                 status: Some(status),
-            } => Some(format!("unusable response (HTTP {status})")),
+            } => Some(format!("unusable response (HTTP {})", status.get())),
             Self::UnusableResponse { status: None } => Some("unusable response".to_string()),
         }
     }
