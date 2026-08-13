@@ -29,16 +29,20 @@ fn is_gated_facade(tool_name: &str) -> bool {
     )
 }
 
-/// `tachi_memory` actions that were standalone ADMIN-ONLY tools before the
-/// #757 fold (`delete_memory`, `memory_gc`, `ingest`, `ingest_source` — see
-/// `ADMIN_ONLY_NATIVE_ROUTE_NAMES` in
-/// `tachi-server/src/tests/profile_tests/tool_profile_router_coverage.rs`).
-/// `doctor_scan` (`tachi_doctor_scan`) is intentionally excluded: it was
-/// OBSERVE-tier pre-fold (read-only), not admin-only.
-///
-/// `action` must already be lowercased by the caller.
-fn memory_action_requires_admin(action: &str) -> bool {
-    matches!(action, "delete" | "gc" | "ingest" | "ingest_source")
+/// Retired model-facing Memory tokens. Reject these before the admin/full-
+/// bundle pass-through so no profile can resurrect a deleted action.
+fn memory_action_retired(action: &str) -> bool {
+    matches!(
+        action,
+        "progress"
+            | "readiness"
+            | "delete"
+            | "gc"
+            | "doctor_scan"
+            | "ingest"
+            | "ingest_source"
+            | "pattern_feedback"
+    )
 }
 
 /// Tachi-owned worker launch is an expert/operator exception, never part of
@@ -111,31 +115,18 @@ pub fn facade_action_allowed(
     {
         return false;
     }
+    if tool_name == "tachi_memory"
+        && action
+            .map(|a| memory_action_retired(&a.to_ascii_lowercase()))
+            .unwrap_or(false)
+    {
+        return false;
+    }
 
     if profile.is_admin() {
         return true;
     }
 
-    // #757-fold fail-safe fix (gpt-5.6-terra review): `delete`/`gc`/`ingest`/
-    // `ingest_source` were standalone tools with NO bundle-pattern match at
-    // all pre-fold (`tool_visible` denies any non-admin profile once no
-    // bundle pattern matches — see tool_profile_router_coverage.rs's
-    // ADMIN_ONLY_NATIVE_ROUTE_NAMES for delete_memory/memory_gc/ingest/
-    // ingest_source). `ToolBundle` has no admin tier — every one of its four
-    // variants is already satisfied by the non-admin `standard()` profile —
-    // so no bundle assignment in `facade_action_required_bundle` can
-    // reproduce an admin-only boundary; folding these into `tachi_memory`
-    // (visible to Standard) silently widened them to any Operate-allowed
-    // caller. Gate explicitly on `profile.is_admin()` (already false here)
-    // instead, before the bundle lookup runs, so they stay admin-only no
-    // matter what bundle they're classified under below.
-    if tool_name == "tachi_memory"
-        && action
-            .map(|a| memory_action_requires_admin(&a.to_ascii_lowercase()))
-            .unwrap_or(false)
-    {
-        return false;
-    }
     if tool_name == "tachi_task"
         && action
             .map(|a| task_action_requires_admin(&a.to_ascii_lowercase()))
@@ -185,8 +176,6 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "checkpoint"
                 | "alerts"
                 | "ask"
-                | "progress"
-                | "readiness"
         ),
         "tachi_skill" => matches!(action, "discover" | "run" | "bundle"),
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
@@ -222,28 +211,9 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             _ => None,
         },
         "tachi_memory" => match action.as_str() {
-            // doctor_scan: read-only (own docstring: "Read-only only — all
-            // mutations are CLI-only") and was OBSERVE-tier pre-#757-fold
-            // (`tachi_doctor_scan` in OBSERVE_TOOL_PATTERNS) — keep parity,
-            // do not narrow a read-only action past its prior visibility.
-            "search" | "get" | "briefing" | "alerts" | "ask" | "progress" | "readiness"
-            | "doctor_scan" => Some(ToolBundle::Observe),
+            "search" | "get" | "briefing" | "alerts" | "ask" => Some(ToolBundle::Observe),
             "save" | "extract_facts" | "checkpoint" => Some(ToolBundle::Remember),
-            "consolidate" | "pattern_feedback" => Some(ToolBundle::Operate),
-            // #757-fold fail-safe fix (gpt-5.6-terra review): delete/gc/
-            // ingest/ingest_source were standalone ADMIN-ONLY tools pre-fold
-            // (absent from every bundle pattern list — no non-admin profile
-            // could see them at all). `ToolBundle` has no admin tier, so
-            // classifying them Operate here would let any Operate-allowed
-            // (non-admin) caller through — that's the fold's fail-safe
-            // violation. The real gate is `memory_action_requires_admin` in
-            // `facade_action_allowed`, which returns `false` for these four
-            // actions before this bundle lookup is ever consulted for a
-            // non-admin profile. The Operate classification below only
-            // exists to satisfy the action-inventory-classification
-            // completeness test (`f919_tachi_memory_actions_are_all_classified`)
-            // — it is NOT the enforcement point; do not rely on it.
-            "delete" | "gc" | "ingest" | "ingest_source" => Some(ToolBundle::Operate),
+            "consolidate" => Some(ToolBundle::Operate),
             _ => None,
         },
         "tachi_skill" => match action.as_str() {
@@ -746,17 +716,45 @@ mod tests {
         ));
     }
 
-    /// #757-fold fail-safe fix (gpt-5.6-terra review): `delete`/`gc`/
-    /// `ingest`/`ingest_source` were standalone ADMIN-ONLY tools pre-fold.
-    /// `tachi_memory` is visible to the non-admin Standard profile (which
-    /// allows every `ToolBundle` including Operate), so a bundle-only
-    /// classification would have silently widened these four to any
-    /// Operate-allowed caller. Assert every non-admin profile — including
-    /// Standard and Operate, which allow every `ToolBundle` — is DENIED,
-    /// and only `admin()` is allowed.
     #[test]
-    fn f757_terra_memory_admin_only_actions_denied_for_non_admin_profiles() {
-        for action in ["delete", "gc", "ingest", "ingest_source"] {
+    fn f1689_memory_actions_have_the_final_bundle_policy() {
+        for action in ["search", "get", "briefing", "alerts", "ask"] {
+            assert_eq!(
+                facade_action_required_bundle("tachi_memory", action),
+                Some(ToolBundle::Observe),
+                "{action} must be Observe"
+            );
+        }
+        for action in ["save", "extract_facts", "checkpoint"] {
+            assert_eq!(
+                facade_action_required_bundle("tachi_memory", action),
+                Some(ToolBundle::Remember),
+                "{action} must be Remember"
+            );
+        }
+        assert_eq!(
+            facade_action_required_bundle("tachi_memory", "consolidate"),
+            Some(ToolBundle::Operate)
+        );
+    }
+
+    #[test]
+    fn f1689_retired_memory_actions_are_unclassified_and_denied() {
+        for action in [
+            "progress",
+            "readiness",
+            "delete",
+            "gc",
+            "doctor_scan",
+            "ingest",
+            "ingest_source",
+            "pattern_feedback",
+        ] {
+            assert_eq!(
+                facade_action_required_bundle("tachi_memory", action),
+                None,
+                "retired Memory action {action} must be unclassified"
+            );
             for profile in [
                 ToolProfile::observe(),
                 ToolProfile::remember(),
@@ -764,39 +762,15 @@ mod tests {
                 ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::delegate(),
+                ToolProfile::admin(),
             ] {
                 assert!(
                     !facade_action_allowed("tachi_memory", Some(action), Some(profile)),
-                    "tachi_memory(action='{action}') must be admin-only, denied for {} profile",
+                    "retired tachi_memory(action='{action}') must be denied for {} profile",
                     profile.as_str()
                 );
             }
-            assert!(
-                facade_action_allowed("tachi_memory", Some(action), Some(ToolProfile::admin())),
-                "tachi_memory(action='{action}') must remain allowed for admin"
-            );
         }
-    }
-
-    /// `doctor_scan` is the one folded action that was OBSERVE-tier (read-only)
-    /// pre-fold, not admin-only — the admin-only gate above must not catch it.
-    #[test]
-    fn f757_terra_doctor_scan_stays_observe_not_admin_only() {
-        assert!(facade_action_allowed(
-            "tachi_memory",
-            Some("doctor_scan"),
-            Some(ToolProfile::observe())
-        ));
-        assert!(facade_action_allowed(
-            "tachi_memory",
-            Some("doctor_scan"),
-            Some(ToolProfile::standard())
-        ));
-        assert!(!facade_action_allowed(
-            "tachi_memory",
-            Some("doctor_scan"),
-            Some(ToolProfile::delegate())
-        ));
     }
 
     #[test]

@@ -1,10 +1,7 @@
-use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::shared_defs::{slim_entry, slim_entry_with_enrichment};
-use crate::tool_params::{
-    ArchiveMemoryParams, DeleteMemoryParams, GetMemoryParams, ListMemoriesParams,
-};
+use crate::tool_params::{ArchiveMemoryParams, GetMemoryParams, ListMemoriesParams};
 use crate::{DbScope, MemoryServer};
-use memcore::{GcConfig, MemoryEntry, MemoryStore};
+use memcore::MemoryEntry;
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -381,99 +378,6 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
     .map_err(|e| format!("Failed to serialize runtime_info: {e}"))
 }
 
-pub(crate) async fn handle_delete_memory(
-    server: &MemoryServer,
-    params: DeleteMemoryParams,
-) -> Result<String, String> {
-    if let Some(ref project_name) = params.project {
-        let project_deleted = server.with_named_project_store(project_name, |store| {
-            store
-                .delete(&params.id)
-                .map_err(|e| format!("Delete failed in project '{}': {}", project_name, e))
-        })?;
-        if project_deleted {
-            // #1413 concern 1: a delete changes what a subsequent search
-            // surfaces; bust the shared (global) recall cache AFTER the store
-            // commit returned. `invalidate_recall_cache_after_write` re-takes
-            // the global write gate via `with_global_store`; calling it from
-            // inside the `with_named_project_store` closure above would nest
-            // that gate inside the named-project gate (or recurse on it when
-            // the delete targets the global store), so it must run here.
-            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
-                server,
-                "delete_memory",
-            );
-            return serde_json::to_string(&json!({
-                "deleted": true,
-                "db": "project",
-                "project": project_name,
-                "id": params.id,
-            }))
-            .map_err(|e| format!("Failed to serialize: {}", e));
-        }
-
-        let global_deleted = server.with_global_store(|store| {
-            store
-                .delete(&params.id)
-                .map_err(|e| format!("Delete failed in global DB: {}", e))
-        })?;
-        if global_deleted {
-            // #1413 concern 1: invalidate after the global store commit
-            // (never inside the closure above — see the note above).
-            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
-                server,
-                "delete_memory",
-            );
-        }
-        return serde_json::to_string(&json!({
-            "deleted": global_deleted,
-            "db": if global_deleted { "global" } else { "not_found" },
-            "project": project_name,
-            "id": params.id,
-        }))
-        .map_err(|e| format!("Failed to serialize: {}", e));
-    }
-
-    if server.has_project_db() {
-        let deleted = server.with_project_store(|store| {
-            store
-                .delete(&params.id)
-                .map_err(|e| format!("Delete failed: {}", e))
-        })?;
-        if deleted {
-            // #1413 concern 1: invalidate after the project-store commit
-            // (never inside the `with_project_store` closure above).
-            let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
-                server,
-                "delete_memory",
-            );
-            return serde_json::to_string(
-                &json!({ "deleted": true, "db": "project", "id": params.id }),
-            )
-            .map_err(|e| format!("Failed to serialize: {}", e));
-        }
-    }
-
-    let deleted = server.with_global_store(|store| {
-        store
-            .delete(&params.id)
-            .map_err(|e| format!("Delete failed: {}", e))
-    })?;
-    if deleted {
-        // #1413 concern 1: invalidate after the global store commit (never
-        // inside the closure above — it would recurse on `global_rw_gate`).
-        let _ =
-            crate::memory_search_ops::invalidate_recall_cache_after_write(server, "delete_memory");
-    }
-
-    serde_json::to_string(&json!({
-        "deleted": deleted,
-        "db": if deleted { "global" } else { "not_found" },
-        "id": params.id,
-    }))
-    .map_err(|e| format!("Failed to serialize: {}", e))
-}
-
 pub(crate) async fn handle_archive_memory(
     server: &MemoryServer,
     params: ArchiveMemoryParams,
@@ -563,78 +467,6 @@ pub(crate) async fn handle_archive_memory(
         "id": params.id,
     }))
     .map_err(|e| format!("Failed to serialize: {}", e))
-}
-
-/// The GC participants shared by global and project stores. Keep their exact
-/// order: `gc_tables` observes pre-kanban rows for its diversity reconciliation.
-fn gc_common_store(store: &mut MemoryStore, db_label: &str) -> Result<serde_json::Value, String> {
-    let mut gc = store
-        .gc_tables(&GcConfig::default())
-        .map_err(|error| format!("GC failed on {db_label} DB: {error}"))?;
-    let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
-    // Branch #5: GC foundry jobs in terminal state >= 30 days old
-    // (was 7d, see project owner's lifecycle spec).
-    let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
-    if let Some(object) = gc.as_object_mut() {
-        object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
-        object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
-    }
-    // #1099: `handoff_memories_pruned` (ex-`gc_expired_handoff_memories`)
-    // retired along with handoff_ops's write path — see handoff_ops.rs's
-    // module doc for the legacy-row data policy (retain read-only, no
-    // longer specially swept; not silently orphaned, still fully readable).
-    Ok(gc)
-}
-
-pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, String> {
-    let mut results = serde_json::Map::new();
-
-    let global_gc = server.with_global_store(|store| {
-        let mut gc = gc_common_store(store, "global")?;
-        // #1001 follow-up (R2 review of #1007 CONCERN, #1029 lesson):
-        // `session_claims` shipped with no reaper — `released` rows were
-        // retained forever and a dead `active` heartbeat (crashed/killed
-        // session that never called release) was invisible to *readers*
-        // (`list_active_claims`'s lazy TTL filter) but stayed in storage
-        // forever. `session_claims` is global-store-only (`claims_ops`
-        // always writes via `with_global_store`), so this sweep only runs
-        // here, not in the project-DB arm below.
-        let claims_gc = memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 7, 30)
-            .map_err(|e| format!("GC session_claims failed on global DB: {e}"))?;
-        if let Some(object) = gc.as_object_mut() {
-            object.insert(
-                "session_claims_released_pruned".into(),
-                json!(claims_gc.released_pruned),
-            );
-            object.insert(
-                "session_claims_active_orphaned".into(),
-                json!(claims_gc.active_orphaned),
-            );
-        }
-        Ok(gc)
-    })?;
-    results.insert("global".into(), global_gc);
-    // #1413 concern 1: bust the shared (global) recall cache right after the
-    // GLOBAL gc closure returns — never inside it (the invalidator re-takes the
-    // global write gate via `with_global_store`, which would recurse on the
-    // non-reentrant `global_rw_gate`). Invalidating per-closure (not once at
-    // the end) closes the partial-success gap: if the project gc arm below
-    // returns Err, the global content change above is still reflected in the
-    // cache rather than left stale behind a now-aborted batch.
-    let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(server, "memory_gc");
-
-    if server.has_project_db() {
-        let project_gc = server.with_project_store(|store| gc_common_store(store, "project"))?;
-        results.insert("project".into(), project_gc);
-        // #1413 concern 1: bust again after the PROJECT gc closure returns.
-        // Project writes can stale the shared (global) recall cache too (a
-        // project-scoped search caches its rows in the global recall_cache
-        // table, keyed by project), so this closure's commit needs its own
-        // bust — never inside the closure.
-        let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(server, "memory_gc");
-    }
-
-    serde_json::to_string(&results).map_err(|e| format!("Failed to serialize: {}", e))
 }
 
 #[cfg(test)]

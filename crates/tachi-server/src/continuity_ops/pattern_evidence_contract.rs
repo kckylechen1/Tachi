@@ -243,10 +243,11 @@ fn pattern_evidence_production_census_is_exact_and_search_is_retired() {
         vec!["complete_ops/handler.rs", "workflow_closure.rs",],
         "only the two operational flow-owning internal producers are admitted",
     );
+    let legacy_pattern_feedback_emitter = concat!("emit_pattern_feedback_", "event");
     assert_eq!(
-        production_callers("emit_pattern_feedback_event"),
-        vec!["facade_memory_ops/pattern_feedback_ops.rs"],
-        "the mutating legacy emitter remains exclusive to the explicit model action",
+        production_callers(legacy_pattern_feedback_emitter),
+        Vec::<String>::new(),
+        "the mutating legacy pattern-feedback emitter is physically retired",
     );
     assert!(
         production_callers("emit_pattern_seen_events").is_empty(),
@@ -255,31 +256,8 @@ fn pattern_evidence_production_census_is_exact_and_search_is_retired() {
     let context = include_str!("context.rs");
     assert!(
         !context.contains("append_pattern_evidence_for_refs(")
-            && !context.contains("emit_pattern_feedback_event(")
+            && !context.contains(&format!("{legacy_pattern_feedback_emitter}("))
             && !context.contains("emit_pattern_seen_events("),
         "model-facing context is explicitly retired from evidence admission",
-    );
-    assert_eq!(
-        tachi_params::TACHI_MEMORY_ACTIONS,
-        &[
-            "search",
-            "get",
-            "save",
-            "extract_facts",
-            "briefing",
-            "checkpoint",
-            "alerts",
-            "ask",
-            "consolidate",
-            "pattern_feedback",
-            "progress",
-            "readiness",
-            "delete",
-            "gc",
-            "doctor_scan",
-            "ingest",
-            "ingest_source",
-        ],
-        "#1756 adds no Memory facade action; the exact inventory stays at 17",
     );
 }

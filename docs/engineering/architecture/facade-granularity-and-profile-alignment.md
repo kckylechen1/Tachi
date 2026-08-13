@@ -20,7 +20,7 @@ It answers three questions raised during a facade review:
 
 - Facades are the right idea, but several are **overloaded**. `tachi_task` carries **10 actions**
   (28 before the 4 PR-lifecycle duplicates were removed to `tachi_gh` in #757);
-  `tachi_memory` carries **17** actions and `tachi_gh` carries **19**; its former
+  `tachi_memory` carries **9** actions and `tachi_gh` carries **19**; its former
   claim/release aliases are retired in #1688 in favor of `tachi_task`.
 - Neither extreme (flatten to 100+ tools, or keep stuffing mega-facades) is correct. The fix is
   **re-slicing facades along agent cognitive domains**, keeping each facade at roughly **7±2 actions**.
@@ -37,7 +37,7 @@ It answers three questions raised during a facade review:
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
 | `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
-| `tachi_memory` | 17 | Overloaded — `recall_*` tuning extracted (#1426); claim/release retired in #1688. Delete, GC, and doctor now have canonical operator CLI owners; their unchanged facade routes are transitional until final #1689 removes the complete retired set. |
+| `tachi_memory` | 9 | Contracted in #1689 to search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate; health, maintenance, ingestion, and pattern evidence use their canonical status, operator, adapter, or internal owners. |
 | `tachi_gh` | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
 | `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
 | `tachi_skill` | 5 | Healthy |
@@ -60,8 +60,9 @@ It answers three questions raised during a facade review:
 4. **Self-tuning actions were interleaved with execution (resolved #1426).** Eight of the nine —
    `route_simulate` / `proposals` / `review_proposal` / `apply_proposals` (task side) and
    `recall_simulate` / `recall_proposals` / `review_recall_proposal` / `apply_recall_proposals`
-   (memory side) — left the daily surfaces for `tachi_tune`. `pattern_feedback` stayed on
-   `tachi_memory`: it is a daily hit/miss signal from ordinary agents, not an operator tuning action.
+   (memory side) — left the daily surfaces for `tachi_tune`. Pattern evidence is now
+   accepted only through the context-bound internal completion/close-loop seam; ordinary
+   agents cannot submit feedback that changes counters or ranking.
 
 ## 2. Flatten vs. facade — pick the middle
 
@@ -89,8 +90,7 @@ tachi_task (10) ─────┬──▶ tachi_task    execution core: comple
                      ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
                      └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
 
-tachi_memory (17) ───┬──▶ tachi_memory  daily: search/get/save/ask/checkpoint/alerts (~7)
-                     └──▶ tachi_tune    recall_simulate/recall_proposals/recall_review/recall_apply (DONE #1426)
+tachi_memory (9) ────────▶ search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate
 ```
 
 `tachi_tune` (self-optimization) stays out of the `standard` surface and is reached only via `admin`

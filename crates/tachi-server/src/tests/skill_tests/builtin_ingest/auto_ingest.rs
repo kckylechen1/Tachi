@@ -1095,53 +1095,14 @@ async fn admitted_auto_ingest_edge_failure_is_partial_without_duplicate_chunks()
 }
 
 #[test]
-fn memory_inventory_and_ingest_callers_remain_source_derived_during_transition() {
-    let inventory_source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../tachi-params/src/facade/action_inventory.rs"
-    ));
-    let inventory_block = inventory_source
-        .split("pub const TACHI_MEMORY_ACTIONS")
-        .nth(1)
-        .and_then(|source| source.split("];").next())
-        .expect("locate the production Memory action inventory");
-    let inventory = inventory_block
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            line.strip_prefix('"')
-                .and_then(|line| line.split('"').next())
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(inventory.len(), 17, "#1689 owns the later 17 -> 9 fold");
-
+fn admitted_ingest_callers_are_source_derived_after_memory_retirement() {
     let facade = include_str!("../../../facade_memory_ops/mod.rs");
-    let facade_inventory_block = facade
-        .split("match action.as_str()")
-        .nth(1)
-        .and_then(|source| source.split("\"recall_simulate\"").next())
-        .expect("locate active Memory facade action arms");
-    let facade_inventory = facade_inventory_block
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let action = line.strip_prefix('"')?.split('"').next()?;
-            line.contains("=>").then_some(action)
-        })
-        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        facade_inventory, inventory,
-        "facade routing must remain an exact source-derived projection of the 17 actions"
+        facade.matches("handle_ingest_source(").count(),
+        0,
+        "Memory cannot call the retired direct ingest-source wrapper"
     );
-    let direct_source_calls = facade.matches("handle_ingest_source(").count();
-    assert_eq!(
-        direct_source_calls, 1,
-        "the one legacy Memory ingest_source caller stays explicit until #1689"
-    );
-    assert!(
-        facade.contains("handle_ingest("),
-        "the legacy unified Memory ingest caller also remains transitional"
-    );
+    assert!(!facade.contains("handle_ingest("));
 
     let auto_ingest = include_str!("../../../pipeline_ops/auto_ingest.rs");
     assert!(

@@ -21,8 +21,8 @@ pub(crate) mod storage;
 
 pub(crate) use self::context::{build_a2a_context, build_continuity_context, list_active_patterns};
 pub(crate) use self::emit::{
-    emit_memory_saved_event, emit_pattern_feedback_event, emit_session_captured_event,
-    emit_task_completion_events, emit_wiki_saved_event, WikiSavedEventInput,
+    emit_memory_saved_event, emit_session_captured_event, emit_task_completion_events,
+    emit_wiki_saved_event, WikiSavedEventInput,
 };
 pub(crate) use self::feedback::{
     append_pattern_evidence_for_refs, attach_pattern_ref_to_row,

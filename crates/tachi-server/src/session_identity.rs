@@ -402,14 +402,8 @@ fn tachi_memory_action_defaults_to_project(action: &str) -> bool {
             | "briefing"
             | "checkpoint"
             | "consolidate"
-            | "delete"
             | "extract_facts"
             | "get"
-            | "ingest"
-            | "ingest_source"
-            | "pattern_feedback"
-            | "progress"
-            | "readiness"
             | "save"
             | "search"
     )
@@ -418,7 +412,7 @@ fn tachi_memory_action_defaults_to_project(action: &str) -> bool {
 fn tachi_memory_action_allows_cross_project_read(action: &str) -> bool {
     matches!(
         action.to_ascii_lowercase().as_str(),
-        "alerts" | "ask" | "briefing" | "consolidate" | "get" | "readiness" | "search"
+        "alerts" | "ask" | "briefing" | "consolidate" | "get" | "search"
     )
 }
 

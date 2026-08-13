@@ -198,15 +198,13 @@ async fn true_empty_recall_count(
     Ok(usize::from(rows.is_empty()))
 }
 
-async fn readiness_fixture(server: &crate::MemoryServer) -> Result<Value, String> {
-    let mut readiness = tachi_memory_params("readiness");
-    readiness.format = Some("json".to_string());
-    let body = crate::facade_memory_ops::handle_tachi_memory(server, readiness).await?;
+async fn status_fixture(server: &crate::MemoryServer) -> Result<Value, String> {
+    let body = crate::status_ops::handle_tachi_status_agent(server, Some("json")).await?;
     let parsed: Value =
-        serde_json::from_str(&body).map_err(|e| format!("parse readiness JSON: {e}"))?;
+        serde_json::from_str(&body).map_err(|e| format!("parse status JSON: {e}"))?;
     Ok(json!({
         "status": parsed["status"].clone(),
-        "vector_health": parsed["vector_health"].clone(),
+        "health_score": parsed["health_score"].clone(),
         "ready_path": "#789 portable vector/backfill readiness issue; first implementation merged as PR #801",
     }))
 }
@@ -317,7 +315,7 @@ async fn run_fixture(
     let (search, rows) = search_fixture(server, fixture).await?;
     let recall = recall_fixture(server, fixture).await?;
     let true_empty_count = true_empty_recall_count(server, fixture).await?;
-    let vector_status = readiness_fixture(server).await?;
+    let vector_status = status_fixture(server).await?;
     let event_projection = event_projection_fixture(server, fixture).await?;
     let diagnostics = recall_diagnostics(fixture, &recall, &rows, true_empty_count);
 

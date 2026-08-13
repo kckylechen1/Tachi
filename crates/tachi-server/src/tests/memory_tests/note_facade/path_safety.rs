@@ -33,7 +33,6 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
                 valid_from: None,
                 valid_until: None,
                 metadata: None,
-                emit_continuity: false,
                 files: Vec::new(),
                 format: None,
             }))
@@ -77,7 +76,6 @@ async fn tachi_save_note_rejects_paths_that_normalize_to_empty() {
                 valid_from: None,
                 valid_until: None,
                 metadata: None,
-                emit_continuity: false,
                 files: Vec::new(),
                 format: None,
             }))

@@ -86,21 +86,24 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     "search",
     "get",
     "save",
-    "extract_facts",
     "briefing",
     "checkpoint",
     "alerts",
     "ask",
+    "extract_facts",
     "consolidate",
-    "pattern_feedback",
+];
+
+/// Memory actions retired from the model-facing facade by #1689.
+pub const TACHI_MEMORY_RETIRED_C2B_ACTIONS: &[&str] = &[
     "progress",
     "readiness",
-    // #757 fold: standalone memory-admin + pipeline tools re-fronted as actions.
     "delete",
     "gc",
     "doctor_scan",
     "ingest",
     "ingest_source",
+    "pattern_feedback",
 ];
 
 /// `tachi_tune` admin/operator actions. Introduced by #1426 to move route
@@ -234,38 +237,36 @@ mod tests {
 
     #[test]
     fn f0_memory_and_verify_counts() {
-        // #1426 moved four recall-tuning actions to tachi_tune, and #1688
-        // removed duplicate claim/release compatibility routes. #1751 then
-        // retires the two legacy sticky actions: 19 -> 17.
-        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 17);
+        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 9);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
         assert_eq!(TachiVerifyAction::ALL.len(), 4);
     }
 
     #[test]
-    fn f1751_memory_inventory_is_exactly_the_seventeen_survivors() {
+    fn f1689_memory_inventory_is_exactly_the_nine_survivors() {
         assert_eq!(
             TACHI_MEMORY_ACTIONS,
             &[
                 "search",
                 "get",
                 "save",
-                "extract_facts",
                 "briefing",
                 "checkpoint",
                 "alerts",
                 "ask",
+                "extract_facts",
                 "consolidate",
-                "pattern_feedback",
-                "progress",
-                "readiness",
-                "delete",
-                "gc",
-                "doctor_scan",
-                "ingest",
-                "ingest_source",
             ],
-            "#1751 must pin the literal 17-action Memory inventory after sticky retirement",
+            "#1689 must pin the literal final nine-action Memory inventory",
+        );
+
+        assert_eq!(
+            crate::facade::memory::TachiMemoryAction::ALL
+                .iter()
+                .map(|action| action.as_str())
+                .collect::<Vec<_>>(),
+            TACHI_MEMORY_ACTIONS,
+            "the typed Memory action enum and published inventory must not drift",
         );
     }
 

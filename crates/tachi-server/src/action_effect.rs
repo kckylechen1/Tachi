@@ -245,26 +245,14 @@ pub(crate) fn facade_action_effect(
         // `handle_search_memory_with_access(..., true)` and is therefore not
         // replay-safe. The remaining classifications are preserved.
         "tachi_memory" => (
-            &[
-                "get",
-                "briefing",
-                "alerts",
-                "ask",
-                "readiness",
-                "doctor_scan",
-            ],
-            &["progress"],
+            &["get", "briefing", "alerts", "ask"],
+            &[],
             &[
                 "search",
                 "save",
                 "extract_facts",
                 "checkpoint",
                 "consolidate",
-                "pattern_feedback",
-                "delete",
-                "gc",
-                "ingest",
-                "ingest_source",
             ],
         ),
         "tachi_event" => (
@@ -525,7 +513,6 @@ mod tests {
         for (tool, action) in [
             ("tachi_memory", "get"),
             ("tachi_memory", "briefing"),
-            ("tachi_memory", "doctor_scan"),
             ("tachi_event", "query"),
             ("tachi_event", "metrics"),
             ("tachi_wiki", "search"),
@@ -549,7 +536,6 @@ mod tests {
         for (tool, action) in [
             ("tachi_memory", "search"),
             ("tachi_memory", "save"),
-            ("tachi_memory", "delete"),
             ("tachi_event", "emit"),
             ("tachi_wiki", "write"),
             ("tachi_task", "complete"),
@@ -574,6 +560,22 @@ mod tests {
                 dlq_unsafe("tachi_task", Some(action)),
                 "retired task action {action} must fail closed for replay"
             );
+        }
+    }
+
+    #[test]
+    fn retired_memory_actions_are_unclassified() {
+        for action in [
+            "progress",
+            "readiness",
+            "delete",
+            "gc",
+            "doctor_scan",
+            "ingest",
+            "ingest_source",
+            "pattern_feedback",
+        ] {
+            assert_eq!(facade_action_effect("tachi_memory", Some(action)), None);
         }
     }
 

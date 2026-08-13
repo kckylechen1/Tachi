@@ -1,14 +1,7 @@
-use std::path::Path;
-
 use serde_json::json;
 use tachi_llm::RerankConfig;
 
-use super::api_keys::collect_api_key_status;
 use crate::status_ops::EXPECTED_EMBEDDING_DIM;
-
-pub(crate) fn provider_key_status_json(global_db_path: &Path) -> serde_json::Value {
-    json!(collect_api_key_status(global_db_path))
-}
 
 pub(crate) fn model_lanes_json() -> serde_json::Value {
     // Report the actually configured rerank provider (not a hardcoded "voyage").

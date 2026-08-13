@@ -134,12 +134,8 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         valid_from: None,
         valid_until: None,
         metadata: None,
-        emit_continuity: false,
         files: Vec::new(),
         references: Vec::new(),
-        flow_id: None,
-        event: None,
-        state: None,
         project: None,
         project_explicit: false,
         domain: None,
@@ -149,18 +145,6 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         notes: None,
         confirm: false,
         state_filter: None,
-        content: None,
-        ingest_type: "source".to_string(),
-        source_url: None,
-        auto_chunk: true,
-        auto_summarize: true,
-        auto_link: true,
-        chunk_size_chars: 1200,
-        chunk_overlap_chars: 120,
-        conversation_id: None,
-        turn_id: None,
-        event_type: None,
-        messages: Vec::new(),
     }
 }
 
@@ -292,45 +276,6 @@ async fn tachi_search_patterns_scope_is_read_only_pattern_evidence() {
         after_events, before_events,
         "retrieval must not append a feedback/evidence event"
     );
-}
-
-#[tokio::test]
-async fn tachi_memory_pattern_feedback_records_hit_without_skill_promotion() {
-    let server = make_server();
-    let memory_id = seed_projected_pattern(
-        &server,
-        "feedback-hit-pattern",
-        "UniquePatternFeedbackNeedle is a pattern that can receive explicit feedback.",
-    )
-    .await;
-
-    let response = server
-        .tachi_memory(Parameters({
-            let mut params = memory_params("pattern_feedback");
-            params.id = Some(memory_id.clone());
-            params.event = Some("hit".to_string());
-            params.query = Some("UniquePatternFeedbackNeedle".to_string());
-            params.summary =
-                Some("Pattern helped choose the right project-cycle action.".to_string());
-            params.metadata = Some(json!({"reviewer": "test"}));
-            params
-        }))
-        .await
-        .expect("pattern feedback");
-    let response_json: serde_json::Value =
-        serde_json::from_str(&response).expect("feedback JSON response");
-    assert_eq!(response_json["status"], json!("saved"));
-    assert_eq!(response_json["outcome"], json!("hit"));
-
-    let entry = server
-        .with_global_store_read(|store| store.get(&memory_id).map_err(|e| e.to_string()))
-        .expect("read pattern after feedback")
-        .expect("pattern exists after feedback");
-    assert_eq!(entry.metadata["counters"]["seen"], json!(2));
-    assert_eq!(entry.metadata["counters"]["hit"], json!(1));
-    assert_eq!(entry.metadata["counters"]["miss"], json!(0));
-    assert_eq!(entry.metadata["counters"]["confidence"], json!(1.0));
-    assert_eq!(entry.tier, "raw");
 }
 
 #[tokio::test]

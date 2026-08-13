@@ -1176,31 +1176,6 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  fault-injection shape is declared rather than machine-proven.",
     },
     Exemption {
-        path: "crates/tachi-server/src/tests/skill_tests/builtin_ingest/ingest_source.rs",
-        basis: ExemptionBasis::DeclaredByReviewerNotProven {
-            signed_by: "tachi#1443 census lane (agent), body read 2026-07-26",
-        },
-        sites: &[
-            Site {
-                symbol: "source_success_audit_failure_is_loud_retryable_and_idempotent",
-                trigger: "FAIL_INGEST_SUCCESS_AUDIT",
-                ddl: "3e163fa670c20d51",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "source_success_audit_failure_is_loud_retryable_and_idempotent",
-                trigger: "FAIL_INGEST_SUCCESS_AUDIT",
-                ddl: "45b5266b1101c731",
-                occurrences: 1,
-            },
-        ],
-        reason: "source_success_audit_failure_is_loud_retryable_and_idempotent \
-                 installs and then drops the audit fault inside \
-                 with_unrestricted_fixture_connection; body read 2026-07-26. \
-                 This is the sanctioned shape, but the file also names a store \
-                 doorway, so it is a declaration.",
-    },
-    Exemption {
         path: "crates/tachi-server/src/tests/wiki_tests/write/facade_routing/guide_metadata.rs",
         basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
         sites: &[

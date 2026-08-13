@@ -419,7 +419,7 @@ Tachi uses SQLite with zero external dependencies:
 
 Plan C project routing keeps the repo-local project DB as canonical and uses
 `~/.tachi/projects/<sanitized-repo-name>/tachi-memory.db` only as a symlink alias.
-If `tachi status`, `tachi_memory(action="readiness")`, or daemon startup reports
+If `tachi status`, `runtime_info`, or daemon startup reports
 “Plan C split-brain”, the alias is a stale regular SQLite file. Repair it
 explicitly:
 
@@ -517,10 +517,9 @@ tachi gc apply --plan gc-plan.json --yes
 ```
 
 Both workflows are irreversible: their durable receipts are audit and
-reconciliation evidence, not backups, and there is no restore verb. The legacy
-`tachi_memory(action="delete"|"gc")` routes remain transitional and unchanged
-on this prerequisite leaf; final #1689 removes them together with the other
-retired Memory actions.
+reconciliation evidence, not backups, and there is no restore verb. They are
+operator-only; the model-facing Memory facade has no delete or garbage-collection
+action.
 
 ### Knowledge Graph & Domains
 
@@ -546,10 +545,10 @@ KV state.
 
 ### Extraction & Ingestion
 
-`extract_facts`, `ingest_event`
-
-Source/event ingestion is folded into `tachi_memory(action="ingest")` and
-`tachi_memory(action="ingest_source")` (#757).
+Ordinary model-authored memory uses `save` and `extract_facts`. File, URL,
+corpus, bulk, snapshot, and event ingestion requires an admitted typed adapter
+or operator path with bounded source identity, provenance, and a receipt; it is
+not a model-facing Memory action and is not hidden inside `save`.
 
 ### Neural Foundry (Context Lifecycle & Evolution)
 
@@ -689,9 +688,8 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 Default `tachi doctor` is the canonical read-only diagnostic owner. It does not
 write the manifest, database, sidecars, cache, or daily markers; `--fix` and
-`--run-daily` are explicit mutation intents. The legacy
-`tachi_memory(action="doctor_scan")` route remains transitional on this leaf
-and is removed by final #1689.
+`--run-daily` are explicit mutation intents. Doctor scans are not exposed as a
+model-facing Memory action.
 
 ---
 

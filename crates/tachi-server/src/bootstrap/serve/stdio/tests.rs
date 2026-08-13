@@ -1077,7 +1077,7 @@ fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
 }
 
 #[test]
-fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
+fn stdio_proxy_archives_global_row_with_bound_project() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -1085,7 +1085,7 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
     let global = tachi_home.join("global/memory.db");
-    let project_name = "Sigil-proxy-delete-e2e";
+    let project_name = "Sigil-proxy-archive-e2e";
     let project = tachi_home
         .join("projects")
         .join(project_name)
@@ -1110,52 +1110,35 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
             client_project: Some(project_name.to_string()),
         };
 
-        for (id, summary) in [
-            ("global-proxy-delete-e2e", "global delete fallback row"),
-            ("global-proxy-archive-e2e", "global archive fallback row"),
-        ] {
-            let result = call_tool_via_stdio_proxy(
-                proxy.clone(),
-                "tachi_memory",
-                serde_json::Map::from_iter([
-                    ("action".to_string(), serde_json::json!("save")),
-                    ("id".to_string(), serde_json::json!(id)),
-                    (
-                        "text".to_string(),
-                        serde_json::json!(format!("{summary} PROXYMUTATEGLOBAL")),
-                    ),
-                    ("summary".to_string(), serde_json::json!(summary)),
-                    (
-                        "path".to_string(),
-                        serde_json::json!("/tests/stdio-proxy-mutate-global"),
-                    ),
-                    ("category".to_string(), serde_json::json!("fact")),
-                    ("scope".to_string(), serde_json::json!("global")),
-                    ("force".to_string(), serde_json::json!(true)),
-                ]),
-            )
-            .await
-            .unwrap_or_else(|err| panic!("seed {id}: {err}"));
-            assert_tool_ok(&result);
-        }
-
-        let deleted = call_tool_via_stdio_proxy(
+        let result = call_tool_via_stdio_proxy(
             proxy.clone(),
             "tachi_memory",
             serde_json::Map::from_iter([
-                ("action".to_string(), serde_json::json!("delete")),
+                ("action".to_string(), serde_json::json!("save")),
                 (
                     "id".to_string(),
-                    serde_json::json!("global-proxy-delete-e2e"),
+                    serde_json::json!("global-proxy-archive-e2e"),
                 ),
+                (
+                    "text".to_string(),
+                    serde_json::json!("global archive fallback row PROXYMUTATEGLOBAL"),
+                ),
+                (
+                    "summary".to_string(),
+                    serde_json::json!("global archive fallback row"),
+                ),
+                (
+                    "path".to_string(),
+                    serde_json::json!("/tests/stdio-proxy-mutate-global"),
+                ),
+                ("category".to_string(), serde_json::json!("fact")),
+                ("scope".to_string(), serde_json::json!("global")),
+                ("force".to_string(), serde_json::json!(true)),
             ]),
         )
         .await
-        .expect("proxied delete should succeed");
-        assert_tool_ok(&deleted);
-        let deleted = first_text_json(&deleted);
-        assert_eq!(deleted["deleted"], serde_json::json!(true));
-        assert_eq!(deleted["db"], serde_json::json!("global"));
+        .expect("seed archive row");
+        assert_tool_ok(&result);
 
         let archived = call_tool_via_stdio_proxy(
             proxy,
@@ -1175,12 +1158,10 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
         (ct, daemon_task)
     });
 
-    assert_eq!(memory_id_count(&global, "global-proxy-delete-e2e"), 0);
     assert_eq!(
         memory_archived_value(&global, "global-proxy-archive-e2e"),
         1
     );
-    assert_eq!(memory_id_count(&project, "global-proxy-delete-e2e"), 0);
     assert_eq!(memory_id_count(&project, "global-proxy-archive-e2e"), 0);
 
     ct.cancel();
@@ -1420,24 +1401,15 @@ fn preflight_maps_tachi_memory_project_actions_without_injecting() {
         "preflight must not inject a default project for search"
     );
 
-    for action in [
-        "consolidate",
-        "pattern_feedback",
-        // #757 fold: delete/ingest/ingest_source now default to bound project
-        // (previously standalone delete_memory/ingest/ingest_source did).
-        "delete",
-        "ingest",
-        "ingest_source",
-    ] {
-        let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
-            serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
-        );
-        let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("action mapped");
-        assert!(
-            !mapped.arguments.expect("args").contains_key("project"),
-            "{action} preflight must not inject a default project"
-        );
-    }
+    let action = "consolidate";
+    let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
+        serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
+    );
+    let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("action mapped");
+    assert!(
+        !mapped.arguments.expect("args").contains_key("project"),
+        "{action} preflight must not inject a default project"
+    );
 }
 
 #[test]
@@ -1510,7 +1482,6 @@ fn proxy_rejects_explicit_cross_project_write_override() {
         ("tachi_memory", Some("save")),
         ("tachi_memory", Some("extract_facts")),
         ("tachi_memory", Some("checkpoint")),
-        ("tachi_memory", Some("delete")),
         ("save_memory", None),
         ("tachi_event", Some("emit")),
         // #1426: the tuning writes kept their cross-project refusal when they
@@ -1547,7 +1518,6 @@ fn proxy_allows_explicit_cross_project_read_override() {
             ("tachi_memory", Some("get")),
             ("tachi_memory", Some("briefing")),
             ("tachi_memory", Some("consolidate")),
-            ("tachi_memory", Some("readiness")),
             // #1426: recall_simulate kept its read-only cross-project
             // standing when it moved to the admin-only tachi_tune surface.
             ("tachi_tune", Some("recall_simulate")),
