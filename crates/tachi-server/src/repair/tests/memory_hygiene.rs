@@ -183,7 +183,15 @@ fn r12_skips_retired_sticky_promotion_and_archive_projections() {
         ("raw-ordinary", "/notes/raw"),
         ("raw-sticky", "//STICKY///raw"),
     ] {
-        insert_memory(&conn, id, memory_path, id, "{}", Some("durable"), Some("external:capture"));
+        insert_memory(
+            &conn,
+            id,
+            memory_path,
+            id,
+            "{}",
+            Some("durable"),
+            Some("external:capture"),
+        );
     }
     insert_memory(
         &conn,
@@ -207,7 +215,16 @@ fn r12_skips_retired_sticky_promotion_and_archive_projections() {
         conn.query_row(
             "SELECT path,tier,archived,superseded_by,revision,metadata FROM memories WHERE id=?1",
             [id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?, row.get::<_, String>(5)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
         )
         .unwrap()
     });
@@ -215,12 +232,28 @@ fn r12_skips_retired_sticky_promotion_and_archive_projections() {
 
     let mut ctx = open_ctx(&path, "test");
     let applied = MemoryHygiene.apply(&mut ctx).unwrap();
-    assert_eq!(applied.applied, 4, "ordinary promote/project/archive path should progress");
     assert_eq!(
-        ctx.conn.query_row("SELECT tier FROM memories WHERE id='distill-ordinary'", [], |row| row.get::<_, String>(0)).unwrap(),
+        applied.applied, 4,
+        "ordinary promote/project/archive path should progress"
+    );
+    assert_eq!(
+        ctx.conn
+            .query_row(
+                "SELECT tier FROM memories WHERE id='distill-ordinary'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
         "consolidated"
     );
-    assert!(ctx.conn.query_row("SELECT archived FROM memories WHERE id='raw-ordinary'", [], |row| row.get::<_, bool>(0)).unwrap());
+    assert!(ctx
+        .conn
+        .query_row(
+            "SELECT archived FROM memories WHERE id='raw-ordinary'",
+            [],
+            |row| row.get::<_, bool>(0)
+        )
+        .unwrap());
     let sticky_after = ["raw-sticky", "distill-sticky"].map(|id| {
         ctx.conn.query_row(
             "SELECT path,tier,archived,superseded_by,revision,metadata FROM memories WHERE id=?1",

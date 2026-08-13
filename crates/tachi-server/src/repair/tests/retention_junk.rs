@@ -527,7 +527,14 @@ fn r8_skips_retired_sticky_cache_rows_while_ordinary_junk_progresses() {
         conn.query_row(
             "SELECT path,category,revision,metadata FROM memories WHERE id=?1",
             [id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
         .unwrap()
     });
@@ -538,7 +545,11 @@ fn r8_skips_retired_sticky_cache_rows_while_ordinary_junk_progresses() {
     assert_eq!(applied.applied, 1);
     assert_eq!(
         ctx.conn
-            .query_row("SELECT COUNT(*) FROM memories WHERE id='ordinary'", [], |row| row.get::<_, i64>(0))
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE id='ordinary'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
             .unwrap(),
         0
     );
@@ -547,7 +558,14 @@ fn r8_skips_retired_sticky_cache_rows_while_ordinary_junk_progresses() {
             .query_row(
                 "SELECT path,category,revision,metadata FROM memories WHERE id=?1",
                 [id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )
             .unwrap()
     });
