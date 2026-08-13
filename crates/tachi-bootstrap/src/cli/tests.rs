@@ -1302,7 +1302,7 @@ fn broker_is_a_plan_apply_surface_with_no_one_shot_mutation() {
                 json: false,
                 out: Some(path)
             }
-        }) if path == std::path::PathBuf::from("/tmp/alias-plan.json")
+        }) if path == *std::path::Path::new("/tmp/alias-plan.json")
     ));
 
     let apply = Cli::try_parse_from([

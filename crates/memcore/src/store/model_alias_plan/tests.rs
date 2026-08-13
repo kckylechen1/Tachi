@@ -435,10 +435,9 @@ fn retiring_a_binding_leaves_the_reverse_lookup_intact() {
     );
     assert!(bindings[0].retired);
     // …and the retired binding is out of the routable set.
-    assert!(current_alias_bindings(store.connection())
+    assert!(!current_alias_bindings(store.connection())
         .expect("bindings")
-        .get("chat.default")
-        .is_none());
+        .contains_key("chat.default"));
 }
 
 #[test]
