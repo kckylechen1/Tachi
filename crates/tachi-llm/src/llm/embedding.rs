@@ -129,7 +129,7 @@ impl super::LlmClient {
                 "input": chunk,
                 "input_type": input_type
             });
-            let mut response_json: Option<Value> = None;
+            let mut chunk_embeddings: Option<Vec<Vec<f32>>> = None;
             let mut last_err = String::new();
             // Recall-path bounds (#926): fewer attempts + a per-request deadline
             // so a blackholed provider cannot freeze recall for minutes.
@@ -244,31 +244,51 @@ impl super::LlmClient {
                     );
                     return Err(format!("Voyage batch API error: {} - {}", status, text));
                 }
-                response_json = Some(serde_json::from_str(&text).map_err(|e| {
+                let json: Value = serde_json::from_str(&text).map_err(|e| {
                     // Protocol failure: a 2xx body that is not the protocol.
                     self.note_deployment_unusable_body(attribution);
                     format!("Failed to parse Voyage batch response: {}", e)
-                })?);
+                })?;
+                // Read **before** the success is recorded, not after it. A
+                // body that parses as JSON and is not a batch — no `data`
+                // array, the wrong number of embeddings, mismatched indexes,
+                // the wrong width — is an unusable response, and the deployment
+                // authority has to hear about it as one. Validating after
+                // `mark_secret_success` recorded `Served`, which clears the
+                // cooldown and resets the error count, while the caller was
+                // handed an error: the seam's own accounting said the
+                // deployment was fine at the moment it demonstrably was not
+                // (codex re-review of PR-C, CP6). This is the chat lane's rule
+                // too — an empty completion is `note_deployment_unusable_body`
+                // and no success (`lane_calls.rs`).
+                let embeddings = match json["data"]
+                    .as_array()
+                    .ok_or_else(|| "Invalid Voyage batch response: missing data array".to_string())
+                    .and_then(|data| {
+                        parse_voyage_batch_embeddings(
+                            data,
+                            chunk.len(),
+                            embedding.dimension() as usize,
+                        )
+                    }) {
+                    Ok(embeddings) => embeddings,
+                    Err(err) => {
+                        self.note_deployment_unusable_body(attribution);
+                        return Err(err);
+                    }
+                };
                 self.mark_secret_success(&selected, attribution);
+                chunk_embeddings = Some(embeddings);
                 break;
             }
 
-            let json = response_json.ok_or_else(|| {
+            all_embeddings.extend(chunk_embeddings.ok_or_else(|| {
                 if last_err.is_empty() {
                     "Voyage batch API failed without a response".to_string()
                 } else {
                     last_err
                 }
-            })?;
-
-            let data = json["data"]
-                .as_array()
-                .ok_or("Invalid Voyage batch response: missing data array")?;
-            all_embeddings.extend(parse_voyage_batch_embeddings(
-                data,
-                chunk.len(),
-                embedding.dimension() as usize,
-            )?);
+            })?);
         }
 
         Ok(all_embeddings)

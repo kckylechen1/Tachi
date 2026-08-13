@@ -527,6 +527,106 @@ async fn a_chat_lane_transport_failure_records_the_deployment_as_unreachable() {
     assert_eq!(deployment.cooldown_until, None);
 }
 
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn an_embedding_body_that_parses_but_is_not_a_batch_is_never_a_success() {
+    use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};
+
+    // Reentrant GlobalTestLock (R2): `VOYAGE_BASE_URL` and the embedding
+    // config vars are process-wide, and `.lock()` already swallows poison.
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
+    // Pin the default model and width: the row's declared dimension is what
+    // the response is validated against.
+    let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
+
+    // 200 OK, valid JSON — and not a batch. One input, zero embeddings back.
+    // The status line and the syntax are both fine, so every check the rework
+    // wired up (transport, status, JSON syntax) passes; only the *semantic*
+    // read can catch this one, which is why it was the branch still recording
+    // a false success (codex re-review of PR-C, CP6).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let app = Router::new().route(
+        "/v1/embeddings",
+        post(|| async { (StatusCode::OK, r#"{"data":[]}"#).into_response() }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+    let _base = EnvRestore::set("VOYAGE_BASE_URL", format!("http://127.0.0.1:{port}"));
+
+    let temp = tempfile::tempdir().expect("temp db");
+    let db_path = temp.path().join("vault.db");
+    let endpoint = crate::llm::embedding::voyage_embeddings_endpoint();
+    let embedding = crate::llm::embedding_config::EmbeddingConfig::from_env()
+        .expect("the default embedding config resolves");
+    let store = memcore::MemoryStore::open(db_path.to_str().expect("utf-8 path"))
+        .expect("initialize the store");
+    crate::llm::catalog_import::import_env_embedding_lane(
+        store.connection(),
+        &embedding,
+        &endpoint,
+        "2026-08-13T00:00:00.000Z",
+    )
+    .expect("import the embedding lane");
+    drop(store);
+
+    let client = LlmClient::new_with_config(config(), Some(&db_path)).expect("client initializes");
+    client.set_provider_secret_pool(
+        "VOYAGE_API_KEY",
+        vec![ProviderSecret {
+            key_id: "VOYAGE_API_KEY_1".to_string(),
+            value: "test-key".to_string(),
+        }],
+    );
+
+    let err = client
+        .embed_voyage_batch(&["probe".to_string()], "query")
+        .await
+        .expect_err("an empty batch is not a usable answer");
+    assert!(
+        err.contains("Voyage batch returned 0 embeddings for 1 inputs"),
+        "the caller must still see why, got: {err}"
+    );
+    client
+        .await_provider_health_persistence()
+        .await
+        .expect("health writes settle");
+
+    let store = memcore::MemoryStore::open(db_path.to_str().expect("utf-8 path")).expect("reopen");
+    let deployment = get_model_deployment_health(
+        store.connection(),
+        &env_deployment_id(crate::llm::catalog_import::ENV_EMBEDDING_LANE),
+    )
+    .expect("read")
+    .expect("a response the lane could not use is deployment evidence");
+    assert_eq!(
+        deployment.state, "error",
+        "the deployment answered and the answer was unusable; recording `Served` here would \
+         clear a real cooldown on the strength of a response the caller was handed an error for"
+    );
+    assert_eq!(
+        deployment.last_error.as_deref(),
+        Some("unusable response"),
+        "no status: the answer's shape was wrong, not its status line"
+    );
+    assert_eq!(
+        deployment.cooldown_until, None,
+        "a malformed body is not an instruction to back off"
+    );
+    assert_eq!(
+        deployment.last_success_at, None,
+        "nothing was served, so nothing may claim a success instant"
+    );
+
+    server.abort();
+}
+
 #[test]
 fn a_success_after_a_throttle_clears_the_deployment_cooldown() {
     let _lock = crate::test_support::global_test_lock().lock();
