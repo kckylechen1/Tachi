@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::llm::catalog_import::DeploymentAttribution;
+
 impl super::super::super::LlmClient {
     fn read_key_health_entry(&self, logical_name: &str, key_id: &str) -> Option<VaultKeyHealth> {
         self.provider_state
@@ -23,12 +25,23 @@ impl super::super::super::LlmClient {
     /// consumer of the key describing its own usage), while the auth probe —
     /// a deliberate request Tachi made and read itself — is
     /// [`EvidenceKind::Probed`].
+    ///
+    /// `attribution` says which catalog deployment (if any) served the request
+    /// this outcome describes (#1681 D4, PR-C). It is a parameter rather than
+    /// something derived here because it *cannot* be derived here:
+    /// `logical_name` is an API-key env var shared by several lanes, so the
+    /// credential identity this function is keyed on does not determine the
+    /// deployment. The deployment write hangs off this seam — see
+    /// `persistence::deployment` — so a 429 is dual-recorded (credential and
+    /// deployment) from one observation, and 401/403 reaches the credential
+    /// surfaces only.
     pub(in crate::llm) fn apply_key_outcome(
         &self,
         selected: &SelectedProviderSecret,
         outcome: TypedOutcome,
         evidence: EvidenceKind,
         reason: Option<&str>,
+        attribution: DeploymentAttribution<'_>,
     ) -> VaultKeyHealth {
         let now = Self::now_utc();
         let mut state = self
@@ -79,6 +92,11 @@ impl super::super::super::LlmClient {
         );
         drop(state);
         self.persist_key_health(&persisted);
+        // The deployment half of the same observation (#1681 D4). Deliberately
+        // after the credential write and deliberately returning nothing: the
+        // two authorities never interfere, and a health row that cannot be
+        // written must not change what this function does.
+        self.note_deployment_outcome(attribution, outcome, evidence);
         persisted
     }
 
@@ -86,21 +104,28 @@ impl super::super::super::LlmClient {
         &self,
         selected: &SelectedProviderSecret,
         reason: Option<&str>,
+        attribution: DeploymentAttribution<'_>,
     ) {
         self.apply_key_outcome(
             selected,
             TypedOutcome::AuthFailed,
             EvidenceKind::SelfReported,
             reason,
+            attribution,
         );
     }
 
-    pub(in crate::llm) fn mark_secret_success(&self, selected: &SelectedProviderSecret) {
+    pub(in crate::llm) fn mark_secret_success(
+        &self,
+        selected: &SelectedProviderSecret,
+        attribution: DeploymentAttribution<'_>,
+    ) {
         self.apply_key_outcome(
             selected,
             TypedOutcome::Success,
             EvidenceKind::SelfReported,
             None,
+            attribution,
         );
     }
 
@@ -108,6 +133,7 @@ impl super::super::super::LlmClient {
         &self,
         selected: &SelectedProviderSecret,
         retry_after: Option<u64>,
+        attribution: DeploymentAttribution<'_>,
     ) {
         self.apply_key_outcome(
             selected,
@@ -116,6 +142,7 @@ impl super::super::super::LlmClient {
             },
             EvidenceKind::SelfReported,
             None,
+            attribution,
         );
         tracing::warn!(
             "[provider] key {} for {} is rate-limited; cooling down for {}s",
@@ -129,12 +156,14 @@ impl super::super::super::LlmClient {
         &self,
         selected: &SelectedProviderSecret,
         reason: Option<&str>,
+        attribution: DeploymentAttribution<'_>,
     ) {
         self.apply_key_outcome(
             selected,
             TypedOutcome::Exhausted,
             EvidenceKind::SelfReported,
             reason,
+            attribution,
         );
     }
 
@@ -151,7 +180,7 @@ impl super::super::super::LlmClient {
             key_id: key_id.to_string(),
             value: String::new(),
         };
-        self.mark_secret_rate_limited(&selected, retry_after);
+        self.mark_secret_rate_limited(&selected, retry_after, DeploymentAttribution::Unattributed);
         if let Some(health) = self.read_key_health_entry(&selected.logical_name, &selected.key_id) {
             self.persist_key_health_now(&health);
         }
@@ -199,7 +228,11 @@ impl super::super::super::LlmClient {
             key_id: key_id.to_string(),
             value: String::new(),
         };
-        self.mark_secret_auth_failed(&selected, Some("forced auth failure"));
+        self.mark_secret_auth_failed(
+            &selected,
+            Some("forced auth failure"),
+            DeploymentAttribution::Unattributed,
+        );
         if let Some(health) = self.read_key_health_entry(logical_name, key_id) {
             self.persist_key_health_now(&health);
         }
@@ -262,18 +295,31 @@ impl super::super::super::LlmClient {
             _ => reason.map(str::to_string),
         };
         match outcome {
-            TypedOutcome::RateLimited { retry_after_secs } => {
-                self.mark_secret_rate_limited(&selected, retry_after_secs)
+            TypedOutcome::RateLimited { retry_after_secs } => self.mark_secret_rate_limited(
+                &selected,
+                retry_after_secs,
+                DeploymentAttribution::Unattributed,
+            ),
+            TypedOutcome::Exhausted => self.mark_secret_exhausted(
+                &selected,
+                reason.as_deref(),
+                DeploymentAttribution::Unattributed,
+            ),
+            TypedOutcome::AuthFailed => self.mark_secret_auth_failed(
+                &selected,
+                reason.as_deref(),
+                DeploymentAttribution::Unattributed,
+            ),
+            TypedOutcome::Success => {
+                self.mark_secret_success(&selected, DeploymentAttribution::Unattributed)
             }
-            TypedOutcome::Exhausted => self.mark_secret_exhausted(&selected, reason.as_deref()),
-            TypedOutcome::AuthFailed => self.mark_secret_auth_failed(&selected, reason.as_deref()),
-            TypedOutcome::Success => self.mark_secret_success(&selected),
             TypedOutcome::Error | TypedOutcome::Unknown => {
                 self.apply_key_outcome(
                     &selected,
                     outcome,
                     EvidenceKind::SelfReported,
                     reason.as_deref(),
+                    DeploymentAttribution::Unattributed,
                 );
             }
         }

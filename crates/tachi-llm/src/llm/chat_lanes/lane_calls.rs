@@ -6,6 +6,7 @@ use reqwest::{
 use serde_json::{self, Value};
 use std::time::{Duration, Instant};
 
+use super::super::catalog_import::DeploymentAttribution;
 use super::super::provider_health::{
     ChatLane, ChatLaneConfig, CompletionStatusV1, Generated, ModelInvocationLaneV1,
     ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
@@ -376,6 +377,16 @@ impl super::super::LlmClient {
         debug_assert!(max_attempts > 0);
         let tier_started = Instant::now();
         let model = model_override.unwrap_or(&cfg.model);
+        // Which catalog deployment this tier's requests are attributable to
+        // (#1681 D4, PR-C). Identity only — the store checks the endpoint and
+        // model against the stored row, so a #1197 fallback tier or a
+        // `model_override` lands as a counted skip rather than as health for a
+        // deployment that never served this request.
+        let attribution = DeploymentAttribution::EnvLane {
+            lane: lane.as_str(),
+            endpoint: &cfg.base_url,
+            model,
+        };
 
         let mut body = serde_json::json!({
             "model": model,
@@ -454,11 +465,12 @@ impl super::super::LlmClient {
                 Err(e) => {
                     let is_auth_status = status.as_u16() == 401 || status.as_u16() == 403;
                     if status.as_u16() == 429 {
-                        self.mark_secret_rate_limited(&selected, retry_after);
+                        self.mark_secret_rate_limited(&selected, retry_after, attribution);
                     } else if is_auth_status {
                         self.mark_secret_auth_failed(
                             &selected,
                             Some(&format!("Chat auth failure {status}")),
+                            attribution,
                         );
                     }
                     last_err = format!("Chat response body read failed after HTTP {status}: {e}");
@@ -490,7 +502,7 @@ impl super::super::LlmClient {
             // Retry on 429 rate-limit or 5xx server errors
             if status.as_u16() == 429 {
                 last_class = ProviderInvocationFailureClass::ProviderExhausted;
-                self.mark_secret_rate_limited(&selected, retry_after);
+                self.mark_secret_rate_limited(&selected, retry_after, attribution);
                 last_err = format!(
                     "API error {status}: {}",
                     redact_provider_response(&resp_text)
@@ -513,11 +525,13 @@ impl super::super::LlmClient {
                     self.mark_secret_exhausted(
                         &selected,
                         Some(&chat_auth_failure_reason(status.as_u16(), &resp_text)),
+                        attribution,
                     );
                 } else {
                     self.mark_secret_auth_failed(
                         &selected,
                         Some(&chat_auth_failure_reason(status.as_u16(), &resp_text)),
+                        attribution,
                     );
                 }
                 last_err = format!(
@@ -629,7 +643,7 @@ impl super::super::LlmClient {
             });
 
             if let Some(text) = content {
-                self.mark_secret_success(&selected);
+                self.mark_secret_success(&selected, attribution);
                 self.circuit_breakers.record_success(breaker_key);
                 let usage = parse_usage_tokens(json.get("usage"));
                 self.record_successful_llm_usage(

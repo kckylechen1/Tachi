@@ -22,7 +22,7 @@ pub use llm::embedding_config::{
 pub use llm::voyage_embeddings_endpoint;
 pub use llm::{
     auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind, CompletionStatusV1,
-    Generated, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
+    DeploymentHealthRecordCounts, Generated, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
     PersistedModelInvocationReceiptV1, ProviderAuthProbeClass, ProviderAuthProbeFamily,
     ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
     ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderProbeDescriptor,

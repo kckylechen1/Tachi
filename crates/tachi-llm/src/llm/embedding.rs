@@ -5,6 +5,7 @@
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
+use super::catalog_import::{DeploymentAttribution, ENV_EMBEDDING_LANE};
 use super::embedding_config::EmbeddingConfig;
 
 /// Voyage API base URL. Defaults to the public endpoint; `VOYAGE_BASE_URL`
@@ -140,9 +141,21 @@ impl super::LlmClient {
                 else {
                     continue;
                 };
+                // Bound here rather than hoisted out of the attempt loop so
+                // the endpoint is still resolved exactly once per attempt, in
+                // the same order, as before (#1681 D3's per-call resolution).
+                let endpoint = voyage_endpoint("/v1/embeddings");
+                // The embedding lane has a catalog row of its own
+                // (`env:embedding`, #1681 D7 PR-B), so its outcomes are
+                // attributable the same way a chat lane's are.
+                let attribution = DeploymentAttribution::EnvLane {
+                    lane: ENV_EMBEDDING_LANE,
+                    endpoint: &endpoint,
+                    model: embedding.model(),
+                };
                 let response = self
                     .http_client()
-                    .post(voyage_endpoint("/v1/embeddings"))
+                    .post(&endpoint)
                     .timeout(Self::recall_request_timeout())
                     .header(CONTENT_TYPE, "application/json")
                     .header(AUTHORIZATION, format!("Bearer {}", selected.value))
@@ -191,7 +204,7 @@ impl super::LlmClient {
                 // 429 rate-limit path (which returns before reaching parse).
                 self.note_recall_provider_outcome(false);
                 if status.as_u16() == 429 {
-                    self.mark_secret_rate_limited(&selected, retry_after);
+                    self.mark_secret_rate_limited(&selected, retry_after, attribution);
                     last_err = format!("Voyage batch API error: {} - {}", status, text);
                     if attempt < max_attempts {
                         continue;
@@ -202,6 +215,7 @@ impl super::LlmClient {
                     self.mark_secret_auth_failed(
                         &selected,
                         Some(&format!("Voyage batch auth failure {status}")),
+                        attribution,
                     );
                     return Err(format!("Voyage batch API error: {} - {}", status, text));
                 }
@@ -212,7 +226,7 @@ impl super::LlmClient {
                     serde_json::from_str(&text)
                         .map_err(|e| format!("Failed to parse Voyage batch response: {}", e))?,
                 );
-                self.mark_secret_success(&selected);
+                self.mark_secret_success(&selected, attribution);
                 break;
             }
 

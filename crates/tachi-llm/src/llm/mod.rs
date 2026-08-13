@@ -33,14 +33,16 @@ pub(crate) use circuit_breaker::{CircuitBreakerRegistry, LaneOutageTracker};
 pub use embedding::voyage_embeddings_endpoint;
 pub use provider_health::ProviderSecret;
 pub use provider_health::{
-    ChatLaneConfig, CompletionStatusV1, Generated, LaneFallbackConfig, ModelEngineKindV1,
-    ModelInvocationLaneV1, PersistedModelInvocationReceiptV1, ProviderAuthProbeClass,
-    ProviderAuthProbeFamily, ProviderAuthProbeResult, ProviderInvocationFailure,
-    ProviderInvocationFailureClass, ProviderInvocationOutcome, ProviderInvocationReceipt,
-    ProviderRuntimeConfig, LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
+    ChatLaneConfig, CompletionStatusV1, DeploymentHealthRecordCounts, Generated,
+    LaneFallbackConfig, ModelEngineKindV1, ModelInvocationLaneV1,
+    PersistedModelInvocationReceiptV1, ProviderAuthProbeClass, ProviderAuthProbeFamily,
+    ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
+    ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderRuntimeConfig,
+    LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
 };
 use provider_health::{
-    ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState, ProviderState,
+    ClaudeCliFailure, DeploymentHealthCounters, ProviderHealthPersistState,
+    ProviderHealthReloadState, ProviderState,
 };
 pub use rerank::{
     RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV,
@@ -91,6 +93,11 @@ pub struct LlmClient {
     provider_materialization_lock: Arc<Mutex<()>>,
     provider_health_reload: Arc<RwLock<ProviderHealthReloadState>>,
     provider_health_persist: Arc<RwLock<ProviderHealthPersistState>>,
+    /// Counts for the deployment-health seam (#1681 D4, PR-C). Not an
+    /// `RwLock`: nothing reads these to decide anything, so atomics are the
+    /// whole state — and a health counter must never be able to contend with
+    /// the invocation path it hangs off.
+    deployment_health: Arc<DeploymentHealthCounters>,
     claude_cli_failure: Arc<RwLock<Option<ClaudeCliFailure>>>,
     pub(crate) circuit_breakers: CircuitBreakerRegistry,
     /// Full-chain (all tiers) outage streak per lane (#1197) — feeds

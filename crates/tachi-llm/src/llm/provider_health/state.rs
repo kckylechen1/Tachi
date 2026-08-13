@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::super::LlmClient;
 use super::*;
 
@@ -339,5 +341,67 @@ impl ProviderState {
         if remove_logical {
             self.cooldowns.remove(logical_name);
         }
+    }
+}
+
+/// What the deployment-health seam did with the outcomes it saw
+/// (tachi#1681 D4, PR-C item 4).
+///
+/// Counts only. A deployment id is not log material, and the rows themselves
+/// are the record; these answer the one question counts can answer — whether
+/// anything is landing at all, and how much of it is being skipped.
+///
+/// Skips are counted rather than logged per event because the steady state of
+/// a fallback-heavy deployment is *many* of them, and a warning per throttled
+/// request would bury the one line that matters.
+#[derive(Debug, Default)]
+pub(in crate::llm) struct DeploymentHealthCounters {
+    recorded: AtomicU64,
+    skipped_unknown_deployment: AtomicU64,
+    skipped_different_request: AtomicU64,
+    failed: AtomicU64,
+}
+
+/// A snapshot of [`DeploymentHealthCounters`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeploymentHealthRecordCounts {
+    pub recorded: u64,
+    /// Outcomes whose deployment id is not in the catalog — the fail-safe skip
+    /// (#1681 D4): a health record with nowhere to land must never make the
+    /// lane call that produced it fail.
+    pub skipped_unknown_deployment: u64,
+    /// Outcomes whose request went somewhere the catalog row does not describe
+    /// — a #1197 fallback tier, or a `model_override`.
+    pub skipped_different_request: u64,
+    /// Writes the store refused (locked database, unreadable row).
+    pub failed: u64,
+}
+
+impl DeploymentHealthCounters {
+    pub(in crate::llm) fn snapshot(&self) -> DeploymentHealthRecordCounts {
+        DeploymentHealthRecordCounts {
+            recorded: self.recorded.load(Ordering::Relaxed),
+            skipped_unknown_deployment: self.skipped_unknown_deployment.load(Ordering::Relaxed),
+            skipped_different_request: self.skipped_different_request.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(in crate::llm) fn note_recorded(&self) {
+        self.recorded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::llm) fn note_unknown_deployment(&self) {
+        self.skipped_unknown_deployment
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::llm) fn note_different_request(&self) {
+        self.skipped_different_request
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::llm) fn note_failure(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
     }
 }
