@@ -15,6 +15,7 @@ use super::common::normalize_utc_iso;
 pub const A2A_TURN_RESPONSE_KIND: &str = "turn_response/v1";
 pub const A2A_SAME_HOST_TRUST_DOMAIN: &str = "same_host";
 pub const MAX_A2A_STORAGE_BATCH: usize = 100;
+pub const MAX_A2A_TURN_RESPONSE_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct A2aRecipientEligibility {
@@ -311,6 +312,11 @@ pub(crate) fn insert_a2a_envelope_in_tx(
     tx: &Transaction<'_>,
     request: &NewA2aEnvelope,
 ) -> Result<A2aInsertOutcome, MemoryError> {
+    if request.body.len() > MAX_A2A_TURN_RESPONSE_BYTES {
+        return Err(MemoryError::InvalidArg(format!(
+            "a2a body exceeds {MAX_A2A_TURN_RESPONSE_BYTES} bytes"
+        )));
+    }
     for (field, value) in [
         ("envelope id", request.envelope_id.as_str()),
         (
@@ -1166,5 +1172,44 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM a2a_envelopes", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn insert_rejects_oversized_bodies_by_bytes_before_any_mutation() {
+        let mut store = store();
+        identity(
+            &store,
+            "issuer",
+            "admission-issuer",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        identity(
+            &store,
+            "recipient",
+            "admission-recipient",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+
+        for (envelope_id, idempotency_key, body) in [
+            ("oversized-ascii", "oversized-ascii", "x".repeat(4097)),
+            ("oversized-utf8", "oversized-utf8", "界".repeat(1366)),
+        ] {
+            let mut request = envelope(envelope_id, idempotency_key, "recipient");
+            request.body = body;
+            let error = insert_a2a_envelope(store.connection_mut(), &request)
+                .expect_err("body over the byte limit must be refused");
+            assert!(error.to_string().contains("4096"), "{error}");
+        }
+
+        let counts: (i64, i64) = store
+            .connection()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM a2a_envelopes),
+                        (SELECT COUNT(*) FROM a2a_delivery_receipts)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("counts");
+        assert_eq!(counts, (0, 0), "rejected bodies must leave no rows");
     }
 }

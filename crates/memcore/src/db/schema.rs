@@ -997,6 +997,7 @@ pub(crate) fn validate_a2a_mailbox_schema(conn: &Connection) -> Result<(), Memor
         ddl::A2A_ISSUER_TRUST_BASIS_CHECK_CLAUSE,
         ddl::A2A_RECIPIENT_TRUST_BASIS_CHECK_CLAUSE,
         ddl::A2A_EXPIRY_CHECK_CLAUSE,
+        ddl::A2A_BODY_SIZE_CHECK_CLAUSE,
         ddl::A2A_IDEMPOTENCY_UNIQUE_CLAUSE,
         ddl::A2A_ISSUER_IDENTITY_FK_CLAUSE,
         ddl::A2A_ISSUER_ADMISSION_FK_CLAUSE,
@@ -2233,6 +2234,19 @@ mod a2a_schema_tests {
     fn canonical_v31_a2a_schema_validates() {
         let conn = install(ddl::A2A_MAILBOX_V31_SQL);
         validate_a2a_mailbox_schema(&conn).expect("canonical v31 mailbox");
+        let body_check: String = conn
+            .query_row(
+                "SELECT COALESCE(sql, '') FROM sqlite_schema
+                 WHERE type='table' AND name='a2a_envelopes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("envelope DDL");
+        assert!(
+            normalize_schema_sql(&body_check)
+                .contains("CHECK (length(CAST(body AS BLOB)) <= 4096)"),
+            "A2A body size must be bounded in bytes by the v31 DDL"
+        );
     }
 
     #[test]
@@ -2257,6 +2271,11 @@ mod a2a_schema_tests {
                 "body digest",
                 ddl::A2A_BODY_DIGEST_CHECK_CLAUSE,
                 "CHECK (length(body_digest) > 0)",
+            ),
+            (
+                "body size",
+                ddl::A2A_BODY_SIZE_CHECK_CLAUSE,
+                "CHECK (length(body) > 0)",
             ),
             (
                 "issuer trust domain",

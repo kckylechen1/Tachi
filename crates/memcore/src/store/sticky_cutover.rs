@@ -228,7 +228,11 @@ mod tests {
             .all(|row| row.disposition == super::StickyCutoverDisposition::ArchiveOnly));
 
         let error = store
-            .apply_sticky_cutover_with_precommit_receipt(&first, |_| Ok(()))
+            .apply_sticky_cutover_with_precommit_receipt(
+                &first,
+                |body| format!("scrubbed:{body}"),
+                |_| Ok(()),
+            )
             .expect_err("unresolved unread rows must block every mutation");
         assert!(error.to_string().contains("unresolved"));
         assert_eq!(
@@ -257,7 +261,11 @@ mod tests {
             };
         }
         let error = store
-            .apply_sticky_cutover_with_precommit_receipt(&resurrection, |_| Ok(()))
+            .apply_sticky_cutover_with_precommit_receipt(
+                &resurrection,
+                |body| format!("scrubbed:{body}"),
+                |_| Ok(()),
+            )
             .expect_err("an archived historical row must never resurrect as an envelope");
         assert!(error.to_string().contains("non-unread"));
         assert_eq!(
@@ -286,6 +294,83 @@ mod tests {
         }
     }
 
+    fn assert_frozen_plan_mutation_rejected(mutate: impl FnOnce(&mut super::StickyCutoverPlan)) {
+        let (_temp, path, mut store) = fixture_store();
+        seed_matrix(&mut store);
+        identity(&store, "operator", "admission-operator");
+        identity(&store, "recipient", "admission-recipient");
+        let mut plan = store
+            .plan_sticky_cutover_at(path.clone(), "2026-08-13T00:00:00Z", str::to_string)
+            .expect("plan");
+        decide(&mut plan);
+        mutate(&mut plan);
+        plan.plan_digest = plan.compute_digest().expect("mutated plan digest");
+
+        let before = std::fs::read(&path).expect("read database before rejected apply");
+        let error = store
+            .apply_sticky_cutover_with_precommit_receipt(&plan, str::to_string, |_| Ok(()))
+            .expect_err("a plan mutation outside the editable decision surface must be refused");
+        assert!(error.to_string().contains("source census"), "{error}");
+        let after = std::fs::read(&path).expect("read database after rejected apply");
+        assert_eq!(
+            before, after,
+            "rejected source drift must not mutate the database"
+        );
+    }
+
+    #[test]
+    fn apply_rejects_every_mutation_of_the_frozen_source_census_before_writes() {
+        assert_frozen_plan_mutation_rejected(|plan| {
+            plan.rows
+                .iter_mut()
+                .find(|row| row.sticky_id == "broadcast")
+                .expect("broadcast row")
+                .scrubbed_body = Some("attacker-controlled replacement".to_string());
+        });
+        assert_frozen_plan_mutation_rejected(|plan| {
+            let row = plan
+                .rows
+                .iter_mut()
+                .find(|row| row.sticky_id == "broadcast")
+                .expect("broadcast row");
+            row.created_at = Some("2026-08-12T01:00:00Z".to_string());
+            row.expires_at = Some("2026-08-19T01:00:00Z".to_string());
+        });
+        assert_frozen_plan_mutation_rejected(|plan| {
+            plan.rows
+                .iter_mut()
+                .find(|row| row.sticky_id == "claimed-cas")
+                .expect("claimed row")
+                .classification = super::LegacyStickyClass::HistoricalExpired;
+        });
+        assert_frozen_plan_mutation_rejected(|plan| {
+            plan.rows.retain(|row| row.sticky_id != "cas-only");
+            plan.planned_rows = plan.rows.len();
+        });
+        assert_frozen_plan_mutation_rejected(|plan| {
+            let mut replacement = plan
+                .rows
+                .iter()
+                .find(|row| row.sticky_id == "cas-only")
+                .expect("CAS-only row")
+                .clone();
+            replacement.sticky_id = "cas-only-replacement".to_string();
+            replacement.claim_evidence = super::StickyClaimEvidence {
+                state: super::StickyClaimEvidenceState::Missing,
+                version: None,
+                evidence_digest: super::sha256(b"missing"),
+            };
+            plan.rows.retain(|row| row.sticky_id != "cas-only");
+            plan.rows.push(replacement);
+            plan.rows.sort_by(|left, right| {
+                left.sticky_id
+                    .cmp(&right.sticky_id)
+                    .then_with(|| left.memory_id.cmp(&right.memory_id))
+            });
+            plan.planned_rows = plan.rows.len();
+        });
+    }
+
     #[test]
     fn apply_is_atomic_cas_bound_and_replay_safe_across_envelope_and_archive() {
         let (_temp, path, mut store) = fixture_store();
@@ -300,15 +385,19 @@ mod tests {
         decide(&mut plan);
 
         let injected = store
-            .apply_sticky_cutover_with_precommit_receipt(&plan, |prepared| {
-                assert_eq!(
-                    prepared.receipt.phase,
-                    super::StickyCutoverReceiptPhase::Prepared
-                );
-                Err(MemoryError::InvalidArg(
-                    "injected receipt persistence failure".to_string(),
-                ))
-            })
+            .apply_sticky_cutover_with_precommit_receipt(
+                &plan,
+                |body| format!("scrubbed:{body}"),
+                |prepared| {
+                    assert_eq!(
+                        prepared.receipt.phase,
+                        super::StickyCutoverReceiptPhase::Prepared
+                    );
+                    Err(MemoryError::InvalidArg(
+                        "injected receipt persistence failure".to_string(),
+                    ))
+                },
+            )
             .expect_err("precommit receipt failure must roll back DB transaction");
         assert!(injected.to_string().contains("injected receipt"));
         let rolled_back: (i64, i64) = store
@@ -327,13 +416,17 @@ mod tests {
         );
 
         let result = store
-            .apply_sticky_cutover_with_precommit_receipt(&plan, |prepared| {
-                assert_eq!(
-                    prepared.receipt.phase,
-                    super::StickyCutoverReceiptPhase::Prepared
-                );
-                Ok(())
-            })
+            .apply_sticky_cutover_with_precommit_receipt(
+                &plan,
+                |body| format!("scrubbed:{body}"),
+                |prepared| {
+                    assert_eq!(
+                        prepared.receipt.phase,
+                        super::StickyCutoverReceiptPhase::Prepared
+                    );
+                    Ok(())
+                },
+            )
             .expect("apply");
         assert!(!result.replayed);
         assert_eq!(
@@ -420,7 +513,11 @@ mod tests {
         assert_eq!(a2a_body, "scrubbed:legacy body broadcast");
 
         let replay = store
-            .apply_sticky_cutover_with_precommit_receipt(&plan, |_| Ok(()))
+            .apply_sticky_cutover_with_precommit_receipt(
+                &plan,
+                |body| format!("scrubbed:{body}"),
+                |_| Ok(()),
+            )
             .expect("replay");
         assert!(replay.replayed);
         assert_eq!(replay.receipt, result.receipt);
@@ -504,7 +601,7 @@ mod tests {
                 .expect("mutate raw claim source");
         }
         let error = store
-            .apply_sticky_cutover_with_precommit_receipt(&decided, |_| Ok(()))
+            .apply_sticky_cutover_with_precommit_receipt(&decided, str::to_string, |_| Ok(()))
             .expect_err("raw claim changes must fail independent CAS");
         assert!(error.to_string().contains("claim CAS drift"));
 
@@ -522,7 +619,7 @@ mod tests {
                 .expect("restore raw claim source");
         }
         let result = store
-            .apply_sticky_cutover_with_precommit_receipt(&decided, |prepared| {
+            .apply_sticky_cutover_with_precommit_receipt(&decided, str::to_string, |prepared| {
                 let prepared_json =
                     serde_json::to_string(&prepared.receipt).expect("prepared JSON");
                 assert!(
@@ -628,7 +725,7 @@ mod tests {
 
         let mut prepared_json = None;
         let result = store
-            .apply_sticky_cutover_with_precommit_receipt(&plan, |prepared| {
+            .apply_sticky_cutover_with_precommit_receipt(&plan, str::to_string, |prepared| {
                 let serialized = serde_json::to_string(&prepared.receipt).expect("prepared JSON");
                 for secret in [
                     CLAIM_CREATED_SECRET,
@@ -735,7 +832,7 @@ mod tests {
                 .expect("mutate legacy source path");
         }
         let error = store
-            .apply_sticky_cutover_with_precommit_receipt(&plan, |_| Ok(()))
+            .apply_sticky_cutover_with_precommit_receipt(&plan, str::to_string, |_| Ok(()))
             .expect_err("changing legacy path must fail full-row CAS");
         assert!(
             error.to_string().contains("memory CAS drift"),
@@ -756,7 +853,7 @@ mod tests {
         }
         let mut prepared_json = None;
         let result = store
-            .apply_sticky_cutover_with_precommit_receipt(&plan, |prepared| {
+            .apply_sticky_cutover_with_precommit_receipt(&plan, str::to_string, |prepared| {
                 let serialized = serde_json::to_string(&prepared.receipt).expect("prepared JSON");
                 assert!(
                     !serialized.contains(PATH_SECRET),
@@ -826,13 +923,13 @@ mod tests {
                 .unwrap();
         }
         let error = store
-            .apply_sticky_cutover_with_precommit_receipt(&plan, |_| Ok(()))
+            .apply_sticky_cutover_with_precommit_receipt(&plan, str::to_string, |_| Ok(()))
             .expect_err("row drift must fail CAS");
         assert!(error.to_string().contains("CAS"));
 
         let (_other_temp, _other_path, mut other) = fixture_store();
         let error = other
-            .apply_sticky_cutover_with_precommit_receipt(&plan, |_| Ok(()))
+            .apply_sticky_cutover_with_precommit_receipt(&plan, str::to_string, |_| Ok(()))
             .expect_err("another physical DB must reject the plan");
         assert!(error.to_string().contains("physical DB identity"));
     }
@@ -1231,18 +1328,24 @@ fn analyze_memory(
 
 impl StickyCutoverPlan {
     pub fn compute_digest(&self) -> Result<String, MemoryError> {
-        let mut frozen = self.clone();
-        frozen.plan_digest.clear();
-        frozen.issuer_agent_identity_id = None;
-        frozen.issuer_connection_id = None;
-        for row in &mut frozen.rows {
+        Ok(sha256(&serde_json::to_vec(
+            &self.immutable_source_projection(),
+        )?))
+    }
+
+    fn immutable_source_projection(&self) -> Self {
+        let mut projection = self.clone();
+        projection.plan_digest.clear();
+        projection.issuer_agent_identity_id = None;
+        projection.issuer_connection_id = None;
+        for row in &mut projection.rows {
             row.disposition = if row.requires_disposition {
                 StickyCutoverDisposition::Unresolved
             } else {
                 StickyCutoverDisposition::ArchiveOnly
             };
         }
-        Ok(sha256(&serde_json::to_vec(&frozen)?))
+        projection
     }
 
     pub fn validate(&self) -> Result<(), MemoryError> {
@@ -1409,6 +1512,69 @@ fn read_claim_by_key(conn: &Connection, sticky_id: &str) -> Result<Option<ClaimR
     .map_err(MemoryError::from)
 }
 
+fn freeze_sticky_cutover_source(
+    conn: &Connection,
+    target_db_identity: String,
+    target_db_physical_identity: String,
+    as_of: &str,
+    scrubber: &mut impl FnMut(&str) -> String,
+) -> Result<StickyCutoverPlan, MemoryError> {
+    let as_of = normalize_timestamp(as_of, "plan as_of")?;
+    let parsed_as_of = DateTime::parse_from_rfc3339(&as_of)
+        .expect("normalized timestamp")
+        .with_timezone(&Utc);
+    let mut claims = read_claims(conn)?;
+    let memories = read_legacy_memories(conn)?;
+    let mut rows = Vec::with_capacity(memories.len() + claims.len());
+    for memory in memories {
+        let sticky_id = sticky_id_from_snapshot(&memory);
+        let evidence = claim_evidence(claims.remove(&sticky_id).as_ref());
+        rows.push(analyze_memory(
+            &memory,
+            sticky_id,
+            evidence,
+            parsed_as_of,
+            scrubber,
+        )?);
+    }
+    for (sticky_id, claim) in claims {
+        rows.push(FrozenLegacyStickyRow {
+            sticky_id,
+            memory_id: None,
+            memory_revision: None,
+            memory_row_digest: None,
+            source_archived: false,
+            created_at: None,
+            expires_at: None,
+            scrubbed_body: None,
+            classification: LegacyStickyClass::CasOnly,
+            claim_evidence: claim_evidence(Some(&claim)),
+            requires_disposition: false,
+            disposition: StickyCutoverDisposition::ArchiveOnly,
+        });
+    }
+    rows.sort_by(|left, right| {
+        left.sticky_id
+            .cmp(&right.sticky_id)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    let mut plan = StickyCutoverPlan {
+        schema_version: STICKY_CUTOVER_SCHEMA_VERSION,
+        policy_version: STICKY_CUTOVER_POLICY.to_string(),
+        target_db_identity,
+        target_db_physical_identity,
+        as_of,
+        issuer_agent_identity_id: None,
+        issuer_connection_id: None,
+        planned_rows: rows.len(),
+        rows,
+        plan_digest: String::new(),
+    };
+    plan.plan_digest = plan.compute_digest()?;
+    plan.validate()?;
+    Ok(plan)
+}
+
 fn archive_metadata(
     source: &LegacyMemorySnapshot,
     plan: &StickyCutoverPlan,
@@ -1546,60 +1712,13 @@ impl MemoryStore {
             ));
         }
         self.verify_opened_physical_db_identity(Path::new(&target_db_identity))?;
-        let as_of = normalize_timestamp(as_of, "plan as_of")?;
-        let parsed_as_of = DateTime::parse_from_rfc3339(&as_of)
-            .expect("normalized timestamp")
-            .with_timezone(&Utc);
-        let mut claims = read_claims(&self.conn)?;
-        let memories = read_legacy_memories(&self.conn)?;
-        let mut rows = Vec::with_capacity(memories.len() + claims.len());
-        for memory in memories {
-            let sticky_id = sticky_id_from_snapshot(&memory);
-            let evidence = claim_evidence(claims.remove(&sticky_id).as_ref());
-            rows.push(analyze_memory(
-                &memory,
-                sticky_id,
-                evidence,
-                parsed_as_of,
-                &mut scrubber,
-            )?);
-        }
-        for (sticky_id, claim) in claims {
-            rows.push(FrozenLegacyStickyRow {
-                sticky_id,
-                memory_id: None,
-                memory_revision: None,
-                memory_row_digest: None,
-                source_archived: false,
-                created_at: None,
-                expires_at: None,
-                scrubbed_body: None,
-                classification: LegacyStickyClass::CasOnly,
-                claim_evidence: claim_evidence(Some(&claim)),
-                requires_disposition: false,
-                disposition: StickyCutoverDisposition::ArchiveOnly,
-            });
-        }
-        rows.sort_by(|left, right| {
-            left.sticky_id
-                .cmp(&right.sticky_id)
-                .then_with(|| left.memory_id.cmp(&right.memory_id))
-        });
-        let mut plan = StickyCutoverPlan {
-            schema_version: STICKY_CUTOVER_SCHEMA_VERSION,
-            policy_version: STICKY_CUTOVER_POLICY.to_string(),
+        freeze_sticky_cutover_source(
+            &self.conn,
             target_db_identity,
             target_db_physical_identity,
             as_of,
-            issuer_agent_identity_id: None,
-            issuer_connection_id: None,
-            planned_rows: rows.len(),
-            rows,
-            plan_digest: String::new(),
-        };
-        plan.plan_digest = plan.compute_digest()?;
-        plan.validate()?;
-        Ok(plan)
+            &mut scrubber,
+        )
     }
 
     fn validate_sticky_cutover_target(&self, plan: &StickyCutoverPlan) -> Result<(), MemoryError> {
@@ -1625,6 +1744,7 @@ impl MemoryStore {
     pub fn apply_sticky_cutover_with_precommit_receipt(
         &mut self,
         plan: &StickyCutoverPlan,
+        mut scrubber: impl FnMut(&str) -> String,
         precommit_receipt: impl FnOnce(&StickyCutoverApplyResult) -> Result<(), MemoryError>,
     ) -> Result<StickyCutoverApplyResult, MemoryError> {
         let _authorization =
@@ -1707,11 +1827,24 @@ impl MemoryStore {
             return Ok(result);
         }
 
+        let current_source = freeze_sticky_cutover_source(
+            &tx,
+            plan.target_db_identity.clone(),
+            plan.target_db_physical_identity.clone(),
+            &plan.as_of,
+            &mut scrubber,
+        )?;
+
         let mut sources = BTreeMap::new();
         for row in &plan.rows {
             if let Some(source) = verify_frozen_row(&tx, row)? {
                 sources.insert(row.sticky_id.clone(), source);
             }
+        }
+        if plan.immutable_source_projection() != current_source.immutable_source_projection() {
+            return Err(MemoryError::InvalidArg(
+                "sticky cutover source census drift".to_string(),
+            ));
         }
         apply_sticky_cutover_in_tx(
             tx,

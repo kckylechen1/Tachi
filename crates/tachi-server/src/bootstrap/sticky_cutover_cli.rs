@@ -152,21 +152,25 @@ fn apply(
     };
     let mut published = existing_receipt.clone();
     fault_replace_db_path(&target)?;
-    let result = store.apply_sticky_cutover_with_precommit_receipt(&plan, |result| {
-        let expected = &result.receipt;
-        if let Some(existing) = published.as_ref() {
-            if existing != expected {
-                return Err(memcore::MemoryError::InvalidArg(
-                    "sticky cutover receipt sidecar conflicts with this plan/application"
-                        .to_string(),
-                ));
+    let result = store.apply_sticky_cutover_with_precommit_receipt(
+        &plan,
+        |body| crate::memory_search_ops::scrub_generated_memory_text(body),
+        |result| {
+            let expected = &result.receipt;
+            if let Some(existing) = published.as_ref() {
+                if existing != expected {
+                    return Err(memcore::MemoryError::InvalidArg(
+                        "sticky cutover receipt sidecar conflicts with this plan/application"
+                            .to_string(),
+                    ));
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-        prepared_file = Some(persist_prepared_receipt(&receipt_path, expected)?);
-        published = Some(expected.clone());
-        fault_after_prepared_publish()
-    })?;
+            prepared_file = Some(persist_prepared_receipt(&receipt_path, expected)?);
+            published = Some(expected.clone());
+            fault_after_prepared_publish()
+        },
+    )?;
     store.verify_opened_physical_db_identity(&target)?;
 
     fault_after_core_commit()?;

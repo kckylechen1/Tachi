@@ -4,8 +4,6 @@ use tachi_params::{TachiA2aAction, TachiA2aParams};
 
 use crate::MemoryServer;
 
-/// Provisional per-kind limit frozen by #1742/#1751.
-pub(crate) const MAX_LOCAL_TURN_RESPONSE_BYTES: usize = 4096;
 const DEFAULT_TURN_RESPONSE_TTL_DAYS: u32 = 7;
 const MAX_TURN_RESPONSE_TTL_DAYS: u32 = 30;
 const DEFAULT_STATUS_LIMIT: usize = 20;
@@ -42,9 +40,10 @@ fn respond(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Stri
     )?;
     let subject_ref = required(params.subject_ref, "subject_ref")?;
     let raw_text = required(params.text, "text")?;
-    if raw_text.len() > MAX_LOCAL_TURN_RESPONSE_BYTES {
+    if raw_text.len() > memcore::db::a2a::MAX_A2A_TURN_RESPONSE_BYTES {
         return Err(format!(
-            "turn_response/v1 text exceeds {MAX_LOCAL_TURN_RESPONSE_BYTES} bytes"
+            "turn_response/v1 text exceeds {} bytes",
+            memcore::db::a2a::MAX_A2A_TURN_RESPONSE_BYTES
         ));
     }
     let without_think_tags = crate::memory_search_ops::scrub_think_tags(&raw_text);
@@ -56,9 +55,10 @@ fn respond(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Stri
     if safe_text.trim().is_empty() {
         return Err("text is empty after hidden-reasoning scrubbing".into());
     }
-    if safe_text.len() > MAX_LOCAL_TURN_RESPONSE_BYTES {
+    if safe_text.len() > memcore::db::a2a::MAX_A2A_TURN_RESPONSE_BYTES {
         return Err(format!(
-            "turn_response/v1 text exceeds {MAX_LOCAL_TURN_RESPONSE_BYTES} bytes"
+            "turn_response/v1 text exceeds {} bytes",
+            memcore::db::a2a::MAX_A2A_TURN_RESPONSE_BYTES
         ));
     }
     let idempotency_key = required(params.idempotency_key, "idempotency_key")?;
@@ -103,7 +103,7 @@ fn respond(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Stri
             "recipient": envelope.recipient_identity_assurance,
         },
         "limits": {
-            "max_local_turn_response_bytes": MAX_LOCAL_TURN_RESPONSE_BYTES,
+            "max_local_turn_response_bytes": memcore::db::a2a::MAX_A2A_TURN_RESPONSE_BYTES,
             "ttl_days": ttl_days,
         },
     }))
@@ -256,7 +256,10 @@ mod tests {
         assert!(secret.contains("secret-bearing"), "{secret}");
         let oversized = handle_tachi_a2a(
             &server,
-            respond(&"x".repeat(MAX_LOCAL_TURN_RESPONSE_BYTES + 1), "large"),
+            respond(
+                &"x".repeat(memcore::db::a2a::MAX_A2A_TURN_RESPONSE_BYTES + 1),
+                "large",
+            ),
         )
         .expect_err("oversized response must fail");
         assert!(oversized.contains("4096"), "{oversized}");
