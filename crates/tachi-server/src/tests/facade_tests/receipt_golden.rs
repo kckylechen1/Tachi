@@ -39,7 +39,6 @@ fn memory_save_params(text: String, path: &str, format: Option<&str>) -> TachiMe
         valid_from: None,
         valid_until: None,
         metadata: None,
-        emit_continuity: false,
         files: Vec::new(),
         references: Vec::new(),
         project: None,
@@ -83,7 +82,6 @@ async fn g3_save_default_omits_echo_sentinel_full_restores_it() {
             valid_from: None,
             valid_until: None,
             metadata: None,
-            emit_continuity: false,
             files: Vec::new(),
             format: Some("json".to_string()),
         }))
@@ -128,7 +126,6 @@ async fn g3_save_default_omits_echo_sentinel_full_restores_it() {
             valid_from: None,
             valid_until: None,
             metadata: None,
-            emit_continuity: false,
             files: Vec::new(),
             format: Some("full".to_string()),
         }))
@@ -220,7 +217,6 @@ async fn g5_checkpoint_receipt_default_under_500_bytes() {
             project_explicit: false,
             domain: Some("engineering".to_string()),
             metadata: None,
-            emit_continuity: false,
             compact: false,
             files: Vec::new(),
             references: Vec::new(),

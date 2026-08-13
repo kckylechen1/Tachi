@@ -106,7 +106,6 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             project_explicit: false,
             domain: Some("rust".to_string()),
             metadata: None,
-            emit_continuity: false,
             compact: false,
             files: Vec::new(),
             references: Vec::new(),

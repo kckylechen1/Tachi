@@ -216,7 +216,6 @@ pub(crate) async fn handle_tachi_memory(
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
                 metadata,
-                emit_continuity: params.emit_continuity,
                 files: params.files.clone(),
                 format: params.format.clone(),
             };
@@ -265,10 +264,9 @@ pub(crate) async fn handle_tachi_memory(
         "apply_recall_proposals" => Err(
             "Invalid tachi_memory action 'apply_recall_proposals'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_apply').".to_string()
         ),
-        _ => Err(format!(
-            "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', or 'consolidate'. Work ownership and release live on tachi_task; agent-to-agent messaging lives on tachi_a2a; recall tuning lives on tachi_tune.",
-            params.action
-        )),
+        _ => Err(action
+            .parse::<TachiMemoryAction>()
+            .expect_err("unmatched Memory action must remain invalid")),
     }
 }
 

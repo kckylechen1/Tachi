@@ -37,7 +37,7 @@ It answers three questions raised during a facade review:
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
 | `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
-| `tachi_memory` | 17 | Overloaded — `recall_*` tuning extracted (#1426); claim/release retired in #1688. Delete, GC, and doctor now have canonical operator CLI owners; their unchanged facade routes are transitional until final #1689 removes the complete retired set. |
+| `tachi_memory` | 9 | Contracted in #1689 to search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate; health, maintenance, ingestion, and pattern evidence use their canonical status, operator, adapter, or internal owners. |
 | `tachi_gh` | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
 | `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
 | `tachi_skill` | 5 | Healthy |

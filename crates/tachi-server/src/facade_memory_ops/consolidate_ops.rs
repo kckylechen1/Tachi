@@ -416,7 +416,6 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
         valid_from: None,
         valid_until: None,
         metadata: None,
-        emit_continuity: false,
         files: Vec::new(),
         references: Vec::new(),
         project: project.map(str::to_string),

@@ -42,7 +42,6 @@ async fn tachi_memory_save_with_title_stays_memory() {
             project_explicit: false,
             domain: None,
             metadata: None,
-            emit_continuity: false,
             compact: false,
             files: Vec::new(),
             references: Vec::new(),

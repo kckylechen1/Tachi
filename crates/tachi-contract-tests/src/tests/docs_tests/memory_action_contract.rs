@@ -35,6 +35,47 @@ fn active_memory_examples_deserialize_and_cover_exact_final_set() {
 }
 
 #[test]
+fn active_contract_corpus_includes_all_retirement_surfaces_and_pins_nine_action_doc() {
+    let fixture = fixture();
+    let active_files = fixture["active_contract_files"]
+        .as_array()
+        .expect("active_contract_files array")
+        .iter()
+        .map(|path| path.as_str().expect("active contract path"))
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "docs/engineering/architecture/downstream-sync-surface.md",
+        "docs/engineering/architecture/facade-granularity-and-profile-alignment.md",
+        "docs/engineering/architecture/kernel-surface-v1.fixture.json",
+        "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+    ] {
+        assert!(
+            active_files.contains(required),
+            "active Memory contract corpus must include {required}",
+        );
+    }
+
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let facade_doc = std::fs::read_to_string(
+        repo.join("docs/engineering/architecture/facade-granularity-and-profile-alignment.md"),
+    )
+    .expect("read facade granularity contract");
+    let memory_row = facade_doc
+        .lines()
+        .find(|line| line.starts_with("| `tachi_memory` |"))
+        .expect("tachi_memory facade inventory row");
+    let documented_count = memory_row
+        .split('|')
+        .nth(2)
+        .expect("Memory action-count column")
+        .trim();
+    assert_eq!(
+        documented_count, "9",
+        "active facade inventory must advertise the final nine-action Memory contract",
+    );
+}
+
+#[test]
 fn retired_memory_actions_are_rejected_and_absent_from_declared_active_contract_files() {
     let fixture = fixture();
     let retired = fixture["retired_actions"]
@@ -57,15 +98,23 @@ fn retired_memory_actions_are_rejected_and_absent_from_declared_active_contract_
         let double_quoted = format!("action=\"{token}\"");
         let single_quoted = format!("action='{token}'");
         let json_action = format!("\"action\":\"{token}\"");
+        let rust_stdio_action = format!("(\"tachi_memory\",Some(\"{token}\"))");
+        let dotted_action = format!("tachi_memory.{token}");
         for relative in active_files {
             let relative = relative.as_str().expect("active contract path");
             let body = std::fs::read_to_string(repo.join(relative))
                 .unwrap_or_else(|error| panic!("read active contract file {relative}: {error}"));
             let compact: String = body.chars().filter(|ch| !ch.is_whitespace()).collect();
+            let slash_listed_action = body
+                .lines()
+                .any(|line| line.contains("`tachi_memory`") && line.contains(&format!("/{token}")));
             assert!(
                 !body.contains(&double_quoted)
                     && !body.contains(&single_quoted)
-                    && !compact.contains(&json_action),
+                    && !compact.contains(&json_action)
+                    && !compact.contains(&rust_stdio_action)
+                    && !body.contains(&dotted_action)
+                    && !slash_listed_action,
                 "active contract file {relative} still teaches retired Memory action {token}"
             );
         }

@@ -43,7 +43,6 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             project_explicit: false,
             domain: Some("engineering".to_string()),
             metadata: None,
-            emit_continuity: false,
             compact: false,
             files: Vec::new(),
             references: Vec::new(),

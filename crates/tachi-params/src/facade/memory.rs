@@ -96,11 +96,11 @@ impl FromStr for TachiMemoryAction {
             "consolidate" => Ok(Self::Consolidate),
             "progress" => Err("retired tachi_memory action 'progress'; use tachi_task(action='status')".to_string()),
             "readiness" => Err("retired tachi_memory action 'readiness'; use tachi_status".to_string()),
-            "delete" => Err("retired tachi_memory action 'delete'; use tachi delete".to_string()),
-            "gc" => Err("retired tachi_memory action 'gc'; use tachi gc".to_string()),
+            "delete" => Err("retired tachi_memory action 'delete'; use tachi delete plan|apply".to_string()),
+            "gc" => Err("retired tachi_memory action 'gc'; use tachi gc plan|apply".to_string()),
             "doctor_scan" => Err("retired tachi_memory action 'doctor_scan'; use tachi doctor".to_string()),
-            "ingest" | "ingest_source" => Err(format!("retired tachi_memory action '{value}'; use the admitted adapter/operator ingest API")),
-            "pattern_feedback" => Err("retired tachi_memory action 'pattern_feedback'; use the internal pattern-evidence API".to_string()),
+            "ingest" | "ingest_source" => Err(format!("retired tachi_memory action '{value}'; use admitted adapter/operator ingest API")),
+            "pattern_feedback" => Err("retired tachi_memory action 'pattern_feedback'; use internal pattern-evidence API".to_string()),
             other => Err(format!("invalid tachi_memory action '{other}'; use search, get, save, briefing, checkpoint, alerts, ask, extract_facts, or consolidate")),
         }
     }
@@ -325,10 +325,6 @@ pub struct TachiSaveParams {
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
 
-    /// Also append a typed continuity ledger event for this memory save.
-    #[serde(default)]
-    pub emit_continuity: bool,
-
     /// Source files this memory references (stored as `metadata.files`). Surfaced
     /// inline on search results so agents can jump to the referenced file without
     /// a follow-up `get_memory`. Merged with paths auto-parsed from `spec:` pointers.
@@ -500,11 +496,6 @@ pub struct TachiMemoryParams {
         description = "[action=save] Arbitrary JSON metadata merged into the stored entry."
     )]
     pub metadata: Option<serde_json::Value>,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=save] Also append a typed continuity ledger event for this memory save."
-    )]
-    pub emit_continuity: bool,
     #[serde(default)]
     #[schemars(
         description = "[action=save] Referenced source files, e.g. docs/SPEC.md, src/lib.rs."

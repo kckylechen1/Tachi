@@ -25,15 +25,18 @@
     "README.md",
     "prompts/tachi_addendum.md",
     "docs/INSTALL.md",
+    "docs/engineering/architecture/downstream-sync-surface.md",
     "docs/engineering/architecture/facade-granularity-and-profile-alignment.md",
     "docs/engineering/architecture/host-adapter-lifecycle-v1.md",
+    "docs/engineering/architecture/kernel-surface-v1.fixture.json",
     "docs/engineering/architecture/library-identity-runtime.md",
     "docs/engineering/architecture/pattern-timeline-bonding-memory.md",
     "docs/engineering/architecture/tachi-continuity-memory-architecture.md",
     "integrations/openclaw/README.md",
     "integrations/openclaw/index.ts",
     "integrations/openclaw/mcp-client.ts",
-    "crates/tachi-server/src/builtins/trading.rs"
+    "crates/tachi-server/src/builtins/trading.rs",
+    "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs"
   ],
   "historical_exclusions": [
     "CHANGELOG.md",

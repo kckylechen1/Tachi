@@ -93,7 +93,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 | Vector / backfill readiness | Coverage, degraded mode | Via core + readiness APIs, not Foundry product UI |
 | Event projection hooks | Continuity projection for adapters | Neutral events only; no GitHub/dispatch events required |
 | Library identity / project routing | Correct DB binding | Required for Quant multi-DB layout |
-| **MCP memory actions** on a **stripped server profile** | `tachi_memory` search/save/briefing/readiness (or HyperMemory aliases) | Profile must deny/omit `tachi_gh`, dispatch ship, PR lifecycle |
+| **MCP memory actions** on a **stripped server profile** | `tachi_memory` search/save/briefing (or HyperMemory aliases); readiness lives on `tachi_status` | Profile must deny/omit `tachi_gh`, dispatch ship, PR lifecycle |
 
 ### 4.2 Blacklist — Tachi-only; never required for Hypermem/zeroclaw/RomanBath memory
 

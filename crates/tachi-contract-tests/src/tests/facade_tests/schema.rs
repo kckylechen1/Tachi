@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use tachi_params::{
-    TachiEventParams, TachiGhParams, TachiMemoryParams, TachiSearchParams, TachiSkillParams,
-    TachiTaskParams, TachiTuneParams,
+    TachiEventParams, TachiGhParams, TachiMemoryParams, TachiSaveParams, TachiSearchParams,
+    TachiSkillParams, TachiTaskParams, TachiTuneParams,
 };
 
 fn enum_values(property: &Value, name: &str) -> Vec<String> {
@@ -106,9 +106,11 @@ fn f1689_retired_memory_actions_are_rejected_with_canonical_owner_guidance() {
 
 #[test]
 fn f1689_memory_schema_removes_retired_only_params() {
-    let schema = rmcp::schemars::schema_for!(TachiMemoryParams);
-    let value = serde_json::to_value(schema).expect("schema serializes");
-    let properties = value["properties"].as_object().expect("properties object");
+    let memory_schema = rmcp::schemars::schema_for!(TachiMemoryParams);
+    let memory_value = serde_json::to_value(memory_schema).expect("Memory schema serializes");
+    let properties = memory_value["properties"]
+        .as_object()
+        .expect("Memory properties object");
 
     for retired_only_field in [
         "flow_id",
@@ -132,6 +134,21 @@ fn f1689_memory_schema_removes_retired_only_params() {
             "retired-only field {retired_only_field} must leave the public Memory schema"
         );
     }
+
+    assert!(
+        !properties.contains_key("emit_continuity"),
+        "ordinary tachi_memory save must not expose the retired evidence-emission workflow",
+    );
+
+    let save_schema = rmcp::schemars::schema_for!(TachiSaveParams);
+    let save_value = serde_json::to_value(save_schema).expect("Save schema serializes");
+    assert!(
+        !save_value["properties"]
+            .as_object()
+            .expect("Save properties object")
+            .contains_key("emit_continuity"),
+        "ordinary tachi_save must not expose the retired evidence-emission workflow",
+    );
 }
 
 #[test]

@@ -44,7 +44,6 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         valid_from: None,
         valid_until: None,
         metadata: None,
-        emit_continuity: false,
         files: Vec::new(),
         references: Vec::new(),
         project: None,

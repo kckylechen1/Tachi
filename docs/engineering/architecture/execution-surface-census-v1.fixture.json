@@ -11,32 +11,32 @@
     "profiles": {
       "standard": {
         "max_visible_tools": 17,
-        "max_total_input_schema_bytes": 60530,
-        "max_total_tool_definition_bytes": 70468,
+        "max_total_input_schema_bytes": 60246,
+        "max_total_tool_definition_bytes": 70184,
         "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "delegate": {
         "max_visible_tools": 12,
-        "max_total_input_schema_bytes": 62006,
-        "max_total_tool_definition_bytes": 67772,
+        "max_total_input_schema_bytes": 61857,
+        "max_total_tool_definition_bytes": 67623,
         "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "coordinate": {
         "max_visible_tools": 39,
-        "max_total_input_schema_bytes": 124323,
-        "max_total_tool_definition_bytes": 142637,
+        "max_total_input_schema_bytes": 124039,
+        "max_total_tool_definition_bytes": 142353,
         "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "operate": {
         "max_visible_tools": 51,
-        "max_total_input_schema_bytes": 119892,
-        "max_total_tool_definition_bytes": 139338,
+        "max_total_input_schema_bytes": 119608,
+        "max_total_tool_definition_bytes": 139054,
         "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "admin": {
         "max_visible_tools": 103,
-        "max_total_input_schema_bytes": 181976,
-        "max_total_tool_definition_bytes": 219631,
+        "max_total_input_schema_bytes": 181692,
+        "max_total_tool_definition_bytes": 219347,
         "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for admin; any regrowth requires explicit adjudication."
       }
     },
@@ -47,8 +47,8 @@
         "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
       },
       "standard.tachi_memory": {
-        "max_top_level_properties": 44,
-        "max_input_schema_bytes": 7885,
+        "max_top_level_properties": 43,
+        "max_input_schema_bytes": 7736,
         "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
       },
       "standard.tachi_gh": {
@@ -201,8 +201,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 181976,
-        "total_tool_definition_bytes": 219631,
+        "total_input_schema_bytes": 181692,
+        "total_tool_definition_bytes": 219347,
         "visible_tool_count": 103,
         "visible_tools": [
           "archive_memory",
@@ -311,8 +311,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 124323,
-        "total_tool_definition_bytes": 142637,
+        "total_input_schema_bytes": 124039,
+        "total_tool_definition_bytes": 142353,
         "visible_tool_count": 39,
         "visible_tools": [
           "extract_facts",
@@ -357,8 +357,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 62006,
-        "total_tool_definition_bytes": 67772,
+        "total_input_schema_bytes": 61857,
+        "total_tool_definition_bytes": 67623,
         "visible_tool_count": 12,
         "visible_tools": [
           "peer_query",
@@ -376,8 +376,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 119892,
-        "total_tool_definition_bytes": 139338,
+        "total_input_schema_bytes": 119608,
+        "total_tool_definition_bytes": 139054,
         "visible_tool_count": 51,
         "visible_tools": [
           "archive_memory",
@@ -434,8 +434,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 60530,
-        "total_tool_definition_bytes": 70468,
+        "total_input_schema_bytes": 60246,
+        "total_tool_definition_bytes": 70184,
         "visible_tool_count": 17,
         "visible_tools": [
           "peer_query",
@@ -920,8 +920,8 @@
           ]
         },
         "tachi_memory": {
-          "input_schema_bytes": 7885,
-          "property_count": 44,
+          "input_schema_bytes": 7736,
+          "property_count": 43,
           "property_names": [
             "action",
             "agent_role",
@@ -930,7 +930,6 @@
             "compact",
             "confirm",
             "domain",
-            "emit_continuity",
             "enable_rerank",
             "entities",
             "error_context",
@@ -970,12 +969,11 @@
           ]
         },
         "tachi_save": {
-          "input_schema_bytes": 3718,
-          "property_count": 24,
+          "input_schema_bytes": 3583,
+          "property_count": 23,
           "property_names": [
             "category",
             "domain",
-            "emit_continuity",
             "entities",
             "files",
             "force",

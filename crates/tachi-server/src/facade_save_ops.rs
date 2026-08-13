@@ -203,7 +203,10 @@ pub(crate) async fn handle_tachi_save(
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
                 metadata,
-                emit_continuity: params.emit_continuity,
+                // Public save facades cannot author continuity evidence. The
+                // internal SaveMemoryParams owner retains its explicit event
+                // path for admitted internal callers.
+                emit_continuity: false,
             };
             handle_save_memory_with_references(server, mem_params, params.references.clone()).await
         }
