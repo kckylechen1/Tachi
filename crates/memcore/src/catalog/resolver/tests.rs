@@ -953,3 +953,65 @@ fn reference_classification_is_the_same_function_the_resolution_uses() {
         ReferenceClass::Ambiguous
     );
 }
+
+// ─── D3's iron rule, at the only place this leaf can enforce it ─────────────
+
+#[test]
+fn nothing_a_resolution_hands_downstream_carries_the_alias_it_resolved() {
+    // #1681 D3: an alias exists only *before* resolution, and a receipt always
+    // records concrete ids. This is the half of that rule PR-D owns — what the
+    // resolver emits. Everything downstream builds its provenance out of this
+    // value, so if the alias name is absent here it cannot reach a receipt
+    // through a resolution at all.
+    //
+    // The other half — a caller handing an alias straight to the provider call,
+    // bypassing resolution entirely — is not fixable by this type, which is
+    // exactly why the ingress gate counts it (tachi-llm `ingress_gate`) and why
+    // the cutover that closes it is #1685.
+    let aliases = two_way_alias();
+    let revision = aliases.policy_revision().to_string();
+    let outcome = resolver(aliases)
+        .try_resolve(&input(
+            "chat.default",
+            &revision,
+            vec![deployment("dep-a", "acct-a"), deployment("dep-b", "acct-b")],
+        ))
+        .expect("stamped input");
+
+    let serialized = serde_json::to_string(&outcome).expect("an outcome serializes");
+    assert!(
+        !serialized.contains("chat.default"),
+        "the alias reached the resolver's output, which is where a receipt \
+         would pick it up: {serialized}"
+    );
+
+    // What it carries instead: catalog-controlled deployment ids and the
+    // provider's own model id — the closed vocabulary review finding 4 ruled
+    // the fallback chain must be built from.
+    let chosen = outcome.selection().chosen().expect("a chosen deployment");
+    assert_eq!(chosen.deployment_id(), "dep-a");
+    assert_eq!(chosen.provider_model_id(), "dep-a-model");
+    assert_eq!(outcome.fallback_order(), &["dep-b"]);
+    assert!(serialized.contains("dep-a-model"));
+}
+
+#[test]
+fn an_abstaining_resolution_names_no_deployment_at_all() {
+    // The mirror of the rule above: an abstain must not leak a "we would have
+    // picked this" hint that a caller could mistake for a routing decision and
+    // record as provenance.
+    let aliases = two_way_alias();
+    let revision = aliases.policy_revision().to_string();
+    let outcome = resolver(aliases)
+        .try_resolve(&input(
+            "chat.unknown-name",
+            &revision,
+            vec![deployment("dep-a", "acct-a")],
+        ))
+        .expect("stamped input");
+
+    let serialized = serde_json::to_string(&outcome).expect("an outcome serializes");
+    assert!(!serialized.contains("dep-a"));
+    assert!(!serialized.contains("acct-a"));
+    assert!(serialized.contains("unknown_alias"));
+}
