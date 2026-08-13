@@ -33,6 +33,7 @@
 
 pub mod alias_plan;
 pub mod alias_policy;
+pub mod endpoint;
 pub mod fold;
 pub mod health;
 pub mod resolver;

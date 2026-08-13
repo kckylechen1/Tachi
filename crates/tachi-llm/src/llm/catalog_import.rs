@@ -52,6 +52,9 @@
 
 use std::fmt;
 
+use memcore::catalog::endpoint::{
+    endpoint_authority, endpoint_credential_leak, EndpointCredentialLeak,
+};
 use memcore::catalog::{
     CatalogSource, DeploymentCapabilities, EmbeddingsCapability, NewModelDeployment, ProtocolKind,
     DEPLOYMENT_STATUS_ACTIVE,
@@ -152,9 +155,16 @@ impl<'a> DeploymentAttribution<'a> {
 /// caller remembering to redact it.
 #[derive(Debug)]
 pub enum CatalogImportError {
-    /// A lane's configured endpoint carried `user:password@`. Refused before
-    /// any row is built — see the module note on refusal versus scrubbing.
-    EndpointCarriesUserinfo { lane: &'static str },
+    /// A lane's configured endpoint carried a credential — `user:password@`,
+    /// or a credential-shaped query key such as `?api_key=`. Refused before
+    /// any row is built; see the module note on refusal versus scrubbing.
+    ///
+    /// `leak` says *how*, in memcore's shared vocabulary, and names at most a
+    /// query **key** — never a value.
+    EndpointCarriesCredential {
+        lane: &'static str,
+        leak: EndpointCredentialLeak,
+    },
     /// The catalog store rejected a write.
     Store(MemoryError),
 }
@@ -162,12 +172,11 @@ pub enum CatalogImportError {
 impl fmt::Display for CatalogImportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EndpointCarriesUserinfo { lane } => write!(
+            Self::EndpointCarriesCredential { lane, leak } => write!(
                 formatter,
-                "lane '{lane}': the configured endpoint carries userinfo credentials, and a \
-                 catalog deployment row is durable public-safe provenance. Refusing to import \
-                 this lane. Remove the credentials from the URL and supply them through the \
-                 lane's API key environment variable instead."
+                "lane '{lane}': {leak}, and a catalog deployment row is durable public-safe \
+                 provenance. Refusing to import this lane. Remove the credential from the URL \
+                 and supply it through the lane's API key environment variable instead."
             ),
             Self::Store(err) => write!(formatter, "catalog store write failed: {err}"),
         }
@@ -177,7 +186,7 @@ impl fmt::Display for CatalogImportError {
 impl std::error::Error for CatalogImportError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::EndpointCarriesUserinfo { .. } => None,
+            Self::EndpointCarriesCredential { .. } => None,
             Self::Store(err) => Some(err),
         }
     }
@@ -187,28 +196,6 @@ impl From<MemoryError> for CatalogImportError {
     fn from(err: MemoryError) -> Self {
         Self::Store(err)
     }
-}
-
-/// Does this endpoint's authority carry a `user[:password]@` prefix?
-///
-/// Deliberately parsed the same way [`env_provider_account_id`] parses the
-/// authority — scheme off, first `/`, `?` or `#` ends it — so the gate and the
-/// derivation can never disagree about which substring is the authority. A
-/// later `@` in a path or query (`/v1/@scope/model`) is not userinfo and is
-/// not refused.
-fn endpoint_carries_userinfo(endpoint: &str) -> bool {
-    endpoint_authority(endpoint).contains('@')
-}
-
-fn endpoint_authority(endpoint: &str) -> &str {
-    let without_scheme = endpoint
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(endpoint);
-    without_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(without_scheme)
 }
 
 /// One lane's env resolution, as a catalog row.
@@ -260,8 +247,8 @@ fn chat_lane_deployment(
     lane_config: &ChatLaneConfig,
     observed_at: &str,
 ) -> Result<NewModelDeployment, CatalogImportError> {
-    if endpoint_carries_userinfo(&lane_config.base_url) {
-        return Err(CatalogImportError::EndpointCarriesUserinfo { lane });
+    if let Some(leak) = endpoint_credential_leak(&lane_config.base_url) {
+        return Err(CatalogImportError::EndpointCarriesCredential { lane, leak });
     }
     let mut row = NewModelDeployment::observed(
         env_deployment_id(lane),
@@ -299,7 +286,7 @@ fn chat_lane_deployment(
 /// names *key env vars*, and which of them won is a live-process fact, not a
 /// property of the resolved config.
 ///
-/// Userinfo is **refused upstream**, by [`endpoint_carries_userinfo`], before
+/// A credential is **refused upstream**, by [`endpoint_credential_leak`], before
 /// this function is ever reached with a credential-bearing URL. The strip
 /// below is therefore defence in depth, not the rule: it exists so a future
 /// caller that reaches the derivation without going through the gate — an
@@ -367,9 +354,10 @@ pub fn env_embedding_deployment(
     endpoint: &str,
     observed_at: &str,
 ) -> Result<EnvLaneDeployment, CatalogImportError> {
-    if endpoint_carries_userinfo(endpoint) {
-        return Err(CatalogImportError::EndpointCarriesUserinfo {
+    if let Some(leak) = endpoint_credential_leak(endpoint) {
+        return Err(CatalogImportError::EndpointCarriesCredential {
             lane: ENV_EMBEDDING_LANE,
+            leak,
         });
     }
     let mut source_refs = vec!["env_api_key:VOYAGE_API_KEY".to_string()];

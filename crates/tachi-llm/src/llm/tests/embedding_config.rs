@@ -283,8 +283,9 @@ fn an_embedding_endpoint_carrying_userinfo_is_refused_like_a_chat_lane() {
     assert!(
         matches!(
             refusal,
-            crate::llm::catalog_import::CatalogImportError::EndpointCarriesUserinfo {
-                lane: "embedding"
+            crate::llm::catalog_import::CatalogImportError::EndpointCarriesCredential {
+                lane: "embedding",
+                leak: memcore::catalog::endpoint::EndpointCredentialLeak::Userinfo
             }
         ),
         "expected a typed embedding-lane refusal, got {refusal:?}"
