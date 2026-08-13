@@ -1,5 +1,1185 @@
 use super::*;
 
+async fn spawn_admitted_ingest_embedding_provider() -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use axum::response::IntoResponse;
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let response_calls = std::sync::Arc::clone(&calls);
+    let app = axum::Router::new()
+        .route(
+            "/v1/embeddings",
+            axum::routing::post(move || {
+                let response_calls = std::sync::Arc::clone(&response_calls);
+                async move {
+                    response_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut embedding = vec![0.0_f32; 1024];
+                    embedding[0] = 1.0;
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!({
+                            "data": [{"index": 0, "embedding": embedding}]
+                        })),
+                    )
+                        .into_response()
+                }
+            }),
+        )
+        .route(
+            "/chat/completions",
+            axum::routing::post(|| async {
+                axum::Json(json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"keywords\":[\"durable-enrichment\"],\"entities\":[]}"
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind admitted-ingest embedding provider");
+    let address = listener.local_addr().expect("mock provider address");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve admitted-ingest embedding provider");
+    });
+    (format!("http://{address}"), calls, task)
+}
+
+#[derive(Clone)]
+struct PausedEmbeddingProvider {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    started: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+async fn spawn_paused_admitted_embedding_provider(
+) -> (String, PausedEmbeddingProvider, tokio::task::JoinHandle<()>) {
+    let provider = PausedEmbeddingProvider {
+        calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        started: std::sync::Arc::new(tokio::sync::Notify::new()),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
+    };
+    let app = axum::Router::new()
+        .route(
+            "/v1/embeddings",
+            axum::routing::post({
+                let provider = provider.clone();
+                move || {
+                    let provider = provider.clone();
+                    async move {
+                        provider
+                            .calls
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        provider.started.notify_waiters();
+                        provider.release.notified().await;
+                        let mut embedding = vec![0.0_f32; 1024];
+                        embedding[0] = 1.0;
+                        axum::Json(json!({
+                            "data": [{"index": 0, "embedding": embedding}]
+                        }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/chat/completions",
+            axum::routing::post(|| async {
+                axum::Json(json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\"keywords\":[\"lease-enrichment\"],\"entities\":[]}"
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind paused admitted embedding provider");
+    let address = listener.local_addr().expect("paused provider address");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve paused admitted embedding provider");
+    });
+    (format!("http://{address}"), provider, task)
+}
+
+fn staged_auto_ingest_fixture(
+    server: &crate::server_state::MemoryServer,
+    text: &str,
+    path: &str,
+) -> crate::pipeline_ops::StagedAutoIngest {
+    let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+        "content": [{"type": "text", "text": text}],
+        "isError": false
+    }))
+    .expect("build staged tool result");
+    let definition = json!({
+        "auto_ingest": true,
+        "ingest_scope": "global",
+        "ingest_domain": "general",
+        "ingest_path_prefix": path,
+    });
+    crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        server,
+        "mcp:admitted-reader",
+        "read",
+        &definition,
+        None,
+        &result,
+    )
+    .expect("stage admitted MCP result")
+    .expect("auto-ingest definition admits text")
+}
+
+async fn complete_admitted_enrichment_stage(
+    server: &crate::server_state::MemoryServer,
+    staged: &crate::pipeline_ops::StagedAutoIngest,
+) {
+    let pending = crate::pipeline_ops::run_staged_auto_ingest(server, staged.clone())
+        .await
+        .expect("admitted enrichment stage remains replayable")
+        .expect("pending enrichment accounting is returned");
+    let pending: Value = serde_json::from_str(&pending).expect("pending enrichment JSON");
+    assert_eq!(pending["status"], "partial");
+    assert_eq!(pending["failed_stage"], "enrichment_pending");
+    assert!(
+        server.complete_retained_admitted_enrichments_for_test() > 0,
+        "the retained consumer must turn durable intents into terminal entry evidence"
+    );
+}
+
+fn ingest_effect_counts(
+    server: &crate::server_state::MemoryServer,
+    path: &str,
+) -> (usize, i64, i64) {
+    server
+        .with_global_store_read(|store| {
+            let memories = store
+                .list_by_path(path, 4096, false)
+                .map_err(|error| error.to_string())?
+                .len();
+            let edges = store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM memory_edges", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| error.to_string())?;
+            let completions = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log \
+                     WHERE server_id = 'ingest' AND success = 1 \
+                       AND tool_name IN ('ingest_source', 'auto_ingest_job')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((memories, edges, completions))
+        })
+        .expect("read admitted-ingest effects")
+}
+
+fn update_staged_payload(
+    server: &crate::server_state::MemoryServer,
+    job_id: &str,
+    transform: impl FnOnce(&mut Value),
+) {
+    server
+        .with_global_store(|store| {
+            let payload = store
+                .connection()
+                .query_row(
+                    "SELECT event_id FROM processed_events \
+                     WHERE event_hash = ?1 AND worker = 'auto_ingest_job'",
+                    [job_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let mut payload: Value =
+                serde_json::from_str(&payload).map_err(|error| error.to_string())?;
+            transform(&mut payload);
+            store
+                .connection()
+                .execute(
+                    "UPDATE processed_events SET event_id = ?1 \
+                     WHERE event_hash = ?2 AND worker = 'auto_ingest_job'",
+                    rusqlite::params![payload.to_string(), job_id],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("mutate durable staged payload fixture");
+}
+
+#[tokio::test]
+async fn admitted_auto_ingest_rejects_oversized_payload_before_mutation() {
+    let server = make_server();
+    let path = "/wiki/general/admitted-too-large";
+    let oversized_result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+        "content": [{
+            "type": "text",
+            "text": "x".repeat(2 * 1024 * 1024 + 1)
+        }],
+        "isError": false
+    }))
+    .expect("build oversized tool result");
+    let definition = json!({
+        "auto_ingest": true,
+        "ingest_scope": "global",
+        "ingest_domain": "general",
+        "ingest_path_prefix": path,
+    });
+
+    let error = crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        &server,
+        "mcp:admitted-reader",
+        "read",
+        &definition,
+        None,
+        &oversized_result,
+    )
+    .expect_err("payload beyond the admitted 2 MiB bound must refuse before staging");
+    assert!(
+        error.contains("payload"),
+        "typed refusal names payload: {error}"
+    );
+    assert_eq!(
+        ingest_effect_counts(&server, path),
+        (0, 0, 0),
+        "admission refusal happens before memory, edge, or completion effects"
+    );
+}
+
+#[tokio::test]
+async fn admitted_auto_ingest_revalidates_the_staged_job_at_mutation_time() {
+    let server = make_server();
+    let path = "/wiki/general/admitted-tamper";
+    let staged = staged_auto_ingest_fixture(&server, "original durable MCP text", path);
+    update_staged_payload(&server, &staged.job_id, |payload| {
+        payload["request"]["content"] = json!("tampered")
+    });
+
+    let error = crate::pipeline_ops::run_staged_auto_ingest(&server, staged)
+        .await
+        .expect_err("mutation-time content drift must conflict");
+    assert!(
+        error.contains("drift"),
+        "typed conflict names drift: {error}"
+    );
+    assert_eq!(
+        ingest_effect_counts(&server, path),
+        (0, 0, 0),
+        "staged-job drift refuses before all ingest effects"
+    );
+}
+
+#[tokio::test]
+async fn admitted_auto_ingest_rejects_chunk_policy_drift_before_mutation() {
+    let server = make_server();
+    let path = "/wiki/general/admitted-policy-drift";
+    let staged = staged_auto_ingest_fixture(&server, "policy drift fixture", path);
+    update_staged_payload(&server, &staged.job_id, |payload| {
+        payload["request"]["chunk_size_chars"] = json!(8193)
+    });
+
+    let error = crate::pipeline_ops::run_staged_auto_ingest(&server, staged)
+        .await
+        .expect_err("mutation-time policy drift must conflict");
+    assert!(
+        error.contains("drift"),
+        "typed conflict names drift: {error}"
+    );
+    assert_eq!(ingest_effect_counts(&server, path), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn admitted_auto_ingest_enrichment_failure_is_partial_and_replayable() {
+    let server = make_server();
+    let path = "/wiki/general/admitted-enrichment-partial";
+    let staged = staged_auto_ingest_fixture(&server, "enrichment must be accounted", path);
+    server.close_enrichment_channel_for_test();
+
+    let first = crate::pipeline_ops::run_staged_auto_ingest(&server, staged.clone())
+        .await
+        .expect("a recoverable admitted stage failure returns typed accounting")
+        .expect("staged ingest returns a partial receipt");
+    let first: Value = serde_json::from_str(&first).expect("partial receipt JSON");
+    assert_eq!(first["status"], "partial");
+    assert_eq!(first["failed_stage"], "enrichment_enqueue");
+    assert_eq!(first["chunks_saved"], 1);
+
+    let pending = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM processed_events WHERE worker = 'auto_ingest_job'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("count replayable staged job");
+    assert_eq!(pending, 1, "partial never retires its recovery authority");
+
+    let replay = crate::pipeline_ops::run_staged_auto_ingest(&server, staged)
+        .await
+        .expect("partial replay remains admitted")
+        .expect("partial replay returns accounting");
+    let replay: Value = serde_json::from_str(&replay).expect("replay receipt JSON");
+    assert_eq!(replay["status"], "partial");
+    assert_eq!(
+        ingest_effect_counts(&server, path).0,
+        1,
+        "retry never duplicates a durable chunk"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn admitted_auto_ingest_restart_replays_durable_enrichment_intent_once() {
+    let (first_server, _home_guard) = crate::tests::make_server_with_temp_home();
+    let (base_url, provider_calls, provider_task) =
+        spawn_admitted_ingest_embedding_provider().await;
+    let _base = crate::test_support::EnvRestore::set("VOYAGE_BASE_URL", &base_url);
+    let _key = crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+    let _extract_base = crate::test_support::EnvRestore::set(
+        "EXTRACT_BASE_URL",
+        &format!("{base_url}/chat/completions"),
+    );
+    let _extract_key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-extract-key");
+    let _extract_model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "test-model");
+
+    let db_path = first_server.global_db_path_buf();
+    let home = first_server.tachi_home_dir().to_path_buf();
+    let path = "/wiki/general/admitted-enrichment-restart";
+    let staged = staged_auto_ingest_fixture(
+        &first_server,
+        "accepted enqueue must survive a process crash",
+        path,
+    );
+
+    let first = crate::pipeline_ops::run_staged_auto_ingest(&first_server, staged.clone())
+        .await
+        .expect("accepted enqueue returns typed pending accounting")
+        .expect("staged job remains visible");
+    let first: Value = serde_json::from_str(&first).expect("pending receipt JSON");
+    assert_eq!(first["status"], "partial");
+    assert_eq!(first["failed_stage"], "enrichment_pending");
+    assert_eq!(
+        first_server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events WHERE worker IN \
+                         ('auto_ingest_job', 'auto_ingest_enrichment_intent')",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count pending job and enrichment intent"),
+        2,
+        "queue acceptance must retain both durable recovery authorities"
+    );
+
+    // The retained receiver is intentionally never consumed: dropping this
+    // server is the process-crash boundary that loses the accepted mpsc item.
+    drop(first_server);
+    rusqlite::Connection::open(&db_path)
+        .expect("open crashed runtime intent store")
+        .execute(
+            "UPDATE processed_events \
+             SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes') \
+             WHERE worker = 'auto_ingest_enrichment_intent'",
+            [],
+        )
+        .expect("expire the dead runtime lease");
+
+    let mut restarted =
+        crate::server_state::MemoryServer::new_with_home_for_test(db_path, None, home)
+            .expect("restart MemoryServer from the same Product DB");
+    restarted.llm = std::sync::Arc::new(
+        tachi_llm::LlmClient::new().expect("construct restart embedding client"),
+    );
+
+    for _ in 0..2 {
+        let replay = crate::pipeline_ops::run_staged_auto_ingest(&restarted, staged.clone())
+            .await
+            .expect("restart replay remains admitted")
+            .expect("restart replay returns pending accounting");
+        let replay: Value = serde_json::from_str(&replay).expect("restart replay JSON");
+        assert_eq!(replay["status"], "partial");
+        assert_eq!(replay["failed_stage"], "enrichment_pending");
+    }
+
+    let mut item = {
+        let mut receiver = restarted
+            .enrichment_lock()
+            .retained_enrich_rx
+            .lock()
+            .expect("lock restarted enrichment receiver");
+        let receiver = receiver.as_mut().expect("test receiver retained");
+        let item = receiver
+            .try_recv()
+            .expect("restart dispatches the durable intent");
+        assert!(
+            receiver.try_recv().is_err(),
+            "repeated replay in one runtime must not duplicate the intent"
+        );
+        item
+    };
+    item.needs_keyword_enrichment = false;
+    restarted.flush_enrichment_batch(&mut vec![item]).await;
+
+    let completed = crate::pipeline_ops::run_staged_auto_ingest(&restarted, staged.clone())
+        .await
+        .expect("terminal enrichment evidence completes the staged job")
+        .expect("completed accounting is returned");
+    let completed: Value = serde_json::from_str(&completed).expect("completed receipt JSON");
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(provider_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(ingest_effect_counts(&restarted, path).0, 1);
+    assert_eq!(
+        restarted
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events WHERE worker IN \
+                         ('auto_ingest_job', 'auto_ingest_enrichment_intent')",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count retired recovery rows"),
+        0
+    );
+
+    let replayed = crate::pipeline_ops::run_staged_auto_ingest(&restarted, staged)
+        .await
+        .expect("terminal job replay is admitted")
+        .expect("terminal receipt is replayed");
+    assert_eq!(
+        serde_json::from_str::<Value>(&replayed).expect("terminal replay JSON")["status"],
+        "replayed"
+    );
+    assert_eq!(provider_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(ingest_effect_counts(&restarted, path).0, 1);
+    provider_task.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn admitted_auto_ingest_live_intent_lease_blocks_cross_runtime_duplicate_provider_work() {
+    let (mut server_a, _home_guard) = crate::tests::make_server_with_temp_home();
+    let (base_url, provider, provider_task) = spawn_paused_admitted_embedding_provider().await;
+    let _base = crate::test_support::EnvRestore::set("VOYAGE_BASE_URL", &base_url);
+    let _key = crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+    let _extract_base = crate::test_support::EnvRestore::set(
+        "EXTRACT_BASE_URL",
+        &format!("{base_url}/chat/completions"),
+    );
+    let _extract_key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-extract-key");
+    let _extract_model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "test-model");
+    server_a.llm =
+        std::sync::Arc::new(tachi_llm::LlmClient::new().expect("construct A provider client"));
+
+    let db_path = server_a.global_db_path_buf();
+    let home = server_a.tachi_home_dir().to_path_buf();
+    let path = "/wiki/general/admitted-enrichment-live-lease";
+    let staged = staged_auto_ingest_fixture(
+        &server_a,
+        "a live owner must exclude another runtime before provider work",
+        path,
+    );
+    let pending = crate::pipeline_ops::run_staged_auto_ingest(&server_a, staged.clone())
+        .await
+        .expect("A persists and dispatches its durable intent")
+        .expect("A returns pending accounting");
+    assert_eq!(
+        serde_json::from_str::<Value>(&pending).expect("A pending JSON")["failed_stage"],
+        "enrichment_pending"
+    );
+    let item_a = {
+        let mut retained = server_a
+            .enrichment_lock()
+            .retained_enrich_rx
+            .lock()
+            .expect("lock A enrichment receiver");
+        retained
+            .as_mut()
+            .expect("A receiver retained")
+            .try_recv()
+            .expect("A owns the dispatched intent")
+    };
+    let worker_a = {
+        let server = server_a.clone();
+        tokio::spawn(async move {
+            server.flush_enrichment_batch(&mut vec![item_a]).await;
+        })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        provider.started.notified(),
+    )
+    .await
+    .expect("A reaches the paused provider");
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let mut server_b =
+        crate::server_state::MemoryServer::new_with_home_for_test(db_path, None, home)
+            .expect("start B against the same Product DB");
+    server_b.llm =
+        std::sync::Arc::new(tachi_llm::LlmClient::new().expect("construct B provider client"));
+    let replay_b = crate::pipeline_ops::run_staged_auto_ingest(&server_b, staged.clone())
+        .await
+        .expect("B replay remains admitted")
+        .expect("B observes pending accounting");
+    assert_eq!(
+        serde_json::from_str::<Value>(&replay_b).expect("B pending JSON")["failed_stage"],
+        "enrichment_pending"
+    );
+    let item_b = server_b
+        .enrichment_lock()
+        .retained_enrich_rx
+        .lock()
+        .expect("lock B enrichment receiver")
+        .as_mut()
+        .expect("B receiver retained")
+        .try_recv()
+        .ok();
+    let b_received_intent = item_b.is_some();
+    let worker_b = item_b.map(|item| {
+        let server = server_b.clone();
+        tokio::spawn(async move {
+            server.flush_enrichment_batch(&mut vec![item]).await;
+        })
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!b_received_intent, "B must not own a live A intent");
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a live durable lease admits exactly one provider invocation"
+    );
+
+    provider.release.notify_waiters();
+    worker_a.await.expect("join A enrichment worker");
+    if let Some(worker_b) = worker_b {
+        worker_b.await.expect("join unexpected B worker");
+    }
+    let terminal_entry = server_a
+        .with_global_store_read(|store| {
+            store
+                .list_by_path(path, 1, false)
+                .map_err(|error| error.to_string())
+        })
+        .expect("load terminal enriched entry");
+    assert_eq!(terminal_entry.len(), 1);
+    assert!(
+        terminal_entry[0].metadata.get("enrichment").is_some(),
+        "provider completion must persist terminal enrichment evidence: {:?}",
+        terminal_entry[0].metadata
+    );
+    let completed = crate::pipeline_ops::run_staged_auto_ingest(&server_a, staged)
+        .await
+        .expect("terminal evidence completes the job")
+        .expect("terminal receipt returned");
+    assert_eq!(
+        serde_json::from_str::<Value>(&completed).expect("completion JSON")["status"],
+        "completed",
+        "terminal accounting: {completed}"
+    );
+    let (intent, job, receipt, completion) = server_a
+        .with_global_store_read(|store| {
+            let count = |worker: &str| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events WHERE worker = ?1",
+                        [worker],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            };
+            let completion = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log WHERE server_id = 'ingest' \
+                     AND tool_name = 'auto_ingest_job' AND success = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((
+                count("auto_ingest_enrichment_intent")?,
+                count("auto_ingest_job")?,
+                count("auto_ingest_job_receipt")?,
+                completion,
+            ))
+        })
+        .expect("read terminal durable state");
+    assert_eq!((intent, job, receipt, completion), (0, 0, 1, 1));
+    assert_eq!(ingest_effect_counts(&server_a, path).0, 1);
+    provider_task.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn admitted_auto_ingest_stale_consumer_cannot_write_or_retire_after_heartbeat_loss() {
+    let (mut server_a, _home_guard) = crate::tests::make_server_with_temp_home();
+    let (base_url, provider, provider_task) = spawn_paused_admitted_embedding_provider().await;
+    let _base = crate::test_support::EnvRestore::set("VOYAGE_BASE_URL", &base_url);
+    let _key = crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+    let _extract_base = crate::test_support::EnvRestore::set(
+        "EXTRACT_BASE_URL",
+        &format!("{base_url}/chat/completions"),
+    );
+    let _extract_key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-extract-key");
+    let _extract_model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "test-model");
+    server_a.llm =
+        std::sync::Arc::new(tachi_llm::LlmClient::new().expect("construct A provider client"));
+
+    let db_path = server_a.global_db_path_buf();
+    let home = server_a.tachi_home_dir().to_path_buf();
+    let path = "/wiki/general/admitted-enrichment-stale-consumer";
+    let staged = staged_auto_ingest_fixture(
+        &server_a,
+        "heartbeat ownership loss must fence stale provider results",
+        path,
+    );
+    let pending = crate::pipeline_ops::run_staged_auto_ingest(&server_a, staged.clone())
+        .await
+        .expect("A dispatches durable enrichment")
+        .expect("A returns pending accounting");
+    assert_eq!(
+        serde_json::from_str::<Value>(&pending).expect("A pending JSON")["failed_stage"],
+        "enrichment_pending"
+    );
+    let item_a = server_a
+        .enrichment_lock()
+        .retained_enrich_rx
+        .lock()
+        .expect("lock A receiver")
+        .as_mut()
+        .expect("A receiver retained")
+        .try_recv()
+        .expect("A receives owned intent");
+    let worker_a = {
+        let server = server_a.clone();
+        tokio::spawn(async move {
+            server.flush_enrichment_batch(&mut vec![item_a]).await;
+        })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        provider.started.notified(),
+    )
+    .await
+    .expect("A enters paused provider call");
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    crate::enrichment::force_next_admitted_heartbeat_ownership_loss_for_test(&server_a);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    crate::test_support::with_unrestricted_fixture_connection(&db_path, |connection| {
+        connection.execute(
+            "UPDATE processed_events \
+             SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes') \
+             WHERE worker = 'auto_ingest_enrichment_intent'",
+            [],
+        )
+    })
+    .expect("expire A lease after forced heartbeat ownership loss");
+
+    let mut server_b =
+        crate::server_state::MemoryServer::new_with_home_for_test(db_path, None, home)
+            .expect("start B against same Product DB");
+    server_b.llm =
+        std::sync::Arc::new(tachi_llm::LlmClient::new().expect("construct B provider client"));
+    let replay_b = crate::pipeline_ops::run_staged_auto_ingest(&server_b, staged.clone())
+        .await
+        .expect("B reclaims expired intent")
+        .expect("B returns pending accounting");
+    assert_eq!(
+        serde_json::from_str::<Value>(&replay_b).expect("B pending JSON")["failed_stage"],
+        "enrichment_pending"
+    );
+    let item_b = server_b
+        .enrichment_lock()
+        .retained_enrich_rx
+        .lock()
+        .expect("lock B receiver")
+        .as_mut()
+        .expect("B receiver retained")
+        .try_recv()
+        .expect("B owns reclaimed intent");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), worker_a)
+        .await
+        .expect("heartbeat ownership loss cancels A before its provider returns")
+        .expect("join stale A consumer");
+    let after_a = server_b
+        .with_global_store_read(|store| {
+            let entry = store
+                .list_by_path(path, 1, false)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .next()
+                .expect("ingested entry remains");
+            let intent_rows = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM processed_events \
+                     WHERE worker = 'auto_ingest_enrichment_intent'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((entry.metadata.get("enrichment").cloned(), intent_rows))
+        })
+        .expect("read state after stale A returns");
+    assert_eq!(
+        after_a,
+        (None, 1),
+        "stale A must discard provider results and cannot retire B's intent"
+    );
+
+    provider.release.notify_waiters();
+    let worker_b = {
+        let server = server_b.clone();
+        tokio::spawn(async move {
+            server.flush_enrichment_batch(&mut vec![item_b]).await;
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while provider.calls.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("B invokes the provider as the sole current owner");
+    provider.release.notify_waiters();
+    worker_b.await.expect("join B enrichment consumer");
+    let completed = crate::pipeline_ops::run_staged_auto_ingest(&server_b, staged)
+        .await
+        .expect("B terminal evidence completes job")
+        .expect("B completion receipt returned");
+    assert_eq!(
+        serde_json::from_str::<Value>(&completed).expect("B completion JSON")["status"],
+        "completed"
+    );
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let (intent, job, receipt, completion) = server_b
+        .with_global_store_read(|store| {
+            let count = |worker: &str| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events WHERE worker = ?1",
+                        [worker],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            };
+            let completion = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log WHERE server_id = 'ingest' \
+                     AND tool_name = 'auto_ingest_job' AND success = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((
+                count("auto_ingest_enrichment_intent")?,
+                count("auto_ingest_job")?,
+                count("auto_ingest_job_receipt")?,
+                completion,
+            ))
+        })
+        .expect("read B-owned terminal durable state");
+    assert_eq!(
+        (intent, job, receipt, completion),
+        (0, 0, 1, 1),
+        "one B-owned terminal intent, receipt, and completion lifecycle"
+    );
+    assert_eq!(ingest_effect_counts(&server_b, path).0, 1);
+    provider_task.abort();
+}
+
+#[tokio::test]
+async fn admitted_auto_ingest_enrichment_ownership_loss_is_typed_partial() {
+    let server = make_server();
+    let path = "/wiki/general/admitted-enrichment-ownership";
+    let staged = staged_auto_ingest_fixture(
+        &server,
+        "ownership loss immediately before enqueue remains replayable",
+        path,
+    );
+    crate::pipeline_ops::force_next_admitted_enrichment_ownership_loss_for_test(&server);
+
+    let first = crate::pipeline_ops::run_staged_auto_ingest(&server, staged.clone())
+        .await
+        .expect("ownership loss is typed accounting, not a bare error")
+        .expect("staged job remains pending");
+    let first: Value = serde_json::from_str(&first).expect("ownership partial JSON");
+    assert_eq!(first["status"], "partial");
+    assert_eq!(first["failed_stage"], "enrichment_ownership");
+    assert_eq!(first["chunks_saved"], 1);
+    assert_eq!(first["enrichments_enqueued"], 0);
+    assert_eq!(first["edges_written"], 0);
+    assert_eq!(ingest_effect_counts(&server, path), (1, 0, 0));
+    assert_eq!(
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events WHERE worker = 'auto_ingest_job'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count replayable staged job"),
+        1
+    );
+
+    let replay = crate::pipeline_ops::run_staged_auto_ingest(&server, staged)
+        .await
+        .expect("ownership partial is replayable")
+        .expect("retry returns closed accounting");
+    let replay: Value = serde_json::from_str(&replay).expect("retry accounting JSON");
+    assert_eq!(replay["status"], "partial");
+    assert_eq!(replay["failed_stage"], "enrichment_pending");
+    assert_eq!(replay["chunks_saved"], 1);
+    assert_eq!(replay["enrichments_enqueued"], 1);
+    assert_eq!(replay["edges_written"], 0);
+    assert_eq!(ingest_effect_counts(&server, path), (1, 0, 0));
+}
+
+#[tokio::test]
+async fn admitted_auto_ingest_chunk_write_failure_is_partial_and_replayable() {
+    let server = make_server();
+    let path = "/wiki/general/admitted-chunk-partial";
+    let staged = staged_auto_ingest_fixture(&server, &"x".repeat(1300), path);
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| {
+            connection.execute_batch(
+                "CREATE TRIGGER fail_admitted_chunk_write \
+                 BEFORE INSERT ON memories WHEN NEW.path LIKE '%/1' \
+                 BEGIN SELECT RAISE(FAIL, 'injected admitted chunk failure'); END;",
+            )
+        },
+    )
+    .expect("inject admitted chunk write failure");
+
+    let first = crate::pipeline_ops::run_staged_auto_ingest(&server, staged.clone())
+        .await
+        .expect("chunk failure is a typed partial outcome")
+        .expect("partial chunk receipt is returned");
+    let first: Value = serde_json::from_str(&first).expect("partial JSON");
+    assert_eq!(first["status"], "partial");
+    assert_eq!(first["failed_stage"], "chunk_write");
+    assert_eq!(first["chunks_saved"], 1);
+    assert_eq!(
+        ingest_effect_counts(&server, path),
+        (1, 0, 0),
+        "the committed prefix is reported without a false completion"
+    );
+
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| connection.execute_batch("DROP TRIGGER fail_admitted_chunk_write"),
+    )
+    .expect("restore admitted chunk writes");
+    complete_admitted_enrichment_stage(&server, &staged).await;
+    let replay = crate::pipeline_ops::run_staged_auto_ingest(&server, staged)
+        .await
+        .expect("partial chunk stage can replay")
+        .expect("replay returns completion accounting");
+    let replay: Value = serde_json::from_str(&replay).expect("completion JSON");
+    assert_eq!(replay["status"], "completed");
+    assert_eq!(ingest_effect_counts(&server, path).0, 2);
+}
+
+#[tokio::test]
+async fn admitted_auto_ingest_completion_receipt_failure_is_partial_and_replayable() {
+    let server = make_server();
+    let path = "/wiki/general/admitted-receipt-partial";
+    let staged =
+        staged_auto_ingest_fixture(&server, "receipt failure must remain replayable", path);
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| {
+            connection.execute_batch(
+                "CREATE TRIGGER fail_admitted_auto_ingest_completion \
+                 BEFORE INSERT ON audit_log \
+                 WHEN NEW.server_id = 'ingest' AND NEW.tool_name = 'auto_ingest_job' \
+                   AND NEW.success = 1 \
+                 BEGIN SELECT RAISE(FAIL, 'injected admitted completion receipt failure'); END;",
+            )
+        },
+    )
+    .expect("inject admitted completion receipt failure");
+
+    complete_admitted_enrichment_stage(&server, &staged).await;
+
+    let first = crate::pipeline_ops::run_staged_auto_ingest(&server, staged.clone())
+        .await
+        .expect("completion-receipt failure is a typed partial outcome")
+        .expect("partial receipt is returned");
+    let first: Value = serde_json::from_str(&first).expect("partial JSON");
+    assert_eq!(first["status"], "partial");
+    assert_eq!(first["failed_stage"], "completion_receipt");
+
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| connection.execute_batch("DROP TRIGGER fail_admitted_auto_ingest_completion"),
+    )
+    .expect("restore completion receipt writes");
+    let replay = crate::pipeline_ops::run_staged_auto_ingest(&server, staged)
+        .await
+        .expect("partial completion receipt can replay")
+        .expect("replay returns a receipt");
+    let replay: Value = serde_json::from_str(&replay).expect("completion JSON");
+    assert_eq!(replay["status"], "replayed");
+    assert_eq!(ingest_effect_counts(&server, path).0, 1);
+}
+
+#[tokio::test]
+async fn admitted_auto_ingest_terminal_replay_returns_the_durable_receipt() {
+    let server = make_server();
+    let path = "/wiki/general/admitted-terminal-receipt";
+    let staged = staged_auto_ingest_fixture(&server, "terminal replay accounting", path);
+
+    complete_admitted_enrichment_stage(&server, &staged).await;
+
+    let completed = crate::pipeline_ops::run_staged_auto_ingest(&server, staged.clone())
+        .await
+        .expect("initial admitted ingest completes")
+        .expect("completed receipt is returned");
+    let completed: Value = serde_json::from_str(&completed).expect("completed JSON");
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["chunks_saved"], 1);
+    assert_eq!(completed["enrichments_enqueued"], 1);
+
+    let replayed = crate::pipeline_ops::run_staged_auto_ingest(&server, staged)
+        .await
+        .expect("same staged handle resolves its durable terminal receipt")
+        .expect("replayed receipt is returned");
+    let replayed: Value = serde_json::from_str(&replayed).expect("replayed JSON");
+    assert_eq!(replayed["status"], "replayed");
+    assert_eq!(replayed["chunks_saved"], completed["chunks_saved"]);
+    assert_eq!(replayed["ids"], completed["ids"]);
+    assert_eq!(ingest_effect_counts(&server, path).0, 1);
+}
+
+#[test]
+fn admitted_auto_ingest_bounds_accept_exact_edges_and_reject_plus_one() {
+    let cases = [
+        (
+            "raw_bytes_exact",
+            "x".repeat(2 * 1024 * 1024),
+            8192,
+            0,
+            true,
+        ),
+        (
+            "raw_bytes_plus_one",
+            "x".repeat(2 * 1024 * 1024 + 1),
+            8192,
+            0,
+            false,
+        ),
+        ("chunk_size_exact", "fixture".to_string(), 8192, 0, true),
+        ("chunk_size_plus_one", "fixture".to_string(), 8193, 0, false),
+        (
+            "overlap_below_size",
+            "fixture".to_string(),
+            1200,
+            1199,
+            true,
+        ),
+        (
+            "overlap_equals_size",
+            "fixture".to_string(),
+            1200,
+            1200,
+            false,
+        ),
+        ("chunk_count_exact", "x".repeat(2048), 1, 0, true),
+        ("chunk_count_plus_one", "x".repeat(2049), 1, 0, false),
+    ];
+    for (label, content, chunk_size, overlap, accepted) in cases {
+        let result = crate::pipeline_ops::validate_admitted_ingest_bounds_for_test(
+            content, chunk_size, overlap,
+        );
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{label} boundary acceptance: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admitted_auto_ingest_edge_failure_is_partial_without_duplicate_chunks() {
+    let server = make_server();
+    let path = "/wiki/general/admitted-edge-partial";
+    let mut target = make_entry("admitted-edge-target");
+    target.path = "/wiki/general/admitted-edge-target".to_string();
+    target.text = "shared admitted edge discriminator phrase".to_string();
+    target.summary = target.text.clone();
+    target.domain = Some("general".to_string());
+    target.metadata = json!({"allow_cross_project": true});
+    server
+        .with_global_store(|store| store.upsert(&target).map_err(|error| error.to_string()))
+        .expect("seed admitted edge peer");
+    let staged =
+        staged_auto_ingest_fixture(&server, "shared admitted edge discriminator phrase", path);
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| {
+            connection.execute_batch(
+                "CREATE TRIGGER fail_admitted_edge_write \
+                 BEFORE INSERT ON memory_edges \
+                 BEGIN SELECT RAISE(FAIL, 'injected admitted edge failure'); END;",
+            )
+        },
+    )
+    .expect("inject admitted edge failure");
+
+    complete_admitted_enrichment_stage(&server, &staged).await;
+
+    let first = crate::pipeline_ops::run_staged_auto_ingest(&server, staged.clone())
+        .await
+        .expect("edge failure is a typed partial outcome")
+        .expect("partial receipt is returned");
+    let first: Value = serde_json::from_str(&first).expect("partial JSON");
+    assert_eq!(first["status"], "partial");
+    assert_eq!(first["failed_stage"], "edge_write");
+    assert_eq!(first["chunks_saved"], 1);
+
+    crate::test_support::with_unrestricted_fixture_connection(
+        &server.global_db_path_buf(),
+        |connection| connection.execute_batch("DROP TRIGGER fail_admitted_edge_write"),
+    )
+    .expect("restore edge writes");
+    let replay = crate::pipeline_ops::run_staged_auto_ingest(&server, staged)
+        .await
+        .expect("partial edge stage can replay")
+        .expect("replay returns a receipt");
+    let replay: Value = serde_json::from_str(&replay).expect("replay JSON");
+    assert_eq!(replay["status"], "completed");
+    assert_eq!(ingest_effect_counts(&server, path).0, 1);
+}
+
+#[test]
+fn memory_inventory_and_ingest_callers_remain_source_derived_during_transition() {
+    let inventory_source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tachi-params/src/facade/action_inventory.rs"
+    ));
+    let inventory_block = inventory_source
+        .split("pub const TACHI_MEMORY_ACTIONS")
+        .nth(1)
+        .and_then(|source| source.split("];").next())
+        .expect("locate the production Memory action inventory");
+    let inventory = inventory_block
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix('"')
+                .and_then(|line| line.split('"').next())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(inventory.len(), 17, "#1689 owns the later 17 -> 9 fold");
+
+    let facade = include_str!("../../../facade_memory_ops/mod.rs");
+    let facade_inventory_block = facade
+        .split("match action.as_str()")
+        .nth(1)
+        .and_then(|source| source.split("\"recall_simulate\"").next())
+        .expect("locate active Memory facade action arms");
+    let facade_inventory = facade_inventory_block
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let action = line.strip_prefix('"')?.split('"').next()?;
+            line.contains("=>").then_some(action)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        facade_inventory, inventory,
+        "facade routing must remain an exact source-derived projection of the 17 actions"
+    );
+    let direct_source_calls = facade.matches("handle_ingest_source(").count();
+    assert_eq!(
+        direct_source_calls, 1,
+        "the one legacy Memory ingest_source caller stays explicit until #1689"
+    );
+    assert!(
+        facade.contains("handle_ingest("),
+        "the legacy unified Memory ingest caller also remains transitional"
+    );
+
+    let auto_ingest = include_str!("../../../pipeline_ops/auto_ingest.rs");
+    assert!(
+        auto_ingest.contains("run_admitted_ingest_from_staged_job("),
+        "MCP replay must enter the typed staged-job owner"
+    );
+    assert_eq!(
+        auto_ingest.matches("handle_ingest_source(").count(),
+        0,
+        "MCP replay cannot bypass the typed staged-job owner"
+    );
+    let proxy = include_str!("../../../mcp_pool/proxy.rs");
+    assert!(proxy.contains("stage_auto_ingest_from_mcp("));
+    assert!(proxy.contains("run_staged_auto_ingest("));
+    assert!(!proxy.contains("handle_ingest_source("));
+
+    for (surface, source) in [
+        ("save", include_str!("../../../facade_save_ops.rs")),
+        (
+            "extract_facts",
+            include_str!("../../../pipeline_ops/ingest/extract.rs"),
+        ),
+    ] {
+        for forbidden_authority in [
+            "reqwest::",
+            "std::fs::read",
+            "tokio::fs::read",
+            "File::open(",
+            "Command::new(",
+        ] {
+            assert!(
+                !source.contains(forbidden_authority),
+                "{surface} accepts text/reference data but owns no fetch/filesystem/command authority: {forbidden_authority}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn auto_ingest_hook_persists_mcp_text_results() {
     let server = make_server();
@@ -27,6 +1207,8 @@ async fn auto_ingest_hook_persists_mcp_text_results() {
     )
     .expect("auto ingest staging must succeed")
     .expect("auto ingest enabled with text content");
+    let staged_job_id = staged.job_id.clone();
+    complete_admitted_enrichment_stage(&server, &staged).await;
     let response = crate::pipeline_ops::run_staged_auto_ingest(&server, staged)
         .await
         .expect("auto ingest must report durable completion")
@@ -42,6 +1224,10 @@ async fn auto_ingest_hook_persists_mcp_text_results() {
         })
         .expect("read synchronously persisted auto-ingest rows");
     assert_eq!(entries.len(), 1, "auto ingest must finish before returning");
+    assert_eq!(entries[0].metadata["capability_id"], "mcp:web-reader");
+    assert_eq!(entries[0].metadata["tool_name"], "webReader");
+    assert_eq!(entries[0].metadata["admitted_job_id"], staged_job_id);
+    assert!(entries[0].metadata["admitted_idempotency_key"].is_string());
     let pending_jobs = server
         .with_global_store_read(|store| {
             store
@@ -58,7 +1244,21 @@ async fn auto_ingest_hook_persists_mcp_text_results() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
 async fn production_runtime_replays_staged_auto_ingest_exactly_once_after_restart() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (base_url, _provider_calls, provider_task) =
+        spawn_admitted_ingest_embedding_provider().await;
+    let _base = crate::test_support::EnvRestore::set("VOYAGE_BASE_URL", &base_url);
+    let _key = crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+    let _extract_base = crate::test_support::EnvRestore::set(
+        "EXTRACT_BASE_URL",
+        &format!("{base_url}/chat/completions"),
+    );
+    let _extract_key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-extract-key");
+    let _extract_model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "test-model");
     let temp = tempfile::tempdir().expect("auto-ingest replay tempdir");
     let db_path = temp.path().join("global.db");
 
@@ -105,7 +1305,7 @@ async fn production_runtime_replays_staged_auto_ingest_exactly_once_after_restar
     )
     .expect("create replacement production runtime with workers");
     let mut completed = false;
-    for _ in 0..200 {
+    for _ in 0..600 {
         let state = replay_runtime
             .with_global_store_read(|store| {
                 let memories = store
@@ -193,6 +1393,7 @@ async fn production_runtime_replays_staged_auto_ingest_exactly_once_after_restar
         "logical replay completion is durable once"
     );
     assert_eq!(terminal_claims, 1, "completed lease row remains terminal");
+    provider_task.abort();
 }
 
 #[tokio::test]
@@ -301,6 +1502,15 @@ async fn malformed_oldest_batch_is_quarantined_without_starving_valid_job() {
         second_cycle, 1,
         "valid job progresses after quarantine batch"
     );
+    assert_eq!(
+        server.complete_retained_admitted_enrichments_for_test(),
+        1,
+        "valid job's durable enrichment intent reaches terminal entry evidence"
+    );
+    let completion_cycle = crate::pipeline_ops::replay_pending_auto_ingest_once(&server)
+        .await
+        .expect("terminal enrichment evidence retires the valid job");
+    assert_eq!(completion_cycle, 1, "valid job completes exactly once");
     let third_cycle = crate::pipeline_ops::replay_pending_auto_ingest_once(&server)
         .await
         .expect("terminal quarantine rows are not retried");
