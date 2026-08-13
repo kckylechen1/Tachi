@@ -194,6 +194,18 @@ fn transport_server_and_protocol_failures_are_all_this_authoritys_business() {
 
 // ─── Retry-After: two forms, one instant ─────────────────────────────────────
 
+/// The instant a `Retry-After` header resolves to, or a panic naming the form
+/// that failed. Every HTTP-date case below goes through this, so "parsed at
+/// all" and "parsed to the right moment" are never conflated.
+fn http_date(raw: &str) -> String {
+    match RetryAfter::parse(raw).unwrap_or_else(|| panic!("{raw:?} must parse as an HTTP-date")) {
+        RetryAfter::HttpDate(instant) => iso(instant),
+        RetryAfter::DeltaSeconds(seconds) => {
+            panic!("{raw:?} was read as {seconds} delta-seconds, not as a date")
+        }
+    }
+}
+
 #[test]
 fn retry_after_parses_both_forms_the_spec_allows() {
     assert_eq!(
@@ -204,21 +216,90 @@ fn retry_after_parses_both_forms_the_spec_allows() {
         RetryAfter::parse(" 120 "),
         Some(RetryAfter::DeltaSeconds(120))
     );
-    let date = RetryAfter::parse("Wed, 21 Oct 2026 07:28:00 GMT").expect("IMF-fixdate parses");
-    let RetryAfter::HttpDate(instant) = date else {
-        panic!("an HTTP-date must not be read as a delta-seconds count");
-    };
-    assert_eq!(iso(instant), "2026-10-21T07:28:00.000Z");
+    assert_eq!(
+        http_date("Wed, 21 Oct 2026 07:28:00 GMT"),
+        "2026-10-21T07:28:00.000Z"
+    );
+}
+
+#[test]
+fn every_http_date_format_a_recipient_must_accept_is_accepted() {
+    // RFC 9110 §5.6.7: a sender emits IMF-fixdate, but a **recipient** must
+    // accept all three formats, because deployed servers still emit the
+    // obsolete two. An earlier revision refused them and fell back to the class
+    // default, which threw away an instruction the provider actually gave
+    // (codex review of PR-C, CP3). All three name the same moment here, so the
+    // assertion is that the *format* changed and the instant did not.
+    assert_eq!(
+        http_date("Sun, 06 Nov 1994 08:49:37 GMT"),
+        "1994-11-06T08:49:37.000Z",
+        "IMF-fixdate"
+    );
+    assert_eq!(
+        http_date("Sunday, 06-Nov-94 08:49:37 GMT"),
+        "1994-11-06T08:49:37.000Z",
+        "RFC 850"
+    );
+    assert_eq!(
+        http_date("Sun Nov  6 08:49:37 1994"),
+        "1994-11-06T08:49:37.000Z",
+        "asctime — space-padded day, no zone at all"
+    );
+    // asctime with a two-digit day is the other half of its grammar.
+    assert_eq!(
+        http_date("Fri Oct 23 08:49:37 2026"),
+        "2026-10-23T08:49:37.000Z",
+        "asctime, two-digit day"
+    );
+    // A near-future RFC 850 date, the only kind a `Retry-After` realistically
+    // carries: the two-digit year must land in this century, not the last.
+    assert_eq!(
+        http_date("Wednesday, 21-Oct-26 07:28:00 GMT"),
+        "2026-10-21T07:28:00.000Z",
+        "RFC 850 with a two-digit year the provider means as 2026"
+    );
+}
+
+#[test]
+fn an_obsolete_date_form_buys_the_same_cooldown_as_the_modern_one() {
+    // The point of accepting all three: the row must not depend on which
+    // grammar the provider happened to render.
+    let now = DateTime::parse_from_rfc3339("2026-10-21T07:26:30Z")
+        .expect("fixed instant")
+        .with_timezone(&Utc);
+    let renderings = [
+        "Wed, 21 Oct 2026 07:28:00 GMT",
+        "Wednesday, 21-Oct-26 07:28:00 GMT",
+        "Wed Oct 21 07:28:00 2026",
+    ];
+    for raw in renderings {
+        let header = RetryAfter::parse(raw).unwrap_or_else(|| panic!("{raw:?} parses"));
+        assert_eq!(
+            header.cooldown_secs_from(now),
+            90,
+            "{raw:?} names a moment 90 seconds out"
+        );
+    }
 }
 
 #[test]
 fn an_unparseable_retry_after_is_not_guessed_at() {
-    // Obsolete formats and junk both fall back to the class default rather than
-    // being coerced into a confident wrong instant.
-    assert_eq!(RetryAfter::parse("Wednesday, 21-Oct-26 07:28:00 GMT"), None);
+    // Junk still falls back to the class default rather than being coerced
+    // into a confident wrong instant. What is *not* junk is any of the three
+    // HTTP-date formats — see the test above.
     assert_eq!(RetryAfter::parse("soon"), None);
     assert_eq!(RetryAfter::parse(""), None);
     assert_eq!(RetryAfter::parse("-30"), None);
+    assert_eq!(
+        RetryAfter::parse("2026-10-21T07:28:00Z"),
+        None,
+        "RFC 3339 is not an HTTP-date; reading it as one would be the guess this refuses"
+    );
+    assert_eq!(
+        RetryAfter::parse("Wed, 21 Oct 2026 07:28:00"),
+        None,
+        "an HTTP-date with its zone missing is malformed, not asctime"
+    );
 }
 
 #[test]

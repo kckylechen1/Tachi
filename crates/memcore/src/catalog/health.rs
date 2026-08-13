@@ -52,8 +52,9 @@
 //! describes how it is behaving this minute (#1681 D1's table boundary).
 //!
 //! `Retry-After` is honoured in both forms RFC 9110 §10.2.3 allows — a
-//! delta-seconds count and an HTTP-date — and both are resolved to an
-//! **instant** ([`RetryAfter::cooldown_until`]). Comparing or sorting the
+//! delta-seconds count and an HTTP-date, the latter in all three formats
+//! §5.6.7 requires a recipient to accept — and every one of them is resolved to
+//! an **instant** ([`RetryAfter::cooldown_until`]). Comparing or sorting the
 //! rendered strings would get a date-form header wrong in exactly the way
 //! `ModelDeployment::freshness_at` documents for `expires_at`. A header we
 //! cannot parse falls back to the class default rather than being guessed at,
@@ -61,7 +62,7 @@
 //! be able to park a deployment forever, and a date already in the past must
 //! not produce a negative cooldown that reads as "no cooldown at all".
 
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
 
 use super::{DeploymentEventKind, ModelDeploymentHealth, NewModelDeploymentEvent};
@@ -102,18 +103,44 @@ const MAX_COOLDOWN_SECS: u64 = 3600;
 pub enum RetryAfter {
     /// `Retry-After: 120`
     DeltaSeconds(u64),
-    /// `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` (IMF-fixdate).
+    /// An HTTP-date, in any of the three formats RFC 9110 §5.6.7 defines.
     HttpDate(DateTime<Utc>),
 }
+
+/// `Sunday, 06-Nov-94 08:49:37 GMT` — the obsolete RFC 850 form. Two-digit
+/// year; see [`RetryAfter::parse`] on why that is harmless here.
+const RFC850_DATE_FORMAT: &str = "%A, %d-%b-%y %H:%M:%S GMT";
+/// `Sun Nov  6 08:49:37 1994` — the obsolete ANSI C `asctime()` form. No zone
+/// at all; §5.6.7 fixes every HTTP-date at UTC, so there is nothing to infer.
+const ASCTIME_DATE_FORMAT: &str = "%a %b %e %H:%M:%S %Y";
 
 impl RetryAfter {
     /// Parse a raw header value, or `None` if it is neither form.
     ///
-    /// The obsolete RFC 850 and asctime date formats are **not** accepted:
-    /// guessing at a format the provider is not supposed to send would turn a
-    /// malformed header into a confident wrong instant, and the class default
-    /// is the honest answer. `None` here is not an error — the caller falls
-    /// back to the default for the outcome class.
+    /// # All three HTTP-date formats
+    ///
+    /// RFC 9110 §5.6.7 is explicit that a *sender* must emit IMF-fixdate while
+    /// a **recipient must accept all three** — IMF-fixdate, RFC 850 and
+    /// asctime — precisely because deployed servers still emit the obsolete
+    /// ones. An earlier revision of this function rejected the obsolete forms
+    /// on the reasoning that guessing at a format a provider "is not supposed
+    /// to send" would manufacture a confident wrong instant. That reasoning
+    /// does not survive contact with the spec: these are not guesses, they are
+    /// named formats with fixed grammars, and refusing them threw away an
+    /// instruction the provider actually gave us in favour of a made-up class
+    /// default. (codex review of #1681 PR-C, CP3.)
+    ///
+    /// The two-digit year in the RFC 850 form is read with chrono's fixed
+    /// pivot (`00..=68` → 2000s, `69..=99` → 1900s) rather than §5.6.7's
+    /// sliding "more than 50 years in the future means the most recent past
+    /// year" rule. The two agree for every year a `Retry-After` can plausibly
+    /// name, and the difference cannot reach a row regardless: a cooldown is
+    /// clamped to `1..=3600` seconds, so a century-scale misreading resolves to
+    /// the same one second (a date in the past) or the same hour (a date far
+    /// in the future) either way.
+    ///
+    /// `None` is still not an error — junk falls back to the class default for
+    /// the outcome.
     pub fn parse(raw: &str) -> Option<Self> {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -122,10 +149,26 @@ impl RetryAfter {
         if let Ok(seconds) = raw.parse::<u64>() {
             return Some(Self::DeltaSeconds(seconds));
         }
-        // IMF-fixdate is an RFC 2822 date-time whose zone is `GMT`.
-        DateTime::parse_from_rfc2822(raw)
-            .ok()
-            .map(|parsed| Self::HttpDate(parsed.with_timezone(&Utc)))
+        Self::parse_http_date(raw).map(Self::HttpDate)
+    }
+
+    /// An HTTP-date in any of §5.6.7's three formats, as an instant.
+    ///
+    /// Every one of them is UTC by definition, so the obsolete forms — which
+    /// carry either a literal `GMT` or no zone at all — are read as naive
+    /// civil times and stamped UTC rather than being given a local offset.
+    fn parse_http_date(raw: &str) -> Option<DateTime<Utc>> {
+        // IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) is an RFC 2822
+        // date-time whose zone is `GMT`.
+        if let Ok(parsed) = DateTime::parse_from_rfc2822(raw) {
+            return Some(parsed.with_timezone(&Utc));
+        }
+        for format in [RFC850_DATE_FORMAT, ASCTIME_DATE_FORMAT] {
+            if let Ok(naive) = NaiveDateTime::parse_from_str(raw, format) {
+                return Some(naive.and_utc());
+            }
+        }
+        None
     }
 
     /// The cooldown this header buys, in seconds from `now`, clamped.
