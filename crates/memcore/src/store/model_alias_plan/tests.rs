@@ -10,7 +10,9 @@ use crate::catalog::alias_plan::{
     AliasAction, AliasPlanBindings, AliasRevisionBinding, BoundAliasPlan, DeploymentRevisionBinding,
 };
 use crate::catalog::{CatalogSource, NewModelDeployment, ProtocolKind, ALIAS_STATUS_RETIRED};
-use crate::db::model_catalog::upsert_model_deployment;
+use crate::db::model_catalog::{
+    list_all_model_alias_events, list_model_alias_events, upsert_model_deployment,
+};
 
 const OBSERVED_AT: &str = "2026-08-13T00:00:00.000Z";
 
@@ -438,6 +440,151 @@ fn retiring_a_binding_leaves_the_reverse_lookup_intact() {
     assert!(!current_alias_bindings(store.connection())
         .expect("bindings")
         .contains_key("chat.default"));
+}
+
+// ─── The single write door and its log (#1681 PR-D review, CP4) ─────────────
+
+/// Every alias paired with the revision its newest event says it reached.
+///
+/// This is the reconciliation the append-only log exists to make possible: the
+/// door writes the row and its event in the same transaction, so an alias whose
+/// current revision is not its newest event's revision — or which has no event
+/// at all — was moved by something that did not come through the door.
+fn revisions_against_the_log(store: &MemoryStore) -> Vec<(String, i64, Option<i64>)> {
+    list_model_aliases(store.connection())
+        .expect("aliases")
+        .into_iter()
+        .map(|alias| {
+            let newest = list_model_alias_events(store.connection(), &alias.alias_name)
+                .expect("events")
+                .last()
+                .map(|event| event.revision);
+            (alias.alias_name, alias.revision, newest)
+        })
+        .collect()
+}
+
+#[test]
+fn every_write_the_door_makes_is_logged_and_an_idempotent_replay_logs_nothing() {
+    let mut store = store();
+    seed_deployment(&store, "env:reasoning");
+
+    let plan = first_plan(&store);
+    let report = apply(&mut store, &plan).expect("apply");
+
+    let events = list_all_model_alias_events(store.connection()).expect("events");
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|event| event.event_kind.as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            AliasEventKind::AliasDeclared.as_str(),
+            AliasEventKind::AliasBindingBound.as_str()
+        ],
+        "one event per write, in the order the plan's actions ran"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.plan_digest.as_deref() == Some(report.plan_digest.as_str())),
+        "every event names the approved plan that caused it"
+    );
+    assert_eq!(
+        events[1].evidence, r#"{"deployment_id":"env:reasoning","priority":0}"#,
+        "a binding event carries the pair it bound, and nothing else"
+    );
+
+    // The row and the log agree, which is the property a bypass breaks.
+    assert_eq!(
+        revisions_against_the_log(&store),
+        vec![("chat.default".to_string(), 2, Some(2))]
+    );
+
+    // Re-declare and re-bind exactly what is there. Nothing moves, so nothing
+    // is logged: an idempotent replay that appended events would turn "nothing
+    // happened" into an audit trail saying otherwise.
+    let replay = BoundAliasPlan {
+        bindings: AliasPlanBindings {
+            policy_revision: policy_revision(&store),
+            aliases: vec![AliasRevisionBinding {
+                alias_name: "chat.default".to_string(),
+                revision: Some(2),
+            }],
+            deployments: vec![DeploymentRevisionBinding {
+                deployment_id: "env:reasoning".to_string(),
+                revision: Some(1),
+            }],
+        },
+        actions: vec![
+            declare("chat.default"),
+            bind("chat.default", "env:reasoning", 0),
+        ],
+    };
+    assert!(!apply(&mut store, &replay).expect("replay").changed);
+    assert_eq!(
+        list_all_model_alias_events(store.connection())
+            .expect("events")
+            .len(),
+        2,
+        "a no-change apply appends no event"
+    );
+}
+
+#[test]
+fn a_refused_plan_writes_no_event_either() {
+    let mut store = store();
+    seed_deployment(&store, "env:reasoning");
+    let plan = first_plan(&store);
+    let honest_digest = alias_plan_digest(&plan);
+
+    let mut tampered = plan;
+    tampered.actions[0] = AliasAction::RetireAlias {
+        alias_name: "chat.default".to_string(),
+    };
+
+    store
+        .apply_model_alias_plan(&tampered, &honest_digest)
+        .expect_err("a rewritten action does not apply under the reviewed digest");
+    assert!(
+        list_all_model_alias_events(store.connection())
+            .expect("events")
+            .is_empty(),
+        "'drift = zero writes' covers the log: a refused plan leaves no trace \
+         claiming it did something"
+    );
+}
+
+#[test]
+fn a_write_that_goes_around_the_door_is_the_one_the_log_cannot_account_for() {
+    let mut store = store();
+    seed_deployment(&store, "env:reasoning");
+    let plan = first_plan(&store);
+    apply(&mut store, &plan).expect("apply");
+    assert_eq!(
+        revisions_against_the_log(&store),
+        vec![("chat.default".to_string(), 2, Some(2))]
+    );
+
+    // There is no Rust API that could do this any more: since CP4 the alias
+    // write accessors are `pub(crate)` and take an `AliasWriteAuthority` whose
+    // only constructor is private to the apply module. Hand-written SQL is the
+    // one remaining bypass, and this is what it leaves behind.
+    store
+        .connection()
+        .execute(
+            "UPDATE model_aliases SET revision = revision + 1 WHERE alias_name = 'chat.default'",
+            [],
+        )
+        .expect("unreviewed write");
+
+    assert_eq!(
+        revisions_against_the_log(&store),
+        vec![("chat.default".to_string(), 3, Some(2))],
+        "the row moved and the log did not: an alias whose revision is not its \
+         newest event's revision was written by something other than plan/apply"
+    );
 }
 
 #[test]

@@ -30,13 +30,39 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::catalog::alias_plan::{alias_plan_digest, AliasAction, BoundAliasPlan};
 use crate::catalog::alias_policy::alias_set_policy_revision;
+use crate::catalog::{AliasEventKind, NewModelAliasEvent};
 use crate::db::model_catalog::{
-    bind_model_alias_deployment, get_model_alias, get_model_deployment, list_model_alias_bindings,
-    list_model_aliases, retire_model_alias, retire_model_alias_binding, stamp_alias_policy_digest,
-    upsert_model_alias, AliasDeclaration, AliasWrite,
+    append_model_alias_event, bind_model_alias_deployment, get_model_alias, get_model_deployment,
+    list_model_alias_bindings, list_model_aliases, retire_model_alias, retire_model_alias_binding,
+    stamp_alias_policy_digest, upsert_model_alias, AliasDeclaration, AliasWrite,
 };
 use crate::error::{AliasPlanRefusal, MemoryError};
 use crate::MemoryStore;
+
+/// Proof that an alias write is happening inside this module's verified apply.
+///
+/// Every `model_aliases` / `model_alias_bindings` / `model_alias_events` write
+/// accessor in `db::model_catalog` takes one, and the only constructor is
+/// private to this module. That is what makes "plan/apply is the single write
+/// door" a compile-time fact rather than a comment: no other module — in this
+/// crate or any other — can produce the token, so no other module can perform
+/// the write. The token carries no data and is never inspected; its whole
+/// content is who is allowed to have made it.
+///
+/// The one bypass it cannot close is hand-written SQL against the tables. That
+/// is what the `policy_digest` stamp on every active alias and the
+/// `model_alias_events` log are for: a row the door did not write is a row
+/// whose stamp and whose newest event do not line up with the current set.
+pub struct AliasWriteAuthority(());
+
+impl AliasWriteAuthority {
+    /// Private on purpose — see the type's doc. `apply_within` is the only
+    /// caller, and it has already verified the plan digest and taken
+    /// `BEGIN IMMEDIATE` by the time it mints one.
+    fn for_verified_apply() -> Self {
+        Self(())
+    }
+}
 
 /// One alias and the revision it now sits at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -135,8 +161,13 @@ fn apply_within(
         bindings_retired: Vec::new(),
         policy_revision: plan.bindings.policy_revision.clone(),
     };
+    // Everything past this point writes, and every write takes the token —
+    // minted here, after the digest matched and every bound revision re-read
+    // clean inside the write lock.
+    let authority = AliasWriteAuthority::for_verified_apply();
+    let plan_digest = report.plan_digest.clone();
     for action in &plan.actions {
-        run_action(tx, action, &mut report)?;
+        run_action(tx, &authority, &plan_digest, action, &mut report)?;
     }
 
     report.changed = !report.aliases_declared.is_empty()
@@ -154,7 +185,12 @@ fn apply_within(
         report.policy_revision = current_policy_revision(tx)?;
         for alias in list_model_aliases(tx)? {
             if alias.status == crate::catalog::ALIAS_STATUS_ACTIVE {
-                stamp_alias_policy_digest(tx, &alias.alias_name, &report.policy_revision)?;
+                stamp_alias_policy_digest(
+                    tx,
+                    &authority,
+                    &alias.alias_name,
+                    &report.policy_revision,
+                )?;
             }
         }
     }
@@ -365,6 +401,8 @@ fn describe(revision: Option<i64>) -> String {
 
 fn run_action(
     tx: &Transaction<'_>,
+    authority: &AliasWriteAuthority,
+    plan_digest: &str,
     action: &AliasAction,
     report: &mut AliasApplyReport,
 ) -> Result<(), MemoryError> {
@@ -377,6 +415,7 @@ fn run_action(
         } => {
             let write = upsert_model_alias(
                 tx,
+                authority,
                 &AliasDeclaration {
                     alias_name: alias_name.clone(),
                     required_capabilities: required_capabilities.clone(),
@@ -384,15 +423,46 @@ fn run_action(
                     source_refs: source_refs.clone(),
                 },
             )?;
-            record(write, &mut report.aliases_declared, alias_name);
+            let kind = match write {
+                AliasWrite::Created { .. } => AliasEventKind::AliasDeclared,
+                // `Unchanged` never reaches the log — `record` drops it.
+                AliasWrite::Unchanged { .. } | AliasWrite::Advanced { .. } => {
+                    AliasEventKind::AliasUpdated
+                }
+            };
+            let event = AliasEvent {
+                alias_name,
+                kind,
+                evidence: "{}".to_string(),
+            };
+            record(
+                tx,
+                authority,
+                plan_digest,
+                write,
+                event,
+                &mut report.aliases_declared,
+            )?;
         }
         AliasAction::RetireAlias { alias_name } => {
             // `None` — the alias is not there. The plan bound its absence and
             // the binding verified, so there is nothing to retire and nothing
             // to report; refusing here would refuse a plan that asked for a
             // state the world is already in.
-            if let Some(write) = retire_model_alias(tx, alias_name)? {
-                record(write, &mut report.aliases_retired, alias_name);
+            if let Some(write) = retire_model_alias(tx, authority, alias_name)? {
+                let event = AliasEvent {
+                    alias_name,
+                    kind: AliasEventKind::AliasRetired,
+                    evidence: "{}".to_string(),
+                };
+                record(
+                    tx,
+                    authority,
+                    plan_digest,
+                    write,
+                    event,
+                    &mut report.aliases_retired,
+                )?;
             }
         }
         AliasAction::BindDeployment {
@@ -400,8 +470,19 @@ fn run_action(
             deployment_id,
             priority,
         } => {
-            let write = bind_model_alias_deployment(tx, alias_name, deployment_id, *priority)?;
+            let write =
+                bind_model_alias_deployment(tx, authority, alias_name, deployment_id, *priority)?;
             if write.changed() {
+                let event = AliasEvent {
+                    alias_name,
+                    kind: AliasEventKind::AliasBindingBound,
+                    evidence: serde_json::json!({
+                        "deployment_id": deployment_id,
+                        "priority": priority,
+                    })
+                    .to_string(),
+                };
+                event.append(tx, authority, plan_digest, write.revision())?;
                 report.bindings_bound.push(AliasBindingRef {
                     alias_name: alias_name.clone(),
                     deployment_id: deployment_id.clone(),
@@ -412,8 +493,16 @@ fn run_action(
             alias_name,
             deployment_id,
         } => {
-            if let Some(write) = retire_model_alias_binding(tx, alias_name, deployment_id)? {
+            if let Some(write) =
+                retire_model_alias_binding(tx, authority, alias_name, deployment_id)?
+            {
                 if write.changed() {
+                    let event = AliasEvent {
+                        alias_name,
+                        kind: AliasEventKind::AliasBindingRetired,
+                        evidence: serde_json::json!({ "deployment_id": deployment_id }).to_string(),
+                    };
+                    event.append(tx, authority, plan_digest, write.revision())?;
                     report.bindings_retired.push(AliasBindingRef {
                         alias_name: alias_name.clone(),
                         deployment_id: deployment_id.clone(),
@@ -425,13 +514,56 @@ fn run_action(
     Ok(())
 }
 
-fn record(write: AliasWrite, into: &mut Vec<AliasRevision>, alias_name: &str) {
-    if write.changed() {
-        into.push(AliasRevision {
-            alias_name: alias_name.to_string(),
-            revision: write.revision(),
-        });
+/// One audit row about to be written, assembled beside the write that earns it.
+struct AliasEvent<'a> {
+    alias_name: &'a str,
+    kind: AliasEventKind,
+    evidence: String,
+}
+
+impl AliasEvent<'_> {
+    fn append(
+        self,
+        tx: &Transaction<'_>,
+        authority: &AliasWriteAuthority,
+        plan_digest: &str,
+        revision: i64,
+    ) -> Result<(), MemoryError> {
+        append_model_alias_event(
+            tx,
+            authority,
+            &NewModelAliasEvent::new(self.alias_name, revision, self.kind)
+                .with_plan_digest(plan_digest)
+                .with_evidence(self.evidence),
+        )?;
+        Ok(())
     }
+}
+
+/// Log an alias-level write and report it, or do neither.
+///
+/// One function so the two cannot come apart: a revision that moved without an
+/// event is precisely the state the log exists to make impossible, and an
+/// `Unchanged` write must produce neither — an idempotent replay that appended
+/// events would turn "nothing happened" into an audit trail saying otherwise.
+fn record(
+    tx: &Transaction<'_>,
+    authority: &AliasWriteAuthority,
+    plan_digest: &str,
+    write: AliasWrite,
+    event: AliasEvent<'_>,
+    into: &mut Vec<AliasRevision>,
+) -> Result<(), MemoryError> {
+    if !write.changed() {
+        return Ok(());
+    }
+    let alias_name = event.alias_name.to_string();
+    event.append(tx, authority, plan_digest, write.revision())?;
+    into.push(AliasRevision {
+        alias_name,
+        revision: write.revision(),
+    });
+    Ok(())
 }
 
 /// The alias-set policy revision of what is stored right now.

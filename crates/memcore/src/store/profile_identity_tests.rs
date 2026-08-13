@@ -87,6 +87,8 @@ const PRODUCT_TABLES: &[&str] = &[
     "model_deployment_events",
     "model_aliases",
     "model_alias_bindings",
+    // tachi#1681 D2 review (CP4) — the alias group's append-only log.
+    "model_alias_events",
     "pricing_snapshots",
     "model_deployment_health",
     "foundry_jobs",

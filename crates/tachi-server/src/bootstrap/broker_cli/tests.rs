@@ -308,13 +308,21 @@ fn the_alias_view_flags_a_row_whose_stamp_is_not_the_current_set_revision() {
 
     // Something writes a binding without going through plan/apply. The set
     // revision moves; the stamps do not.
-    memcore::db::model_catalog::bind_model_alias_deployment(
-        store.connection(),
-        "lane.reasoning",
-        "env:reasoning-elsewhere",
-        1,
-    )
-    .expect("unreviewed write");
+    //
+    // Hand-written SQL, and that is the finding: since the #1681 PR-D review
+    // (CP4) there is no *Rust* way to reach this table from outside memcore —
+    // the write accessors are `pub(crate)` and take an `AliasWriteAuthority`
+    // only `apply_model_alias_plan` can mint. This test asserts what the
+    // remaining bypass looks like from the operator's side.
+    store
+        .connection()
+        .execute(
+            "INSERT INTO model_alias_bindings
+                (alias_name, deployment_id, priority, retired, created_at, updated_at)
+             VALUES ('lane.reasoning', 'env:reasoning-elsewhere', 1, 0, ?1, ?1)",
+            rusqlite::params!["2026-08-13T00:00:00.000Z"],
+        )
+        .expect("unreviewed write");
 
     let view = render_alias_set(&store).expect("render");
     assert!(

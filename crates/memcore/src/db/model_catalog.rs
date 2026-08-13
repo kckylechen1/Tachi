@@ -42,12 +42,13 @@ use crate::catalog::health::{
 };
 use crate::catalog::{
     partition_authoritative_at, AttachmentBounds, AuthoritativePartition, CatalogSource,
-    DeploymentCapabilities, DeploymentEventKind, ModelAlias, ModelAliasBinding, ModelDeployment,
-    ModelDeploymentEvent, ModelDeploymentHealth, NewModelDeployment, NewModelDeploymentEvent,
-    PricingSnapshot, ProtocolKind, ALIAS_STATUS_ACTIVE, ALIAS_STATUS_RETIRED,
-    DEPLOYMENT_STATUS_RETIRED,
+    DeploymentCapabilities, DeploymentEventKind, ModelAlias, ModelAliasBinding, ModelAliasEvent,
+    ModelDeployment, ModelDeploymentEvent, ModelDeploymentHealth, NewModelAliasEvent,
+    NewModelDeployment, NewModelDeploymentEvent, PricingSnapshot, ProtocolKind,
+    ALIAS_STATUS_ACTIVE, ALIAS_STATUS_RETIRED, DEPLOYMENT_STATUS_RETIRED,
 };
 use crate::error::MemoryError;
+use crate::store::model_alias_plan::AliasWriteAuthority;
 use crate::vault::health::EvidenceKind;
 
 use super::common::now_utc_iso;
@@ -643,6 +644,18 @@ pub fn list_model_alias_bindings(conn: &Connection) -> Result<Vec<ModelAliasBind
 // These compose inside the caller's write transaction and never open one; the
 // only sanctioned caller is `MemoryStore::apply_model_alias_plan`, which holds
 // `BEGIN IMMEDIATE` for the whole verify-then-write sequence.
+//
+// # Why "the only sanctioned caller" is a type and not a comment
+//
+// The #1681 PR-D review (CP4) found this paragraph was the whole enforcement:
+// the functions were `pub` under a `pub mod`, so any crate could bind an alias
+// without a reviewed plan, and a test in another crate already did. They are
+// now `pub(crate)` *and* take an [`AliasWriteAuthority`], whose constructor is
+// private to `store::model_alias_plan`. There is no way to reach these writes
+// except through the transaction that verified a plan digest and re-read every
+// bound revision — not by discipline, by construction. The remaining bypass is
+// hand-written SQL against the table, which is what the alias `policy_digest`
+// stamp and the `model_alias_events` log exist to make visible after the fact.
 
 /// What one alias-row write did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,8 +702,9 @@ pub struct AliasDeclaration {
 /// An unchanged declaration spends no revision: re-applying a plan that
 /// declares what is already there must not look like a policy change, or every
 /// idempotent replay would invalidate every outstanding `ModelRef`.
-pub fn upsert_model_alias(
+pub(crate) fn upsert_model_alias(
     conn: &Connection,
+    _authority: &AliasWriteAuthority,
     declaration: &AliasDeclaration,
 ) -> Result<AliasWrite, MemoryError> {
     let now = now_utc_iso();
@@ -744,8 +758,9 @@ pub fn upsert_model_alias(
 /// Stop offering an alias as a routable name. The row and its bindings stay:
 /// retiring is a policy statement, not an erasure of what the name used to
 /// mean.
-pub fn retire_model_alias(
+pub(crate) fn retire_model_alias(
     conn: &Connection,
+    _authority: &AliasWriteAuthority,
     alias_name: &str,
 ) -> Result<Option<AliasWrite>, MemoryError> {
     let Some(existing) = get_model_alias(conn, alias_name)? else {
@@ -773,8 +788,9 @@ pub fn retire_model_alias(
 /// a change to what the alias *means*, and an alias whose bindings moved while
 /// its revision stood still would let a plan apply against a routing set it
 /// never read.
-pub fn bind_model_alias_deployment(
+pub(crate) fn bind_model_alias_deployment(
     conn: &Connection,
+    _authority: &AliasWriteAuthority,
     alias_name: &str,
     deployment_id: &str,
     priority: i64,
@@ -818,8 +834,9 @@ pub fn bind_model_alias_deployment(
 /// Retire one binding. Returns `None` when there was no such binding at all —
 /// distinct from `Unchanged`, which means the binding is there and already
 /// retired.
-pub fn retire_model_alias_binding(
+pub(crate) fn retire_model_alias_binding(
     conn: &Connection,
+    _authority: &AliasWriteAuthority,
     alias_name: &str,
     deployment_id: &str,
 ) -> Result<Option<AliasWrite>, MemoryError> {
@@ -854,8 +871,9 @@ pub fn retire_model_alias_binding(
 /// make the digest chase its own tail. A row whose `policy_digest` differs from
 /// the recomputed set revision is the detectable signature of a write that did
 /// not come through plan/apply.
-pub fn stamp_alias_policy_digest(
+pub(crate) fn stamp_alias_policy_digest(
     conn: &Connection,
+    _authority: &AliasWriteAuthority,
     alias_name: &str,
     policy_digest: &str,
 ) -> Result<(), MemoryError> {
@@ -887,6 +905,81 @@ fn advance_alias_revision(
         params![alias_name, revision, now],
     )?;
     Ok(AliasWrite::Advanced { revision })
+}
+
+// ─── model_alias_events (append-only) ────────────────────────────────────────
+
+const ALIAS_EVENT_COLUMNS: &str =
+    "id, alias_name, revision, event_kind, plan_digest, evidence, created_at";
+
+/// Append one alias audit row. The only write this table has: there is no
+/// update and no delete accessor for `model_alias_events` anywhere in the
+/// codebase, which is what "append-only" means here.
+///
+/// Gated by [`AliasWriteAuthority`] like the row writes it accompanies — an
+/// event log any caller can write to records what that caller wanted recorded,
+/// which is the opposite of an audit trail.
+pub(crate) fn append_model_alias_event(
+    conn: &Connection,
+    _authority: &AliasWriteAuthority,
+    event: &NewModelAliasEvent,
+) -> Result<i64, MemoryError> {
+    conn.execute(
+        "INSERT INTO model_alias_events
+            (alias_name, revision, event_kind, plan_digest, evidence, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            event.alias_name,
+            event.revision,
+            event.event_kind,
+            event.plan_digest,
+            event.evidence,
+            now_utc_iso(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// One alias's event log, oldest first.
+pub fn list_model_alias_events(
+    conn: &Connection,
+    alias_name: &str,
+) -> Result<Vec<ModelAliasEvent>, MemoryError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ALIAS_EVENT_COLUMNS} FROM model_alias_events WHERE alias_name = ?1 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![alias_name], row_to_alias_event)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// The whole alias event log, oldest first — what an auditor replays against
+/// the alias rows to find a write that did not come through plan/apply.
+pub fn list_all_model_alias_events(conn: &Connection) -> Result<Vec<ModelAliasEvent>, MemoryError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ALIAS_EVENT_COLUMNS} FROM model_alias_events ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([], row_to_alias_event)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn row_to_alias_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelAliasEvent> {
+    Ok(ModelAliasEvent {
+        id: row.get("id")?,
+        alias_name: row.get("alias_name")?,
+        revision: row.get("revision")?,
+        event_kind: row.get("event_kind")?,
+        plan_digest: row.get("plan_digest")?,
+        evidence: row.get("evidence")?,
+        created_at: row.get("created_at")?,
+    })
 }
 
 // ─── model_deployment_health ─────────────────────────────────────────────────
