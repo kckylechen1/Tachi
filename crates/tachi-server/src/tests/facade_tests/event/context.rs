@@ -1,5 +1,171 @@
 use super::*;
 
+fn normalize_legacy_context_feedback_event_ids(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if object
+                .get("event_id")
+                .and_then(Value::as_str)
+                .is_some_and(|event_id| event_id.starts_with("event-"))
+            {
+                object.insert("event_id".to_string(), json!("<volatile-event-id>"));
+            }
+            for value in object.values_mut() {
+                normalize_legacy_context_feedback_event_ids(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                normalize_legacy_context_feedback_event_ids(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn tachi_event_context_preserves_legacy_feedback_receipt_without_side_effects() {
+    let server = make_server();
+    let mut pattern = tachi_event_params("emit");
+    pattern.id = Some("context-feedback-parity-seed".to_string());
+    pattern.source_repo = Some("sigil".to_string());
+    pattern.adapter = Some("facade-test".to_string());
+    pattern.domain = Some("agent_os".to_string());
+    pattern.session_id = Some("source-session".to_string());
+    pattern.actor = Some("codex".to_string());
+    pattern.event_type = Some("pattern.observed".to_string());
+    pattern.authority = Some("collect_only".to_string());
+    pattern.projection_hints = vec!["pattern".to_string()];
+    pattern.created_at = Some("2026-08-13T00:00:00Z".to_string());
+    pattern.payload = Some(json!({
+        "pattern_key": "context-feedback-parity",
+        "summary": "Context feedback parity pattern",
+        "text": "Context stays read-only without changing its public feedback receipt.",
+    }));
+    crate::event_ops::handle_tachi_event(&server, pattern)
+        .await
+        .expect("emit parity pattern");
+
+    let mut project = tachi_event_params("project");
+    project.projection_hints = vec!["pattern".to_string()];
+    crate::event_ops::handle_tachi_event(&server, project)
+        .await
+        .expect("project parity pattern");
+
+    let memories_before = server
+        .with_global_store_read(|store| store.get_all(100).map_err(|error| error.to_string()))
+        .and_then(|entries| serde_json::to_value(entries).map_err(|error| error.to_string()))
+        .expect("snapshot memories before context");
+    let events_before = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("snapshot events before context");
+
+    let mut context = tachi_event_params("context");
+    context.session_id = Some("caller-session-is-not-admission".to_string());
+    context.projection_hints = vec!["pattern".to_string()];
+    let first_body = crate::event_ops::handle_tachi_event(&server, context.clone())
+        .await
+        .expect("first context parity response");
+    let first: Value = serde_json::from_str(&first_body).expect("first context parity JSON");
+    let mut feedback = first["feedback"].clone();
+    normalize_legacy_context_feedback_event_ids(&mut feedback);
+
+    assert_eq!(
+        feedback,
+        json!({
+            "error_count": 0,
+            "errors": [],
+            "events": [{
+                "event_id": "<volatile-event-id>",
+                "event_type": "pattern.seen",
+                "outcome": "seen",
+                "pattern_id": "projection-pattern-a97c112a3d975342",
+                "projection": "pattern",
+                "projection_key": "context-feedback-parity",
+                "projection_report": {
+                    "auto_only": true,
+                    "dry_run": false,
+                    "error_count": 0,
+                    "errors": [],
+                    "projected_count": 2,
+                    "projections": [
+                        {
+                            "already_projected": false,
+                            "dry_run": false,
+                            "event_id": "<volatile-event-id>",
+                            "event_type": "pattern.seen",
+                            "graph_edges": {"edges": [], "saved_count": 0, "skipped": [], "skipped_count": 0},
+                            "memory_id": "projection-pattern-a97c112a3d975342",
+                            "path": "/user/patterns/pattern_memory/a97c112a3d97",
+                            "projection": "pattern",
+                            "summary": "seen",
+                            "tier": "raw"
+                        },
+                        {
+                            "already_projected": true,
+                            "dry_run": false,
+                            "event_id": "context-feedback-parity-seed",
+                            "event_type": "pattern.observed",
+                            "graph_edges": {"edges": [], "saved_count": 0, "skipped": [], "skipped_count": 0},
+                            "memory_id": "projection-pattern-a97c112a3d975342",
+                            "path": "/user/patterns/agent_os/a97c112a3d97",
+                            "projection": "pattern",
+                            "summary": "Context feedback parity pattern",
+                            "tier": "raw"
+                        }
+                    ],
+                    "promotion_candidate_count": 0,
+                    "promotion_candidates": [],
+                    "skipped": [],
+                    "skipped_count": 0,
+                    "status": "completed"
+                },
+                "status": "saved"
+            }],
+            "saved_count": 1,
+            "status": "saved"
+        }),
+        "only the legacy UUID event id is normalized; the remaining public feedback payload is frozen from base 45ffac21"
+    );
+
+    let second_body = crate::event_ops::handle_tachi_event(&server, context)
+        .await
+        .expect("second context parity response");
+    assert_eq!(
+        second_body, first_body,
+        "the synthesized legacy receipt must be deterministic without writes"
+    );
+    let memories_after = server
+        .with_global_store_read(|store| store.get_all(100).map_err(|error| error.to_string()))
+        .and_then(|entries| serde_json::to_value(entries).map_err(|error| error.to_string()))
+        .expect("snapshot memories after context");
+    let events_after = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("snapshot events after context");
+    assert_eq!(
+        memories_after, memories_before,
+        "context mutated memory or counters"
+    );
+    assert_eq!(
+        events_after, events_before,
+        "context appended a feedback event"
+    );
+}
+
 #[tokio::test]
 async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
     let server = make_server();
@@ -230,8 +396,9 @@ async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
         parsed["host_lifecycle"]["event_envelope"]["event_type_prefix"],
         json!("host.")
     );
-    assert_eq!(parsed["feedback"]["status"], json!("skipped"));
-    assert_eq!(parsed["feedback"]["reason"], json!("read_only_bundle"));
+    assert_eq!(parsed["feedback"]["status"], json!("saved"));
+    assert_eq!(parsed["feedback"]["saved_count"], json!(2));
+    assert_eq!(parsed["feedback"]["error_count"], json!(0));
     let memories_after_context = server
         .with_global_store_read(|store| store.get_all(100).map_err(|error| error.to_string()))
         .and_then(|entries| serde_json::to_value(entries).map_err(|error| error.to_string()))
@@ -307,9 +474,10 @@ async fn tachi_event_context_is_read_only_without_caller_session_id() {
     let parsed: Value = serde_json::from_str(&body).expect("context JSON");
 
     assert_eq!(parsed["status"], json!("completed"));
-    assert_eq!(parsed["feedback"]["status"], json!("skipped"));
-    assert_eq!(parsed["feedback"]["reason"], json!("read_only_bundle"));
-    assert!(parsed["feedback"].get("saved_count").is_none());
+    assert_eq!(parsed["feedback"]["status"], json!("saved"));
+    assert_eq!(parsed["feedback"]["saved_count"], json!(0));
+    assert_eq!(parsed["feedback"]["error_count"], json!(0));
+    assert_eq!(parsed["feedback"]["events"], json!([]));
 }
 
 /// tachi#1561 (L4): `tachi_event(action='context')` emits its `memories`
