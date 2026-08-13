@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::autofix::auto_fix_authorized;
-use super::classify::classify_one_with_provider;
+use super::classify::{classify_one_immutable_with_provider, classify_one_with_provider};
 use super::{
     AutoFixAction, DbClassification, DoctorFinding, DoctorReport, JobBreakdown, SummaryByClass,
 };
@@ -143,6 +143,26 @@ impl Default for ScanOptions {
 }
 
 pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> DoctorReport {
+    scan_with_open_mode(roots, quarantine_root, options, false)
+}
+
+/// CLI doctor's default scan. SQLite WAL readers normally create or update
+/// `-wal`/`-shm`; immutable opens deliberately trade live-WAL visibility for
+/// a byte-stable diagnostic and leave the visible WAL as degradation evidence.
+pub(crate) fn scan_strict_read_only(
+    roots: &[PathBuf],
+    quarantine_root: &Path,
+    options: ScanOptions,
+) -> DoctorReport {
+    scan_with_open_mode(roots, quarantine_root, options, true)
+}
+
+fn scan_with_open_mode(
+    roots: &[PathBuf],
+    quarantine_root: &Path,
+    options: ScanOptions,
+    immutable: bool,
+) -> DoctorReport {
     let candidates: Vec<PathBuf> = collect_candidates(roots, options.max_depth)
         .into_iter()
         .filter(|path| !path_is_under(path, quarantine_root))
@@ -164,7 +184,11 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
 
     for physical_store in &mut physical_stores {
         let open_path = PathBuf::from(&physical_store.open_path);
-        let classified = classify_one_with_provider(&open_path, &routing_config);
+        let classified = if immutable {
+            classify_one_immutable_with_provider(&open_path, &routing_config)
+        } else {
+            classify_one_with_provider(&open_path, &routing_config)
+        };
         physical_store.open_failure_kind = classified
             .error
             .as_ref()

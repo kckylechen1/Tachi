@@ -42,6 +42,7 @@ pub mod open_context;
 // tachi#1643: NOT admin-gated. #1630's premise is a host-owned sync loop with
 // no Tachi daemon, so the outbox is portable surface — the same reason the v29
 // migration takes no `StoreProfile`.
+mod operator_maintenance;
 pub mod outbox;
 mod recall_cache;
 #[cfg(feature = "admin")]
@@ -199,6 +200,15 @@ pub(crate) use open::{
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
 };
+pub(crate) use operator_maintenance::{
+    apply_operator_delete_candidate_facts, apply_operator_gc_candidate_facts,
+    delete_candidate_facts, gc_candidate_facts, operator_maintenance_authority,
+};
+pub use operator_maintenance::{
+    is_kanban_gc_candidate, DeleteMaintenanceOutcome, GcMaintenanceOutcome, MaintenanceClassFact,
+    OperatorMaintenanceCommittedReceiptBinding, OperatorMaintenanceOperation,
+    OperatorMaintenancePlanBinding, OPERATOR_DELETE_CLASSES, OPERATOR_GC_CLASSES,
+};
 /// tachi#1643 durable outbox write/read seams. Crate-internal on purpose: they
 /// take a `Transaction`/`Connection`, and the invariant this leaf exists to
 /// hold — an event is only ever durable in the same transaction as the object
@@ -242,7 +252,7 @@ pub use schema::{init_schema, init_schema_with_label_mut, SchemaInitOutcome};
 pub use search_generation::{bump_search_generation, search_generation};
 pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
-pub(crate) use state::refuse_store_identity_namespace;
+pub(crate) use state::refuse_general_mutation_namespace;
 pub use state::{
     backfill_missing_expires_at, delete_state, get_state, insert_state_if_absent,
     list_derived_by_source, list_state, reap_expired_state, save_derived, save_derived_with_id,

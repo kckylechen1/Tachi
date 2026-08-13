@@ -129,6 +129,14 @@ pub(super) async fn run_pre_serve_command(
             .await?;
             Ok(true)
         }
+        Commands::Gc { action } => {
+            crate::repair::memory_maintenance::run_gc(action.clone(), app_home)?;
+            Ok(true)
+        }
+        Commands::Delete { action } => {
+            crate::repair::memory_maintenance::run_delete(action.clone(), app_home)?;
+            Ok(true)
+        }
         Commands::Manifest { action } => {
             super::super::manifest_cli::run_manifest_command(
                 action.clone(),

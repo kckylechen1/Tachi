@@ -3735,10 +3735,27 @@ pub fn delete(
     if trimmed.is_empty() {
         return Err(MemoryError::InvalidArg("empty ID".to_string()));
     }
-    refuse_reserved_rem_operation_mutation(trimmed, "deleted")?;
-
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    refuse_retired_sticky_row_within_tx(&tx, trimmed, "deleted")?;
+    let deleted = delete_memory_within_tx(&tx, trimmed, vec_available, profile)?;
+    tx.commit()?;
+    Ok(deleted)
+}
+
+/// Canonical exact-id deletion inside a caller-owned writer transaction.
+/// Operator maintenance uses this seam so prepared-receipt publication and
+/// every associated-index cleanup share one commit boundary.
+pub(crate) fn delete_memory_within_tx(
+    tx: &Connection,
+    id: &str,
+    vec_available: bool,
+    profile: StoreProfile,
+) -> Result<bool, MemoryError> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(MemoryError::InvalidArg("empty ID".to_string()));
+    }
+    refuse_reserved_rem_operation_mutation(trimmed, "deleted")?;
+    refuse_retired_sticky_row_within_tx(tx, trimmed, "deleted")?;
     // Delete from main table and check if anything was actually removed
     tx.execute("DELETE FROM memories WHERE id = ?1", params![trimmed])?;
     let deleted = tx.changes() > 0;
@@ -3746,7 +3763,7 @@ pub fn delete(
     if deleted {
         // Clean up FTS index
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![trimmed])?;
-        delete_memories_symbolic_fts(&tx, trimmed)?;
+        delete_memories_symbolic_fts(tx, trimmed)?;
 
         if vec_available {
             tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed])?;
@@ -3775,11 +3792,13 @@ pub fn delete(
         }
     }
 
-    tx.commit()?;
     Ok(deleted)
 }
 
-fn refuse_reserved_rem_operation_mutation(id: &str, action: &str) -> Result<(), MemoryError> {
+pub(crate) fn refuse_reserved_rem_operation_mutation(
+    id: &str,
+    action: &str,
+) -> Result<(), MemoryError> {
     if crate::namespace::is_reserved_wiki_rem_id(id) {
         return Err(MemoryError::InvalidArg(format!(
             "invariant: reserved REM operation {id} cannot be {action} through a generic lifecycle seam"

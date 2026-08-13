@@ -4,8 +4,7 @@ mod cards_ledger;
 mod hub;
 mod tool_dispatch;
 
-use super::{open_cli_store, open_cli_store_read_only, print_pretty_json};
-use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
+use super::{open_cli_store_read_only, print_pretty_json};
 use crate::server_state::MemoryServer;
 use crate::tool_params::{
     ExtractFactsParams, GetMemoryParams, ListMemoriesParams, RememberParams, SearchMemoryParams,
@@ -100,15 +99,8 @@ pub(super) async fn run_cli_command(
                 }
             }))
         }
-        Commands::Gc => {
-            let mut store = open_cli_store(db_path)?;
-            let mut gc = store.gc_tables(&memcore::GcConfig::default())?;
-            let kanban_deleted =
-                gc_expired_kanban_cards(&mut store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
-            if let Some(object) = gc.as_object_mut() {
-                object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
-            }
-            print_pretty_json(&gc)
+        Commands::Gc { .. } | Commands::Delete { .. } => {
+            Err("maintenance plan/apply command escaped the pre-serve dispatcher".into())
         }
         Commands::BackfillVectors { .. } => {
             unreachable!("BackfillVectors is handled in async context before this point")

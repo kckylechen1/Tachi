@@ -764,7 +764,23 @@ impl MemoryStore {
     /// for legacy/foreign/possibly-corrupt files, by design (see that
     /// module's doc comment).
     pub fn open_read_only(db_path: &str) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, None, UNKNOWN_DB_LABEL)
+        Self::open_read_only_inner(db_path, None, UNKNOWN_DB_LABEL, false)
+    }
+
+    /// Open one existing DB through SQLite's immutable URI mode.
+    ///
+    /// This is the strict operator-plan boundary: it cannot create or update
+    /// WAL/SHM sidecars. Because immutable mode intentionally ignores WAL, a
+    /// non-empty WAL is refused rather than returning a stale preview.
+    pub fn open_read_only_immutable(db_path: &str) -> Result<Self, MemoryError> {
+        let wal_path = std::path::PathBuf::from(format!("{db_path}-wal"));
+        if std::fs::metadata(&wal_path).is_ok_and(|metadata| metadata.len() != 0) {
+            return Err(MemoryError::InvalidArg(format!(
+                "immutable maintenance plan refuses non-empty WAL at {}",
+                wal_path.display()
+            )));
+        }
+        Self::open_read_only_inner(db_path, None, UNKNOWN_DB_LABEL, true)
     }
 
     /// [`Self::open_read_only`] for a caller that knows which store this is.
@@ -781,7 +797,7 @@ impl MemoryStore {
     /// Path-routing validation stays off (as for every read-only open): it is
     /// a write-time guard, and a read-only SQLite handle cannot write anyway.
     pub fn open_read_only_with_label(db_path: &str, db_label: &str) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, None, db_label)
+        Self::open_read_only_inner(db_path, None, db_label, false)
     }
 
     /// Open an existing DB read-only while tolerating a stamped older schema.
@@ -798,19 +814,49 @@ impl MemoryStore {
         db_path: &str,
         operation: ReadOnlyBackfillOperation,
     ) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, Some(operation), UNKNOWN_DB_LABEL)
+        Self::open_read_only_inner(db_path, Some(operation), UNKNOWN_DB_LABEL, false)
     }
 
     fn open_read_only_inner(
         db_path: &str,
         compat_operation: Option<ReadOnlyBackfillOperation>,
         db_label: &str,
+        immutable: bool,
     ) -> Result<Self, MemoryError> {
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
-        let conn = db::open_read_only(db_path)?;
+        let conn = if immutable {
+            let path = std::path::Path::new(db_path);
+            #[cfg(unix)]
+            let bytes = {
+                use std::os::unix::ffi::OsStrExt;
+                path.as_os_str().as_bytes()
+            };
+            #[cfg(not(unix))]
+            let owned = path.to_string_lossy().into_owned();
+            #[cfg(not(unix))]
+            let bytes = owned.as_bytes();
+            let mut encoded = String::with_capacity(bytes.len());
+            for &byte in bytes {
+                if byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~' | b':')
+                {
+                    encoded.push(char::from(byte));
+                } else {
+                    use std::fmt::Write as _;
+                    write!(&mut encoded, "%{byte:02X}").expect("write URI escape to string");
+                }
+            }
+            let uri = format!("file:{encoded}?mode=ro&immutable=1");
+            Connection::open_with_flags(
+                uri,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            )?
+        } else {
+            db::open_read_only(db_path)?
+        };
         let opened_physical_db_identity =
             validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
