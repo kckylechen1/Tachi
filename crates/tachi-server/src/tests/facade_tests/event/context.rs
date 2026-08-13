@@ -130,19 +130,25 @@ async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
         .expect("project lorebook, affect, and pattern");
     let projected_json: Value = serde_json::from_str(&projected).expect("projected JSON");
     assert_eq!(projected_json["projected_count"], json!(5));
+    let memories_before_context = server
+        .with_global_store_read(|store| store.get_all(100).map_err(|error| error.to_string()))
+        .and_then(|entries| serde_json::to_value(entries).map_err(|error| error.to_string()))
+        .expect("snapshot memories before context evidence");
 
-    let mut context = tachi_event_params("context");
-    context.projection_hints = vec![
+    let mut context_with_caller_session = tachi_event_params("context");
+    context_with_caller_session.session_id = Some("caller-supplied-not-admission".to_string());
+    context_with_caller_session.projection_hints = vec![
         "world_book".to_string(),
         "affect".to_string(),
         "pattern".to_string(),
         "bonding".to_string(),
         "timeline".to_string(),
     ];
-    let body = crate::event_ops::handle_tachi_event(&server, context)
-        .await
-        .expect("context");
-    let parsed: Value = serde_json::from_str(&body).expect("context JSON");
+    let body_with_caller_session =
+        crate::event_ops::handle_tachi_event(&server, context_with_caller_session.clone())
+            .await
+            .expect("context with caller-supplied session");
+    let parsed: Value = serde_json::from_str(&body_with_caller_session).expect("context JSON");
     assert_eq!(parsed["status"], json!("completed"));
     assert_eq!(
         parsed["lorebook"][0]["lorebook"]["keys"],
@@ -224,7 +230,48 @@ async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
         parsed["host_lifecycle"]["event_envelope"]["event_type_prefix"],
         json!("host.")
     );
-    assert_eq!(parsed["feedback"]["saved_count"], json!(2));
+    assert_eq!(parsed["feedback"]["status"], json!("skipped"));
+    assert_eq!(parsed["feedback"]["reason"], json!("read_only_bundle"));
+    let memories_after_context = server
+        .with_global_store_read(|store| store.get_all(100).map_err(|error| error.to_string()))
+        .and_then(|entries| serde_json::to_value(entries).map_err(|error| error.to_string()))
+        .expect("snapshot memories after context evidence");
+    assert_eq!(
+        memories_after_context, memories_before_context,
+        "context retrieval must not mutate any memory row or counter",
+    );
+    let evidence_events = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    adapter: Some("tachi.pattern_evidence.v1".to_string()),
+                    limit: 20,
+                    ..Default::default()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("list context evidence events");
+    assert!(evidence_events.is_empty());
+
+    let replay_body = crate::event_ops::handle_tachi_event(&server, context_with_caller_session)
+        .await
+        .expect("replay context");
+    assert_eq!(
+        replay_body, body_with_caller_session,
+        "caller-supplied session text must not change the read-only context payload",
+    );
+    let replayed_events = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    adapter: Some("tachi.pattern_evidence.v1".to_string()),
+                    limit: 20,
+                    ..Default::default()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("list replayed context evidence events");
+    assert!(replayed_events.is_empty());
     assert_eq!(
         parsed["guardrails"]["a2a"],
         json!("share evidence and open questions, not conclusions")
@@ -246,6 +293,23 @@ async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
         json!(false)
     );
     assert!(a2a_json.get("feedback").is_none());
+}
+
+#[tokio::test]
+async fn tachi_event_context_is_read_only_without_caller_session_id() {
+    let server = make_server();
+    let mut context = tachi_event_params("context");
+    context.projection_hints = vec!["pattern".to_string()];
+
+    let body = crate::event_ops::handle_tachi_event(&server, context)
+        .await
+        .expect("context without session id");
+    let parsed: Value = serde_json::from_str(&body).expect("context JSON");
+
+    assert_eq!(parsed["status"], json!("completed"));
+    assert_eq!(parsed["feedback"]["status"], json!("skipped"));
+    assert_eq!(parsed["feedback"]["reason"], json!("read_only_bundle"));
+    assert!(parsed["feedback"].get("saved_count").is_none());
 }
 
 /// tachi#1561 (L4): `tachi_event(action='context')` emits its `memories`

@@ -151,6 +151,32 @@ pub(super) fn write_event(
     }
 }
 
+pub(super) fn write_event_if_absent(
+    server: &MemoryServer,
+    target: &ContinuityEventTarget,
+    event: &TachiEventRecord,
+) -> Result<bool, String> {
+    if let Some(project_name) = target.named_project.as_deref() {
+        server.with_named_project_store(project_name, |store| {
+            store
+                .insert_tachi_event_if_absent(event)
+                .map_err(|error| format!("insert continuity event: {error}"))
+        })
+    } else if let Some(db_path) = target.db_path.as_ref() {
+        server.with_path_store(db_path, |store| {
+            store
+                .insert_tachi_event_if_absent(event)
+                .map_err(|error| format!("insert continuity event: {error}"))
+        })
+    } else {
+        server.with_store_for_scope(target.target_db, |store| {
+            store
+                .insert_tachi_event_if_absent(event)
+                .map_err(|error| format!("insert continuity event: {error}"))
+        })
+    }
+}
+
 pub(crate) fn read_events(
     server: &MemoryServer,
     target: &ContinuityEventTarget,

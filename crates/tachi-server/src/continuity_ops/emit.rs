@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use memcore::{AuthorityLevel, EffectScope, MemoryEntry, ProjectionKind, TachiEventRecord};
 use serde_json::{json, Value};
 
@@ -166,44 +164,12 @@ pub(crate) fn emit_memory_saved_event(
     }
 }
 
-fn pattern_projection_from_str(value: Option<&str>) -> ProjectionKind {
-    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("bonding") => ProjectionKind::Bonding,
-        _ => ProjectionKind::Pattern,
-    }
-}
-
 fn feedback_event_type(projection: ProjectionKind, outcome: &str) -> String {
     let prefix = match projection {
         ProjectionKind::Bonding => "bonding",
         _ => "pattern",
     };
     format!("{prefix}.{outcome}")
-}
-
-fn pattern_row_projection_key(row: &Value) -> Option<&str> {
-    row.get("metadata")
-        .and_then(|metadata| metadata.get("projection_key"))
-        .or_else(|| row.get("projection_key"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn pattern_row_projection(row: &Value) -> ProjectionKind {
-    pattern_projection_from_str(
-        row.get("metadata")
-            .and_then(|metadata| metadata.get("projection_kind"))
-            .or_else(|| row.get("projection_kind"))
-            .and_then(Value::as_str),
-    )
-}
-
-fn pattern_row_id(row: &Value) -> Option<&str> {
-    row.get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn emit_pattern_feedback_event(
@@ -284,55 +250,6 @@ pub(crate) fn emit_pattern_feedback_event(
         "outcome": outcome,
         "projection_report": projection_report,
     }))
-}
-
-pub(crate) fn emit_pattern_seen_events(
-    server: &MemoryServer,
-    project: Option<&str>,
-    query: Option<&str>,
-    rows: &[Value],
-    source: Option<&str>,
-) -> Value {
-    let mut seen_keys = HashSet::new();
-    let mut saved = Vec::new();
-    let mut errors = Vec::new();
-    for row in rows {
-        let Some(projection_key) = pattern_row_projection_key(row) else {
-            continue;
-        };
-        if !seen_keys.insert(projection_key.to_string()) {
-            continue;
-        }
-        let pattern_id = pattern_row_id(row).unwrap_or(projection_key);
-        let projection = pattern_row_projection(row);
-        match emit_pattern_feedback_event(
-            server,
-            project,
-            pattern_id,
-            projection_key,
-            projection,
-            "seen",
-            query,
-            None,
-            source.or(Some("pattern_seen")),
-            None,
-        ) {
-            Ok(value) => saved.push(value),
-            Err(error) => errors.push(json!({
-                "pattern_id": pattern_id,
-                "projection_key": projection_key,
-                "error": error,
-            })),
-        }
-    }
-
-    json!({
-        "status": if errors.is_empty() { "saved" } else { "partial" },
-        "saved_count": saved.len(),
-        "error_count": errors.len(),
-        "events": saved,
-        "errors": errors,
-    })
 }
 
 pub(crate) struct WikiSavedEventInput<'a> {

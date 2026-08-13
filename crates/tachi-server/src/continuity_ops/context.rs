@@ -5,7 +5,6 @@ use crate::tool_params::TachiEventParams;
 use crate::MemoryServer;
 use memory_server_runtime::{query_limit, trim_opt};
 
-use super::emit::emit_pattern_seen_events;
 use super::feedback::pattern_ref_json;
 use super::projection::{projected_path_prefix, projection_filters, projection_kind_metadata};
 use super::read_models::{
@@ -242,24 +241,11 @@ fn build_continuity_context_inner(
         .map(timeline_context_json)
         .collect::<Vec<_>>();
     let a2a = a2a_context_bundle(&pattern_refs, &bonding, &timeline, &events);
-    let feedback = if record_seen {
-        emit_pattern_seen_events(
-            server,
-            params.project.as_deref(),
-            query
-                .event_type
-                .as_deref()
-                .or(query.session_id.as_deref())
-                .or(query.domain.as_deref()),
-            &patterns,
-            Some("tachi_event.context"),
-        )
-    } else {
-        json!({
-            "status": "skipped",
-            "reason": "read_only_bundle",
-        })
-    };
+    let _ = record_seen;
+    let feedback = json!({
+        "status": "skipped",
+        "reason": "read_only_bundle",
+    });
     let host_lifecycle = host_lifecycle_contract();
 
     Ok(json!({

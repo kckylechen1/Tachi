@@ -10,6 +10,9 @@ mod emit;
 mod feedback;
 mod outcome;
 mod parsing;
+mod pattern_evidence;
+#[cfg(test)]
+mod pattern_evidence_contract;
 mod pipeline;
 mod projection;
 mod promotion;
@@ -18,16 +21,16 @@ pub(crate) mod storage;
 
 pub(crate) use self::context::{build_a2a_context, build_continuity_context, list_active_patterns};
 pub(crate) use self::emit::{
-    emit_memory_saved_event, emit_pattern_feedback_event, emit_pattern_seen_events,
-    emit_session_captured_event, emit_task_completion_events, emit_wiki_saved_event,
-    WikiSavedEventInput,
+    emit_memory_saved_event, emit_pattern_feedback_event, emit_session_captured_event,
+    emit_task_completion_events, emit_wiki_saved_event, WikiSavedEventInput,
 };
 pub(crate) use self::feedback::{
-    attach_pattern_ref_to_row, emit_pattern_feedback_for_refs, pattern_feedback_refs_from_strings,
-    pattern_ref_json,
+    append_pattern_evidence_for_refs, attach_pattern_ref_to_row,
+    pattern_feedback_refs_from_strings, pattern_ref_json, PatternEvidenceBatchInput,
 };
 pub(crate) use self::outcome::evaluate_outcome_labels;
 pub(crate) use self::parsing::{parse_continuity_candidate_batch, parse_continuity_outcome_label};
+pub(crate) use self::pattern_evidence::PatternEvidenceSource;
 pub(crate) use self::pipeline::maybe_spawn_session_continuity_pipeline;
 pub(crate) use self::projection::{
     project_auto_continuity_events_for_target, project_continuity_events,
