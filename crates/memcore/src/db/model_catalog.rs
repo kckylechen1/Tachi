@@ -22,10 +22,13 @@
 //!
 //! # Transactions
 //!
-//! These accessors never open a transaction of their own, so they compose
-//! inside a caller's write transaction (an inner `BEGIN` would fail outright —
-//! SQLite has no nested transactions). The multi-statement ones document what
-//! a caller outside a transaction risks.
+//! These accessors never open a `BEGIN` of their own, so they compose inside a
+//! caller's write transaction (an inner `BEGIN` would fail outright — SQLite
+//! has no nested transactions). The multi-statement ones document what a caller
+//! outside a transaction risks — except
+//! [`record_model_deployment_outcome`], whose row-plus-event transition is
+//! atomic by itself: it uses a `SAVEPOINT`, which nests inside a caller's
+//! transaction and starts one when there is none (the `db::graph` precedent).
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -702,10 +705,30 @@ pub enum DeploymentHealthWrite {
 /// credential, account or alias table — none of those types appear in this
 /// function's signature or in the writer's (discrimination 11).
 ///
-/// Two statements, no internal transaction (the module's rule). A caller that
-/// needs the row and its event to land atomically wraps the call; the ordering
-/// here is row-then-event, so a failure between them leaves an event-less
-/// health row rather than an event for a write that did not happen.
+/// # One snapshot, one transition (#1681 CP4/CP7)
+///
+/// All four steps — the deployment-identity check, the read of the existing
+/// health row, the health upsert, and the event append — run inside **one**
+/// `SAVEPOINT`. Three separate defects close together that way:
+///
+/// 1. **No event-less row.** An append that fails rolls the health row back
+///    with it, so `model_deployment_health` can never hold a state no event in
+///    `model_deployment_events` accounts for — which is exactly the equality
+///    the catalog fold (#1681 discrimination 12) projects.
+/// 2. **No validate-then-drift window.** The `model_deployments` read that
+///    authorises the write shares the transaction's snapshot with the write
+///    itself, so a concurrent re-import cannot move `endpoint_ref`,
+///    `provider_model_id` or `revision` in between: either this write sees one
+///    consistent catalog row or it fails and is counted.
+/// 3. **No interleaved event ids.** Two concurrent outcomes can no longer both
+///    read health at count `n` and land at `n+1` with their events swapped
+///    around each other's row write.
+///
+/// A `SAVEPOINT` rather than a `BEGIN`, following `db::graph::write_edge_row`'s
+/// precedent: it nests cleanly whether or not the caller already holds a
+/// transaction, and when there is none it starts one and `RELEASE` commits it.
+/// That keeps this accessor composable inside a caller's write transaction —
+/// the module's rule — while still being atomic on its own.
 pub fn record_model_deployment_outcome(
     conn: &Connection,
     target: &DeploymentOutcomeTarget<'_>,
@@ -713,36 +736,52 @@ pub fn record_model_deployment_outcome(
     evidence: EvidenceKind,
     now: DateTime<Utc>,
 ) -> Result<DeploymentHealthWrite, MemoryError> {
-    let deployment_id = target.deployment_id();
-    let Some(deployment) = get_model_deployment(conn, deployment_id)? else {
-        return Ok(DeploymentHealthWrite::Skipped(
-            DeploymentHealthSkip::NoSuchDeployment,
-        ));
-    };
-    if !target.describes(&deployment) {
-        return Ok(DeploymentHealthWrite::Skipped(
-            DeploymentHealthSkip::DescribesADifferentRequest,
-        ));
+    conn.execute_batch("SAVEPOINT record_model_deployment_outcome")?;
+    let result = (|| -> Result<DeploymentHealthWrite, MemoryError> {
+        let deployment_id = target.deployment_id();
+        let Some(deployment) = get_model_deployment(conn, deployment_id)? else {
+            return Ok(DeploymentHealthWrite::Skipped(
+                DeploymentHealthSkip::NoSuchDeployment,
+            ));
+        };
+        if !target.describes(&deployment) {
+            return Ok(DeploymentHealthWrite::Skipped(
+                DeploymentHealthSkip::DescribesADifferentRequest,
+            ));
+        }
+
+        let existing = get_model_deployment_health(conn, deployment_id)?;
+        let write = record_deployment_outcome(
+            existing.as_ref(),
+            deployment_id,
+            deployment.revision,
+            outcome,
+            evidence,
+            now,
+        );
+
+        upsert_model_deployment_health(conn, &write.health)?;
+        let event_id = append_model_deployment_event(conn, &write.event)?;
+
+        Ok(DeploymentHealthWrite::Recorded {
+            event_id,
+            state: write.health.state,
+            cooldown_until: write.health.cooldown_until,
+        })
+    })();
+    match result {
+        Ok(write) => {
+            conn.execute_batch("RELEASE record_model_deployment_outcome")?;
+            Ok(write)
+        }
+        Err(err) => {
+            // Best-effort unwind: the error the caller needs to see is the one
+            // that failed the write, not a secondary failure while undoing it.
+            let _ = conn.execute_batch("ROLLBACK TO record_model_deployment_outcome");
+            let _ = conn.execute_batch("RELEASE record_model_deployment_outcome");
+            Err(err)
+        }
     }
-
-    let existing = get_model_deployment_health(conn, deployment_id)?;
-    let write = record_deployment_outcome(
-        existing.as_ref(),
-        deployment_id,
-        deployment.revision,
-        outcome,
-        evidence,
-        now,
-    );
-
-    upsert_model_deployment_health(conn, &write.health)?;
-    let event_id = append_model_deployment_event(conn, &write.event)?;
-
-    Ok(DeploymentHealthWrite::Recorded {
-        event_id,
-        state: write.health.state,
-        cooldown_until: write.health.cooldown_until,
-    })
 }
 
 /// Persist a health row the single writer produced.

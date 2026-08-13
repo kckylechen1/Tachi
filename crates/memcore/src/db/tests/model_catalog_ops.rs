@@ -880,6 +880,102 @@ fn a_fallback_tiers_throttle_is_not_recorded_against_the_lanes_primary_row() {
     );
 }
 
+/// Make the event append — and only the event append — fail, from inside the
+/// database.
+///
+/// A trigger rather than a dropped table so the assertions afterwards can read
+/// both tables and prove the *whole* transition unwound: an injection that
+/// removed the events table would leave "no event" untestable and could not
+/// show that a pre-existing health row survived byte-identical.
+fn break_the_event_append(conn: &Connection) {
+    conn.execute_batch(
+        "CREATE TRIGGER refuse_event_append BEFORE INSERT ON model_deployment_events
+         BEGIN SELECT RAISE(ABORT, 'injected append failure'); END",
+    )
+    .expect("install the failure injection");
+}
+
+#[test]
+fn an_event_append_failure_rolls_the_health_row_back_with_it() {
+    // The atomicity discrimination (#1681 CP4/CP7): the health row and its
+    // event land together or not at all. Without one transaction the upsert
+    // commits on its own and the table holds a state no event accounts for —
+    // which is precisely the equality the catalog fold projects.
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+
+    // A prior, successful observation, so the test can distinguish "rolled
+    // back to the previous state" from "never wrote anything at all".
+    record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Served,
+        EvidenceKind::SelfReported,
+        instant(0),
+    )
+    .expect("the first record succeeds");
+    let before = get_model_deployment_health(&conn, "env:extract")
+        .expect("read")
+        .expect("row");
+    let events_before = list_model_deployment_events(&conn, "env:extract").expect("events");
+
+    break_the_event_append(&conn);
+
+    let err = record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Throttled {
+            retry_after: Some(RetryAfter::DeltaSeconds(45)),
+        },
+        EvidenceKind::SelfReported,
+        instant(60),
+    )
+    .expect_err("an append the database refuses must surface as an error, not a silent half-write");
+    assert!(
+        err.to_string().contains("injected append failure"),
+        "the caller must see why, got: {err}"
+    );
+
+    assert_eq!(
+        get_model_deployment_health(&conn, "env:extract")
+            .expect("read")
+            .expect("the earlier row is still there"),
+        before,
+        "the failed throttle must leave the health row byte-identical: a cooldown whose event \
+         never landed is a state nothing in the log can explain"
+    );
+    assert_eq!(
+        list_model_deployment_events(&conn, "env:extract").expect("events"),
+        events_before,
+        "and nothing may have been appended either"
+    );
+}
+
+#[test]
+fn a_first_outcome_whose_event_cannot_be_appended_leaves_no_row_at_all() {
+    // The other half: with no prior row, the rollback must remove the row the
+    // upsert created rather than leaving a fresh event-less one behind.
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+    break_the_event_append(&conn);
+
+    record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Unreachable,
+        EvidenceKind::Probed,
+        instant(0),
+    )
+    .expect_err("the append is refused");
+
+    assert!(
+        get_model_deployment_health(&conn, "env:extract")
+            .expect("read")
+            .is_none(),
+        "no event, no row"
+    );
+}
+
 #[test]
 fn a_success_after_a_cooldown_clears_it_through_the_store() {
     let conn = catalog_conn();
