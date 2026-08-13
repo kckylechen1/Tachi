@@ -119,6 +119,41 @@ async fn an_alias_shaped_override_is_counted_and_still_sent_unchanged() {
     server.abort();
 }
 
+/// #1681 PR-D review (CP5, round 2): `call_reasoning_llm_provider_only_with_
+/// receipt` is a second public door onto `call_provider_tier` and was
+/// calling it directly, skipping the gate entirely — an override routed
+/// through this entry was invisible to the unresolved-reference count. Same
+/// fixture, same assertions as the `call_extract_llm` case above, just
+/// through the door that used to be unobserved.
+#[tokio::test]
+async fn the_receipt_only_provider_entry_is_now_observed_too() {
+    let (client, seen, server, _temp) = recording_provider().await;
+
+    client
+        .call_reasoning_llm_provider_only_with_receipt(
+            "system",
+            "user",
+            Some("chat.premium"),
+            0.0,
+            16,
+        )
+        .await
+        .expect("the call succeeds");
+
+    let reported = client.unresolved_model_references();
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0].lane, "reasoning");
+    assert_eq!(reported[0].reference, "chat.premium");
+    assert_eq!(reported[0].count, 1);
+    assert_eq!(client.unresolved_model_reference_overflow(), 0);
+
+    // Behaviour is still unchanged: the provider received the raw override.
+    let sent = seen.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    assert_eq!(sent, vec!["chat.premium".to_string()]);
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn an_ordinary_lane_call_reports_nothing() {
     let (client, seen, server, _temp) = recording_provider().await;

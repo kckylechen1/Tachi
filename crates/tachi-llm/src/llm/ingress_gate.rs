@@ -64,7 +64,13 @@ const MAX_REFERENCE_CHARS: usize = 64;
 /// their first [`MAX_REFERENCE_CHARS`] characters do land in one entry: their
 /// sightings are still counted, and a counter whose *totals* are exact while
 /// its per-key list is coarse is the same trade the entry cap already makes.
-fn bounded_reference(raw: &str) -> String {
+///
+/// `pub(crate)`: the CP5 review (#1681 PR-D) found the same unbounded
+/// `model_override` reaching a second write sink — `llm_usage.model`
+/// (`chat_lanes::lane_calls`) and its retry-log `eprintln!` — past this
+/// module's own boundary. Both sinks reuse this exact bound rather than
+/// growing a second copy of it.
+pub(crate) fn bounded_reference(raw: &str) -> String {
     let mut bounded: String = raw
         .chars()
         .take(MAX_REFERENCE_CHARS)
