@@ -244,10 +244,36 @@ fn deployment_event_kind_round_trips_and_refuses_unknown_values() {
         DeploymentEventKind::DeploymentImported,
         DeploymentEventKind::DeploymentUpdated,
         DeploymentEventKind::DeploymentRetired,
+        DeploymentEventKind::HealthServed,
+        DeploymentEventKind::HealthCooldown,
+        DeploymentEventKind::HealthError,
     ] {
         assert_eq!(DeploymentEventKind::parse(kind.as_str()), Some(kind));
     }
     assert_eq!(DeploymentEventKind::parse("deployment_deleted"), None);
+}
+
+#[test]
+fn the_two_authorities_sharing_the_event_log_stay_distinguishable() {
+    // One append-only table carries both catalog metadata transitions and
+    // health observations (#1681 D1/D4). A reader that could not tell them
+    // apart would let "the deployment was throttled at 09:04" read as a change
+    // to what the deployment *is* — which is the merge the four-authority rule
+    // exists to prevent.
+    for kind in [
+        DeploymentEventKind::HealthServed,
+        DeploymentEventKind::HealthCooldown,
+        DeploymentEventKind::HealthError,
+    ] {
+        assert!(kind.is_health());
+    }
+    for kind in [
+        DeploymentEventKind::DeploymentImported,
+        DeploymentEventKind::DeploymentUpdated,
+        DeploymentEventKind::DeploymentRetired,
+    ] {
+        assert!(!kind.is_health());
+    }
 }
 
 #[test]

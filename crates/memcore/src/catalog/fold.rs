@@ -155,6 +155,13 @@ impl CatalogProjection {
             // status transition the row itself records, and the fold reports
             // the log, not a guess about what the row now says.
             Some(DeploymentEventKind::DeploymentUpdated) | None => {}
+            // Health events (#1681 D4) say how the deployment is *behaving*,
+            // never what it *is*, so they touch no lifecycle field here.
+            Some(
+                DeploymentEventKind::HealthServed
+                | DeploymentEventKind::HealthCooldown
+                | DeploymentEventKind::HealthError,
+            ) => {}
         }
 
         ApplyOutcome::Applied
