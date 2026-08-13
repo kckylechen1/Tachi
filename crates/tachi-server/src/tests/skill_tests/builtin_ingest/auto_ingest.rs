@@ -643,6 +643,189 @@ async fn admitted_auto_ingest_live_intent_lease_blocks_cross_runtime_duplicate_p
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn admitted_auto_ingest_stale_consumer_cannot_write_or_retire_after_heartbeat_loss() {
+    let (mut server_a, _home_guard) = crate::tests::make_server_with_temp_home();
+    let (base_url, provider, provider_task) = spawn_paused_admitted_embedding_provider().await;
+    let _base = crate::test_support::EnvRestore::set("VOYAGE_BASE_URL", &base_url);
+    let _key = crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+    let _extract_base = crate::test_support::EnvRestore::set(
+        "EXTRACT_BASE_URL",
+        &format!("{base_url}/chat/completions"),
+    );
+    let _extract_key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-extract-key");
+    let _extract_model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "test-model");
+    server_a.llm =
+        std::sync::Arc::new(tachi_llm::LlmClient::new().expect("construct A provider client"));
+
+    let db_path = server_a.global_db_path_buf();
+    let home = server_a.tachi_home_dir().to_path_buf();
+    let path = "/wiki/general/admitted-enrichment-stale-consumer";
+    let staged = staged_auto_ingest_fixture(
+        &server_a,
+        "heartbeat ownership loss must fence stale provider results",
+        path,
+    );
+    let pending = crate::pipeline_ops::run_staged_auto_ingest(&server_a, staged.clone())
+        .await
+        .expect("A dispatches durable enrichment")
+        .expect("A returns pending accounting");
+    assert_eq!(
+        serde_json::from_str::<Value>(&pending).expect("A pending JSON")["failed_stage"],
+        "enrichment_pending"
+    );
+    let item_a = server_a
+        .enrichment_lock()
+        .retained_enrich_rx
+        .lock()
+        .expect("lock A receiver")
+        .as_mut()
+        .expect("A receiver retained")
+        .try_recv()
+        .expect("A receives owned intent");
+    let worker_a = {
+        let server = server_a.clone();
+        tokio::spawn(async move {
+            server.flush_enrichment_batch(&mut vec![item_a]).await;
+        })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        provider.started.notified(),
+    )
+    .await
+    .expect("A enters paused provider call");
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    crate::enrichment::force_next_admitted_heartbeat_ownership_loss_for_test(&server_a);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    crate::test_support::with_unrestricted_fixture_connection(&db_path, |connection| {
+        connection.execute(
+            "UPDATE processed_events \
+             SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes') \
+             WHERE worker = 'auto_ingest_enrichment_intent'",
+            [],
+        )
+    })
+    .expect("expire A lease after forced heartbeat ownership loss");
+
+    let mut server_b =
+        crate::server_state::MemoryServer::new_with_home_for_test(db_path, None, home)
+            .expect("start B against same Product DB");
+    server_b.llm =
+        std::sync::Arc::new(tachi_llm::LlmClient::new().expect("construct B provider client"));
+    let replay_b = crate::pipeline_ops::run_staged_auto_ingest(&server_b, staged.clone())
+        .await
+        .expect("B reclaims expired intent")
+        .expect("B returns pending accounting");
+    assert_eq!(
+        serde_json::from_str::<Value>(&replay_b).expect("B pending JSON")["failed_stage"],
+        "enrichment_pending"
+    );
+    let item_b = server_b
+        .enrichment_lock()
+        .retained_enrich_rx
+        .lock()
+        .expect("lock B receiver")
+        .as_mut()
+        .expect("B receiver retained")
+        .try_recv()
+        .expect("B owns reclaimed intent");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), worker_a)
+        .await
+        .expect("heartbeat ownership loss cancels A before its provider returns")
+        .expect("join stale A consumer");
+    let after_a = server_b
+        .with_global_store_read(|store| {
+            let entry = store
+                .list_by_path(path, 1, false)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .next()
+                .expect("ingested entry remains");
+            let intent_rows = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM processed_events \
+                     WHERE worker = 'auto_ingest_enrichment_intent'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((entry.metadata.get("enrichment").cloned(), intent_rows))
+        })
+        .expect("read state after stale A returns");
+    assert_eq!(
+        after_a,
+        (None, 1),
+        "stale A must discard provider results and cannot retire B's intent"
+    );
+
+    provider.release.notify_waiters();
+    let worker_b = {
+        let server = server_b.clone();
+        tokio::spawn(async move {
+            server.flush_enrichment_batch(&mut vec![item_b]).await;
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while provider.calls.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("B invokes the provider as the sole current owner");
+    provider.release.notify_waiters();
+    worker_b.await.expect("join B enrichment consumer");
+    let completed = crate::pipeline_ops::run_staged_auto_ingest(&server_b, staged)
+        .await
+        .expect("B terminal evidence completes job")
+        .expect("B completion receipt returned");
+    assert_eq!(
+        serde_json::from_str::<Value>(&completed).expect("B completion JSON")["status"],
+        "completed"
+    );
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let (intent, job, receipt, completion) = server_b
+        .with_global_store_read(|store| {
+            let count = |worker: &str| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM processed_events WHERE worker = ?1",
+                        [worker],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            };
+            let completion = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log WHERE server_id = 'ingest' \
+                     AND tool_name = 'auto_ingest_job' AND success = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((
+                count("auto_ingest_enrichment_intent")?,
+                count("auto_ingest_job")?,
+                count("auto_ingest_job_receipt")?,
+                completion,
+            ))
+        })
+        .expect("read B-owned terminal durable state");
+    assert_eq!(
+        (intent, job, receipt, completion),
+        (0, 0, 1, 1),
+        "one B-owned terminal intent, receipt, and completion lifecycle"
+    );
+    assert_eq!(ingest_effect_counts(&server_b, path).0, 1);
+    provider_task.abort();
+}
+
+#[tokio::test]
 async fn admitted_auto_ingest_enrichment_ownership_loss_is_typed_partial() {
     let server = make_server();
     let path = "/wiki/general/admitted-enrichment-ownership";
