@@ -1401,16 +1401,15 @@ fn preflight_maps_tachi_memory_project_actions_without_injecting() {
         "preflight must not inject a default project for search"
     );
 
-    for action in ["consolidate"] {
-        let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
-            serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
-        );
-        let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("action mapped");
-        assert!(
-            !mapped.arguments.expect("args").contains_key("project"),
-            "{action} preflight must not inject a default project"
-        );
-    }
+    let action = "consolidate";
+    let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
+        serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
+    );
+    let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("action mapped");
+    assert!(
+        !mapped.arguments.expect("args").contains_key("project"),
+        "{action} preflight must not inject a default project"
+    );
 }
 
 #[test]
