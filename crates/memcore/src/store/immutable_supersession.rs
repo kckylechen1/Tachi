@@ -33,6 +33,11 @@ pub struct ImmutableSupersessionTransaction<'tx> {
 }
 
 impl<'tx> ImmutableSupersessionTransaction<'tx> {
+    fn validate_memory_write(entry: &MemoryEntry) -> Result<(), MemoryError> {
+        crate::path_router::validate_retired_sticky_write(&entry.path, &entry.category)
+            .map_err(|error| MemoryError::InvalidArg(error.to_string()))
+    }
+
     /// Claim `source_id -> target_id` exactly once.
     ///
     /// A same-edge replay and a conflicting edge both fail loudly, so callers
@@ -177,6 +182,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
 
     /// Persist an entry inside the replacement transaction.
     pub fn upsert(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        Self::validate_memory_write(entry)?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::upsert_within_tx(&self.tx, entry, self.vec_available, None).map(|_| ())
@@ -192,6 +198,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         &mut self,
         entry: &MemoryEntry,
     ) -> Result<db::InsertMemoryResult, MemoryError> {
+        Self::validate_memory_write(entry)?;
         if crate::namespace::is_reserved_wiki_rem_id(&entry.id) {
             return Err(MemoryError::InvalidArg(format!(
                 "id '{}' is in the reserved 'wiki-rem:' namespace; use insert_rem_operation_if_absent",
@@ -210,6 +217,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         &mut self,
         entry: &MemoryEntry,
     ) -> Result<db::InsertMemoryResult, MemoryError> {
+        Self::validate_memory_write(entry)?;
         let rem_string = |key: &str| {
             entry
                 .metadata
@@ -260,6 +268,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         metadata_patch: &Map<String, Value>,
         mutations: &[db::ValidatedReferenceMutation],
     ) -> Result<(), MemoryError> {
+        Self::validate_memory_write(entry)?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         // A replacement transaction has already selected its canonical target.
@@ -357,6 +366,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         mutations: &[db::ValidatedReferenceMutation],
         policy: db::NearDuplicatePolicy,
     ) -> Result<(db::IdlessUpsertResult, Value), MemoryError> {
+        Self::validate_memory_write(entry)?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
@@ -470,6 +480,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         scope: &str,
         metadata: &serde_json::Value,
     ) -> Result<(), MemoryError> {
+        crate::path_router::validate_retired_sticky_write(path, "other")
+            .map_err(|error| MemoryError::InvalidArg(error.to_string()))?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::save_derived_with_id(
@@ -510,6 +522,7 @@ impl MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::types::Value as SqlValue;
     use serde_json::json;
 
     fn fixture_entry(id: &str) -> MemoryEntry {
@@ -544,6 +557,207 @@ mod tests {
             query_diversity: 0,
             tier: "raw".to_string(),
         }
+    }
+
+    /// Capture every user table as a comparable value snapshot. A retirement
+    /// refusal must not merely leave the target row looking unchanged: it
+    /// must leave all SQLite bytes represented by the ordinary store tables
+    /// unchanged, including FTS/vector projections and metadata tables.
+    fn database_snapshot(store: &MemoryStore) -> Vec<(String, Vec<Vec<String>>)> {
+        let conn = store.connection();
+        let table_names = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' \
+                 AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .expect("prepare table snapshot")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("list snapshot tables")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read snapshot tables");
+
+        table_names
+            .into_iter()
+            .map(|table| {
+                let quoted = format!("\"{}\"", table.replace('"', "\"\""));
+                let mut stmt = conn
+                    .prepare(&format!("SELECT * FROM {quoted}"))
+                    .expect("prepare table contents snapshot");
+                let column_count = stmt.column_count();
+                let rows = stmt
+                    .query_map([], |row| {
+                        (0..column_count)
+                            .map(|column| {
+                                row.get::<_, SqlValue>(column)
+                                    .map(|value| format!("{value:?}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .expect("read table contents snapshot")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("collect table contents snapshot");
+                (table, rows)
+            })
+            .collect()
+    }
+
+    fn retired_entry(path: &str, category: &str, id: &str) -> MemoryEntry {
+        let mut entry = fixture_entry(id);
+        entry.path = path.to_string();
+        entry.category = category.to_string();
+        entry
+    }
+
+    fn assert_transaction_refuses_without_writes<F>(label: &str, entry: MemoryEntry, operation: F)
+    where
+        F: Fn(&mut ImmutableSupersessionTransaction<'_>, &MemoryEntry) -> Result<(), MemoryError>,
+    {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        let before = database_snapshot(&store);
+        let before_changes = store.connection().total_changes();
+        let error = store
+            .with_immutable_supersession_transaction(|tx| operation(tx, &entry))
+            .expect_err(label);
+        assert!(
+            error.to_string().contains("tachi_a2a"),
+            "{label} must name its successor: {error}"
+        );
+        assert_eq!(
+            store.connection().total_changes(),
+            before_changes,
+            "{label} must execute zero SQLite changes"
+        );
+        assert_eq!(
+            database_snapshot(&store),
+            before,
+            "{label} refusal must leave every ordinary store table byte-identical"
+        );
+    }
+
+    fn assert_transaction_family_refuses<F>(label: &str, operation: F)
+    where
+        F: Copy
+            + Fn(&mut ImmutableSupersessionTransaction<'_>, &MemoryEntry) -> Result<(), MemoryError>,
+    {
+        for (variant, entry) in [
+            (
+                "retired path",
+                retired_entry("//STICKY///legacy/", "fact", "retired-path"),
+            ),
+            (
+                "retired category",
+                retired_entry("/ordinary", " Sticky ", "retired-category"),
+            ),
+        ] {
+            assert_transaction_refuses_without_writes(
+                &format!("{label} must reject {variant}"),
+                entry,
+                operation,
+            );
+        }
+    }
+
+    #[test]
+    fn immutable_transaction_upsert_rejects_retired_path_and_category() {
+        assert_transaction_family_refuses("transaction upsert", |tx, entry| tx.upsert(entry));
+    }
+
+    #[test]
+    fn immutable_transaction_insert_if_absent_rejects_retired_path_and_category() {
+        assert_transaction_family_refuses("transaction insert_if_absent", |tx, entry| {
+            tx.insert_if_absent(entry).map(|_| ())
+        });
+    }
+
+    #[test]
+    fn immutable_transaction_insert_rem_rejects_retired_path_and_category() {
+        assert_transaction_family_refuses(
+            "transaction insert_rem_operation_if_absent",
+            |tx, entry| tx.insert_rem_operation_if_absent(entry).map(|_| ()),
+        );
+    }
+
+    #[test]
+    fn immutable_transaction_validated_reference_upsert_rejects_retired_path_and_category() {
+        assert_transaction_family_refuses("transaction validated reference upsert", |tx, entry| {
+            tx.upsert_with_validated_reference_mutations(entry, &Map::new(), &[])
+        });
+    }
+
+    #[test]
+    fn immutable_transaction_validated_reference_upsert_with_removals_rejects_retired_path_and_category(
+    ) {
+        assert_transaction_family_refuses(
+            "transaction validated reference upsert with removals",
+            |tx, entry| {
+                tx.upsert_with_validated_reference_mutations_and_metadata_removals(
+                    entry,
+                    None,
+                    &Map::new(),
+                    &[],
+                    &[],
+                    db::NearDuplicatePolicy::NonSemantic,
+                )
+                .map(|_| ())
+            },
+        );
+    }
+
+    #[test]
+    fn immutable_transaction_memory_writers_accept_normal_path_and_category() {
+        let normal_entry = || fixture_entry("normal-transaction-writer");
+
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .with_immutable_supersession_transaction(|tx| tx.upsert(&normal_entry()))
+            .expect("normal transaction upsert");
+
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .with_immutable_supersession_transaction(|tx| {
+                tx.insert_if_absent(&normal_entry()).map(|_| ())
+            })
+            .expect("normal transaction insert_if_absent");
+
+        let mut rem = normal_entry();
+        rem.id = "wiki-rem:normal".to_string();
+        rem.source = "wiki".to_string();
+        rem.path = "/wiki/drafts/normal".to_string();
+        rem.metadata = json!({
+            "rem": {
+                "producer": "weekly_wiki_evolver",
+                "operation_id": "wiki-rem:normal",
+                "operation_status": "pending_sources"
+            }
+        });
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .with_immutable_supersession_transaction(|tx| {
+                tx.insert_rem_operation_if_absent(&rem).map(|_| ())
+            })
+            .expect("normal transaction insert_rem_operation_if_absent");
+
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .with_immutable_supersession_transaction(|tx| {
+                tx.upsert_with_validated_reference_mutations(&normal_entry(), &Map::new(), &[])
+            })
+            .expect("normal validated reference upsert");
+
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .with_immutable_supersession_transaction(|tx| {
+                tx.upsert_with_validated_reference_mutations_and_metadata_removals(
+                    &normal_entry(),
+                    None,
+                    &Map::new(),
+                    &[],
+                    &[],
+                    db::NearDuplicatePolicy::NonSemantic,
+                )
+                .map(|_| ())
+            })
+            .expect("normal validated reference upsert with removals");
     }
 
     /// tachi#1635 (#1632 conformance, item 1): the transaction wrapper's

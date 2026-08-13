@@ -15,6 +15,8 @@ impl MemoryStore {
         scope: &str,
         metadata: &serde_json::Value,
     ) -> Result<String, MemoryError> {
+        crate::path_router::validate_retired_sticky_write(path, "other")
+            .map_err(|error| MemoryError::InvalidArg(error.to_string()))?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::save_derived(
@@ -35,6 +37,8 @@ impl MemoryStore {
         scope: &str,
         metadata: &serde_json::Value,
     ) -> Result<(), MemoryError> {
+        crate::path_router::validate_retired_sticky_write(path, "other")
+            .map_err(|error| MemoryError::InvalidArg(error.to_string()))?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::save_derived_with_id(
@@ -135,5 +139,104 @@ impl MemoryStore {
             let _authorization = db::authorize_reserved_reference_write(&authorization)?;
             db::archive_stale_memories_with_config(&self.conn, stale_days, &self.policy.recall)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::types::Value as SqlValue;
+
+    fn derived_snapshot(store: &MemoryStore) -> Vec<Vec<String>> {
+        let mut stmt = store
+            .connection()
+            .prepare(
+                "SELECT id, text, path, summary, importance, source, scope, metadata, created_at \
+                 FROM derived_items ORDER BY id",
+            )
+            .expect("prepare derived snapshot");
+        let column_count = stmt.column_count();
+        stmt.query_map([], |row| {
+            (0..column_count)
+                .map(|column| {
+                    row.get::<_, SqlValue>(column)
+                        .map(|value| format!("{value:?}"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read derived snapshot")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect derived snapshot")
+    }
+
+    #[test]
+    fn derived_writers_reject_retired_paths_without_writes() {
+        for (index, path) in ["/sticky", "//STICKY///legacy/"].into_iter().enumerate() {
+            let store = MemoryStore::open_in_memory().expect("open memory store");
+            let before = derived_snapshot(&store);
+            let before_changes = store.connection().total_changes();
+            let error = store
+                .save_derived(
+                    "derived body",
+                    path,
+                    "derived summary",
+                    0.5,
+                    "test",
+                    "general",
+                    &serde_json::json!({"index": index}),
+                )
+                .expect_err("save_derived must reject a retired path");
+            assert!(error.to_string().contains("tachi_a2a"), "{error}");
+            assert_eq!(store.connection().total_changes(), before_changes);
+            assert_eq!(derived_snapshot(&store), before);
+
+            let before = derived_snapshot(&store);
+            let before_changes = store.connection().total_changes();
+            let error = store
+                .save_derived_with_id(
+                    &format!("retired-derived-{index}"),
+                    "derived body",
+                    path,
+                    "derived summary",
+                    0.5,
+                    "test",
+                    "general",
+                    &serde_json::json!({"index": index}),
+                )
+                .expect_err("save_derived_with_id must reject a retired path");
+            assert!(error.to_string().contains("tachi_a2a"), "{error}");
+            assert_eq!(store.connection().total_changes(), before_changes);
+            assert_eq!(derived_snapshot(&store), before);
+        }
+    }
+
+    #[test]
+    fn derived_writers_accept_a_normal_path() {
+        let store = MemoryStore::open_in_memory().expect("open memory store");
+        let id = store
+            .save_derived(
+                "derived body",
+                "/derived/normal",
+                "derived summary",
+                0.5,
+                "test",
+                "general",
+                &serde_json::json!({}),
+            )
+            .expect("save_derived normal path");
+        store
+            .save_derived_with_id(
+                "normal-derived",
+                "derived body",
+                "/derived/normal",
+                "derived summary",
+                0.5,
+                "test",
+                "general",
+                &serde_json::json!({}),
+            )
+            .expect("save_derived_with_id normal path");
+        assert!(!id.is_empty());
+        assert_eq!(derived_snapshot(&store).len(), 2);
     }
 }

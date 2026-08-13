@@ -1045,7 +1045,7 @@ impl MemoryStore {
         // decision. Check it before the cross-project metadata bypass and
         // before the host-injected KernelPolicy escape hatch, and keep legacy
         // `/sticky` rows available only to the read/cutover SQL paths.
-        if let Err(error) = path_router::validate_retired_memory_write(&entry.path, &entry.category)
+        if let Err(error) = path_router::validate_retired_sticky_write(&entry.path, &entry.category)
         {
             eprintln!(
                 "warning: retired-memory write rejected db_label={} path={} category={} error={}",
@@ -1061,9 +1061,12 @@ impl MemoryStore {
                 .get("allow_cross_project")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if let Err(e) =
-                path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
-            {
+            if let Err(e) = path_router::validate_memory_write_for_db(
+                &entry.path,
+                &entry.category,
+                &self.db_label,
+                allow_cross,
+            ) {
                 eprintln!(
                     "warning: path-routing validation rejected write db_label={} path={} error={}",
                     self.db_label, entry.path, e

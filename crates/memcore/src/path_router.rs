@@ -219,7 +219,7 @@ pub(crate) fn validate_path_for_db(
 /// This check deliberately has no store-label or policy escape hatch: legacy
 /// sticky rows remain readable for cutover, but no normal writer may recreate
 /// them after the A2A replacement.
-pub(crate) fn validate_retired_memory_write(
+pub(crate) fn validate_retired_sticky_write(
     path: &str,
     category: &str,
 ) -> Result<(), PathRoutingError> {
@@ -249,7 +249,7 @@ pub(crate) fn validate_memory_write_for_db(
     db_label: &str,
     allow_cross_project: bool,
 ) -> Result<(), PathRoutingError> {
-    validate_retired_memory_write(path, category)?;
+    validate_retired_sticky_write(path, category)?;
     validate_path_for_db(path, db_label, allow_cross_project)
 }
 
