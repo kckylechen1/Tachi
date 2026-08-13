@@ -455,7 +455,8 @@ mod tests {
                 .execute(
                     "UPDATE memories
                      SET metadata=json_set(metadata,'$.claimed_by','MEMORY_METADATA_SECRET',
-                                           '$.claimed_at','MEMORY_METADATA_AT_SECRET')
+                                           '$.claimed_at','MEMORY_METADATA_AT_SECRET',
+                                           '$.sticky.to','LEGACY_TO_SECRET')
                      WHERE id='sticky:claimed-cas'",
                     [],
                 )
@@ -481,7 +482,8 @@ mod tests {
             !plan_json.contains("DO_NOT_PERSIST_CLAIM_SECRET")
                 && !plan_json.contains("CLAIM_JSON_SECRET")
                 && !plan_json.contains("MEMORY_METADATA_SECRET")
-                && !plan_json.contains("MEMORY_METADATA_AT_SECRET"),
+                && !plan_json.contains("MEMORY_METADATA_AT_SECRET")
+                && !plan_json.contains("LEGACY_TO_SECRET"),
             "plan must not retain arbitrary legacy claim fields"
         );
 
@@ -527,7 +529,8 @@ mod tests {
                     !prepared_json.contains("DO_NOT_PERSIST_CLAIM_SECRET")
                         && !prepared_json.contains("CLAIM_JSON_SECRET")
                         && !prepared_json.contains("MEMORY_METADATA_SECRET")
-                        && !prepared_json.contains("MEMORY_METADATA_AT_SECRET"),
+                        && !prepared_json.contains("MEMORY_METADATA_AT_SECRET")
+                        && !prepared_json.contains("LEGACY_TO_SECRET"),
                     "prepared receipt must not retain arbitrary legacy claim fields"
                 );
                 Ok(())
@@ -538,7 +541,8 @@ mod tests {
             !committed_json.contains("DO_NOT_PERSIST_CLAIM_SECRET")
                 && !committed_json.contains("CLAIM_JSON_SECRET")
                 && !committed_json.contains("MEMORY_METADATA_SECRET")
-                && !committed_json.contains("MEMORY_METADATA_AT_SECRET"),
+                && !committed_json.contains("MEMORY_METADATA_AT_SECRET")
+                && !committed_json.contains("LEGACY_TO_SECRET"),
             "committed receipt must not retain arbitrary legacy claim fields"
         );
         let archive_json: String = store
@@ -554,7 +558,8 @@ mod tests {
             !archive_json.contains("DO_NOT_PERSIST_CLAIM_SECRET")
                 && !archive_json.contains("CLAIM_JSON_SECRET")
                 && !archive_json.contains("MEMORY_METADATA_SECRET")
-                && !archive_json.contains("MEMORY_METADATA_AT_SECRET"),
+                && !archive_json.contains("MEMORY_METADATA_AT_SECRET")
+                && !archive_json.contains("LEGACY_TO_SECRET"),
             "archive must not retain arbitrary legacy claim fields"
         );
     }
@@ -668,7 +673,6 @@ pub struct FrozenLegacyStickyRow {
     pub memory_revision: Option<i64>,
     pub memory_row_digest: Option<String>,
     pub source_archived: bool,
-    pub legacy_to: Option<String>,
     pub created_at: Option<String>,
     pub expires_at: Option<String>,
     pub scrubbed_body: Option<String>,
@@ -924,11 +928,13 @@ fn analyze_memory(
         .and_then(|value| value.get("ttl_days"))
         .and_then(|value| value.as_i64());
     let to_value = sticky.and_then(|value| value.get("to"));
-    let legacy_to = match to_value {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
-        _ => Some(String::new()),
-    };
+    let malformed_legacy_recipient = matches!(
+        to_value,
+        Some(serde_json::Value::String(value)) if value.trim().is_empty()
+    ) || matches!(
+        to_value,
+        Some(value) if !value.is_null() && !value.is_string()
+    );
 
     let created = created_raw
         .and_then(|value| normalize_timestamp(value, "created_at").ok())
@@ -946,7 +952,7 @@ fn analyze_memory(
         || created.is_none()
         || expires.is_none()
         || ttl_days.is_none_or(|days| days <= 0)
-        || legacy_to.as_ref().is_some_and(|value| value.is_empty())
+        || malformed_legacy_recipient
         || !matches!(status, Some("unread" | "claimed" | "expired"));
     let live_classification = if corrupt || evidence.state == StickyClaimEvidenceState::Malformed {
         LegacyStickyClass::Corrupt
@@ -979,7 +985,6 @@ fn analyze_memory(
         memory_revision: Some(row.revision),
         memory_row_digest: Some(memory_row_digest(row)?),
         source_archived: row.archived,
-        legacy_to,
         created_at: created.map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true)),
         expires_at: expires.map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true)),
         scrubbed_body: (classification == LegacyStickyClass::Unread)
@@ -1341,7 +1346,6 @@ impl MemoryStore {
                 memory_revision: None,
                 memory_row_digest: None,
                 source_archived: false,
-                legacy_to: None,
                 created_at: None,
                 expires_at: None,
                 scrubbed_body: None,
