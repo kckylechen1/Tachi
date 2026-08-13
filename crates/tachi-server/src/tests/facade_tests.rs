@@ -161,33 +161,39 @@ async fn retired_memory_claim_release_are_rejected_without_mutating_workclaim_ro
 
     let before = session_claim_snapshot(&server);
     let legacy_payloads = [
-        serde_json::json!({
-            "action": "release",
-            "format": "json",
-            "claim_id": "c2a1-historical-presence",
-            "release_reason": "retired-memory-route"
-        }),
-        serde_json::json!({
-            "action": "claim",
-            "format": "json",
-            "issue_ref": "kckylechen1/tachi#1688",
-            "flow_id": "flow-c2a1",
-            "branch": "legacy/c2a1-new",
-            "declared_file_scope": ["crates/tachi-server/src/facade_memory_ops/mod.rs"]
-        }),
+        (
+            "release",
+            serde_json::json!({
+                "action": "release",
+                "format": "json",
+                "claim_id": "c2a1-historical-presence",
+                "release_reason": "retired-memory-route"
+            }),
+        ),
+        (
+            "claim",
+            serde_json::json!({
+                "action": "claim",
+                "format": "json",
+                "issue_ref": "kckylechen1/tachi#1688",
+                "flow_id": "flow-c2a1",
+                "branch": "legacy/c2a1-new",
+                "declared_file_scope": ["crates/tachi-server/src/facade_memory_ops/mod.rs"]
+            }),
+        ),
     ];
-    let mut outcomes = Vec::new();
-    for payload in legacy_payloads {
-        let params: TachiMemoryParams =
-            serde_json::from_value(payload).expect("legacy Memory payload deserializes");
-        let action = params.action.clone();
-        let outcome = crate::facade_memory_ops::handle_tachi_memory(&server, params).await;
-        outcomes.push((action, outcome));
-    }
 
-    for (action, outcome) in outcomes {
-        let error = outcome.expect_err("retired Memory claim/release must be rejected");
-        assert!(error.contains("tachi_task"), "{action} guidance: {error}");
+    for (action, payload) in legacy_payloads {
+        let error = serde_json::from_value::<TachiMemoryParams>(payload)
+            .expect_err("retired Memory claim/release must fail at typed deserialization")
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "invalid tachi_memory action '{action}'; use search, get, save, briefing, checkpoint, alerts, ask, extract_facts, or consolidate"
+            ),
+            "retired Memory action={action} must carry exact typed-boundary guidance",
+        );
         assert_eq!(
             session_claim_snapshot(&server),
             before,
