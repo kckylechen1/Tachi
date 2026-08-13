@@ -432,6 +432,11 @@ impl super::super::LlmClient {
             let resp = match resp {
                 Ok(r) => r,
                 Err(e) => {
+                    // Deployment-only evidence (#1681 D4): no status line ever
+                    // arrived, so there is no credential fact here at all. One
+                    // record per attempt, because each attempt is its own
+                    // observation of the deployment.
+                    self.note_deployment_transport_failure(attribution);
                     last_err = format!("HTTP request failed: {e}");
                     last_class = ProviderInvocationFailureClass::Transient;
                     if attempt < max_attempts
@@ -460,6 +465,17 @@ impl super::super::LlmClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
+            // The same header, unparsed, for the deployment authority alone
+            // (#1681 D4). Read beside `retry_after` rather than replacing it:
+            // that one is a delta-seconds count feeding the retry sleep, and
+            // widening it to HTTP-dates would change how long a retry waits.
+            // This copy goes through `RetryAfter::parse`, so all three RFC 9110
+            // date formats reach a health row without touching lane timing.
+            let retry_after_header = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             let resp_text = match resp.text().await {
                 Ok(text) => text,
                 Err(e) => {
@@ -471,6 +487,21 @@ impl super::super::LlmClient {
                             &selected,
                             Some(&format!("Chat auth failure {status}")),
                             attribution,
+                        );
+                    } else if status.is_success() {
+                        // Headers said 2xx and then the body never finished
+                        // arriving: nothing was served, whatever the status
+                        // line promised.
+                        self.note_deployment_unusable_body(attribution);
+                    } else {
+                        // 5xx, 402 and the rest still carry their status: the
+                        // deployment answered, it just answered badly. (429 and
+                        // the auth statuses are handled above — 429 through the
+                        // dual record, auth never at all.)
+                        self.note_deployment_http_status(
+                            attribution,
+                            status.as_u16(),
+                            retry_after_header.as_deref(),
                         );
                     }
                     last_err = format!("Chat response body read failed after HTTP {status}: {e}");
@@ -570,6 +601,14 @@ impl super::super::LlmClient {
                 });
             }
             if status.is_server_error() {
+                // #1681 D4: a 5xx is the deployment's own failure and nobody
+                // else's — deployment-only, and it cools the row down only if
+                // the provider named a `Retry-After`.
+                self.note_deployment_http_status(
+                    attribution,
+                    status.as_u16(),
+                    retry_after_header.as_deref(),
+                );
                 last_class = ProviderInvocationFailureClass::Transient;
                 last_err = format!(
                     "API error {status}: {}",
@@ -600,6 +639,16 @@ impl super::super::LlmClient {
             }
 
             if !status.is_success() {
+                // Everything left over: a `402` (quota spent behind this
+                // deployment — throttling, per #1681 D4's 429/quota rule) and
+                // the plain refusals, `400`/`404`/`422`. The lane still fails
+                // exactly as it did; what changed is that the observation is
+                // no longer thrown away.
+                self.note_deployment_http_status(
+                    attribution,
+                    status.as_u16(),
+                    retry_after_header.as_deref(),
+                );
                 return Err(ProviderTierFailure {
                     class: ProviderInvocationFailureClass::LaneOutage,
                     provider_attempts,
@@ -612,16 +661,23 @@ impl super::super::LlmClient {
             }
 
             // Parse JSON response
-            let json: Value =
-                serde_json::from_str(&resp_text).map_err(|e| ProviderTierFailure {
-                    class: ProviderInvocationFailureClass::LaneOutage,
-                    provider_attempts,
-                    latency_ms: tier_started.elapsed().as_millis(),
-                    safe_detail: format!(
-                        "Failed to parse chat response JSON: {e} — {}",
-                        redact_provider_response(&resp_text)
-                    ),
-                })?;
+            let json: Value = match serde_json::from_str(&resp_text) {
+                Ok(json) => json,
+                Err(e) => {
+                    // A protocol failure: 2xx, and the body is not the
+                    // protocol it claimed. Deployment-only (#1681 D4).
+                    self.note_deployment_unusable_body(attribution);
+                    return Err(ProviderTierFailure {
+                        class: ProviderInvocationFailureClass::LaneOutage,
+                        provider_attempts,
+                        latency_ms: tier_started.elapsed().as_millis(),
+                        safe_detail: format!(
+                            "Failed to parse chat response JSON: {e} — {}",
+                            redact_provider_response(&resp_text)
+                        ),
+                    });
+                }
+            };
 
             // #1071 fix-round checkpoint 6: read `finish_reason` regardless
             // of whether content came back, so a non-empty-but-cut-off
@@ -684,6 +740,12 @@ impl super::super::LlmClient {
                     },
                 });
             }
+
+            // An empty completion is one of the three shapes
+            // `DeploymentOutcome::UnusableResponse` names: the deployment
+            // answered, and the answer was of no use. Deployment-only — the
+            // credential worked fine.
+            self.note_deployment_unusable_body(attribution);
 
             // Content was empty — build diagnostic info
             let usage = json

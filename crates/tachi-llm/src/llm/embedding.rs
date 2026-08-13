@@ -170,6 +170,9 @@ impl super::LlmClient {
                     // the body forever isn't recorded as a success.
                     Ok(response) => response,
                     Err(err) => {
+                        // No status line: deployment-only evidence (#1681 D4),
+                        // exactly as on the chat lanes.
+                        self.note_deployment_transport_failure(attribution);
                         self.note_recall_provider_outcome(err.is_timeout());
                         last_err = format!("Voyage batch API request failed: {err}");
                         if attempt < max_attempts {
@@ -186,7 +189,19 @@ impl super::LlmClient {
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok());
+                // The raw header for the deployment authority, parsed through
+                // `RetryAfter::parse` so all three RFC 9110 date forms land —
+                // see the same read in `lane_calls.rs` on why it is a second
+                // read rather than a widening of `retry_after`.
+                let retry_after_header = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
                 let text = response.text().await.map_err(|e| {
+                    // The body stalled: whatever the status line said, nothing
+                    // usable came back.
+                    self.note_deployment_unusable_body(attribution);
                     // Headers-then-stall (#926 review): the body read carries
                     // its own share of the request's `.timeout()` budget and
                     // can time out even though `send()` already returned Ok.
@@ -220,12 +235,20 @@ impl super::LlmClient {
                     return Err(format!("Voyage batch API error: {} - {}", status, text));
                 }
                 if !status.is_success() {
+                    // 402, 5xx and the plain refusals — the same gap the chat
+                    // lanes had (#1681 D4, codex CP6).
+                    self.note_deployment_http_status(
+                        attribution,
+                        status.as_u16(),
+                        retry_after_header.as_deref(),
+                    );
                     return Err(format!("Voyage batch API error: {} - {}", status, text));
                 }
-                response_json = Some(
-                    serde_json::from_str(&text)
-                        .map_err(|e| format!("Failed to parse Voyage batch response: {}", e))?,
-                );
+                response_json = Some(serde_json::from_str(&text).map_err(|e| {
+                    // Protocol failure: a 2xx body that is not the protocol.
+                    self.note_deployment_unusable_body(attribution);
+                    format!("Failed to parse Voyage batch response: {}", e)
+                })?);
                 self.mark_secret_success(&selected, attribution);
                 break;
             }

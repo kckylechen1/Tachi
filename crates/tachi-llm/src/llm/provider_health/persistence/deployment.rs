@@ -36,7 +36,7 @@
 //! bookkeeping row could not be written would be strictly worse than not
 //! having the row.
 
-use memcore::catalog::health::{DeploymentOutcome, RetryAfter};
+use memcore::catalog::health::{DeploymentOutcome, ProviderResponseSignal, RetryAfter};
 use memcore::db::model_catalog::{
     record_model_deployment_outcome, DeploymentHealthSkip, DeploymentHealthWrite,
     DeploymentOutcomeTarget,
@@ -90,6 +90,81 @@ impl super::super::super::LlmClient {
         outcome: TypedOutcome,
         evidence: EvidenceKind,
     ) {
+        let Some(outcome) = deployment_outcome_for(outcome) else {
+            return;
+        };
+        self.record_deployment_outcome(attribution, outcome, evidence);
+    }
+
+    /// The deployment half of an outcome the credential authority has nothing
+    /// to say about (#1681 D4: `timeout/5xx/protocol` → deployment only, and a
+    /// `402` whose quota signal is not an auth status).
+    ///
+    /// The chat and embedding lanes reach it through the three
+    /// intention-named wrappers below rather than through
+    /// `DeploymentOutcome::classify` directly, so the classification stays in
+    /// this module — the call sites gain one line each and no HTTP-response
+    /// judgment. That is what keeps "`lane_calls.rs` only gained hooks" true:
+    /// there is nothing at those sites to get wrong.
+    pub(in crate::llm) fn note_deployment_response(
+        &self,
+        attribution: DeploymentAttribution<'_>,
+        signal: ProviderResponseSignal,
+        retry_after: Option<RetryAfter>,
+    ) {
+        let Some(outcome) = DeploymentOutcome::classify(signal, retry_after) else {
+            // 401/403. The credential and account authorities own those, and
+            // the deployment vocabulary cannot express them at all.
+            return;
+        };
+        self.record_deployment_outcome(attribution, outcome, EvidenceKind::SelfReported);
+    }
+
+    /// The request never produced a status line: a connect failure, a timeout,
+    /// a dropped connection.
+    pub(in crate::llm) fn note_deployment_transport_failure(
+        &self,
+        attribution: DeploymentAttribution<'_>,
+    ) {
+        self.note_deployment_response(attribution, ProviderResponseSignal::NoResponse, None);
+    }
+
+    /// The deployment answered and the answer was unusable: a body that never
+    /// finished arriving, one that would not parse, or a completion with no
+    /// content in it.
+    pub(in crate::llm) fn note_deployment_unusable_body(
+        &self,
+        attribution: DeploymentAttribution<'_>,
+    ) {
+        self.note_deployment_response(attribution, ProviderResponseSignal::UnusableBody, None);
+    }
+
+    /// The deployment answered with `status`.
+    ///
+    /// `retry_after_header` is the raw header, parsed **here** through
+    /// [`RetryAfter::parse`] so all three RFC 9110 HTTP-date formats reach a
+    /// row. The lane's own `retry_after` — a delta-seconds `u64` feeding the
+    /// retry sleep — is deliberately left alone: widening it would change how
+    /// long a retry waits, and this seam records, it does not steer.
+    pub(in crate::llm) fn note_deployment_http_status(
+        &self,
+        attribution: DeploymentAttribution<'_>,
+        status: u16,
+        retry_after_header: Option<&str>,
+    ) {
+        self.note_deployment_response(
+            attribution,
+            ProviderResponseSignal::Status(status),
+            retry_after_header.and_then(RetryAfter::parse),
+        );
+    }
+
+    fn record_deployment_outcome(
+        &self,
+        attribution: DeploymentAttribution<'_>,
+        outcome: DeploymentOutcome,
+        evidence: EvidenceKind,
+    ) {
         let (Some(deployment_id), Some(endpoint), Some(model)) = (
             attribution.env_deployment_id(),
             attribution.endpoint(),
@@ -100,10 +175,12 @@ impl super::super::super::LlmClient {
             // deployment we failed to find.
             return;
         };
-        let Some(outcome) = deployment_outcome_for(outcome) else {
-            return;
-        };
         let Some(db_path) = self.vault_db_path.clone() else {
+            // Attributable, but this client has nowhere to write. Counted
+            // rather than dropped in silence: "the seam recorded nothing"
+            // and "the seam had no store to record into" are different
+            // operational states, and only one of them is a bug.
+            self.deployment_health.note_no_store();
             return;
         };
 
@@ -198,6 +275,12 @@ impl super::super::super::LlmClient {
             Ok(DeploymentHealthWrite::Skipped(
                 DeploymentHealthSkip::DescribesADifferentRequest,
             )) => counters.note_different_request(),
+            Ok(DeploymentHealthWrite::Skipped(DeploymentHealthSkip::StaleObservation)) => {
+                counters.note_stale_observation()
+            }
+            Ok(DeploymentHealthWrite::Skipped(DeploymentHealthSkip::AuthClassStatus)) => {
+                counters.note_auth_class_status()
+            }
             Err(err) => {
                 counters.note_failure();
                 // Logged, never propagated: the invocation this describes has
