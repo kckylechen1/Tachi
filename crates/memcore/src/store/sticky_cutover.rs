@@ -565,6 +565,125 @@ mod tests {
     }
 
     #[test]
+    fn legacy_path_is_digest_only_across_plan_receipts_and_archive_and_cas_binds_full_row() {
+        const PATH_SECRET: &str = "LEGACY_PATH_SECRET";
+        let (_temp, path, mut store) = fixture_store();
+        let entry = sticky_entry(
+            "path-secret",
+            Some(PATH_SECRET),
+            "unread",
+            "2026-08-12T00:00:00Z",
+            7,
+        );
+        assert_eq!(entry.path, format!("/sticky/to/{PATH_SECRET}"));
+        assert_eq!(entry.metadata["sticky"]["to"], PATH_SECRET);
+        store.upsert(&entry).expect("seed path secret row");
+
+        let mut plan = store
+            .plan_sticky_cutover_at(path.clone(), "2026-08-13T00:00:00Z", str::to_string)
+            .expect("plan");
+        let path_row = plan
+            .rows
+            .iter()
+            .find(|row| row.sticky_id == "path-secret")
+            .expect("path secret row");
+        let source_row_digest = path_row.memory_row_digest.clone().expect("row digest");
+        let plan_json = serde_json::to_string(&plan).expect("plan JSON");
+        assert!(
+            !plan_json.contains(PATH_SECRET),
+            "plan retained raw legacy path or recipient"
+        );
+
+        decide(&mut plan);
+        for row in &mut plan.rows {
+            if row.sticky_id == "path-secret" {
+                row.disposition = super::StickyCutoverDisposition::Discard {
+                    reason: "fixture resolves path-secret as unread".to_string(),
+                };
+            }
+        }
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize path CAS fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET path=?1 WHERE id='sticky:path-secret'",
+                    [format!("/sticky/to/{PATH_SECRET}-changed")],
+                )
+                .expect("mutate legacy source path");
+        }
+        let error = store
+            .apply_sticky_cutover_with_precommit_receipt(&plan, |_| Ok(()))
+            .expect_err("changing legacy path must fail full-row CAS");
+        assert!(
+            error.to_string().contains("memory CAS drift"),
+            "actual CAS error: {error}"
+        );
+
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize path CAS restore fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET path=?1 WHERE id='sticky:path-secret'",
+                    [format!("/sticky/to/{PATH_SECRET}")],
+                )
+                .expect("restore legacy source path");
+        }
+        let mut prepared_json = None;
+        let result = store
+            .apply_sticky_cutover_with_precommit_receipt(&plan, |prepared| {
+                let serialized = serde_json::to_string(&prepared.receipt).expect("prepared JSON");
+                assert!(
+                    !serialized.contains(PATH_SECRET),
+                    "prepared receipt retained raw legacy path or recipient"
+                );
+                prepared_json = Some(serialized);
+                Ok(())
+            })
+            .expect("apply");
+        assert!(prepared_json.is_some());
+        let committed_json = serde_json::to_string(&result.receipt).expect("committed JSON");
+        assert!(
+            !committed_json.contains(PATH_SECRET),
+            "committed receipt retained raw legacy path or recipient"
+        );
+        let archive_json: String = store
+            .connection()
+            .query_row(
+                "SELECT json_extract(metadata,'$.legacy_sticky_archive')
+                 FROM memories WHERE id='sticky:path-secret'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("archive JSON");
+        assert!(
+            !archive_json.contains(PATH_SECRET),
+            "archive retained raw legacy path or recipient"
+        );
+        let archive: serde_json::Value = serde_json::from_str(&archive_json).expect("archive");
+        assert_eq!(
+            archive["source_evidence"]["path_digest"],
+            super::sha256(format!("/sticky/to/{PATH_SECRET}").as_bytes())
+        );
+        assert!(archive["source_evidence"].get("path").is_none());
+        let receipt_row = result
+            .receipt
+            .rows
+            .iter()
+            .find(|row| row.sticky_id == "path-secret")
+            .expect("path secret receipt row");
+        assert_eq!(
+            receipt_row.source_row_digest.as_deref(),
+            Some(source_row_digest.as_str())
+        );
+    }
+
+    #[test]
     fn apply_rejects_memory_cas_or_physical_database_drift_before_mutation() {
         let (_temp, path, mut store) = fixture_store();
         seed_matrix(&mut store);
@@ -1202,7 +1321,7 @@ fn archive_metadata(
         "envelope_id": envelope_id,
         "source_evidence": {
             "memory_id": source.id,
-            "path": source.path,
+            "path_digest": sha256(source.path.as_bytes()),
             "timestamp": source.timestamp,
             "valid_until": source.valid_until,
             "was_archived": source.archived,
