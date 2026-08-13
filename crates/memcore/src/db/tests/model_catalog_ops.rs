@@ -1263,6 +1263,138 @@ fn two_connections_committing_out_of_order_leave_the_latest_observation_standing
     );
 }
 
+/// A file-backed catalog database and a connection onto it, with the schema
+/// and the process-wide extensions the in-memory helper inherits.
+fn catalog_file_db(dir: &std::path::Path) -> (String, Connection) {
+    let path = dir
+        .join("catalog.db")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let _ = crate::db::enable_simple_auto_extension();
+    crate::db::register_sqlite_vec();
+    let conn = open_catalog_connection(&path);
+    init_schema(&conn).expect("schema initializes");
+    (path, conn)
+}
+
+/// Another connection onto the same file, with a busy budget. rusqlite's
+/// default is zero, which turns "wait for the writer that holds the lock" into
+/// an instant `SQLITE_BUSY` and makes a contended schedule untestable.
+fn open_catalog_connection(path: &str) -> Connection {
+    let conn = Connection::open(path).expect("open the catalog database");
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .expect("busy budget");
+    conn
+}
+
+#[test]
+fn an_outcome_observed_during_another_writers_transaction_still_sees_its_commit() {
+    // The *concurrent* half of CP5. The out-of-order test above cannot reach
+    // it: it is sequential by construction — the success has committed before
+    // the throttle connection is even opened — so it proves late arrival, not
+    // a shared pre-write snapshot (codex re-review of PR-C, CP5).
+    //
+    // The schedule below is the one WAL actually produces. The throttle
+    // connection holds the write lock with its transaction still open; the
+    // success connection enters the store door while it is held; the throttle
+    // commits underneath it. With a deferred transaction the success reads the
+    // pre-throttle snapshot, passes the staleness check against a row that is
+    // already obsolete, and then has its upsert refused with
+    // `SQLITE_BUSY_SNAPSHOT` — which the busy handler does not retry — leaving
+    // the superseded cooldown durable and the newer observation unrecorded.
+    // With the write lock taken before the read, it waits, reads the throttle's
+    // committed row, and supersedes it.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (path, reader) = catalog_file_db(temp.path());
+    upsert_model_deployment(&reader, &extract_lane()).expect("import");
+
+    let throttled_at = instant(0);
+    let served_at = instant(5);
+
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let throttle_path = path.clone();
+    let throttle = std::thread::spawn(move || {
+        let conn = open_catalog_connection(&throttle_path);
+        // The caller's own transaction: the store door nests in it, so nothing
+        // this thread writes is visible until the `COMMIT` below.
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .expect("take the write lock");
+        record_model_deployment_outcome(
+            &conn,
+            &extract_request(),
+            DeploymentOutcome::Throttled {
+                retry_after: Some(RetryAfter::DeltaSeconds(45)),
+            },
+            EvidenceKind::SelfReported,
+            throttled_at,
+        )
+        .expect("the throttle records inside the caller's transaction");
+        locked_tx.send(()).expect("announce the held lock");
+        release_rx
+            .recv()
+            .expect("wait for the success to be in flight");
+        conn.execute_batch("COMMIT").expect("commit the throttle");
+    });
+
+    locked_rx
+        .recv()
+        .expect("the throttle connection holds the write lock");
+
+    let success_path = path.clone();
+    let success = std::thread::spawn(move || {
+        let conn = open_catalog_connection(&success_path);
+        record_model_deployment_outcome(
+            &conn,
+            &extract_request(),
+            DeploymentOutcome::Served,
+            EvidenceKind::SelfReported,
+            served_at,
+        )
+    });
+
+    // Long enough for the success connection to be inside the store door —
+    // blocked on the write lock now, or (before this fix) already past its
+    // reads and blocked on the upsert. Overshooting only makes the test
+    // weaker, never flaky: it would merely let the success start after the
+    // commit, which is the sequential case the test above already covers.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    release_tx.send(()).expect("release the throttle");
+    throttle.join().expect("throttle thread");
+
+    let write = success
+        .join()
+        .expect("success thread")
+        .expect("a write that waited for the lock is not a failed write");
+    assert!(
+        matches!(write, DeploymentHealthWrite::Recorded { .. }),
+        "the newer observation must land, got {write:?}"
+    );
+
+    let health = get_model_deployment_health(&reader, "env:extract")
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        health.state, "ok",
+        "the surviving row must be the most recent observation, not the one that got the lock first"
+    );
+    assert_eq!(
+        health.cooldown_until, None,
+        "a cooldown the success superseded must not outlive it"
+    );
+    assert_eq!(health.observed_at, iso(served_at));
+    assert_eq!(
+        list_model_deployment_events(&reader, "env:extract")
+            .expect("events")
+            .len(),
+        3,
+        "the import, the throttle, and the success that superseded it — both writes are \
+         observations and the log keeps both"
+    );
+}
+
 #[test]
 fn an_observation_at_the_same_instant_as_the_row_is_still_recorded() {
     // The guard is strictly-earlier: two outcomes sharing a timestamp are

@@ -28,7 +28,10 @@
 //! outside a transaction risks — except
 //! [`record_model_deployment_outcome`], whose row-plus-event transition is
 //! atomic by itself: it uses a `SAVEPOINT`, which nests inside a caller's
-//! transaction and starts one when there is none (the `db::graph` precedent).
+//! transaction (the `db::graph` precedent), and when there is none to nest in
+//! it opens a `BEGIN IMMEDIATE` around it — read-then-write ordering needs the
+//! write lock taken before the read, which a deferred transaction does not do
+//! (#1681 CP5).
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -757,11 +760,35 @@ pub enum DeploymentHealthWrite {
 /// beyond the one the write already takes, and it fails safe — the surviving
 /// row is always the most recent observation, whichever write got there first.
 ///
-/// A `SAVEPOINT` rather than a `BEGIN`, following `db::graph::write_edge_row`'s
-/// precedent: it nests cleanly whether or not the caller already holds a
-/// transaction, and when there is none it starts one and `RELEASE` commits it.
-/// That keeps this accessor composable inside a caller's write transaction —
-/// the module's rule — while still being atomic on its own.
+/// # The lock comes before the read, not after it (#1681 CP5)
+///
+/// "The transaction that will do the write" has to be a *write* transaction
+/// from its first statement. A `SAVEPOINT` on an idle connection opens a
+/// **deferred** transaction: the reads above take a snapshot, and only the
+/// upsert tries to take the write lock. Two connections can therefore read the
+/// same snapshot, and in WAL the second one to attempt its write is refused
+/// with `SQLITE_BUSY_SNAPSHOT` — which the busy handler does not retry,
+/// because retrying could not help: the snapshot it read is already obsolete
+/// ([SQLite isolation](https://www.sqlite.org/isolation.html)). The newer
+/// observation then exits as a failed write and the older one, having
+/// committed first, stays durable — the exact inversion the ordering rule
+/// above exists to prevent, and one no comparison made *before* the write can
+/// see (codex re-review of PR-C, CP5).
+///
+/// So when this function owns the transaction it opens it with `BEGIN
+/// IMMEDIATE`: the write lock is taken before the first read, a competing
+/// writer waits on the busy handler instead of racing, and whichever
+/// connection gets in second reads the other's committed row and compares
+/// against *that*.
+///
+/// A `SAVEPOINT` **inside** it, following `db::graph::write_edge_row`'s
+/// precedent, so the accessor still nests cleanly in a caller that already
+/// holds a transaction — the module's rule. In that case the caller owns the
+/// snapshot and therefore owns this guarantee: a caller that opens a deferred
+/// transaction, reads, and only then calls this function has already taken the
+/// snapshot this function would have avoided. Nothing here can upgrade someone
+/// else's transaction, and pretending otherwise (by opening a second one)
+/// would break composability to buy a promise it could not keep.
 pub fn record_model_deployment_outcome(
     conn: &Connection,
     target: &DeploymentOutcomeTarget<'_>,
@@ -779,6 +806,13 @@ pub fn record_model_deployment_outcome(
         return Ok(DeploymentHealthWrite::Skipped(
             DeploymentHealthSkip::AuthClassStatus,
         ));
+    }
+    // `BEGIN IMMEDIATE` only when there is no transaction to nest in: it takes
+    // the write lock now, before the reads below, so the snapshot they compare
+    // against is the one the write will land on.
+    let owns_transaction = conn.is_autocommit();
+    if owns_transaction {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
     }
     conn.execute_batch("SAVEPOINT record_model_deployment_outcome")?;
     let result = (|| -> Result<DeploymentHealthWrite, MemoryError> {
@@ -827,6 +861,9 @@ pub fn record_model_deployment_outcome(
     match result {
         Ok(write) => {
             conn.execute_batch("RELEASE record_model_deployment_outcome")?;
+            if owns_transaction {
+                conn.execute_batch("COMMIT")?;
+            }
             Ok(write)
         }
         Err(err) => {
@@ -834,6 +871,9 @@ pub fn record_model_deployment_outcome(
             // that failed the write, not a secondary failure while undoing it.
             let _ = conn.execute_batch("ROLLBACK TO record_model_deployment_outcome");
             let _ = conn.execute_batch("RELEASE record_model_deployment_outcome");
+            if owns_transaction {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
             Err(err)
         }
     }
