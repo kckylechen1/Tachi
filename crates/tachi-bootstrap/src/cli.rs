@@ -84,10 +84,12 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+mod broker_actions;
 mod commands;
 mod maintenance_actions;
 mod vault_actions;
 
+pub use broker_actions::BrokerAction;
 pub use commands::{Commands, RecallCoverageArgs};
 pub use maintenance_actions::{
     BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DedupeAction, DistillAction,

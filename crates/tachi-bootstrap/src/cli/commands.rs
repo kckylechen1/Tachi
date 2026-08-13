@@ -1,8 +1,8 @@
 use super::{
-    BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DistillAction, EnvAction,
-    EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction,
-    ManifestAction, McpAction, PokeAction, RepairAction, RescueAction, SkillSurfaceAction,
-    VaultAction, WatcherAction, WikiAction, WorktreeAction,
+    BrokerAction, BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DistillAction,
+    EnvAction, EvalAction, FoundryAction, HarnessAction, HostAction, HubAction,
+    InjectionSurfaceAction, ManifestAction, McpAction, PokeAction, RepairAction, RescueAction,
+    SkillSurfaceAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -515,6 +515,12 @@ pub enum Commands {
         /// per-capture MemoryDistill failures after the Phase 1 migration.
         #[arg(long, value_name = "DAYS", num_args = 0..=1, default_missing_value = "14", global = true)]
         purge_failed: Option<u64>,
+    },
+    /// Model-broker alias governance (tachi#1681 D2): show the alias set,
+    /// plan a change against it, apply a reviewed plan.
+    Broker {
+        #[command(subcommand)]
+        action: BrokerAction,
     },
     /// Vault secret management (init, unlock, set, get, remove, list, lock, status).
     Vault {

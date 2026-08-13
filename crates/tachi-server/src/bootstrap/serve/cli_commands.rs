@@ -208,6 +208,10 @@ pub(super) async fn run_pre_serve_command(
             .await?;
             Ok(true)
         }
+        Commands::Broker { action } => {
+            super::super::broker_cli::run_broker_command(global_db_path, action.clone())?;
+            Ok(true)
+        }
         Commands::Vault { action } => {
             super::super::vault_cli::run_vault_command(global_db_path, app_home, action.clone())
                 .await?;

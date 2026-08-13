@@ -122,6 +122,9 @@ pub(super) async fn run_cli_command(
         Commands::Distill { .. } => {
             unreachable!("Distill is handled in async context before generic CLI dispatch")
         }
+        Commands::Broker { .. } => {
+            unreachable!("Broker is handled in async context before generic CLI dispatch")
+        }
         Commands::Vault { .. } => {
             unreachable!("Vault is handled in async context before generic CLI dispatch")
         }
