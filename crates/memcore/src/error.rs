@@ -174,6 +174,64 @@ impl std::fmt::Display for ProviderPlanRefusal {
     }
 }
 
+/// Why a bound **alias** plan was refused at apply time (tachi#1681 D2). Every
+/// one of these means zero writes, for the same reason
+/// [`ProviderPlanRefusal`] does: the refusal is raised inside apply's single
+/// write transaction, which rolls back.
+///
+/// A separate vocabulary rather than a reuse of [`ProviderPlanRefusal`]: the
+/// two plans bind different objects, and a shared enum would force an alias
+/// refusal to be reported as, say, `account_revision_drift` — a sentence that
+/// is not true about anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AliasPlanRefusal {
+    /// The digest recomputed from the plan's own bound content does not equal
+    /// the digest it was presented under — an edited action or an edited
+    /// digest, both caught.
+    PlanDigestMismatch,
+    /// The alias-set policy revision moved between plan and apply. The
+    /// strongest of these checks: it catches a change to an alias this plan
+    /// never mentions, which no per-row binding could notice and which still
+    /// re-routes traffic the operator reviewed nothing about.
+    PolicyRevisionDrift,
+    /// A bound alias is no longer at the revision the plan was built against,
+    /// or appeared/vanished against what the plan bound.
+    AliasRevisionDrift,
+    /// A bound deployment is no longer at the revision the plan read, or
+    /// appeared/vanished against what the plan bound.
+    DeploymentRevisionDrift,
+    /// An action touches an alias the plan never bound a precondition for.
+    /// Structural: an unbound alias is an unverified write, refused even when
+    /// nothing has actually drifted.
+    UnboundAlias,
+    /// An action binds a deployment the plan never bound a precondition for.
+    UnboundDeployment,
+    /// An action binds an alias to a deployment that does not exist. Alias
+    /// governance never mints the thing it governs.
+    UnknownDeployment,
+    /// The plan is internally malformed — a blank identifier, a duplicate
+    /// binding, non-object declaration JSON, or two actions contradicting each
+    /// other. Refused before any write, because apply never guesses what a
+    /// plan meant.
+    MalformedPlan,
+}
+
+impl std::fmt::Display for AliasPlanRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::PlanDigestMismatch => "plan_digest_mismatch",
+            Self::PolicyRevisionDrift => "policy_revision_drift",
+            Self::AliasRevisionDrift => "alias_revision_drift",
+            Self::DeploymentRevisionDrift => "deployment_revision_drift",
+            Self::UnboundAlias => "unbound_alias",
+            Self::UnboundDeployment => "unbound_deployment",
+            Self::UnknownDeployment => "unknown_deployment",
+            Self::MalformedPlan => "malformed_plan",
+        };
+        formatter.write_str(reason)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MemoryError {
     #[error("SQLite error: {0}")]
@@ -235,6 +293,19 @@ pub enum MemoryError {
     #[error("provider account plan refused ({reason}): {detail}")]
     ProviderAccountPlanRefused {
         reason: ProviderPlanRefusal,
+        detail: String,
+    },
+
+    /// tachi#1681 D2: a bound alias plan was refused at apply time.
+    ///
+    /// **Nothing was written** — the refusal is raised inside apply's single
+    /// write transaction, so the alias set is exactly what it was before the
+    /// call. `detail` carries alias names, deployment ids, revisions and
+    /// digests; it never carries a credential, because nothing in this path
+    /// ever holds one.
+    #[error("model alias plan refused ({reason}): {detail}")]
+    ModelAliasPlanRefused {
+        reason: AliasPlanRefusal,
         detail: String,
     },
 

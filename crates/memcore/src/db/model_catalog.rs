@@ -44,7 +44,8 @@ use crate::catalog::{
     partition_authoritative_at, AttachmentBounds, AuthoritativePartition, CatalogSource,
     DeploymentCapabilities, DeploymentEventKind, ModelAlias, ModelAliasBinding, ModelDeployment,
     ModelDeploymentEvent, ModelDeploymentHealth, NewModelDeployment, NewModelDeploymentEvent,
-    PricingSnapshot, ProtocolKind, DEPLOYMENT_STATUS_RETIRED,
+    PricingSnapshot, ProtocolKind, ALIAS_STATUS_ACTIVE, ALIAS_STATUS_RETIRED,
+    DEPLOYMENT_STATUS_RETIRED,
 };
 use crate::error::MemoryError;
 use crate::vault::health::EvidenceKind;
@@ -558,28 +559,45 @@ pub fn get_pricing_snapshot(
 
 // ─── model_aliases + model_alias_bindings (read side) ────────────────────────
 
+const ALIAS_COLUMNS: &str = "alias_name, required_capabilities, constraints, status, revision, \
+     policy_digest, source_refs, created_at, updated_at";
+
+fn row_to_alias(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelAlias> {
+    let source_refs_raw: String = row.get("source_refs")?;
+    Ok(ModelAlias {
+        alias_name: row.get("alias_name")?,
+        required_capabilities: row.get("required_capabilities")?,
+        constraints: row.get("constraints")?,
+        status: row.get("status")?,
+        revision: row.get("revision")?,
+        policy_digest: row.get("policy_digest")?,
+        source_refs: serde_json::from_str(&source_refs_raw).unwrap_or_default(),
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+/// One alias by name.
+pub fn get_model_alias(
+    conn: &Connection,
+    alias_name: &str,
+) -> Result<Option<ModelAlias>, MemoryError> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {ALIAS_COLUMNS} FROM model_aliases WHERE alias_name = ?1"),
+            params![alias_name],
+            row_to_alias,
+        )
+        .optional()?)
+}
+
 /// Every alias, ordered by name. The reviewed plan/apply **write** path is
 /// #1681 D2 / PR-D; PR-B only reads.
 pub fn list_model_aliases(conn: &Connection) -> Result<Vec<ModelAlias>, MemoryError> {
-    let mut stmt = conn.prepare(
-        "SELECT alias_name, required_capabilities, constraints, status, revision, \
-         policy_digest, source_refs, created_at, updated_at \
-         FROM model_aliases ORDER BY alias_name",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let source_refs_raw: String = row.get("source_refs")?;
-        Ok(ModelAlias {
-            alias_name: row.get("alias_name")?,
-            required_capabilities: row.get("required_capabilities")?,
-            constraints: row.get("constraints")?,
-            status: row.get("status")?,
-            revision: row.get("revision")?,
-            policy_digest: row.get("policy_digest")?,
-            source_refs: serde_json::from_str(&source_refs_raw).unwrap_or_default(),
-            created_at: row.get("created_at")?,
-            updated_at: row.get("updated_at")?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ALIAS_COLUMNS} FROM model_aliases ORDER BY alias_name"
+    ))?;
+    let rows = stmt.query_map([], row_to_alias)?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
@@ -610,6 +628,265 @@ pub fn list_model_alias_bindings(conn: &Connection) -> Result<Vec<ModelAliasBind
         out.push(row?);
     }
     Ok(out)
+}
+
+// ─── model_aliases + model_alias_bindings (write side, #1681 D2 / PR-D) ──────
+//
+// Every accessor below is a *named transition*, like the deployment ones, and
+// none of them is a generic update: an alias's declared shape, its bindings and
+// its status each move through their own call, and each one advances the
+// owning alias's revision. That advance is what makes the plan's bound
+// precondition meaningful — an alias whose revision did not move was not
+// touched, and one whose revision moved cannot be applied against a plan that
+// read the earlier value.
+//
+// These compose inside the caller's write transaction and never open one; the
+// only sanctioned caller is `MemoryStore::apply_model_alias_plan`, which holds
+// `BEGIN IMMEDIATE` for the whole verify-then-write sequence.
+
+/// What one alias-row write did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AliasWrite {
+    Created {
+        revision: i64,
+    },
+    /// The row already said exactly this. No revision was spent.
+    Unchanged {
+        revision: i64,
+    },
+    Advanced {
+        revision: i64,
+    },
+}
+
+impl AliasWrite {
+    pub fn revision(self) -> i64 {
+        match self {
+            Self::Created { revision }
+            | Self::Unchanged { revision }
+            | Self::Advanced { revision } => revision,
+        }
+    }
+
+    pub fn changed(self) -> bool {
+        !matches!(self, Self::Unchanged { .. })
+    }
+}
+
+/// The declared shape of an alias — what it requires of a candidate, not which
+/// candidates it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasDeclaration {
+    pub alias_name: String,
+    pub required_capabilities: String,
+    pub constraints: String,
+    pub source_refs: Vec<String>,
+}
+
+/// Create the alias or bring its declared shape to this one, reviving a
+/// retired alias in the process.
+///
+/// An unchanged declaration spends no revision: re-applying a plan that
+/// declares what is already there must not look like a policy change, or every
+/// idempotent replay would invalidate every outstanding `ModelRef`.
+pub fn upsert_model_alias(
+    conn: &Connection,
+    declaration: &AliasDeclaration,
+) -> Result<AliasWrite, MemoryError> {
+    let now = now_utc_iso();
+    let source_refs = serde_json::to_string(&declaration.source_refs)?;
+    let Some(existing) = get_model_alias(conn, &declaration.alias_name)? else {
+        conn.execute(
+            "INSERT INTO model_aliases (
+                alias_name, required_capabilities, constraints, status, revision,
+                policy_digest, source_refs, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 1, NULL, ?5, ?6, ?6)",
+            params![
+                declaration.alias_name,
+                declaration.required_capabilities,
+                declaration.constraints,
+                ALIAS_STATUS_ACTIVE,
+                source_refs,
+                now,
+            ],
+        )?;
+        return Ok(AliasWrite::Created { revision: 1 });
+    };
+
+    let unchanged = existing.status == ALIAS_STATUS_ACTIVE
+        && existing.required_capabilities == declaration.required_capabilities
+        && existing.constraints == declaration.constraints
+        && existing.source_refs == declaration.source_refs;
+    if unchanged {
+        return Ok(AliasWrite::Unchanged {
+            revision: existing.revision,
+        });
+    }
+
+    let revision = existing.revision + 1;
+    conn.execute(
+        "UPDATE model_aliases SET required_capabilities = ?2, constraints = ?3, status = ?4,
+             revision = ?5, source_refs = ?6, updated_at = ?7
+         WHERE alias_name = ?1",
+        params![
+            declaration.alias_name,
+            declaration.required_capabilities,
+            declaration.constraints,
+            ALIAS_STATUS_ACTIVE,
+            revision,
+            source_refs,
+            now,
+        ],
+    )?;
+    Ok(AliasWrite::Advanced { revision })
+}
+
+/// Stop offering an alias as a routable name. The row and its bindings stay:
+/// retiring is a policy statement, not an erasure of what the name used to
+/// mean.
+pub fn retire_model_alias(
+    conn: &Connection,
+    alias_name: &str,
+) -> Result<Option<AliasWrite>, MemoryError> {
+    let Some(existing) = get_model_alias(conn, alias_name)? else {
+        return Ok(None);
+    };
+    if existing.status == ALIAS_STATUS_RETIRED {
+        return Ok(Some(AliasWrite::Unchanged {
+            revision: existing.revision,
+        }));
+    }
+    let revision = existing.revision + 1;
+    conn.execute(
+        "UPDATE model_aliases SET status = ?2, revision = ?3, updated_at = ?4
+         WHERE alias_name = ?1",
+        params![alias_name, ALIAS_STATUS_RETIRED, revision, now_utc_iso()],
+    )?;
+    Ok(Some(AliasWrite::Advanced { revision }))
+}
+
+/// Bind, re-prioritize or revive one alias → deployment candidacy, advancing
+/// the owning alias's revision when anything actually moves.
+///
+/// The alias revision bump lives here rather than in the caller because the
+/// DDL's own comment makes it a write-path responsibility: a binding change is
+/// a change to what the alias *means*, and an alias whose bindings moved while
+/// its revision stood still would let a plan apply against a routing set it
+/// never read.
+pub fn bind_model_alias_deployment(
+    conn: &Connection,
+    alias_name: &str,
+    deployment_id: &str,
+    priority: i64,
+) -> Result<AliasWrite, MemoryError> {
+    let now = now_utc_iso();
+    let existing: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT priority, retired FROM model_alias_bindings
+             WHERE alias_name = ?1 AND deployment_id = ?2",
+            params![alias_name, deployment_id],
+            |row| Ok((row.get("priority")?, row.get("retired")?)),
+        )
+        .optional()?;
+
+    match existing {
+        Some((current_priority, retired)) if current_priority == priority && retired == 0 => {
+            Ok(AliasWrite::Unchanged {
+                revision: current_alias_revision(conn, alias_name)?,
+            })
+        }
+        Some(_) => {
+            conn.execute(
+                "UPDATE model_alias_bindings SET priority = ?3, retired = 0, updated_at = ?4
+                 WHERE alias_name = ?1 AND deployment_id = ?2",
+                params![alias_name, deployment_id, priority, now],
+            )?;
+            advance_alias_revision(conn, alias_name, &now)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO model_alias_bindings (
+                    alias_name, deployment_id, priority, retired, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 0, ?4, ?4)",
+                params![alias_name, deployment_id, priority, now],
+            )?;
+            advance_alias_revision(conn, alias_name, &now)
+        }
+    }
+}
+
+/// Retire one binding. Returns `None` when there was no such binding at all —
+/// distinct from `Unchanged`, which means the binding is there and already
+/// retired.
+pub fn retire_model_alias_binding(
+    conn: &Connection,
+    alias_name: &str,
+    deployment_id: &str,
+) -> Result<Option<AliasWrite>, MemoryError> {
+    let retired: Option<i64> = conn
+        .query_row(
+            "SELECT retired FROM model_alias_bindings WHERE alias_name = ?1 AND deployment_id = ?2",
+            params![alias_name, deployment_id],
+            |row| row.get("retired"),
+        )
+        .optional()?;
+    let Some(retired) = retired else {
+        return Ok(None);
+    };
+    if retired != 0 {
+        return Ok(Some(AliasWrite::Unchanged {
+            revision: current_alias_revision(conn, alias_name)?,
+        }));
+    }
+    let now = now_utc_iso();
+    conn.execute(
+        "UPDATE model_alias_bindings SET retired = 1, updated_at = ?3
+         WHERE alias_name = ?1 AND deployment_id = ?2",
+        params![alias_name, deployment_id, now],
+    )?;
+    Ok(Some(advance_alias_revision(conn, alias_name, &now)?))
+}
+
+/// Stamp the alias-set policy revision this row was last reviewed under.
+///
+/// Deliberately **not** a revision-advancing write: the stamp records which
+/// reviewed apply the row came out of, and letting it bump the counter would
+/// make the digest chase its own tail. A row whose `policy_digest` differs from
+/// the recomputed set revision is the detectable signature of a write that did
+/// not come through plan/apply.
+pub fn stamp_alias_policy_digest(
+    conn: &Connection,
+    alias_name: &str,
+    policy_digest: &str,
+) -> Result<(), MemoryError> {
+    conn.execute(
+        "UPDATE model_aliases SET policy_digest = ?2 WHERE alias_name = ?1",
+        params![alias_name, policy_digest],
+    )?;
+    Ok(())
+}
+
+fn current_alias_revision(conn: &Connection, alias_name: &str) -> Result<i64, MemoryError> {
+    conn.query_row(
+        "SELECT revision FROM model_aliases WHERE alias_name = ?1",
+        params![alias_name],
+        |row| row.get("revision"),
+    )
+    .optional()?
+    .ok_or_else(|| MemoryError::NotFound(format!("model alias '{alias_name}'")))
+}
+
+fn advance_alias_revision(
+    conn: &Connection,
+    alias_name: &str,
+    now: &str,
+) -> Result<AliasWrite, MemoryError> {
+    let revision = current_alias_revision(conn, alias_name)? + 1;
+    conn.execute(
+        "UPDATE model_aliases SET revision = ?2, updated_at = ?3 WHERE alias_name = ?1",
+        params![alias_name, revision, now],
+    )?;
+    Ok(AliasWrite::Advanced { revision })
 }
 
 // ─── model_deployment_health ─────────────────────────────────────────────────

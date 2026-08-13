@@ -31,6 +31,7 @@
 //!   separate by table boundary, the way `account_custody` split custody off
 //!   the account row (ddl.rs:776-782).
 
+pub mod alias_plan;
 pub mod alias_policy;
 pub mod fold;
 pub mod health;
