@@ -3,6 +3,8 @@ use memcore::{AuthorityLevel, EffectScope, TachiEventQuery};
 use super::pattern_evidence::{
     append_pattern_evidence, PatternEvidenceInput, PatternEvidenceOutcome, PatternEvidenceSource,
 };
+use super::storage::{list_projection_memories, ContinuityEventTarget};
+use crate::tool_params::TachiEventParams;
 use crate::MemoryServer;
 
 fn production_callers(symbol: &str) -> Vec<String> {
@@ -71,6 +73,72 @@ fn events(server: &MemoryServer) -> Vec<memcore::TachiEventRecord> {
         .expect("list events")
 }
 
+fn project_params() -> TachiEventParams {
+    TachiEventParams {
+        action: "project".to_string(),
+        format: None,
+        id: None,
+        source_repo: None,
+        adapter: None,
+        project: None,
+        project_explicit: false,
+        domain: None,
+        session_id: None,
+        actor: None,
+        event_type: None,
+        authority: None,
+        effects: Vec::new(),
+        projection_hints: Vec::new(),
+        payload: None,
+        provenance: None,
+        created_at: None,
+        limit: 20,
+        path_prefix: None,
+        dry_run: false,
+    }
+}
+
+fn assert_pattern_evidence_was_not_projected(server: &MemoryServer, report: &serde_json::Value) {
+    let target = ContinuityEventTarget::new(crate::DbScope::Global, None, None);
+    let patterns = list_projection_memories(server, &target, "/user/patterns", 20)
+        .expect("list projected pattern memories");
+    let projection_state = patterns
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "id": entry.id,
+                "tier": entry.tier,
+                "counters": entry.metadata.get("counters"),
+            })
+        })
+        .collect::<Vec<_>>();
+    let active_memory_count = server
+        .with_global_store_read(|store| {
+            store
+                .count_active_memories()
+                .map_err(|error| error.to_string())
+        })
+        .expect("count active memories");
+
+    assert_eq!(
+        serde_json::json!({
+            "projected_count": report["projected_count"],
+            "skipped_count": report["skipped_count"],
+            "promotion_candidate_count": report["promotion_candidate_count"],
+            "active_memory_count": active_memory_count,
+            "pattern_projection_state": projection_state,
+        }),
+        serde_json::json!({
+            "projected_count": 0,
+            "skipped_count": 1,
+            "promotion_candidate_count": 0,
+            "active_memory_count": 0,
+            "pattern_projection_state": [],
+        }),
+        "append-only pattern evidence must never create projection memory, counters, tiers, or promotion candidates"
+    );
+}
+
 #[test]
 fn pattern_evidence_replays_one_collect_only_event_without_projection() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -135,6 +203,37 @@ fn pattern_evidence_missing_real_identity_refuses_before_write() {
 
     assert!(error.contains("real run/session/flow id"));
     assert!(events(&server).is_empty());
+}
+
+#[test]
+fn pattern_evidence_auto_projector_denies_materialization() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = MemoryServer::new(dir.path().join("memory.db"), None).expect("server");
+    append_pattern_evidence(&server, input()).expect("append admitted pattern evidence");
+
+    let report = super::projection::project_auto_continuity_events_for_target(
+        &server,
+        ContinuityEventTarget::new(crate::DbScope::Global, None, None),
+        20,
+    )
+    .expect("run actual auto projector");
+
+    assert_pattern_evidence_was_not_projected(&server, &report);
+}
+
+#[tokio::test]
+async fn pattern_evidence_explicit_project_route_denies_materialization() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = MemoryServer::new(dir.path().join("memory.db"), None).expect("server");
+    append_pattern_evidence(&server, input()).expect("append admitted pattern evidence");
+
+    let response = crate::event_ops::handle_tachi_event(&server, project_params())
+        .await
+        .expect("run actual tachi_event project route");
+    let report: serde_json::Value =
+        serde_json::from_str(&response).expect("parse project route response");
+
+    assert_pattern_evidence_was_not_projected(&server, &report);
 }
 
 #[test]

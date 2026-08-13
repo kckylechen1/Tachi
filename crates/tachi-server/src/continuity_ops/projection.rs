@@ -22,6 +22,8 @@ use self::entry::{
 };
 pub(super) use self::entry::{projected_path_prefix, projection_filters, projection_kind_metadata};
 
+const NON_PROJECTABLE_PATTERN_EVIDENCE_ADAPTER: &str = "tachi.pattern_evidence.v1";
+
 pub(crate) fn project_continuity_events(
     server: &MemoryServer,
     params: &TachiEventParams,
@@ -111,6 +113,14 @@ fn project_continuity_events_inner(
     let mut promotion_candidates = Vec::new();
 
     for event in events {
+        if event.adapter == NON_PROJECTABLE_PATTERN_EVIDENCE_ADAPTER {
+            skipped.push(json!({
+                "event_id": event.id,
+                "event_type": event.event_type,
+                "reason": "append-only pattern evidence is not projectable",
+            }));
+            continue;
+        }
         if auto_only && !auto_projectable_event(&event) {
             skipped.push(json!({
                 "event_id": event.id,
