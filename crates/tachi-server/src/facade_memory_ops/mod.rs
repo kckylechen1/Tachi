@@ -50,12 +50,6 @@ pub(crate) async fn handle_tachi_memory(
     params: TachiMemoryParams,
 ) -> Result<String, String> {
     let action = params.action.to_ascii_lowercase();
-    if let Some(owner) = retired_memory_action_owner(&action) {
-        return Err(format!(
-            "retired tachi_memory action '{}'; use {owner}",
-            params.action
-        ));
-    }
     if should_forward_facade_read(&action) {
         if let Some(body) =
             crate::cli_client::maybe_forward_server_read(server, "tachi_memory", &params).await?
@@ -275,19 +269,6 @@ pub(crate) async fn handle_tachi_memory(
             "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', or 'consolidate'. Work ownership and release live on tachi_task; agent-to-agent messaging lives on tachi_a2a; recall tuning lives on tachi_tune.",
             params.action
         )),
-    }
-}
-
-fn retired_memory_action_owner(action: &str) -> Option<&'static str> {
-    match action {
-        "progress" => Some("tachi_task(action='status')"),
-        "readiness" => Some("tachi_status"),
-        "delete" => Some("tachi delete plan|apply"),
-        "gc" => Some("tachi gc plan|apply"),
-        "doctor_scan" => Some("tachi doctor"),
-        "ingest" | "ingest_source" => Some("admitted adapter/operator ingest API"),
-        "pattern_feedback" => Some("internal pattern-evidence API"),
-        _ => None,
     }
 }
 

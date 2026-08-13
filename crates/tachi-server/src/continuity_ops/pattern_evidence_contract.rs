@@ -243,8 +243,9 @@ fn pattern_evidence_production_census_is_exact_and_search_is_retired() {
         vec!["complete_ops/handler.rs", "workflow_closure.rs",],
         "only the two operational flow-owning internal producers are admitted",
     );
+    let legacy_pattern_feedback_emitter = concat!("emit_pattern_feedback_", "event");
     assert_eq!(
-        production_callers("emit_pattern_feedback_event"),
+        production_callers(legacy_pattern_feedback_emitter),
         Vec::<String>::new(),
         "the mutating legacy pattern-feedback emitter is physically retired",
     );
@@ -255,7 +256,7 @@ fn pattern_evidence_production_census_is_exact_and_search_is_retired() {
     let context = include_str!("context.rs");
     assert!(
         !context.contains("append_pattern_evidence_for_refs(")
-            && !context.contains("emit_pattern_feedback_event(")
+            && !context.contains(&format!("{legacy_pattern_feedback_emitter}("))
             && !context.contains("emit_pattern_seen_events("),
         "model-facing context is explicitly retired from evidence admission",
     );

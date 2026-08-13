@@ -6,8 +6,8 @@ use super::current_work_anchor::{
     prepend_anchor_evidence_rows, resolve_current_work_anchors,
 };
 use super::evidence_format::{
-    build_thinking_scaffold, evidence_rows, format_agent_status, json_string, parse_json_or_empty,
-    sections_to_evidence, synthesis_markdown_text, wants_json,
+    build_thinking_scaffold, evidence_rows, format_agent_status, json_string, sections_to_evidence,
+    synthesis_markdown_text, wants_json,
 };
 use crate::agent_markdown;
 use crate::facade_search_ops::collect_tachi_search_sections;
