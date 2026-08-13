@@ -60,6 +60,29 @@ pub mod foundry;
 #[cfg(feature = "admin")]
 pub mod hub;
 pub mod kernel_policy;
+/// The #1681/#1682 model-broker seam — the five frozen types both Broker
+/// chains build on (`ModelRef`, `ResolvedDeployment`, `ResolutionOutcome`,
+/// `OperationalResolver`, `HealthObservation`).
+///
+/// **Vendored, not authored here.** This module's bytes are the exact frozen
+/// content of `leaf/1681-1682-broker-seam` @ `4b53edcd`, which is still an
+/// open PR (#1739) and therefore not in this stack's ancestry. #1681 PR-D
+/// cannot restate the resolver's output vocabulary in a *different* shape
+/// without forking the contract, so it carries the frozen one verbatim: when
+/// #1739 merges, the two adds are byte-identical and collapse into one file.
+///
+/// Two follow-ups belong to that merge, not to this stack:
+/// - #1739's `lib.rs` also re-exports the seam's type list at the crate root.
+///   That list carries `DeploymentCapabilities`, which PR-A already re-exports
+///   here as the *catalog row* type of the same name. The two are different
+///   types (the seam's is a flat bool projection; the catalog's carries
+///   `EmbeddingsCapability`), so one of the two root re-exports must be
+///   path-qualified. This stack adds no root re-export at all — every consumer
+///   names `memcore::model_broker_seam::…` — which leaves the collision for
+///   the merge to rule on instead of pre-deciding it wrongly.
+/// - Any review fix that lands on #1739 after `4b53edcd` must be re-vendored
+///   here (or land as the merge resolution).
+pub mod model_broker_seam;
 pub mod namespace;
 pub mod near_dup;
 pub mod noise;
