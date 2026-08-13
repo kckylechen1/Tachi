@@ -1020,6 +1020,157 @@ fn a_success_after_a_cooldown_clears_it_through_the_store() {
 }
 
 #[test]
+fn two_connections_committing_out_of_order_leave_the_latest_observation_standing() {
+    // The ordering discrimination (#1681 CP5). The production shape: a 429 is
+    // observed, its write is scheduled off the call path, the lane retries
+    // immediately and succeeds — and the throttle's write commits *after* the
+    // success's. Two connections onto one file database reproduce exactly that
+    // without a race: the writes are separate, and they are deliberately
+    // committed in the wrong order.
+    //
+    // A single-connection version of this test cannot fail: it would be
+    // sequential by construction, which is why the codex review called the
+    // existing success-after-throttle test blind to this.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_path = temp.path().join("catalog.db");
+    let path = db_path.to_str().expect("utf-8 path");
+
+    // A file-backed schema needs the FTS tokenizer and the vector extension
+    // registered in this process; the in-memory helper above inherits them
+    // from whichever test registered them first, which a single-test run does
+    // not. Registration is idempotent (`register_once`).
+    let _ = crate::db::enable_simple_auto_extension();
+    crate::db::register_sqlite_vec();
+
+    let writer = Connection::open(path).expect("open writer");
+    init_schema(&writer).expect("schema initializes");
+    upsert_model_deployment(&writer, &extract_lane()).expect("import");
+
+    let throttled_at = instant(0);
+    let served_at = instant(5);
+
+    // The later observation commits first.
+    let served = Connection::open(path).expect("open the success connection");
+    assert!(matches!(
+        record_model_deployment_outcome(
+            &served,
+            &extract_request(),
+            DeploymentOutcome::Served,
+            EvidenceKind::SelfReported,
+            served_at,
+        )
+        .expect("record the success"),
+        DeploymentHealthWrite::Recorded { .. }
+    ));
+
+    // The earlier one lands second, from a different connection.
+    let throttled = Connection::open(path).expect("open the throttle connection");
+    assert_eq!(
+        record_model_deployment_outcome(
+            &throttled,
+            &extract_request(),
+            DeploymentOutcome::Throttled {
+                retry_after: Some(RetryAfter::DeltaSeconds(45)),
+            },
+            EvidenceKind::SelfReported,
+            throttled_at,
+        )
+        .expect("a stale observation is not an error"),
+        DeploymentHealthWrite::Skipped(DeploymentHealthSkip::StaleObservation),
+        "a throttle observed before a success that already landed must be dropped, not applied"
+    );
+
+    let health = get_model_deployment_health(&writer, "env:extract")
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        health.state, "ok",
+        "the terminal state must be the most recent observation, not the last write to arrive"
+    );
+    assert_eq!(
+        health.cooldown_until, None,
+        "a late-arriving 429 must not park a deployment that has since served a request"
+    );
+    assert_eq!(health.observed_at, iso(served_at));
+    assert_eq!(
+        list_model_deployment_events(&writer, "env:extract")
+            .expect("events")
+            .len(),
+        2,
+        "import plus the one health event that was actually applied — a dropped observation \
+         appends nothing either, or the fold would disagree with the row"
+    );
+}
+
+#[test]
+fn an_observation_at_the_same_instant_as_the_row_is_still_recorded() {
+    // The guard is strictly-earlier: two outcomes sharing a timestamp are
+    // indistinguishable in order, and refusing the second would silently drop
+    // a real observation (every test instant in this module is a fixed clock).
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+
+    for outcome in [DeploymentOutcome::Served, DeploymentOutcome::Unreachable] {
+        assert!(matches!(
+            record_model_deployment_outcome(
+                &conn,
+                &extract_request(),
+                outcome,
+                EvidenceKind::SelfReported,
+                instant(0),
+            )
+            .expect("record"),
+            DeploymentHealthWrite::Recorded { .. }
+        ));
+    }
+
+    assert_eq!(
+        get_model_deployment_health(&conn, "env:extract")
+            .expect("read")
+            .expect("row")
+            .state,
+        "error",
+        "the second observation at the same instant still wins"
+    );
+}
+
+#[test]
+fn an_unparseable_observed_at_does_not_freeze_the_row() {
+    // Fail-safe direction of the ordering guard: a row whose `observed_at`
+    // carries no readable instant (a hand-written row, a future writer's
+    // format) must not become permanently unwritable. No ordering information
+    // means the guard cannot fire, not that everything is stale.
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+    record_failure_health(&conn, "env:extract", "error", "seeded");
+    conn.execute(
+        "UPDATE model_deployment_health SET observed_at = 'not-a-timestamp' \
+         WHERE deployment_id = 'env:extract'",
+        [],
+    )
+    .expect("scramble the observation time");
+
+    assert!(matches!(
+        record_model_deployment_outcome(
+            &conn,
+            &extract_request(),
+            DeploymentOutcome::Served,
+            EvidenceKind::SelfReported,
+            instant(0),
+        )
+        .expect("record"),
+        DeploymentHealthWrite::Recorded { .. }
+    ));
+    assert_eq!(
+        get_model_deployment_health(&conn, "env:extract")
+            .expect("read")
+            .expect("row")
+            .state,
+        "ok"
+    );
+}
+
+#[test]
 fn a_retired_deployment_still_records_what_happened_when_it_was_called() {
     // Deliberate: health is an observation, not an admission decision.
     // Refusing to record because the row is retired would lose the evidence

@@ -34,7 +34,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::catalog::fold::CatalogProjection;
-use crate::catalog::health::{record_deployment_outcome, DeploymentOutcome};
+use crate::catalog::health::{is_stale_observation, record_deployment_outcome, DeploymentOutcome};
 use crate::catalog::{
     partition_authoritative_at, AttachmentBounds, AuthoritativePartition, CatalogSource,
     DeploymentCapabilities, DeploymentEventKind, ModelAlias, ModelAliasBinding, ModelDeployment,
@@ -675,6 +675,13 @@ pub enum DeploymentHealthSkip {
     /// The row exists but describes a different endpoint or model than the
     /// request that produced this outcome — see [`DeploymentOutcomeTarget`].
     DescribesADifferentRequest,
+    /// The row already records a **later** observation than this one. Health
+    /// writes are scheduled off the call path and can arrive out of order (a
+    /// 429 schedules its write and the lane retries immediately; the retry's
+    /// success can commit first), so the door orders them by the instant the
+    /// outcome was observed rather than by the order the writes land — see
+    /// [`crate::catalog::health::is_stale_observation`].
+    StaleObservation,
 }
 
 /// What [`record_model_deployment_outcome`] did.
@@ -724,6 +731,21 @@ pub enum DeploymentHealthWrite {
 ///    read health at count `n` and land at `n+1` with their events swapped
 ///    around each other's row write.
 ///
+/// # Last observation wins, by observation time (#1681 CP5)
+///
+/// Atomicity alone does not order anything. Health writes are scheduled off the
+/// call path — a 429 schedules its write and the lane retries in the same
+/// breath — so the retry's success can commit before the throttle it
+/// superseded, and a naive last-write-wins row would end up back in a cooldown
+/// the deployment had already left. Inside the same transaction that will do
+/// the write, an outcome observed **earlier** than the row's `observed_at` is
+/// therefore refused as [`DeploymentHealthSkip::StaleObservation`] — a counted
+/// skip, not an error.
+///
+/// This is deliberately cheaper than serialising per lane: it needs no lock
+/// beyond the one the write already takes, and it fails safe — the surviving
+/// row is always the most recent observation, whichever write got there first.
+///
 /// A `SAVEPOINT` rather than a `BEGIN`, following `db::graph::write_edge_row`'s
 /// precedent: it nests cleanly whether or not the caller already holds a
 /// transaction, and when there is none it starts one and `RELEASE` commits it.
@@ -751,6 +773,17 @@ pub fn record_model_deployment_outcome(
         }
 
         let existing = get_model_deployment_health(conn, deployment_id)?;
+        // Ordered inside the same snapshot that will write the row, so the
+        // comparison cannot be made against a version of the row a concurrent
+        // writer is about to replace.
+        if existing
+            .as_ref()
+            .is_some_and(|existing| is_stale_observation(existing, now))
+        {
+            return Ok(DeploymentHealthWrite::Skipped(
+                DeploymentHealthSkip::StaleObservation,
+            ));
+        }
         let write = record_deployment_outcome(
             existing.as_ref(),
             deployment_id,

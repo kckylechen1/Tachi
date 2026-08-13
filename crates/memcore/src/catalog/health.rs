@@ -405,6 +405,36 @@ pub fn record_deployment_outcome(
     }
 }
 
+/// Whether an observation made at `now` is **older** than the one the row
+/// already carries (#1681 D4, ordering guard).
+///
+/// Health writes do not reach the store in the order the observations
+/// happened: a 429 schedules its write and the lane immediately retries, so a
+/// later success can commit first and the stale throttle would then reinstate a
+/// cooldown the deployment has already worked its way out of. The row is
+/// last-observation-wins, and this is how "last" is decided — by the instant
+/// the outcome was *observed*, which every caller captures synchronously, not
+/// by the order the writes happen to be committed in.
+///
+/// Compared as **instants**, never as strings: `observed_at` is written here as
+/// RFC3339-with-millis, but a row another writer produced could carry a numeric
+/// offset, and a lexical compare would then order it exactly wrong — the same
+/// trap [`crate::catalog::ModelDeployment::freshness_at`] documents for
+/// `expires_at`.
+///
+/// An `observed_at` this cannot parse yields `false`: with no ordering
+/// information the guard must not fire, because a guard that refused every row
+/// it could not order would silently stop recording health altogether. Equal
+/// instants are not stale — two observations sharing a timestamp are
+/// indistinguishable in order, and refusing the second would drop a real
+/// outcome.
+pub fn is_stale_observation(existing: &ModelDeploymentHealth, now: DateTime<Utc>) -> bool {
+    match DateTime::parse_from_rfc3339(&existing.observed_at) {
+        Ok(recorded) => now < recorded.with_timezone(&Utc),
+        Err(_) => false,
+    }
+}
+
 /// A fresh, healthy row for a deployment nothing has been recorded about yet.
 pub fn new_deployment_health(deployment_id: &str, now_iso: &str) -> ModelDeploymentHealth {
     ModelDeploymentHealth {
