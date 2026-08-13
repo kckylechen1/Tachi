@@ -565,6 +565,126 @@ mod tests {
     }
 
     #[test]
+    fn raw_legacy_timestamps_are_not_serialized_in_plan_receipt_or_archive() {
+        const CLAIM_CREATED_SECRET: &str = "RAW_CLAIM_CREATED_TIMESTAMP_SECRET";
+        const CLAIM_UPDATED_SECRET: &str = "RAW_CLAIM_UPDATED_TIMESTAMP_SECRET";
+        const SOURCE_TIMESTAMP_SECRET: &str = "RAW_SOURCE_TIMESTAMP_SECRET";
+        const SOURCE_VALID_UNTIL_SECRET: &str = "RAW_SOURCE_VALID_UNTIL_SECRET";
+
+        let (_temp, path, mut store) = fixture_store();
+        let entry = sticky_entry(
+            "timestamp-secrets",
+            None,
+            "claimed",
+            "2026-08-12T00:00:00Z",
+            7,
+        );
+        store.upsert(&entry).expect("seed timestamp fixture");
+        store
+            .set_state(
+                "sticky_claim",
+                "timestamp-secrets",
+                r#"{"claimed_by":"reader","claimed_at":"2026-08-12T01:00:00Z"}"#,
+            )
+            .expect("seed timestamp claim");
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize timestamp fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET timestamp=?1,valid_until=?2
+                     WHERE id='sticky:timestamp-secrets'",
+                    rusqlite::params![SOURCE_TIMESTAMP_SECRET, SOURCE_VALID_UNTIL_SECRET],
+                )
+                .expect("poison source timestamps");
+            store
+                .connection()
+                .execute(
+                    "UPDATE hard_state SET created_at=?1,updated_at=?2
+                     WHERE namespace='sticky_claim' AND key='timestamp-secrets'",
+                    rusqlite::params![CLAIM_CREATED_SECRET, CLAIM_UPDATED_SECRET],
+                )
+                .expect("poison claim timestamps");
+        }
+
+        let plan = store
+            .plan_sticky_cutover_at(path, "2026-08-13T00:00:00Z", str::to_string)
+            .expect("plan");
+        let plan_json = serde_json::to_string(&plan).expect("plan JSON");
+        for secret in [
+            CLAIM_CREATED_SECRET,
+            CLAIM_UPDATED_SECRET,
+            SOURCE_TIMESTAMP_SECRET,
+            SOURCE_VALID_UNTIL_SECRET,
+        ] {
+            assert!(!plan_json.contains(secret), "plan retained {secret}");
+        }
+        let plan_value: serde_json::Value = serde_json::from_str(&plan_json).expect("plan value");
+        let claim_evidence = &plan_value["rows"][0]["claim_evidence"];
+        assert!(claim_evidence.get("created_at").is_none());
+        assert!(claim_evidence.get("updated_at").is_none());
+
+        let mut prepared_json = None;
+        let result = store
+            .apply_sticky_cutover_with_precommit_receipt(&plan, |prepared| {
+                let serialized = serde_json::to_string(&prepared.receipt).expect("prepared JSON");
+                for secret in [
+                    CLAIM_CREATED_SECRET,
+                    CLAIM_UPDATED_SECRET,
+                    SOURCE_TIMESTAMP_SECRET,
+                    SOURCE_VALID_UNTIL_SECRET,
+                ] {
+                    assert!(
+                        !serialized.contains(secret),
+                        "prepared receipt retained {secret}"
+                    );
+                }
+                prepared_json = Some(serialized);
+                Ok(())
+            })
+            .expect("apply");
+        assert!(prepared_json.is_some());
+        let committed_json = serde_json::to_string(&result.receipt).expect("committed JSON");
+        for secret in [
+            CLAIM_CREATED_SECRET,
+            CLAIM_UPDATED_SECRET,
+            SOURCE_TIMESTAMP_SECRET,
+            SOURCE_VALID_UNTIL_SECRET,
+        ] {
+            assert!(
+                !committed_json.contains(secret),
+                "committed receipt retained {secret}"
+            );
+        }
+        let archive_json: String = store
+            .connection()
+            .query_row(
+                "SELECT json_extract(metadata,'$.legacy_sticky_archive')
+                 FROM memories WHERE id='sticky:timestamp-secrets'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("archive JSON");
+        for secret in [
+            CLAIM_CREATED_SECRET,
+            CLAIM_UPDATED_SECRET,
+            SOURCE_TIMESTAMP_SECRET,
+            SOURCE_VALID_UNTIL_SECRET,
+        ] {
+            assert!(!archive_json.contains(secret), "archive retained {secret}");
+        }
+        let archive: serde_json::Value = serde_json::from_str(&archive_json).expect("archive");
+        let source_evidence = &archive["source_evidence"];
+        assert!(source_evidence.get("timestamp").is_none());
+        assert!(source_evidence.get("valid_until").is_none());
+        let archived_claim = &archive["claim_evidence"];
+        assert!(archived_claim.get("created_at").is_none());
+        assert!(archived_claim.get("updated_at").is_none());
+    }
+
+    #[test]
     fn legacy_path_is_digest_only_across_plan_receipts_and_archive_and_cas_binds_full_row() {
         const PATH_SECRET: &str = "LEGACY_PATH_SECRET";
         let (_temp, path, mut store) = fixture_store();
@@ -770,8 +890,6 @@ pub enum StickyClaimEvidenceState {
 pub struct StickyClaimEvidence {
     pub state: StickyClaimEvidenceState,
     pub version: Option<i64>,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
     pub evidence_digest: String,
 }
 
@@ -890,8 +1008,6 @@ struct ClaimRow {
     key: String,
     value_json: String,
     version: i64,
-    created_at: String,
-    updated_at: String,
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -925,8 +1041,6 @@ fn claim_evidence(claim: Option<&ClaimRow>) -> StickyClaimEvidence {
         return StickyClaimEvidence {
             state: StickyClaimEvidenceState::Missing,
             version: None,
-            created_at: None,
-            updated_at: None,
             evidence_digest: sha256(b"missing"),
         };
     };
@@ -948,8 +1062,6 @@ fn claim_evidence(claim: Option<&ClaimRow>) -> StickyClaimEvidence {
             StickyClaimEvidenceState::Malformed
         },
         version: Some(claim.version),
-        created_at: Some(claim.created_at.clone()),
-        updated_at: Some(claim.updated_at.clone()),
         evidence_digest: sha256(claim.value_json.as_bytes()),
     }
 }
@@ -981,7 +1093,7 @@ fn read_legacy_memories(conn: &Connection) -> Result<Vec<LegacyMemorySnapshot>, 
 
 fn read_claims(conn: &Connection) -> Result<BTreeMap<String, ClaimRow>, MemoryError> {
     let mut statement = conn.prepare(
-        "SELECT key,value_json,version,created_at,updated_at
+        "SELECT key,value_json,version
          FROM hard_state WHERE namespace='sticky_claim' ORDER BY key",
     )?;
     let rows = statement.query_map([], |row| {
@@ -989,8 +1101,6 @@ fn read_claims(conn: &Connection) -> Result<BTreeMap<String, ClaimRow>, MemoryEr
             key: row.get(0)?,
             value_json: row.get(1)?,
             version: row.get(2)?,
-            created_at: row.get(3)?,
-            updated_at: row.get(4)?,
         })
     })?;
     Ok(rows
@@ -1284,7 +1394,7 @@ fn read_memory_snapshot_by_id(
 
 fn read_claim_by_key(conn: &Connection, sticky_id: &str) -> Result<Option<ClaimRow>, MemoryError> {
     conn.query_row(
-        "SELECT key,value_json,version,created_at,updated_at
+        "SELECT key,value_json,version
          FROM hard_state WHERE namespace='sticky_claim' AND key=?1",
         [sticky_id],
         |row| {
@@ -1292,8 +1402,6 @@ fn read_claim_by_key(conn: &Connection, sticky_id: &str) -> Result<Option<ClaimR
                 key: row.get(0)?,
                 value_json: row.get(1)?,
                 version: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
             })
         },
     )
@@ -1322,8 +1430,6 @@ fn archive_metadata(
         "source_evidence": {
             "memory_id": source.id,
             "path_digest": sha256(source.path.as_bytes()),
-            "timestamp": source.timestamp,
-            "valid_until": source.valid_until,
             "was_archived": source.archived,
             "revision": source.revision,
             "row_digest": row.memory_row_digest,
