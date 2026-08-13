@@ -359,6 +359,7 @@ impl MemoryServer {
             )),
             enrichment: EnrichmentRuntime {
                 enrich_tx,
+                durable_dispatch_runtime_id: Arc::from(uuid::Uuid::new_v4().to_string()),
                 #[cfg(test)]
                 retained_enrich_rx,
             },

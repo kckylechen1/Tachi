@@ -2,10 +2,37 @@ use crate::foundry_runtime_ops::enqueue_foundry_capture_maintenance;
 use crate::server_state::{DbScope, MemoryServer};
 use memcore::store::enrichment::EnrichmentInvocationReceipts;
 use memcore::{MemoryEntry, MemoryStore};
+use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+const ADMITTED_ENRICHMENT_INTENT_WORKER: &str = "auto_ingest_enrichment_intent";
+const ADMITTED_ENRICHMENT_INTENT_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct AdmittedEnrichmentIntentV1 {
+    version: u8,
+    job_id: String,
+    idempotency_key: String,
+    entry_id: String,
+    revision: i64,
+    target_db: String,
+    named_project: Option<String>,
+    needs_embedding: bool,
+    needs_summary: bool,
+    needs_metadata: bool,
+    dispatch_runtime_id: Option<String>,
+}
+
+pub(crate) enum DurableEnrichmentDispatch {
+    Completed,
+    Pending {
+        item: Box<EnrichmentItem>,
+        should_enqueue: bool,
+    },
+}
 
 // ─── Enrichment Batcher ──────────────────────────────────────────────────────
 
@@ -38,6 +65,7 @@ pub(crate) struct EnrichmentItem {
     pub(crate) foundry_agent_id: Option<String>,
     pub(crate) foundry_path_prefix: Option<String>,
     pub(crate) revision: i64,
+    pub(crate) admitted_intent: Option<AdmittedEnrichmentIntentV1>,
 }
 
 pub(crate) fn needs_metadata_enrichment(keywords: &[String], _entities: &[String]) -> bool {
@@ -158,6 +186,243 @@ pub(crate) fn build_enrichment_item(
         foundry_agent_id,
         foundry_path_prefix,
         revision,
+        admitted_intent: None,
+    }
+}
+
+fn admitted_enrichment_intent_hash(intent: &AdmittedEnrichmentIntentV1) -> String {
+    crate::utils::stable_hash(&format!(
+        "{}:{}:{}:{}",
+        intent.job_id, intent.idempotency_key, intent.entry_id, intent.revision
+    ))
+}
+
+fn admitted_enrichment_is_terminal(
+    entry: &MemoryEntry,
+    intent: &AdmittedEnrichmentIntentV1,
+) -> bool {
+    let Some(enrichment) = entry.metadata.get("enrichment") else {
+        return false;
+    };
+    if enrichment.get("failed_stage").is_some() {
+        return false;
+    }
+    let status = enrichment
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    (!intent.needs_embedding || status.contains("embedded"))
+        && (!intent.needs_summary || status.contains("summarized"))
+        && (!intent.needs_metadata || status.contains("metadata"))
+}
+
+impl MemoryServer {
+    pub(crate) fn prepare_durable_admitted_enrichment(
+        &self,
+        mut item: EnrichmentItem,
+        job_id: &str,
+        idempotency_key: &str,
+    ) -> Result<DurableEnrichmentDispatch, String> {
+        let runtime_id = self
+            .enrichment_lock()
+            .durable_dispatch_runtime_id
+            .to_string();
+        let mut intent = AdmittedEnrichmentIntentV1 {
+            version: ADMITTED_ENRICHMENT_INTENT_VERSION,
+            job_id: job_id.to_string(),
+            idempotency_key: idempotency_key.to_string(),
+            entry_id: item.id.clone(),
+            revision: item.revision,
+            target_db: item.target_db.as_str().to_string(),
+            named_project: item.named_project.clone(),
+            needs_embedding: item.needs_embedding,
+            needs_summary: item.needs_summary,
+            needs_metadata: item.needs_metadata,
+            dispatch_runtime_id: None,
+        };
+        let intent_hash = admitted_enrichment_intent_hash(&intent);
+        let action = |store: &mut MemoryStore| {
+            let entry = store
+                .get(&intent.entry_id)
+                .map_err(|error| format!("load admitted enrichment entry: {error}"))?
+                .ok_or_else(|| {
+                    "admitted enrichment entry disappeared before dispatch".to_string()
+                })?;
+            let bound_job = entry
+                .metadata
+                .get("admitted_job_id")
+                .and_then(serde_json::Value::as_str);
+            let bound_key = entry
+                .metadata
+                .get("admitted_idempotency_key")
+                .and_then(serde_json::Value::as_str);
+            if bound_job != Some(intent.job_id.as_str())
+                || bound_key != Some(intent.idempotency_key.as_str())
+                || entry.revision != intent.revision
+            {
+                return Err("admitted enrichment intent binding drift at mutation time".to_string());
+            }
+            if admitted_enrichment_is_terminal(&entry, &intent) {
+                store
+                    .connection()
+                    .execute(
+                        "DELETE FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+                        rusqlite::params![intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
+                    )
+                    .map_err(|error| format!("retire terminal enrichment intent: {error}"))?;
+                return Ok(None);
+            }
+
+            let existing = store
+                .connection()
+                .query_row(
+                    "SELECT event_id FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+                    rusqlite::params![intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| format!("load admitted enrichment intent: {error}"))?;
+            let should_enqueue = match existing {
+                Some(payload) => {
+                    let existing: AdmittedEnrichmentIntentV1 = serde_json::from_str(&payload)
+                        .map_err(|error| format!("decode admitted enrichment intent: {error}"))?;
+                    let mut immutable_existing = existing.clone();
+                    immutable_existing.dispatch_runtime_id = None;
+                    if immutable_existing != intent {
+                        return Err(
+                            "admitted enrichment intent binding drift at mutation time".to_string()
+                        );
+                    }
+                    existing.dispatch_runtime_id.as_deref() != Some(runtime_id.as_str())
+                }
+                None => true,
+            };
+            if should_enqueue {
+                intent.dispatch_runtime_id = Some(runtime_id.clone());
+                let payload = serde_json::to_string(&intent)
+                    .map_err(|error| format!("serialize admitted enrichment intent: {error}"))?;
+                store
+                    .connection()
+                    .execute(
+                        "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
+                         VALUES (?1, ?2, ?3, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')) \
+                         ON CONFLICT(event_hash, worker) DO UPDATE SET \
+                           event_id = excluded.event_id, created_at = excluded.created_at",
+                        rusqlite::params![intent_hash, payload, ADMITTED_ENRICHMENT_INTENT_WORKER,],
+                    )
+                    .map_err(|error| format!("persist admitted enrichment intent: {error}"))?;
+            }
+            Ok(Some(should_enqueue))
+        };
+        let pending = if let Some(project_name) = item.named_project.as_deref() {
+            self.with_named_project_store(project_name, action)?
+        } else {
+            self.with_store_for_scope(item.target_db, action)?
+        };
+        let Some(should_enqueue) = pending else {
+            return Ok(DurableEnrichmentDispatch::Completed);
+        };
+        item.admitted_intent = Some(intent);
+        Ok(DurableEnrichmentDispatch::Pending {
+            item: Box::new(item),
+            should_enqueue,
+        })
+    }
+
+    pub(crate) fn mark_admitted_enrichment_pending(
+        &self,
+        intent: &AdmittedEnrichmentIntentV1,
+    ) -> Result<(), String> {
+        let intent_hash = admitted_enrichment_intent_hash(intent);
+        let action = |store: &mut MemoryStore| {
+            let mut pending = intent.clone();
+            pending.dispatch_runtime_id = None;
+            let payload = serde_json::to_string(&pending)
+                .map_err(|error| format!("serialize pending enrichment intent: {error}"))?;
+            store
+                .connection()
+                .execute(
+                    "UPDATE processed_events SET event_id = ?1 \
+                     WHERE event_hash = ?2 AND worker = ?3",
+                    rusqlite::params![payload, intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
+                )
+                .map(|_| ())
+                .map_err(|error| format!("release admitted enrichment dispatch: {error}"))
+        };
+        if let Some(project_name) = intent.named_project.as_deref() {
+            self.with_named_project_store(project_name, action)
+        } else {
+            self.with_store_for_scope(
+                if intent.target_db == DbScope::Global.as_str() {
+                    DbScope::Global
+                } else {
+                    DbScope::Project
+                },
+                action,
+            )
+        }
+    }
+
+    fn reconcile_admitted_enrichment_intent(&self, item: &EnrichmentItem) {
+        let Some(intent) = item.admitted_intent.as_ref() else {
+            return;
+        };
+        let intent_hash = admitted_enrichment_intent_hash(intent);
+        let action = |store: &mut MemoryStore| {
+            let terminal = store
+                .get(&intent.entry_id)
+                .map_err(|error| format!("load enriched admitted entry: {error}"))?
+                .is_some_and(|entry| admitted_enrichment_is_terminal(&entry, intent));
+            if terminal {
+                store
+                    .connection()
+                    .execute(
+                        "DELETE FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+                        rusqlite::params![intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| format!("retire admitted enrichment intent: {error}"))
+            } else {
+                let mut pending = intent.clone();
+                pending.dispatch_runtime_id = None;
+                let payload = serde_json::to_string(&pending)
+                    .map_err(|error| format!("serialize retryable enrichment intent: {error}"))?;
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE processed_events SET event_id = ?1 \
+                         WHERE event_hash = ?2 AND worker = ?3",
+                        rusqlite::params![payload, intent_hash, ADMITTED_ENRICHMENT_INTENT_WORKER],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| format!("retain admitted enrichment intent: {error}"))
+            }
+        };
+        let result = if let Some(project_name) = intent.named_project.as_deref() {
+            self.with_named_project_store(project_name, action)
+        } else {
+            self.with_store_for_scope(item.target_db, action)
+        };
+        if let Err(error) = result {
+            tracing::error!(%error, entry_id = %intent.entry_id, "failed to reconcile admitted enrichment intent");
+        }
+    }
+
+    fn wake_admitted_auto_ingest_completion(&self, item: &EnrichmentItem) {
+        if item.admitted_intent.is_none() {
+            return;
+        }
+        let server = self.clone();
+        tokio::spawn(async move {
+            // The first replay returns partial and releases its claim only
+            // after this consumer flush began. Let that owner-fenced cleanup
+            // finish before the terminal-evidence replay tries to claim.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Err(error) = crate::pipeline_ops::replay_pending_auto_ingest_once(&server).await
+            {
+                tracing::error!(%error, "durable enrichment could not wake auto-ingest completion");
+            }
+        });
     }
 }
 
@@ -211,6 +476,56 @@ impl MemoryServer {
             .lock()
             .expect("lock retained test enrichment receiver")
             .take();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_retained_admitted_enrichments_for_test(&self) -> usize {
+        let mut items = Vec::new();
+        {
+            let mut retained = self
+                .enrichment_lock()
+                .retained_enrich_rx
+                .lock()
+                .expect("lock retained test enrichment receiver");
+            let receiver = retained.as_mut().expect("test receiver retained");
+            while let Ok(item) = receiver.try_recv() {
+                if item.admitted_intent.is_some() {
+                    items.push(item);
+                }
+            }
+        }
+        for item in &items {
+            let summary = item.needs_summary.then_some("durable test summary");
+            let embedding = item.needs_embedding.then(|| {
+                let mut vector = vec![0.0_f32; 1024];
+                vector[0] = 1.0;
+                vector
+            });
+            let keywords = item
+                .needs_metadata
+                .then(|| vec!["durable-test-keyword".to_string()]);
+            let update = |store: &mut MemoryStore| {
+                store
+                    .update_enrichment_fields(
+                        &item.id,
+                        summary,
+                        embedding.as_deref(),
+                        keywords.as_deref(),
+                        None,
+                        item.revision,
+                    )
+                    .map_err(|error| format!("complete retained test enrichment: {error}"))
+            };
+            let updated = if let Some(project_name) = item.named_project.as_deref() {
+                self.with_named_project_store(project_name, update)
+            } else {
+                self.with_store_for_scope(item.target_db, update)
+            }
+            .expect("write retained test enrichment");
+            assert!(updated, "retained test enrichment revision must match");
+            self.reconcile_admitted_enrichment_intent(item);
+        }
+        items.len()
     }
 
     pub(crate) fn requeue_auth_failed_enrichment_retries(&self, trigger: &str) -> usize {
@@ -288,6 +603,7 @@ impl MemoryServer {
                 foundry_agent_id: None,
                 foundry_path_prefix: None,
                 revision: candidate.revision,
+                admitted_intent: None,
             };
             if self.enqueue_enrichment(item) {
                 queued += 1;
@@ -774,6 +1090,15 @@ impl MemoryServer {
                     write_keyword_enrichment_status(self, item, status);
                 }
             }
+        }
+
+        // Admitted auto-ingest remains pending until the revision-checked
+        // enrichment write above has produced terminal entry metadata. A
+        // failed/no-op stage clears only this runtime's dispatch marker so the
+        // durable intent can be retried; a successful write retires the intent.
+        for item in &items {
+            self.reconcile_admitted_enrichment_intent(item);
+            self.wake_admitted_auto_ingest_completion(item);
         }
 
         // Batch-granularity recall-cache bust (not per item — see the
