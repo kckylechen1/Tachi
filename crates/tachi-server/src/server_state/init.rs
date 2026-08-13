@@ -320,7 +320,8 @@ impl MemoryServer {
             // graph/state primitives (add_edge/get_edges/memory_graph/
             // set_state/get_state) were deleted outright (#757 surface prune;
             // #913 dead-code round found zero remaining in-crate callers).
-            tool_router: Self::continuity_tool_router()
+            tool_router: Self::a2a_tool_router()
+                + Self::continuity_tool_router()
                 + Self::component_tool_router()
                 + Self::copilot_tool_router()
                 + Self::dispatch_tool_router()

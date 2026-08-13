@@ -66,10 +66,6 @@ async fn tachi_memory_save_with_title_stays_memory() {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
-            to: None,
-            ttl_days: None,
-            include_read: false,
-            agent_id: None,
         }))
         .await
         .expect("tachi_memory save should succeed");

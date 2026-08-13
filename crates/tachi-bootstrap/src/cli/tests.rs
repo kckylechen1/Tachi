@@ -2,6 +2,37 @@ use super::*;
 use clap::{CommandFactory, Parser};
 
 #[test]
+fn a2a_sticky_cutover_exposes_only_plan_and_confirmed_apply() {
+    Cli::try_parse_from(["tachi", "a2a", "sticky-cutover", "plan"])
+        .expect("the read-only sticky cutover plan command must parse");
+    Cli::try_parse_from([
+        "tachi",
+        "a2a",
+        "sticky-cutover",
+        "apply",
+        "--plan",
+        "sticky-cutover-plan.json",
+        "--confirm",
+    ])
+    .expect("sticky cutover apply must require an explicit plan and confirmation");
+
+    for argv in [
+        vec!["tachi", "a2a", "sticky-cutover", "apply"],
+        vec![
+            "tachi",
+            "a2a",
+            "sticky-cutover",
+            "apply",
+            "--plan",
+            "sticky-cutover-plan.json",
+        ],
+    ] {
+        Cli::try_parse_from(argv)
+            .expect_err("sticky cutover apply without both --plan and --confirm must fail");
+    }
+}
+
+#[test]
 fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
     let preview =
         Cli::try_parse_from(["tachi", "wiki", "corpus"]).expect("wiki corpus preview should parse");

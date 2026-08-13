@@ -7,8 +7,7 @@
 //! that is already running against a target dir chosen for the OLD identity,
 //! which is precisely the cross-lineage poisoning the broker exists to prevent.
 //!
-//! Storage is the `hard_state` KV table — the same store the sticky claim gate
-//! and the orchestrator use:
+//! Storage is the `hard_state` KV table shared with other operator receipts:
 //!
 //! - [`TICKET_NS`] (key = ticket id) — the immutable request. Written with
 //!   `insert_state_if_absent` (a single `INSERT ... ON CONFLICT DO NOTHING`), so

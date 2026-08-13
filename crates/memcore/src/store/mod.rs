@@ -62,6 +62,8 @@ pub mod rem;
 pub mod sandbox;
 pub mod snapshot_import;
 pub mod state;
+#[cfg(feature = "admin")]
+pub mod sticky_cutover;
 pub mod tasks;
 #[cfg(feature = "admin")]
 pub mod vault;

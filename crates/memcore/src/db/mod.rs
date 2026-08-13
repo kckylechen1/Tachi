@@ -1,3 +1,5 @@
+#[cfg(feature = "admin")]
+pub mod a2a;
 mod agent_state;
 pub mod anchor;
 mod audit;
@@ -128,6 +130,7 @@ pub(crate) use memory_crud::query_hash;
 #[cfg(test)]
 pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
+pub use memory_crud::refuse_retired_sticky_row_within_tx;
 pub(crate) use memory_crud::search_fts_raw_match;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
 pub(crate) use memory_crud::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals;
@@ -136,14 +139,15 @@ pub(crate) use memory_crud::wiki_corpus_store_sql_splice;
 pub(crate) use memory_crud::AccessUpdate;
 pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;
 pub use memory_crud::{
-    access_event_density, archive_memory, archive_memory_if_revision, delete,
-    delete_memories_symbolic_fts, fetch_by_ids, fetch_by_ids_excluding_store_internal,
-    find_active_wiki_entry_by_path, find_exact_path_text_id, get_access_times, get_all,
-    get_use_access_times, is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
-    list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
-    list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
-    normalize_for_write, record_enrichment_failure, record_memory_use, release_event_claim,
-    restore_archived_if_revision, search_fts, search_symbolic_candidates, search_vec,
+    access_event_density, archive_memory, archive_memory_if_revision,
+    archive_memory_revision_within_tx, delete, delete_memories_symbolic_fts, fetch_by_ids,
+    fetch_by_ids_excluding_store_internal, find_active_wiki_entry_by_path, find_exact_path_text_id,
+    get_access_times, get_all, get_use_access_times, is_reserved_wiki_internal_path,
+    is_user_facing_wiki_entry, list_active_wiki_ingest_predecessors, list_by_path,
+    list_by_path_active_unsuperseded, list_by_path_recent, list_user_facing_wiki_entries,
+    list_wiki_duplicate_candidates, normalize_for_write, record_enrichment_failure,
+    record_memory_use, release_event_claim, restore_archived_if_revision,
+    restore_archived_revision_within_tx, search_fts, search_symbolic_candidates, search_vec,
     set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
     supersede_memory_if_revision, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
     try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
@@ -153,7 +157,8 @@ pub use memory_crud::{
     MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 pub(crate) use memory_crud::{
-    archive_with_metadata_if_expected_state, restore_with_metadata_if_expected_state,
+    archive_memory_within_tx, archive_with_metadata_if_expected_state,
+    restore_with_metadata_if_expected_state, supersede_memory_within_tx,
     supersede_with_metadata_if_expected_state, update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the

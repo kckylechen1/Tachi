@@ -69,6 +69,16 @@ pub fn apply_rescue(
 
     // Re-read rows so we have full payloads (the plan only carries metadata).
     let rows = read_source_rows(source)?;
+    for row in &rows {
+        let path = memcore::path_router::normalize_path(&row.path);
+        let category = MemoryCategory::normalize(&row.category);
+        if path == "/sticky" || path.starts_with("/sticky/") || category == "sticky" {
+            return Err(format!(
+                "legacy sticky source row {} is retired and read-only; use tachi_a2a/sticky_cutover instead",
+                row.id
+            ));
+        }
+    }
     let by_id: std::collections::HashMap<String, &SourceRow> =
         rows.iter().map(|r| (r.id.clone(), r)).collect();
 

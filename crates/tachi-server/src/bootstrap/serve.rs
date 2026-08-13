@@ -22,7 +22,7 @@ mod stdio;
 
 use self::backfill_commands::run_if_backfill_command;
 use self::background::*;
-use self::cli_commands::run_pre_serve_command;
+use self::cli_commands::{run_if_a2a_command, run_pre_serve_command};
 use self::daemon::serve_http_daemon;
 use self::logging::*;
 use self::runtime::*;
@@ -38,6 +38,15 @@ fn should_load_project_local_env(command: &Commands, no_project_db: bool) -> boo
 
 fn should_defer_manifest_startup(command: &Commands, daemon: bool, no_project_db: bool) -> bool {
     daemon && no_project_db && matches!(command, Commands::Serve)
+}
+
+fn is_a2a_sticky_cutover(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::A2a {
+            action: tachi_bootstrap::cli::A2aAction::StickyCutover { .. }
+        }
+    )
 }
 
 fn should_refresh_plan_c_symlink(
@@ -359,7 +368,7 @@ async fn resolve_global_db(
                 .join(".sigil")
                 .join(memcore::LEGACY_MEMORY_DB_FILENAME),
         ];
-        if !default_global.exists() {
+        if !default_global.exists() && !is_a2a_sticky_cutover(&ctx.command) {
             for legacy in legacy_candidates {
                 if legacy.exists() {
                     copy_legacy_db_guarded(&legacy, &default_global).await?;
@@ -464,7 +473,7 @@ async fn resolve_global_db(
                     .ok()
                     .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
                     .unwrap_or(false);
-                if !bypass {
+                if !bypass && !is_a2a_sticky_cutover(&ctx.command) {
                     if let Err(err) = m.check_writable(&entry.path) {
                         // Before failing hard, check if any live process
                         // is already holding this DB — that is the most
@@ -513,7 +522,10 @@ async fn resolve_global_db(
         global_db_path
     };
 
-    if let Some(parent) = global_db_path.parent() {
+    if !is_a2a_sticky_cutover(&ctx.command) {
+        let Some(parent) = global_db_path.parent() else {
+            return Ok(global_db_path);
+        };
         tokio::fs::create_dir_all(parent).await?;
     }
 
@@ -525,6 +537,13 @@ async fn run_startup_hygiene(
     ctx: &StartupContext,
     global_db_path: &PathBuf,
 ) -> Result<Option<StartupHygiene>, Box<dyn std::error::Error>> {
+    // Operator cutover must open exactly the already-resolved global DB and
+    // exit before project aliases, legacy copies, GC, or server startup can
+    // mutate unrelated state.
+    if run_if_a2a_command(&ctx.command, &ctx.app_home, global_db_path)? {
+        return Ok(None);
+    }
+
     // Backfill commands need async LLM clients, so handle them before generic CLI dispatch.
     // #1181: thread the top-level `--allow-schema-migration` decision through
     // so a rehearsal `backfill-*` run against a disposable copy of a real

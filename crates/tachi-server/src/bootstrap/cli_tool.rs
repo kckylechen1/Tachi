@@ -32,6 +32,9 @@ pub(super) async fn run_cli_command(
             "recall coverage invariant: recall-coverage must run through the explicit in-process read-only route before generic CLI tool dispatch"
                 .into(),
         ),
+        Commands::A2a { .. } => {
+            unreachable!("A2a administration is handled before generic CLI tool dispatch")
+        }
         Commands::Search {
             query,
             path,

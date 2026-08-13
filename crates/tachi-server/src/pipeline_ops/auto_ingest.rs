@@ -101,7 +101,7 @@ pub(crate) async fn build_similarity_edges(
             lease
                 .write_owned(|store| {
                     store
-                        .add_edge_with_provenance(
+                        .add_edge_with_provenance_within_tx(
                             &edge,
                             &memcore::db::EdgeProvenance {
                                 authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),

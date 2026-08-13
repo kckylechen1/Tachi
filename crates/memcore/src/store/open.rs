@@ -1041,6 +1041,18 @@ impl MemoryStore {
     /// of it — a second copy is how the escape hatch and the `db_label`
     /// routing rule drift apart.
     pub(crate) fn validate_write_path(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        // Retirement is a global write boundary, not an ordinary routing
+        // decision. Check it before the cross-project metadata bypass and
+        // before the host-injected KernelPolicy escape hatch, and keep legacy
+        // `/sticky` rows available only to the read/cutover SQL paths.
+        if let Err(error) = path_router::validate_retired_sticky_write(&entry.path, &entry.category)
+        {
+            eprintln!(
+                "warning: retired-memory write rejected db_label={} path={} category={} error={}",
+                self.db_label, entry.path, entry.category, error
+            );
+            return Err(MemoryError::InvalidArg(error.to_string()));
+        }
         // tachi#1585 D5: this store's `KernelPolicy::path_validation_escape_hatch`,
         // not a `TACHI_DISABLE_PATH_VALIDATION` env read.
         if self.path_validation && !self.policy.path_validation_escape_hatch {
@@ -1049,9 +1061,12 @@ impl MemoryStore {
                 .get("allow_cross_project")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if let Err(e) =
-                path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
-            {
+            if let Err(e) = path_router::validate_memory_write_for_db(
+                &entry.path,
+                &entry.category,
+                &self.db_label,
+                allow_cross,
+            ) {
                 eprintln!(
                     "warning: path-routing validation rejected write db_label={} path={} error={}",
                     self.db_label, entry.path, e
@@ -2027,6 +2042,80 @@ mod exact_dedupe_open_tests {
         store.upsert_batch(&[]).expect("empty batch is Ok");
         let stats = store.stats(true).expect("stats");
         assert_eq!(stats.total, 0, "empty batch must not write a row");
+    }
+
+    #[test]
+    fn retired_sticky_write_guard_precedes_cross_project_and_policy_bypasses() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("retired-sticky-guard.db");
+        let policy = crate::KernelPolicy {
+            path_validation_escape_hatch: true,
+            ..Default::default()
+        };
+        let mut store = MemoryStore::open_with_label(&path.to_string_lossy(), "global")
+            .expect("open labelled store")
+            .with_kernel_policy(policy);
+
+        let mut rejected = |id: &str, path: &str, category: &str| {
+            let mut entry = test_memory_entry(id);
+            entry.path = path.to_string();
+            entry.category = category.to_string();
+            entry.metadata = serde_json::json!({"allow_cross_project": true});
+            let error = store
+                .upsert(&entry)
+                .expect_err("ordinary upsert must reject retired sticky input");
+            assert!(
+                error.to_string().contains("tachi_a2a"),
+                "unexpected error: {error}"
+            );
+            assert!(store.get(id).expect("get after refusal").is_none());
+        };
+
+        rejected("sticky-path-root", "/sticky", "fact");
+        rejected("sticky-path-alias", "//STICKY///legacy/", "fact");
+        rejected("sticky-category-case", "/notes/ordinary", " Sticky ");
+
+        let mut insert_only = test_memory_entry("sticky-insert-only");
+        insert_only.path = "/sticky/legacy".to_string();
+        insert_only.metadata = serde_json::json!({"allow_cross_project": true});
+        let error = store
+            .insert_if_absent(&insert_only)
+            .expect_err("insert-only writer must reject retired path");
+        assert!(error.to_string().contains("tachi_a2a"), "{error}");
+
+        let mut idless = test_memory_entry("sticky-idless");
+        idless.category = "STICKY".to_string();
+        let error = store
+            .upsert_idless(&idless, "retired-sticky-identity")
+            .expect_err("id-less writer must reject retired category");
+        assert!(error.to_string().contains("tachi_a2a"), "{error}");
+
+        let mut batch = test_memory_entry("sticky-batch");
+        batch.path = "/sticky/batch".to_string();
+        let error = store
+            .upsert_batch(&[batch])
+            .expect_err("batch writer must reject retired path");
+        assert!(error.to_string().contains("tachi_a2a"), "{error}");
+
+        let mut validated = test_memory_entry("sticky-validated");
+        validated.category = "sticky".to_string();
+        let error = store
+            .upsert_with_validated_reference_mutations(
+                &validated,
+                None,
+                &serde_json::Map::new(),
+                &[],
+            )
+            .expect_err("validated-reference writer must reject retired category");
+        assert!(error.to_string().contains("tachi_a2a"), "{error}");
+
+        let mut ordinary = test_memory_entry("ordinary-near-sticky");
+        ordinary.path = "/stickiness/allowed".to_string();
+        ordinary.category = "fact".to_string();
+        ordinary.metadata = serde_json::json!({"allow_cross_project": true});
+        store
+            .upsert(&ordinary)
+            .expect("near-match path remains allowed");
     }
 
     #[test]

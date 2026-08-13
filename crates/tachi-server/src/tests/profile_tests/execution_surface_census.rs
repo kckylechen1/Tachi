@@ -339,9 +339,10 @@ fn zero_headroom_schema_surfaces_have_exact_caps() {
         BTreeSet::from([
             "admin.tachi_task".to_string(),
             "standard.tachi_gh".to_string(),
+            "standard.tachi_memory".to_string(),
             "standard.tachi_task".to_string(),
         ]),
-        "#1713 must check the three expected zero-headroom surfaces"
+        "#1713/#1751 must check the four expected zero-headroom surfaces"
     );
     let violations = zero_headroom_surface_violations(&observed, &fixture["provisional_budgets"]);
     assert!(
@@ -400,6 +401,44 @@ fn zero_headroom_gate_rejects_gh_growth_and_cap_slack_mutants() {
             .any(|message| message.contains("surface.standard.tachi_gh.input_schema_bytes")),
         "standard GH schema-byte cap slack must fail the exact gate"
     );
+}
+
+#[test]
+fn zero_headroom_gate_rejects_post_retirement_memory_growth_and_cap_slack() {
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("execution census fixture parses");
+    let observed = observed_census();
+    let surface = "standard.tachi_memory";
+
+    let mut grown = observed.clone();
+    for metric in ["property_count", "input_schema_bytes"] {
+        let value = grown["schema_surfaces"]["standard"]["tachi_memory"][metric]
+            .as_u64()
+            .expect("Memory schema metric");
+        grown["schema_surfaces"]["standard"]["tachi_memory"][metric] = json!(value + 1);
+    }
+    let growth = zero_headroom_surface_violations(&grown, &fixture["provisional_budgets"]);
+    assert!(growth
+        .iter()
+        .any(|message| message.contains("surface.standard.tachi_memory.property_count")));
+    assert!(growth
+        .iter()
+        .any(|message| message.contains("surface.standard.tachi_memory.input_schema_bytes")));
+
+    let mut slack = fixture.clone();
+    for metric in ["max_top_level_properties", "max_input_schema_bytes"] {
+        let value = slack["provisional_budgets"]["surfaces"][surface][metric]
+            .as_u64()
+            .expect("Memory schema cap");
+        slack["provisional_budgets"]["surfaces"][surface][metric] = json!(value + 1);
+    }
+    let slack_violations =
+        zero_headroom_surface_violations(&observed, &slack["provisional_budgets"]);
+    assert!(slack_violations
+        .iter()
+        .any(|message| message.contains("surface.standard.tachi_memory.property_count")));
+    assert!(slack_violations
+        .iter()
+        .any(|message| message.contains("surface.standard.tachi_memory.input_schema_bytes")));
 }
 
 #[test]

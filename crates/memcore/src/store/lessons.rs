@@ -120,6 +120,7 @@ impl MemoryStore {
             tx.commit()?;
             return Ok(None);
         };
+        db::refuse_retired_sticky_row_within_tx(&tx, &id, "updated as a lesson duplicate")?;
 
         #[cfg(test)]
         pause_after_lesson_candidate_read(&id);

@@ -79,6 +79,7 @@
     clippy::useless_format
 )]
 
+mod a2a_ops;
 mod action_effect;
 mod agent_eval;
 mod agent_markdown;
@@ -172,7 +173,6 @@ mod skill_policy;
 mod skill_source_resolver;
 mod staffing_ops;
 mod status_ops;
-mod sticky_ops;
 mod task_lifecycle;
 #[cfg(test)]
 mod test_support;

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use std::collections::HashMap;
 
 use crate::db::StoreProfile;
@@ -25,8 +25,18 @@ pub fn gc_tables(
     cfg: &GcConfig,
     profile: StoreProfile,
 ) -> Result<serde_json::Value, MemoryError> {
+    let as_of = now_utc_iso();
+    gc_tables_at(conn, cfg, profile, &as_of)
+}
+
+fn gc_tables_at(
+    conn: &mut Connection,
+    cfg: &GcConfig,
+    profile: StoreProfile,
+    as_of: &str,
+) -> Result<serde_json::Value, MemoryError> {
     let product = profile.includes_product();
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
     // 1. access_history: retain latest N entries per (memory_id, event_kind),
     //    delete rest.
@@ -106,16 +116,39 @@ pub fn gc_tables(
         [],
     )?;
 
-    // Reconcile query_diversity after pruning access_history rows.
-    let diversity_updated: usize = tx.execute(
-        "UPDATE memories
-         SET query_diversity = (
-             SELECT COUNT(DISTINCT query_hash)
-             FROM access_history
-             WHERE memory_id = memories.id AND query_hash != ''
-         )",
-        [],
-    )?;
+    // Reconcile query_diversity after pruning access_history rows. Candidate
+    // discovery deliberately does not approximate the retired-sticky
+    // classifier in SQL: normalize/classify every id against the canonical
+    // ordinary-writer guard in this same writer transaction, then mutate only
+    // the ids it admitted.
+    let diversity_candidate_ids = {
+        let mut stmt = tx.prepare("SELECT id FROM memories")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    let mut diversity_ordinary_ids = Vec::with_capacity(diversity_candidate_ids.len());
+    for id in diversity_candidate_ids {
+        match super::refuse_retired_sticky_row_within_tx(&tx, &id, "query-diversity reconciled") {
+            Ok(()) => diversity_ordinary_ids.push(id),
+            Err(MemoryError::InvalidArg(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let mut diversity_updated = 0usize;
+    for id in diversity_ordinary_ids {
+        diversity_updated += tx.execute(
+            "UPDATE memories
+             SET query_diversity = (
+                 SELECT COUNT(DISTINCT query_hash)
+                 FROM access_history
+                 WHERE memory_id = memories.id AND query_hash != ''
+             )
+             WHERE id = ?1",
+            [&id],
+        )?;
+    }
 
     // 6. Orphaned agent_known_state (PRODUCT; memory was deleted but
     //    known-state remained)
@@ -146,6 +179,35 @@ pub fn gc_tables(
     );
     let impression_quota_deleted = tx.execute(&impression_quota_sql, [])?;
 
+    // #1751 v32: body content is retained until the authoritative terminal
+    // receipt is at least 90 days old. The digest and every other envelope /
+    // receipt field remain immutable. A bounded subquery prevents one GC call
+    // from monopolizing the Product writer lock; later calls resume naturally.
+    const A2A_BODY_SCRUB_BATCH: i64 = 100;
+    let a2a_bodies_scrubbed = if product {
+        tx.execute(
+            "UPDATE a2a_envelopes SET body=NULL
+             WHERE envelope_id IN (
+                 SELECT e.envelope_id
+                   FROM a2a_envelopes e
+                   JOIN a2a_delivery_receipts r
+                     ON r.envelope_id=e.envelope_id
+                    AND r.state=e.current_state
+                    AND r.envelope_version=e.state_version
+                  WHERE e.body IS NOT NULL
+                    AND e.current_state IN ('consumed','expired')
+                    AND unixepoch(r.occurred_at, '+90 days') <= unixepoch(?1)
+                  ORDER BY r.occurred_at,e.envelope_id
+                  LIMIT ?2
+             )",
+            params![as_of, A2A_BODY_SCRUB_BATCH],
+        )?
+    } else {
+        0
+    };
+    #[cfg(test)]
+    test_hooks::fail_after_a2a_body_scrub()?;
+
     tx.commit()?;
 
     Ok(serde_json::json!({
@@ -157,7 +219,289 @@ pub fn gc_tables(
         "orphaned_access_history": orphan_deleted,
         "orphaned_agent_known_state": orphan_aks_deleted,
         "recall_impression_groups_pruned": impression_age_deleted + impression_quota_deleted,
+        "a2a_bodies_scrubbed": a2a_bodies_scrubbed,
     }))
+}
+
+#[cfg(test)]
+mod test_hooks {
+    use std::cell::Cell;
+
+    use crate::error::MemoryError;
+
+    thread_local! {
+        static FAIL_AFTER_A2A_BODY_SCRUB: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn arm_fail_after_a2a_body_scrub() {
+        FAIL_AFTER_A2A_BODY_SCRUB.with(|flag| flag.set(true));
+    }
+
+    pub(super) fn fail_after_a2a_body_scrub() -> Result<(), MemoryError> {
+        if FAIL_AFTER_A2A_BODY_SCRUB.with(|flag| flag.replace(false)) {
+            return Err(MemoryError::Internal(
+                "test_hooks: injected failure after A2A body scrub".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod a2a_body_retention_tests {
+    use super::*;
+
+    fn product_conn() -> Connection {
+        let _ = libsimple::enable_auto_extension();
+        crate::db::register_sqlite_vec();
+        let conn = Connection::open_in_memory().expect("open product fixture");
+        crate::db::schema::init_schema(&conn).expect("initialize current Product schema");
+        conn.execute_batch(
+            "INSERT INTO agent_identities(agent_identity_id,created_at)
+                 VALUES ('retention-agent','2026-01-01T00:00:00.000Z');
+             INSERT INTO identity_admissions
+                 (admission_id,agent_identity_id,connection_id,state,created_at)
+                 VALUES ('retention-admission','retention-agent','retention-connection',
+                         'self_asserted','2026-01-01T00:00:00.000Z');",
+        )
+        .expect("seed retention identity");
+        conn
+    }
+
+    fn seed_envelope(conn: &Connection, id: &str, state: &str, occurred_at: Option<&str>) {
+        let version = if state == "received" { 1 } else { 3 };
+        conn.execute(
+            "INSERT INTO a2a_envelopes
+             (envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,
+              recipient_agent_identity_id,recipient_admission_id,subject_ref,body,
+              body_digest,issuer_identity_assurance,recipient_identity_assurance,
+              issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,
+              recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version)
+             VALUES (?1,'turn_response/v1','retention-agent','retention-admission',
+                     'retention-agent','retention-admission','peer_publication:retention',?2,
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'self_asserted','self_asserted','same_host','same_host',
+                     'current_local_connection','historical_local_admission',?1,
+                     '2026-01-01T00:00:00.000Z','2027-01-01T00:00:00.000Z',?3,?4)",
+            params![id, format!("body-{id}"), state, version],
+        )
+        .expect("seed envelope");
+        if let Some(occurred_at) = occurred_at {
+            conn.execute(
+                "INSERT INTO a2a_delivery_receipts
+                 (receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,
+                  actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at)
+                 VALUES (?1 || ':receipt',?1,?2,?3,'retention-agent','retention-admission',
+                         'self_asserted','same_host','current_local_connection',?4)",
+                params![id, version, state, occurred_at],
+            )
+            .expect("seed matching receipt");
+        }
+    }
+
+    fn body(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT body FROM a2a_envelopes WHERE envelope_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .expect("read envelope body")
+    }
+
+    #[test]
+    fn gc_scrubs_only_terminal_body_at_matching_receipt_plus_ninety_days() {
+        let mut conn = product_conn();
+        let as_of = chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z").unwrap();
+        let at_90 = (as_of - chrono::Duration::days(90)).to_rfc3339();
+        let at_89 = (as_of - chrono::Duration::days(89)).to_rfc3339();
+        seed_envelope(&conn, "consumed-90", "consumed", Some(&at_90));
+        seed_envelope(&conn, "expired-90", "expired", Some(&at_90));
+        seed_envelope(&conn, "consumed-89", "consumed", Some(&at_89));
+        seed_envelope(&conn, "received-old", "received", Some(&at_90));
+        seed_envelope(&conn, "missing-receipt", "consumed", None);
+
+        let first = gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            &as_of.to_rfc3339(),
+        )
+        .expect("retention GC");
+        assert_eq!(first["a2a_bodies_scrubbed"], 2);
+        assert_eq!(body(&conn, "consumed-90"), None);
+        assert_eq!(body(&conn, "expired-90"), None);
+        for id in ["consumed-89", "received-old", "missing-receipt"] {
+            assert_eq!(body(&conn, id), Some(format!("body-{id}")), "{id}");
+        }
+
+        let repeat = gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            &as_of.to_rfc3339(),
+        )
+        .expect("idempotent repeat");
+        assert_eq!(repeat["a2a_bodies_scrubbed"], 0);
+    }
+
+    #[test]
+    fn gc_body_scrub_rolls_back_with_the_outer_table_sweep() {
+        let mut conn = product_conn();
+        seed_envelope(
+            &conn,
+            "rollback-terminal",
+            "consumed",
+            Some("2026-01-01T00:00:00Z"),
+        );
+        test_hooks::arm_fail_after_a2a_body_scrub();
+        let error = gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            "2026-08-13T12:00:00Z",
+        )
+        .expect_err("injected post-scrub failure must roll back");
+        assert!(error.to_string().contains("injected failure"), "{error}");
+        assert_eq!(
+            body(&conn, "rollback-terminal"),
+            Some("body-rollback-terminal".to_string())
+        );
+    }
+
+    #[test]
+    fn gc_body_scrub_is_bounded_to_one_hundred_rows_per_call() {
+        let mut conn = product_conn();
+        for index in 0..101 {
+            seed_envelope(
+                &conn,
+                &format!("bounded-{index:03}"),
+                "expired",
+                Some("2026-01-01T00:00:00Z"),
+            );
+        }
+        let first = gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            "2026-08-13T12:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(first["a2a_bodies_scrubbed"], 100);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM a2a_envelopes WHERE body IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    fn seed_memory(conn: &Connection, id: &str, path: &str, category: &str, query_diversity: i64) {
+        conn.execute(
+            "INSERT INTO memories (
+                 id, path, summary, text, importance, timestamp, category, source, scope,
+                 created_at, updated_at, last_access, revision, retention_policy, query_diversity
+             ) VALUES (?1, ?2, '', ?1, 0.4, '2020-01-01T00:00:00Z', ?3, 'manual', 'general',
+                       '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z',
+                       '2020-01-01T00:00:00Z', 1, 'durable', ?4)",
+            params![id, path, category, query_diversity],
+        )
+        .expect("seed memory");
+    }
+
+    fn seed_display_access(conn: &Connection, id: &str, query_hash: &str) {
+        conn.execute(
+            "INSERT INTO access_history(memory_id, accessed_at, query_hash, event_kind)
+             VALUES (?1, '2026-08-13T00:00:00Z', ?2, 'display')",
+            params![id, query_hash],
+        )
+        .expect("seed display access");
+    }
+
+    #[test]
+    fn gc_tables_preserves_malformed_retired_sticky_diversity_while_ordinary_reconciles() {
+        let mut conn = product_conn();
+        seed_memory(&conn, "ordinary-diversity", "/notes/ordinary", "fact", 7);
+        seed_memory(
+            &conn,
+            "sticky-malformed-diversity",
+            "//STICKY///legacy",
+            "fact",
+            7,
+        );
+        seed_display_access(&conn, "ordinary-diversity", "ordinary-query");
+        seed_display_access(&conn, "sticky-malformed-diversity", "sticky-query");
+
+        gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            "2026-08-13T12:00:00Z",
+        )
+        .expect("stats GC");
+
+        let diversity: Vec<(String, i64)> = ["ordinary-diversity", "sticky-malformed-diversity"]
+            .into_iter()
+            .map(|id| {
+                conn.query_row(
+                    "SELECT path, query_diversity FROM memories WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            diversity,
+            vec![
+                ("/notes/ordinary".to_string(), 1),
+                ("//STICKY///legacy".to_string(), 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn gc_archive_preserves_malformed_retired_sticky_while_ordinary_progresses() {
+        let conn = product_conn();
+        seed_memory(&conn, "ordinary-archive", "/notes/ordinary", "fact", 0);
+        seed_memory(
+            &conn,
+            "sticky-malformed-archive",
+            "//STICKY///legacy",
+            "fact",
+            0,
+        );
+        conn.execute(
+            "UPDATE memories SET importance=0.2 WHERE id IN ('ordinary-archive', 'sticky-malformed-archive')",
+            [],
+        )
+        .expect("lower archive fixture importance");
+
+        let archived =
+            archive_stale_memories_with_config(&conn, 60, &crate::RecallConfig::default())
+                .expect("archive stale memories");
+        assert_eq!(archived, 1);
+        let states: Vec<(String, i64, i64)> = ["ordinary-archive", "sticky-malformed-archive"]
+            .into_iter()
+            .map(|id| {
+                conn.query_row(
+                    "SELECT path, archived, revision FROM memories WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("/notes/ordinary".to_string(), 1, 2),
+                ("//STICKY///legacy".to_string(), 0, 1),
+            ]
+        );
+    }
 }
 
 // ─── AUTO-ARCHIVE STALE MEMORIES ──────────────────────────────────────────────
@@ -183,8 +527,8 @@ struct ArchivalPass {
     importance_below: f64,
     /// Which `retention_policy` values this predicate claims.
     retention_scope: &'static str,
-    /// `UPDATE … RETURNING id`; `?1` is `stale_days`, `?2` the archival time.
-    sql: String,
+    /// Candidate predicate; `?1` is `stale_days`.
+    predicate_sql: String,
 }
 
 /// Result of running one [`ArchivalPass`].
@@ -194,29 +538,47 @@ struct ArchivalOutcome {
 }
 
 /// Run a single archival pass and capture the ids it actually archived.
-///
-/// The `query_map` iterator is drained to exhaustion rather than run through
-/// `execute`: with a `RETURNING` clause the modified rows are the statement's
-/// output, so stepping it to completion is what both applies the whole update
-/// and yields every id. `execute` is the wrong verb for a returning statement.
-///
+/// Candidate discovery, canonical retired-sticky classification, and mutation
+/// all share the caller's immediate writer transaction.
 fn run_archival_pass(
-    conn: &Connection,
+    tx: &Transaction<'_>,
     pass: &ArchivalPass,
     stale_days: u32,
     now: &str,
 ) -> Result<ArchivalOutcome, MemoryError> {
-    let mut stmt = conn.prepare(&pass.sql)?;
-    let mut count = 0usize;
-    let mut ids: Vec<String> = Vec::new();
-    let rows = stmt.query_map(params![stale_days, now], |row| row.get::<_, String>(0))?;
-    for row in rows {
-        let id = row?;
-        count += 1;
-        ids.push(id);
+    let candidate_ids = {
+        let sql = format!("SELECT id FROM memories WHERE {}", pass.predicate_sql);
+        let mut stmt = tx.prepare(&sql)?;
+        let ids = stmt
+            .query_map([stale_days], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    let mut ordinary_ids = Vec::with_capacity(candidate_ids.len());
+    for id in candidate_ids {
+        match super::refuse_retired_sticky_row_within_tx(tx, &id, "GC-archived") {
+            Ok(()) => ordinary_ids.push(id),
+            Err(MemoryError::InvalidArg(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let mut ids = Vec::with_capacity(ordinary_ids.len());
+    for id in ordinary_ids {
+        if tx.execute(
+            "UPDATE memories
+             SET archived = 1, updated_at = ?1, revision = revision + 1
+             WHERE id = ?2",
+            params![now, id],
+        )? == 1
+        {
+            ids.push(id);
+        }
     }
     ids.sort();
-    Ok(ArchivalOutcome { count, ids })
+    Ok(ArchivalOutcome {
+        count: ids.len(),
+        ids,
+    })
 }
 
 pub(crate) fn write_gc_archived_receipt(
@@ -316,7 +678,7 @@ pub fn archive_stale_memories_with_config(
     // `unchecked_transaction` takes `&Connection`, which keeps this function's
     // signature — and `MemoryStore::archive_stale_memories`'s `&self` — intact.
     // It rolls back on drop, so any `?` below abandons the whole sweep.
-    let tx = conn.unchecked_transaction()?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let now = now_utc_iso();
 
     // Skip permanent and pinned memories entirely
@@ -353,15 +715,13 @@ pub fn archive_stale_memories_with_config(
             recency_column,
             importance_below: 0.5,
             retention_scope: "durable_or_unset",
-            sql: format!(
-                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
-                 WHERE archived = 0
+            predicate_sql: format!(
+                "archived = 0
                    AND {recency_column} IS NOT NULL
                    AND unixepoch({recency_column}) < unixepoch('now', '-' || ?1 || ' days')
                    AND importance < 0.5
                    AND (retention_policy IS NULL OR retention_policy = 'durable')
-                   {exempt_clause}
-                 RETURNING id"
+                   {exempt_clause}"
             ),
         },
         ArchivalPass {
@@ -369,15 +729,13 @@ pub fn archive_stale_memories_with_config(
             recency_column: "timestamp",
             importance_below: 0.3,
             retention_scope: "durable_or_unset",
-            sql: format!(
-                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
-                 WHERE archived = 0
+            predicate_sql: format!(
+                "archived = 0
                    AND {recency_column} IS NULL
                    AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
                    AND importance < 0.3
                    AND (retention_policy IS NULL OR retention_policy = 'durable')
-                   {exempt_clause}
-                 RETURNING id"
+                   {exempt_clause}"
             ),
         },
         // Ephemeral: more aggressive thresholds (importance < 0.7 / < 0.5)
@@ -386,14 +744,12 @@ pub fn archive_stale_memories_with_config(
             recency_column,
             importance_below: 0.7,
             retention_scope: "ephemeral",
-            sql: format!(
-                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
-                  WHERE archived = 0
+            predicate_sql: format!(
+                "archived = 0
                     AND {recency_column} IS NOT NULL
                     AND unixepoch({recency_column}) < unixepoch('now', '-' || ?1 || ' days')
                     AND importance < 0.7
-                    AND retention_policy = 'ephemeral'
-                  RETURNING id"
+                    AND retention_policy = 'ephemeral'"
             ),
         },
         ArchivalPass {
@@ -401,14 +757,12 @@ pub fn archive_stale_memories_with_config(
             recency_column: "timestamp",
             importance_below: 0.5,
             retention_scope: "ephemeral",
-            sql: format!(
-                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
-                  WHERE archived = 0
+            predicate_sql: format!(
+                "archived = 0
                     AND {recency_column} IS NULL
                     AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
                     AND importance < 0.5
-                    AND retention_policy = 'ephemeral'
-                  RETURNING id"
+                    AND retention_policy = 'ephemeral'"
             ),
         },
     ];

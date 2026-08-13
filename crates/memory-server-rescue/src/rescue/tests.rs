@@ -186,3 +186,40 @@ fn apply_routes_rows_into_target_dbs_with_trading_isolation() {
     assert!(!source_path.exists());
     assert!(std::path::Path::new(&report.source_backed_up_to.unwrap()).exists());
 }
+
+#[test]
+fn apply_rejects_retired_sticky_source_rows_before_target_writes_or_backup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source_path = tmp.path().join("source.db");
+    let targets_root = tmp.path().join("projects");
+    let src = Connection::open(&source_path).unwrap();
+    src.execute_batch(
+        "CREATE TABLE memories (
+            id TEXT PRIMARY KEY,path TEXT NOT NULL,summary TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL DEFAULT '',importance REAL NOT NULL DEFAULT 0.7,
+            timestamp TEXT NOT NULL,category TEXT NOT NULL DEFAULT 'fact',
+            topic TEXT NOT NULL DEFAULT '',keywords TEXT NOT NULL DEFAULT '[]',
+            persons TEXT NOT NULL DEFAULT '[]',entities TEXT NOT NULL DEFAULT '[]',
+            location TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT 'manual',
+            scope TEXT NOT NULL DEFAULT 'general',archived INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT '',
+            access_count INTEGER NOT NULL DEFAULT 0,last_access TEXT,
+            metadata TEXT NOT NULL DEFAULT '{}',revision INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO memories (id,path,timestamp,category,created_at,updated_at)
+        VALUES ('legacy-sticky','/sticky/legacy','2026-01-01T00:00:00Z','sticky',
+                '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
+    )
+    .unwrap();
+    drop(src);
+
+    let plan = plan_rescue(&source_path).expect("plan legacy source");
+    let error = apply_rescue(&source_path, &targets_root, plan)
+        .expect_err("rescue must not copy retired sticky history");
+    assert!(error.contains("tachi_a2a"), "{error}");
+    assert!(
+        source_path.exists(),
+        "a refused rescue must not rename its source"
+    );
+    assert!(!targets_root.exists(), "refusal must precede target writes");
+}

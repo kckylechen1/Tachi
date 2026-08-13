@@ -66,10 +66,6 @@ fn memory_save_params(text: String, path: &str, format: Option<&str>) -> TachiMe
         turn_id: None,
         event_type: None,
         messages: Vec::new(),
-        to: None,
-        ttl_days: None,
-        include_read: false,
-        agent_id: None,
     }
 }
 
@@ -263,10 +259,6 @@ async fn g5_checkpoint_receipt_default_under_500_bytes() {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
-            to: None,
-            ttl_days: None,
-            include_read: false,
-            agent_id: None,
         },
     )
     .await

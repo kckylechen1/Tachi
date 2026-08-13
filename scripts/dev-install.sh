@@ -9,8 +9,8 @@ DESTINATION="${INSTALL_DIR}/tachi"
 TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/.cache/sigil-shared-target}"
 RELEASE_BINARY="${TARGET_DIR}/release/tachi"
 SENTINELS=(
-  "sticky_leave (leave a read-once ephemeral note"
-  "sticky_check (claim/list unread stickies"
+  "[action=respond|required] Stable recipient AgentIdentity id."
+  "[action=status] Header/receipt row limit"
   "FROM session_claims WHERE claim_id = ?1"
   "dispatch_outcomes row "
 )
@@ -41,7 +41,7 @@ trap 'rm -f "${literal_dump}"' EXIT
 strings "${RELEASE_BINARY}" > "${literal_dump}"
 for sentinel in "${SENTINELS[@]}"; do
   # Each sentinel includes literal syntax or whitespace, so a private Rust
-  # identifier such as `handle_sticky_leave` cannot satisfy this release gate.
+  # identifier such as `handle_a2a_respond` cannot satisfy this release gate.
   if ! grep -Fq "${sentinel}" "${literal_dump}"; then
     fail "release literal gate failed: missing ${sentinel}"
   fi

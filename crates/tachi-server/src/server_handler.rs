@@ -273,10 +273,9 @@ fn describe_allowed_task_actions(allowed: &[&str]) -> String {
     }
 }
 
-/// Intersect the advertised `tachi_task.action` enum with the same action
-/// policy used at call time. This keeps ordinary profiles from planning around
-/// operator-only Tachi dispatch and prevents restricted profiles from seeing
-/// capabilities they cannot invoke. Admin retains the complete schema.
+/// Intersect each gated facade's advertised action enum with the same policy
+/// used at call time. This keeps projected schemas from teaching a caller an
+/// action the server will deny. Admin retains the complete schema.
 fn narrow_gated_action_schemas(
     tools: &mut [rmcp::model::Tool],
     profile: Option<tachi_hub::ToolProfile>,
@@ -286,23 +285,69 @@ fn narrow_gated_action_schemas(
         return;
     }
     for tool in tools.iter_mut() {
-        if tool.name.as_ref() != "tachi_task" {
-            continue;
+        match tool.name.as_ref() {
+            "tachi_task" => {
+                let allowed: Vec<&str> = tachi_params::TachiTaskAction::primary_wire_strings()
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_task", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required task memory, policy, or ledger action. Ordinary local delegation uses the host harness's native subagent. Recommendations are advisory and do not authorize an execution backend. GitHub PR lifecycle is tachi_gh only.",
+                );
+                hide_operator_dispatch_properties(tool);
+                let action_summary = describe_allowed_task_actions(&allowed);
+                tool.description = Some(std::borrow::Cow::Owned(format!(
+                    "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
+                )));
+            }
+            "tachi_a2a" => {
+                let allowed: Vec<&str> = tachi_params::TACHI_A2A_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_a2a", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required same-host advisory-mailbox action allowed by the active profile.",
+                );
+                if !allowed.contains(&"respond") {
+                    hide_a2a_respond_properties(tool);
+                }
+            }
+            _ => {}
         }
-        let allowed: Vec<&str> = tachi_params::TachiTaskAction::primary_wire_strings()
-            .iter()
-            .copied()
-            .filter(|action| {
-                tachi_hub::facade_action_allowed("tachi_task", Some(action), Some(profile))
-            })
-            .collect();
-        narrow_action_enum_property(tool, &allowed);
-        hide_operator_dispatch_properties(tool);
-        let action_summary = describe_allowed_task_actions(&allowed);
-        tool.description = Some(std::borrow::Cow::Owned(format!(
-            "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
-        )));
     }
+}
+
+fn hide_a2a_respond_properties(tool: &mut rmcp::model::Tool) {
+    let mut schema = (*tool.input_schema).clone();
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        schema.clear();
+        schema.insert("not".to_string(), serde_json::json!({}));
+        tool.input_schema = std::sync::Arc::new(schema);
+        return;
+    };
+    for property in [
+        "recipient_agent_identity_id",
+        "subject_ref",
+        "text",
+        "idempotency_key",
+        "ttl_days",
+    ] {
+        properties.remove(property);
+    }
+    tool.input_schema = std::sync::Arc::new(schema);
 }
 
 /// Apply the production profile, action-schema, and annotation projection used
@@ -420,8 +465,19 @@ fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
 /// Intersect the existing `properties.action.enum` with `allowed`. An absent
 /// enum fails closed to an empty set rather than advertising an action that
 /// runtime policy rejects.
-fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
+fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str], description: &str) {
     let mut schema = (*tool.input_schema).clone();
+    let referenced_values = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|properties| properties.get("action"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|action| action.get("$ref"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .and_then(|name| schema.get("$defs")?.get(name))
+        .and_then(|definition| definition.get("enum"))
+        .cloned();
     let Some(action_prop) = schema
         .get_mut("properties")
         .and_then(|p| p.as_object_mut())
@@ -433,6 +489,16 @@ fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
         tool.input_schema = std::sync::Arc::new(schema);
         return;
     };
+    // schemars may emit a small enum directly or behind a local `$defs`
+    // reference. Inline the latter before filtering so the projected wire is
+    // self-contained and the same helper covers every gated facade.
+    if !action_prop.contains_key("enum") {
+        action_prop.remove("$ref");
+        if let Some(values) = referenced_values {
+            action_prop.insert("enum".to_string(), values);
+            action_prop.insert("type".to_string(), serde_json::json!("string"));
+        }
+    }
     let values = action_prop
         .entry("enum")
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
@@ -447,10 +513,7 @@ fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
     }
     action_prop.insert(
         "description".to_string(),
-        serde_json::Value::String(
-            "Required task memory, policy, or ledger action. Ordinary local delegation uses the host harness's native subagent. Recommendations are advisory and do not authorize an execution backend. GitHub PR lifecycle is tachi_gh only."
-                .to_string(),
-        ),
+        serde_json::Value::String(description.to_string()),
     );
     tool.input_schema = std::sync::Arc::new(schema);
 }
@@ -1183,7 +1246,8 @@ mod tests {
     /// router-sum listing has exactly one copy to keep in sync with
     /// `server_state/init.rs`.
     fn native_tools() -> Vec<rmcp::model::Tool> {
-        (MemoryServer::continuity_tool_router()
+        (MemoryServer::a2a_tool_router()
+            + MemoryServer::continuity_tool_router()
             + MemoryServer::component_tool_router()
             + MemoryServer::copilot_tool_router()
             + MemoryServer::dispatch_tool_router()
@@ -1216,6 +1280,72 @@ mod tests {
         let ann = tool.annotations.expect("annotations set");
         assert_eq!(ann.read_only_hint, Some(true));
         assert_eq!(ann.destructive_hint, Some(false));
+    }
+
+    /// Break caught: tools/list exposing a write action or its payload fields
+    /// to a profile whose call-time gate permits only status.
+    #[test]
+    fn projected_a2a_schema_matches_profile_action_gate() {
+        fn projected(profile: tachi_hub::ToolProfile) -> rmcp::model::Tool {
+            project_tool_definitions(native_tools(), Some(profile), None)
+                .into_iter()
+                .find(|tool| tool.name.as_ref() == "tachi_a2a")
+                .expect("profile-visible tachi_a2a")
+        }
+
+        let observe = projected(tachi_hub::ToolProfile::observe());
+        let observe_properties = observe.input_schema["properties"]
+            .as_object()
+            .expect("observe a2a properties");
+        assert_eq!(
+            observe_properties["action"]["enum"],
+            json!(["status"]),
+            "projection must advertise exactly the call-time-allowed action"
+        );
+        for respond_only in [
+            "recipient_agent_identity_id",
+            "subject_ref",
+            "text",
+            "idempotency_key",
+            "ttl_days",
+        ] {
+            assert!(
+                !observe_properties.contains_key(respond_only),
+                "observe schema leaked respond-only field {respond_only}"
+            );
+        }
+        assert!(observe_properties.contains_key("limit"));
+        assert!(tachi_hub::facade_action_allowed(
+            "tachi_a2a",
+            Some("status"),
+            Some(tachi_hub::ToolProfile::observe())
+        ));
+        assert!(!tachi_hub::facade_action_allowed(
+            "tachi_a2a",
+            Some("respond"),
+            Some(tachi_hub::ToolProfile::observe())
+        ));
+
+        let remember = projected(tachi_hub::ToolProfile::remember());
+        let remember_properties = remember.input_schema["properties"]
+            .as_object()
+            .expect("remember a2a properties");
+        assert_eq!(
+            remember_properties["action"]["enum"],
+            json!(["respond", "status"])
+        );
+        for respond_field in [
+            "recipient_agent_identity_id",
+            "subject_ref",
+            "text",
+            "idempotency_key",
+            "ttl_days",
+        ] {
+            assert!(
+                remember_properties.contains_key(respond_field),
+                "remember schema lost respond field {respond_field}"
+            );
+        }
     }
 
     #[test]

@@ -101,9 +101,6 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     "doctor_scan",
     "ingest",
     "ingest_source",
-    // #964: read-once agent-to-agent ephemeral notes.
-    "sticky_leave",
-    "sticky_check",
 ];
 
 /// `tachi_tune` admin/operator actions. Introduced by #1426 to move route
@@ -132,6 +129,9 @@ pub const TACHI_EVENT_ACTIONS: &[&str] = &[
     "a2a",
     "label_eval",
 ];
+
+/// Closed local advisory-mailbox actions (#1751).
+pub const TACHI_A2A_ACTIONS: &[&str] = &["respond", "status"];
 
 /// `tachi_wiki` facade actions. Single source for `facade::tachi_wiki_action_schema`
 /// and #1098's `action_effect` completeness test.
@@ -235,14 +235,15 @@ mod tests {
     #[test]
     fn f0_memory_and_verify_counts() {
         // #1426 moved four recall-tuning actions to tachi_tune, and #1688
-        // removed the duplicate claim/release compatibility routes: 25 -> 19.
-        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 19);
+        // removed duplicate claim/release compatibility routes. #1751 then
+        // retires the two legacy sticky actions: 19 -> 17.
+        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 17);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
         assert_eq!(TachiVerifyAction::ALL.len(), 4);
     }
 
     #[test]
-    fn f1688_c2a1_memory_inventory_is_exactly_the_nineteen_survivors() {
+    fn f1751_memory_inventory_is_exactly_the_seventeen_survivors() {
         assert_eq!(
             TACHI_MEMORY_ACTIONS,
             &[
@@ -263,10 +264,8 @@ mod tests {
                 "doctor_scan",
                 "ingest",
                 "ingest_source",
-                "sticky_leave",
-                "sticky_check",
             ],
-            "#1688 C2a-1 must pin the literal 19-action Memory inventory",
+            "#1751 must pin the literal 17-action Memory inventory after sticky retirement",
         );
     }
 

@@ -563,7 +563,7 @@ Source/event ingestion is folded into `tachi_memory(action="ingest")` and
 
 ### Handoff
 
-`tachi_handoff(action='promote_issue')` — the only surviving handoff action (#1099 retired `handoff_leave`/`handoff_check`; use `tachi_memory(action='sticky_leave'|'sticky_check')` or `tachi_orchestrator(action='handoff_write'|'handoff_read')` instead).
+`tachi_handoff(action='promote_issue')` — the only surviving handoff action (#1099 retired `handoff_leave`/`handoff_check`; use `tachi_a2a(action='respond')` or `tachi_orchestrator(action='handoff_write'|'handoff_read')` instead).
 
 ### Kanban (Inter-Agent)
 

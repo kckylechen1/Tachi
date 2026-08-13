@@ -572,14 +572,12 @@ fn gc_common_store(store: &mut MemoryStore, db_label: &str) -> Result<serde_json
         .gc_tables(&GcConfig::default())
         .map_err(|error| format!("GC failed on {db_label} DB: {error}"))?;
     let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
-    let sticky_expired = crate::sticky_ops::gc_expired_sticky_memories(store)?;
     // Branch #5: GC foundry jobs in terminal state >= 30 days old
     // (was 7d, see project owner's lifecycle spec).
     let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
     if let Some(object) = gc.as_object_mut() {
         object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
         object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
-        object.insert("sticky_memories_expired".into(), json!(sticky_expired));
     }
     // #1099: `handoff_memories_pruned` (ex-`gc_expired_handoff_memories`)
     // retired along with handoff_ops's write path — see handoff_ops.rs's

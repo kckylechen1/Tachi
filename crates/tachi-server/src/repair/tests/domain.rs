@@ -56,3 +56,29 @@ fn r9_domain_backfill_repairs_missing_and_path_like_values() {
         ]
     );
 }
+
+#[test]
+fn r9_skips_retired_sticky_domains_while_ordinary_rows_progress() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "retired-sticky-domain.db");
+    for (id, memory_path) in [
+        ("ordinary", "/notes/ordinary"),
+        ("sticky-canonical", "/sticky/legacy"),
+        ("sticky-malformed", "//STICKY///legacy"),
+    ] {
+        insert_memory(&conn, id, memory_path, id, "{}", None, None);
+    }
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let applied = DomainRepair.apply(&mut ctx).unwrap();
+    assert_eq!(applied.applied, 1);
+    let domains = ["ordinary", "sticky-canonical", "sticky-malformed"].map(|id| {
+        ctx.conn
+            .query_row("SELECT domain FROM memories WHERE id=?1", [id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .unwrap()
+    });
+    assert_eq!(domains, [Some("notes".to_string()), None, None]);
+}

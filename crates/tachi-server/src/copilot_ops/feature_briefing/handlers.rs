@@ -9,6 +9,63 @@ use super::docs::{
 use super::markdown::format_feature_briefing_markdown;
 use super::stage::{feature_next_action, infer_feature_stage};
 
+const A2A_BRIEFING_RESPONSE_LIMIT: usize = 20;
+
+fn current_briefing_actor(server: &MemoryServer) -> Option<memcore::A2aTransitionActor> {
+    server
+        .work_claim_connection()
+        .and_then(|(identity, connection_id, admission)| {
+            (admission == "self_asserted").then_some((identity, connection_id))
+        })
+        .and_then(|(identity, connection_id)| {
+            Some(memcore::A2aTransitionActor {
+                agent_identity_id: identity?,
+                connection_id: (!connection_id.trim().is_empty()).then_some(connection_id)?,
+            })
+        })
+}
+
+fn consume_a2a_responses_for_briefing(server: &MemoryServer) -> Result<Vec<Value>, String> {
+    let Some(actor) = current_briefing_actor(server) else {
+        return Ok(Vec::new());
+    };
+    let envelopes = server.with_global_store(|store| {
+        memcore::consume_a2a_for_recipient(
+            store.connection_mut(),
+            &actor,
+            A2A_BRIEFING_RESPONSE_LIMIT,
+            &Utc::now().to_rfc3339(),
+        )
+        .map_err(|error| error.to_string())
+    })?;
+    envelopes
+        .into_iter()
+        .map(|envelope| {
+            let body = envelope.body.ok_or_else(|| {
+                format!(
+                    "A2A invariant violation: pending envelope '{}' has no body",
+                    envelope.envelope_id
+                )
+            })?;
+            Ok(json!({
+                "envelope_id": envelope.envelope_id,
+                "kind": envelope.kind,
+                "issuer_agent_identity_id": envelope.issuer_agent_identity_id,
+                "recipient_agent_identity_id": envelope.recipient_agent_identity_id,
+                "subject_ref": envelope.subject_ref,
+                "body": crate::memory_search_ops::scrub_generated_memory_text(&body),
+                "body_digest": envelope.body_digest,
+                "identity_assurance": {
+                    "issuer": envelope.issuer_identity_assurance,
+                    "recipient": envelope.recipient_identity_assurance,
+                },
+                "created_at": envelope.created_at,
+                "expires_at": envelope.expires_at,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()
+}
+
 fn doc_index_item_ids(doc_index: &Value) -> std::collections::HashSet<String> {
     doc_index
         .get("groups")
@@ -196,6 +253,10 @@ pub(crate) async fn handle_tachi_feature_briefing(
     } else {
         crate::clamp_facade_top_k(params.top_k.unwrap_or(6))
     };
+    // Briefing is the only v1 delivery boundary. Selection and the
+    // received→accepted→consumed receipts happen in one Memcore transaction;
+    // JSON and Markdown below render this same immutable vector.
+    let a2a_responses = consume_a2a_responses_for_briefing(server)?;
     let query = feature_briefing_query(params);
     let wiki_plan = WikiReadPlan::from_project(params.project.as_deref())?;
     let project_work_record = project_work_records(params);
@@ -373,6 +434,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let mut response = json!({
         "status": "ok",
         "kind": kind,
+        "a2a_responses": a2a_responses,
         "objective": params.task.clone().unwrap_or_else(|| query.clone()),
         "scope": {
             "project": params.project,
@@ -430,5 +492,243 @@ pub(crate) async fn handle_tachi_feature_briefing(
         serde_json::to_string(&response).map_err(|e| format!("serialize feature briefing: {e}"))
     } else {
         Ok(format_feature_briefing_markdown(&response))
+    }
+}
+
+#[cfg(test)]
+mod a2a_response_tests {
+    use super::*;
+    use memcore::NewA2aEnvelope;
+
+    fn briefing_params(format: &str) -> TachiTaskParams {
+        serde_json::from_value(json!({
+            "action": "brief",
+            "task": "continue the reviewed slice",
+            "format": format,
+            "include_global": true,
+        }))
+        .expect("briefing params")
+    }
+
+    fn seed_response(
+        server: &MemoryServer,
+        envelope_id: &str,
+        body: &str,
+        created_at: &str,
+        expires_at: &str,
+    ) {
+        crate::claims_ops::admit_agent_connection(
+            server,
+            Some("agent.recipient".to_string()),
+            true,
+        )
+        .expect("historical recipient admission");
+        crate::claims_ops::admit_agent_connection(server, Some("agent.issuer".to_string()), true)
+            .expect("current issuer admission");
+        let (_, issuer_connection_id, _) =
+            server.work_claim_connection().expect("issuer connection");
+        server
+            .with_global_store(|store| {
+                memcore::insert_a2a_envelope(
+                    store.connection_mut(),
+                    &NewA2aEnvelope {
+                        envelope_id: envelope_id.to_string(),
+                        issuer_agent_identity_id: "agent.issuer".to_string(),
+                        issuer_connection_id,
+                        recipient_agent_identity_id: "agent.recipient".to_string(),
+                        subject_ref: "peer_publication:publication-parity".to_string(),
+                        body: body.to_string(),
+                        idempotency_key: envelope_id.to_string(),
+                        created_at: created_at.to_string(),
+                        expires_at: expires_at.to_string(),
+                    },
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })
+            .expect("seed A2A response");
+        crate::claims_ops::admit_agent_connection(
+            server,
+            Some("agent.recipient".to_string()),
+            true,
+        )
+        .expect("current recipient admission");
+    }
+
+    /// Break caught: selecting responses separately per renderer, rendering
+    /// them below Memory/Wiki, or returning different envelope ids/body.
+    #[tokio::test]
+    async fn json_and_markdown_render_the_same_consumed_response_first() {
+        let json_server = crate::tests::make_server();
+        let markdown_server = crate::tests::make_server();
+        for server in [&*json_server, &*markdown_server] {
+            seed_response(
+                server,
+                "envelope-parity",
+                "review complete <think>private chain</think>; continue with slice four",
+                "2026-08-12T00:00:00Z",
+                "2099-08-19T00:00:00Z",
+            );
+        }
+
+        let json_body = handle_tachi_feature_briefing(&json_server, &briefing_params("json"))
+            .await
+            .expect("JSON briefing");
+        let json_value: Value = serde_json::from_str(&json_body).expect("JSON response");
+        let selected = json_value["a2a_responses"]
+            .as_array()
+            .expect("A2A response array");
+        assert_eq!(selected.len(), 1, "{json_value}");
+        assert_eq!(selected[0]["envelope_id"], "envelope-parity");
+        assert_eq!(
+            selected[0]["body"],
+            "review complete ; continue with slice four"
+        );
+
+        let markdown =
+            handle_tachi_feature_briefing(&markdown_server, &briefing_params("markdown"))
+                .await
+                .expect("Markdown briefing");
+        assert!(markdown.contains("envelope-parity"), "{markdown}");
+        assert!(
+            markdown.contains("review complete ; continue with slice four"),
+            "{markdown}"
+        );
+        assert!(!json_body.contains("private chain"), "{json_body}");
+        assert!(!markdown.contains("private chain"), "{markdown}");
+        let a2a_at = markdown.find("## A2A Responses").expect("A2A section");
+        let objective_at = markdown.find("## Objective").expect("objective section");
+        let memory_at = markdown
+            .find("## Memory Fragments / Checkpoints")
+            .expect("memory section");
+        assert!(a2a_at < objective_at && a2a_at < memory_at, "{markdown}");
+
+        let status = json_server
+            .with_global_store_read(|store| {
+                memcore::list_a2a_status(store.connection(), "agent.recipient", 10)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("status after briefing");
+        assert_eq!(status[0].current_state, "consumed");
+        assert_eq!(
+            status[0]
+                .receipts
+                .iter()
+                .map(|receipt| receipt.state.as_str())
+                .collect::<Vec<_>>(),
+            ["received", "accepted", "consumed"]
+        );
+
+        let second = handle_tachi_feature_briefing(&json_server, &briefing_params("json"))
+            .await
+            .expect("second JSON briefing");
+        let second: Value = serde_json::from_str(&second).unwrap();
+        assert!(second["a2a_responses"].as_array().unwrap().is_empty());
+    }
+
+    /// Break caught: an expired body leaking into briefing or expiry being
+    /// appended repeatedly on later briefing reads.
+    #[tokio::test]
+    async fn expired_response_is_terminal_and_never_projected() {
+        let server = crate::tests::make_server();
+        seed_response(
+            &server,
+            "envelope-expired",
+            "must never render",
+            "2026-08-01T00:00:00Z",
+            "2026-08-02T00:00:00Z",
+        );
+        for _ in 0..2 {
+            let body = handle_tachi_feature_briefing(&server, &briefing_params("json"))
+                .await
+                .expect("briefing");
+            let value: Value = serde_json::from_str(&body).unwrap();
+            assert!(value["a2a_responses"].as_array().unwrap().is_empty());
+            assert!(!body.contains("must never render"), "{body}");
+        }
+        let status = server
+            .with_global_store_read(|store| {
+                memcore::list_a2a_status(store.connection(), "agent.recipient", 10)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("status");
+        assert_eq!(status[0].current_state, "expired");
+        assert_eq!(
+            status[0]
+                .receipts
+                .iter()
+                .filter(|receipt| receipt.state == "expired")
+                .count(),
+            1
+        );
+    }
+
+    /// Break caught: using a seat/agent_id fallback when the current
+    /// connection is remote/unavailable, thereby exposing or consuming a
+    /// different identity's pending response.
+    #[tokio::test]
+    async fn unavailable_current_identity_neither_reads_nor_consumes() {
+        let server = crate::tests::make_server();
+        seed_response(
+            &server,
+            "envelope-unavailable",
+            "recipient-only body",
+            "2026-08-12T00:00:00Z",
+            "2099-08-19T00:00:00Z",
+        );
+        crate::claims_ops::admit_agent_connection(&server, Some("agent.remote".to_string()), false)
+            .expect("record unavailable current identity");
+        let body = handle_tachi_feature_briefing(&server, &briefing_params("json"))
+            .await
+            .expect("briefing remains available without mailbox authority");
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert!(value["a2a_responses"].as_array().unwrap().is_empty());
+        assert!(!body.contains("recipient-only body"), "{body}");
+        let status = server
+            .with_global_store_read(|store| {
+                memcore::list_a2a_status(store.connection(), "agent.recipient", 10)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("recipient status");
+        assert_eq!(status[0].current_state, "received");
+        assert_eq!(status[0].receipts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_envelope_without_body_fails_briefing_without_consuming_it() {
+        let server = crate::tests::make_server();
+        seed_response(
+            &server,
+            "envelope-missing-pending-body",
+            "must remain pending",
+            "2026-08-12T00:00:00Z",
+            "2099-08-19T00:00:00Z",
+        );
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE a2a_envelopes SET body=NULL
+                         WHERE envelope_id='envelope-missing-pending-body'",
+                        [],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+            .expect("inject impossible pending-body state");
+
+        let error = handle_tachi_feature_briefing(&server, &briefing_params("json"))
+            .await
+            .expect_err("missing pending body is a loud invariant violation");
+        assert!(error.contains("pending envelope"), "{error}");
+        let status = server
+            .with_global_store_read(|store| {
+                memcore::list_a2a_status(store.connection(), "agent.recipient", 10)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(status[0].current_state, "received");
+        assert_eq!(status[0].receipts.len(), 1);
     }
 }

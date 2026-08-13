@@ -344,7 +344,7 @@ pub struct TachiDomainAdapterParams {
 pub struct TachiHandoffParams {
     /// Action: only "promote_issue" (create/link a GitHub issue from an
     /// existing handoff memo) is supported. "leave"/"check" were retired in
-    /// #1099 — use tachi_memory(action='sticky_leave'|'sticky_check') or
+    /// #1099 retired the old handoff memo routes; use
     /// tachi_orchestrator(action='handoff_write'|'handoff_read') instead.
     pub action: String,
 
@@ -539,6 +539,9 @@ pub struct TachiSkillParams {
 mod task;
 pub use task::{TachiDispatchReason, TachiTaskParams};
 
+mod a2a;
+pub use a2a::{TachiA2aAction, TachiA2aParams};
+
 mod tune;
 pub use tune::{TachiTuneAction, TachiTuneParams};
 
@@ -546,9 +549,9 @@ mod action_enums;
 mod action_inventory;
 pub use action_enums::{TachiTaskAction, TachiVerifyAction};
 pub use action_inventory::{
-    TACHI_EVENT_ACTIONS, TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX, TACHI_MEMORY_ACTIONS,
-    TACHI_MEMORY_ACTION_SOFT_MAX, TACHI_ORCHESTRATOR_ACTIONS, TACHI_SKILL_ACTIONS,
-    TACHI_STAFF_ACTIONS, TACHI_TASK_PRIMARY_ACTION_SOFT_MAX,
+    TACHI_A2A_ACTIONS, TACHI_EVENT_ACTIONS, TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX,
+    TACHI_MEMORY_ACTIONS, TACHI_MEMORY_ACTION_SOFT_MAX, TACHI_ORCHESTRATOR_ACTIONS,
+    TACHI_SKILL_ACTIONS, TACHI_STAFF_ACTIONS, TACHI_TASK_PRIMARY_ACTION_SOFT_MAX,
     TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_TASK_RETIRED_ACTIONS,
     TACHI_TASK_RETIRED_C1A_ACTIONS, TACHI_TASK_RETIRED_C1C_ACTIONS, TACHI_TUNE_ACTIONS,
     TACHI_WIKI_ACTIONS,
@@ -571,5 +574,37 @@ mod tests {
         assert_eq!(clamp_facade_top_k(0), 1);
         assert_eq!(clamp_facade_top_k(6), 6);
         assert_eq!(clamp_facade_top_k(10_000), MAX_FACADE_TOP_K);
+    }
+
+    /// Break caught: widening the public mailbox beyond the two frozen
+    /// actions, or silently accepting caller-controlled issuer/kind fields.
+    #[test]
+    fn a2a_wire_is_closed_to_respond_and_status() {
+        let respond: TachiA2aParams = serde_json::from_value(serde_json::json!({
+            "action": "respond",
+            "recipient_agent_identity_id": "agent.peer",
+            "subject_ref": "peer_publication:publication-1",
+            "text": "review complete",
+            "idempotency_key": "reply-1"
+        }))
+        .expect("frozen respond wire");
+        assert_eq!(respond.action, TachiA2aAction::Respond);
+
+        let status: TachiA2aParams =
+            serde_json::from_value(serde_json::json!({"action": "status"}))
+                .expect("frozen status wire");
+        assert_eq!(status.action, TachiA2aAction::Status);
+
+        for invalid in [
+            serde_json::json!({"action": "send"}),
+            serde_json::json!({"action": "respond", "kind": "freeform/v1"}),
+            serde_json::json!({"action": "respond", "from": "forged-agent"}),
+            serde_json::json!({"action": "respond", "session_client": "seat-a"}),
+        ] {
+            assert!(
+                serde_json::from_value::<TachiA2aParams>(invalid).is_err(),
+                "unknown action/authority fields must fail at deserialization"
+            );
+        }
     }
 }
