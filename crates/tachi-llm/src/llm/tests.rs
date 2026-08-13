@@ -61,6 +61,7 @@ mod deployment_health;
 mod embedding_config;
 mod embedding_rerank;
 mod extract_quality_golden;
+mod ingress_gate;
 mod provider_key_persistence;
 mod provider_pool;
 mod recall_pool_hygiene;

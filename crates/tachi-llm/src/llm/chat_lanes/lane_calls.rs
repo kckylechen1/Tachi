@@ -286,6 +286,19 @@ impl super::super::LlmClient {
         let primary_cfg = self.lane(lane).clone();
         let primary_breaker_key = format!("chat:{}", lane.as_str());
 
+        // #1681 PR-D debt (a): this is the seam that accepts an arbitrary
+        // model string, and after #1685's cutover a string arriving here must
+        // have come from a resolution. Nothing here can resolve one yet, so
+        // the gate counts and warns and changes nothing — see
+        // `llm::ingress_gate` for why measuring is the correct move at this
+        // point in the migration and refusing is not.
+        self.ingress_gate.observe(
+            lane.as_str(),
+            model_override,
+            &primary_cfg.model,
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        );
+
         let mut tiers: Vec<(ChatLaneConfig, String)> =
             vec![(primary_cfg.clone(), primary_breaker_key)];
         if let Some(fallback_cfg) = self.fallback_lane(lane) {
