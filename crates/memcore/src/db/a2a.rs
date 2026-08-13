@@ -1,9 +1,11 @@
 //! Product-only local A2A mailbox persistence (#1751).
 //!
 //! This module owns database identity, idempotency and transition atomicity.
-//! It does not infer a live peer, scrub content, or grant authority: those are
-//! server admission/rendering responsibilities. A historical eligible
-//! admission is deliberately sufficient for offline advisory delivery.
+//! It does not scrub content or grant authority: those remain server
+//! admission/rendering responsibilities. Offline delivery uses the envelope's
+//! historical recipient admission; recipient-triggered transitions must carry
+//! an exact runtime identity/connection pair, which storage resolves to the
+//! current local admission inside the same transaction.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -25,6 +27,17 @@ pub struct A2aRecipientEligibility {
     pub identity_assurance: String,
     pub trust_domain: String,
     pub trust_basis: String,
+}
+
+/// Runtime identity and connection presented by a recipient transition.
+///
+/// The admission id is deliberately not caller-supplied: storage resolves it
+/// from this exact pair inside the Product transaction immediately before
+/// selecting or updating envelopes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct A2aTransitionActor {
+    pub agent_identity_id: String,
+    pub connection_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -180,7 +193,7 @@ pub fn resolve_a2a_recipient_eligibility(
     .map_err(Into::into)
 }
 
-fn resolve_current_issuer_admission(
+fn resolve_current_local_admission(
     conn: &Connection,
     agent_identity_id: &str,
     connection_id: &str,
@@ -345,7 +358,7 @@ pub(crate) fn insert_a2a_envelope_in_tx(
         ));
     }
     let body_digest = format!("{:x}", Sha256::digest(request.body.as_bytes()));
-    let issuer = resolve_current_issuer_admission(
+    let issuer = resolve_current_local_admission(
         tx,
         &request.issuer_agent_identity_id,
         &request.issuer_connection_id,
@@ -498,6 +511,7 @@ pub fn list_a2a_status(
 fn append_transition_receipt(
     tx: &Transaction<'_>,
     envelope: &A2aEnvelope,
+    actor: &A2aRecipientEligibility,
     version: i64,
     state: &str,
     occurred_at: &str,
@@ -512,11 +526,11 @@ fn append_transition_receipt(
             envelope.envelope_id,
             version,
             state,
-            envelope.recipient_agent_identity_id,
-            envelope.recipient_admission_id,
-            envelope.recipient_identity_assurance,
-            envelope.recipient_trust_domain,
-            envelope.recipient_trust_basis,
+            actor.agent_identity_id,
+            actor.admission_id,
+            actor.identity_assurance,
+            actor.trust_domain,
+            actor.trust_basis,
             occurred_at,
         ],
     )?;
@@ -525,7 +539,7 @@ fn append_transition_receipt(
 
 fn expire_a2a_for_recipient_in_tx(
     tx: &Transaction<'_>,
-    recipient_agent_identity_id: &str,
+    actor: &A2aRecipientEligibility,
     limit: i64,
     now: &str,
 ) -> Result<usize, MemoryError> {
@@ -536,7 +550,7 @@ fn expire_a2a_for_recipient_in_tx(
     ))?;
     let envelopes = stmt
         .query_map(
-            params![recipient_agent_identity_id, now, limit],
+            params![actor.agent_identity_id, now, limit],
             row_to_envelope,
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -559,43 +573,61 @@ fn expire_a2a_for_recipient_in_tx(
                 envelope.envelope_id
             )));
         }
-        append_transition_receipt(tx, envelope, next_version, "expired", now)?;
+        append_transition_receipt(tx, envelope, actor, next_version, "expired", now)?;
     }
     Ok(envelopes.len())
 }
 
 pub fn expire_a2a_for_recipient(
     conn: &mut Connection,
-    recipient_agent_identity_id: &str,
+    actor: &A2aTransitionActor,
     limit: usize,
     now: &str,
 ) -> Result<usize, MemoryError> {
     refuse_blank(
         "expiry recipient agent identity id",
-        recipient_agent_identity_id,
+        &actor.agent_identity_id,
     )?;
+    refuse_blank("expiry recipient connection id", &actor.connection_id)?;
     let limit = validate_limit(limit)?;
     let now = normalize_utc_iso(now)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let expired = expire_a2a_for_recipient_in_tx(&tx, recipient_agent_identity_id, limit, &now)?;
+    let recipient =
+        resolve_current_local_admission(&tx, &actor.agent_identity_id, &actor.connection_id)?
+            .ok_or_else(|| {
+                MemoryError::InvalidArg(
+                    "a2a transition actor is not bound to the exact current local connection"
+                        .to_string(),
+                )
+            })?;
+    let expired = expire_a2a_for_recipient_in_tx(&tx, &recipient, limit, &now)?;
     tx.commit()?;
     Ok(expired)
 }
 
 pub fn consume_a2a_for_recipient(
     conn: &mut Connection,
-    recipient_agent_identity_id: &str,
+    actor: &A2aTransitionActor,
     limit: usize,
     now: &str,
 ) -> Result<Vec<A2aEnvelope>, MemoryError> {
     refuse_blank(
         "consume recipient agent identity id",
-        recipient_agent_identity_id,
+        &actor.agent_identity_id,
     )?;
+    refuse_blank("consume recipient connection id", &actor.connection_id)?;
     let limit = validate_limit(limit)?;
     let now = normalize_utc_iso(now)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    expire_a2a_for_recipient_in_tx(&tx, recipient_agent_identity_id, limit, &now)?;
+    let recipient =
+        resolve_current_local_admission(&tx, &actor.agent_identity_id, &actor.connection_id)?
+            .ok_or_else(|| {
+                MemoryError::InvalidArg(
+                    "a2a transition actor is not bound to the exact current local connection"
+                        .to_string(),
+                )
+            })?;
+    expire_a2a_for_recipient_in_tx(&tx, &recipient, limit, &now)?;
 
     let mut stmt = tx.prepare(&format!(
         "SELECT {ENVELOPE_COLUMNS} FROM a2a_envelopes
@@ -604,7 +636,7 @@ pub fn consume_a2a_for_recipient(
     ))?;
     let envelopes = stmt
         .query_map(
-            params![recipient_agent_identity_id, now, limit],
+            params![recipient.agent_identity_id, now, limit],
             row_to_envelope,
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -619,7 +651,7 @@ pub fn consume_a2a_for_recipient(
             params![
                 accepted_version,
                 envelope.envelope_id,
-                recipient_agent_identity_id,
+                recipient.agent_identity_id,
                 envelope.state_version,
             ],
         )?;
@@ -629,7 +661,14 @@ pub fn consume_a2a_for_recipient(
                 envelope.envelope_id
             )));
         }
-        append_transition_receipt(&tx, &envelope, accepted_version, "accepted", &now)?;
+        append_transition_receipt(
+            &tx,
+            &envelope,
+            &recipient,
+            accepted_version,
+            "accepted",
+            &now,
+        )?;
         #[cfg(test)]
         test_hooks::fail_after_accepted_receipt()?;
         let consumed_version = accepted_version + 1;
@@ -640,7 +679,7 @@ pub fn consume_a2a_for_recipient(
             params![
                 consumed_version,
                 envelope.envelope_id,
-                recipient_agent_identity_id,
+                recipient.agent_identity_id,
                 accepted_version,
             ],
         )?;
@@ -650,7 +689,14 @@ pub fn consume_a2a_for_recipient(
                 envelope.envelope_id
             )));
         }
-        append_transition_receipt(&tx, &envelope, consumed_version, "consumed", &now)?;
+        append_transition_receipt(
+            &tx,
+            &envelope,
+            &recipient,
+            consumed_version,
+            "consumed",
+            &now,
+        )?;
         consumed.push(read_envelope_by_id(&tx, &envelope.envelope_id)?);
     }
     tx.commit()?;
@@ -699,7 +745,8 @@ pub(crate) mod test_hooks {
 mod tests {
     use super::*;
     use crate::db::session_claims::{
-        insert_agent_identity, record_unverified_admission, AgentIdentity, UnverifiedAdmissionState,
+        insert_agent_identity, record_rejected_admission, record_unverified_admission,
+        AgentIdentity, UnverifiedAdmissionState,
     };
     use crate::{DbOpenContext, MemoryStore, StoreProfile};
 
@@ -745,6 +792,13 @@ mod tests {
             idempotency_key: key.to_string(),
             created_at: "2026-08-12T00:00:00Z".to_string(),
             expires_at: "2026-08-19T00:00:00Z".to_string(),
+        }
+    }
+
+    fn transition_actor(agent_identity_id: &str, admission_id: &str) -> A2aTransitionActor {
+        A2aTransitionActor {
+            agent_identity_id: agent_identity_id.to_string(),
+            connection_id: format!("connection-{admission_id}"),
         }
     }
 
@@ -862,7 +916,7 @@ mod tests {
 
         let first = consume_a2a_for_recipient(
             store.connection_mut(),
-            "recipient",
+            &transition_actor("recipient", "admission-recipient"),
             1,
             "2026-08-13T00:00:00Z",
         )
@@ -871,7 +925,7 @@ mod tests {
         assert_eq!(first[0].body, "scrubbed response");
         assert!(consume_a2a_for_recipient(
             store.connection_mut(),
-            "recipient",
+            &transition_actor("recipient", "admission-recipient"),
             1,
             "2026-08-13T00:00:00Z",
         )
@@ -887,6 +941,142 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(states, ["received", "accepted", "consumed"]);
+    }
+
+    #[test]
+    fn transitions_record_the_current_recipient_admission_not_delivery_admission() {
+        let mut store = store();
+        identity(
+            &store,
+            "issuer",
+            "admission-issuer",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        identity(
+            &store,
+            "recipient",
+            "admission-recipient-a",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        let live = envelope("current-actor-live", "current-actor-live", "recipient");
+        insert_a2a_envelope(store.connection_mut(), &live).expect("insert live envelope");
+        let mut expired = envelope(
+            "current-actor-expired",
+            "current-actor-expired",
+            "recipient",
+        );
+        expired.created_at = "2026-08-01T00:00:00Z".to_string();
+        expired.expires_at = "2026-08-12T00:00:00Z".to_string();
+        insert_a2a_envelope(store.connection_mut(), &expired).expect("insert expired envelope");
+        record_unverified_admission(
+            store.connection(),
+            "admission-recipient-b",
+            "recipient",
+            "connection-admission-recipient-b",
+            UnverifiedAdmissionState::SelfAsserted,
+        )
+        .expect("current recipient admission");
+
+        consume_a2a_for_recipient(
+            store.connection_mut(),
+            &transition_actor("recipient", "admission-recipient-b"),
+            10,
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("consume live response");
+
+        let status = list_a2a_status(store.connection(), "recipient", 10).expect("status");
+        let mut receipts = status
+            .into_iter()
+            .flat_map(|row| row.receipts)
+            .filter(|receipt| receipt.state != "received")
+            .collect::<Vec<_>>();
+        receipts.sort_by_key(|receipt| receipt.state.clone());
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| (receipt.state.as_str(), receipt.actor_admission_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("accepted", "admission-recipient-b"),
+                ("consumed", "admission-recipient-b"),
+                ("expired", "admission-recipient-b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_transition_actors_leave_envelope_and_receipts_unchanged() {
+        let mut store = store();
+        identity(
+            &store,
+            "issuer",
+            "admission-issuer",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        identity(
+            &store,
+            "recipient",
+            "admission-recipient-a",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        record_unverified_admission(
+            store.connection(),
+            "admission-recipient-unavailable",
+            "recipient",
+            "connection-recipient-unavailable",
+            UnverifiedAdmissionState::Unavailable,
+        )
+        .expect("unavailable admission");
+        record_rejected_admission(
+            store.connection(),
+            "admission-recipient-rejected",
+            "connection-recipient-rejected",
+            "test rejection",
+        )
+        .expect("rejected admission");
+        let request = envelope("invalid-actor", "invalid-actor", "recipient");
+        insert_a2a_envelope(store.connection_mut(), &request).expect("insert response");
+
+        let invalid_actors = [
+            A2aTransitionActor {
+                agent_identity_id: "recipient".to_string(),
+                connection_id: "forged-connection".to_string(),
+            },
+            A2aTransitionActor {
+                agent_identity_id: "wrong-identity".to_string(),
+                connection_id: "connection-admission-recipient-a".to_string(),
+            },
+            A2aTransitionActor {
+                agent_identity_id: "recipient".to_string(),
+                connection_id: "connection-recipient-unavailable".to_string(),
+            },
+            A2aTransitionActor {
+                agent_identity_id: "recipient".to_string(),
+                connection_id: "connection-recipient-rejected".to_string(),
+            },
+        ];
+        for actor in &invalid_actors {
+            assert!(consume_a2a_for_recipient(
+                store.connection_mut(),
+                actor,
+                1,
+                "2026-08-13T00:00:00Z",
+            )
+            .is_err());
+            assert!(expire_a2a_for_recipient(
+                store.connection_mut(),
+                actor,
+                1,
+                "2026-08-13T00:00:00Z",
+            )
+            .is_err());
+        }
+
+        let status = list_a2a_status(store.connection(), "recipient", 10).expect("status");
+        assert_eq!(status[0].current_state, "received");
+        assert_eq!(status[0].state_version, 1);
+        assert_eq!(status[0].receipts.len(), 1);
     }
 
     /// Structural discriminator for the storage slice integrated immediately
@@ -907,6 +1097,14 @@ mod tests {
                     UnverifiedAdmissionState::SelfAsserted,
                 );
             }
+            record_unverified_admission(
+                seed.connection(),
+                "admission-recipient-b",
+                "recipient",
+                "connection-admission-recipient-b",
+                UnverifiedAdmissionState::SelfAsserted,
+            )
+            .expect("current recipient admission");
             insert_a2a_envelope(
                 seed.connection_mut(),
                 &envelope("envelope-race", "key-race", "recipient"),
@@ -926,7 +1124,7 @@ mod tests {
                     barrier.wait();
                     consume_a2a_for_recipient(
                         store.connection_mut(),
-                        "recipient",
+                        &transition_actor("recipient", "admission-recipient-b"),
                         1,
                         "2026-08-13T00:00:00Z",
                     )
@@ -952,6 +1150,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["received", "accepted", "consumed"]
         );
+        assert!(status[0]
+            .receipts
+            .iter()
+            .filter(|receipt| receipt.state != "received")
+            .all(|receipt| receipt.actor_admission_id == "admission-recipient-b"));
     }
 
     #[test]
@@ -971,7 +1174,7 @@ mod tests {
         assert_eq!(
             expire_a2a_for_recipient(
                 store.connection_mut(),
-                "recipient",
+                &transition_actor("recipient", "admission-recipient"),
                 10,
                 "2026-08-13T00:00:00Z"
             )
@@ -981,7 +1184,7 @@ mod tests {
         assert_eq!(
             expire_a2a_for_recipient(
                 store.connection_mut(),
-                "recipient",
+                &transition_actor("recipient", "admission-recipient"),
                 10,
                 "2026-08-13T00:00:00Z"
             )
@@ -1007,7 +1210,7 @@ mod tests {
         test_hooks::arm_fail_after_accepted_receipt();
         assert!(consume_a2a_for_recipient(
             store.connection_mut(),
-            "recipient",
+            &transition_actor("recipient", "admission-recipient"),
             1,
             "2026-08-13T00:00:00Z",
         )

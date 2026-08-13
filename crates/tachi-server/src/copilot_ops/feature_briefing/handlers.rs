@@ -11,22 +11,28 @@ use super::stage::{feature_next_action, infer_feature_stage};
 
 const A2A_BRIEFING_RESPONSE_LIMIT: usize = 20;
 
-fn current_briefing_recipient(server: &MemoryServer) -> Option<String> {
+fn current_briefing_actor(server: &MemoryServer) -> Option<memcore::A2aTransitionActor> {
     server
         .work_claim_connection()
-        .and_then(|(identity, _, admission)| (admission == "self_asserted").then_some(identity))
-        .flatten()
-        .filter(|identity| !identity.trim().is_empty())
+        .and_then(|(identity, connection_id, admission)| {
+            (admission == "self_asserted").then_some((identity, connection_id))
+        })
+        .and_then(|(identity, connection_id)| {
+            Some(memcore::A2aTransitionActor {
+                agent_identity_id: identity?,
+                connection_id: (!connection_id.trim().is_empty()).then_some(connection_id)?,
+            })
+        })
 }
 
 fn consume_a2a_responses_for_briefing(server: &MemoryServer) -> Result<Vec<Value>, String> {
-    let Some(recipient_agent_identity_id) = current_briefing_recipient(server) else {
+    let Some(actor) = current_briefing_actor(server) else {
         return Ok(Vec::new());
     };
     let envelopes = server.with_global_store(|store| {
         memcore::consume_a2a_for_recipient(
             store.connection_mut(),
-            &recipient_agent_identity_id,
+            &actor,
             A2A_BRIEFING_RESPONSE_LIMIT,
             &Utc::now().to_rfc3339(),
         )
