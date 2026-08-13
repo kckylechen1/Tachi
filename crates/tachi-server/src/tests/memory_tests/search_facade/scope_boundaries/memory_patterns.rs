@@ -722,6 +722,88 @@ async fn tachi_complete_with_foreign_dispatch_skips_pattern_evidence() {
 }
 
 #[tokio::test]
+async fn tachi_complete_with_foreign_issue_flow_skips_pattern_evidence() {
+    let server = make_server();
+    let flow_id = "flow_pattern_complete_foreign_issue_001";
+    let dispatch_id = "dispatch_pattern_complete_foreign_issue_001";
+    let _flow = seed_flow_record(flow_id, Some("kckylechen1/tachi#1756"));
+    seed_completion_dispatch_owner(&server, flow_id, dispatch_id);
+    let memory_id = seed_projected_pattern(
+        &server,
+        "complete-pattern-foreign-issue",
+        "UniquePatternForeignIssueNeedle must remain bound to its owning issue.",
+    )
+    .await;
+
+    let response = server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("pattern-complete-foreign-issue".to_string()),
+            task: "Completion claims a foreign issue".to_string(),
+            agent: "codex".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("fix_request".to_string()),
+            dispatch_id: Some(dispatch_id.to_string()),
+            flow_id: Some(flow_id.to_string()),
+            issue_ref: Some("  kckylechen1/tachi#9999  ".to_string()),
+            evidence_refs: vec![format!("pattern:{memory_id}")],
+            diff_present: Some(false),
+            scope: Some("project".to_string()),
+            profile: None,
+            risk: None,
+            duration_ms: None,
+            skills_used: Vec::new(),
+            cost_tokens: None,
+            cost_usd: None,
+            quality_score: Some(0.9),
+            notes: None,
+            trajectory: None,
+            diff: None,
+            worktree: None,
+            subagents: Vec::new(),
+            eval_run_ids: Vec::new(),
+            feedback_rules_applied: Vec::new(),
+            pr_ref: None,
+            tests_run: Vec::new(),
+            project: None,
+            format: None,
+            signatures: Vec::new(),
+            rulings: Vec::new(),
+            adjudication: None,
+        }))
+        .await
+        .expect("complete with foreign issue");
+    let parsed: Value = serde_json::from_str(&response).expect("complete response JSON");
+    let event_count = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    adapter: Some("tachi.pattern_evidence.v1".to_string()),
+                    limit: 20,
+                    ..Default::default()
+                })
+                .map(|events| events.len())
+                .map_err(|error| error.to_string())
+        })
+        .expect("count pattern evidence events");
+
+    assert_eq!(
+        json!({
+            "status": parsed["pipeline"]["pattern_feedback"]["status"],
+            "reason": parsed["pipeline"]["pattern_feedback"]["reason"],
+            "saved_count": parsed["pipeline"]["pattern_feedback"]["saved_count"],
+            "event_count": event_count,
+        }),
+        json!({
+            "status": "skipped",
+            "reason": "unverified_flow_identity",
+            "saved_count": 0,
+            "event_count": 0,
+        }),
+        "a valid flow and dispatch cannot admit evidence for a foreign caller issue"
+    );
+}
+
+#[tokio::test]
 async fn close_loop_attaches_pattern_refs_and_records_append_only_hit_evidence() {
     let server = make_server();
     let _flow = seed_flow_record("flow_pattern_close_loop_001", Some("kckylechen1/tachi#250"));

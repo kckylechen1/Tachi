@@ -603,13 +603,22 @@ pub(crate) async fn handle_tachi_complete(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
+        let expected_issue_ref = params
+            .issue_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let verified_flow_revision = params
             .dispatch_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|dispatch_id| {
-                crate::task_lifecycle::verified_flow_revision(flow_id, None, Some(dispatch_id))
+                crate::task_lifecycle::verified_flow_revision(
+                    flow_id,
+                    expected_issue_ref,
+                    Some(dispatch_id),
+                )
             })
             .unwrap_or(Ok(None));
         let mut completion_revision_payload = task_event_payload.clone();
