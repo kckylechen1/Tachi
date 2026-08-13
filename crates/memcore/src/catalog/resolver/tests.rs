@@ -425,6 +425,254 @@ fn each_operational_axis_reports_its_own_exclusion_reason() {
     assert!(outcome.fallback_order().is_empty());
 }
 
+/// One way to make a candidate fail exactly one axis, applied to whichever
+/// fixture that axis actually reads — the deployment row, its placement, or the
+/// request snapshot.
+///
+/// Exists so a test can say "fail *these two* axes" and have the fixture
+/// assembled for it. Without that, every axis-order test has to hand-build
+/// eleven deployments, which is why the first cut only ever tested candidates
+/// that failed a single axis — and a candidate with one failing axis reports
+/// the same reason no matter what order the axes run in (#1681 PR-D review,
+/// CP1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Inactive,
+    Stale,
+    Account,
+    Capability,
+    Dimensions,
+    Context,
+    Output,
+    Attachment,
+    Region,
+    DataPolicy,
+    Cooldown,
+    Budget,
+}
+
+impl Axis {
+    fn reason(self) -> ExclusionReason {
+        match self {
+            Self::Inactive => ExclusionReason::DeploymentInactive,
+            Self::Stale => ExclusionReason::StaleCatalog,
+            Self::Account => ExclusionReason::AccountNotAdmitted,
+            Self::Capability => ExclusionReason::CapabilityMismatch,
+            Self::Dimensions => ExclusionReason::EmbeddingDimensionMismatch,
+            Self::Context => ExclusionReason::ContextWindowExceeded,
+            Self::Output => ExclusionReason::MaxOutputExceeded,
+            Self::Attachment => ExclusionReason::AttachmentBoundsExceeded,
+            Self::Region => ExclusionReason::RegionBlocked,
+            Self::DataPolicy => ExclusionReason::DataPolicyBlocked,
+            Self::Cooldown => ExclusionReason::HealthCooldown,
+            Self::Budget => ExclusionReason::BudgetExceeded,
+        }
+    }
+}
+
+/// The documented axis order, from `exclusion_for`'s own comment: identity and
+/// authority, then what the deployment intrinsically cannot do, then the
+/// caller's placement policy, then transient health, then budget.
+const AXIS_ORDER: [Axis; 12] = [
+    Axis::Inactive,
+    Axis::Stale,
+    Axis::Account,
+    Axis::Capability,
+    Axis::Dimensions,
+    Axis::Context,
+    Axis::Output,
+    Axis::Attachment,
+    Axis::Region,
+    Axis::DataPolicy,
+    Axis::Cooldown,
+    Axis::Budget,
+];
+
+/// Resolve one request in which each named candidate fails exactly the axes it
+/// was given and passes every other one.
+fn resolve_failing(cases: &[(&str, &[Axis])]) -> ResolutionOutcome {
+    let aliases = AliasSetSnapshot::from_rows(
+        &[alias_row("chat.default")],
+        &cases
+            .iter()
+            .map(|(id, _)| binding_row("chat.default", id, 0))
+            .collect::<Vec<_>>(),
+    );
+    let revision = aliases.policy_revision().to_string();
+
+    let mut placements = Vec::new();
+    let mut candidates = Vec::new();
+    let mut stale = Vec::new();
+    let mut cooldowns = Vec::new();
+
+    for (id, axes) in cases {
+        let fails = |axis: Axis| axes.contains(&axis);
+        let account = if fails(Axis::Account) {
+            "acct-blocked"
+        } else {
+            "acct-ok"
+        };
+        let mut parts = deployment(id, account).into_parts();
+        if fails(Axis::Capability) {
+            parts.capabilities = DeploymentCapabilities::default();
+        }
+        parts.bounds = DeploymentBounds {
+            // An undeclared width fails the required-width axis: silence is
+            // not agreement, so passing that axis means declaring it.
+            embedding_dimensions: (!fails(Axis::Dimensions)).then_some(1_024),
+            context_window: fails(Axis::Context).then_some(999),
+            max_output: fails(Axis::Output).then_some(499),
+            attachment_bytes: fails(Axis::Attachment).then_some(4_095),
+        };
+        // No price at all is what fails the budget axis: an unprovable ceiling
+        // is a refusal, not a pass.
+        parts.pricing_snapshot_ref = (!fails(Axis::Budget)).then(|| "ps1:affordable".to_string());
+        candidates.push(ResolvedDeployment::new(parts).expect("fixture deployment is well formed"));
+
+        let mut placement = DeploymentPlacement::unconstrained(*id)
+            .with_region(if fails(Axis::Region) {
+                "eu-west"
+            } else {
+                "us-east"
+            })
+            .with_data_policy(if fails(Axis::DataPolicy) {
+                "trains-on-input"
+            } else {
+                "zero-retention"
+            });
+        if fails(Axis::Inactive) {
+            placement = placement.retired();
+        }
+        placements.push(placement);
+
+        if fails(Axis::Stale) {
+            stale.push((*id).to_string());
+        }
+        if fails(Axis::Cooldown) {
+            cooldowns.push(DeploymentCooldown {
+                deployment_id: (*id).to_string(),
+                cooldown_until: None,
+            });
+        }
+    }
+
+    let resolver = CatalogResolver::new(
+        aliases,
+        placements,
+        vec![price("ps1:affordable", 10, 10)],
+        RequestRequirements {
+            required_capabilities: DeploymentCapabilities {
+                chat: true,
+                ..DeploymentCapabilities::default()
+            },
+            required_embedding_dimensions: Some(1_024),
+            prompt_tokens: Some(1_000),
+            max_output_tokens: Some(500),
+            attachment_bytes: Some(4_096),
+            allowed_regions: vec!["us-east".to_string()],
+            allowed_data_policies: vec!["zero-retention".to_string()],
+        },
+    );
+
+    let mut request = input("chat.default", &revision, candidates);
+    request.catalog.stale_deployment_ids = stale;
+    request.health.cooldowns = cooldowns;
+    request.accounts = AccountSnapshot {
+        accounts: vec![AccountAvailability {
+            account_ref: "acct-blocked".to_string(),
+            admitted: false,
+        }],
+    };
+    request.budget = BudgetContext {
+        ceiling_usd: Some(0.001),
+    };
+
+    resolver.try_resolve(&request).expect("stamped input")
+}
+
+#[test]
+fn a_candidate_that_fails_two_axes_reports_the_earlier_one() {
+    // Every adjacent pair in the documented order, which is enough: if each
+    // axis outranks its immediate successor, the whole order is fixed by
+    // transitivity, and any reordering at all moves at least one adjacent pair.
+    for pair in AXIS_ORDER.windows(2) {
+        let (earlier, later) = (pair[0], pair[1]);
+
+        let both = resolve_failing(&[("dep-both", &[earlier, later])]);
+        assert_eq!(
+            exclusion_of(&both, "dep-both"),
+            Some(earlier.reason()),
+            "a candidate failing {earlier:?} and {later:?} must report {earlier:?}: the \
+             reported reason is a property of the documented order, not of which \
+             check happens to run first"
+        );
+
+        // …and the later axis is genuinely armed, so the assertion above is
+        // about precedence and not about a trigger that never fired.
+        let alone = resolve_failing(&[("dep-both", &[later])]);
+        assert_eq!(
+            exclusion_of(&alone, "dep-both"),
+            Some(later.reason()),
+            "the {later:?} trigger must exclude on its own, or the pair above proves nothing"
+        );
+    }
+}
+
+#[test]
+fn a_caller_region_constraint_excludes_a_candidate_that_declares_no_placement() {
+    // The fail-closed posture toward unknown: a non-empty allowlist refuses a
+    // candidate whose placement is unknown, because an undeclared region
+    // cannot be shown to be one of the permitted ones. Nothing else in this
+    // file exercises it — every other candidate has a placement row — so
+    // flipping `allowed()` to admit the undeclared case would go unnoticed.
+    let revision = two_way_alias().policy_revision().to_string();
+    let constrained = |allowed_regions: Vec<String>, allowed_data_policies: Vec<String>| {
+        CatalogResolver::new(
+            two_way_alias(),
+            // No placement rows at all: this is what an env-imported catalog
+            // looks like today.
+            Vec::new(),
+            Vec::new(),
+            RequestRequirements {
+                allowed_regions,
+                allowed_data_policies,
+                ..RequestRequirements::default()
+            },
+        )
+        .try_resolve(&input(
+            "chat.default",
+            &revision,
+            vec![deployment("dep-a", "acct-a")],
+        ))
+        .expect("stamped input")
+    };
+
+    let by_region = constrained(vec!["us-east".to_string()], Vec::new());
+    assert_eq!(
+        exclusion_of(&by_region, "dep-a"),
+        Some(ExclusionReason::RegionBlocked),
+        "a candidate that declares no region is not a candidate the caller's \
+         region policy has been shown to permit"
+    );
+    assert_eq!(
+        by_region.selection().abstain_reason(),
+        Some(AbstainReason::NoEligibleCandidate),
+        "fail-closed means abstaining, not routing to the unplaced deployment"
+    );
+
+    let by_policy = constrained(Vec::new(), vec!["zero-retention".to_string()]);
+    assert_eq!(
+        exclusion_of(&by_policy, "dep-a"),
+        Some(ExclusionReason::DataPolicyBlocked)
+    );
+
+    // The mirror, so the rule above is a statement about *constrained*
+    // requests: with no allowlist there is nothing to be shown, and the same
+    // placement-less candidate resolves.
+    let unconstrained = constrained(Vec::new(), Vec::new());
+    assert_eq!(chosen_id(&unconstrained), "dep-a");
+}
+
 #[test]
 fn an_embedding_width_that_disagrees_with_the_index_is_refused_loudly() {
     let aliases = AliasSetSnapshot::from_rows(
@@ -652,11 +900,19 @@ fn the_fallback_order_is_capped_at_four_and_carries_evaluated_deployment_ids() {
     );
     let revision = aliases.policy_revision().to_string();
 
+    // Deliberately scrambled. Fed the ids already sorted, this test passed
+    // whether the chain was ordered or merely echoed back (#1681 PR-D review,
+    // CP1) — and "the first four in input order" is exactly the bug a cap is
+    // there to prevent, since the caller's assembly order is not a ranking.
+    let scrambled = ["dep-6", "dep-3", "dep-1", "dep-5", "dep-2", "dep-4"];
     let outcome = resolver(aliases)
         .try_resolve(&input(
             "chat.default",
             &revision,
-            ids.iter().map(|id| deployment(id, "acct-shared")).collect(),
+            scrambled
+                .iter()
+                .map(|id| deployment(id, "acct-shared"))
+                .collect(),
         ))
         .expect("stamped input");
 
@@ -691,6 +947,146 @@ fn an_excluded_candidate_never_reaches_the_fallback_chain() {
     assert!(
         outcome.fallback_order().is_empty(),
         "a stale deployment is not a place to fall back to"
+    );
+}
+
+// ─── D5's winner order, one edge at a time ──────────────────────────────────
+//
+// pin > price > deployment_id, and each edge is pinned by an otherwise
+// *equivalent* pair: the two candidates differ in exactly the axis under test,
+// so the assertion cannot be satisfied by a comparator that dropped it. The
+// pre-existing determinism test could not do this — its candidates differed in
+// price *and* id at once, so it stayed green with the final tiebreak deleted
+// (#1681 PR-D review, CP1).
+
+/// Two candidates, identical but for the price sheet each points at, resolved
+/// in both input orders.
+fn priced_pair(cheap_for: &str, dear_for: &str) -> (String, String) {
+    let aliases = two_way_alias();
+    let revision = aliases.policy_revision().to_string();
+    let resolver = CatalogResolver::new(
+        aliases,
+        Vec::new(),
+        vec![price("ps1:cheap", 10, 10), price("ps1:dear", 900, 900)],
+        RequestRequirements {
+            prompt_tokens: Some(1_000_000),
+            ..RequestRequirements::default()
+        },
+    );
+    let sheet = |id: &str| {
+        if id == cheap_for {
+            "ps1:cheap"
+        } else {
+            "ps1:dear"
+        }
+    };
+    let resolve = |order: [&str; 2]| {
+        chosen_id(
+            &resolver
+                .try_resolve(&input(
+                    "chat.default",
+                    &revision,
+                    order
+                        .iter()
+                        .map(|id| priced(id, "acct-shared", sheet(id)))
+                        .collect(),
+                ))
+                .expect("stamped input"),
+        )
+        .to_string()
+    };
+    assert_eq!(
+        dear_for,
+        if cheap_for == "dep-a" {
+            "dep-b"
+        } else {
+            "dep-a"
+        }
+    );
+    (resolve(["dep-a", "dep-b"]), resolve(["dep-b", "dep-a"]))
+}
+
+#[test]
+fn price_outranks_the_id_tiebreak_in_both_directions() {
+    // Cheap is the lexicographically *later* id: the cheap one still wins, so
+    // price is doing the deciding and not the tiebreak that follows it.
+    let (forward, reversed) = priced_pair("dep-b", "dep-a");
+    assert_eq!((forward.as_str(), reversed.as_str()), ("dep-b", "dep-b"));
+
+    // Invert only the price sheet assignment — every other field of both
+    // candidates is unchanged — and the winner inverts with it.
+    let (forward, reversed) = priced_pair("dep-a", "dep-b");
+    assert_eq!((forward.as_str(), reversed.as_str()), ("dep-a", "dep-a"));
+}
+
+#[test]
+fn candidates_that_tie_on_price_are_ordered_lexicographically_not_by_arrival() {
+    // Same account, same (absent) price, same everything: the deployment id is
+    // the only thing left to decide with. Delete the final tiebreak and the
+    // stable sort hands back input order, which is how a caller's assembly
+    // order silently becomes a routing decision.
+    let ids = ["dep-z", "dep-m", "dep-a"];
+    let aliases = AliasSetSnapshot::from_rows(
+        &[alias_row("chat.default")],
+        &ids.iter()
+            .map(|id| binding_row("chat.default", id, 0))
+            .collect::<Vec<_>>(),
+    );
+    let revision = aliases.policy_revision().to_string();
+
+    let outcome = resolver(aliases)
+        .try_resolve(&input(
+            "chat.default",
+            &revision,
+            ids.iter().map(|id| deployment(id, "acct-shared")).collect(),
+        ))
+        .expect("stamped input");
+
+    assert_eq!(
+        chosen_id(&outcome),
+        "dep-a",
+        "the winner is the smallest id, not the first one the caller listed"
+    );
+    assert_eq!(outcome.fallback_order(), &["dep-m", "dep-z"]);
+}
+
+#[test]
+fn a_pin_outranks_price_and_is_not_merely_the_cheapest_by_coincidence() {
+    // The pin is put on the *expensive* candidate. A comparator that had lost
+    // the pin term would pick the cheap one, and one that had lost the price
+    // term would still pick the pinned one — so this edge needs the pin and
+    // the price to disagree, which the pre-existing pin test (no prices at
+    // all) could not arrange.
+    let aliases = two_way_alias();
+    let revision = aliases.policy_revision().to_string();
+    let resolver = CatalogResolver::new(
+        aliases,
+        Vec::new(),
+        vec![price("ps1:cheap", 10, 10), price("ps1:dear", 900, 900)],
+        RequestRequirements {
+            prompt_tokens: Some(1_000_000),
+            ..RequestRequirements::default()
+        },
+    );
+
+    let mut request = input(
+        "chat.default",
+        &revision,
+        vec![
+            priced("dep-a", "acct-shared", "ps1:cheap"),
+            priced("dep-b", "acct-shared", "ps1:dear"),
+        ],
+    );
+    request.pin = PinContext {
+        pinned_deployment_id: Some("dep-b".to_string()),
+    };
+
+    let outcome = resolver.try_resolve(&request).expect("stamped input");
+    assert_eq!(chosen_id(&outcome), "dep-b");
+    assert_eq!(
+        outcome.fallback_order(),
+        &["dep-a"],
+        "the cheaper unpinned candidate is still the place to fall back to"
     );
 }
 
