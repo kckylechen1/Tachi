@@ -46,10 +46,10 @@ This line makes Tachi's project-cycle direction explicit:
 - Continuity memory is now typed: session captures, memory writes, outcome
   labels, projections, and active patterns can be stored and queried as durable
   project context.
-- Pattern memory now has an explicit feedback loop: `tachi_memory`
-  `action="search" scope="patterns"` records `seen`, while `tachi_memory`
-  `action="pattern_feedback"` records reviewed `hit`, `miss`, and `stale`
-  signals without promoting anything into skills automatically.
+- Pattern memory has an explicit evidence loop: pattern search remains read-only,
+  while admitted completion and close-loop paths append context-bound,
+  replay-idempotent evidence internally. Models cannot submit feedback that
+  retunes ranking or promotes patterns into skills.
 - `tachi_task` can guide a full issue/PR/doc lifecycle: intake, doc index,
   verification status, PR handoff, release notes, reference
   building, and close-loop writes back to memory/wiki/docs.
