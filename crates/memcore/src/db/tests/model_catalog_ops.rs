@@ -548,6 +548,71 @@ fn a_projection_rebuilt_mid_stream_catches_up_to_the_same_state() {
     );
 }
 
+#[test]
+fn a_health_write_folds_into_the_catalog_projection_the_same_way_twice() {
+    // Discrimination 12 extended to the health rows (#1681 D7 PR-C item 5),
+    // against a log this module's own writers produced: full replay must equal
+    // incremental advance *and* the fold's health bundle must agree with the
+    // table it projects. A fold that could not see health events would pass
+    // the first half while disagreeing about every cooldown.
+    use crate::db::model_catalog::{advance_catalog_projection, replay_catalog_projection};
+
+    let conn = catalog_conn();
+    let mut incremental = crate::catalog::fold::CatalogProjection::empty();
+
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+    advance_catalog_projection(&conn, &mut incremental).expect("advance 1");
+
+    record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Throttled {
+            retry_after: Some(RetryAfter::DeltaSeconds(45)),
+        },
+        EvidenceKind::SelfReported,
+        instant(0),
+    )
+    .expect("throttle");
+
+    let mut moved = extract_lane();
+    moved.provider_model_id = "Qwen/Qwen3.5-72B".to_string();
+    upsert_model_deployment(&conn, &moved).expect("advance the catalog row");
+    advance_catalog_projection(&conn, &mut incremental).expect("advance 2");
+
+    record_model_deployment_outcome(
+        &conn,
+        &DeploymentOutcomeTarget::deployment("env:extract"),
+        DeploymentOutcome::ServerError {
+            status: 502,
+            retry_after: None,
+        },
+        EvidenceKind::Probed,
+        instant(90),
+    )
+    .expect("server error");
+    advance_catalog_projection(&conn, &mut incremental).expect("advance 3");
+
+    let full = replay_catalog_projection(&conn).expect("full replay");
+    assert_eq!(full.digest(), incremental.digest());
+    assert_eq!(full, incremental);
+
+    let folded = full.get("env:extract").expect("folded");
+    assert_eq!(
+        folded.revision, 2,
+        "two health events between catalog events must not move the catalog revision"
+    );
+    let health_fold = folded.health.as_ref().expect("health folded");
+    let health_row = get_model_deployment_health(&conn, "env:extract")
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        health_fold.state, health_row.state,
+        "the state replayed from the log and the state in the table are the same fact"
+    );
+    assert_eq!(health_fold.cooldown_until, health_row.cooldown_until);
+    assert_eq!(health_fold.event_count, 2);
+}
+
 // ─── staleness at the store boundary ─────────────────────────────────────────
 
 #[test]

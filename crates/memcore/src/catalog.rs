@@ -405,10 +405,24 @@ impl DeploymentEventKind {
     /// separate fields (#1681 D1's table-boundary rule, applied to the
     /// projection).
     pub fn is_health(self) -> bool {
-        matches!(
-            self,
-            Self::HealthServed | Self::HealthCooldown | Self::HealthError
-        )
+        self.health_state().is_some()
+    }
+
+    /// The `model_deployment_health.state` a health event of this kind put the
+    /// row in; `None` for the catalog-metadata kinds.
+    ///
+    /// This is the mapping that lets the fold reconstruct health state from the
+    /// log alone — which is what makes replaying the log a check on the table
+    /// rather than a second copy of it. It is the same mapping
+    /// [`health::DeploymentOutcome::state`] applies when writing, and a test
+    /// pins the two together.
+    pub fn health_state(self) -> Option<&'static str> {
+        match self {
+            Self::HealthServed => Some(health::DEPLOYMENT_HEALTH_STATE_OK),
+            Self::HealthCooldown => Some(health::DEPLOYMENT_HEALTH_STATE_COOLDOWN),
+            Self::HealthError => Some(health::DEPLOYMENT_HEALTH_STATE_ERROR),
+            Self::DeploymentImported | Self::DeploymentUpdated | Self::DeploymentRetired => None,
+        }
     }
 }
 

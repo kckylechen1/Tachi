@@ -25,6 +25,17 @@
 //!    an inclusive boundary, or a retried batch — would double-count, and the
 //!    equivalence would hold only for callers who happened to slice perfectly.
 //!
+//! # Two authorities, one log, separate fields
+//!
+//! `model_deployment_events` carries both catalog-metadata transitions and the
+//! health observations PR-C's single writer appends (#1681 D4). The fold keeps
+//! them in separate fields — [`DeploymentFold::health`] versus `revision` /
+//! `imported` / `retired` — for the same reason the schema keeps them in
+//! separate tables: a deployment being throttled at 09:04 is not a change to
+//! what that deployment *is*. Because health state is reconstructible from the
+//! log alone, replaying it is a genuine check on `model_deployment_health`
+//! rather than a second copy of it.
+//!
 //! # Unrecognized event kinds are reported, not skipped
 //!
 //! A log written by a newer build can contain a kind this build cannot type.
@@ -51,9 +62,10 @@ use super::{DeploymentEventKind, ModelDeploymentEvent};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentFold {
     pub deployment_id: String,
-    /// The revision the most recent event produced.
+    /// The revision the most recent **catalog** event produced. Health events
+    /// do not move it — see [`CatalogProjection::apply`].
     pub revision: i64,
-    /// Id of the most recent event folded into this entry.
+    /// Id of the most recent event folded into this entry, of any kind.
     pub last_event_id: i64,
     /// `None` when the most recent event carried a kind this build cannot
     /// type.
@@ -63,6 +75,41 @@ pub struct DeploymentFold {
     /// log starts mid-life (`false`) is a real finding, not a rounding error.
     pub imported: bool,
     pub retired: bool,
+    /// What the health events in the log say about how this deployment is
+    /// behaving (#1681 D4). `None` until one lands — a deployment nothing has
+    /// been observed about is not the same as one observed to be healthy.
+    pub health: Option<HealthFold>,
+}
+
+/// The health half of a deployment's fold: the same state
+/// `model_deployment_health` holds, reconstructed from the log alone.
+///
+/// Kept in its own field rather than flattened alongside `revision` and
+/// `retired` because these are two authorities sharing one append-only table
+/// (#1681 D1/D4). A projection that mixed them would let "the provider
+/// throttled us at 09:04" read as a change to what the deployment *is*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthFold {
+    /// `ok` / `cooldown` / `error`, derived from the event kind.
+    pub state: &'static str,
+    /// The cooldown the most recent health event recorded, as the writer wrote
+    /// it. `None` when that event set none.
+    pub cooldown_until: Option<String>,
+    pub last_event_id: i64,
+    pub last_event_kind: DeploymentEventKind,
+    pub event_count: usize,
+}
+
+impl HealthFold {
+    fn to_json(&self) -> Value {
+        json!({
+            "state": self.state,
+            "cooldown_until": self.cooldown_until,
+            "last_event_id": self.last_event_id,
+            "last_event_kind": self.last_event_kind.as_str(),
+            "event_count": self.event_count,
+        })
+    }
 }
 
 impl DeploymentFold {
@@ -75,8 +122,24 @@ impl DeploymentFold {
             "event_count": self.event_count,
             "imported": self.imported,
             "retired": self.retired,
+            "health": self.health.as_ref().map(HealthFold::to_json),
         })
     }
+}
+
+/// The cooldown a health event's evidence recorded, if it recorded one.
+///
+/// Read out of the evidence JSON rather than inferred from the kind, because
+/// the *instant* is the fact a reader needs and only the writer knows it.
+/// Evidence that is not an object, or carries no readable `cooldown_until`,
+/// yields `None` — a fold cannot invent a cooldown, and a health event written
+/// by a newer build must still fold rather than panic.
+fn evidence_cooldown_until(evidence: &str) -> Option<String> {
+    serde_json::from_str::<Value>(evidence)
+        .ok()?
+        .get("cooldown_until")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// What [`CatalogProjection::apply`] did with an event.
@@ -142,26 +205,60 @@ impl CatalogProjection {
                 event_count: 0,
                 imported: false,
                 retired: false,
+                health: None,
             });
 
-        entry.revision = event.revision;
         entry.last_event_id = event.id;
         entry.last_event_kind = kind;
         entry.event_count += 1;
         match kind {
-            Some(DeploymentEventKind::DeploymentImported) => entry.imported = true,
-            Some(DeploymentEventKind::DeploymentRetired) => entry.retired = true,
+            Some(DeploymentEventKind::DeploymentImported) => {
+                entry.revision = event.revision;
+                entry.imported = true;
+            }
+            Some(DeploymentEventKind::DeploymentRetired) => {
+                entry.revision = event.revision;
+                entry.retired = true;
+            }
             // An update after a retirement un-retires nothing: retirement is a
             // status transition the row itself records, and the fold reports
             // the log, not a guess about what the row now says.
-            Some(DeploymentEventKind::DeploymentUpdated) | None => {}
+            //
+            // An untypeable kind still carries its revision: a newer build's
+            // catalog transition is a catalog transition, and pretending its
+            // revision did not happen would be a quieter lie than reporting the
+            // kind as unrecognized.
+            Some(DeploymentEventKind::DeploymentUpdated) | None => {
+                entry.revision = event.revision;
+            }
             // Health events (#1681 D4) say how the deployment is *behaving*,
-            // never what it *is*, so they touch no lifecycle field here.
+            // never what it *is*. They deliberately do **not** set `revision`:
+            // a health event carries the revision it *observed*, so a write
+            // that raced a re-import would otherwise roll the projection's
+            // catalog revision backwards — the log would then disagree with
+            // `model_deployments` about a fact the health authority has no
+            // business asserting.
             Some(
-                DeploymentEventKind::HealthServed
+                health_kind @ (DeploymentEventKind::HealthServed
                 | DeploymentEventKind::HealthCooldown
-                | DeploymentEventKind::HealthError,
-            ) => {}
+                | DeploymentEventKind::HealthError),
+            ) => {
+                let state = health_kind
+                    .health_state()
+                    .expect("a health event kind always has a health state");
+                let count = entry
+                    .health
+                    .as_ref()
+                    .map(|health| health.event_count)
+                    .unwrap_or(0);
+                entry.health = Some(HealthFold {
+                    state,
+                    cooldown_until: evidence_cooldown_until(&event.evidence),
+                    last_event_id: event.id,
+                    last_event_kind: health_kind,
+                    event_count: count + 1,
+                });
+            }
         }
 
         ApplyOutcome::Applied
@@ -247,6 +344,43 @@ mod tests {
             event(4, "env:reasoning", 1, "deployment_imported"),
             event(5, "env:summary", 2, "deployment_retired"),
             event(6, "env:extract", 3, "deployment_updated"),
+        ]
+    }
+
+    fn health_event(
+        id: i64,
+        deployment_id: &str,
+        revision: i64,
+        kind: DeploymentEventKind,
+        cooldown_until: Option<&str>,
+    ) -> ModelDeploymentEvent {
+        let mut event = event(id, deployment_id, revision, kind.as_str());
+        event.evidence = json!({
+            "outcome": "fixture",
+            "state": kind.health_state(),
+            "cooldown_until": cooldown_until,
+        })
+        .to_string();
+        event
+    }
+
+    /// A log both authorities wrote into, which is the shape production
+    /// produces: imports, a revision advance, and health observations
+    /// interleaved.
+    fn mixed_log() -> Vec<ModelDeploymentEvent> {
+        vec![
+            event(1, "env:extract", 1, "deployment_imported"),
+            event(2, "env:summary", 1, "deployment_imported"),
+            health_event(
+                3,
+                "env:extract",
+                1,
+                DeploymentEventKind::HealthCooldown,
+                Some("2026-08-11T00:01:00.000Z"),
+            ),
+            event(4, "env:extract", 2, "deployment_updated"),
+            health_event(5, "env:summary", 1, DeploymentEventKind::HealthError, None),
+            health_event(6, "env:extract", 2, DeploymentEventKind::HealthServed, None),
         ]
     }
 
@@ -386,6 +520,140 @@ mod tests {
         let mut more = log();
         more.push(event(7, "env:reasoning", 2, "deployment_retired"));
         assert_ne!(base.digest(), CatalogProjection::replay(&more).digest());
+    }
+
+    // ─── discrimination 12, extended over the health bundle ──────────────────
+
+    #[test]
+    fn full_replay_equals_incremental_application_over_health_events_too() {
+        let events = mixed_log();
+        let full = CatalogProjection::replay(&events);
+
+        let mut incremental = CatalogProjection::empty();
+        for chunk in events.chunks(2) {
+            incremental.extend(chunk);
+        }
+        // And the two failure modes the id guard exists for, now with health
+        // events in the stream: an inclusive watermark and a retried batch.
+        incremental.extend(&events[3..6]);
+        incremental.extend(&events[0..6]);
+
+        assert_eq!(
+            full.digest(),
+            incremental.digest(),
+            "health rows have to survive the same replay-equivalence property as catalog rows, or \
+             a daemon that restarted disagrees with one that did not about which deployment is \
+             cooling down"
+        );
+        assert_eq!(full, incremental);
+
+        let extract = full.get("env:extract").expect("folded");
+        let health = extract.health.as_ref().expect("health folded");
+        assert_eq!(health.state, "ok", "the last health event served");
+        assert_eq!(health.event_count, 2);
+        assert_eq!(health.cooldown_until, None);
+        assert_eq!(health.last_event_id, 6);
+    }
+
+    #[test]
+    fn the_health_bundle_carries_the_cooldown_the_writer_recorded() {
+        let projection = CatalogProjection::replay(&mixed_log()[..3]);
+        let health = projection
+            .get("env:extract")
+            .expect("folded")
+            .health
+            .as_ref()
+            .expect("health folded");
+        assert_eq!(health.state, "cooldown");
+        assert_eq!(
+            health.cooldown_until.as_deref(),
+            Some("2026-08-11T00:01:00.000Z"),
+            "the instant is the fact a reader needs, and only the writer knows it"
+        );
+    }
+
+    #[test]
+    fn a_deployment_with_no_health_event_is_unobserved_not_healthy() {
+        let projection = CatalogProjection::replay(&log());
+        assert!(
+            projection
+                .get("env:reasoning")
+                .expect("folded")
+                .health
+                .is_none(),
+            "a deployment nothing has been observed about must not read as one observed to be \
+             healthy — the resolver's answer differs"
+        );
+    }
+
+    #[test]
+    fn a_health_event_never_moves_the_catalog_revision() {
+        // The race this rules out: a health write computed against revision 1
+        // lands after a re-import advanced the row to 2. If health events set
+        // the projection's revision, the fold would roll it back and disagree
+        // with `model_deployments` about a fact the health authority has no
+        // business asserting.
+        let events = vec![
+            event(1, "env:extract", 1, "deployment_imported"),
+            event(2, "env:extract", 2, "deployment_updated"),
+            health_event(3, "env:extract", 1, DeploymentEventKind::HealthError, None),
+        ];
+        let fold = CatalogProjection::replay(&events);
+        let extract = fold.get("env:extract").expect("folded");
+        assert_eq!(extract.revision, 2);
+        assert_eq!(
+            extract.health.as_ref().map(|health| health.state),
+            Some("error")
+        );
+        assert_eq!(
+            extract.event_count, 3,
+            "it still counts as an event in the log"
+        );
+        assert_eq!(
+            extract.last_event_kind,
+            Some(DeploymentEventKind::HealthError),
+            "and it is still the most recent event"
+        );
+    }
+
+    #[test]
+    fn the_digest_moves_when_a_health_event_lands() {
+        let base = CatalogProjection::replay(&mixed_log());
+        let mut more = mixed_log();
+        more.push(health_event(
+            7,
+            "env:extract",
+            2,
+            DeploymentEventKind::HealthCooldown,
+            Some("2026-08-11T00:05:00.000Z"),
+        ));
+        assert_ne!(
+            base.digest(),
+            CatalogProjection::replay(&more).digest(),
+            "a comparison that could not see health events would pass while the two sides \
+             disagreed about every cooldown"
+        );
+    }
+
+    #[test]
+    fn health_evidence_a_fold_cannot_read_yields_no_cooldown_rather_than_a_panic() {
+        let mut event = health_event(
+            1,
+            "env:extract",
+            1,
+            DeploymentEventKind::HealthCooldown,
+            None,
+        );
+        event.evidence = "not json".to_string();
+        let projection = CatalogProjection::replay(&[event]);
+        let health = projection
+            .get("env:extract")
+            .expect("folded")
+            .health
+            .as_ref()
+            .expect("health folded");
+        assert_eq!(health.state, "cooldown");
+        assert_eq!(health.cooldown_until, None);
     }
 
     #[test]

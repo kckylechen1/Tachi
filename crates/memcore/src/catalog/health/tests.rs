@@ -450,6 +450,13 @@ fn every_outcome_maps_to_exactly_one_event_kind_and_state() {
             "every outcome this writer records must be a health event, or the fold would read it \
              as a change to what the deployment is"
         );
+        assert_eq!(
+            kind.health_state(),
+            Some(state),
+            "the state the writer stores and the state the fold reconstructs from the event kind \
+             are one mapping; if they drift, a replay silently reports a different health state \
+             than the table holds"
+        );
         let write = record(None, outcome, at(0));
         assert_eq!(write.health.state, state);
         assert_eq!(write.event.event_kind, kind.as_str());
