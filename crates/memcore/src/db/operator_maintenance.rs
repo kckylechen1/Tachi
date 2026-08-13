@@ -60,54 +60,270 @@ pub enum OperatorMaintenanceOperation {
     Delete,
 }
 
-/// Closed input for the committed operator-maintenance authority. Callers can
-/// supply only plan/target/receipt bindings; transaction source/post facts are
-/// added by this module and no arbitrary JSON can enter the authority row.
-#[derive(Debug, Clone)]
-pub struct OperatorMaintenanceAuthorityInput {
-    plan_digest: String,
-    operation: OperatorMaintenanceOperation,
-    target_physical_identity: String,
-    profile: String,
-    apply_timestamp: String,
-    committed_receipt_digest: String,
+const OPERATOR_PLAN_VERSION: u32 = 1;
+const OPERATOR_RECEIPT_VERSION: u32 = 1;
+const OPERATOR_POLICY_VERSION: &str = "tachi-memory-maintenance-v1";
+const OPERATOR_KANBAN_MAX_AGE_DAYS: u64 = 30;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum OperatorMaintenancePolicy {
+    Gc {
+        access_history_keep_per_memory: usize,
+        processed_events_max_days: u32,
+        audit_log_max_days: u32,
+        audit_log_max_rows: usize,
+        agent_known_state_max_days: u32,
+        recall_impression_max_groups: usize,
+        recall_impression_max_days: u32,
+        kanban_max_age_days: u64,
+    },
+    Delete {
+        exact_id_canonical_delete: bool,
+    },
 }
 
-impl OperatorMaintenanceAuthorityInput {
-    pub fn new(
-        plan_digest: String,
-        operation: OperatorMaintenanceOperation,
-        target_physical_identity: String,
-        profile: String,
-        apply_timestamp: String,
-        committed_receipt_digest: String,
-    ) -> Result<Self, MemoryError> {
-        for (label, digest) in [
-            ("plan", &plan_digest),
-            ("committed receipt", &committed_receipt_digest),
-        ] {
-            if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(MemoryError::InvalidArg(format!(
-                    "operator maintenance {label} digest must be SHA-256"
-                )));
-            }
+impl OperatorMaintenancePolicy {
+    fn canonical_gc() -> Self {
+        let cfg = GcConfig::default();
+        Self::Gc {
+            access_history_keep_per_memory: cfg.access_history_keep_per_memory,
+            processed_events_max_days: cfg.processed_events_max_days,
+            audit_log_max_days: cfg.audit_log_max_days,
+            audit_log_max_rows: cfg.audit_log_max_rows,
+            agent_known_state_max_days: cfg.agent_known_state_max_days,
+            recall_impression_max_groups: cfg.recall_impression_max_groups,
+            recall_impression_max_days: cfg.recall_impression_max_days,
+            kanban_max_age_days: OPERATOR_KANBAN_MAX_AGE_DAYS,
         }
-        if target_physical_identity.is_empty()
-            || !matches!(profile.as_str(), "tachi_full" | "portable_kernel")
-            || chrono::DateTime::parse_from_rfc3339(&apply_timestamp).is_err()
+    }
+
+    fn gc_config(&self) -> Option<(GcConfig, u64)> {
+        let Self::Gc {
+            access_history_keep_per_memory,
+            processed_events_max_days,
+            audit_log_max_days,
+            audit_log_max_rows,
+            agent_known_state_max_days,
+            recall_impression_max_groups,
+            recall_impression_max_days,
+            kanban_max_age_days,
+        } = self
+        else {
+            return None;
+        };
+        Some((
+            GcConfig {
+                access_history_keep_per_memory: *access_history_keep_per_memory,
+                processed_events_max_days: *processed_events_max_days,
+                audit_log_max_days: *audit_log_max_days,
+                audit_log_max_rows: *audit_log_max_rows,
+                agent_known_state_max_days: *agent_known_state_max_days,
+                recall_impression_max_groups: *recall_impression_max_groups,
+                recall_impression_max_days: *recall_impression_max_days,
+            },
+            *kanban_max_age_days,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorMaintenancePlanWire {
+    version: u32,
+    operation: OperatorMaintenanceOperation,
+    target_path: String,
+    target_physical_identity: String,
+    profile: String,
+    as_of: String,
+    policy_version: String,
+    policy: OperatorMaintenancePolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delete_id: Option<String>,
+    source: Vec<MaintenanceClassFact>,
+    digest: String,
+}
+
+impl OperatorMaintenancePlanWire {
+    fn computed_digest(&self) -> Result<String, MemoryError> {
+        let mut unsigned = self.clone();
+        unsigned.digest.clear();
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&unsigned)?)
+        ))
+    }
+}
+
+/// Opaque binding decoded from the canonical CLI maintenance plan. Its fields
+/// cannot be supplied independently by a caller.
+#[derive(Debug, Clone)]
+pub struct OperatorMaintenancePlanBinding(OperatorMaintenancePlanWire);
+
+impl OperatorMaintenancePlanBinding {
+    pub fn from_canonical_json(bytes: &[u8]) -> Result<Self, MemoryError> {
+        let plan: OperatorMaintenancePlanWire = serde_json::from_slice(bytes)?;
+        let expected_classes = match plan.operation {
+            OperatorMaintenanceOperation::Gc => OPERATOR_GC_CLASSES,
+            OperatorMaintenanceOperation::Delete => OPERATOR_DELETE_CLASSES,
+        };
+        validate_registry(&plan.source, expected_classes, "plan")?;
+        validate_fact_digests(&plan.source)?;
+        let arguments_match = match (&plan.operation, &plan.policy, &plan.delete_id) {
+            (OperatorMaintenanceOperation::Gc, policy, None) => {
+                policy == &OperatorMaintenancePolicy::canonical_gc()
+            }
+            (
+                OperatorMaintenanceOperation::Delete,
+                OperatorMaintenancePolicy::Delete {
+                    exact_id_canonical_delete: true,
+                },
+                Some(id),
+            ) => !id.is_empty() && id == id.trim(),
+            _ => false,
+        };
+        if plan.version != OPERATOR_PLAN_VERSION
+            || plan.policy_version != OPERATOR_POLICY_VERSION
+            || plan.target_path.is_empty()
+            || plan.target_physical_identity.is_empty()
+            || StoreProfile::from_stamp_token(&plan.profile).is_none()
+            || chrono::DateTime::parse_from_rfc3339(&plan.as_of).is_err()
+            || !arguments_match
+            || plan.digest != plan.computed_digest()?
         {
             return Err(MemoryError::InvalidArg(
-                "operator maintenance authority target/profile/timestamp is invalid".to_string(),
+                "operator maintenance plan binding is not canonical".to_string(),
             ));
         }
-        Ok(Self {
-            plan_digest,
-            operation,
-            target_physical_identity,
-            profile,
-            apply_timestamp,
-            committed_receipt_digest,
-        })
+        Ok(Self(plan))
+    }
+
+    pub(crate) fn operation(&self) -> OperatorMaintenanceOperation {
+        self.0.operation
+    }
+
+    pub(crate) fn target_physical_identity(&self) -> &str {
+        &self.0.target_physical_identity
+    }
+
+    pub(crate) fn profile(&self) -> StoreProfile {
+        StoreProfile::from_stamp_token(&self.0.profile).expect("validated maintenance plan profile")
+    }
+
+    pub(crate) fn source(&self) -> &[MaintenanceClassFact] {
+        &self.0.source
+    }
+
+    pub(crate) fn as_of(&self) -> &str {
+        &self.0.as_of
+    }
+
+    pub(crate) fn gc_config(&self) -> Option<(GcConfig, u64)> {
+        self.0.policy.gc_config()
+    }
+
+    pub(crate) fn delete_id(&self) -> Option<&str> {
+        self.0.delete_id.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OperatorReceiptPhase {
+    Prepared,
+    Committed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorMaintenanceReceiptWire {
+    version: u32,
+    plan_digest: String,
+    operation: OperatorMaintenanceOperation,
+    target_path: String,
+    target_physical_identity: String,
+    profile: String,
+    phase: OperatorReceiptPhase,
+    apply_timestamp: String,
+    source: Vec<MaintenanceClassFact>,
+    post: Vec<MaintenanceClassFact>,
+    cache_invalidated: bool,
+    reconciliation: String,
+    digest: String,
+}
+
+impl OperatorMaintenanceReceiptWire {
+    fn computed_digest(&self) -> Result<String, MemoryError> {
+        let mut unsigned = self.clone();
+        unsigned.digest.clear();
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&unsigned)?)
+        ))
+    }
+}
+
+/// Opaque binding decoded from the canonical committed receipt projection.
+#[derive(Debug, Clone)]
+pub struct OperatorMaintenanceCommittedReceiptBinding(OperatorMaintenanceReceiptWire);
+
+impl OperatorMaintenanceCommittedReceiptBinding {
+    pub fn from_canonical_json(
+        plan: &OperatorMaintenancePlanBinding,
+        bytes: &[u8],
+    ) -> Result<Self, MemoryError> {
+        let receipt: OperatorMaintenanceReceiptWire = serde_json::from_slice(bytes)?;
+        validate_registry(
+            &receipt.source,
+            match receipt.operation {
+                OperatorMaintenanceOperation::Gc => OPERATOR_GC_CLASSES,
+                OperatorMaintenanceOperation::Delete => OPERATOR_DELETE_CLASSES,
+            },
+            "receipt source",
+        )?;
+        validate_registry(
+            &receipt.post,
+            match receipt.operation {
+                OperatorMaintenanceOperation::Gc => OPERATOR_GC_CLASSES,
+                OperatorMaintenanceOperation::Delete => OPERATOR_DELETE_CLASSES,
+            },
+            "receipt post",
+        )?;
+        validate_fact_digests(&receipt.source)?;
+        validate_fact_digests(&receipt.post)?;
+        if receipt.version != OPERATOR_RECEIPT_VERSION
+            || receipt.plan_digest != plan.0.digest
+            || receipt.operation != plan.0.operation
+            || receipt.target_path != plan.0.target_path
+            || receipt.target_physical_identity != plan.0.target_physical_identity
+            || receipt.profile != plan.0.profile
+            || receipt.phase != OperatorReceiptPhase::Committed
+            || chrono::DateTime::parse_from_rfc3339(&receipt.apply_timestamp).is_err()
+            || receipt.source != plan.0.source
+            || !receipt.cache_invalidated
+            || receipt.reconciliation != "complete"
+            || receipt.digest != receipt.computed_digest()?
+        {
+            return Err(MemoryError::InvalidArg(
+                "operator maintenance committed receipt binding is not canonical".to_string(),
+            ));
+        }
+        Ok(Self(receipt))
+    }
+}
+
+fn validate_fact_digests(facts: &[MaintenanceClassFact]) -> Result<(), MemoryError> {
+    let mut classes = BTreeSet::new();
+    if facts.iter().all(|fact| {
+        classes.insert(fact.class.as_str())
+            && fact.digest.len() == 64
+            && fact.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        Ok(())
+    } else {
+        Err(MemoryError::InvalidArg(
+            "operator maintenance facts are invalid".to_string(),
+        ))
     }
 }
 
@@ -779,7 +995,7 @@ where
         &Connection,
         &[MaintenanceClassFact],
         &[MaintenanceClassFact],
-    ) -> Result<OperatorMaintenanceAuthorityInput, MemoryError>,
+    ) -> Result<OperatorMaintenanceCommittedReceiptBinding, MemoryError>,
 {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let source_candidates = collect_gc_candidates(
@@ -949,7 +1165,7 @@ where
         &Connection,
         &[MaintenanceClassFact],
         &[MaintenanceClassFact],
-    ) -> Result<OperatorMaintenanceAuthorityInput, MemoryError>,
+    ) -> Result<OperatorMaintenanceCommittedReceiptBinding, MemoryError>,
 {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let source = delete_candidate_facts(&tx, id, vec_available, profile)?;
@@ -981,23 +1197,23 @@ fn insert_operator_maintenance_authority(
     expected_operation: OperatorMaintenanceOperation,
     source: &[MaintenanceClassFact],
     post: &[MaintenanceClassFact],
-    input: &OperatorMaintenanceAuthorityInput,
+    input: &OperatorMaintenanceCommittedReceiptBinding,
 ) -> Result<(), MemoryError> {
-    if input.operation != expected_operation {
+    if input.0.operation != expected_operation || input.0.source != source || input.0.post != post {
         return Err(MemoryError::InvalidArg(
-            "operator maintenance authority operation does not match transaction".to_string(),
+            "operator maintenance receipt does not match the transaction".to_string(),
         ));
     }
     let authority = OperatorMaintenanceAuthority {
         version: 1,
-        plan_digest: &input.plan_digest,
-        operation: input.operation,
-        target_physical_identity: &input.target_physical_identity,
-        profile: &input.profile,
-        apply_timestamp: &input.apply_timestamp,
+        plan_digest: &input.0.plan_digest,
+        operation: input.0.operation,
+        target_physical_identity: &input.0.target_physical_identity,
+        profile: &input.0.profile,
+        apply_timestamp: &input.0.apply_timestamp,
         source,
         post,
-        committed_receipt_digest: &input.committed_receipt_digest,
+        committed_receipt_digest: &input.0.digest,
     };
     let value_json = serde_json::to_string(&authority)?;
     let now = db::now_utc_iso();
@@ -1006,7 +1222,7 @@ fn insert_operator_maintenance_authority(
          VALUES (?1, ?2, ?3, 1, ?4, ?4)",
         params![
             super::state::OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE,
-            input.plan_digest,
+            input.0.plan_digest,
             value_json,
             now
         ],

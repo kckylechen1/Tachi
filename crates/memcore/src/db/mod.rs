@@ -206,8 +206,8 @@ pub(crate) use operator_maintenance::{
 };
 pub use operator_maintenance::{
     is_kanban_gc_candidate, DeleteMaintenanceOutcome, GcMaintenanceOutcome, MaintenanceClassFact,
-    OperatorMaintenanceAuthorityInput, OperatorMaintenanceOperation, OPERATOR_DELETE_CLASSES,
-    OPERATOR_GC_CLASSES,
+    OperatorMaintenanceCommittedReceiptBinding, OperatorMaintenanceOperation,
+    OperatorMaintenancePlanBinding, OPERATOR_DELETE_CLASSES, OPERATOR_GC_CLASSES,
 };
 /// tachi#1643 durable outbox write/read seams. Crate-internal on purpose: they
 /// take a `Transaction`/`Connection`, and the invariant this leaf exists to

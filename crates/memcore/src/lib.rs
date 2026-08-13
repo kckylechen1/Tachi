@@ -184,8 +184,8 @@ pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, Ev
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
 pub use db::{
     DeleteMaintenanceOutcome, GcMaintenanceOutcome, MaintenanceClassFact,
-    OperatorMaintenanceAuthorityInput, OperatorMaintenanceOperation, OPERATOR_DELETE_CLASSES,
-    OPERATOR_GC_CLASSES,
+    OperatorMaintenanceCommittedReceiptBinding, OperatorMaintenanceOperation,
+    OperatorMaintenancePlanBinding, OPERATOR_DELETE_CLASSES, OPERATOR_GC_CLASSES,
 };
 pub use embed_config::embed_raw_tier_enabled;
 pub use error::{

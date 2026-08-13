@@ -28,14 +28,9 @@ impl MemoryStore {
     /// Re-freeze, mutate, and expose the precommit boundary inside one
     /// `BEGIN IMMEDIATE` transaction. The callback is where the server makes
     /// its prepared receipt durable; an error rolls the whole mutation back.
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_operator_gc_with_precommit_receipt<F>(
         &mut self,
-        cfg: &GcConfig,
-        as_of: &str,
-        kanban_max_age_days: u64,
-        include_kanban: bool,
-        expected: &[db::MaintenanceClassFact],
+        plan: &db::OperatorMaintenancePlanBinding,
         before_commit: F,
     ) -> Result<db::GcMaintenanceOutcome, MemoryError>
     where
@@ -43,19 +38,23 @@ impl MemoryStore {
             &Connection,
             &[db::MaintenanceClassFact],
             &[db::MaintenanceClassFact],
-        ) -> Result<db::OperatorMaintenanceAuthorityInput, MemoryError>,
+        ) -> Result<db::OperatorMaintenanceCommittedReceiptBinding, MemoryError>,
     {
+        self.validate_operator_maintenance_plan(plan, db::OperatorMaintenanceOperation::Gc)?;
+        let (cfg, kanban_max_age_days) = plan.gc_config().ok_or_else(|| {
+            MemoryError::InvalidArg("operator GC plan has the wrong policy".to_string())
+        })?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::apply_operator_gc_candidate_facts(
             &mut self.conn,
-            cfg,
+            &cfg,
             self.profile,
             self.vec_available,
-            as_of,
+            plan.as_of(),
             kanban_max_age_days,
-            include_kanban,
-            expected,
+            true,
+            plan.source(),
             before_commit,
         )
     }
@@ -71,8 +70,7 @@ impl MemoryStore {
     /// Re-freeze and canonically delete one exact ID inside one transaction.
     pub fn apply_operator_delete_with_precommit_receipt<F>(
         &mut self,
-        id: &str,
-        expected: &[db::MaintenanceClassFact],
+        plan: &db::OperatorMaintenancePlanBinding,
         before_commit: F,
     ) -> Result<db::DeleteMaintenanceOutcome, MemoryError>
     where
@@ -80,8 +78,12 @@ impl MemoryStore {
             &Connection,
             &[db::MaintenanceClassFact],
             &[db::MaintenanceClassFact],
-        ) -> Result<db::OperatorMaintenanceAuthorityInput, MemoryError>,
+        ) -> Result<db::OperatorMaintenanceCommittedReceiptBinding, MemoryError>,
     {
+        self.validate_operator_maintenance_plan(plan, db::OperatorMaintenanceOperation::Delete)?;
+        let id = plan.delete_id().ok_or_else(|| {
+            MemoryError::InvalidArg("operator delete plan lost its exact ID".to_string())
+        })?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::apply_operator_delete_candidate_facts(
@@ -89,9 +91,25 @@ impl MemoryStore {
             id,
             self.vec_available,
             self.profile,
-            expected,
+            plan.source(),
             before_commit,
         )
+    }
+
+    fn validate_operator_maintenance_plan(
+        &self,
+        plan: &db::OperatorMaintenancePlanBinding,
+        operation: db::OperatorMaintenanceOperation,
+    ) -> Result<(), MemoryError> {
+        if plan.operation() != operation
+            || plan.profile() != self.profile
+            || self.opened_physical_db_identity.as_deref() != Some(plan.target_physical_identity())
+        {
+            return Err(MemoryError::InvalidArg(
+                "operator maintenance plan does not bind the opened store".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Read the closed, same-transaction authority for one canonical operator

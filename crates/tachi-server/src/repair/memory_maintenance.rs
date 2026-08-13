@@ -6,8 +6,8 @@
 use crate::daemon_lock::{DualDaemonLock, DualLockError};
 use crate::db_ownership::{daemon_ownership, DbOwnership};
 use memcore::{
-    GcConfig, MaintenanceClassFact, MemoryStore, OperatorMaintenanceAuthorityInput,
-    OperatorMaintenanceOperation, StoreProfile, OPERATOR_DELETE_CLASSES, OPERATOR_GC_CLASSES,
+    GcConfig, MaintenanceClassFact, MemoryStore, OperatorMaintenanceCommittedReceiptBinding,
+    OperatorMaintenancePlanBinding, StoreProfile, OPERATOR_DELETE_CLASSES, OPERATOR_GC_CLASSES,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -272,27 +272,6 @@ struct CommittedReceiptAuthority {
 }
 
 impl CommittedReceiptAuthority {
-    fn from_prepared(
-        plan: &MaintenancePlan,
-        prepared: &MaintenanceReceipt,
-    ) -> Result<(Self, MaintenanceReceipt), serde_json::Error> {
-        let committed = prepared.committed()?;
-        Ok((
-            Self {
-                version: AUTHORITY_VERSION,
-                plan_digest: plan.digest.clone(),
-                operation: plan.operation,
-                target_physical_identity: plan.target_physical_identity.clone(),
-                profile: plan.profile.clone(),
-                apply_timestamp: committed.apply_timestamp.clone(),
-                source: committed.source.clone(),
-                post: committed.post.clone(),
-                committed_receipt_digest: committed.digest.clone(),
-            },
-            committed,
-        ))
-    }
-
     fn committed_for_plan(&self, plan: &MaintenancePlan) -> Result<MaintenanceReceipt, String> {
         if self.version != AUTHORITY_VERSION
             || self.plan_digest != plan.digest
@@ -682,8 +661,10 @@ fn apply_common(
         )
         .into());
     }
-    let plan: MaintenancePlan = serde_json::from_slice(&std::fs::read(plan_path)?)?;
+    let plan_bytes = std::fs::read(plan_path)?;
+    let plan: MaintenancePlan = serde_json::from_slice(&plan_bytes)?;
     plan.validate()?;
+    let operator_plan = OperatorMaintenancePlanBinding::from_canonical_json(&plan_bytes)?;
     if plan.operation != expected_operation {
         return Err("maintenance plan operation does not match CLI command".into());
     }
@@ -772,47 +753,33 @@ fn apply_common(
         #[cfg(test)]
         DB_APPLY_CALLS.with(|count| count.set(count.get() + 1));
         let apply_result = match operation {
-            MaintenanceOperation::Gc => {
-                let (cfg, kanban_days) = plan.policy.gc_config()?;
-                store
-                    .apply_operator_gc_with_precommit_receipt(
-                        &cfg,
-                        &plan.as_of,
-                        kanban_days,
-                        true,
-                        &plan.source,
-                        |_, source, post| {
-                            prepare_or_validate_receipt(
-                                &plan,
-                                &receipt_out,
-                                &apply_timestamp,
-                                source,
-                                post,
-                                &mut prepared_receipt,
-                                &mut prepared_file,
-                            )
-                        },
+            MaintenanceOperation::Gc => store
+                .apply_operator_gc_with_precommit_receipt(&operator_plan, |_, source, post| {
+                    prepare_or_validate_receipt(
+                        &plan,
+                        &operator_plan,
+                        &receipt_out,
+                        &apply_timestamp,
+                        source,
+                        post,
+                        &mut prepared_receipt,
+                        &mut prepared_file,
                     )
-                    .map(|_| ())
-            }
+                })
+                .map(|_| ()),
             MaintenanceOperation::Delete => store
-                .apply_operator_delete_with_precommit_receipt(
-                    plan.delete_id
-                        .as_deref()
-                        .ok_or("validated delete plan lost its exact ID")?,
-                    &plan.source,
-                    |_, source, post| {
-                        prepare_or_validate_receipt(
-                            &plan,
-                            &receipt_out,
-                            &apply_timestamp,
-                            source,
-                            post,
-                            &mut prepared_receipt,
-                            &mut prepared_file,
-                        )
-                    },
-                )
+                .apply_operator_delete_with_precommit_receipt(&operator_plan, |_, source, post| {
+                    prepare_or_validate_receipt(
+                        &plan,
+                        &operator_plan,
+                        &receipt_out,
+                        &apply_timestamp,
+                        source,
+                        post,
+                        &mut prepared_receipt,
+                        &mut prepared_file,
+                    )
+                })
                 .map(|_| ()),
         };
         if let Err(error) = apply_result {
@@ -922,13 +889,14 @@ fn apply_common(
 #[allow(clippy::too_many_arguments)]
 fn prepare_or_validate_receipt(
     plan: &MaintenancePlan,
+    operator_plan: &OperatorMaintenancePlanBinding,
     receipt_out: &Path,
     apply_timestamp: &str,
     source: &[MaintenanceClassFact],
     post: &[MaintenanceClassFact],
     prepared_receipt: &mut Option<MaintenanceReceipt>,
     prepared_file: &mut Option<File>,
-) -> Result<OperatorMaintenanceAuthorityInput, memcore::MemoryError> {
+) -> Result<OperatorMaintenanceCommittedReceiptBinding, memcore::MemoryError> {
     if let Some(existing) = prepared_receipt {
         if existing.source != source || existing.post != post {
             return Err(memcore::MemoryError::InvalidArg(
@@ -992,19 +960,12 @@ fn prepare_or_validate_receipt(
             "maintenance apply lost its prepared receipt before authority write".to_string(),
         )
     })?;
-    let (authority, _committed) = CommittedReceiptAuthority::from_prepared(plan, prepared)
+    let committed = prepared
+        .committed()
         .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
-    OperatorMaintenanceAuthorityInput::new(
-        authority.plan_digest,
-        match authority.operation {
-            MaintenanceOperation::Gc => OperatorMaintenanceOperation::Gc,
-            MaintenanceOperation::Delete => OperatorMaintenanceOperation::Delete,
-        },
-        authority.target_physical_identity,
-        authority.profile,
-        authority.apply_timestamp,
-        authority.committed_receipt_digest,
-    )
+    let committed_bytes = serde_json::to_vec(&committed)
+        .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
+    OperatorMaintenanceCommittedReceiptBinding::from_canonical_json(operator_plan, &committed_bytes)
 }
 
 #[cfg(test)]
@@ -1973,32 +1934,122 @@ mod tests {
     #[test]
     fn public_operator_apply_cannot_forge_arbitrary_authority_json() {
         let fixture = fixture();
+        plan_delete(&fixture);
+        let plan_bytes = std::fs::read(&fixture.plan_path).unwrap();
+        let plan: MaintenancePlan = serde_json::from_slice(&plan_bytes).unwrap();
+        let operator_plan =
+            OperatorMaintenancePlanBinding::from_canonical_json(&plan_bytes).unwrap();
         let mut store =
             MemoryStore::open_existing_read_write(&fixture.db_path.to_string_lossy()).unwrap();
-        let source = store.plan_operator_delete("delete-me").unwrap();
-        let forged_key = "a".repeat(64);
         let error = store
-            .apply_operator_delete_with_precommit_receipt(
-                "delete-me",
-                &source,
-                |_tx, _source, _post| {
-                    OperatorMaintenanceAuthorityInput::new(
-                        forged_key.clone(),
-                        OperatorMaintenanceOperation::Gc,
-                        "unix:1:2".to_string(),
-                        "tachi_full".to_string(),
-                        "2026-08-13T00:00:00Z".to_string(),
-                        "b".repeat(64),
-                    )
-                },
-            )
-            .expect_err("typed authority operation must bind the delete transaction");
-        assert!(error.to_string().contains("operation"), "{error}");
+            .apply_operator_delete_with_precommit_receipt(&operator_plan, |_tx, source, post| {
+                let receipt = MaintenanceReceipt {
+                    version: RECEIPT_VERSION,
+                    plan_digest: plan.digest.clone(),
+                    operation: plan.operation,
+                    target_path: plan.target_path.clone(),
+                    target_physical_identity: plan.target_physical_identity.clone(),
+                    profile: plan.profile.clone(),
+                    phase: ReceiptPhase::Committed,
+                    apply_timestamp: "2026-08-13T00:00:00Z".to_string(),
+                    source: source.to_vec(),
+                    post: post.to_vec(),
+                    cache_invalidated: true,
+                    reconciliation: "complete".to_string(),
+                    digest: String::new(),
+                }
+                .seal()
+                .unwrap();
+                let mut value = serde_json::to_value(receipt).unwrap();
+                value["body"] = serde_json::json!("forged maintenance body");
+                OperatorMaintenanceCommittedReceiptBinding::from_canonical_json(
+                    &operator_plan,
+                    &serde_json::to_vec(&value).unwrap(),
+                )
+            })
+            .expect_err("unknown/body receipt authority must roll back");
+        assert!(error.to_string().contains("unknown field"), "{error}");
         assert!(memory_exists(&fixture.db_path));
         assert!(store
-            .get_state_kv("operator_maintenance_receipt", &forged_key)
+            .get_state_kv("operator_maintenance_receipt", &plan.digest)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn same_operation_cannot_forge_independent_authority_bindings() {
+        let mut violations = Vec::new();
+        for forged_field in [
+            "plan_digest",
+            "physical_identity",
+            "profile",
+            "receipt_digest",
+        ] {
+            let fixture = fixture();
+            plan_delete(&fixture);
+            let mut plan: MaintenancePlan =
+                serde_json::from_slice(&std::fs::read(&fixture.plan_path).unwrap()).unwrap();
+            match forged_field {
+                "plan_digest" => plan.digest = "a".repeat(64),
+                "physical_identity" => {
+                    plan.target_physical_identity = "unix:9:9".to_string();
+                    plan = plan.seal().unwrap();
+                }
+                "profile" => {
+                    plan.profile = "portable_kernel".to_string();
+                    plan = plan.seal().unwrap();
+                }
+                "receipt_digest" => {}
+                _ => unreachable!(),
+            }
+            let plan_bytes = serde_json::to_vec(&plan).unwrap();
+            let mut store =
+                MemoryStore::open_existing_read_write(&fixture.db_path.to_string_lossy()).unwrap();
+            let result = OperatorMaintenancePlanBinding::from_canonical_json(&plan_bytes).and_then(
+                |operator_plan| {
+                    store.apply_operator_delete_with_precommit_receipt(
+                        &operator_plan,
+                        |_tx, source, post| {
+                            let mut receipt = MaintenanceReceipt {
+                                version: RECEIPT_VERSION,
+                                plan_digest: plan.digest.clone(),
+                                operation: plan.operation,
+                                target_path: plan.target_path.clone(),
+                                target_physical_identity: plan.target_physical_identity.clone(),
+                                profile: plan.profile.clone(),
+                                phase: ReceiptPhase::Committed,
+                                apply_timestamp: "2026-08-13T00:00:00Z".to_string(),
+                                source: source.to_vec(),
+                                post: post.to_vec(),
+                                cache_invalidated: true,
+                                reconciliation: "complete".to_string(),
+                                digest: String::new(),
+                            }
+                            .seal()
+                            .unwrap();
+                            if forged_field == "receipt_digest" {
+                                receipt.digest = "c".repeat(64);
+                            }
+                            OperatorMaintenanceCommittedReceiptBinding::from_canonical_json(
+                                &operator_plan,
+                                &serde_json::to_vec(&receipt).unwrap(),
+                            )
+                        },
+                    )
+                },
+            );
+            let row_exists = store
+                .get_state_kv("operator_maintenance_receipt", &plan.digest)
+                .unwrap()
+                .is_some();
+            if result.is_ok() || !memory_exists(&fixture.db_path) || row_exists {
+                violations.push(forged_field);
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "same-operation forgeries committed instead of rolling back: {violations:?}"
+        );
     }
 
     #[test]
