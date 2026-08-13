@@ -3795,7 +3795,7 @@ fn refuse_reserved_rem_operation_mutation(id: &str, action: &str) -> Result<(), 
 /// row is not retired and preserves each public by-id API's established no-op
 /// semantics. The typed sticky-cutover implementation does not call this
 /// ordinary-writer seam; its frozen-plan CAS remains the sole exception.
-pub(crate) fn refuse_retired_sticky_row_within_tx(
+pub fn refuse_retired_sticky_row_within_tx(
     tx: &Transaction<'_>,
     id: &str,
     operation: &str,

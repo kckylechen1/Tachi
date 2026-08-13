@@ -130,6 +130,7 @@ pub(crate) use memory_crud::query_hash;
 #[cfg(test)]
 pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
+pub use memory_crud::refuse_retired_sticky_row_within_tx;
 pub(crate) use memory_crud::search_fts_raw_match;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
 pub(crate) use memory_crud::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals;
@@ -156,9 +157,8 @@ pub use memory_crud::{
 };
 pub(crate) use memory_crud::{
     archive_memory_within_tx, archive_with_metadata_if_expected_state,
-    refuse_retired_sticky_row_within_tx, restore_with_metadata_if_expected_state,
-    supersede_memory_within_tx, supersede_with_metadata_if_expected_state,
-    update_with_revision_if_expected_state,
+    restore_with_metadata_if_expected_state, supersede_memory_within_tx,
+    supersede_with_metadata_if_expected_state, update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
 /// function's own doc for when a hand-built fixture is legitimate.

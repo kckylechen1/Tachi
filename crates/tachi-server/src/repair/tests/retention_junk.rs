@@ -44,6 +44,96 @@ fn r2_retention_backfill() {
 }
 
 #[test]
+fn r2_skips_canonical_and_malformed_retired_sticky_rows_while_ordinary_progresses() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "retired-sticky.db");
+    insert_memory(
+        &conn,
+        "ordinary",
+        "/notes/ordinary",
+        "ordinary",
+        "{}",
+        None,
+        None,
+    );
+    insert_memory(
+        &conn,
+        "sticky-canonical",
+        "/sticky/legacy",
+        "canonical sticky",
+        "{}",
+        None,
+        None,
+    );
+    insert_memory(
+        &conn,
+        "sticky-malformed",
+        "//STICKY///legacy",
+        "malformed sticky",
+        "{}",
+        None,
+        None,
+    );
+    conn.execute(
+        "UPDATE memories SET category='sticky' WHERE id='sticky-canonical'",
+        [],
+    )
+    .unwrap();
+    let sticky_before: Vec<(String, String, Option<String>)> =
+        ["sticky-canonical", "sticky-malformed"]
+            .into_iter()
+            .map(|id| {
+                conn.query_row(
+                    "SELECT path, category, retention_policy FROM memories WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap()
+            })
+            .collect();
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = RetentionBackfill.dry_run(&mut ctx).unwrap();
+    assert_eq!(
+        dry.findings
+            .iter()
+            .map(|finding| finding.count)
+            .sum::<usize>(),
+        1,
+        "R2 must not claim retired sticky rows as backfill candidates: {dry:?}"
+    );
+
+    let applied = RetentionBackfill.apply(&mut ctx).unwrap();
+    assert_eq!(applied.applied, 1);
+    assert_eq!(
+        ctx.conn
+            .query_row(
+                "SELECT retention_policy FROM memories WHERE id='ordinary'",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+            .as_deref(),
+        Some("durable")
+    );
+    let sticky_after: Vec<(String, String, Option<String>)> =
+        ["sticky-canonical", "sticky-malformed"]
+            .into_iter()
+            .map(|id| {
+                ctx.conn
+                    .query_row(
+                        "SELECT path, category, retention_policy FROM memories WHERE id=?1",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap()
+            })
+            .collect();
+    assert_eq!(sticky_after, sticky_before);
+}
+
+#[test]
 fn r8_routes_exact_duplicates_to_dedupe_without_deleting_evidence() {
     let dir = TempDir::new().unwrap();
     let (path, conn) = fresh_db(&dir, "junk.db");

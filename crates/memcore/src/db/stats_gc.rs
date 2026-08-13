@@ -116,19 +116,39 @@ fn gc_tables_at(
         [],
     )?;
 
-    // Reconcile query_diversity after pruning access_history rows.
-    let diversity_updated: usize = tx.execute(
-        "UPDATE memories
-         SET query_diversity = (
-             SELECT COUNT(DISTINCT query_hash)
-             FROM access_history
-             WHERE memory_id = memories.id AND query_hash != ''
-         )
-         WHERE lower(trim(category)) <> 'sticky'
-           AND lower(trim(path)) <> '/sticky'
-           AND lower(trim(path)) NOT LIKE '/sticky/%'",
-        [],
-    )?;
+    // Reconcile query_diversity after pruning access_history rows. Candidate
+    // discovery deliberately does not approximate the retired-sticky
+    // classifier in SQL: normalize/classify every id against the canonical
+    // ordinary-writer guard in this same writer transaction, then mutate only
+    // the ids it admitted.
+    let diversity_candidate_ids = {
+        let mut stmt = tx.prepare("SELECT id FROM memories")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    let mut diversity_ordinary_ids = Vec::with_capacity(diversity_candidate_ids.len());
+    for id in diversity_candidate_ids {
+        match super::refuse_retired_sticky_row_within_tx(&tx, &id, "query-diversity reconciled") {
+            Ok(()) => diversity_ordinary_ids.push(id),
+            Err(MemoryError::InvalidArg(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let mut diversity_updated = 0usize;
+    for id in diversity_ordinary_ids {
+        diversity_updated += tx.execute(
+            "UPDATE memories
+             SET query_diversity = (
+                 SELECT COUNT(DISTINCT query_hash)
+                 FROM access_history
+                 WHERE memory_id = memories.id AND query_hash != ''
+             )
+             WHERE id = ?1",
+            [&id],
+        )?;
+    }
 
     // 6. Orphaned agent_known_state (PRODUCT; memory was deleted but
     //    known-state remained)
@@ -377,6 +397,111 @@ mod a2a_body_retention_tests {
             1
         );
     }
+
+    fn seed_memory(conn: &Connection, id: &str, path: &str, category: &str, query_diversity: i64) {
+        conn.execute(
+            "INSERT INTO memories (
+                 id, path, summary, text, importance, timestamp, category, source, scope,
+                 created_at, updated_at, last_access, revision, retention_policy, query_diversity
+             ) VALUES (?1, ?2, '', ?1, 0.4, '2020-01-01T00:00:00Z', ?3, 'manual', 'general',
+                       '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z',
+                       '2020-01-01T00:00:00Z', 1, 'durable', ?4)",
+            params![id, path, category, query_diversity],
+        )
+        .expect("seed memory");
+    }
+
+    fn seed_display_access(conn: &Connection, id: &str, query_hash: &str) {
+        conn.execute(
+            "INSERT INTO access_history(memory_id, accessed_at, query_hash, event_kind)
+             VALUES (?1, '2026-08-13T00:00:00Z', ?2, 'display')",
+            params![id, query_hash],
+        )
+        .expect("seed display access");
+    }
+
+    #[test]
+    fn gc_tables_preserves_malformed_retired_sticky_diversity_while_ordinary_reconciles() {
+        let mut conn = product_conn();
+        seed_memory(&conn, "ordinary-diversity", "/notes/ordinary", "fact", 7);
+        seed_memory(
+            &conn,
+            "sticky-malformed-diversity",
+            "//STICKY///legacy",
+            "fact",
+            7,
+        );
+        seed_display_access(&conn, "ordinary-diversity", "ordinary-query");
+        seed_display_access(&conn, "sticky-malformed-diversity", "sticky-query");
+
+        gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            "2026-08-13T12:00:00Z",
+        )
+        .expect("stats GC");
+
+        let diversity: Vec<(String, i64)> = ["ordinary-diversity", "sticky-malformed-diversity"]
+            .into_iter()
+            .map(|id| {
+                conn.query_row(
+                    "SELECT path, query_diversity FROM memories WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            diversity,
+            vec![
+                ("/notes/ordinary".to_string(), 1),
+                ("//STICKY///legacy".to_string(), 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn gc_archive_preserves_malformed_retired_sticky_while_ordinary_progresses() {
+        let conn = product_conn();
+        seed_memory(&conn, "ordinary-archive", "/notes/ordinary", "fact", 0);
+        seed_memory(
+            &conn,
+            "sticky-malformed-archive",
+            "//STICKY///legacy",
+            "fact",
+            0,
+        );
+        conn.execute(
+            "UPDATE memories SET importance=0.2 WHERE id IN ('ordinary-archive', 'sticky-malformed-archive')",
+            [],
+        )
+        .expect("lower archive fixture importance");
+
+        let archived =
+            archive_stale_memories_with_config(&conn, 60, &crate::RecallConfig::default())
+                .expect("archive stale memories");
+        assert_eq!(archived, 1);
+        let states: Vec<(String, i64, i64)> = ["ordinary-archive", "sticky-malformed-archive"]
+            .into_iter()
+            .map(|id| {
+                conn.query_row(
+                    "SELECT path, archived, revision FROM memories WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("/notes/ordinary".to_string(), 1, 2),
+                ("//STICKY///legacy".to_string(), 0, 1),
+            ]
+        );
+    }
 }
 
 // ─── AUTO-ARCHIVE STALE MEMORIES ──────────────────────────────────────────────
@@ -402,8 +527,8 @@ struct ArchivalPass {
     importance_below: f64,
     /// Which `retention_policy` values this predicate claims.
     retention_scope: &'static str,
-    /// `UPDATE … RETURNING id`; `?1` is `stale_days`, `?2` the archival time.
-    sql: String,
+    /// Candidate predicate; `?1` is `stale_days`.
+    predicate_sql: String,
 }
 
 /// Result of running one [`ArchivalPass`].
@@ -413,29 +538,47 @@ struct ArchivalOutcome {
 }
 
 /// Run a single archival pass and capture the ids it actually archived.
-///
-/// The `query_map` iterator is drained to exhaustion rather than run through
-/// `execute`: with a `RETURNING` clause the modified rows are the statement's
-/// output, so stepping it to completion is what both applies the whole update
-/// and yields every id. `execute` is the wrong verb for a returning statement.
-///
+/// Candidate discovery, canonical retired-sticky classification, and mutation
+/// all share the caller's immediate writer transaction.
 fn run_archival_pass(
-    conn: &Connection,
+    tx: &Transaction<'_>,
     pass: &ArchivalPass,
     stale_days: u32,
     now: &str,
 ) -> Result<ArchivalOutcome, MemoryError> {
-    let mut stmt = conn.prepare(&pass.sql)?;
-    let mut count = 0usize;
-    let mut ids: Vec<String> = Vec::new();
-    let rows = stmt.query_map(params![stale_days, now], |row| row.get::<_, String>(0))?;
-    for row in rows {
-        let id = row?;
-        count += 1;
-        ids.push(id);
+    let candidate_ids = {
+        let sql = format!("SELECT id FROM memories WHERE {}", pass.predicate_sql);
+        let mut stmt = tx.prepare(&sql)?;
+        let ids = stmt
+            .query_map([stale_days], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    let mut ordinary_ids = Vec::with_capacity(candidate_ids.len());
+    for id in candidate_ids {
+        match super::refuse_retired_sticky_row_within_tx(tx, &id, "GC-archived") {
+            Ok(()) => ordinary_ids.push(id),
+            Err(MemoryError::InvalidArg(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let mut ids = Vec::with_capacity(ordinary_ids.len());
+    for id in ordinary_ids {
+        if tx.execute(
+            "UPDATE memories
+             SET archived = 1, updated_at = ?1, revision = revision + 1
+             WHERE id = ?2",
+            params![now, id],
+        )? == 1
+        {
+            ids.push(id);
+        }
     }
     ids.sort();
-    Ok(ArchivalOutcome { count, ids })
+    Ok(ArchivalOutcome {
+        count: ids.len(),
+        ids,
+    })
 }
 
 pub(crate) fn write_gc_archived_receipt(
@@ -572,18 +715,13 @@ pub fn archive_stale_memories_with_config(
             recency_column,
             importance_below: 0.5,
             retention_scope: "durable_or_unset",
-            sql: format!(
-                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
-                 WHERE archived = 0
-                   AND lower(trim(category)) <> 'sticky'
-                   AND lower(trim(path)) <> '/sticky'
-                   AND lower(trim(path)) NOT LIKE '/sticky/%'
+            predicate_sql: format!(
+                "archived = 0
                    AND {recency_column} IS NOT NULL
                    AND unixepoch({recency_column}) < unixepoch('now', '-' || ?1 || ' days')
                    AND importance < 0.5
                    AND (retention_policy IS NULL OR retention_policy = 'durable')
-                   {exempt_clause}
-                 RETURNING id"
+                   {exempt_clause}"
             ),
         },
         ArchivalPass {
@@ -591,18 +729,13 @@ pub fn archive_stale_memories_with_config(
             recency_column: "timestamp",
             importance_below: 0.3,
             retention_scope: "durable_or_unset",
-            sql: format!(
-                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
-                 WHERE archived = 0
-                   AND lower(trim(category)) <> 'sticky'
-                   AND lower(trim(path)) <> '/sticky'
-                   AND lower(trim(path)) NOT LIKE '/sticky/%'
+            predicate_sql: format!(
+                "archived = 0
                    AND {recency_column} IS NULL
                    AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
                    AND importance < 0.3
                    AND (retention_policy IS NULL OR retention_policy = 'durable')
-                   {exempt_clause}
-                 RETURNING id"
+                   {exempt_clause}"
             ),
         },
         // Ephemeral: more aggressive thresholds (importance < 0.7 / < 0.5)
@@ -611,17 +744,12 @@ pub fn archive_stale_memories_with_config(
             recency_column,
             importance_below: 0.7,
             retention_scope: "ephemeral",
-            sql: format!(
-                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
-                  WHERE archived = 0
-                    AND lower(trim(category)) <> 'sticky'
-                    AND lower(trim(path)) <> '/sticky'
-                    AND lower(trim(path)) NOT LIKE '/sticky/%'
+            predicate_sql: format!(
+                "archived = 0
                     AND {recency_column} IS NOT NULL
                     AND unixepoch({recency_column}) < unixepoch('now', '-' || ?1 || ' days')
                     AND importance < 0.7
-                    AND retention_policy = 'ephemeral'
-                  RETURNING id"
+                    AND retention_policy = 'ephemeral'"
             ),
         },
         ArchivalPass {
@@ -629,17 +757,12 @@ pub fn archive_stale_memories_with_config(
             recency_column: "timestamp",
             importance_below: 0.5,
             retention_scope: "ephemeral",
-            sql: format!(
-                "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
-                  WHERE archived = 0
-                    AND lower(trim(category)) <> 'sticky'
-                    AND lower(trim(path)) <> '/sticky'
-                    AND lower(trim(path)) NOT LIKE '/sticky/%'
+            predicate_sql: format!(
+                "archived = 0
                     AND {recency_column} IS NULL
                     AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
                     AND importance < 0.5
-                    AND retention_policy = 'ephemeral'
-                  RETURNING id"
+                    AND retention_policy = 'ephemeral'"
             ),
         },
     ];
