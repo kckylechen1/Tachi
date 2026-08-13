@@ -173,12 +173,7 @@ fn legacy_context_feedback_receipt(
                 "source": "pattern_feedback",
                 "note": "pattern feedback updates continuity projection counters via the event ledger",
             }),
-            created_at: pattern
-                .get("counters")
-                .and_then(|counters| counters.get("last_seen"))
-                .and_then(Value::as_str)
-                .unwrap_or("1970-01-01T00:00:00Z")
-                .to_string(),
+            created_at: super::now_rfc3339(),
         };
         let mut preview_events = vec![event.clone()];
         preview_events.extend(prior_events.iter().rev().cloned());

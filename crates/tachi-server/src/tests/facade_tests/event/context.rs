@@ -1,6 +1,10 @@
 use super::*;
 
-fn normalize_legacy_context_feedback_event_ids(value: &mut Value) {
+fn normalize_legacy_context_feedback_volatility(
+    value: &mut Value,
+    call_started_ms: i64,
+    call_finished_ms: i64,
+) {
     match value {
         Value::Object(object) => {
             if object
@@ -10,13 +14,36 @@ fn normalize_legacy_context_feedback_event_ids(value: &mut Value) {
             {
                 object.insert("event_id".to_string(), json!("<volatile-event-id>"));
             }
+            let is_current_call_timestamp = object
+                .get("last_seen")
+                .and_then(Value::as_str)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| {
+                    let timestamp_ms = value.timestamp_millis();
+                    (call_started_ms..=call_finished_ms).contains(&timestamp_ms)
+                })
+                .unwrap_or(false);
+            if is_current_call_timestamp {
+                object.insert(
+                    "last_seen".to_string(),
+                    json!("<volatile-current-call-time>"),
+                );
+            }
             for value in object.values_mut() {
-                normalize_legacy_context_feedback_event_ids(value);
+                normalize_legacy_context_feedback_volatility(
+                    value,
+                    call_started_ms,
+                    call_finished_ms,
+                );
             }
         }
         Value::Array(values) => {
             for value in values {
-                normalize_legacy_context_feedback_event_ids(value);
+                normalize_legacy_context_feedback_volatility(
+                    value,
+                    call_started_ms,
+                    call_finished_ms,
+                );
             }
         }
         _ => {}
@@ -70,12 +97,18 @@ async fn tachi_event_context_preserves_legacy_feedback_receipt_without_side_effe
     let mut context = tachi_event_params("context");
     context.session_id = Some("caller-session-is-not-admission".to_string());
     context.projection_hints = vec!["pattern".to_string()];
+    let first_started_ms = chrono::Utc::now().timestamp_millis();
     let first_body = crate::event_ops::handle_tachi_event(&server, context.clone())
         .await
         .expect("first context parity response");
+    let first_finished_ms = chrono::Utc::now().timestamp_millis();
     let first: Value = serde_json::from_str(&first_body).expect("first context parity JSON");
     let mut feedback = first["feedback"].clone();
-    normalize_legacy_context_feedback_event_ids(&mut feedback);
+    normalize_legacy_context_feedback_volatility(
+        &mut feedback,
+        first_started_ms,
+        first_finished_ms,
+    );
 
     assert_eq!(
         feedback,
@@ -132,15 +165,24 @@ async fn tachi_event_context_preserves_legacy_feedback_receipt_without_side_effe
             "saved_count": 1,
             "status": "saved"
         }),
-        "only the legacy UUID event id is normalized; the remaining public feedback payload is frozen from base 45ffac21"
+        "only legacy UUID event ids and bounded current-call timestamps are normalized; the remaining public feedback payload is frozen from base 45ffac21"
     );
 
+    let second_started_ms = chrono::Utc::now().timestamp_millis();
     let second_body = crate::event_ops::handle_tachi_event(&server, context)
         .await
         .expect("second context parity response");
+    let second_finished_ms = chrono::Utc::now().timestamp_millis();
+    let second: Value = serde_json::from_str(&second_body).expect("second context parity JSON");
+    let mut second_feedback = second["feedback"].clone();
+    normalize_legacy_context_feedback_volatility(
+        &mut second_feedback,
+        second_started_ms,
+        second_finished_ms,
+    );
     assert_eq!(
-        second_body, first_body,
-        "the synthesized legacy receipt must be deterministic without writes"
+        second_feedback, feedback,
+        "stable legacy receipt fields must remain deterministic without writes"
     );
     let memories_after = server
         .with_global_store_read(|store| store.get_all(100).map_err(|error| error.to_string()))
@@ -163,6 +205,137 @@ async fn tachi_event_context_preserves_legacy_feedback_receipt_without_side_effe
     assert_eq!(
         events_after, events_before,
         "context appended a feedback event"
+    );
+}
+
+#[tokio::test]
+async fn tachi_event_context_preview_uses_current_time_for_mature_pattern_without_writes() {
+    let server = make_server();
+    let historical_times = [
+        "2001-02-03T04:05:00Z",
+        "2001-02-03T04:06:00Z",
+        "2001-02-03T04:07:00Z",
+    ];
+
+    for ((id, event_type), created_at) in [
+        ("context-mature-candidate", "pattern.candidate"),
+        ("context-mature-seen", "pattern.seen"),
+        ("context-mature-hit", "pattern.hit"),
+    ]
+    .into_iter()
+    .zip(historical_times)
+    {
+        let mut emit = tachi_event_params("emit");
+        emit.id = Some(id.to_string());
+        emit.source_repo = Some("sigil".to_string());
+        emit.adapter = Some("facade-test".to_string());
+        emit.domain = Some("agent_os".to_string());
+        emit.session_id = Some("historical-mature-pattern".to_string());
+        emit.actor = Some("codex".to_string());
+        emit.event_type = Some(event_type.to_string());
+        emit.authority = Some("collect_only".to_string());
+        emit.projection_hints = vec!["pattern".to_string()];
+        emit.created_at = Some(created_at.to_string());
+        emit.payload = Some(json!({
+            "pattern_key": "historical-mature-context",
+            "summary": "Historical mature context pattern",
+            "text": "A pure context preview reports the current observation time.",
+        }));
+        crate::event_ops::handle_tachi_event(&server, emit)
+            .await
+            .expect("emit historical mature pattern event");
+    }
+
+    let mut project = tachi_event_params("project");
+    project.projection_hints = vec!["pattern".to_string()];
+    project.limit = 10;
+    let projected_body = crate::event_ops::handle_tachi_event(&server, project)
+        .await
+        .expect("project historical mature pattern");
+    let projected: Value =
+        serde_json::from_str(&projected_body).expect("historical projection JSON");
+    assert_eq!(projected["promotion_candidate_count"], json!(1));
+    let memory_id = projected["promotion_candidates"][0]["memory_id"]
+        .as_str()
+        .expect("historical promotion candidate memory id")
+        .to_string();
+    assert_eq!(
+        projected["promotion_candidates"][0]["counters"],
+        json!({
+            "confidence": 1.0,
+            "hit": 1,
+            "last_seen": "2001-02-03T04:05:00.000Z",
+            "miss": 0,
+            "seen": 3,
+        }),
+        "fixture must be mature and historical before context"
+    );
+
+    let memories_before = server
+        .with_global_store_read(|store| store.get_all(100).map_err(|error| error.to_string()))
+        .and_then(|entries| serde_json::to_value(entries).map_err(|error| error.to_string()))
+        .expect("snapshot memories before mature context");
+    let events_before = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("snapshot events before mature context");
+
+    let mut context = tachi_event_params("context");
+    context.projection_hints = vec!["pattern".to_string()];
+    let call_started_ms = chrono::Utc::now().timestamp_millis();
+    let context_body = crate::event_ops::handle_tachi_event(&server, context)
+        .await
+        .expect("mature context response");
+    let call_finished_ms = chrono::Utc::now().timestamp_millis();
+    let context_json: Value = serde_json::from_str(&context_body).expect("mature context JSON");
+    let candidate =
+        &context_json["feedback"]["events"][0]["projection_report"]["promotion_candidates"][0];
+    assert_eq!(candidate["memory_id"], json!(memory_id));
+    assert_eq!(candidate["projection"], json!("pattern"));
+    assert_eq!(candidate["reason"], json!("hit_threshold"));
+    assert_eq!(candidate["tier"], json!("consolidated"));
+    assert_eq!(candidate["counters"]["seen"], json!(4));
+    assert_eq!(candidate["counters"]["hit"], json!(1));
+    assert_eq!(candidate["counters"]["miss"], json!(0));
+    assert_eq!(candidate["counters"]["confidence"], json!(1.0));
+    let candidate_last_seen = candidate["counters"]["last_seen"]
+        .as_str()
+        .expect("mature preview candidate last_seen");
+    let candidate_last_seen_ms = chrono::DateTime::parse_from_rfc3339(candidate_last_seen)
+        .expect("mature preview last_seen is RFC3339")
+        .timestamp_millis();
+    assert!(
+        (call_started_ms..=call_finished_ms).contains(&candidate_last_seen_ms),
+        "legacy context semantics require current call time; got {candidate_last_seen} outside {call_started_ms}..={call_finished_ms}"
+    );
+
+    let memories_after = server
+        .with_global_store_read(|store| store.get_all(100).map_err(|error| error.to_string()))
+        .and_then(|entries| serde_json::to_value(entries).map_err(|error| error.to_string()))
+        .expect("snapshot memories after mature context");
+    let events_after = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("snapshot events after mature context");
+    assert_eq!(
+        memories_after, memories_before,
+        "mature context preview mutated memory or counters"
+    );
+    assert_eq!(
+        events_after, events_before,
+        "mature context preview appended an event"
     );
 }
 
