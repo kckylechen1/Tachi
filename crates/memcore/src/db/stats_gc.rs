@@ -25,6 +25,16 @@ pub fn gc_tables(
     cfg: &GcConfig,
     profile: StoreProfile,
 ) -> Result<serde_json::Value, MemoryError> {
+    let as_of = now_utc_iso();
+    gc_tables_at(conn, cfg, profile, &as_of)
+}
+
+fn gc_tables_at(
+    conn: &mut Connection,
+    cfg: &GcConfig,
+    profile: StoreProfile,
+    as_of: &str,
+) -> Result<serde_json::Value, MemoryError> {
     let product = profile.includes_product();
     let tx = conn.transaction()?;
 
@@ -146,6 +156,35 @@ pub fn gc_tables(
     );
     let impression_quota_deleted = tx.execute(&impression_quota_sql, [])?;
 
+    // #1751 v32: body content is retained until the authoritative terminal
+    // receipt is at least 90 days old. The digest and every other envelope /
+    // receipt field remain immutable. A bounded subquery prevents one GC call
+    // from monopolizing the Product writer lock; later calls resume naturally.
+    const A2A_BODY_SCRUB_BATCH: i64 = 100;
+    let a2a_bodies_scrubbed = if product {
+        tx.execute(
+            "UPDATE a2a_envelopes SET body=NULL
+             WHERE envelope_id IN (
+                 SELECT e.envelope_id
+                   FROM a2a_envelopes e
+                   JOIN a2a_delivery_receipts r
+                     ON r.envelope_id=e.envelope_id
+                    AND r.state=e.current_state
+                    AND r.envelope_version=e.state_version
+                  WHERE e.body IS NOT NULL
+                    AND e.current_state IN ('consumed','expired')
+                    AND unixepoch(r.occurred_at, '+90 days') <= unixepoch(?1)
+                  ORDER BY r.occurred_at,e.envelope_id
+                  LIMIT ?2
+             )",
+            params![as_of, A2A_BODY_SCRUB_BATCH],
+        )?
+    } else {
+        0
+    };
+    #[cfg(test)]
+    test_hooks::fail_after_a2a_body_scrub()?;
+
     tx.commit()?;
 
     Ok(serde_json::json!({
@@ -157,7 +196,184 @@ pub fn gc_tables(
         "orphaned_access_history": orphan_deleted,
         "orphaned_agent_known_state": orphan_aks_deleted,
         "recall_impression_groups_pruned": impression_age_deleted + impression_quota_deleted,
+        "a2a_bodies_scrubbed": a2a_bodies_scrubbed,
     }))
+}
+
+#[cfg(test)]
+mod test_hooks {
+    use std::cell::Cell;
+
+    use crate::error::MemoryError;
+
+    thread_local! {
+        static FAIL_AFTER_A2A_BODY_SCRUB: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn arm_fail_after_a2a_body_scrub() {
+        FAIL_AFTER_A2A_BODY_SCRUB.with(|flag| flag.set(true));
+    }
+
+    pub(super) fn fail_after_a2a_body_scrub() -> Result<(), MemoryError> {
+        if FAIL_AFTER_A2A_BODY_SCRUB.with(|flag| flag.replace(false)) {
+            return Err(MemoryError::Internal(
+                "test_hooks: injected failure after A2A body scrub".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod a2a_body_retention_tests {
+    use super::*;
+
+    fn product_conn() -> Connection {
+        let _ = libsimple::enable_auto_extension();
+        crate::db::register_sqlite_vec();
+        let conn = Connection::open_in_memory().expect("open product fixture");
+        crate::db::schema::init_schema(&conn).expect("initialize current Product schema");
+        conn.execute_batch(
+            "INSERT INTO agent_identities(agent_identity_id,created_at)
+                 VALUES ('retention-agent','2026-01-01T00:00:00.000Z');
+             INSERT INTO identity_admissions
+                 (admission_id,agent_identity_id,connection_id,state,created_at)
+                 VALUES ('retention-admission','retention-agent','retention-connection',
+                         'self_asserted','2026-01-01T00:00:00.000Z');",
+        )
+        .expect("seed retention identity");
+        conn
+    }
+
+    fn seed_envelope(conn: &Connection, id: &str, state: &str, occurred_at: Option<&str>) {
+        let version = if state == "received" { 1 } else { 3 };
+        conn.execute(
+            "INSERT INTO a2a_envelopes
+             (envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,
+              recipient_agent_identity_id,recipient_admission_id,subject_ref,body,
+              body_digest,issuer_identity_assurance,recipient_identity_assurance,
+              issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,
+              recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version)
+             VALUES (?1,'turn_response/v1','retention-agent','retention-admission',
+                     'retention-agent','retention-admission','peer_publication:retention',?2,
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'self_asserted','self_asserted','same_host','same_host',
+                     'current_local_connection','historical_local_admission',?1,
+                     '2026-01-01T00:00:00.000Z','2027-01-01T00:00:00.000Z',?3,?4)",
+            params![id, format!("body-{id}"), state, version],
+        )
+        .expect("seed envelope");
+        if let Some(occurred_at) = occurred_at {
+            conn.execute(
+                "INSERT INTO a2a_delivery_receipts
+                 (receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,
+                  actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at)
+                 VALUES (?1 || ':receipt',?1,?2,?3,'retention-agent','retention-admission',
+                         'self_asserted','same_host','current_local_connection',?4)",
+                params![id, version, state, occurred_at],
+            )
+            .expect("seed matching receipt");
+        }
+    }
+
+    fn body(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT body FROM a2a_envelopes WHERE envelope_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .expect("read envelope body")
+    }
+
+    #[test]
+    fn gc_scrubs_only_terminal_body_at_matching_receipt_plus_ninety_days() {
+        let mut conn = product_conn();
+        let as_of = chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z").unwrap();
+        let at_90 = (as_of - chrono::Duration::days(90)).to_rfc3339();
+        let at_89 = (as_of - chrono::Duration::days(89)).to_rfc3339();
+        seed_envelope(&conn, "consumed-90", "consumed", Some(&at_90));
+        seed_envelope(&conn, "expired-90", "expired", Some(&at_90));
+        seed_envelope(&conn, "consumed-89", "consumed", Some(&at_89));
+        seed_envelope(&conn, "received-old", "received", Some(&at_90));
+        seed_envelope(&conn, "missing-receipt", "consumed", None);
+
+        let first = gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            &as_of.to_rfc3339(),
+        )
+        .expect("retention GC");
+        assert_eq!(first["a2a_bodies_scrubbed"], 2);
+        assert_eq!(body(&conn, "consumed-90"), None);
+        assert_eq!(body(&conn, "expired-90"), None);
+        for id in ["consumed-89", "received-old", "missing-receipt"] {
+            assert_eq!(body(&conn, id), Some(format!("body-{id}")), "{id}");
+        }
+
+        let repeat = gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            &as_of.to_rfc3339(),
+        )
+        .expect("idempotent repeat");
+        assert_eq!(repeat["a2a_bodies_scrubbed"], 0);
+    }
+
+    #[test]
+    fn gc_body_scrub_rolls_back_with_the_outer_table_sweep() {
+        let mut conn = product_conn();
+        seed_envelope(
+            &conn,
+            "rollback-terminal",
+            "consumed",
+            Some("2026-01-01T00:00:00Z"),
+        );
+        test_hooks::arm_fail_after_a2a_body_scrub();
+        let error = gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            "2026-08-13T12:00:00Z",
+        )
+        .expect_err("injected post-scrub failure must roll back");
+        assert!(error.to_string().contains("injected failure"), "{error}");
+        assert_eq!(
+            body(&conn, "rollback-terminal"),
+            Some("body-rollback-terminal".to_string())
+        );
+    }
+
+    #[test]
+    fn gc_body_scrub_is_bounded_to_one_hundred_rows_per_call() {
+        let mut conn = product_conn();
+        for index in 0..101 {
+            seed_envelope(
+                &conn,
+                &format!("bounded-{index:03}"),
+                "expired",
+                Some("2026-01-01T00:00:00Z"),
+            );
+        }
+        let first = gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            "2026-08-13T12:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(first["a2a_bodies_scrubbed"], 100);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM a2a_envelopes WHERE body IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
 }
 
 // ─── AUTO-ARCHIVE STALE MEMORIES ──────────────────────────────────────────────

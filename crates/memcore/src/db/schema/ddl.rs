@@ -1577,6 +1577,8 @@ pub(super) const A2A_RECEIPT_ACTOR_IDENTITY_FK_CLAUSE: &str =
     "FOREIGN KEY (actor_agent_identity_id) REFERENCES agent_identities(agent_identity_id)";
 pub(super) const A2A_RECEIPT_ACTOR_ADMISSION_FK_CLAUSE: &str =
     "FOREIGN KEY (actor_admission_id) REFERENCES identity_admissions(admission_id)";
+pub(super) const A2A_BODY_SIZE_V32_CHECK_CLAUSE: &str =
+    "CHECK (body IS NULL OR length(CAST(body AS BLOB)) BETWEEN 1 AND 4096)";
 
 pub(super) const A2A_MAILBOX_V31_SQL: &str = r#"
         CREATE TABLE IF NOT EXISTS a2a_envelopes (
@@ -1633,6 +1635,67 @@ pub(super) const A2A_MAILBOX_V31_SQL: &str = r#"
             FOREIGN KEY (actor_admission_id) REFERENCES identity_admissions(admission_id)
         );
         CREATE INDEX IF NOT EXISTS idx_a2a_receipts_envelope_version
+            ON a2a_delivery_receipts(envelope_id, envelope_version);
+"#;
+
+/// Canonical Product A2A pair after v32 body-retention migration. This is
+/// intentionally separate from the v31 install DDL: a stamped v31 database
+/// must cross the explicit table-rebuild migration before a body can become
+/// nullable, and a current database must validate this exact shape.
+pub(super) const A2A_MAILBOX_V32_SQL: &str = r#"
+        CREATE TABLE a2a_envelopes (
+            envelope_id                    TEXT PRIMARY KEY NOT NULL,
+            kind                           TEXT NOT NULL CHECK (kind = 'turn_response/v1'),
+            issuer_agent_identity_id       TEXT NOT NULL,
+            issuer_admission_id            TEXT NOT NULL,
+            recipient_agent_identity_id    TEXT NOT NULL,
+            recipient_admission_id         TEXT NOT NULL,
+            subject_ref                    TEXT NOT NULL,
+            body                           TEXT,
+            body_digest                    TEXT NOT NULL CHECK (length(body_digest) = 64 AND body_digest = lower(body_digest) AND body_digest NOT GLOB '*[^0-9a-f]*'),
+            issuer_identity_assurance      TEXT NOT NULL CHECK (issuer_identity_assurance = 'self_asserted'),
+            recipient_identity_assurance   TEXT NOT NULL CHECK (recipient_identity_assurance = 'self_asserted'),
+            issuer_trust_domain            TEXT NOT NULL CHECK (issuer_trust_domain = 'same_host'),
+            recipient_trust_domain         TEXT NOT NULL CHECK (recipient_trust_domain = 'same_host'),
+            issuer_trust_basis             TEXT NOT NULL CHECK (issuer_trust_basis = 'current_local_connection'),
+            recipient_trust_basis          TEXT NOT NULL CHECK (recipient_trust_basis = 'historical_local_admission'),
+            idempotency_key                TEXT NOT NULL,
+            created_at                     TEXT NOT NULL,
+            expires_at                     TEXT NOT NULL,
+            current_state                  TEXT NOT NULL CHECK (current_state IN ('received','accepted','consumed','expired')),
+            state_version                  INTEGER NOT NULL CHECK (state_version > 0),
+            UNIQUE (issuer_agent_identity_id, idempotency_key),
+            CHECK (length(trim(subject_ref)) > 0),
+            CHECK (body IS NULL OR length(CAST(body AS BLOB)) BETWEEN 1 AND 4096),
+            CHECK (expires_at > created_at),
+            FOREIGN KEY (issuer_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (issuer_admission_id) REFERENCES identity_admissions(admission_id),
+            FOREIGN KEY (recipient_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (recipient_admission_id) REFERENCES identity_admissions(admission_id)
+        );
+        CREATE INDEX idx_a2a_envelopes_recipient_state
+            ON a2a_envelopes(recipient_agent_identity_id, current_state, expires_at, created_at, envelope_id);
+        CREATE INDEX idx_a2a_envelopes_issuer_created
+            ON a2a_envelopes(issuer_agent_identity_id, created_at DESC, envelope_id DESC);
+
+        CREATE TABLE a2a_delivery_receipts (
+            receipt_id                     TEXT PRIMARY KEY NOT NULL,
+            envelope_id                    TEXT NOT NULL,
+            envelope_version               INTEGER NOT NULL CHECK (envelope_version > 0),
+            state                          TEXT NOT NULL CHECK (state IN ('received','accepted','consumed','expired')),
+            actor_agent_identity_id        TEXT NOT NULL,
+            actor_admission_id             TEXT NOT NULL,
+            identity_assurance             TEXT NOT NULL CHECK (identity_assurance = 'self_asserted'),
+            trust_domain                   TEXT NOT NULL CHECK (trust_domain = 'same_host'),
+            trust_basis                    TEXT NOT NULL CHECK (trust_basis IN ('current_local_connection','historical_local_admission')),
+            occurred_at                    TEXT NOT NULL,
+            UNIQUE (envelope_id, envelope_version),
+            UNIQUE (envelope_id, state),
+            FOREIGN KEY (envelope_id) REFERENCES a2a_envelopes(envelope_id),
+            FOREIGN KEY (actor_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (actor_admission_id) REFERENCES identity_admissions(admission_id)
+        );
+        CREATE INDEX idx_a2a_receipts_envelope_version
             ON a2a_delivery_receipts(envelope_id, envelope_version);
 "#;
 

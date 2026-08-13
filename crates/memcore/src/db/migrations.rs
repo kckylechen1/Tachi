@@ -59,6 +59,9 @@
 //!   precedents both state why a table may not arrive through idempotent init
 //!   DDL — a stamped-older database would silently acquire a new write surface
 //!   without migration authority or a matching stamp.
+//! - v32: rebuild the Product A2A table pair so terminal envelope bodies can
+//!   be scrubbed after their bounded retention window while immutable digests
+//!   and delivery receipts remain (#1751).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -102,8 +105,9 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 31;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 32;
 
+mod a2a_body_retention;
 mod basic;
 mod cross_db;
 mod dispatch_adjudications;
@@ -122,6 +126,7 @@ mod sentinel;
 mod session_claims_identity;
 mod symbolic_fts;
 
+use a2a_body_retention::*;
 use basic::*;
 use cross_db::*;
 use dispatch_adjudications::*;
@@ -184,6 +189,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v29_memory_outbox",
     "v30_memory_outbox_destination_apply",
     "v31_a2a_mailbox",
+    "v32_a2a_body_retention",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -221,6 +227,7 @@ pub struct MigrationReport {
     pub memory_outbox_schema_objects_created: usize,
     pub memory_outbox_destination_apply_schema_objects_created: usize,
     pub a2a_mailbox_schema_objects_created: usize,
+    pub a2a_body_retention_schema_objects_rebuilt: usize,
 }
 
 #[cfg(test)]
@@ -724,6 +731,11 @@ pub(crate) fn run_data_migrations_in_tx(
             migrate_v31_a2a_mailbox(conn, profile)
         })?
         .unwrap_or(0);
+    report.a2a_body_retention_schema_objects_rebuilt =
+        apply_versioned_migration(conn, "v32_a2a_body_retention", |conn| {
+            migrate_v32_a2a_body_retention(conn, profile)
+        })?
+        .unwrap_or(0);
 
     Ok(report)
 }
@@ -782,7 +794,7 @@ fn migrate_v31_a2a_mailbox(conn: &Connection, profile: StoreProfile) -> Result<u
         return Ok(0);
     }
     crate::db::schema::install_a2a_mailbox_schema(conn)?;
-    crate::db::schema::validate_a2a_mailbox_schema(conn)?;
+    crate::db::schema::validate_a2a_mailbox_v31_schema(conn)?;
     Ok(5)
 }
 
@@ -880,6 +892,78 @@ mod tests {
         // Idempotent re-mark.
         mark_run(&conn, "v1_test").unwrap();
         assert!(was_run(&conn, "v1_test").unwrap());
+    }
+
+    /// RED for #1751 v32: a real stamped-v31 Product pair, including its
+    /// immutable receipt row, must survive the FK-pair rebuild with only the
+    /// body nullability contract changing. The current v31 kernel leaves the
+    /// stamp and body shape unchanged, so this assertion is intentionally
+    /// failing until the v32 migration is installed.
+    #[test]
+    fn v31_a2a_mailbox_upgrades_to_v32_without_losing_rows_or_receipts() {
+        let (mut conn, tmp) = open_test_db();
+        // Build the complete pre-existing migration inventory first. Then
+        // deliberately downgrade only the A2A pair and stamp to v31, so this
+        // fixture remains valid under both the pre-v32 and post-v32 kernels.
+        run_data_migrations(&mut conn, "global", tmp.path()).expect("build complete v31 fixture");
+        conn.execute_batch(
+            "DROP TABLE a2a_delivery_receipts;
+             DROP TABLE a2a_envelopes;
+             DELETE FROM hard_state WHERE namespace='migrations' AND key='v32_a2a_body_retention';
+             PRAGMA user_version=31;",
+        )
+        .expect("downgrade pair to v31");
+        crate::db::schema::install_a2a_mailbox_schema(&conn).expect("install v31 pair");
+        conn.execute_batch(
+            "INSERT INTO agent_identities(agent_identity_id,created_at)
+                 VALUES ('a2a-v32-issuer','2026-08-01T00:00:00.000Z'),
+                        ('a2a-v32-recipient','2026-08-01T00:00:00.000Z');
+             INSERT INTO identity_admissions(admission_id,agent_identity_id,connection_id,state,created_at)
+                 VALUES ('a2a-v32-issuer-admission','a2a-v32-issuer','a2a-v32-issuer-connection','self_asserted','2026-08-01T00:00:00.000Z'),
+                        ('a2a-v32-recipient-admission','a2a-v32-recipient','a2a-v32-recipient-connection','self_asserted','2026-08-01T00:00:00.000Z');
+             INSERT INTO a2a_envelopes
+                 (envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,
+                  recipient_agent_identity_id,recipient_admission_id,subject_ref,body,
+                  body_digest,issuer_identity_assurance,recipient_identity_assurance,
+                  issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,
+                  recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version)
+             VALUES ('a2a-v32-envelope','turn_response/v1','a2a-v32-issuer','a2a-v32-issuer-admission',
+                     'a2a-v32-recipient','a2a-v32-recipient-admission','peer_publication:v32',
+                     'immutable body','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'self_asserted','self_asserted','same_host','same_host',
+                     'current_local_connection','historical_local_admission','a2a-v32-key',
+                     '2026-08-01T00:00:00.000Z','2026-08-08T00:00:00.000Z','consumed',3);
+             INSERT INTO a2a_delivery_receipts
+                 (receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,
+                  actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at)
+             VALUES ('a2a-v32-envelope:received:1','a2a-v32-envelope',1,'received',
+                     'a2a-v32-issuer','a2a-v32-issuer-admission','self_asserted','same_host',
+                     'current_local_connection','2026-08-01T00:00:00.000Z'),
+                    ('a2a-v32-envelope:consumed:3','a2a-v32-envelope',3,'consumed',
+                     'a2a-v32-recipient','a2a-v32-recipient-admission','self_asserted','same_host',
+                     'current_local_connection','2026-08-02T00:00:00.000Z');",
+        )
+        .expect("seed v31 row and receipts");
+        run_data_migrations_with_profile(&mut conn, "global", tmp.path(), StoreProfile::TachiFull)
+            .expect("v31 fixture must migrate");
+
+        assert_eq!(read_schema_version(&conn).unwrap(), 32);
+        let body: Option<String> = conn
+            .query_row(
+                "SELECT body FROM a2a_envelopes WHERE envelope_id='a2a-v32-envelope'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(body.as_deref(), Some("immutable body"));
+        let receipt_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM a2a_delivery_receipts WHERE envelope_id='a2a-v32-envelope'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt_count, 2);
     }
 
     #[test]

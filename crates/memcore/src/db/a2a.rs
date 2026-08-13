@@ -65,7 +65,9 @@ pub struct A2aEnvelope {
     pub recipient_agent_identity_id: String,
     pub recipient_admission_id: String,
     pub subject_ref: String,
-    pub body: String,
+    /// Present until terminal-retention GC scrubs the content. The immutable
+    /// digest remains available for idempotent replay and audit afterward.
+    pub body: Option<String>,
     pub body_digest: String,
     pub issuer_identity_assurance: String,
     pub recipient_identity_assurance: String,
@@ -301,7 +303,10 @@ fn payload_matches(
         && existing.issuer_agent_identity_id == request.issuer_agent_identity_id
         && existing.recipient_agent_identity_id == request.recipient_agent_identity_id
         && existing.subject_ref == request.subject_ref
-        && existing.body == request.body
+        && existing
+            .body
+            .as_deref()
+            .is_none_or(|body| body == request.body)
         && existing.body_digest == body_digest
         && existing.issuer_trust_domain == A2A_SAME_HOST_TRUST_DOMAIN
         && existing.recipient_trust_domain == A2A_SAME_HOST_TRUST_DOMAIN
@@ -643,6 +648,12 @@ pub fn consume_a2a_for_recipient(
     drop(stmt);
     let mut consumed = Vec::with_capacity(envelopes.len());
     for envelope in envelopes {
+        if envelope.body.is_none() {
+            return Err(MemoryError::Internal(format!(
+                "a2a pending envelope '{}' has no body",
+                envelope.envelope_id
+            )));
+        }
         let accepted_version = envelope.state_version + 1;
         let changed = tx.execute(
             "UPDATE a2a_envelopes SET current_state='accepted',state_version=?1
@@ -922,7 +933,7 @@ mod tests {
         )
         .expect("consume");
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].body, "scrubbed response");
+        assert_eq!(first[0].body.as_deref(), Some("scrubbed response"));
         assert!(consume_a2a_for_recipient(
             store.connection_mut(),
             &transition_actor("recipient", "admission-recipient"),
@@ -1003,6 +1014,50 @@ mod tests {
                 ("expired", "admission-recipient-b"),
             ]
         );
+    }
+
+    #[test]
+    fn idempotent_replay_after_body_scrub_uses_the_immutable_digest() {
+        let mut store = store();
+        identity(
+            &store,
+            "issuer",
+            "admission-issuer",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        identity(
+            &store,
+            "recipient",
+            "admission-recipient",
+            UnverifiedAdmissionState::SelfAsserted,
+        );
+        let request = envelope("scrubbed-replay", "scrubbed-replay", "recipient");
+        insert_a2a_envelope(store.connection_mut(), &request).expect("initial delivery");
+        store
+            .connection()
+            .execute(
+                "UPDATE a2a_envelopes SET body=NULL WHERE envelope_id='scrubbed-replay'",
+                [],
+            )
+            .expect("simulate terminal retention scrub");
+
+        let replay = insert_a2a_envelope(store.connection_mut(), &request)
+            .expect("same digest remains an idempotent replay");
+        let replayed = match replay {
+            A2aInsertOutcome::Replay { envelope, .. } => envelope,
+            A2aInsertOutcome::Created { .. } => panic!("expected replay"),
+        };
+        assert_eq!(replayed.body, None);
+        assert_eq!(
+            replayed.body_digest,
+            format!("{:x}", Sha256::digest(request.body.as_bytes()))
+        );
+
+        let mut conflict = request;
+        conflict.body = "different body".to_string();
+        let error = insert_a2a_envelope(store.connection_mut(), &conflict)
+            .expect_err("scrubbed content must not turn idempotency into a wildcard");
+        assert!(matches!(error, MemoryError::Duplicate(_)), "{error}");
     }
 
     #[test]

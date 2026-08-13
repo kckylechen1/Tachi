@@ -38,16 +38,22 @@ fn consume_a2a_responses_for_briefing(server: &MemoryServer) -> Result<Vec<Value
         )
         .map_err(|error| error.to_string())
     })?;
-    Ok(envelopes
+    envelopes
         .into_iter()
         .map(|envelope| {
-            json!({
+            let body = envelope.body.ok_or_else(|| {
+                format!(
+                    "A2A invariant violation: pending envelope '{}' has no body",
+                    envelope.envelope_id
+                )
+            })?;
+            Ok(json!({
                 "envelope_id": envelope.envelope_id,
                 "kind": envelope.kind,
                 "issuer_agent_identity_id": envelope.issuer_agent_identity_id,
                 "recipient_agent_identity_id": envelope.recipient_agent_identity_id,
                 "subject_ref": envelope.subject_ref,
-                "body": crate::memory_search_ops::scrub_generated_memory_text(&envelope.body),
+                "body": crate::memory_search_ops::scrub_generated_memory_text(&body),
                 "body_digest": envelope.body_digest,
                 "identity_assurance": {
                     "issuer": envelope.issuer_identity_assurance,
@@ -55,9 +61,9 @@ fn consume_a2a_responses_for_briefing(server: &MemoryServer) -> Result<Vec<Value
                 },
                 "created_at": envelope.created_at,
                 "expires_at": envelope.expires_at,
-            })
+            }))
         })
-        .collect())
+        .collect::<Result<Vec<_>, String>>()
 }
 
 fn doc_index_item_ids(doc_index: &Value) -> std::collections::HashSet<String> {
@@ -684,6 +690,44 @@ mod a2a_response_tests {
                     .map_err(|error| error.to_string())
             })
             .expect("recipient status");
+        assert_eq!(status[0].current_state, "received");
+        assert_eq!(status[0].receipts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_envelope_without_body_fails_briefing_without_consuming_it() {
+        let server = crate::tests::make_server();
+        seed_response(
+            &server,
+            "envelope-missing-pending-body",
+            "must remain pending",
+            "2026-08-12T00:00:00Z",
+            "2099-08-19T00:00:00Z",
+        );
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE a2a_envelopes SET body=NULL
+                         WHERE envelope_id='envelope-missing-pending-body'",
+                        [],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+            .expect("inject impossible pending-body state");
+
+        let error = handle_tachi_feature_briefing(&server, &briefing_params("json"))
+            .await
+            .expect_err("missing pending body is a loud invariant violation");
+        assert!(error.contains("pending envelope"), "{error}");
+        let status = server
+            .with_global_store_read(|store| {
+                memcore::list_a2a_status(store.connection(), "agent.recipient", 10)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
         assert_eq!(status[0].current_state, "received");
         assert_eq!(status[0].receipts.len(), 1);
     }
