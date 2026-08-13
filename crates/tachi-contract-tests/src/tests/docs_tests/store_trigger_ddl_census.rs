@@ -787,10 +787,10 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
         }],
         reason: "break_the_event_append installs its RAISE(ABORT) trigger on the \
                  bare in-memory rusqlite Connection returned by catalog_conn and \
-                 the append-failure rollback test executes the store door on that \
-                 same unguarded connection — #1443's sanctioned memcore pattern. \
-                 Body read 2026-08-13. The proof remains valid only while this \
-                 file names no MemoryStore doorway.",
+                 the append-failure rollback and connection-state tests execute \
+                 the store door on that same unguarded connection — #1443's \
+                 sanctioned memcore pattern. Body read 2026-08-13. The proof \
+                 remains valid only while this file names no MemoryStore doorway.",
     },
     Exemption {
         path: "crates/memcore/src/db/tests/search_generation.rs",

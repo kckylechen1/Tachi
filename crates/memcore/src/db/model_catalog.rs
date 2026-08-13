@@ -789,6 +789,11 @@ pub enum DeploymentHealthWrite {
 /// snapshot this function would have avoided. Nothing here can upgrade someone
 /// else's transaction, and pretending otherwise (by opening a second one)
 /// would break composability to buy a promise it could not keep.
+///
+/// Whatever fails — a read, the append, the commit itself — the connection
+/// comes back in the state the caller lent it: a transaction this function
+/// opened is closed before the error is returned, and a caller's own
+/// transaction is left open with only this function's work rolled back.
 pub fn record_model_deployment_outcome(
     conn: &Connection,
     target: &DeploymentOutcomeTarget<'_>,
@@ -814,7 +819,15 @@ pub fn record_model_deployment_outcome(
     if owns_transaction {
         conn.execute_batch("BEGIN IMMEDIATE")?;
     }
-    conn.execute_batch("SAVEPOINT record_model_deployment_outcome")?;
+    if let Err(err) = conn.execute_batch("SAVEPOINT record_model_deployment_outcome") {
+        // Nothing to undo inside, but a transaction this function opened is
+        // this function's to close — an early return that leaves one open
+        // hands the caller a connection it never put into a transaction.
+        if owns_transaction {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+        return Err(err.into());
+    }
     let result = (|| -> Result<DeploymentHealthWrite, MemoryError> {
         let deployment_id = target.deployment_id();
         let Some(deployment) = get_model_deployment(conn, deployment_id)? else {
@@ -859,21 +872,78 @@ pub fn record_model_deployment_outcome(
         })
     })();
     match result {
-        Ok(write) => {
-            conn.execute_batch("RELEASE record_model_deployment_outcome")?;
-            if owns_transaction {
-                conn.execute_batch("COMMIT")?;
+        // A refused commit is a failed write like any other, and gets the same
+        // unwind. It used to get none: `RELEASE`'s `?` returned straight to the
+        // caller, leaving the transaction this function opened **open** —
+        // SQLite keeps a transaction alive when its commit is refused — so the
+        // caller got back a connection silently enrolled in a transaction it
+        // never started (codex re-review of PR-C, NEW2).
+        Ok(write) => match commit_outcome_transaction(conn, owns_transaction) {
+            Ok(()) => Ok(write),
+            Err(err) => {
+                unwind_outcome_transaction(conn, owns_transaction);
+                Err(err)
             }
-            Ok(write)
-        }
+        },
         Err(err) => {
-            // Best-effort unwind: the error the caller needs to see is the one
-            // that failed the write, not a secondary failure while undoing it.
-            let _ = conn.execute_batch("ROLLBACK TO record_model_deployment_outcome");
-            let _ = conn.execute_batch("RELEASE record_model_deployment_outcome");
-            if owns_transaction {
-                let _ = conn.execute_batch("ROLLBACK");
-            }
+            unwind_outcome_transaction(conn, owns_transaction);
+            Err(err)
+        }
+    }
+}
+
+/// Commit [`record_model_deployment_outcome`]'s work: release its savepoint,
+/// and commit the transaction it opened if it opened one.
+fn commit_outcome_transaction(
+    conn: &Connection,
+    owns_transaction: bool,
+) -> Result<(), MemoryError> {
+    conn.execute_batch("RELEASE record_model_deployment_outcome")?;
+    if owns_transaction {
+        conn.execute_batch("COMMIT")?;
+    }
+    Ok(())
+}
+
+/// Undo it, and hand the connection back in the state the caller lent it.
+///
+/// Best-effort by design: the error the caller needs to see is the one that
+/// failed the write, not a secondary failure while undoing it. The step that
+/// is not optional is the last one — a transaction this function opened is
+/// this function's to close, whichever statement failed. Leaving it open would
+/// enrol every later write on that connection in a transaction nobody
+/// remembers opening, and fail the next `BEGIN` outright.
+///
+/// When the caller owns the transaction, the savepoint unwind is the *whole*
+/// undo: the caller's own work stays, its transaction stays open, and it
+/// decides what a failed inner write means.
+fn unwind_outcome_transaction(conn: &Connection, owns_transaction: bool) {
+    let _ = conn.execute_batch("ROLLBACK TO record_model_deployment_outcome");
+    let _ = conn.execute_batch("RELEASE record_model_deployment_outcome");
+    if owns_transaction {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+}
+
+/// The commit-and-unwind pair as `record_model_deployment_outcome` runs it,
+/// reachable from `db::tests`.
+///
+/// `cfg(test)` and crate-private, the same shape as
+/// `ServerErrorStatus::refused_for_tests`: a `RELEASE`/`COMMIT` the database
+/// refuses is not a state these tables can be driven into through a real
+/// schema — they carry no deferred constraints, and in WAL a writer that
+/// already holds the lock does not lose it at commit time — while the branch
+/// that matters is not *how* the commit failed but what the connection looks
+/// like afterwards.
+#[cfg(test)]
+pub(in crate::db) fn commit_or_unwind_outcome_transaction_for_tests(
+    conn: &Connection,
+    owns_transaction: bool,
+) -> Result<(), MemoryError> {
+    match commit_outcome_transaction(conn, owns_transaction) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            unwind_outcome_transaction(conn, owns_transaction);
             Err(err)
         }
     }

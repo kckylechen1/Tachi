@@ -1137,6 +1137,130 @@ fn a_first_outcome_whose_event_cannot_be_appended_leaves_no_row_at_all() {
     );
 }
 
+/// A second deployment, so a caller's own work is distinguishable from the
+/// store door's.
+fn summary_lane() -> NewModelDeployment {
+    let mut lane = extract_lane();
+    lane.deployment_id = "env:summary".to_string();
+    lane.provider_model_id = "Qwen/Qwen3.5-7B".to_string();
+    lane
+}
+
+/// A transaction can be opened on this connection — which it cannot be if one
+/// is already open, since SQLite has no nested transactions. Sharper than
+/// `is_autocommit()` alone: it asserts the state the *next* caller will meet.
+fn assert_no_transaction_is_open(conn: &Connection, why: &str) {
+    assert!(conn.is_autocommit(), "{why}");
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .unwrap_or_else(|err| panic!("{why}: {err}"));
+    conn.execute_batch("ROLLBACK").expect("close it again");
+}
+
+#[test]
+fn a_failed_write_returns_a_connection_this_door_opened_to_its_caller_closed() {
+    // The owned-transaction half of the failure contract. The door opens its
+    // own transaction now (CP5), which makes closing it on every exit the
+    // door's job: a caller handed back a connection sitting inside a
+    // transaction it never started would enrol every later write in it and see
+    // its next `BEGIN` refused.
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+    break_the_event_append(&conn);
+
+    record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Unreachable,
+        EvidenceKind::Probed,
+        instant(0),
+    )
+    .expect_err("the append is refused");
+
+    assert_no_transaction_is_open(
+        &conn,
+        "a transaction this function opened is this function's to close, on the failure path too",
+    );
+}
+
+#[test]
+fn a_failed_write_inside_a_callers_transaction_leaves_the_caller_in_charge() {
+    // The nested half. The door must undo its own work and nothing else: the
+    // caller's transaction stays open, its own writes stay in it, and the
+    // caller — not this function — decides what a failed inner write means.
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .expect("the caller opens its own transaction");
+    upsert_model_deployment(&conn, &summary_lane()).expect("the caller's own write");
+    break_the_event_append(&conn);
+
+    let err = record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Served,
+        EvidenceKind::SelfReported,
+        instant(0),
+    )
+    .expect_err("the append is refused");
+    assert!(
+        err.to_string().contains("injected append failure"),
+        "the caller must see why, got: {err}"
+    );
+
+    assert!(
+        !conn.is_autocommit(),
+        "the door must not close a transaction it did not open — the caller's work is still \
+         uncommitted and only the caller knows whether that is now wrong"
+    );
+    assert!(
+        get_model_deployment(&conn, "env:summary")
+            .expect("read")
+            .is_some(),
+        "and it must not roll the caller's own work back either"
+    );
+    assert!(
+        get_model_deployment_health(&conn, "env:extract")
+            .expect("read")
+            .is_none(),
+        "its own half is gone, though"
+    );
+
+    conn.execute_batch("COMMIT")
+        .expect("the caller's transaction is still its own to commit");
+    assert!(
+        get_model_deployment(&conn, "env:summary")
+            .expect("read")
+            .is_some(),
+        "and what it committed is durable"
+    );
+}
+
+#[test]
+fn a_commit_the_database_refuses_still_closes_the_transaction_it_opened() {
+    // NEW2. The success path used to `?` straight out of `RELEASE`, so a
+    // refused commit — which SQLite answers by leaving the transaction *open* —
+    // skipped the unwind that every closure error got, and the caller received
+    // an error plus a connection still inside a transaction.
+    //
+    // Driven through the door's own commit/unwind pair rather than through a
+    // refused commit, because these tables carry no deferred constraint that
+    // could refuse one: a `RELEASE` naming a savepoint that is not on the stack
+    // fails exactly as a refused commit does, and what is under test is what
+    // the connection looks like afterwards.
+    let conn = catalog_conn();
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .expect("the transaction the door would have opened");
+
+    crate::db::model_catalog::commit_or_unwind_outcome_transaction_for_tests(&conn, true)
+        .expect_err("a commit the database refuses is an error");
+
+    assert_no_transaction_is_open(
+        &conn,
+        "a refused commit must still return the connection to its caller closed",
+    );
+}
+
 #[test]
 fn a_success_after_a_cooldown_clears_it_through_the_store() {
     let conn = catalog_conn();
