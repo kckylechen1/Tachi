@@ -2048,8 +2048,10 @@ mod exact_dedupe_open_tests {
     fn retired_sticky_write_guard_precedes_cross_project_and_policy_bypasses() {
         let dir = tempfile::tempdir().expect("temp db dir");
         let path = dir.path().join("retired-sticky-guard.db");
-        let mut policy = crate::KernelPolicy::default();
-        policy.path_validation_escape_hatch = true;
+        let policy = crate::KernelPolicy {
+            path_validation_escape_hatch: true,
+            ..Default::default()
+        };
         let mut store = MemoryStore::open_with_label(&path.to_string_lossy(), "global")
             .expect("open labelled store")
             .with_kernel_policy(policy);

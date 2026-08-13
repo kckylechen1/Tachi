@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use std::collections::HashMap;
 
 use crate::db::StoreProfile;
@@ -36,7 +36,7 @@ fn gc_tables_at(
     as_of: &str,
 ) -> Result<serde_json::Value, MemoryError> {
     let product = profile.includes_product();
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
     // 1. access_history: retain latest N entries per (memory_id, event_kind),
     //    delete rest.
@@ -123,7 +123,10 @@ fn gc_tables_at(
              SELECT COUNT(DISTINCT query_hash)
              FROM access_history
              WHERE memory_id = memories.id AND query_hash != ''
-         )",
+         )
+         WHERE lower(trim(category)) <> 'sticky'
+           AND lower(trim(path)) <> '/sticky'
+           AND lower(trim(path)) NOT LIKE '/sticky/%'",
         [],
     )?;
 
@@ -532,7 +535,7 @@ pub fn archive_stale_memories_with_config(
     // `unchecked_transaction` takes `&Connection`, which keeps this function's
     // signature — and `MemoryStore::archive_stale_memories`'s `&self` — intact.
     // It rolls back on drop, so any `?` below abandons the whole sweep.
-    let tx = conn.unchecked_transaction()?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let now = now_utc_iso();
 
     // Skip permanent and pinned memories entirely
@@ -572,6 +575,9 @@ pub fn archive_stale_memories_with_config(
             sql: format!(
                 "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
                  WHERE archived = 0
+                   AND lower(trim(category)) <> 'sticky'
+                   AND lower(trim(path)) <> '/sticky'
+                   AND lower(trim(path)) NOT LIKE '/sticky/%'
                    AND {recency_column} IS NOT NULL
                    AND unixepoch({recency_column}) < unixepoch('now', '-' || ?1 || ' days')
                    AND importance < 0.5
@@ -588,6 +594,9 @@ pub fn archive_stale_memories_with_config(
             sql: format!(
                 "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
                  WHERE archived = 0
+                   AND lower(trim(category)) <> 'sticky'
+                   AND lower(trim(path)) <> '/sticky'
+                   AND lower(trim(path)) NOT LIKE '/sticky/%'
                    AND {recency_column} IS NULL
                    AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
                    AND importance < 0.3
@@ -605,6 +614,9 @@ pub fn archive_stale_memories_with_config(
             sql: format!(
                 "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
                   WHERE archived = 0
+                    AND lower(trim(category)) <> 'sticky'
+                    AND lower(trim(path)) <> '/sticky'
+                    AND lower(trim(path)) NOT LIKE '/sticky/%'
                     AND {recency_column} IS NOT NULL
                     AND unixepoch({recency_column}) < unixepoch('now', '-' || ?1 || ' days')
                     AND importance < 0.7
@@ -620,6 +632,9 @@ pub fn archive_stale_memories_with_config(
             sql: format!(
                 "UPDATE memories SET archived = 1, updated_at = ?2, revision = revision + 1
                   WHERE archived = 0
+                    AND lower(trim(category)) <> 'sticky'
+                    AND lower(trim(path)) <> '/sticky'
+                    AND lower(trim(path)) NOT LIKE '/sticky/%'
                     AND {recency_column} IS NULL
                     AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
                     AND importance < 0.5

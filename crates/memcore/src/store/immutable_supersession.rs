@@ -97,7 +97,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         // that does NOT lead back to `source_id`).
         self.refuse_supersession_cycle(source_id, target_id)?;
         self.refuse_ineligible_supersession_target(target_id)?;
-        let changed = db::supersede_memory(&self.tx, source_id, target_id)?;
+        let changed = db::supersede_memory_within_tx(&self.tx, source_id, target_id)?;
         if !changed {
             return Err(MemoryError::InvalidArg(format!(
                 "immutable supersession CAS refused for {source_id} -> {target_id}"
@@ -415,7 +415,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     pub fn archive_claimed_source(&mut self, source_id: &str) -> Result<(), MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        if !db::archive_memory(&self.tx, source_id)? {
+        if !db::archive_memory_within_tx(&self.tx, source_id)? {
             return Err(MemoryError::InvalidArg(format!(
                 "archive claimed source failed for {source_id}"
             )));
@@ -608,6 +608,19 @@ mod tests {
         entry
     }
 
+    fn retire_existing_fixture(store: &MemoryStore, id: &str) {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize raw legacy sticky fixture");
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET path='/sticky/legacy', category='sticky' WHERE id=?1",
+                [id],
+            )
+            .expect("turn ordinary seed into raw legacy sticky fixture");
+    }
+
     fn assert_transaction_refuses_without_writes<F>(label: &str, entry: MemoryEntry, operation: F)
     where
         F: Fn(&mut ImmutableSupersessionTransaction<'_>, &MemoryEntry) -> Result<(), MemoryError>,
@@ -758,6 +771,36 @@ mod tests {
                 .map(|_| ())
             })
             .expect("normal validated reference upsert with removals");
+    }
+
+    #[test]
+    fn immutable_supersession_rejects_retired_source_or_target_before_any_side_effect() {
+        for retired_id in ["source", "target"] {
+            let mut store = MemoryStore::open_in_memory().expect("open memory store");
+            store
+                .insert_if_absent(&fixture_entry("source"))
+                .expect("seed source");
+            store
+                .insert_if_absent(&fixture_entry("target"))
+                .expect("seed target");
+            retire_existing_fixture(&store, retired_id);
+            let before = database_snapshot(&store);
+            let before_changes = store.connection().total_changes();
+
+            let error = store
+                .with_immutable_supersession_transaction(|operation| {
+                    operation.claim_immutable_supersession("source", "target")?;
+                    operation.archive_claimed_source("source")
+                })
+                .expect_err("retired source or target must refuse the whole transaction");
+            assert!(error.to_string().contains("tachi_a2a"), "{error}");
+            assert_eq!(store.connection().total_changes(), before_changes);
+            assert_eq!(
+                database_snapshot(&store),
+                before,
+                "{retired_id} retirement refusal must precede row, edge, and projection writes"
+            );
+        }
     }
 
     /// tachi#1635 (#1632 conformance, item 1): the transaction wrapper's

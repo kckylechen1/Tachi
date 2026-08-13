@@ -1,5 +1,7 @@
 //! Daily truth-maintenance helpers on [`MemoryStore`].
 
+use rusqlite::{Transaction, TransactionBehavior};
+
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +32,7 @@ impl MemoryStore {
     ) -> Result<usize, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let archived_at = db::now_utc_iso();
         let (activity_predicate, receipt_predicate, activity_column) =
             if recall_config.use_provenance_recency {
@@ -50,12 +52,36 @@ impl MemoryStore {
             "UPDATE memories
              SET archived = 1, updated_at = ?1, revision = revision + 1
              WHERE archived = 0
+               AND lower(trim(category)) <> 'sticky'
+               AND lower(trim(path)) <> '/sticky'
+               AND lower(trim(path)) NOT LIKE '/sticky/%'
                AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned', 'durable')
                AND importance < 0.70
                AND {activity_predicate}
                AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')
              RETURNING id"
         );
+        let candidate_sql = format!(
+            "SELECT id FROM memories
+             WHERE archived = 0
+               AND lower(trim(category)) <> 'sticky'
+               AND lower(trim(path)) <> '/sticky'
+               AND lower(trim(path)) NOT LIKE '/sticky/%'
+               AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned', 'durable')
+               AND importance < 0.70
+               AND {activity_predicate}
+               AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')"
+        );
+        let candidate_ids = {
+            let mut stmt = tx.prepare(&candidate_sql)?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        for id in &candidate_ids {
+            db::refuse_retired_sticky_row_within_tx(&tx, id, "archived by stale maintenance")?;
+        }
         let mut stmt = tx.prepare(&sql)?;
         let mut ids = stmt
             .query_map([&archived_at], |row| row.get::<_, String>(0))?
@@ -120,16 +146,40 @@ impl MemoryStore {
         }
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        Ok(self.conn.execute(
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let candidate_ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM memories
+                 WHERE archived = 0 AND tier = 'raw' AND recall_count >= 3
+                   AND lower(trim(category)) <> 'sticky'
+                   AND lower(trim(path)) <> '/sticky'
+                   AND lower(trim(path)) NOT LIKE '/sticky/%'
+                   AND query_diversity >= 3
+                   AND COALESCE(retention_policy, '') NOT IN ('ephemeral')",
+            )?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        for id in &candidate_ids {
+            db::refuse_retired_sticky_row_within_tx(&tx, id, "promoted by recall maintenance")?;
+        }
+        let changed = tx.execute(
             "UPDATE memories
              SET tier = 'consolidated', updated_at = datetime('now')
              WHERE archived = 0
+               AND lower(trim(category)) <> 'sticky'
+               AND lower(trim(path)) <> '/sticky'
+               AND lower(trim(path)) NOT LIKE '/sticky/%'
                AND tier = 'raw'
                AND recall_count >= 3
                AND query_diversity >= 3
                AND COALESCE(retention_policy, '') NOT IN ('ephemeral')",
             [],
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// Load active entries that still lack an embedding vector, highest
@@ -240,12 +290,15 @@ impl MemoryStore {
     pub fn promote_memory_to_durable(&self, id: &str) -> Result<(), MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        self.conn.execute(
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        db::refuse_retired_sticky_row_within_tx(&tx, id, "promoted to durable")?;
+        tx.execute(
             "UPDATE memories
              SET importance = 0.7, retention_policy = 'durable', updated_at = datetime('now')
              WHERE id = ?1",
             rusqlite::params![id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -309,6 +362,78 @@ mod tests {
                 [id],
             )
             .expect("backdate created_at");
+    }
+
+    fn retire_as_sticky_fixture(store: &MemoryStore, id: &str) {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize raw legacy sticky fixture");
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET path='/sticky/legacy', category='sticky' WHERE id=?1",
+                [id],
+            )
+            .expect("retire fixture row");
+    }
+
+    #[test]
+    fn maintenance_skips_retired_sticky_while_ordinary_rows_progress() {
+        let mut archive_store = MemoryStore::open_in_memory().expect("open archive store");
+        for id in ["ordinary-stale", "sticky-stale"] {
+            archive_store
+                .upsert(&test_entry(id))
+                .expect("seed stale row");
+            backdate_created_at(&archive_store, id);
+        }
+        retire_as_sticky_fixture(&archive_store, "sticky-stale");
+        assert_eq!(archive_store.archive_stale_low_value_memories().unwrap(), 1);
+        assert!(
+            archive_store
+                .get_with_options("ordinary-stale", true)
+                .unwrap()
+                .unwrap()
+                .archived
+        );
+        let sticky_archive: (i64, i64) = archive_store
+            .connection()
+            .query_row(
+                "SELECT archived,revision FROM memories WHERE id='sticky-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(sticky_archive, (0, 1), "GC must not touch retired sticky");
+
+        let mut promotion_store = MemoryStore::open_in_memory().expect("open promotion store");
+        for id in ["ordinary-promote", "sticky-promote"] {
+            let mut entry = test_entry(id);
+            entry.recall_count = 3;
+            entry.query_diversity = 3;
+            promotion_store.upsert(&entry).expect("seed promotion row");
+        }
+        retire_as_sticky_fixture(&promotion_store, "sticky-promote");
+        assert_eq!(
+            promotion_store
+                .promote_diversely_recalled_raw_memories(&crate::RecallConfig {
+                    use_provenance_recency: false,
+                    ..crate::RecallConfig::default()
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            promotion_store
+                .get("ordinary-promote")
+                .unwrap()
+                .unwrap()
+                .tier,
+            "consolidated"
+        );
+        assert_eq!(
+            promotion_store.get("sticky-promote").unwrap().unwrap().tier,
+            "raw"
+        );
     }
 
     #[test]

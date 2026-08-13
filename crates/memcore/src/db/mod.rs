@@ -155,8 +155,10 @@ pub use memory_crud::{
     MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 pub(crate) use memory_crud::{
-    archive_with_metadata_if_expected_state, restore_with_metadata_if_expected_state,
-    supersede_with_metadata_if_expected_state, update_with_revision_if_expected_state,
+    archive_memory_within_tx, archive_with_metadata_if_expected_state,
+    refuse_retired_sticky_row_within_tx, restore_with_metadata_if_expected_state,
+    supersede_memory_within_tx, supersede_with_metadata_if_expected_state,
+    update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
 /// function's own doc for when a hand-built fixture is legitimate.

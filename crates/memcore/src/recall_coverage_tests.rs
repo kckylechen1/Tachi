@@ -114,6 +114,50 @@ fn recall_coverage_path_list_only_prefixes_have_exact_boundaries() {
 }
 
 #[test]
+fn ordinary_recall_excludes_legacy_sticky_without_recording_access() {
+    let mut store = MemoryStore::open_in_memory().expect("open store");
+    insert(
+        &mut store,
+        fixture_entry("legacy-sticky", "/notes/seed", "LegacyStickyRecallNeedle"),
+    );
+    {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize raw legacy sticky fixture");
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET path='/sticky/legacy', category='sticky' WHERE id='legacy-sticky'",
+                [],
+            )
+            .expect("turn ordinary seed into raw legacy sticky fixture");
+    }
+
+    let results = store
+        .search("LegacyStickyRecallNeedle", None)
+        .expect("ordinary recall");
+    assert!(
+        results.is_empty(),
+        "retired sticky history is cutover input, not an ordinary recall result"
+    );
+    let (access_count, scored_count, recall_count, history): (i64, i64, i64, i64) = store
+        .connection()
+        .query_row(
+            "SELECT access_count,scored_count,recall_count,
+                    (SELECT COUNT(*) FROM access_history WHERE memory_id=memories.id)
+             FROM memories WHERE id='legacy-sticky'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read sticky access state");
+    assert_eq!(
+        (access_count, scored_count, recall_count, history),
+        (0, 0, 0, 0),
+        "defensive access guards must keep a retired row byte-stable even if a search leg drifts"
+    );
+}
+
+#[test]
 fn recall_coverage_partitions_every_row_and_keeps_mixed_populations_eligible() {
     let dir = tempfile::tempdir().expect("temp db dir");
     let path = dir.path().join("coverage.db");

@@ -64,6 +64,7 @@ pub fn update_with_revision(
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "revision-updated")?;
     let updated = update_with_revision_within_tx(
         &tx,
         id,
@@ -92,6 +93,7 @@ pub(crate) fn update_with_revision_if_expected_state(
     expected: &ExpectedMemoryState,
 ) -> Result<bool, MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "revision-updated")?;
     let ids = vec![id.to_string()];
     let mut current = super::fetch_by_ids(&tx, &ids, true)?;
     let Some(current) = current.remove(id) else {
@@ -159,6 +161,12 @@ pub(crate) fn supersede_with_metadata_if_expected_state(
     }
     super::refuse_reserved_rem_operation_mutation(id, "superseded")?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "metadata-superseded")?;
+    super::refuse_retired_sticky_row_within_tx(
+        &tx,
+        superseded_by,
+        "used as a metadata supersession target",
+    )?;
     if !expected_state_matches_within_tx(&tx, id, expected)? {
         tx.commit()?;
         return Ok(false);
@@ -195,6 +203,7 @@ pub(crate) fn restore_with_metadata_if_expected_state(
 ) -> Result<bool, MemoryError> {
     super::refuse_reserved_rem_operation_mutation(id, "restored")?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "metadata-restored")?;
     if !expected_state_matches_within_tx(&tx, id, expected)? {
         tx.commit()?;
         return Ok(false);
@@ -229,6 +238,7 @@ pub(crate) fn archive_with_metadata_if_expected_state(
 ) -> Result<bool, MemoryError> {
     super::refuse_reserved_rem_operation_mutation(id, "archived")?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "metadata-archived")?;
     if !expected_state_matches_within_tx(&tx, id, expected)? {
         tx.commit()?;
         return Ok(false);
@@ -391,7 +401,8 @@ pub fn update_enrichment_fields(
     }
 
     let now = now_utc_iso();
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "enriched")?;
     let keywords_json = new_keywords.map(serde_json::to_string).transpose()?;
     let entities_json = new_entities.map(serde_json::to_string).transpose()?;
 
@@ -658,6 +669,8 @@ pub fn record_enrichment_failure(
     error: &str,
 ) -> Result<(), MemoryError> {
     let now = now_utc_iso();
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "stamped with enrichment failure")?;
     // Write-side keyword enrichment (#921) keeps a dedicated keywords_status so
     // operators can distinguish enriched/pending/skipped/failed without
     // collapsing it into the multi-stage overall enrichment.status string.
@@ -668,7 +681,7 @@ pub fn record_enrichment_failure(
     };
     if auth_class_enrichment_error(error) {
         if let Some(kw_status) = keywords_status {
-            conn.execute(
+            tx.execute(
                 r#"UPDATE memories
                    SET metadata = json_set(
                          CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
@@ -695,7 +708,7 @@ pub fn record_enrichment_failure(
                 ],
             )?;
         } else {
-            conn.execute(
+            tx.execute(
                 r#"UPDATE memories
                    SET metadata = json_set(
                          CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
@@ -715,7 +728,7 @@ pub fn record_enrichment_failure(
             )?;
         }
     } else if let Some(kw_status) = keywords_status {
-        conn.execute(
+        tx.execute(
             r#"UPDATE memories
                SET metadata = json_remove(
                      json_set(
@@ -733,7 +746,7 @@ pub fn record_enrichment_failure(
             params![stage, error, &now, kw_status, id],
         )?;
     } else {
-        conn.execute(
+        tx.execute(
             r#"UPDATE memories
                SET metadata = json_remove(
                      json_set(
@@ -750,6 +763,7 @@ pub fn record_enrichment_failure(
             params![stage, error, &now, id],
         )?;
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -762,7 +776,9 @@ pub fn set_keyword_enrichment_status(
     status: &str,
 ) -> Result<(), MemoryError> {
     let now = now_utc_iso();
-    conn.execute(
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "given keyword enrichment status")?;
+    tx.execute(
         r#"UPDATE memories
            SET metadata = json_set(
                  CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
@@ -772,6 +788,7 @@ pub fn set_keyword_enrichment_status(
            WHERE id = ?3"#,
         params![status, &now, id],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -786,7 +803,9 @@ pub fn set_keyword_enrichment_pending_if_unset(
     id: &str,
 ) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
-    let rows = conn.execute(
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "marked pending for keyword enrichment")?;
+    let rows = tx.execute(
         r#"UPDATE memories
            SET metadata = json_set(
                  CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
@@ -806,5 +825,6 @@ pub fn set_keyword_enrichment_pending_if_unset(
              )"#,
         params![&now, id],
     )?;
+    tx.commit()?;
     Ok(rows > 0)
 }

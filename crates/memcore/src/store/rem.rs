@@ -1,6 +1,6 @@
 //! REM wiki-evolver persistence helpers on [`MemoryStore`].
 
-use rusqlite::{OptionalExtension, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
@@ -139,7 +139,18 @@ impl MemoryStore {
     ) -> Result<(), MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        self.conn.execute(
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let ids = {
+            let mut stmt = tx.prepare("SELECT id FROM memories WHERE path=?1")?;
+            let ids = stmt
+                .query_map([path], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        for id in &ids {
+            db::refuse_retired_sticky_row_within_tx(&tx, id, "marked pending for REM review")?;
+        }
+        tx.execute(
             r#"UPDATE memories
                SET metadata = json_set(
                      CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
@@ -150,6 +161,7 @@ impl MemoryStore {
                  AND (json_extract(metadata, '$.review_status') IS NULL)"#,
             rusqlite::params![generated_at, path],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -248,6 +260,9 @@ impl MemoryStore {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for (id, _) in sources {
+                db::refuse_retired_sticky_row_within_tx(&tx, id, "marked as processed by REM")?;
+            }
             for (id, expected_revision) in sources {
                 let state = tx.query_row(
                     "SELECT COALESCE(json_extract(metadata, '$.rem.processed'), 0), \
@@ -397,6 +412,9 @@ impl MemoryStore {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for (id, _) in sources {
+                db::refuse_retired_sticky_row_within_tx(&tx, id, "rolled back by REM")?;
+            }
             for (id, expected_revision) in sources {
                 let state = tx.query_row(
                     "SELECT COALESCE(json_extract(metadata, '$.rem.processed'), 0), \
@@ -495,6 +513,7 @@ impl MemoryStore {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            db::refuse_retired_sticky_row_within_tx(&tx, draft_id, "aborted by REM recovery")?;
             let state = tx.query_row(
                 "SELECT archived, superseded_by, json_extract(metadata, '$.rem.operation_status') \
                  FROM memories WHERE id = ?1",
@@ -575,6 +594,7 @@ impl MemoryStore {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            db::refuse_retired_sticky_row_within_tx(&tx, draft_id, "completed by REM")?;
             let status = tx.query_row(
                 "SELECT archived, superseded_by, json_extract(metadata, '$.rem.operation_status') \
                  FROM memories WHERE id = ?1",
