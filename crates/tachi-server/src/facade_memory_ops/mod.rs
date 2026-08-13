@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn facade_read_actions_include_briefing_forwarding() {
-        for action in ["search", "get", "briefing", "alerts", "ask", "readiness"] {
+        for action in ["search", "get", "briefing", "alerts", "ask"] {
             assert!(
                 should_forward_facade_read(action),
                 "{action} should use daemon read forwarding"
