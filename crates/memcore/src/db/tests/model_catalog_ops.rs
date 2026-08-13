@@ -752,14 +752,106 @@ fn a_throttle_writes_health_and_its_event_and_leaves_the_catalog_row_alone() {
     );
 }
 
+/// Every table the credential and account authorities own (#1680 D1/D5/D6).
+/// Named rather than derived so that adding one to the schema without adding
+/// it here is a decision someone has to make, not an omission that hides.
+const CREDENTIAL_AND_ACCOUNT_TABLES: [&str; 5] = [
+    "vault_key_health",
+    "provider_accounts",
+    "provider_account_aliases",
+    "provider_account_events",
+    "account_custody",
+];
+
+/// Every row of `table`, every column, as comparable text.
+///
+/// `SELECT *` on purpose: naming columns would make this blind to a column
+/// added later, and the property under test is that *nothing whatsoever* in
+/// these tables moves. Sorted so the comparison does not depend on SQLite's
+/// scan order.
+fn dump_table(conn: &Connection, table: &str) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT * FROM {table}"))
+        .expect("prepare dump");
+    let columns = stmt.column_count();
+    let rows = stmt
+        .query_map([], |row| {
+            let mut cells = Vec::with_capacity(columns);
+            for index in 0..columns {
+                cells.push(format!("{:?}", row.get_ref(index)?));
+            }
+            Ok(cells.join("|"))
+        })
+        .expect("dump rows");
+    let mut out: Vec<String> = rows.map(|row| row.expect("dump row")).collect();
+    out.sort();
+    out
+}
+
+fn dump_credential_and_account_tables(conn: &Connection) -> Vec<(&'static str, Vec<String>)> {
+    CREDENTIAL_AND_ACCOUNT_TABLES
+        .iter()
+        .map(|table| (*table, dump_table(conn, table)))
+        .collect()
+}
+
+/// Populate every credential and account table with a row that a forbidden
+/// `UPDATE` or `DELETE` could visibly damage.
+fn seed_credential_and_account_authorities(conn: &Connection) {
+    conn.execute_batch(
+        "INSERT INTO vault_key_health
+            (logical_name, key_id, status, cooldown_until, last_success, last_attempt,
+             last_error, error_count, auth_failed, disabled, metadata, updated_at)
+         VALUES ('EXTRACT_API_KEY', 'EXTRACT_API_KEY_1', 'rate_limited',
+                 '2026-08-11T00:05:00.000Z', '2026-08-10T23:00:00.000Z',
+                 '2026-08-11T00:00:00.000Z', 'seeded credential error', 3, 0, 0,
+                 '{\"seeded\":true}', '2026-08-11T00:00:00.000Z');
+
+         INSERT INTO provider_accounts
+            (account_id, provider_kind, auth_mode, auth_ref, account_fingerprint,
+             account_class, capabilities, credential_policy_ref, refresh_authority,
+             status, revision, source_refs, created_at, updated_at)
+         VALUES ('acct-seeded', 'siliconflow', 'api_key_pool', 'vault:seeded', 'fp-seeded',
+                 'model_api', '[\"chat\"]', NULL, 'none', 'active', 4, '[\"seed\"]',
+                 '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z');
+
+         INSERT INTO provider_account_aliases
+            (account_id, alias_name, source_kind, first_seen, last_seen, retired)
+         VALUES ('acct-seeded', 'EXTRACT_API_KEY', 'env', '2026-08-10T00:00:00.000Z',
+                 '2026-08-11T00:00:00.000Z', 0);
+
+         INSERT INTO provider_account_events
+            (account_id, revision, event_kind, plan_digest, evidence, created_at)
+         VALUES ('acct-seeded', 4, 'account_imported', 'digest-seeded', '{\"seeded\":true}',
+                 '2026-08-10T00:00:00.000Z');
+
+         INSERT INTO account_custody
+            (auth_ref, account_id, custody_kind, custody_target, revision, updated_at)
+         VALUES ('vault:seeded', 'acct-seeded', 'vault_rotation_pool', 'pool/seeded', 4,
+                 '2026-08-10T00:00:00.000Z');",
+    )
+    .expect("seed the credential and account authorities");
+}
+
 #[test]
 fn a_deployment_outcome_never_reaches_the_credential_authority() {
     // Discrimination 11 at the store boundary: the deployment writer's whole
-    // type face is deployment-shaped, so a storm of outcomes leaves the
-    // credential table exactly as empty as it started. A merged health score
-    // would show up here first.
+    // type face is deployment-shaped, so a storm of outcomes must leave every
+    // credential and account table byte-identical. A merged health score would
+    // show up here first.
+    //
+    // The tables are **seeded first**. An earlier version of this test started
+    // them empty and asserted `COUNT(*) == 0`, which a forbidden `UPDATE` or
+    // `DELETE` would have passed without a murmur — there was nothing there to
+    // damage (codex review of PR-C, NEW). Now every table holds a row whose
+    // every column is compared before and after.
     let conn = catalog_conn();
     upsert_model_deployment(&conn, &extract_lane()).expect("import");
+    seed_credential_and_account_authorities(&conn);
+    let before = dump_credential_and_account_tables(&conn);
+    for (table, rows) in &before {
+        assert!(!rows.is_empty(), "precondition: {table} must be seeded");
+    }
 
     for outcome in [
         DeploymentOutcome::Throttled { retry_after: None },
@@ -776,23 +868,36 @@ fn a_deployment_outcome_never_reaches_the_credential_authority() {
         )
         .expect("record succeeds");
     }
+    // The refused paths too: a skip must be as inert as a write.
+    for target in [
+        extract_request(),
+        DeploymentOutcomeTarget::deployment("env:not-in-the-catalog"),
+        DeploymentOutcomeTarget::request("env:extract", "https://elsewhere.test", "other-model"),
+    ] {
+        let _ = record_model_deployment_outcome(
+            &conn,
+            &target,
+            DeploymentOutcome::ServerError {
+                status: ServerErrorStatus::refused_for_tests(403),
+                retry_after: None,
+            },
+            EvidenceKind::Probed,
+            instant(0),
+        );
+    }
 
-    let credential_rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM vault_key_health", [], |row| {
-            row.get(0)
-        })
-        .expect("credential health count");
     assert_eq!(
-        credential_rows, 0,
-        "recording deployment health must not create, clear or touch a credential row — the two \
-         authorities share nothing but a database file"
+        dump_credential_and_account_tables(&conn),
+        before,
+        "recording deployment health must not create, clear, update or delete anything in the \
+         credential and account authorities — the three share nothing but a database file"
     );
-    let account_rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM provider_accounts", [], |row| {
-            row.get(0)
-        })
-        .expect("account count");
-    assert_eq!(account_rows, 0);
+
+    // …and the deployment authority did do its job, so the equality above is
+    // not the vacuous "nothing happened at all".
+    assert!(get_model_deployment_health(&conn, "env:extract")
+        .expect("read")
+        .is_some());
 }
 
 #[test]
