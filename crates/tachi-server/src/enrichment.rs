@@ -204,6 +204,15 @@ impl MemoryServer {
         true
     }
 
+    #[cfg(test)]
+    pub(crate) fn close_enrichment_channel_for_test(&self) {
+        self.enrichment_lock()
+            .retained_enrich_rx
+            .lock()
+            .expect("lock retained test enrichment receiver")
+            .take();
+    }
+
     pub(crate) fn requeue_auth_failed_enrichment_retries(&self, trigger: &str) -> usize {
         const LIMIT_PER_DB: usize = 64;
         let mut total = 0usize;

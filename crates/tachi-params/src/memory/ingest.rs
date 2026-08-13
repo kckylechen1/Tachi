@@ -132,7 +132,7 @@ pub struct IngestEventParams {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub struct IngestSourceParams {
     /// Raw source content to ingest
     pub content: String,

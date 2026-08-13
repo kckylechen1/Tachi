@@ -46,6 +46,8 @@ pub(super) const FOUNDRY_CHANNEL_CAPACITY: usize = 256;
 #[derive(Clone)]
 pub(crate) struct EnrichmentRuntime {
     pub(crate) enrich_tx: mpsc::Sender<EnrichmentItem>,
+    #[cfg(test)]
+    pub(crate) retained_enrich_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<EnrichmentItem>>>>,
 }
 
 #[derive(Clone)]

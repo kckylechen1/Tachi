@@ -24,4 +24,5 @@ mod structured_event;
 pub(crate) use event::handle_ingest_event;
 pub(crate) use extract::handle_extract_facts;
 pub(crate) use router::handle_ingest;
+pub(in crate::pipeline_ops) use source::handle_admitted_ingest_source;
 pub(crate) use source::handle_ingest_source;
