@@ -62,7 +62,7 @@
 //! be able to park a deployment forever, and a date already in the past must
 //! not produce a negative cooldown that reads as "no cooldown at all".
 
-use chrono::{DateTime, Duration, NaiveDateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
 
 use super::{DeploymentEventKind, ModelDeploymentHealth, NewModelDeploymentEvent};
@@ -107,12 +107,22 @@ pub enum RetryAfter {
     HttpDate(DateTime<Utc>),
 }
 
-/// `Sunday, 06-Nov-94 08:49:37 GMT` — the obsolete RFC 850 form. Two-digit
-/// year; see [`RetryAfter::parse`] on why that is harmless here.
-const RFC850_DATE_FORMAT: &str = "%A, %d-%b-%y %H:%M:%S GMT";
-/// `Sun Nov  6 08:49:37 1994` — the obsolete ANSI C `asctime()` form. No zone
-/// at all; §5.6.7 fixes every HTTP-date at UTC, so there is nothing to infer.
-const ASCTIME_DATE_FORMAT: &str = "%a %b %e %H:%M:%S %Y";
+/// Day names in `Weekday::num_days_from_monday` order, so the index a name
+/// resolves to *is* the weekday the parsed date has to agree with.
+const SHORT_DAY_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const LONG_DAY_NAMES: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+/// Month names in calendar order, `1..=12`.
+const MONTH_NAMES: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 impl RetryAfter {
     /// Parse a raw header value, or `None` if it is neither form.
@@ -130,18 +140,35 @@ impl RetryAfter {
     /// instruction the provider actually gave us in favour of a made-up class
     /// default. (codex review of #1681 PR-C, CP3.)
     ///
-    /// The two-digit year in the RFC 850 form is read with chrono's fixed
-    /// pivot (`00..=68` → 2000s, `69..=99` → 1900s) rather than §5.6.7's
-    /// sliding "more than 50 years in the future means the most recent past
-    /// year" rule. The two agree for every year a `Retry-After` can plausibly
-    /// name, and the difference cannot reach a row regardless: a cooldown is
-    /// clamped to `1..=3600` seconds, so a century-scale misreading resolves to
-    /// the same one second (a date in the past) or the same hour (a date far
-    /// in the future) either way.
+    /// # Why `received_at`
+    ///
+    /// The RFC 850 form carries a two-digit year, and §5.6.7 resolves it
+    /// against the moment the timestamp is *read*: a recipient must interpret
+    /// a year that appears to be more than 50 years in the future as the most
+    /// recent past year with the same last two digits. That rule moves with
+    /// the calendar, so it cannot be a constant pivot — chrono's
+    /// (`00..=68` → 2000s, `69..=99` → 1900s) throws away a valid instruction
+    /// for every year between "50 years out" and 2068: read in 2026, `69`
+    /// means 2069, which is 43 years away, not 1969. The parameter is the
+    /// same instant the caller is about to stamp the observation with, so the
+    /// header and the row agree on what "now" was (codex review of #1681 PR-C,
+    /// CP3).
+    ///
+    /// # Strict grammars, not "whatever chrono accepts"
+    ///
+    /// Each of the three forms is parsed against its own fixed grammar —
+    /// day-name spelling (short for IMF-fixdate and asctime, long for RFC
+    /// 850), field widths, separators and the literal `GMT` — and a date whose
+    /// day-name disagrees with its own calendar date is refused. An earlier
+    /// revision delegated IMF-fixdate to `DateTime::parse_from_rfc2822`, which
+    /// accepts a great deal that is not an HTTP-date (a numeric `+0000` zone,
+    /// a two-digit year, comments, folded whitespace). That made the parser's
+    /// stated boundary — junk returns `None` rather than being guessed at —
+    /// untrue for exactly the inputs a strict reading is meant to catch.
     ///
     /// `None` is still not an error — junk falls back to the class default for
     /// the outcome.
-    pub fn parse(raw: &str) -> Option<Self> {
+    pub fn parse(raw: &str, received_at: DateTime<Utc>) -> Option<Self> {
         let raw = raw.trim();
         if raw.is_empty() {
             return None;
@@ -149,7 +176,7 @@ impl RetryAfter {
         if let Ok(seconds) = raw.parse::<u64>() {
             return Some(Self::DeltaSeconds(seconds));
         }
-        Self::parse_http_date(raw).map(Self::HttpDate)
+        Self::parse_http_date(raw, received_at).map(Self::HttpDate)
     }
 
     /// An HTTP-date in any of §5.6.7's three formats, as an instant.
@@ -157,18 +184,17 @@ impl RetryAfter {
     /// Every one of them is UTC by definition, so the obsolete forms — which
     /// carry either a literal `GMT` or no zone at all — are read as naive
     /// civil times and stamped UTC rather than being given a local offset.
-    fn parse_http_date(raw: &str) -> Option<DateTime<Utc>> {
-        // IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) is an RFC 2822
-        // date-time whose zone is `GMT`.
-        if let Ok(parsed) = DateTime::parse_from_rfc2822(raw) {
-            return Some(parsed.with_timezone(&Utc));
+    fn parse_http_date(raw: &str, received_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        // Every byte of every grammar is ASCII, and the readers below index by
+        // byte offset. A non-ASCII value is not an HTTP-date, so this is the
+        // rejection and the slicing precondition at once.
+        if !raw.is_ascii() {
+            return None;
         }
-        for format in [RFC850_DATE_FORMAT, ASCTIME_DATE_FORMAT] {
-            if let Ok(naive) = NaiveDateTime::parse_from_str(raw, format) {
-                return Some(naive.and_utc());
-            }
-        }
-        None
+        imf_fixdate(raw)
+            .or_else(|| rfc850_date(raw, received_at))
+            .or_else(|| asctime_date(raw))
+            .map(|civil| civil.and_utc())
     }
 
     /// The cooldown this header buys, in seconds from `now`, clamped.
@@ -188,6 +214,147 @@ impl RetryAfter {
     pub fn cooldown_until(self, now: DateTime<Utc>) -> DateTime<Utc> {
         now + Duration::seconds(self.cooldown_secs_from(now) as i64)
     }
+}
+
+/// `Sun, 06 Nov 1994 08:49:37 GMT` — IMF-fixdate, the one form a sender may
+/// emit. Twenty-nine characters, every one of them fixed by the grammar.
+fn imf_fixdate(raw: &str) -> Option<NaiveDateTime> {
+    if raw.len() != 29 {
+        return None;
+    }
+    let day_name = day_name_index(&raw[0..3], &SHORT_DAY_NAMES)?;
+    if &raw[3..5] != ", " || &raw[7..8] != " " || &raw[11..12] != " " || &raw[16..17] != " " {
+        return None;
+    }
+    let day = digits(&raw[5..7], 2)?;
+    let month = month_number(&raw[8..11])?;
+    let year = digits(&raw[12..16], 4)? as i32;
+    let time = time_of_day(&raw[17..25])?;
+    if &raw[25..29] != " GMT" {
+        return None;
+    }
+    civil_date_time(day_name, year, month, day, time)
+}
+
+/// `Sunday, 06-Nov-94 08:49:37 GMT` — the obsolete RFC 850 form: long
+/// day-name, dash-separated date, and the two-digit year §5.6.7 resolves
+/// against `received_at`.
+fn rfc850_date(raw: &str, received_at: DateTime<Utc>) -> Option<NaiveDateTime> {
+    let (day_name, rest) = raw.split_once(", ")?;
+    let day_name = day_name_index(day_name, &LONG_DAY_NAMES)?;
+    if rest.len() != 22 {
+        return None;
+    }
+    if &rest[2..3] != "-" || &rest[6..7] != "-" || &rest[9..10] != " " {
+        return None;
+    }
+    let day = digits(&rest[0..2], 2)?;
+    let month = month_number(&rest[3..6])?;
+    let year = rfc850_year(digits(&rest[7..9], 2)?, received_at);
+    let time = time_of_day(&rest[10..18])?;
+    if &rest[18..22] != " GMT" {
+        return None;
+    }
+    civil_date_time(day_name, year, month, day, time)
+}
+
+/// `Sun Nov  6 08:49:37 1994` — the obsolete ANSI C `asctime()` form. No zone
+/// at all; §5.6.7 fixes every HTTP-date at UTC, so there is nothing to infer.
+/// Twenty-four characters, with the day space-padded rather than zero-padded —
+/// which is why this cannot be read by splitting on whitespace.
+fn asctime_date(raw: &str) -> Option<NaiveDateTime> {
+    if raw.len() != 24 {
+        return None;
+    }
+    let day_name = day_name_index(&raw[0..3], &SHORT_DAY_NAMES)?;
+    if &raw[3..4] != " " || &raw[7..8] != " " || &raw[10..11] != " " || &raw[19..20] != " " {
+        return None;
+    }
+    let month = month_number(&raw[4..7])?;
+    let day = if &raw[8..9] == " " {
+        digits(&raw[9..10], 1)?
+    } else {
+        digits(&raw[8..10], 2)?
+    };
+    let time = time_of_day(&raw[11..19])?;
+    let year = digits(&raw[20..24], 4)? as i32;
+    civil_date_time(day_name, year, month, day, time)
+}
+
+/// RFC 9110 §5.6.7's moving 50-year rule: a two-digit year that would land
+/// more than 50 years after `received_at` is the most recent past year ending
+/// in those digits instead.
+///
+/// Year granularity, deliberately: the rule exists to disambiguate a century,
+/// and a day-level reading of "50 years" would make the same header resolve
+/// differently either side of an arbitrary anniversary.
+fn rfc850_year(year_of_century: u32, received_at: DateTime<Utc>) -> i32 {
+    let received_year = received_at.year();
+    let candidate = received_year.div_euclid(100) * 100 + year_of_century as i32;
+    if candidate - received_year > 50 {
+        candidate - 100
+    } else {
+        candidate
+    }
+}
+
+/// The index of `name` in `names`, which is also its
+/// `Weekday::num_days_from_monday`. Case-sensitive: §5.6.7 spells every
+/// day-name and month-name as a case-sensitive ABNF literal.
+fn day_name_index(name: &str, names: &[&str; 7]) -> Option<u32> {
+    names
+        .iter()
+        .position(|known| *known == name)
+        .map(|i| i as u32)
+}
+
+/// `1..=12` for a three-letter month name.
+fn month_number(name: &str) -> Option<u32> {
+    MONTH_NAMES
+        .iter()
+        .position(|known| *known == name)
+        .map(|i| i as u32 + 1)
+}
+
+/// Exactly `width` ASCII digits, as a number. `str::parse` alone would accept
+/// a sign, whitespace and any width, none of which these grammars allow.
+fn digits(text: &str, width: usize) -> Option<u32> {
+    if text.len() != width || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// `HH:MM:SS`, exactly.
+fn time_of_day(text: &str) -> Option<(u32, u32, u32)> {
+    if text.len() != 8 || &text[2..3] != ":" || &text[5..6] != ":" {
+        return None;
+    }
+    Some((
+        digits(&text[0..2], 2)?,
+        digits(&text[3..5], 2)?,
+        digits(&text[6..8], 2)?,
+    ))
+}
+
+/// The civil date-time these fields name, or `None` if they do not name one.
+///
+/// The day-name is checked against the date it claims to describe. It is
+/// redundant information, and a value whose two halves disagree is not a
+/// moment the provider named — it is a malformed header, which this module
+/// answers with the class default rather than with a confident wrong instant.
+fn civil_date_time(
+    day_name: u32,
+    year: i32,
+    month: u32,
+    day: u32,
+    (hour, minute, second): (u32, u32, u32),
+) -> Option<NaiveDateTime> {
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    if date.weekday().num_days_from_monday() != day_name {
+        return None;
+    }
+    date.and_hms_opt(hour, minute, second)
 }
 
 /// The cooldown a throttle report buys after defaulting and clamping. Exposed

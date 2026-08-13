@@ -146,16 +146,22 @@ impl super::super::super::LlmClient {
     /// row. The lane's own `retry_after` — a delta-seconds `u64` feeding the
     /// retry sleep — is deliberately left alone: widening it would change how
     /// long a retry waits, and this seam records, it does not steer.
+    ///
+    /// The clock is this client's own [`Self::now_utc`], the same one the
+    /// record below is stamped with: RFC 9110 §5.6.7 resolves the RFC 850
+    /// form's two-digit year against the moment of receipt, so the header and
+    /// the observation must not be read against two different "now"s.
     pub(in crate::llm) fn note_deployment_http_status(
         &self,
         attribution: DeploymentAttribution<'_>,
         status: u16,
         retry_after_header: Option<&str>,
     ) {
+        let received_at = Self::now_utc();
         self.note_deployment_response(
             attribution,
             ProviderResponseSignal::Status(status),
-            retry_after_header.and_then(RetryAfter::parse),
+            retry_after_header.and_then(|raw| RetryAfter::parse(raw, received_at)),
         );
     }
 

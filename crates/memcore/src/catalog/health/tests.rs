@@ -194,11 +194,23 @@ fn transport_server_and_protocol_failures_are_all_this_authoritys_business() {
 
 // ─── Retry-After: two forms, one instant ─────────────────────────────────────
 
+/// When the header was read. Fixed rather than `Utc::now()`: RFC 9110 §5.6.7
+/// resolves the RFC 850 form's two-digit year *relative to now*, so a test
+/// with a live clock would assert a different year every few decades — which
+/// is the property under test, not an accident to paper over.
+fn received() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-08-13T00:00:00Z")
+        .expect("fixed receipt instant")
+        .with_timezone(&Utc)
+}
+
 /// The instant a `Retry-After` header resolves to, or a panic naming the form
 /// that failed. Every HTTP-date case below goes through this, so "parsed at
 /// all" and "parsed to the right moment" are never conflated.
 fn http_date(raw: &str) -> String {
-    match RetryAfter::parse(raw).unwrap_or_else(|| panic!("{raw:?} must parse as an HTTP-date")) {
+    match RetryAfter::parse(raw, received())
+        .unwrap_or_else(|| panic!("{raw:?} must parse as an HTTP-date"))
+    {
         RetryAfter::HttpDate(instant) => iso(instant),
         RetryAfter::DeltaSeconds(seconds) => {
             panic!("{raw:?} was read as {seconds} delta-seconds, not as a date")
@@ -209,11 +221,11 @@ fn http_date(raw: &str) -> String {
 #[test]
 fn retry_after_parses_both_forms_the_spec_allows() {
     assert_eq!(
-        RetryAfter::parse("120"),
+        RetryAfter::parse("120", received()),
         Some(RetryAfter::DeltaSeconds(120))
     );
     assert_eq!(
-        RetryAfter::parse(" 120 "),
+        RetryAfter::parse(" 120 ", received()),
         Some(RetryAfter::DeltaSeconds(120))
     );
     assert_eq!(
@@ -273,7 +285,7 @@ fn an_obsolete_date_form_buys_the_same_cooldown_as_the_modern_one() {
         "Wed Oct 21 07:28:00 2026",
     ];
     for raw in renderings {
-        let header = RetryAfter::parse(raw).unwrap_or_else(|| panic!("{raw:?} parses"));
+        let header = RetryAfter::parse(raw, now).unwrap_or_else(|| panic!("{raw:?} parses"));
         assert_eq!(
             header.cooldown_secs_from(now),
             90,
@@ -287,19 +299,120 @@ fn an_unparseable_retry_after_is_not_guessed_at() {
     // Junk still falls back to the class default rather than being coerced
     // into a confident wrong instant. What is *not* junk is any of the three
     // HTTP-date formats — see the test above.
-    assert_eq!(RetryAfter::parse("soon"), None);
-    assert_eq!(RetryAfter::parse(""), None);
-    assert_eq!(RetryAfter::parse("-30"), None);
+    assert_eq!(RetryAfter::parse("soon", received()), None);
+    assert_eq!(RetryAfter::parse("", received()), None);
+    assert_eq!(RetryAfter::parse("-30", received()), None);
     assert_eq!(
-        RetryAfter::parse("2026-10-21T07:28:00Z"),
+        RetryAfter::parse("2026-10-21T07:28:00Z", received()),
         None,
         "RFC 3339 is not an HTTP-date; reading it as one would be the guess this refuses"
     );
     assert_eq!(
-        RetryAfter::parse("Wed, 21 Oct 2026 07:28:00"),
+        RetryAfter::parse("Wed, 21 Oct 2026 07:28:00", received()),
         None,
         "an HTTP-date with its zone missing is malformed, not asctime"
     );
+}
+
+#[test]
+fn a_two_digit_year_is_resolved_against_the_moment_the_header_was_read() {
+    // RFC 9110 §5.6.7: a two-digit year that would land **more than 50 years**
+    // in the future is the most recent past year ending in those digits;
+    // anything else is read forward. chrono's fixed pivot (`69..=99` → 1900s)
+    // gets this wrong for every year between "50 years out" and 2068, which
+    // for a header read in 2026 means silently discarding a valid instruction
+    // (codex review of PR-C, CP3).
+    //
+    // `received()` is 2026, so `69` is 43 years out — inside the window, and
+    // therefore 2069. The pre-fix parser resolved it to 1969, whose weekday
+    // (Thursday) disagrees with the header, so it fell all the way through to
+    // `None` and the class default.
+    assert_eq!(
+        http_date("Wednesday, 06-Nov-69 08:49:37 GMT"),
+        "2069-11-06T08:49:37.000Z",
+        "43 years out is not 57 years ago"
+    );
+    // The boundary, both sides of it, in a form only one reading can satisfy:
+    // 2076-02-29 is a Saturday and 1976-02-29 is a Sunday; 1977-01-01 is a
+    // Saturday and 2077-01-01 is a Friday. Exactly 50 years out is *not* more
+    // than 50, so it stays in the future; 51 years out folds back a century.
+    assert_eq!(
+        http_date("Saturday, 29-Feb-76 08:49:37 GMT"),
+        "2076-02-29T08:49:37.000Z",
+        "exactly 50 years ahead is still ahead"
+    );
+    assert_eq!(
+        http_date("Saturday, 01-Jan-77 08:49:37 GMT"),
+        "1977-01-01T08:49:37.000Z",
+        "51 years ahead is the most recent past year ending in 77"
+    );
+    // And the case the rule was written for: an old timestamp stays old. Read
+    // in 2026, `94` would be 2094 — 68 years out — so it is 1994.
+    assert_eq!(
+        http_date("Sunday, 06-Nov-94 08:49:37 GMT"),
+        "1994-11-06T08:49:37.000Z",
+        "the obsolete form's original example"
+    );
+    // The receipt instant is load-bearing, not decoration: the *same* header
+    // read eight years earlier is 51 years out, which the rule folds back to
+    // 1969 — a Thursday, so the header stops describing any moment at all. No
+    // fixed pivot can produce both readings.
+    let read_in_2018 = DateTime::parse_from_rfc3339("2018-08-13T00:00:00Z")
+        .expect("fixed receipt instant")
+        .with_timezone(&Utc);
+    assert_eq!(
+        RetryAfter::parse("Wednesday, 06-Nov-69 08:49:37 GMT", read_in_2018),
+        None,
+        "1969-11-06 was a Thursday"
+    );
+}
+
+#[test]
+fn a_date_that_is_not_exactly_one_of_the_three_grammars_is_refused() {
+    // The other half of CP3. `DateTime::parse_from_rfc2822` accepts a great
+    // deal that is not IMF-fixdate — a numeric zone, a two-digit year, a long
+    // day-name — so delegating to it made "junk returns `None`" untrue for
+    // exactly the inputs a strict reading exists to catch.
+    for (raw, why) in [
+        (
+            "Wed, 21 Oct 2026 07:28:00 +0000",
+            "IMF-fixdate ends in the literal `GMT`, not a numeric zone",
+        ),
+        (
+            "Wed, 21 Oct 26 07:28:00 GMT",
+            "IMF-fixdate's year is four digits; two is the RFC 850 form's, with its own separators",
+        ),
+        (
+            "Wednesday, 21 Oct 2026 07:28:00 GMT",
+            "the long day-name belongs to RFC 850, which is dash-separated",
+        ),
+        (
+            "Sun, 06-Nov-94 08:49:37 GMT",
+            "and the short day-name is not the RFC 850 form either",
+        ),
+        (
+            "Wed 21 Oct 2026 07:28:00 GMT",
+            "the comma after the day-name is part of the grammar",
+        ),
+        (
+            "Wed, 21 Oct 2026 7:28:00 GMT",
+            "every numeric field is fixed-width",
+        ),
+        (
+            "Sun Nov 6 08:49:37 1994",
+            "asctime pads its day to two columns with a space",
+        ),
+        (
+            "Thu, 21 Oct 2026 07:28:00 GMT",
+            "2026-10-21 is a Wednesday: a header whose two halves disagree names no moment",
+        ),
+        (
+            "Wed, 21 Oct 2026 07:28:00 gmt",
+            "§5.6.7 spells its literals case-sensitively",
+        ),
+    ] {
+        assert_eq!(RetryAfter::parse(raw, received()), None, "{raw:?} — {why}");
+    }
 }
 
 #[test]
@@ -310,7 +423,7 @@ fn an_http_date_cooldown_is_measured_from_the_parsed_instant_not_the_string() {
     let now = DateTime::parse_from_rfc3339("2026-10-21T07:28:00+08:00")
         .expect("fixed instant")
         .with_timezone(&Utc);
-    let header = RetryAfter::parse("Tue, 20 Oct 2026 23:29:30 GMT").expect("parses");
+    let header = RetryAfter::parse("Tue, 20 Oct 2026 23:29:30 GMT", now).expect("parses");
     assert_eq!(header.cooldown_secs_from(now), 90);
     assert_eq!(iso(header.cooldown_until(now)), "2026-10-20T23:29:30.000Z");
 }
