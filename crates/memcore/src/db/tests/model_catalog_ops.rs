@@ -22,6 +22,7 @@
 
 use super::*;
 
+use crate::catalog::health::{DeploymentOutcome, RetryAfter};
 use crate::catalog::{
     CatalogSource, DeploymentCapabilities, DeploymentEventKind, EmbeddingsCapability,
     ModelDeployment, NewModelDeployment, NewModelDeploymentEvent, PricingSnapshot, ProtocolKind,
@@ -30,9 +31,12 @@ use crate::catalog::{
 use crate::db::model_catalog::{
     append_model_deployment_event, get_model_deployment, get_model_deployment_health,
     get_pricing_snapshot, list_all_model_deployment_events, list_model_deployment_events,
-    list_model_deployments, list_model_deployments_by_source, retire_model_deployment,
-    upsert_model_deployment, upsert_pricing_snapshot, DeploymentWrite, PricingSnapshotWrite,
+    list_model_deployments, list_model_deployments_by_source, record_model_deployment_outcome,
+    retire_model_deployment, upsert_model_deployment, upsert_pricing_snapshot,
+    DeploymentHealthSkip, DeploymentHealthWrite, DeploymentOutcomeTarget, DeploymentWrite,
+    PricingSnapshotWrite,
 };
+use crate::vault::health::EvidenceKind;
 
 fn catalog_conn() -> Connection {
     let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -585,6 +589,306 @@ fn an_expired_row_is_still_listed_but_never_authoritative() {
         2,
         "staleness is not deletion — the row stays readable, it just stops speaking for the \
          present"
+    );
+}
+
+// ─── the health single writer (PR-C) ─────────────────────────────────────────
+
+fn instant(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("fixed test instant")
+}
+
+fn iso(instant: chrono::DateTime<chrono::Utc>) -> String {
+    instant.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// The target an `env:extract` request produces — endpoint and model as
+/// [`extract_lane`] recorded them.
+fn extract_request() -> DeploymentOutcomeTarget<'static> {
+    DeploymentOutcomeTarget::request(
+        "env:extract",
+        "https://api.siliconflow.cn/v1/chat/completions",
+        "Qwen/Qwen3.5-27B",
+    )
+}
+
+#[test]
+fn a_throttle_writes_health_and_its_event_and_leaves_the_catalog_row_alone() {
+    // Discrimination 5 again, this time against the *sanctioned* writer rather
+    // than the raw-SQL stand-in above: the one path a 429 can take must not be
+    // able to touch what the deployment is.
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+    let before = get_model_deployment(&conn, "env:extract")
+        .expect("read")
+        .expect("row");
+
+    let write = record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Throttled {
+            retry_after: Some(RetryAfter::DeltaSeconds(45)),
+        },
+        EvidenceKind::SelfReported,
+        instant(0),
+    )
+    .expect("record succeeds");
+
+    let DeploymentHealthWrite::Recorded {
+        event_id,
+        ref state,
+        ref cooldown_until,
+    } = write
+    else {
+        panic!("a matching request must be recorded, got {write:?}");
+    };
+    assert!(event_id > 0);
+    assert_eq!(state, "cooldown");
+    assert_eq!(cooldown_until.as_deref(), Some(iso(instant(45))).as_deref());
+
+    let after = get_model_deployment(&conn, "env:extract")
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        before, after,
+        "the catalog row must be byte-identical: a provider throttling us says nothing about the \
+         deployment's capabilities, context window, pricing pointer or revision"
+    );
+
+    let health = get_model_deployment_health(&conn, "env:extract")
+        .expect("health read")
+        .expect("health row exists");
+    assert_eq!(health.state, "cooldown");
+    assert_eq!(
+        health.cooldown_until.as_deref(),
+        Some(iso(instant(45))).as_deref(),
+        "the cooldown is a health-row state, never a catalog column"
+    );
+    assert_eq!(health.error_count, 1);
+    assert_eq!(health.evidence_kind, Some(EvidenceKind::SelfReported));
+    assert_eq!(health.observed_at, iso(instant(0)));
+
+    let events = list_model_deployment_events(&conn, "env:extract").expect("events");
+    assert_eq!(events.len(), 2, "import, then exactly one health event");
+    assert_eq!(
+        events[1].event_kind,
+        DeploymentEventKind::HealthCooldown.as_str()
+    );
+    assert_eq!(
+        events[1].revision, 1,
+        "a health event carries the catalog revision it observed and does not advance it"
+    );
+}
+
+#[test]
+fn a_deployment_outcome_never_reaches_the_credential_authority() {
+    // Discrimination 11 at the store boundary: the deployment writer's whole
+    // type face is deployment-shaped, so a storm of outcomes leaves the
+    // credential table exactly as empty as it started. A merged health score
+    // would show up here first.
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+
+    for outcome in [
+        DeploymentOutcome::Throttled { retry_after: None },
+        DeploymentOutcome::Unreachable,
+        DeploymentOutcome::ServerError {
+            status: 503,
+            retry_after: None,
+        },
+        DeploymentOutcome::Served,
+    ] {
+        record_model_deployment_outcome(
+            &conn,
+            &extract_request(),
+            outcome,
+            EvidenceKind::SelfReported,
+            instant(0),
+        )
+        .expect("record succeeds");
+    }
+
+    let credential_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM vault_key_health", [], |row| {
+            row.get(0)
+        })
+        .expect("credential health count");
+    assert_eq!(
+        credential_rows, 0,
+        "recording deployment health must not create, clear or touch a credential row — the two \
+         authorities share nothing but a database file"
+    );
+    let account_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM provider_accounts", [], |row| {
+            row.get(0)
+        })
+        .expect("account count");
+    assert_eq!(account_rows, 0);
+}
+
+#[test]
+fn an_outcome_for_a_deployment_the_catalog_does_not_know_is_skipped() {
+    // The fail-safe the lane path depends on: a health record that has nowhere
+    // to land is a counted skip, never an error travelling back up the call
+    // that produced it.
+    let conn = catalog_conn();
+
+    let write = record_model_deployment_outcome(
+        &conn,
+        &DeploymentOutcomeTarget::deployment("env:reasoning"),
+        DeploymentOutcome::Throttled { retry_after: None },
+        EvidenceKind::SelfReported,
+        instant(0),
+    )
+    .expect("a missing deployment is not an error");
+
+    assert_eq!(
+        write,
+        DeploymentHealthWrite::Skipped(DeploymentHealthSkip::NoSuchDeployment)
+    );
+    assert!(get_model_deployment_health(&conn, "env:reasoning")
+        .expect("read")
+        .is_none());
+    assert!(list_all_model_deployment_events(&conn)
+        .expect("events")
+        .is_empty());
+}
+
+#[test]
+fn a_fallback_tiers_throttle_is_not_recorded_against_the_lanes_primary_row() {
+    // The mis-attribution this target type exists to prevent: #1197's
+    // cross-provider fallback sends the request to a provider the `env:extract`
+    // row does not describe. Cooling `env:extract` down for it would be a
+    // fabricated health fact about a deployment that throttled nothing.
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+
+    let from_fallback = DeploymentOutcomeTarget::request(
+        "env:extract",
+        "https://api.deepseek.com/v1/chat/completions",
+        "deepseek-chat",
+    );
+    let write = record_model_deployment_outcome(
+        &conn,
+        &from_fallback,
+        DeploymentOutcome::Throttled { retry_after: None },
+        EvidenceKind::SelfReported,
+        instant(0),
+    )
+    .expect("a mismatch is not an error");
+    assert_eq!(
+        write,
+        DeploymentHealthWrite::Skipped(DeploymentHealthSkip::DescribesADifferentRequest)
+    );
+
+    // Same endpoint, different model — a `model_override` — is the other half
+    // of the same trap.
+    let overridden = DeploymentOutcomeTarget::request(
+        "env:extract",
+        "https://api.siliconflow.cn/v1/chat/completions",
+        "Qwen/Qwen3.5-72B",
+    );
+    assert_eq!(
+        record_model_deployment_outcome(
+            &conn,
+            &overridden,
+            DeploymentOutcome::Throttled { retry_after: None },
+            EvidenceKind::SelfReported,
+            instant(0),
+        )
+        .expect("record"),
+        DeploymentHealthWrite::Skipped(DeploymentHealthSkip::DescribesADifferentRequest)
+    );
+
+    assert!(
+        get_model_deployment_health(&conn, "env:extract")
+            .expect("read")
+            .is_none(),
+        "neither mis-attributed outcome may leave a trace on the primary row's health"
+    );
+    assert_eq!(
+        list_model_deployment_events(&conn, "env:extract")
+            .expect("events")
+            .len(),
+        1,
+        "and neither may append an event"
+    );
+}
+
+#[test]
+fn a_success_after_a_cooldown_clears_it_through_the_store() {
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+
+    record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Throttled {
+            retry_after: Some(RetryAfter::DeltaSeconds(45)),
+        },
+        EvidenceKind::SelfReported,
+        instant(0),
+    )
+    .expect("throttle");
+    record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Served,
+        EvidenceKind::SelfReported,
+        instant(60),
+    )
+    .expect("success");
+
+    let health = get_model_deployment_health(&conn, "env:extract")
+        .expect("read")
+        .expect("row");
+    assert_eq!(health.state, "ok");
+    assert_eq!(health.cooldown_until, None);
+    assert_eq!(health.error_count, 0);
+    assert_eq!(
+        health.last_success_at.as_deref(),
+        Some(iso(instant(60))).as_deref()
+    );
+    assert_eq!(
+        list_model_deployment_events(&conn, "env:extract")
+            .expect("events")
+            .len(),
+        3,
+        "one row, two health events — the log keeps both, the row keeps the latest"
+    );
+}
+
+#[test]
+fn a_retired_deployment_still_records_what_happened_when_it_was_called() {
+    // Deliberate: health is an observation, not an admission decision.
+    // Refusing to record because the row is retired would lose the evidence
+    // that the retirement was right. Admission is the resolver's gate (PR-D).
+    let conn = catalog_conn();
+    upsert_model_deployment(&conn, &extract_lane()).expect("import");
+    retire_model_deployment(&conn, "env:extract").expect("retire");
+
+    let write = record_model_deployment_outcome(
+        &conn,
+        &extract_request(),
+        DeploymentOutcome::Unreachable,
+        EvidenceKind::Probed,
+        instant(0),
+    )
+    .expect("record");
+    assert!(matches!(write, DeploymentHealthWrite::Recorded { .. }));
+
+    let health = get_model_deployment_health(&conn, "env:extract")
+        .expect("read")
+        .expect("row");
+    assert_eq!(health.state, "error");
+    assert_eq!(health.evidence_kind, Some(EvidenceKind::Probed));
+    assert_eq!(
+        get_model_deployment(&conn, "env:extract")
+            .expect("read")
+            .expect("row")
+            .revision,
+        2,
+        "the retirement revision, unmoved by the health write"
     );
 }
 

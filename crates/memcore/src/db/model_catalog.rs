@@ -27,9 +27,11 @@
 //! SQLite has no nested transactions). The multi-statement ones document what
 //! a caller outside a transaction risks.
 
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::catalog::fold::CatalogProjection;
+use crate::catalog::health::{record_deployment_outcome, DeploymentOutcome};
 use crate::catalog::{
     partition_authoritative_at, AttachmentBounds, AuthoritativePartition, CatalogSource,
     DeploymentCapabilities, DeploymentEventKind, ModelAlias, ModelAliasBinding, ModelDeployment,
@@ -602,12 +604,191 @@ pub fn list_model_alias_bindings(conn: &Connection) -> Result<Vec<ModelAliasBind
     Ok(out)
 }
 
-// ─── model_deployment_health (read side) ─────────────────────────────────────
+// ─── model_deployment_health ─────────────────────────────────────────────────
 
-/// Read one deployment's health row. The single **writer**
-/// (`record_deployment_outcome`, #1681 D4) is PR-C's; PR-B ships the read so
-/// the "a failure never erases catalog metadata" discriminator can assert on
-/// both tables at once.
+/// Which deployment an outcome is being recorded against, and (for an outcome
+/// produced by a real request) what that request actually used.
+///
+/// The endpoint/model expectation exists because "the lane that made this call"
+/// and "the deployment row describing that lane" are not always the same thing:
+/// a cross-provider fallback tier (#1197) and a caller-supplied `model_override`
+/// both send the request somewhere the lane's catalog row does not describe.
+/// Recording a 429 from a fallback provider against the primary row would cool
+/// down a deployment that never throttled anything — a wrong health fact, and
+/// later a wrong exclusion. So the expectation is checked against the stored row
+/// and a mismatch is reported as a skip rather than written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeploymentOutcomeTarget<'a> {
+    deployment_id: &'a str,
+    expects: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> DeploymentOutcomeTarget<'a> {
+    /// An outcome produced by a request to `endpoint_ref` naming
+    /// `provider_model_id`. Recorded only if the stored row still describes
+    /// exactly that.
+    pub fn request(
+        deployment_id: &'a str,
+        endpoint_ref: &'a str,
+        provider_model_id: &'a str,
+    ) -> Self {
+        Self {
+            deployment_id,
+            expects: Some((endpoint_ref, provider_model_id)),
+        }
+    }
+
+    /// An outcome about a deployment addressed by id alone — a probe that read
+    /// the catalog row it is probing, and so cannot be pointing at a different
+    /// endpoint than the one recorded.
+    pub fn deployment(deployment_id: &'a str) -> Self {
+        Self {
+            deployment_id,
+            expects: None,
+        }
+    }
+
+    pub fn deployment_id(&self) -> &str {
+        self.deployment_id
+    }
+
+    fn describes(&self, deployment: &ModelDeployment) -> bool {
+        let Some((endpoint_ref, provider_model_id)) = self.expects else {
+            return true;
+        };
+        deployment.endpoint_ref.as_deref().map(str::trim) == Some(endpoint_ref.trim())
+            && deployment.provider_model_id.trim() == provider_model_id.trim()
+    }
+}
+
+/// Why an outcome was not recorded. Both arms are ordinary operating states,
+/// not errors: the caller counts them and carries on, because a missing health
+/// row must never make the call path that produced the outcome fail (#1681 D4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentHealthSkip {
+    /// No catalog row with that id. Health about a deployment the catalog does
+    /// not know is a row nothing can ever interpret.
+    NoSuchDeployment,
+    /// The row exists but describes a different endpoint or model than the
+    /// request that produced this outcome — see [`DeploymentOutcomeTarget`].
+    DescribesADifferentRequest,
+}
+
+/// What [`record_model_deployment_outcome`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeploymentHealthWrite {
+    Recorded {
+        /// Id of the appended `model_deployment_events` row.
+        event_id: i64,
+        state: String,
+        cooldown_until: Option<String>,
+    },
+    Skipped(DeploymentHealthSkip),
+}
+
+/// **The** store-level entry point for `model_deployment_health` (#1681 D4).
+///
+/// Reads the deployment row (to confirm it exists, to check the target's
+/// expectation, and to carry its revision onto the event), computes the row
+/// transition with [`record_deployment_outcome`] — the single writer — then
+/// persists the row and appends its event.
+///
+/// # What it cannot do
+///
+/// It never writes `model_deployments`. The deployment row is read and nothing
+/// else, which is discrimination 5 made structural rather than promised: no
+/// outcome path, however unlucky, can null out a `context_window` or retire a
+/// deployment because a provider had a bad minute. It also touches no
+/// credential, account or alias table — none of those types appear in this
+/// function's signature or in the writer's (discrimination 11).
+///
+/// Two statements, no internal transaction (the module's rule). A caller that
+/// needs the row and its event to land atomically wraps the call; the ordering
+/// here is row-then-event, so a failure between them leaves an event-less
+/// health row rather than an event for a write that did not happen.
+pub fn record_model_deployment_outcome(
+    conn: &Connection,
+    target: &DeploymentOutcomeTarget<'_>,
+    outcome: DeploymentOutcome,
+    evidence: EvidenceKind,
+    now: DateTime<Utc>,
+) -> Result<DeploymentHealthWrite, MemoryError> {
+    let deployment_id = target.deployment_id();
+    let Some(deployment) = get_model_deployment(conn, deployment_id)? else {
+        return Ok(DeploymentHealthWrite::Skipped(
+            DeploymentHealthSkip::NoSuchDeployment,
+        ));
+    };
+    if !target.describes(&deployment) {
+        return Ok(DeploymentHealthWrite::Skipped(
+            DeploymentHealthSkip::DescribesADifferentRequest,
+        ));
+    }
+
+    let existing = get_model_deployment_health(conn, deployment_id)?;
+    let write = record_deployment_outcome(
+        existing.as_ref(),
+        deployment_id,
+        deployment.revision,
+        outcome,
+        evidence,
+        now,
+    );
+
+    upsert_model_deployment_health(conn, &write.health)?;
+    let event_id = append_model_deployment_event(conn, &write.event)?;
+
+    Ok(DeploymentHealthWrite::Recorded {
+        event_id,
+        state: write.health.state,
+        cooldown_until: write.health.cooldown_until,
+    })
+}
+
+/// Persist a health row the single writer produced.
+///
+/// Private on purpose: a public row-shaped upsert would be a second door into
+/// this table, and the whole point of #1681 D4 (like #1680 D6 before it) is
+/// that there is one. Everything reachable from outside this module goes
+/// through [`record_model_deployment_outcome`].
+fn upsert_model_deployment_health(
+    conn: &Connection,
+    health: &ModelDeploymentHealth,
+) -> Result<(), MemoryError> {
+    conn.execute(
+        "INSERT INTO model_deployment_health
+            (deployment_id, state, cooldown_until, last_success_at, last_attempt_at, last_error,
+             error_count, evidence_kind, observed_at, metadata, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(deployment_id) DO UPDATE SET
+            state = excluded.state,
+            cooldown_until = excluded.cooldown_until,
+            last_success_at = excluded.last_success_at,
+            last_attempt_at = excluded.last_attempt_at,
+            last_error = excluded.last_error,
+            error_count = excluded.error_count,
+            evidence_kind = excluded.evidence_kind,
+            observed_at = excluded.observed_at,
+            metadata = excluded.metadata,
+            updated_at = excluded.updated_at",
+        params![
+            health.deployment_id,
+            health.state,
+            health.cooldown_until,
+            health.last_success_at,
+            health.last_attempt_at,
+            health.last_error,
+            health.error_count,
+            health.evidence_kind.map(EvidenceKind::as_str),
+            health.observed_at,
+            health.metadata,
+            health.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Read one deployment's health row.
 pub fn get_model_deployment_health(
     conn: &Connection,
     deployment_id: &str,
