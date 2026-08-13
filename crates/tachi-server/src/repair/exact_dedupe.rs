@@ -92,9 +92,9 @@ fn persist_prepared_receipt_before_commit(
                 "exact-dedupe prepared receipt could not be staged durably at {}: {error}",
                 receipt_out.display()
             ),
-            super::receipt::PreparedArtifactError::AlreadyExists => format!(
-                "exact-dedupe receipt output already exists: {}",
-                receipt_out.display()
+            super::receipt::PreparedArtifactError::AlreadyExists(retained) => format!(
+                "exact-dedupe receipt output already exists: {}; staged artifact retained at {}",
+                receipt_out.display(), retained.display()
             ),
             super::receipt::PreparedArtifactError::Publish(error) => format!(
                 "exact-dedupe prepared receipt could not be atomically published before commit at {}: {error}",
@@ -1102,7 +1102,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn partial_prepared_stage_write_never_publishes_or_leaks_a_receipt() {
+    fn partial_prepared_stage_write_never_publishes_and_retains_private_evidence() {
         let (_dir, app_home, db_path, plan_path, receipt_path) = fixture();
         set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
         inject_fault_during_prepared_stage_write_for_test(true);
@@ -1121,6 +1121,7 @@ mod tests {
                 .contains("injected partial prepared-receipt write failure"),
             "unexpected refusal: {error}"
         );
+        assert!(error.to_string().contains("retained at"), "{error}");
         assert!(
             !receipt_path.exists(),
             "partial bytes must never appear at the public receipt path"
@@ -1134,7 +1135,10 @@ mod tests {
                     .to_string_lossy()
                     .contains("exact-dedupe-prepared")
             });
-        assert!(!leaked_stage, "partial staging file must be removed");
+        assert!(
+            leaked_stage,
+            "partial private staging evidence must be retained without pathname cleanup"
+        );
         let archived: i64 = rusqlite::Connection::open(&db_path)
             .unwrap()
             .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))
@@ -1163,6 +1167,7 @@ mod tests {
                 .contains("injected prepared-receipt parent sync failure"),
             "unexpected refusal: {error}"
         );
+        assert!(error.to_string().contains("retained at"), "{error}");
         let retained: ExactDedupeReceipt = serde_json::from_slice(
             &std::fs::read(&receipt_path).expect("prepared receipt remains inspectable"),
         )
@@ -1180,7 +1185,10 @@ mod tests {
                     .to_string_lossy()
                     .contains("exact-dedupe-prepared")
             });
-        assert!(!leaked_stage, "prepared staging name must be removed");
+        assert!(
+            leaked_stage,
+            "prepared staging evidence must be retained without pathname cleanup"
+        );
         let archived: i64 = rusqlite::Connection::open(&db_path)
             .unwrap()
             .query_row("SELECT sum(archived) FROM memories", [], |row| row.get(0))

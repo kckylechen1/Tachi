@@ -17,6 +17,39 @@ use std::cell::Cell;
 std::thread_local! {
     static FAULT_DURING_PREPARED_STAGE_WRITE: Cell<bool> = const { Cell::new(false) };
     static FAULT_BEFORE_PREPARED_PARENT_SYNC: Cell<bool> = const { Cell::new(false) };
+    static REPLACE_STAGED_BEFORE_CLEANUP: Cell<Option<CleanupEdge>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupEdge {
+    StageWriteFailure,
+    PublishFailure,
+    ParentSyncFailure,
+    Success,
+    FinalizeExchangeFailure,
+}
+
+#[cfg(test)]
+fn inject_replace_staged_before_cleanup_for_test(edge: CleanupEdge) {
+    REPLACE_STAGED_BEFORE_CLEANUP.with(|slot| slot.set(Some(edge)));
+}
+
+#[cfg(test)]
+fn replace_staged_before_cleanup(path: &Path, edge: CleanupEdge) -> Result<(), std::io::Error> {
+    if REPLACE_STAGED_BEFORE_CLEANUP.with(|slot| {
+        if slot.get() == Some(edge) {
+            slot.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        let retained = path.with_extension(format!("retained-{edge:?}"));
+        fs::rename(path, retained)?;
+        fs::write(path, format!("FOREIGN-STAGED-{edge:?}"))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,9 +139,15 @@ fn write_staged_receipt(
             file.sync_all()
         })();
         if let Err(error) = write_result {
-            drop(file);
-            let _ = fs::remove_file(&candidate);
-            return Err(error);
+            #[cfg(test)]
+            replace_staged_before_cleanup(&candidate, CleanupEdge::StageWriteFailure)?;
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; partial staging artifact retained at {}",
+                    candidate.display()
+                ),
+            ));
         }
         return Ok((candidate, file));
     }
@@ -121,7 +160,7 @@ fn write_staged_receipt(
 #[derive(Debug)]
 pub(super) enum PreparedArtifactError {
     Stage(std::io::Error),
-    AlreadyExists,
+    AlreadyExists(PathBuf),
     Publish(std::io::Error),
     ParentSync(std::io::Error),
 }
@@ -136,21 +175,39 @@ pub(super) fn persist_prepared_artifact_bytes(
     let (staged, file) = write_staged_receipt(output, kind, "prepared", bytes)
         .map_err(PreparedArtifactError::Stage)?;
     if let Err(error) = fs::hard_link(&staged, output) {
-        let _ = fs::remove_file(&staged);
+        #[cfg(test)]
+        replace_staged_before_cleanup(&staged, CleanupEdge::PublishFailure)
+            .map_err(PreparedArtifactError::Publish)?;
         if error.kind() == std::io::ErrorKind::AlreadyExists {
-            return Err(PreparedArtifactError::AlreadyExists);
+            return Err(PreparedArtifactError::AlreadyExists(staged));
         }
-        return Err(PreparedArtifactError::Publish(error));
+        return Err(PreparedArtifactError::Publish(std::io::Error::new(
+            error.kind(),
+            format!("{error}; staging artifact retained at {}", staged.display()),
+        )));
     }
     if let Err(error) = sync_prepared_receipt_parent(output) {
         // Never unlink the public name after publication: a concurrent actor
         // could replace it between the check and unlink. The caller decides
         // whether a surrounding DB transaction must roll back.
-        let _ = fs::remove_file(&staged);
-        return Err(PreparedArtifactError::ParentSync(error));
+        #[cfg(test)]
+        replace_staged_before_cleanup(&staged, CleanupEdge::ParentSyncFailure)
+            .map_err(PreparedArtifactError::ParentSync)?;
+        return Err(PreparedArtifactError::ParentSync(std::io::Error::new(
+            error.kind(),
+            format!("{error}; staging artifact retained at {}", staged.display()),
+        )));
     }
-    if fs::remove_file(&staged).is_ok() {
-        let _ = sync_receipt_parent(output);
+    #[cfg(test)]
+    replace_staged_before_cleanup(&staged, CleanupEdge::Success)
+        .map_err(PreparedArtifactError::Publish)?;
+    if !path_names_open_file(&staged, &file).map_err(PreparedArtifactError::Publish)? {
+        return Err(PreparedArtifactError::Publish(std::io::Error::other(
+            format!(
+                "prepared staging path changed before return; no pathname was deleted: {}",
+                staged.display()
+            ),
+        )));
     }
     Ok(file)
 }
@@ -244,8 +301,13 @@ pub(super) fn finalize_prepared_receipt(
     let (staged, committed_file) =
         write_staged_receipt(receipt_out, kind, "prepared-backup", committed_bytes)?;
     if let Err(error) = atomic_exchange_paths(&staged, receipt_out) {
-        let _ = fs::remove_file(&staged);
-        return Err(format!("atomic committed-receipt exchange failed: {error}").into());
+        #[cfg(test)]
+        replace_staged_before_cleanup(&staged, CleanupEdge::FinalizeExchangeFailure)?;
+        return Err(format!(
+            "atomic committed-receipt exchange failed: {error}; committed staging artifact retained at {}",
+            staged.display()
+        )
+        .into());
     }
     if !path_names_open_file(&staged, prepared_file)? {
         // The output was replaced before the exchange. Exchange back so the
@@ -336,4 +398,75 @@ pub(super) fn publish_committed_projection(
         .into());
     }
     Ok(projection)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn foreign_survives(dir: &Path, edge: CleanupEdge) -> bool {
+        let expected = format!("FOREIGN-STAGED-{edge:?}").into_bytes();
+        dir.read_dir()
+            .unwrap()
+            .any(|entry| std::fs::read(entry.unwrap().path()).is_ok_and(|bytes| bytes == expected))
+    }
+
+    #[test]
+    fn cleanup_edges_never_delete_a_foreign_staged_replacement() {
+        let stage_failure = tempfile::tempdir().unwrap();
+        let output = stage_failure.path().join("receipt.json");
+        inject_fault_during_prepared_stage_write_for_test(true);
+        inject_replace_staged_before_cleanup_for_test(CleanupEdge::StageWriteFailure);
+        persist_prepared_artifact_bytes(&output, ReceiptKind::MemoryMaintenance, b"prepared")
+            .expect_err("partial stage write must fail");
+        assert!(foreign_survives(
+            stage_failure.path(),
+            CleanupEdge::StageWriteFailure
+        ));
+
+        let publish_failure = tempfile::tempdir().unwrap();
+        let output = publish_failure.path().join("receipt.json");
+        fs::write(&output, b"existing").unwrap();
+        inject_replace_staged_before_cleanup_for_test(CleanupEdge::PublishFailure);
+        persist_prepared_artifact_bytes(&output, ReceiptKind::MemoryMaintenance, b"prepared")
+            .expect_err("no-overwrite publication must fail");
+        assert!(foreign_survives(
+            publish_failure.path(),
+            CleanupEdge::PublishFailure
+        ));
+
+        let parent_failure = tempfile::tempdir().unwrap();
+        let output = parent_failure.path().join("receipt.json");
+        inject_fault_before_prepared_parent_sync_for_test(true);
+        inject_replace_staged_before_cleanup_for_test(CleanupEdge::ParentSyncFailure);
+        persist_prepared_artifact_bytes(&output, ReceiptKind::MemoryMaintenance, b"prepared")
+            .expect_err("parent sync failure must be non-success");
+        assert!(foreign_survives(
+            parent_failure.path(),
+            CleanupEdge::ParentSyncFailure
+        ));
+
+        let success_cleanup = tempfile::tempdir().unwrap();
+        let output = success_cleanup.path().join("receipt.json");
+        inject_replace_staged_before_cleanup_for_test(CleanupEdge::Success);
+        persist_prepared_artifact_bytes(&output, ReceiptKind::MemoryMaintenance, b"prepared")
+            .expect_err("staged replacement before success cleanup must be non-success");
+        assert!(foreign_survives(
+            success_cleanup.path(),
+            CleanupEdge::Success
+        ));
+
+        let finalize_failure = tempfile::tempdir().unwrap();
+        let output = finalize_failure.path().join("missing-public.json");
+        let prepared_path = finalize_failure.path().join("prepared");
+        fs::write(&prepared_path, b"prepared").unwrap();
+        let prepared = File::open(prepared_path).unwrap();
+        inject_replace_staged_before_cleanup_for_test(CleanupEdge::FinalizeExchangeFailure);
+        finalize_prepared_receipt(&output, ReceiptKind::ExactDedupe, &prepared, b"committed")
+            .expect_err("exchange against missing public path must fail");
+        assert!(foreign_survives(
+            finalize_failure.path(),
+            CleanupEdge::FinalizeExchangeFailure
+        ));
+    }
 }

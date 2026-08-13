@@ -36,7 +36,6 @@ impl MemoryStore {
         kanban_max_age_days: u64,
         include_kanban: bool,
         expected: &[db::MaintenanceClassFact],
-        authority_key: &str,
         before_commit: F,
     ) -> Result<db::GcMaintenanceOutcome, MemoryError>
     where
@@ -44,7 +43,7 @@ impl MemoryStore {
             &Connection,
             &[db::MaintenanceClassFact],
             &[db::MaintenanceClassFact],
-        ) -> Result<String, MemoryError>,
+        ) -> Result<db::OperatorMaintenanceAuthorityInput, MemoryError>,
     {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
@@ -57,7 +56,6 @@ impl MemoryStore {
             kanban_max_age_days,
             include_kanban,
             expected,
-            authority_key,
             before_commit,
         )
     }
@@ -75,7 +73,6 @@ impl MemoryStore {
         &mut self,
         id: &str,
         expected: &[db::MaintenanceClassFact],
-        authority_key: &str,
         before_commit: F,
     ) -> Result<db::DeleteMaintenanceOutcome, MemoryError>
     where
@@ -83,7 +80,7 @@ impl MemoryStore {
             &Connection,
             &[db::MaintenanceClassFact],
             &[db::MaintenanceClassFact],
-        ) -> Result<String, MemoryError>,
+        ) -> Result<db::OperatorMaintenanceAuthorityInput, MemoryError>,
     {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
@@ -93,7 +90,6 @@ impl MemoryStore {
             self.vec_available,
             self.profile,
             expected,
-            authority_key,
             before_commit,
         )
     }

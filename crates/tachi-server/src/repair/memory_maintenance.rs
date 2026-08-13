@@ -6,8 +6,8 @@
 use crate::daemon_lock::{DualDaemonLock, DualLockError};
 use crate::db_ownership::{daemon_ownership, DbOwnership};
 use memcore::{
-    GcConfig, MaintenanceClassFact, MemoryStore, StoreProfile, OPERATOR_DELETE_CLASSES,
-    OPERATOR_GC_CLASSES,
+    GcConfig, MaintenanceClassFact, MemoryStore, OperatorMaintenanceAuthorityInput,
+    OperatorMaintenanceOperation, StoreProfile, OPERATOR_DELETE_CLASSES, OPERATOR_GC_CLASSES,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -396,8 +396,11 @@ fn artifact_error(
         super::receipt::PreparedArtifactError::Stage(error) => {
             format!("{operation} artifact stage/fsync failed at {}: {error}", path.display())
         }
-        super::receipt::PreparedArtifactError::AlreadyExists => {
-            format!("{operation} artifact already exists: {}", path.display())
+        super::receipt::PreparedArtifactError::AlreadyExists(retained) => {
+            format!(
+                "{operation} artifact already exists: {}; staged artifact retained at {}",
+                path.display(), retained.display()
+            )
         }
         super::receipt::PreparedArtifactError::Publish(error) => format!(
             "{operation} artifact atomic publish failed at {}: {error}",
@@ -778,7 +781,6 @@ fn apply_common(
                         kanban_days,
                         true,
                         &plan.source,
-                        &plan.digest,
                         |_, source, post| {
                             prepare_or_validate_receipt(
                                 &plan,
@@ -799,7 +801,6 @@ fn apply_common(
                         .as_deref()
                         .ok_or("validated delete plan lost its exact ID")?,
                     &plan.source,
-                    &plan.digest,
                     |_, source, post| {
                         prepare_or_validate_receipt(
                             &plan,
@@ -927,7 +928,7 @@ fn prepare_or_validate_receipt(
     post: &[MaintenanceClassFact],
     prepared_receipt: &mut Option<MaintenanceReceipt>,
     prepared_file: &mut Option<File>,
-) -> Result<String, memcore::MemoryError> {
+) -> Result<OperatorMaintenanceAuthorityInput, memcore::MemoryError> {
     if let Some(existing) = prepared_receipt {
         if existing.source != source || existing.post != post {
             return Err(memcore::MemoryError::InvalidArg(
@@ -993,8 +994,17 @@ fn prepare_or_validate_receipt(
     })?;
     let (authority, _committed) = CommittedReceiptAuthority::from_prepared(plan, prepared)
         .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
-    serde_json::to_string(&authority)
-        .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))
+    OperatorMaintenanceAuthorityInput::new(
+        authority.plan_digest,
+        match authority.operation {
+            MaintenanceOperation::Gc => OperatorMaintenanceOperation::Gc,
+            MaintenanceOperation::Delete => OperatorMaintenanceOperation::Delete,
+        },
+        authority.target_physical_identity,
+        authority.profile,
+        authority.apply_timestamp,
+        authority.committed_receipt_digest,
+    )
 }
 
 #[cfg(test)]
@@ -1958,6 +1968,95 @@ mod tests {
             .operator_maintenance_committed_authority(&plan.digest)
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn public_operator_apply_cannot_forge_arbitrary_authority_json() {
+        let fixture = fixture();
+        let mut store =
+            MemoryStore::open_existing_read_write(&fixture.db_path.to_string_lossy()).unwrap();
+        let source = store.plan_operator_delete("delete-me").unwrap();
+        let forged_key = "a".repeat(64);
+        let error = store
+            .apply_operator_delete_with_precommit_receipt(
+                "delete-me",
+                &source,
+                |_tx, _source, _post| {
+                    OperatorMaintenanceAuthorityInput::new(
+                        forged_key.clone(),
+                        OperatorMaintenanceOperation::Gc,
+                        "unix:1:2".to_string(),
+                        "tachi_full".to_string(),
+                        "2026-08-13T00:00:00Z".to_string(),
+                        "b".repeat(64),
+                    )
+                },
+            )
+            .expect_err("typed authority operation must bind the delete transaction");
+        assert!(error.to_string().contains("operation"), "{error}");
+        assert!(memory_exists(&fixture.db_path));
+        assert!(store
+            .get_state_kv("operator_maintenance_receipt", &forged_key)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn ttl_backfill_and_reaper_never_mutate_committed_authority() {
+        use crate::db_ownership::{set_ownership_inject_for_test, DbOwnership};
+
+        let fixture = fixture();
+        plan_delete(&fixture);
+        let plan: MaintenancePlan =
+            serde_json::from_slice(&std::fs::read(&fixture.plan_path).unwrap()).unwrap();
+        set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+        run_delete(
+            DeleteAction::Apply {
+                plan: fixture.plan_path.clone(),
+                yes: true,
+            },
+            &fixture.app_home,
+        )
+        .unwrap();
+        let committed_bytes = std::fs::read(receipt_path(&fixture.plan_path)).unwrap();
+        let store =
+            MemoryStore::open_existing_read_write(&fixture.db_path.to_string_lossy()).unwrap();
+        let before = store
+            .get_state_kv("operator_maintenance_receipt", &plan.digest)
+            .unwrap()
+            .expect("same-transaction authority");
+        assert_eq!(
+            store
+                .backfill_missing_expires_at(
+                    "operator_maintenance_receipt",
+                    "2020-01-01T00:00:00Z",
+                    None,
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.reap_expired_state("2026-08-13T00:00:00Z").unwrap(), 0);
+        assert_eq!(
+            store
+                .get_state_kv("operator_maintenance_receipt", &plan.digest)
+                .unwrap()
+                .unwrap(),
+            before,
+            "authority bytes and version must remain unchanged"
+        );
+        drop(store);
+        run_delete(
+            DeleteAction::Apply {
+                plan: fixture.plan_path.clone(),
+                yes: true,
+            },
+            &fixture.app_home,
+        )
+        .expect("authority-backed replay remains valid after TTL maintenance");
+        assert_eq!(
+            std::fs::read(receipt_path(&fixture.plan_path)).unwrap(),
+            committed_bytes
+        );
     }
 
     #[cfg(unix)]

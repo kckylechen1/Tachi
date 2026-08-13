@@ -53,6 +53,78 @@ pub struct MaintenanceClassFact {
     pub digest: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorMaintenanceOperation {
+    Gc,
+    Delete,
+}
+
+/// Closed input for the committed operator-maintenance authority. Callers can
+/// supply only plan/target/receipt bindings; transaction source/post facts are
+/// added by this module and no arbitrary JSON can enter the authority row.
+#[derive(Debug, Clone)]
+pub struct OperatorMaintenanceAuthorityInput {
+    plan_digest: String,
+    operation: OperatorMaintenanceOperation,
+    target_physical_identity: String,
+    profile: String,
+    apply_timestamp: String,
+    committed_receipt_digest: String,
+}
+
+impl OperatorMaintenanceAuthorityInput {
+    pub fn new(
+        plan_digest: String,
+        operation: OperatorMaintenanceOperation,
+        target_physical_identity: String,
+        profile: String,
+        apply_timestamp: String,
+        committed_receipt_digest: String,
+    ) -> Result<Self, MemoryError> {
+        for (label, digest) in [
+            ("plan", &plan_digest),
+            ("committed receipt", &committed_receipt_digest),
+        ] {
+            if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "operator maintenance {label} digest must be SHA-256"
+                )));
+            }
+        }
+        if target_physical_identity.is_empty()
+            || !matches!(profile.as_str(), "tachi_full" | "portable_kernel")
+            || chrono::DateTime::parse_from_rfc3339(&apply_timestamp).is_err()
+        {
+            return Err(MemoryError::InvalidArg(
+                "operator maintenance authority target/profile/timestamp is invalid".to_string(),
+            ));
+        }
+        Ok(Self {
+            plan_digest,
+            operation,
+            target_physical_identity,
+            profile,
+            apply_timestamp,
+            committed_receipt_digest,
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorMaintenanceAuthority<'a> {
+    version: u32,
+    plan_digest: &'a str,
+    operation: OperatorMaintenanceOperation,
+    target_physical_identity: &'a str,
+    profile: &'a str,
+    apply_timestamp: &'a str,
+    source: &'a [MaintenanceClassFact],
+    post: &'a [MaintenanceClassFact],
+    committed_receipt_digest: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mutation {
     DeleteRowids {
@@ -700,7 +772,6 @@ pub(crate) fn apply_operator_gc_candidate_facts<F>(
     kanban_max_age_days: u64,
     include_kanban: bool,
     expected: &[MaintenanceClassFact],
-    authority_key: &str,
     before_commit: F,
 ) -> Result<GcMaintenanceOutcome, MemoryError>
 where
@@ -708,7 +779,7 @@ where
         &Connection,
         &[MaintenanceClassFact],
         &[MaintenanceClassFact],
-    ) -> Result<String, MemoryError>,
+    ) -> Result<OperatorMaintenanceAuthorityInput, MemoryError>,
 {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let source_candidates = collect_gc_candidates(
@@ -737,8 +808,14 @@ where
         kanban_max_age_days,
         include_kanban,
     )?;
-    let authority_json = before_commit(&tx, &source, &post)?;
-    insert_operator_maintenance_authority(&tx, authority_key, &authority_json)?;
+    let authority = before_commit(&tx, &source, &post)?;
+    insert_operator_maintenance_authority(
+        &tx,
+        OperatorMaintenanceOperation::Gc,
+        &source,
+        &post,
+        &authority,
+    )?;
     tx.commit()?;
     Ok(GcMaintenanceOutcome { source, post })
 }
@@ -865,7 +942,6 @@ pub(crate) fn apply_operator_delete_candidate_facts<F>(
     vec_available: bool,
     profile: StoreProfile,
     expected: &[MaintenanceClassFact],
-    authority_key: &str,
     before_commit: F,
 ) -> Result<DeleteMaintenanceOutcome, MemoryError>
 where
@@ -873,7 +949,7 @@ where
         &Connection,
         &[MaintenanceClassFact],
         &[MaintenanceClassFact],
-    ) -> Result<String, MemoryError>,
+    ) -> Result<OperatorMaintenanceAuthorityInput, MemoryError>,
 {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let source = delete_candidate_facts(&tx, id, vec_available, profile)?;
@@ -884,8 +960,14 @@ where
     }
     let deleted = delete_memory_within_tx(&tx, id, vec_available, profile)?;
     let post = delete_candidate_facts(&tx, id, vec_available, profile)?;
-    let authority_json = before_commit(&tx, &source, &post)?;
-    insert_operator_maintenance_authority(&tx, authority_key, &authority_json)?;
+    let authority = before_commit(&tx, &source, &post)?;
+    insert_operator_maintenance_authority(
+        &tx,
+        OperatorMaintenanceOperation::Delete,
+        &source,
+        &post,
+        &authority,
+    )?;
     tx.commit()?;
     Ok(DeleteMaintenanceOutcome {
         source,
@@ -896,26 +978,35 @@ where
 
 fn insert_operator_maintenance_authority(
     conn: &Connection,
-    key: &str,
-    value_json: &str,
+    expected_operation: OperatorMaintenanceOperation,
+    source: &[MaintenanceClassFact],
+    post: &[MaintenanceClassFact],
+    input: &OperatorMaintenanceAuthorityInput,
 ) -> Result<(), MemoryError> {
-    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if input.operation != expected_operation {
         return Err(MemoryError::InvalidArg(
-            "operator maintenance authority key must be a SHA-256 plan digest".to_string(),
+            "operator maintenance authority operation does not match transaction".to_string(),
         ));
     }
-    serde_json::from_str::<serde_json::Value>(value_json).map_err(|error| {
-        MemoryError::InvalidArg(format!(
-            "operator maintenance committed authority is not valid JSON: {error}"
-        ))
-    })?;
+    let authority = OperatorMaintenanceAuthority {
+        version: 1,
+        plan_digest: &input.plan_digest,
+        operation: input.operation,
+        target_physical_identity: &input.target_physical_identity,
+        profile: &input.profile,
+        apply_timestamp: &input.apply_timestamp,
+        source,
+        post,
+        committed_receipt_digest: &input.committed_receipt_digest,
+    };
+    let value_json = serde_json::to_string(&authority)?;
     let now = db::now_utc_iso();
     conn.execute(
         "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
          VALUES (?1, ?2, ?3, 1, ?4, ?4)",
         params![
             super::state::OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE,
-            key,
+            input.plan_digest,
             value_json,
             now
         ],

@@ -225,13 +225,15 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
     let removed = conn.execute(
         "DELETE FROM hard_state
          WHERE namespace != ?2
+           AND namespace != ?3
            AND json_valid(value_json)
            AND json_type(value_json, '$.expires_at') = 'text'
            AND datetime(json_extract(value_json, '$.expires_at')) IS NOT NULL
            AND datetime(json_extract(value_json, '$.expires_at')) < datetime(?1)",
         params![
             now_rfc3339,
-            crate::db::store_profile::STORE_IDENTITY_NAMESPACE
+            crate::db::store_profile::STORE_IDENTITY_NAMESPACE,
+            OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE
         ],
     )?;
     Ok(removed)
@@ -294,7 +296,9 @@ pub fn backfill_missing_expires_at(
     // TTL sweep (which runs against every namespace) an unstamp path for the
     // write-once store identity. Skip it unconditionally rather than trust
     // every future call site to avoid passing this namespace in.
-    if namespace == crate::db::store_profile::STORE_IDENTITY_NAMESPACE {
+    if namespace == crate::db::store_profile::STORE_IDENTITY_NAMESPACE
+        || namespace == OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE
+    {
         return Ok(0);
     }
     match terminal_status {
