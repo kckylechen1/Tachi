@@ -380,7 +380,7 @@ fn target_for_plan(
     plan: &MaintenancePlan,
     app_home: &Path,
 ) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
-    let (target, daemon_scope) = super::exact_dedupe::target_and_daemon_scope(
+    let (target, daemon_scope) = super::exact_dedupe::manifest_target_and_daemon_scope(
         plan.operation.label(),
         &plan.target_path,
         app_home,
@@ -440,7 +440,7 @@ fn plan_common(
     delete_id: Option<String>,
     app_home: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (target, _) = super::exact_dedupe::target_and_daemon_scope(
+    let (target, _) = super::exact_dedupe::manifest_target_and_daemon_scope(
         operation.label(),
         &db.to_string_lossy(),
         app_home,
@@ -767,35 +767,57 @@ fn prepare_or_validate_receipt(
                 "prepared maintenance receipt facts changed on replay".to_string(),
             ));
         }
-        return Ok(());
-    }
-    let receipt = MaintenanceReceipt {
-        version: RECEIPT_VERSION,
-        plan_digest: plan.digest.clone(),
-        operation: plan.operation,
-        target_path: plan.target_path.clone(),
-        target_physical_identity: plan.target_physical_identity.clone(),
-        profile: plan.profile.clone(),
-        phase: ReceiptPhase::Prepared,
-        apply_timestamp: apply_timestamp.to_string(),
-        source: source.to_vec(),
-        post: post.to_vec(),
-        cache_invalidated: false,
-        reconciliation: "required".to_string(),
-        digest: String::new(),
-    }
-    .seal()
-    .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
-    let bytes = pretty_bytes(&receipt)
+    } else {
+        let receipt = MaintenanceReceipt {
+            version: RECEIPT_VERSION,
+            plan_digest: plan.digest.clone(),
+            operation: plan.operation,
+            target_path: plan.target_path.clone(),
+            target_physical_identity: plan.target_physical_identity.clone(),
+            profile: plan.profile.clone(),
+            phase: ReceiptPhase::Prepared,
+            apply_timestamp: apply_timestamp.to_string(),
+            source: source.to_vec(),
+            post: post.to_vec(),
+            cache_invalidated: false,
+            reconciliation: "required".to_string(),
+            digest: String::new(),
+        }
+        .seal()
         .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
-    #[cfg(test)]
-    fault_before_prepared_publish()?;
-    let file = publish_artifact("maintenance prepared receipt", receipt_out, &bytes)
-        .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
-    *prepared_file = Some(file);
-    *prepared_receipt = Some(receipt);
+        let bytes = pretty_bytes(&receipt)
+            .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
+        #[cfg(test)]
+        fault_before_prepared_publish()?;
+        let file = publish_artifact("maintenance prepared receipt", receipt_out, &bytes)
+            .map_err(|error| memcore::MemoryError::InvalidArg(error.to_string()))?;
+        *prepared_file = Some(file);
+        *prepared_receipt = Some(receipt);
+    }
     #[cfg(test)]
     fault_after_prepared_publish()?;
+    #[cfg(test)]
+    fault_replace_prepared_path_before_commit(receipt_out)?;
+    let prepared_file = prepared_file.as_ref().ok_or_else(|| {
+        memcore::MemoryError::InvalidArg(
+            "maintenance apply lost its opened prepared receipt inode before commit".to_string(),
+        )
+    })?;
+    match super::receipt::path_names_open_file(receipt_out, prepared_file) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(memcore::MemoryError::InvalidArg(format!(
+                "prepared receipt pathname {} no longer names the opened prepared inode before commit",
+                receipt_out.display()
+            )))
+        }
+        Err(error) => {
+            return Err(memcore::MemoryError::InvalidArg(format!(
+                "prepared receipt pathname {} could not be revalidated against the opened inode before commit: {error}",
+                receipt_out.display()
+            )))
+        }
+    }
     Ok(())
 }
 
@@ -806,6 +828,7 @@ use std::cell::Cell;
 std::thread_local! {
     static FAIL_BEFORE_PREPARED_PUBLISH: Cell<bool> = const { Cell::new(false) };
     static FAIL_AFTER_PREPARED_PUBLISH: Cell<bool> = const { Cell::new(false) };
+    static REPLACE_PREPARED_BEFORE_COMMIT: Cell<bool> = const { Cell::new(false) };
     static FAIL_BEFORE_CACHE: Cell<bool> = const { Cell::new(false) };
     static FAIL_BEFORE_FINALIZE: Cell<bool> = const { Cell::new(false) };
     static DB_APPLY_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -837,6 +860,24 @@ fn fault_after_prepared_publish() -> Result<(), memcore::MemoryError> {
         &FAIL_AFTER_PREPARED_PUBLISH,
         "injected post-publication precommit failure",
     )
+}
+
+#[cfg(test)]
+fn replaced_prepared_evidence_path(receipt_out: &Path) -> PathBuf {
+    receipt_out.with_extension("prepared-retained")
+}
+
+#[cfg(test)]
+fn fault_replace_prepared_path_before_commit(
+    receipt_out: &Path,
+) -> Result<(), memcore::MemoryError> {
+    if !REPLACE_PREPARED_BEFORE_COMMIT.with(|fault| fault.replace(false)) {
+        return Ok(());
+    }
+    let retained = replaced_prepared_evidence_path(receipt_out);
+    std::fs::rename(receipt_out, &retained)?;
+    std::fs::write(receipt_out, b"FOREIGN-REPLACEMENT-EVIDENCE")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -989,6 +1030,118 @@ mod tests {
                 "plan leaked {sentinel}"
             );
         }
+    }
+
+    #[test]
+    fn maintenance_requires_manifest_inventory_membership_before_plan_or_apply() {
+        let fixture = fixture();
+        let external_db = fixture._dir.path().join("external-memory.db");
+        let mut external_store = MemoryStore::open(&external_db.to_string_lossy()).unwrap();
+        external_store
+            .insert_if_absent(&fixture_entry("delete-me", "/notes/external"))
+            .unwrap();
+        drop(external_store);
+
+        let external_delete_plan = fixture._dir.path().join("external-delete-plan.json");
+        let external_gc_plan = fixture._dir.path().join("external-gc-plan.json");
+        let external_before = std::fs::read(&external_db).unwrap();
+
+        for error in [
+            run_delete(
+                DeleteAction::Plan {
+                    db: external_db.clone(),
+                    id: "delete-me".to_string(),
+                    out: external_delete_plan.clone(),
+                },
+                &fixture.app_home,
+            )
+            .expect_err("external delete target must not enter plan authority"),
+            run_gc(
+                GcAction::Plan {
+                    db: external_db.clone(),
+                    out: external_gc_plan.clone(),
+                },
+                &fixture.app_home,
+            )
+            .expect_err("external GC target must not enter plan authority"),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("did not resolve to exactly one manifest DB"),
+                "external target reached synthetic inventory fallback: {error}"
+            );
+        }
+        assert!(!external_delete_plan.exists());
+        assert!(!external_gc_plan.exists());
+        assert!(!receipt_path(&external_delete_plan).exists());
+        assert_eq!(std::fs::read(&external_db).unwrap(), external_before);
+
+        // Freeze a valid plan while the external DB is manifest-backed, then
+        // remove that authority. Apply must re-resolve the manifest and refuse
+        // before publishing a receipt or opening the DB read-write.
+        let manifest_path = fixture.app_home.join("manifest.json");
+        let original_manifest = std::fs::read(&manifest_path).unwrap();
+        let mut manifest = Manifest::load(&manifest_path).unwrap();
+        manifest.dbs.push(DbEntry {
+            path: std::fs::canonicalize(&external_db)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            role: DbRole::Project,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: String::new(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "project:external".to_string(),
+            notes: String::new(),
+        });
+        manifest.save(&manifest_path).unwrap();
+        run_delete(
+            DeleteAction::Plan {
+                db: external_db.clone(),
+                id: "delete-me".to_string(),
+                out: external_delete_plan.clone(),
+            },
+            &fixture.app_home,
+        )
+        .unwrap();
+        std::fs::write(&manifest_path, original_manifest).unwrap();
+
+        let external_before_apply = std::fs::read(&external_db).unwrap();
+        let error = run_delete(
+            DeleteAction::Apply {
+                plan: external_delete_plan.clone(),
+                yes: true,
+            },
+            &fixture.app_home,
+        )
+        .expect_err("apply must revalidate manifest inventory membership");
+        assert!(
+            error
+                .to_string()
+                .contains("did not resolve to exactly one manifest DB"),
+            "external apply reached synthetic inventory fallback: {error}"
+        );
+        assert!(!receipt_path(&external_delete_plan).exists());
+        assert_eq!(std::fs::read(&external_db).unwrap(), external_before_apply);
+        assert!(memory_exists(&external_db));
+
+        // The exact same plan/apply path remains available for the peer that
+        // is still backed by the manifest.
+        plan_delete(&fixture);
+        run_delete(
+            DeleteAction::Apply {
+                plan: fixture.plan_path.clone(),
+                yes: true,
+            },
+            &fixture.app_home,
+        )
+        .unwrap();
+        assert!(!memory_exists(&fixture.db_path));
+        assert!(receipt_path(&fixture.plan_path).exists());
     }
 
     #[cfg(unix)]
@@ -1360,6 +1513,61 @@ mod tests {
         assert!(error.to_string().contains("rolled back"), "{error}");
         assert!(memory_exists(&publish.db_path));
         assert!(!receipt_path(&publish.plan_path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_path_replacement_before_commit_rolls_back_fresh_and_replay() {
+        use crate::db_ownership::{set_ownership_inject_for_test, DbOwnership};
+
+        for replay in [false, true] {
+            let fixture = fixture();
+            plan_delete(&fixture);
+            let receipt_out = receipt_path(&fixture.plan_path);
+
+            if replay {
+                FAIL_AFTER_PREPARED_PUBLISH.with(|fault| fault.set(true));
+                set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+                let error = run_delete(
+                    DeleteAction::Apply {
+                        plan: fixture.plan_path.clone(),
+                        yes: true,
+                    },
+                    &fixture.app_home,
+                )
+                .expect_err("fixture must retain a prepared replay receipt");
+                assert!(error.to_string().contains("rolled back"), "{error}");
+                assert!(receipt_out.exists());
+                assert!(memory_exists(&fixture.db_path));
+            }
+
+            REPLACE_PREPARED_BEFORE_COMMIT.with(|fault| fault.set(true));
+            set_ownership_inject_for_test(Some(DbOwnership::NotOwned));
+            let error = run_delete(
+                DeleteAction::Apply {
+                    plan: fixture.plan_path.clone(),
+                    yes: true,
+                },
+                &fixture.app_home,
+            )
+            .expect_err("prepared pathname replacement must refuse before commit");
+
+            assert!(error.to_string().contains("rolled back"), "{error}");
+            assert!(
+                error.to_string().contains("prepared receipt pathname"),
+                "{error}"
+            );
+            assert!(memory_exists(&fixture.db_path));
+            assert_eq!(
+                std::fs::read(&receipt_out).unwrap(),
+                b"FOREIGN-REPLACEMENT-EVIDENCE"
+            );
+            let retained: MaintenanceReceipt = serde_json::from_slice(
+                &std::fs::read(replaced_prepared_evidence_path(&receipt_out)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(retained.phase, ReceiptPhase::Prepared);
+        }
     }
 
     #[cfg(unix)]

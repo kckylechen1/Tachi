@@ -205,7 +205,7 @@ fn atomic_exchange_paths(_left: &Path, _right: &Path) -> Result<(), std::io::Err
 }
 
 #[cfg(unix)]
-fn path_names_open_file(path: &Path, file: &File) -> Result<bool, std::io::Error> {
+pub(super) fn path_names_open_file(path: &Path, file: &File) -> Result<bool, std::io::Error> {
     let path_metadata = fs::symlink_metadata(path)?;
     let file_metadata = file.metadata()?;
     Ok(path_metadata.file_type().is_file()
@@ -214,7 +214,7 @@ fn path_names_open_file(path: &Path, file: &File) -> Result<bool, std::io::Error
 }
 
 #[cfg(not(unix))]
-fn path_names_open_file(_path: &Path, _file: &File) -> Result<bool, std::io::Error> {
+pub(super) fn path_names_open_file(_path: &Path, _file: &File) -> Result<bool, std::io::Error> {
     Ok(false)
 }
 

@@ -185,6 +185,25 @@ pub(super) fn target_and_daemon_scope(
     app_home: &Path,
     require_write: bool,
 ) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    target_and_daemon_scope_with_inventory_policy(operation, db, app_home, require_write, false)
+}
+
+pub(super) fn manifest_target_and_daemon_scope(
+    operation: &str,
+    db: &str,
+    app_home: &Path,
+    require_write: bool,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    target_and_daemon_scope_with_inventory_policy(operation, db, app_home, require_write, true)
+}
+
+fn target_and_daemon_scope_with_inventory_policy(
+    operation: &str,
+    db: &str,
+    app_home: &Path,
+    require_write: bool,
+    manifest_only: bool,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
     let manifest_path = app_home.join("manifest.json");
     let manifest = Manifest::load(&manifest_path)?;
     if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
@@ -195,8 +214,12 @@ pub(super) fn target_and_daemon_scope(
         )
         .into());
     }
-    let entry = super::inventory::resolve_one(&manifest, db)?
-        .ok_or_else(|| format!("--db '{db}' did not resolve to exactly one manifest DB"))?;
+    let entry = if manifest_only {
+        super::inventory::resolve_manifest_one(&manifest, db)?
+    } else {
+        super::inventory::resolve_one(&manifest, db)?
+    }
+    .ok_or_else(|| format!("--db '{db}' did not resolve to exactly one manifest DB"))?;
     crate::path_utils::manifest_db_leaf_exists(&entry)?;
     let target = std::fs::canonicalize(entry.path)?;
     let authorized = manifest
