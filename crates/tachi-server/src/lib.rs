@@ -108,7 +108,6 @@ mod dispatch_profile;
 mod dlq_ops;
 pub(crate) mod docs_ops;
 mod doctor;
-mod doctor_ops;
 mod domain_adapter_ops;
 mod enrichment;
 mod event_ops;

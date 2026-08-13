@@ -175,15 +175,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     let destructive = matches!(
         name,
         "archive_memory"
-            // #757-fold fix (gpt-5.6-terra review): `delete_memory`/
-            // `memory_gc` were destructive on main; folding them into
-            // `tachi_memory(action='delete'|'gc')` dropped the tool off this
-            // list entirely (falling to the `false` default below), which
-            // fails open on the MCP destructive_hint. `tachi_task` is
-            // already annotated destructive wholesale despite having
-            // read-only actions (status/plan/board/...) — same tool-level
-            // (not action-aware) precedent applies here.
-            | "tachi_memory"
             | "tachi_task"
             | "tachi_staff"
             | "tachi_orchestrator"
@@ -1017,30 +1008,13 @@ impl ServerHandler for MemoryServer {
                 self.check_session_rate_limit(name, &args_hash)?
             };
 
-            // #757-fold fix (gpt-5.6-terra review, CONCERN): `tachi_doctor_scan`
-            // was in CACHEABLE_TOOLS pre-fold (read-only). Folding it into
-            // `tachi_memory(action='doctor_scan')` moved it under the
-            // tool-name-level `tachi_memory` entry in CACHE_INVALIDATING_TOOLS
-            // (needed because every OTHER tachi_memory action is a genuine
-            // read/write mix), which would invalidate the whole tool cache —
-            // including unrelated cached reads from other tools — on every
-            // doctor_scan call. The cache key already hashes the full
-            // arguments (including `action`), so this facade's one read-only
-            // action can be carved out precisely without touching the
-            // mutating actions' invalidation.
-            let is_memory_doctor_scan_read = name == "tachi_memory"
-                && action_arg
-                    .as_deref()
-                    .map(|action| action.eq_ignore_ascii_case("doctor_scan"))
-                    .unwrap_or(false);
-
             // ─── Phantom Tools: cache invalidation on write ops ──────────
-            if CACHE_INVALIDATING_TOOLS.contains(&name) && !is_memory_doctor_scan_read {
+            if CACHE_INVALIDATING_TOOLS.contains(&name) {
                 self.tool_cache_lock().clear();
             }
 
             // ─── Phantom Tools: check cache for read-only tools ──────────
-            let is_cacheable = CACHEABLE_TOOLS.contains(&name) || is_memory_doctor_scan_read;
+            let is_cacheable = CACHEABLE_TOOLS.contains(&name);
             let cache_key = if is_cacheable {
                 let args_str = params
                     .arguments
@@ -1961,13 +1935,8 @@ mod tests {
         );
     }
 
-    /// #757-fold fix (gpt-5.6-terra review): `delete_memory`/`memory_gc` were
-    /// destructive-annotated on main; the fold into `tachi_memory(action=
-    /// 'delete'|'gc')` dropped `tachi_memory` off the destructive list
-    /// entirely, so it fell through to `destructive_hint=false`. Assert the
-    /// unified facade is annotated destructive again.
     #[test]
-    fn tachi_memory_facade_is_annotated_destructive() {
+    fn tachi_memory_facade_is_not_destructive_after_maintenance_retirement() {
         let mut tool: rmcp::model::Tool = serde_json::from_value(json!({
             "name": "tachi_memory",
             "description": "tool tachi_memory",
@@ -1980,8 +1949,8 @@ mod tests {
         annotate_tool(&mut tool);
         assert_eq!(
             tool.annotations.expect("annotations set").destructive_hint,
-            Some(true),
-            "tachi_memory must be destructive_hint=true (fronts delete/gc, both destructive)"
+            Some(false),
+            "tachi_memory no longer fronts delete or GC"
         );
     }
 

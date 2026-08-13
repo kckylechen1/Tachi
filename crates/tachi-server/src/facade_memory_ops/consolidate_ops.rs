@@ -419,9 +419,6 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
         emit_continuity: false,
         files: Vec::new(),
         references: Vec::new(),
-        flow_id: None,
-        event: None,
-        state: None,
         project: project.map(str::to_string),
         project_explicit: false,
         domain: None,
@@ -431,18 +428,6 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
         notes: None,
         confirm: false,
         state_filter: None,
-        content: None,
-        ingest_type: "source".to_string(),
-        source_url: None,
-        auto_chunk: true,
-        auto_summarize: true,
-        auto_link: true,
-        chunk_size_chars: 1200,
-        chunk_overlap_chars: 120,
-        conversation_id: None,
-        turn_id: None,
-        event_type: None,
-        messages: Vec::new(),
     }
 }
 

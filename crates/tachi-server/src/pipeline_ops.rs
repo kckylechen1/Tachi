@@ -14,8 +14,6 @@ pub(crate) use auto_ingest::{validate_admitted_ingest_bounds_for_test, StagedAut
 pub(crate) use helpers::calculate_promotion_score;
 #[cfg(test)]
 pub(crate) use ingest::force_next_admitted_enrichment_ownership_loss_for_test;
-pub(crate) use ingest::{
-    handle_extract_facts, handle_ingest, handle_ingest_event, handle_ingest_source,
-};
+pub(crate) use ingest::{handle_extract_facts, handle_ingest_event};
 pub(crate) use status::handle_get_pipeline_status;
 pub(crate) use sync::handle_sync_memories;

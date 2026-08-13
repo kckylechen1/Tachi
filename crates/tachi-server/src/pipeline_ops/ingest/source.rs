@@ -32,16 +32,6 @@ fn take_admitted_enrichment_ownership_loss_for_test(server: &MemoryServer) -> bo
     }
 }
 
-pub(crate) async fn handle_ingest_source(
-    server: &MemoryServer,
-    params: IngestSourceParams,
-) -> Result<String, String> {
-    // Transitional Memory `ingest_source` owns no MCP staging admission.
-    // #1689 may retire that public action; until then it remains deliberately
-    // on the legacy behavior path rather than accepting a free-standing flag.
-    handle_ingest_source_with_admission(server, params, None).await
-}
-
 pub(in crate::pipeline_ops) async fn handle_admitted_ingest_source(
     server: &MemoryServer,
     request: super::super::auto_ingest::AdmittedIngestRequest,

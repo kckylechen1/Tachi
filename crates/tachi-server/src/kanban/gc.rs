@@ -9,9 +9,8 @@ use super::*;
 /// the shared recall-cache invalidator from here would re-enter
 /// `with_global_store` (recursing on the non-reentrant `global_rw_gate` when
 /// the caller holds the global store, or nesting the global gate inside the
-/// project gate otherwise). The post-commit cache bust is the caller's job,
-/// issued AFTER this returns and the store lock is released — see
-/// `handle_memory_gc` in `memory_ops.rs`.
+/// project gate otherwise). The post-commit cache bust is the operator GC
+/// caller's job, issued AFTER this returns and the store lock is released.
 pub(crate) fn gc_expired_kanban_cards(
     store: &mut MemoryStore,
     max_age_days: u64,

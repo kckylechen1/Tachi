@@ -177,9 +177,6 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         as_of: None,
         valid_from: None,
         valid_until: None,
-        flow_id: None,
-        event: None,
-        state: None,
         project: None,
         project_explicit: false,
         domain: Some("agent".to_string()),
@@ -193,18 +190,6 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         notes: None,
         confirm: false,
         state_filter: None,
-        content: None,
-        ingest_type: "source".to_string(),
-        source_url: None,
-        auto_chunk: true,
-        auto_summarize: true,
-        auto_link: true,
-        chunk_size_chars: 1200,
-        chunk_overlap_chars: 120,
-        conversation_id: None,
-        turn_id: None,
-        event_type: None,
-        messages: Vec::new(),
     };
     let (saved, display_path, already_formatted, echo) =
         save_memory_checkpoint(server, params).await?;

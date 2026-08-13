@@ -245,8 +245,8 @@ fn pattern_evidence_production_census_is_exact_and_search_is_retired() {
     );
     assert_eq!(
         production_callers("emit_pattern_feedback_event"),
-        vec!["facade_memory_ops/pattern_feedback_ops.rs"],
-        "the mutating legacy emitter remains exclusive to the explicit model action",
+        Vec::<String>::new(),
+        "the mutating legacy pattern-feedback emitter is physically retired",
     );
     assert!(
         production_callers("emit_pattern_seen_events").is_empty(),
@@ -258,28 +258,5 @@ fn pattern_evidence_production_census_is_exact_and_search_is_retired() {
             && !context.contains("emit_pattern_feedback_event(")
             && !context.contains("emit_pattern_seen_events("),
         "model-facing context is explicitly retired from evidence admission",
-    );
-    assert_eq!(
-        tachi_params::TACHI_MEMORY_ACTIONS,
-        &[
-            "search",
-            "get",
-            "save",
-            "extract_facts",
-            "briefing",
-            "checkpoint",
-            "alerts",
-            "ask",
-            "consolidate",
-            "pattern_feedback",
-            "progress",
-            "readiness",
-            "delete",
-            "gc",
-            "doctor_scan",
-            "ingest",
-            "ingest_source",
-        ],
-        "#1756 adds no Memory facade action; the exact inventory stays at 17",
     );
 }
