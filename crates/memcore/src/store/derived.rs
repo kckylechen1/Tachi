@@ -74,6 +74,17 @@ impl MemoryStore {
         db::archive_memory_if_revision(&self.conn, id, expected_revision)
     }
 
+    /// Archive under a transaction/savepoint already owned by the caller.
+    pub fn archive_memory_revision_within_tx(
+        &self,
+        id: &str,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::archive_memory_revision_within_tx(&self.conn, id, expected_revision)
+    }
+
     /// Restore an archived memory only when its archived revision is unchanged.
     pub fn restore_archived_if_revision(
         &self,
@@ -83,6 +94,17 @@ impl MemoryStore {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::restore_archived_if_revision(&self.conn, id, expected_revision)
+    }
+
+    /// Restore under a transaction/savepoint already owned by the caller.
+    pub fn restore_archived_revision_within_tx(
+        &self,
+        id: &str,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::restore_archived_revision_within_tx(&self.conn, id, expected_revision)
     }
 
     /// Mark a memory as superseded by a newer/canonical memory.

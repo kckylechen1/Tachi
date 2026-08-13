@@ -3796,7 +3796,7 @@ fn refuse_reserved_rem_operation_mutation(id: &str, action: &str) -> Result<(), 
 /// semantics. The typed sticky-cutover implementation does not call this
 /// ordinary-writer seam; its frozen-plan CAS remains the sole exception.
 pub fn refuse_retired_sticky_row_within_tx(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: &str,
     operation: &str,
 ) -> Result<(), MemoryError> {
@@ -3817,10 +3817,7 @@ pub fn refuse_retired_sticky_row_within_tx(
     Ok(())
 }
 
-pub(crate) fn archive_memory_within_tx(
-    tx: &Transaction<'_>,
-    id: &str,
-) -> Result<bool, MemoryError> {
+pub(crate) fn archive_memory_within_tx(tx: &Connection, id: &str) -> Result<bool, MemoryError> {
     refuse_reserved_rem_operation_mutation(id, "archived")?;
     refuse_retired_sticky_row_within_tx(tx, id, "archived")?;
     let now = now_utc_iso();
@@ -3843,16 +3840,25 @@ pub fn archive_memory_if_revision(
     id: &str,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
-    refuse_reserved_rem_operation_mutation(id, "archived")?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    refuse_retired_sticky_row_within_tx(&tx, id, "revision-archived")?;
+    let changed = archive_memory_revision_within_tx(&tx, id, expected_revision)?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub fn archive_memory_revision_within_tx(
+    tx: &Connection,
+    id: &str,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
+    refuse_reserved_rem_operation_mutation(id, "archived")?;
+    refuse_retired_sticky_row_within_tx(tx, id, "revision-archived")?;
     let now = now_utc_iso();
     tx.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0 AND revision = ?3",
         params![now, id, expected_revision],
     )?;
     let changed = tx.changes() > 0;
-    tx.commit()?;
     Ok(changed)
 }
 
@@ -3861,16 +3867,25 @@ pub fn restore_archived_if_revision(
     id: &str,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
-    refuse_reserved_rem_operation_mutation(id, "restored")?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    refuse_retired_sticky_row_within_tx(&tx, id, "restored")?;
+    let changed = restore_archived_revision_within_tx(&tx, id, expected_revision)?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub fn restore_archived_revision_within_tx(
+    tx: &Connection,
+    id: &str,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
+    refuse_reserved_rem_operation_mutation(id, "restored")?;
+    refuse_retired_sticky_row_within_tx(tx, id, "restored")?;
     let now = now_utc_iso();
     tx.execute(
         "UPDATE memories SET archived = 0, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 1 AND revision = ?3",
         params![now, id, expected_revision],
     )?;
     let changed = tx.changes() > 0;
-    tx.commit()?;
     Ok(changed)
 }
 
@@ -3888,7 +3903,7 @@ pub fn supersede_memory(
 }
 
 pub(crate) fn supersede_memory_within_tx(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: &str,
     superseded_by: &str,
 ) -> Result<bool, MemoryError> {

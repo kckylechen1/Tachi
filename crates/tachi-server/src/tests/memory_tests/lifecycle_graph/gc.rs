@@ -47,6 +47,7 @@ fn expected_gc_keys(include_session_claims: bool) -> std::collections::BTreeSet<
         "kanban_cards_pruned",
         "foundry_jobs_pruned",
         "recall_impression_groups_pruned",
+        "a2a_bodies_scrubbed",
     ]
     .into_iter()
     .map(str::to_string)

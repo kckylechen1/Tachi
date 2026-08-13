@@ -12,6 +12,16 @@ use crate::{
 };
 
 impl MemoryStore {
+    fn retired_sticky_edge_preflight(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        operation: &str,
+    ) -> Result<(), MemoryError> {
+        db::refuse_retired_sticky_row_within_tx(&self.conn, source_id, operation)?;
+        db::refuse_retired_sticky_row_within_tx(&self.conn, target_id, operation)
+    }
+
     fn with_retired_sticky_edge_preflight<T>(
         &self,
         source_id: &str,
@@ -52,6 +62,20 @@ impl MemoryStore {
             "given a provenance graph edge",
             |conn| db::add_edge_with_provenance(conn, edge, provenance),
         )
+    }
+
+    /// Add an edge under a transaction/savepoint already owned by the caller.
+    pub fn add_edge_with_provenance_within_tx(
+        &self,
+        edge: &MemoryEdge,
+        provenance: &db::EdgeProvenance,
+    ) -> Result<(), MemoryError> {
+        self.retired_sticky_edge_preflight(
+            &edge.source_id,
+            &edge.target_id,
+            "given a provenance graph edge",
+        )?;
+        db::add_edge_with_provenance(&self.conn, edge, provenance)
     }
 
     /// Typed, caller-scoped write door for the #772 component-governance

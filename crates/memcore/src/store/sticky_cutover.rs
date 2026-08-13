@@ -221,6 +221,71 @@ mod tests {
     }
 
     #[test]
+    fn cutover_census_canonically_finds_malformed_sticky_paths_and_excludes_ordinary_rows() {
+        let (_temp, path, mut store) = fixture_store();
+        let mut legacy = sticky_entry(
+            "malformed-locator",
+            None,
+            "unread",
+            "2026-08-12T00:00:00Z",
+            7,
+        );
+        legacy.id = "legacy-malformed-locator".to_string();
+        legacy.path = "//STICKY///x".to_string();
+        legacy.category = "other".to_string();
+        seed_legacy_memory(&store, &legacy);
+
+        let mut ordinary = sticky_entry("ordinary-row", None, "unread", "2026-08-12T00:00:00Z", 7);
+        ordinary.id = "ordinary-row".to_string();
+        ordinary.path = "/notes/ordinary".to_string();
+        ordinary.category = "other".to_string();
+        seed_legacy_memory(&store, &ordinary);
+
+        let mut plan = store
+            .plan_sticky_cutover_at(path, "2026-08-13T00:00:00Z", str::to_string)
+            .expect("plan canonically classified legacy locator");
+        assert_eq!(
+            plan.rows
+                .iter()
+                .map(|row| row.sticky_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["malformed-locator"],
+            "the full census must include canonical retired-sticky locators and exclude ordinary rows"
+        );
+        assert_eq!(
+            plan.rows[0].classification,
+            super::LegacyStickyClass::Unread
+        );
+        assert!(plan.rows[0].requires_disposition);
+        assert_eq!(
+            plan.rows[0].disposition,
+            super::StickyCutoverDisposition::Unresolved
+        );
+
+        plan.rows[0].disposition = super::StickyCutoverDisposition::Discard {
+            reason: "owner adjudicated malformed legacy locator".to_string(),
+        };
+        let applied = store
+            .apply_sticky_cutover_with_precommit_receipt(&plan, str::to_string, |_| Ok(()))
+            .expect("apply archives the canonically classified legacy row");
+        assert_eq!(applied.discarded, 1);
+        assert_eq!(applied.receipt.rows[0].outcome, "discarded");
+
+        let legacy_after = store
+            .get_with_options("legacy-malformed-locator", true)
+            .expect("read legacy row")
+            .expect("legacy row remains as archived audit evidence");
+        assert!(legacy_after.archived);
+        assert!(legacy_after.text.is_empty());
+        let ordinary_after = store
+            .get("ordinary-row")
+            .expect("read ordinary row")
+            .expect("ordinary row remains present");
+        assert!(!ordinary_after.archived);
+        assert_eq!(ordinary_after.text, ordinary.text);
+    }
+
+    #[test]
     fn plan_is_read_only_deterministic_and_classifies_the_frozen_legacy_matrix() {
         let (_temp, path, mut store) = fixture_store();
         seed_matrix(&mut store);
@@ -1225,27 +1290,35 @@ fn claim_evidence(claim: Option<&ClaimRow>) -> StickyClaimEvidence {
 
 fn read_legacy_memories(conn: &Connection) -> Result<Vec<LegacyMemorySnapshot>, MemoryError> {
     let mut statement = conn.prepare(
-        "SELECT id,path,text,timestamp,valid_until,archived,revision,metadata
+        "SELECT id,path,text,timestamp,valid_until,archived,revision,metadata,category
          FROM memories
-         WHERE (category='sticky' OR id LIKE 'sticky:%'
-                OR path='/sticky' OR path LIKE '/sticky/%')
          ORDER BY id",
     )?;
     let rows = statement
         .query_map([], |row| {
-            Ok(LegacyMemorySnapshot {
-                id: row.get(0)?,
-                path: row.get(1)?,
-                text: row.get(2)?,
-                timestamp: row.get(3)?,
-                valid_until: row.get(4)?,
-                archived: row.get::<_, i64>(5)? != 0,
-                revision: row.get(6)?,
-                metadata: row.get(7)?,
-            })
+            Ok((
+                LegacyMemorySnapshot {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    text: row.get(2)?,
+                    timestamp: row.get(3)?,
+                    valid_until: row.get(4)?,
+                    archived: row.get::<_, i64>(5)? != 0,
+                    revision: row.get(6)?,
+                    metadata: row.get(7)?,
+                },
+                row.get::<_, String>(8)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+    Ok(rows
+        .into_iter()
+        .filter_map(|(row, category)| {
+            crate::path_router::validate_retired_sticky_write(&row.path, &category)
+                .is_err()
+                .then_some(row)
+        })
+        .collect())
 }
 
 fn read_claims(conn: &Connection) -> Result<BTreeMap<String, ClaimRow>, MemoryError> {
