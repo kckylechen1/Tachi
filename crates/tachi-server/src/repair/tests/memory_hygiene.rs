@@ -174,3 +174,69 @@ fn r12_memory_hygiene_repairs_legacy_distill_and_archives_safe_raw_only() {
         "R12 should be idempotent after apply: {dry_after:?}"
     );
 }
+
+#[test]
+fn r12_skips_retired_sticky_promotion_and_archive_projections() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "retired-sticky-hygiene.db");
+    for (id, memory_path) in [
+        ("raw-ordinary", "/notes/raw"),
+        ("raw-sticky", "//STICKY///raw"),
+    ] {
+        insert_memory(&conn, id, memory_path, id, "{}", Some("durable"), Some("external:capture"));
+    }
+    insert_memory(
+        &conn,
+        "distill-ordinary",
+        "/foundry/distilled/ordinary",
+        "ordinary distill",
+        r#"{"source_memory_ids":["raw-ordinary"]}"#,
+        Some("permanent"),
+        Some("foundry_distill"),
+    );
+    insert_memory(
+        &conn,
+        "distill-sticky",
+        "/sticky/distilled/legacy",
+        "retired distill",
+        r#"{"source_memory_ids":["raw-sticky"]}"#,
+        Some("permanent"),
+        Some("foundry_distill"),
+    );
+    let sticky_before = ["raw-sticky", "distill-sticky"].map(|id| {
+        conn.query_row(
+            "SELECT path,tier,archived,superseded_by,revision,metadata FROM memories WHERE id=?1",
+            [id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?, row.get::<_, String>(5)?)),
+        )
+        .unwrap()
+    });
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let applied = MemoryHygiene.apply(&mut ctx).unwrap();
+    assert_eq!(applied.applied, 4, "ordinary promote/project/archive path should progress");
+    assert_eq!(
+        ctx.conn.query_row("SELECT tier FROM memories WHERE id='distill-ordinary'", [], |row| row.get::<_, String>(0)).unwrap(),
+        "consolidated"
+    );
+    assert!(ctx.conn.query_row("SELECT archived FROM memories WHERE id='raw-ordinary'", [], |row| row.get::<_, bool>(0)).unwrap());
+    let sticky_after = ["raw-sticky", "distill-sticky"].map(|id| {
+        ctx.conn.query_row(
+            "SELECT path,tier,archived,superseded_by,revision,metadata FROM memories WHERE id=?1",
+            [id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, i64>(4)?, row.get::<_, String>(5)?)),
+        ).unwrap()
+    });
+    assert_eq!(sticky_after, sticky_before);
+    assert_eq!(
+        ctx.conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM derived_items WHERE id='derived:distill-sticky') +
+                    (SELECT COUNT(*) FROM memory_edges WHERE source_id IN ('raw-sticky','distill-sticky') OR target_id IN ('raw-sticky','distill-sticky'))",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap(),
+        0,
+        "R12 must create no projection involving a retired sticky row"
+    );
+}

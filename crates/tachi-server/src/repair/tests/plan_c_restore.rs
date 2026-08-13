@@ -92,6 +92,56 @@ fn r11_plan_c_split_brain_merges_alias_and_relinks_symlink() {
 }
 
 #[test]
+#[cfg(unix)]
+fn r11_retired_sticky_alias_candidate_refuses_before_canonical_mutation() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved = std::env::var_os("TACHI_HOME");
+    for (suffix, sticky_path) in [
+        ("canonical", "/sticky/legacy"),
+        ("malformed", "//STICKY///legacy"),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let tachi_home = dir.path().join("home");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        let repo = dir.path().join(format!("Split Brain {suffix}"));
+        let local_db = repo.join(".tachi/memory.db");
+        let local_conn = fresh_db_at(&local_db, &format!("project:split_{suffix}"));
+        insert_memory(&local_conn, "canonical-only", "/project/local", "local", "{}", None, None);
+        drop(local_conn);
+        let alias_db = crate::path_utils::plan_c_global_db_path(&format!("Split_Brain_{suffix}"));
+        let alias_conn = fresh_db_at(&alias_db, &format!("alias:split_{suffix}"));
+        insert_memory(&alias_conn, "alias-ordinary", "/project/alias", "ordinary", "{}", None, None);
+        insert_memory(&alias_conn, "alias-sticky", sticky_path, "retired", "{}", None, None);
+        drop(alias_conn);
+
+        let mut ctx = open_ctx(&local_db, &format!("project:split_{suffix}"));
+        let canonical_before = std::fs::read(&local_db).unwrap();
+        let error = PlanCRepair { backup_alias: false }
+            .apply(&mut ctx)
+            .expect_err("any retired sticky alias candidate must fail the whole merge");
+        assert!(error.to_string().contains("retired sticky row"), "{error}");
+        drop(ctx);
+        assert_eq!(std::fs::read(&local_db).unwrap(), canonical_before);
+        assert!(alias_db.is_file() && !alias_db.is_symlink());
+        assert_eq!(
+            Connection::open(&local_db)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM memories WHERE id='alias-ordinary'", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "ordinary alias rows must not partially copy before refusal"
+        );
+    }
+    if let Some(value) = saved {
+        std::env::set_var("TACHI_HOME", value);
+    } else {
+        std::env::remove_var("TACHI_HOME");
+    }
+}
+
+#[test]
 fn plan_c_repair_opens_v23_guards_and_denies_raw_reference_writes() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("plan-c-v23.db");

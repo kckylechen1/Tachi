@@ -504,6 +504,56 @@ fn r8_deletes_producer_marked_empty_json_cache_once() {
     assert_eq!(remaining, 0);
 }
 
+#[test]
+fn r8_skips_retired_sticky_cache_rows_while_ordinary_junk_progresses() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "retired-sticky-junk.db");
+    for (id, memory_path) in [
+        ("ordinary", "/cache/ordinary"),
+        ("sticky-canonical", "/sticky/cache"),
+        ("sticky-malformed", "//STICKY///cache"),
+    ] {
+        insert_memory(
+            &conn,
+            id,
+            memory_path,
+            id,
+            "{}",
+            Some("ephemeral"),
+            Some(memcore::namespace::FOUNDRY_RECALL_CACHE_SOURCE),
+        );
+    }
+    let sticky_before = ["sticky-canonical", "sticky-malformed"].map(|id| {
+        conn.query_row(
+            "SELECT path,category,revision,metadata FROM memories WHERE id=?1",
+            [id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)),
+        )
+        .unwrap()
+    });
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let applied = JunkCleanup.apply(&mut ctx).unwrap();
+    assert_eq!(applied.applied, 1);
+    assert_eq!(
+        ctx.conn
+            .query_row("SELECT COUNT(*) FROM memories WHERE id='ordinary'", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let sticky_after = ["sticky-canonical", "sticky-malformed"].map(|id| {
+        ctx.conn
+            .query_row(
+                "SELECT path,category,revision,metadata FROM memories WHERE id=?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)),
+            )
+            .unwrap()
+    });
+    assert_eq!(sticky_after, sticky_before);
+}
+
 #[tokio::test]
 async fn r8_cli_backend_keeps_dry_run_non_mutating_and_apply_opt_in() {
     let dir = TempDir::new().unwrap();
