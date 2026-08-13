@@ -442,10 +442,25 @@ mod tests {
         seed_matrix(&mut store);
         identity(&store, "operator", "admission-operator");
         identity(&store, "recipient", "admission-recipient");
-        let source_claim = r#"{"claimed_by":"reader","claimed_at":"2026-08-12T01:00:00Z","type":"sticky_claim","state":"claimed","body":"DO_NOT_PERSIST_CLAIM_SECRET"}"#;
+        let source_claim = r#"{"claimed_by":"CLAIM_JSON_SECRET","claimed_at":"2026-08-12T01:00:00Z","type":"sticky_claim","state":"claimed","body":"DO_NOT_PERSIST_CLAIM_SECRET"}"#;
         store
             .set_state("sticky_claim", "claimed-cas", source_claim)
             .expect("seed claim with an untrusted extra field");
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize legacy metadata fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories
+                     SET metadata=json_set(metadata,'$.claimed_by','MEMORY_METADATA_SECRET',
+                                           '$.claimed_at','MEMORY_METADATA_AT_SECRET')
+                     WHERE id='sticky:claimed-cas'",
+                    [],
+                )
+                .expect("seed legacy metadata secrets");
+        }
         let plan = store
             .plan_sticky_cutover_at(path, "2026-08-13T00:00:00Z", str::to_string)
             .expect("plan");
@@ -455,8 +470,7 @@ mod tests {
             .find(|row| row.sticky_id == "claimed-cas")
             .expect("claimed row")
             .claim_evidence;
-        assert_eq!(claim.claimed_by.as_deref(), Some("reader"));
-        assert_eq!(claim.claimed_at.as_deref(), Some("2026-08-12T01:00:00Z"));
+        assert_eq!(claim.state, super::StickyClaimEvidenceState::Valid);
         assert_eq!(
             claim.evidence_digest,
             super::sha256(source_claim.as_bytes()),
@@ -464,13 +478,16 @@ mod tests {
         );
         let plan_json = serde_json::to_string(&plan).expect("plan JSON");
         assert!(
-            !plan_json.contains("DO_NOT_PERSIST_CLAIM_SECRET"),
+            !plan_json.contains("DO_NOT_PERSIST_CLAIM_SECRET")
+                && !plan_json.contains("CLAIM_JSON_SECRET")
+                && !plan_json.contains("MEMORY_METADATA_SECRET")
+                && !plan_json.contains("MEMORY_METADATA_AT_SECRET"),
             "plan must not retain arbitrary legacy claim fields"
         );
 
         let mut decided = plan.clone();
         decide(&mut decided);
-        let changed_claim = r#"{"claimed_by":"reader","claimed_at":"2026-08-12T01:00:00Z","type":"sticky_claim","state":"claimed","body":"CHANGED_CLAIM_SECRET"}"#;
+        let changed_claim = r#"{"claimed_by":"CLAIM_JSON_SECRET","claimed_at":"2026-08-12T01:00:00Z","type":"sticky_claim","state":"claimed","body":"CHANGED_CLAIM_SECRET"}"#;
         {
             let _authorization =
                 crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
@@ -507,7 +524,10 @@ mod tests {
                 let prepared_json =
                     serde_json::to_string(&prepared.receipt).expect("prepared JSON");
                 assert!(
-                    !prepared_json.contains("DO_NOT_PERSIST_CLAIM_SECRET"),
+                    !prepared_json.contains("DO_NOT_PERSIST_CLAIM_SECRET")
+                        && !prepared_json.contains("CLAIM_JSON_SECRET")
+                        && !prepared_json.contains("MEMORY_METADATA_SECRET")
+                        && !prepared_json.contains("MEMORY_METADATA_AT_SECRET"),
                     "prepared receipt must not retain arbitrary legacy claim fields"
                 );
                 Ok(())
@@ -515,7 +535,10 @@ mod tests {
             .expect("apply");
         let committed_json = serde_json::to_string(&result.receipt).expect("committed JSON");
         assert!(
-            !committed_json.contains("DO_NOT_PERSIST_CLAIM_SECRET"),
+            !committed_json.contains("DO_NOT_PERSIST_CLAIM_SECRET")
+                && !committed_json.contains("CLAIM_JSON_SECRET")
+                && !committed_json.contains("MEMORY_METADATA_SECRET")
+                && !committed_json.contains("MEMORY_METADATA_AT_SECRET"),
             "committed receipt must not retain arbitrary legacy claim fields"
         );
         let archive_json: String = store
@@ -528,7 +551,10 @@ mod tests {
             )
             .expect("archive JSON");
         assert!(
-            !archive_json.contains("DO_NOT_PERSIST_CLAIM_SECRET"),
+            !archive_json.contains("DO_NOT_PERSIST_CLAIM_SECRET")
+                && !archive_json.contains("CLAIM_JSON_SECRET")
+                && !archive_json.contains("MEMORY_METADATA_SECRET")
+                && !archive_json.contains("MEMORY_METADATA_AT_SECRET"),
             "archive must not retain arbitrary legacy claim fields"
         );
     }
@@ -619,8 +645,6 @@ pub enum StickyClaimEvidenceState {
 #[serde(deny_unknown_fields)]
 pub struct StickyClaimEvidence {
     pub state: StickyClaimEvidenceState,
-    pub claimed_by: Option<String>,
-    pub claimed_at: Option<String>,
     pub version: Option<i64>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -777,8 +801,6 @@ fn claim_evidence(claim: Option<&ClaimRow>) -> StickyClaimEvidence {
     let Some(claim) = claim else {
         return StickyClaimEvidence {
             state: StickyClaimEvidenceState::Missing,
-            claimed_by: None,
-            claimed_at: None,
             version: None,
             created_at: None,
             updated_at: None,
@@ -791,24 +813,17 @@ fn claim_evidence(claim: Option<&ClaimRow>) -> StickyClaimEvidence {
         object
             .and_then(|object| object.get(name))
             .and_then(|value| value.as_str())
-            .map(str::to_string)
     };
     let claimed_by = field("claimed_by");
     let claimed_at = field("claimed_at");
-    let valid = claimed_by
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-        && claimed_at
-            .as_deref()
-            .is_some_and(|value| DateTime::parse_from_rfc3339(value).is_ok());
+    let valid = claimed_by.is_some_and(|value| !value.trim().is_empty())
+        && claimed_at.is_some_and(|value| DateTime::parse_from_rfc3339(value).is_ok());
     StickyClaimEvidence {
         state: if valid {
             StickyClaimEvidenceState::Valid
         } else {
             StickyClaimEvidenceState::Malformed
         },
-        claimed_by,
-        claimed_at,
         version: Some(claim.version),
         created_at: Some(claim.created_at.clone()),
         updated_at: Some(claim.updated_at.clone()),
@@ -1170,24 +1185,8 @@ fn archive_metadata(
     envelope_id: Option<&str>,
 ) -> Result<String, MemoryError> {
     // The retired memory row must not become a second body-retention system.
-    // Preserve the known non-body producer fields plus cryptographic evidence;
-    // malformed/unknown metadata is represented by its digest, never raw bytes.
-    let parsed = serde_json::from_str::<serde_json::Value>(&source.metadata).ok();
-    let sticky = parsed.as_ref().and_then(|value| value.get("sticky"));
-    let legacy_metadata = serde_json::json!({
-        "sticky_id": parsed.as_ref().and_then(|value| value.get("sticky_id")),
-        "status": parsed.as_ref().and_then(|value| value.get("status")),
-        "claimed_by": parsed.as_ref().and_then(|value| value.get("claimed_by")),
-        "claimed_at": parsed.as_ref().and_then(|value| value.get("claimed_at")),
-        "sticky": {
-            "id": sticky.and_then(|value| value.get("id")),
-            "from_agent": sticky.and_then(|value| value.get("from_agent")),
-            "to": sticky.and_then(|value| value.get("to")),
-            "created_at": sticky.and_then(|value| value.get("created_at")),
-            "ttl_days": sticky.and_then(|value| value.get("ttl_days")),
-            "identity_assurance": sticky.and_then(|value| value.get("identity_assurance")),
-        }
-    });
+    // Keep only closed cutover outcomes, typed source identity, and digests;
+    // arbitrary legacy metadata is represented by its digest, never copied.
     let archive = serde_json::json!({
         "schema_version": STICKY_CUTOVER_SCHEMA_VERSION,
         "policy_version": STICKY_CUTOVER_POLICY,
@@ -1206,8 +1205,6 @@ fn archive_metadata(
             "row_digest": row.memory_row_digest,
             "metadata_digest": sha256(source.metadata.as_bytes()),
             "body_digest": sha256(source.text.as_bytes()),
-            "legacy_to": row.legacy_to,
-            "legacy_metadata": legacy_metadata,
         },
         "claim_evidence": row.claim_evidence,
         "archived_at": plan.as_of,
