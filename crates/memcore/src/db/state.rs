@@ -5,6 +5,8 @@ use crate::error::MemoryError;
 
 use super::common::now_utc_iso;
 
+pub(crate) const OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE: &str = "operator_maintenance_receipt";
+
 #[derive(Debug, Clone)]
 pub struct StateRow {
     pub key: String,
@@ -30,7 +32,7 @@ pub struct StateRow {
 /// also written by migrations and fixtures that must remain able to build the
 /// table itself, and a trigger would have to be installed before the first
 /// stamp and validated forever after by the trigger-inventory gate.
-pub(crate) fn refuse_store_identity_namespace(
+pub(crate) fn refuse_general_mutation_namespace(
     namespace: &str,
     operation: &str,
 ) -> Result<(), MemoryError> {
@@ -39,6 +41,19 @@ pub(crate) fn refuse_store_identity_namespace(
             "hard_state namespace '{namespace}' is write-once store identity and cannot be \
              {operation} (kckylechen1/Sigil#1579); it is stamped once by schema init via \
              insert_state_if_absent"
+        )));
+    }
+    refuse_operator_maintenance_authority_namespace(namespace, operation)?;
+    Ok(())
+}
+
+fn refuse_operator_maintenance_authority_namespace(
+    namespace: &str,
+    operation: &str,
+) -> Result<(), MemoryError> {
+    if namespace == OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE {
+        return Err(MemoryError::InvalidArg(format!(
+            "hard_state namespace '{namespace}' is closed committed operator-maintenance authority and cannot be {operation} through a general state API"
         )));
     }
     Ok(())
@@ -51,7 +66,7 @@ pub fn set_state(
     key: &str,
     value_json: &str,
 ) -> Result<u32, MemoryError> {
-    refuse_store_identity_namespace(namespace, "overwritten")?;
+    refuse_general_mutation_namespace(namespace, "overwritten")?;
     let now = now_utc_iso();
     conn.execute(
         "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
@@ -72,7 +87,7 @@ pub fn set_state(
 
 /// Insert a state row only when the key is currently absent.
 ///
-/// Deliberately **not** guarded by [`refuse_store_identity_namespace`] here:
+/// Deliberately **not** guarded against the store-identity namespace here:
 /// this is the exact primitive [`crate::db::store_identity::write_stamp_if_absent`]
 /// calls to write the store's write-once identity stamps in the first place
 /// (kckylechen1/Sigil#1579) — guarding it at this layer would make the
@@ -88,6 +103,9 @@ pub fn insert_state_if_absent(
     key: &str,
     value_json: &str,
 ) -> Result<bool, MemoryError> {
+    // Store identity deliberately enters through this low-level primitive;
+    // operator-maintenance authority has a separate transaction-bound writer.
+    refuse_operator_maintenance_authority_namespace(namespace, "inserted")?;
     let now = now_utc_iso();
     let changed = conn.execute(
         "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
@@ -106,7 +124,7 @@ pub fn set_state_if_version(
     value_json: &str,
     expected_version: u32,
 ) -> Result<bool, MemoryError> {
-    refuse_store_identity_namespace(namespace, "overwritten")?;
+    refuse_general_mutation_namespace(namespace, "overwritten")?;
     let now = now_utc_iso();
     let changed = conn.execute(
         "UPDATE hard_state
@@ -141,7 +159,7 @@ pub fn get_state(
 
 /// Delete a single state row. Returns whether a row was actually removed.
 pub fn delete_state(conn: &Connection, namespace: &str, key: &str) -> Result<bool, MemoryError> {
-    refuse_store_identity_namespace(namespace, "deleted")?;
+    refuse_general_mutation_namespace(namespace, "deleted")?;
     let changed = conn.execute(
         "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
         params![namespace, key],

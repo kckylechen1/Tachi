@@ -28,6 +28,7 @@ impl MemoryStore {
     /// Re-freeze, mutate, and expose the precommit boundary inside one
     /// `BEGIN IMMEDIATE` transaction. The callback is where the server makes
     /// its prepared receipt durable; an error rolls the whole mutation back.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_operator_gc_with_precommit_receipt<F>(
         &mut self,
         cfg: &GcConfig,
@@ -35,6 +36,7 @@ impl MemoryStore {
         kanban_max_age_days: u64,
         include_kanban: bool,
         expected: &[db::MaintenanceClassFact],
+        authority_key: &str,
         before_commit: F,
     ) -> Result<db::GcMaintenanceOutcome, MemoryError>
     where
@@ -42,11 +44,11 @@ impl MemoryStore {
             &Connection,
             &[db::MaintenanceClassFact],
             &[db::MaintenanceClassFact],
-        ) -> Result<(), MemoryError>,
+        ) -> Result<String, MemoryError>,
     {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        db::apply_gc_candidate_facts(
+        db::apply_operator_gc_candidate_facts(
             &mut self.conn,
             cfg,
             self.profile,
@@ -55,6 +57,7 @@ impl MemoryStore {
             kanban_max_age_days,
             include_kanban,
             expected,
+            authority_key,
             before_commit,
         )
     }
@@ -72,6 +75,7 @@ impl MemoryStore {
         &mut self,
         id: &str,
         expected: &[db::MaintenanceClassFact],
+        authority_key: &str,
         before_commit: F,
     ) -> Result<db::DeleteMaintenanceOutcome, MemoryError>
     where
@@ -79,17 +83,27 @@ impl MemoryStore {
             &Connection,
             &[db::MaintenanceClassFact],
             &[db::MaintenanceClassFact],
-        ) -> Result<(), MemoryError>,
+        ) -> Result<String, MemoryError>,
     {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        db::apply_delete_candidate_facts(
+        db::apply_operator_delete_candidate_facts(
             &mut self.conn,
             id,
             self.vec_available,
             self.profile,
             expected,
+            authority_key,
             before_commit,
         )
+    }
+
+    /// Read the closed, same-transaction authority for one canonical operator
+    /// maintenance plan. This is not a general hard-state access surface.
+    pub fn operator_maintenance_committed_authority(
+        &self,
+        plan_digest: &str,
+    ) -> Result<Option<String>, MemoryError> {
+        db::operator_maintenance_authority(&self.conn, plan_digest)
     }
 }

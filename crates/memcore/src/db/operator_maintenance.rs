@@ -690,6 +690,59 @@ where
     Ok(GcMaintenanceOutcome { source, post })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_operator_gc_candidate_facts<F>(
+    conn: &mut Connection,
+    cfg: &GcConfig,
+    profile: StoreProfile,
+    vec_available: bool,
+    as_of: &str,
+    kanban_max_age_days: u64,
+    include_kanban: bool,
+    expected: &[MaintenanceClassFact],
+    authority_key: &str,
+    before_commit: F,
+) -> Result<GcMaintenanceOutcome, MemoryError>
+where
+    F: FnOnce(
+        &Connection,
+        &[MaintenanceClassFact],
+        &[MaintenanceClassFact],
+    ) -> Result<String, MemoryError>,
+{
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let source_candidates = collect_gc_candidates(
+        &tx,
+        cfg,
+        profile,
+        as_of,
+        kanban_max_age_days,
+        include_kanban,
+    )?;
+    let source = source_candidates
+        .iter()
+        .map(|candidate| candidate.fact.clone())
+        .collect::<Vec<_>>();
+    if source != expected {
+        return Err(MemoryError::InvalidArg(
+            "maintenance GC source facts changed after planning".to_string(),
+        ));
+    }
+    apply_candidates(&tx, &source_candidates, vec_available, profile)?;
+    let post = gc_candidate_facts(
+        &tx,
+        cfg,
+        profile,
+        as_of,
+        kanban_max_age_days,
+        include_kanban,
+    )?;
+    let authority_json = before_commit(&tx, &source, &post)?;
+    insert_operator_maintenance_authority(&tx, authority_key, &authority_json)?;
+    tx.commit()?;
+    Ok(GcMaintenanceOutcome { source, post })
+}
+
 fn fact_from_query(
     conn: &Connection,
     class: &str,
@@ -772,6 +825,7 @@ pub(crate) fn delete_candidate_facts(
     Ok(facts)
 }
 
+#[cfg(test)]
 pub(crate) fn apply_delete_candidate_facts<F>(
     conn: &mut Connection,
     id: &str,
@@ -803,6 +857,89 @@ where
         post,
         deleted,
     })
+}
+
+pub(crate) fn apply_operator_delete_candidate_facts<F>(
+    conn: &mut Connection,
+    id: &str,
+    vec_available: bool,
+    profile: StoreProfile,
+    expected: &[MaintenanceClassFact],
+    authority_key: &str,
+    before_commit: F,
+) -> Result<DeleteMaintenanceOutcome, MemoryError>
+where
+    F: FnOnce(
+        &Connection,
+        &[MaintenanceClassFact],
+        &[MaintenanceClassFact],
+    ) -> Result<String, MemoryError>,
+{
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let source = delete_candidate_facts(&tx, id, vec_available, profile)?;
+    if source != expected {
+        return Err(MemoryError::InvalidArg(
+            "maintenance delete source facts changed after planning".to_string(),
+        ));
+    }
+    let deleted = delete_memory_within_tx(&tx, id, vec_available, profile)?;
+    let post = delete_candidate_facts(&tx, id, vec_available, profile)?;
+    let authority_json = before_commit(&tx, &source, &post)?;
+    insert_operator_maintenance_authority(&tx, authority_key, &authority_json)?;
+    tx.commit()?;
+    Ok(DeleteMaintenanceOutcome {
+        source,
+        post,
+        deleted,
+    })
+}
+
+fn insert_operator_maintenance_authority(
+    conn: &Connection,
+    key: &str,
+    value_json: &str,
+) -> Result<(), MemoryError> {
+    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(MemoryError::InvalidArg(
+            "operator maintenance authority key must be a SHA-256 plan digest".to_string(),
+        ));
+    }
+    serde_json::from_str::<serde_json::Value>(value_json).map_err(|error| {
+        MemoryError::InvalidArg(format!(
+            "operator maintenance committed authority is not valid JSON: {error}"
+        ))
+    })?;
+    let now = db::now_utc_iso();
+    conn.execute(
+        "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 1, ?4, ?4)",
+        params![
+            super::state::OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE,
+            key,
+            value_json,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn operator_maintenance_authority(
+    conn: &Connection,
+    key: &str,
+) -> Result<Option<String>, MemoryError> {
+    let result = conn.query_row(
+        "SELECT value_json, version FROM hard_state WHERE namespace=?1 AND key=?2",
+        params![super::state::OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE, key],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+    );
+    match result {
+        Ok((value, 1)) => Ok(Some(value)),
+        Ok((_value, version)) => Err(MemoryError::InvalidArg(format!(
+            "operator maintenance authority has invalid version {version}"
+        ))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
