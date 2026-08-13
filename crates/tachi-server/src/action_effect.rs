@@ -265,8 +265,6 @@ pub(crate) fn facade_action_effect(
                 "gc",
                 "ingest",
                 "ingest_source",
-                "sticky_leave",
-                "sticky_check",
             ],
         ),
         "tachi_event" => (
@@ -435,14 +433,7 @@ mod tests {
         // the raw name "remote__tachi_memory", which never matched
         // "tachi_memory" exactly, so this returned `false` (safe to replay) —
         // the exact bug the owner's adjudication comment named.
-        for action in [
-            "save",
-            "gc",
-            "claim",
-            "release",
-            "sticky_leave",
-            "sticky_check",
-        ] {
+        for action in ["save", "gc", "claim", "release"] {
             assert!(
                 dlq_unsafe("remote__tachi_memory", Some(action)),
                 "remote__tachi_memory(action='{action}') must be unsafe to replay post-#1098"

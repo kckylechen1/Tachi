@@ -23,7 +23,7 @@ pub enum MemoryCategory {
     Wiki,
     Guide,
     Eval,
-    /// #964: sticky notes (read-once agent-to-agent ephemeral memos).
+    /// Legacy category retained only so existing rows can be parsed and cut over.
     Sticky,
 }
 

@@ -164,9 +164,8 @@ moved into a facade.
 different jobs with one loosely-addressed, read-then-write memo shape. Both jobs now have a
 purpose-built home, and #1016 rules `handoff_ops` **deprecated, not deleted**:
 
-- **Short agent-to-agent note, read-once** → `sticky_ops` (#964,
-  `tachi_memory(action='sticky_leave'|'sticky_check')`). Atomic-claim delivery via `hard_state`
-  CAS, TTL, and explicit addressing replace the old acknowledge-loop's last-write-wins race.
+- **Same-host advisory message** → `tachi_a2a(action='respond')` (#1751).
+  Explicit AgentIdentity admission, idempotency, and delivery receipts replace the old memo loop.
 - **Structured baton for a resumed/handed-off task** → `orchestrator_ops::HandoffPacket`
   (`tachi_orchestrator(action='handoff_write'|'handoff_read')`). Carries objective /
   current_state / completed_steps / remaining_steps / files_touched / commands_run / tests_run /

@@ -365,29 +365,18 @@ pub(crate) async fn handle_tachi_dispatch(
 
     // 1. Create isolated workspace directory + MCP config
     //
-    // `agent_seat` (round-3 fix, codex final review of #964/PR #1003, BUG
-    // CP2): the seat identity written to `TACHI_AGENT_SEAT` for the spawned
-    // worker, distinct from `params.tool_profile` (the capability/tool
-    // surface). Round-2 derived this from `params.profile` (falling back to
-    // `agent_norm`), but `params.profile` is a `DispatchProfile` — a
-    // capability-surface selector like `codex_55_review`, not a seat — so
-    // two concurrently dispatched workers on the same profile collided as
-    // one seat (both write/consume the same `TACHI_AGENT_SEAT`, silently
-    // cross-consuming each other's stickies). The dispatch `dispatch_id`
-    // (already unique per lane — timestamp + sanitized agent + uuid suffix,
-    // see `new_dispatch_id`) is available at this point precisely because
-    // every dispatched worker gets one; using it as the seat makes collision
-    // structurally impossible. A `to:`-addressed sticky can target a
-    // dispatch id directly if ever needed.
+    // `agent_seat` is the lane identity written to `TACHI_AGENT_SEAT`, distinct
+    // from `params.tool_profile` (a shared capability selector). Use the
+    // already lane-unique dispatch id so claims and runtime receipts cannot
+    // collide merely because two workers share a profile.
     //
-    // Collision-window caveat (round-4, codex review of #964/PR #1003 —
-    // NOT a #964 regression, leader-adjudicated as out of scope here):
+    // Collision-window caveat:
     // `new_dispatch_id` mints an 8-hex-char (32-bit) uuid suffix alongside a
     // same-second timestamp and the agent name, so two same-agent dispatches
     // landing in the same second could in theory mint the same `dispatch_id`
     // and therefore the same seat. `dispatch_id` already keys run
     // directories system-wide, so a collision here would break far more
-    // than sticky delivery — this is a pre-existing property of
+    // than identity-bound delivery — this is a pre-existing property of
     // `new_dispatch_id`, not introduced by this fix, and widening its
     // entropy is a dispatch-system-wide change tracked as a follow-up, not
     // done in this PR.

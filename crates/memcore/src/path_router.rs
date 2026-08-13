@@ -3,9 +3,7 @@
 //! Canonical path conventions:
 //!   /handoff/{agent_id}   - handoff memos (project-local by default;
 //!                           handoff_ops opts into cross-project for global DB)
-//!   /sticky/{to-or-broadcast} - sticky notes (project-local by default;
-//!                           sticky_ops opts into cross-project for global DB;
-//!                           "broadcast" bucket = no `to` addressee, leader-only)
+//!   /sticky/{legacy-bucket} - retired sticky rows retained for cutover reads
 //!   /kanban/{board}       - kanban cards (project-local by default;
 //!                           kanban opts into cross-project for global DB)
 //!   /wiki/{category}/...  - wiki entries (wiki DB only)
@@ -205,18 +203,6 @@ pub(crate) fn validate_path_for_db(
 // stays: legacy `/handoff/*` rows are retained read-only and must still
 // route/validate correctly.
 
-/// Build the canonical sticky path bucket for a `to` addressee, defaulting to
-/// `/sticky/broadcast` when `to` is absent (frozen semantics: absent `to`
-/// means addressed to the leader/main session only — worker seats never
-/// consume unaddressed stickies).
-pub fn standardize_sticky_path(to: Option<&str>) -> String {
-    let id = to
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("broadcast");
-    format!("/sticky/{id}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,14 +268,6 @@ mod tests {
         assert_eq!(classify_path("/domain/domain-pack/notes"), PathRouting::Any);
         assert_eq!(classify_path("/foo/bar"), PathRouting::Project);
         assert_eq!(classify_path("/"), PathRouting::Project);
-    }
-
-    #[test]
-    fn standardize_sticky_path_defaults_to_broadcast() {
-        assert_eq!(standardize_sticky_path(None), "/sticky/broadcast");
-        assert_eq!(standardize_sticky_path(Some("  ")), "/sticky/broadcast");
-        assert_eq!(standardize_sticky_path(Some("oz")), "/sticky/oz");
-        assert_eq!(standardize_sticky_path(Some(" oz ")), "/sticky/oz");
     }
 
     #[test]

@@ -173,7 +173,6 @@ mod skill_policy;
 mod skill_source_resolver;
 mod staffing_ops;
 mod status_ops;
-mod sticky_ops;
 mod task_lifecycle;
 #[cfg(test)]
 mod test_support;

@@ -67,10 +67,6 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
-            to: None,
-            ttl_days: None,
-            include_read: false,
-            agent_id: None,
         },
     )
     .await

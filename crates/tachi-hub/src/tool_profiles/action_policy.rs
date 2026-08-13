@@ -68,11 +68,6 @@ fn task_action_retired(action: &str) -> bool {
     )
 }
 
-// Note: sticky_leave/sticky_check (#964) are deliberately NOT admin-only —
-// worker/delegate seats must be able to leave/check stickies addressed to
-// their own seat name, which is the feature's core worker↔leader use case.
-// They are classified Remember/Observe below, same tier as save/search.
-
 /// A profile that already allows every bundle (standard/admin) gains nothing
 /// from an unclassified-action fallback: it would have allowed the action
 /// anyway once classified, so letting the call through to the handler (for a
@@ -192,8 +187,6 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "ask"
                 | "progress"
                 | "readiness"
-                | "sticky_leave"
-                | "sticky_check"
         ),
         "tachi_skill" => matches!(action, "discover" | "run" | "bundle"),
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
@@ -234,8 +227,8 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             // (`tachi_doctor_scan` in OBSERVE_TOOL_PATTERNS) — keep parity,
             // do not narrow a read-only action past its prior visibility.
             "search" | "get" | "briefing" | "alerts" | "ask" | "progress" | "readiness"
-            | "doctor_scan" | "sticky_check" => Some(ToolBundle::Observe),
-            "save" | "extract_facts" | "checkpoint" | "sticky_leave" => Some(ToolBundle::Remember),
+            | "doctor_scan" => Some(ToolBundle::Observe),
+            "save" | "extract_facts" | "checkpoint" => Some(ToolBundle::Remember),
             "consolidate" | "pattern_feedback" => Some(ToolBundle::Operate),
             // #757-fold fail-safe fix (gpt-5.6-terra review): delete/gc/
             // ingest/ingest_source were standalone ADMIN-ONLY tools pre-fold

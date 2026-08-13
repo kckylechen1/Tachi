@@ -46,7 +46,6 @@ fn expected_gc_keys(include_session_claims: bool) -> std::collections::BTreeSet<
         "orphaned_agent_known_state",
         "kanban_cards_pruned",
         "foundry_jobs_pruned",
-        "sticky_memories_expired",
         "recall_impression_groups_pruned",
     ]
     .into_iter()

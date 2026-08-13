@@ -71,10 +71,6 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         turn_id: None,
         event_type: None,
         messages: Vec::new(),
-        to: None,
-        ttl_days: None,
-        include_read: false,
-        agent_id: None,
     }
 }
 

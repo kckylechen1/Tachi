@@ -74,10 +74,6 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
-            to: None,
-            ttl_days: None,
-            include_read: false,
-            agent_id: None,
         },
     )
     .await

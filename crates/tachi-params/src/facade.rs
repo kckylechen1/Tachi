@@ -344,7 +344,7 @@ pub struct TachiDomainAdapterParams {
 pub struct TachiHandoffParams {
     /// Action: only "promote_issue" (create/link a GitHub issue from an
     /// existing handoff memo) is supported. "leave"/"check" were retired in
-    /// #1099 — use tachi_memory(action='sticky_leave'|'sticky_check') or
+    /// #1099 retired the old handoff memo routes; use
     /// tachi_orchestrator(action='handoff_write'|'handoff_read') instead.
     pub action: String,
 

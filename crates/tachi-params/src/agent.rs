@@ -9,7 +9,7 @@ fn default_copilot_top_k() -> usize {
 //
 // #1099: `HandoffLeaveParams`/`HandoffCheckParams` retired along with the
 // `handoff_leave`/`handoff_check` routes and `tachi_handoff`'s 'leave'/
-// 'check' actions (see #1016 — sticky/orchestrator replace them).
+// 'check' actions (see #1016 — A2A/orchestrator replace them).
 // `HandoffPromoteIssueParams` survives; `promote_issue` is the one
 // documented handoff capability without a replacement.
 

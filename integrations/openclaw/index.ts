@@ -1121,7 +1121,7 @@ export const memoryHybridBridgePlugin = {
       // registered here would advertise tools that always return `tool not
       // found`, mirroring the ghost_whisper/ghost_listen precedent above.
       // Removed — agents that want a handoff-style memo should use
-      // tachi_memory(action='sticky_leave'|'sticky_check') or
+      // tachi_a2a(action='respond') or
       // tachi_orchestrator(action='handoff_write'|'handoff_read') instead.
       registerTachiPassthrough(
         "tachi_run_skill",
