@@ -437,6 +437,103 @@ mod tests {
     }
 
     #[test]
+    fn claim_evidence_whitelists_fields_and_binds_raw_digest_without_retaining_value_json() {
+        let (_temp, path, mut store) = fixture_store();
+        seed_matrix(&mut store);
+        identity(&store, "operator", "admission-operator");
+        identity(&store, "recipient", "admission-recipient");
+        let source_claim = r#"{"claimed_by":"reader","claimed_at":"2026-08-12T01:00:00Z","type":"sticky_claim","state":"claimed","body":"DO_NOT_PERSIST_CLAIM_SECRET"}"#;
+        store
+            .set_state("sticky_claim", "claimed-cas", source_claim)
+            .expect("seed claim with an untrusted extra field");
+        let plan = store
+            .plan_sticky_cutover_at(path, "2026-08-13T00:00:00Z", str::to_string)
+            .expect("plan");
+        let claim = &plan
+            .rows
+            .iter()
+            .find(|row| row.sticky_id == "claimed-cas")
+            .expect("claimed row")
+            .claim_evidence;
+        assert_eq!(claim.claimed_by.as_deref(), Some("reader"));
+        assert_eq!(claim.claimed_at.as_deref(), Some("2026-08-12T01:00:00Z"));
+        assert_eq!(
+            claim.evidence_digest,
+            super::sha256(source_claim.as_bytes()),
+            "CAS evidence must bind the raw source by digest without retaining it"
+        );
+        let plan_json = serde_json::to_string(&plan).expect("plan JSON");
+        assert!(
+            !plan_json.contains("DO_NOT_PERSIST_CLAIM_SECRET"),
+            "plan must not retain arbitrary legacy claim fields"
+        );
+
+        let mut decided = plan.clone();
+        decide(&mut decided);
+        let changed_claim = r#"{"claimed_by":"reader","claimed_at":"2026-08-12T01:00:00Z","type":"sticky_claim","state":"claimed","body":"CHANGED_CLAIM_SECRET"}"#;
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize claim CAS drift fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE hard_state SET value_json=?1
+                     WHERE namespace='sticky_claim' AND key='claimed-cas'",
+                    [changed_claim],
+                )
+                .expect("mutate raw claim source");
+        }
+        let error = store
+            .apply_sticky_cutover_with_precommit_receipt(&decided, |_| Ok(()))
+            .expect_err("raw claim changes must fail independent CAS");
+        assert!(error.to_string().contains("claim CAS drift"));
+
+        {
+            let _authorization =
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .expect("authorize claim CAS restore fixture");
+            store
+                .connection()
+                .execute(
+                    "UPDATE hard_state SET value_json=?1
+                     WHERE namespace='sticky_claim' AND key='claimed-cas'",
+                    [source_claim],
+                )
+                .expect("restore raw claim source");
+        }
+        let result = store
+            .apply_sticky_cutover_with_precommit_receipt(&decided, |prepared| {
+                let prepared_json =
+                    serde_json::to_string(&prepared.receipt).expect("prepared JSON");
+                assert!(
+                    !prepared_json.contains("DO_NOT_PERSIST_CLAIM_SECRET"),
+                    "prepared receipt must not retain arbitrary legacy claim fields"
+                );
+                Ok(())
+            })
+            .expect("apply");
+        let committed_json = serde_json::to_string(&result.receipt).expect("committed JSON");
+        assert!(
+            !committed_json.contains("DO_NOT_PERSIST_CLAIM_SECRET"),
+            "committed receipt must not retain arbitrary legacy claim fields"
+        );
+        let archive_json: String = store
+            .connection()
+            .query_row(
+                "SELECT json_extract(metadata,'$.legacy_sticky_archive')
+                 FROM memories WHERE id='sticky:claimed-cas'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("archive JSON");
+        assert!(
+            !archive_json.contains("DO_NOT_PERSIST_CLAIM_SECRET"),
+            "archive must not retain arbitrary legacy claim fields"
+        );
+    }
+
+    #[test]
     fn apply_rejects_memory_cas_or_physical_database_drift_before_mutation() {
         let (_temp, path, mut store) = fixture_store();
         seed_matrix(&mut store);
@@ -522,7 +619,8 @@ pub enum StickyClaimEvidenceState {
 #[serde(deny_unknown_fields)]
 pub struct StickyClaimEvidence {
     pub state: StickyClaimEvidenceState,
-    pub value_json: Option<String>,
+    pub claimed_by: Option<String>,
+    pub claimed_at: Option<String>,
     pub version: Option<i64>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -679,43 +777,42 @@ fn claim_evidence(claim: Option<&ClaimRow>) -> StickyClaimEvidence {
     let Some(claim) = claim else {
         return StickyClaimEvidence {
             state: StickyClaimEvidenceState::Missing,
-            value_json: None,
+            claimed_by: None,
+            claimed_at: None,
             version: None,
             created_at: None,
             updated_at: None,
             evidence_digest: sha256(b"missing"),
         };
     };
-    let valid = serde_json::from_str::<serde_json::Value>(&claim.value_json)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .is_some_and(|object| {
-            object
-                .get("claimed_by")
-                .and_then(|value| value.as_str())
-                .is_some_and(|value| !value.trim().is_empty())
-                && object
-                    .get("claimed_at")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|value| DateTime::parse_from_rfc3339(value).is_ok())
-        });
-    let digest_input = serde_json::json!({
-        "value_json": claim.value_json,
-        "version": claim.version,
-        "created_at": claim.created_at,
-        "updated_at": claim.updated_at,
-    });
+    let parsed = serde_json::from_str::<serde_json::Value>(&claim.value_json).ok();
+    let object = parsed.as_ref().and_then(|value| value.as_object());
+    let field = |name: &str| {
+        object
+            .and_then(|object| object.get(name))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+    let claimed_by = field("claimed_by");
+    let claimed_at = field("claimed_at");
+    let valid = claimed_by
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && claimed_at
+            .as_deref()
+            .is_some_and(|value| DateTime::parse_from_rfc3339(value).is_ok());
     StickyClaimEvidence {
         state: if valid {
             StickyClaimEvidenceState::Valid
         } else {
             StickyClaimEvidenceState::Malformed
         },
-        value_json: Some(claim.value_json.clone()),
+        claimed_by,
+        claimed_at,
         version: Some(claim.version),
         created_at: Some(claim.created_at.clone()),
         updated_at: Some(claim.updated_at.clone()),
-        evidence_digest: sha256(&serde_json::to_vec(&digest_input).unwrap_or_default()),
+        evidence_digest: sha256(claim.value_json.as_bytes()),
     }
 }
 
