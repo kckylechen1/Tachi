@@ -13,6 +13,28 @@ fn fixture() -> Value {
     serde_json::from_str(FIXTURE).expect("memory action fixture parses")
 }
 
+fn active_contract_teaches_memory_action(body: &str, token: &str) -> bool {
+    let double_quoted = format!("action=\"{token}\"");
+    let single_quoted = format!("action='{token}'");
+    let json_action = format!("\"action\":\"{token}\"");
+    let rust_stdio_action = format!("(\"tachi_memory\",Some(\"{token}\"))");
+    let dotted_action = format!("tachi_memory.{token}");
+    let compact: String = body.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let backticked_action_list = body.lines().any(|line| {
+        line.split_once("`tachi_memory` ")
+            .and_then(|(_, suffix)| suffix.split_whitespace().next())
+            .filter(|list| list.contains('/'))
+            .is_some_and(|list| list.split('/').any(|action| action == token))
+    });
+
+    body.contains(&double_quoted)
+        || body.contains(&single_quoted)
+        || compact.contains(&json_action)
+        || compact.contains(&rust_stdio_action)
+        || body.contains(&dotted_action)
+        || backticked_action_list
+}
+
 #[test]
 fn active_memory_examples_deserialize_and_cover_exact_final_set() {
     let fixture = fixture();
@@ -76,6 +98,23 @@ fn active_contract_corpus_includes_all_retirement_surfaces_and_pins_nine_action_
 }
 
 #[test]
+fn active_contract_scanner_detects_backticked_memory_action_lists_without_prose_false_positive() {
+    let prior_active_row = "| MCP memory actions | `tachi_memory` search/save/briefing/readiness (or HyperMemory aliases) |";
+    for listed_action in ["search", "save", "briefing", "readiness"] {
+        assert!(
+            active_contract_teaches_memory_action(prior_active_row, listed_action),
+            "the exact prior comma/slash-list form must parse listed action {listed_action}",
+        );
+    }
+
+    let prose = "`tachi_memory` readiness moved to the canonical status owner.";
+    assert!(
+        !active_contract_teaches_memory_action(prose, "readiness"),
+        "a prose mention without an action list must not be classified as an active route",
+    );
+}
+
+#[test]
 fn retired_memory_actions_are_rejected_and_absent_from_declared_active_contract_files() {
     let fixture = fixture();
     let retired = fixture["retired_actions"]
@@ -95,26 +134,12 @@ fn retired_memory_actions_are_rejected_and_absent_from_declared_active_contract_
     for token in retired {
         let token = token.as_str().expect("retired action token");
         assert!(unique.insert(token), "duplicate retired action {token}");
-        let double_quoted = format!("action=\"{token}\"");
-        let single_quoted = format!("action='{token}'");
-        let json_action = format!("\"action\":\"{token}\"");
-        let rust_stdio_action = format!("(\"tachi_memory\",Some(\"{token}\"))");
-        let dotted_action = format!("tachi_memory.{token}");
         for relative in active_files {
             let relative = relative.as_str().expect("active contract path");
             let body = std::fs::read_to_string(repo.join(relative))
                 .unwrap_or_else(|error| panic!("read active contract file {relative}: {error}"));
-            let compact: String = body.chars().filter(|ch| !ch.is_whitespace()).collect();
-            let slash_listed_action = body
-                .lines()
-                .any(|line| line.contains("`tachi_memory`") && line.contains(&format!("/{token}")));
             assert!(
-                !body.contains(&double_quoted)
-                    && !body.contains(&single_quoted)
-                    && !compact.contains(&json_action)
-                    && !compact.contains(&rust_stdio_action)
-                    && !body.contains(&dotted_action)
-                    && !slash_listed_action,
+                !active_contract_teaches_memory_action(&body, token),
                 "active contract file {relative} still teaches retired Memory action {token}"
             );
         }
