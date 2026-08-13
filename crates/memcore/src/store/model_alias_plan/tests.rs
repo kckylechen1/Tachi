@@ -173,7 +173,7 @@ fn a_plan_that_changes_nothing_writes_nothing_and_stays_replayable() {
 }
 
 #[test]
-fn re_applying_a_plan_that_did_change_something_is_a_drift_refusal() {
+fn re_applying_a_plan_that_did_change_something_reports_its_own_spent_revision() {
     let mut store = store();
     seed_deployment(&store, "env:reasoning");
     let plan = first_plan(&store);
@@ -181,8 +181,98 @@ fn re_applying_a_plan_that_did_change_something_is_a_drift_refusal() {
     let settled = snapshot(&store);
 
     let error = apply(&mut store, &plan).expect_err("a spent plan is not applyable twice");
-    assert_eq!(refusal(error), AliasPlanRefusal::PolicyRevisionDrift);
+    let MemoryError::ModelAliasPlanRefused { reason, detail } = error else {
+        panic!("expected an alias plan refusal");
+    };
+    // Ruling 7, and the axis order that makes it reachable: a changing apply
+    // moves the set revision as a *side effect* of moving its own bound rows,
+    // so a set-first check would report `policy_revision_drift` for every spent
+    // plan and this refusal could never be produced. `alias_revision_drift`
+    // says "this approved change has already been applied"; the set-level one
+    // says "somebody else moved the world, re-plan". Different next actions.
+    assert_eq!(reason, AliasPlanRefusal::AliasRevisionDrift);
+    assert!(
+        detail.contains("chat.default") && detail.contains("absent"),
+        "the refusal names the alias whose bound revision is spent: {detail}"
+    );
     assert_eq!(snapshot(&store), settled, "a refused replay writes nothing");
+}
+
+#[test]
+fn a_spent_bind_only_plan_reports_the_alias_too_not_the_set() {
+    // The sibling of the test above on the *binding* path: no declaration is
+    // replayed here, so the only thing that moved the alias's revision is the
+    // binding write. Ruling 7 holds for every action that spends a revision,
+    // not only for the one that creates the row.
+    let mut store = store();
+    seed_deployment(&store, "env:reasoning");
+    seed_deployment(&store, "env:extract");
+    {
+        let plan = first_plan(&store);
+        apply(&mut store, &plan).expect("seed the alias");
+    }
+
+    let bind_only = BoundAliasPlan {
+        bindings: AliasPlanBindings {
+            policy_revision: policy_revision(&store),
+            aliases: vec![AliasRevisionBinding {
+                alias_name: "chat.default".to_string(),
+                revision: Some(2),
+            }],
+            deployments: vec![DeploymentRevisionBinding {
+                deployment_id: "env:extract".to_string(),
+                revision: Some(1),
+            }],
+        },
+        actions: vec![bind("chat.default", "env:extract", 1)],
+    };
+    assert!(apply(&mut store, &bind_only).expect("first apply").changed);
+    let settled = snapshot(&store);
+
+    let error = apply(&mut store, &bind_only).expect_err("a spent plan is not applyable twice");
+    assert_eq!(refusal(error), AliasPlanRefusal::AliasRevisionDrift);
+    assert_eq!(snapshot(&store), settled);
+}
+
+#[test]
+fn a_no_change_plan_is_still_replayable_after_the_set_settles() {
+    // The other side of ruling 7, and the reason the refusal above must be the
+    // *specific* one: a plan that asks for a state the world is already in
+    // spends no revision, so nothing it bound moved and nothing refuses it. If
+    // "already applied" and "nothing to do" collapsed into one verdict, this
+    // plan would be unusable as the idempotent check it exists to be.
+    let mut store = store();
+    seed_deployment(&store, "env:reasoning");
+    {
+        let plan = first_plan(&store);
+        apply(&mut store, &plan).expect("seed the alias");
+    }
+    let settled = snapshot(&store);
+
+    let no_change = BoundAliasPlan {
+        bindings: AliasPlanBindings {
+            policy_revision: policy_revision(&store),
+            aliases: vec![AliasRevisionBinding {
+                alias_name: "chat.default".to_string(),
+                revision: Some(2),
+            }],
+            deployments: vec![DeploymentRevisionBinding {
+                deployment_id: "env:reasoning".to_string(),
+                revision: Some(1),
+            }],
+        },
+        actions: vec![
+            declare("chat.default"),
+            bind("chat.default", "env:reasoning", 0),
+        ],
+    };
+    for round in 0..3 {
+        let report = apply(&mut store, &no_change).unwrap_or_else(|error| {
+            panic!("a plan that changes nothing stays replayable (round {round}): {error:?}")
+        });
+        assert!(!report.changed);
+        assert_eq!(snapshot(&store), settled);
+    }
 }
 
 // ─── Drift = zero writes ────────────────────────────────────────────────────

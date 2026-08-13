@@ -23,6 +23,14 @@
 //! "apply exactly once" is what an approval means. A plan that changes nothing
 //! (the world already matches) moves no revision and stays replayable, which is
 //! the only case where replay is meaningful.
+//!
+//! Which refusal a replay reports is part of that property and not decoration:
+//! `alias_revision_drift` names the plan's own spent preconditions, so an
+//! operator reads "this has already been applied", while
+//! `policy_revision_drift` names a set that moved for some *other* reason, so
+//! an operator reads "re-plan against what is there now". The two answers ask
+//! for different next actions, which is why [`apply_within`] checks the bound
+//! rows before the set.
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::Serialize;
@@ -147,10 +155,19 @@ fn apply_within(
         );
     }
 
+    // The plan's own bound rows before the ambient set, and that order is the
+    // ruling rather than a detail (#1681 PR-D review, CP3). A candidate that
+    // fails several preconditions reports the most specific one it fails: the
+    // alias *this plan bound* having moved is a fact about this plan, while
+    // the set revision having moved is a fact about the world, and every
+    // changing apply moves the set as a side effect of moving its own rows. So
+    // checking the set first made every spent-plan replay report
+    // `policy_revision_drift`, and ruling 7's `alias_revision_drift` — "this
+    // approved change has already been applied" — became unreachable.
     verify_plan_shape(plan)?;
-    verify_policy_revision(tx, plan)?;
     verify_aliases(tx, plan)?;
     verify_deployments(tx, plan)?;
+    verify_policy_revision(tx, plan)?;
 
     let mut report = AliasApplyReport {
         plan_digest: recomputed,
