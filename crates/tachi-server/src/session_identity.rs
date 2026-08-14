@@ -19,7 +19,9 @@ pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
 /// Process-env twin of [`HEADER_AGENT_IDENTITY`] / [`META_AGENT_IDENTITY`].
 /// Stdio hosts (Cursor `mcp.json`) cannot set initialize `_meta`; they can
 /// stamp this on `tachi serve`. Absent/invalid stays absent — never minted
-/// (#1761). Header and `_meta` still win when present.
+/// (#1761). Header and `_meta` still win when present. HTTP direct-connect
+/// (request Parts present) does not read this env; the proxy/CLI forwards
+/// it as a header instead.
 pub(crate) const ENV_AGENT_IDENTITY: &str = "TACHI_AGENT_IDENTITY";
 pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
 /// #1120 PR1: same shape as `HEADER_PROJECT`, but carries a filesystem path

@@ -734,6 +734,10 @@ fn http_session_identity(
             Ok(None) => {}
             Err(err) => identity.workspace_root_error = Some(err),
         }
+        // HTTP has request Parts. Env fallback is stdio/local only
+        // (#1761): a daemon process env must not confer identity on a
+        // direct-connect session that omitted both `_meta` and header.
+        return identity;
     }
     if identity.agent_identity_id.is_none() && identity.agent_identity_error.is_none() {
         identity.agent_identity_id = crate::session_identity::agent_identity_from_env_value(

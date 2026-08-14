@@ -2330,3 +2330,63 @@ fn capture_initialize_identity_meta_wins_blank_omits_absent_uses_env() {
         "absent _meta key may take a valid process env"
     );
 }
+
+/// #1761 review: daemon-process env must not confer identity on a direct
+/// HTTP session that omitted both `_meta` and `X-Tachi-Agent-Identity`.
+/// Pre-fix that leak admits the session as `unavailable` (has identity,
+/// not local). Post-fix it stays identity-less → `rejected`.
+#[test]
+fn http_direct_connect_does_not_inherit_daemon_process_env_identity() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    let _env = EnvRestore::set(
+        crate::session_identity::ENV_AGENT_IDENTITY,
+        "agent.daemon.env",
+    );
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let headers = http_headers(&[]);
+        let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+
+        let a2a = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers,
+            2,
+            "tachi_a2a",
+            serde_json::Map::from_iter([("action".to_string(), serde_json::json!("status"))]),
+        )
+        .await;
+        let text = a2a
+            .get("error")
+            .and_then(|err| err.get("message"))
+            .and_then(|message| message.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| http_tool_text(&a2a));
+        assert!(
+            text.contains("a2a issuer admission rejected"),
+            "direct HTTP must stay identity-less when env is the only assertion: {text}\n{a2a:#}"
+        );
+        assert!(
+            !text.contains("unavailable"),
+            "daemon env leak would admit as unavailable, not rejected: {text}\n{a2a:#}"
+        );
+        (ct, daemon_task)
+    });
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+}
