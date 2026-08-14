@@ -2026,3 +2026,260 @@ async fn auto_ingest_arguments_digest_binds_idempotency() {
         "changed argument value must produce a different arguments_digest: {digests:?}"
     );
 }
+
+const ECHOED_PASSWORD: &str = "hunter2secret";
+const ECHOED_BEARER: &str = "echo-token-REDTEST888";
+const URL_USERINFO_PASSWORD: &str = "weakpass123";
+const URL_SESSION_CREDENTIAL: &str = "weakpass456";
+const LEGACY_URL_USERINFO: &str = "legacyurlpass111";
+const LEGACY_URL_SESSION: &str = "legacysession222";
+
+fn assert_absent_everywhere(
+    server: &crate::server_state::MemoryServer,
+    needle: &str,
+    receipt: Option<&str>,
+) {
+    for cell in table_cell_strings(server, "processed_events") {
+        assert!(
+            !cell.contains(needle),
+            "processed_events leaked {needle:?}: {cell}"
+        );
+    }
+    for cell in table_cell_strings(server, "memories") {
+        assert!(!cell.contains(needle), "memories leaked {needle:?}: {cell}");
+    }
+    if let Some(receipt) = receipt {
+        assert!(
+            !receipt.contains(needle),
+            "receipt leaked {needle:?}: {receipt}"
+        );
+    }
+}
+
+fn stage_with_text_and_url(
+    server: &crate::server_state::MemoryServer,
+    path: &str,
+    text: &str,
+    url: Option<&str>,
+) -> crate::pipeline_ops::StagedAutoIngest {
+    let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+        "content": [{"type": "text", "text": text}],
+        "isError": false
+    }))
+    .expect("build discriminating tool result");
+    let definition = json!({
+        "auto_ingest": true,
+        "ingest_scope": "global",
+        "ingest_domain": "general",
+        "ingest_path_prefix": path,
+    });
+    let arguments = url.map(|url| serde_json::Map::from_iter([("url".to_string(), json!(url))]));
+    crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        server,
+        "mcp:secret-reader",
+        "read",
+        &definition,
+        arguments.as_ref(),
+        &result,
+    )
+    .expect("discriminating staging must succeed")
+    .expect("auto-ingest definition admits text")
+}
+
+#[tokio::test]
+async fn auto_ingest_scrubs_echoed_secret_content() {
+    let server = make_server();
+    let path = "/wiki/general/auto-ingest-echoed-content";
+    let text = format!("password: {ECHOED_PASSWORD}\nAuthorization: Bearer {ECHOED_BEARER}");
+    let staged = stage_with_text_and_url(&server, path, &text, None);
+    let staged_payloads = load_auto_ingest_job_payloads(&server);
+    let encoded = staged_payloads[0].to_string();
+    assert!(
+        !encoded.contains(ECHOED_PASSWORD),
+        "staged payload kept echoed password: {encoded}"
+    );
+    assert!(
+        !encoded.contains(ECHOED_BEARER),
+        "staged payload kept echoed bearer: {encoded}"
+    );
+    let receipt = complete_secret_bearing_ingest(&server, &staged).await;
+    assert_absent_everywhere(&server, ECHOED_PASSWORD, Some(&receipt));
+    assert_absent_everywhere(&server, ECHOED_BEARER, Some(&receipt));
+}
+
+#[tokio::test]
+async fn auto_ingest_strips_url_userinfo_credentials() {
+    let server = make_server();
+    let path = "/wiki/general/auto-ingest-url-userinfo";
+    let staged = stage_with_text_and_url(
+        &server,
+        path,
+        "public article body for userinfo fixture",
+        Some(&format!(
+            "https://user:{URL_USERINFO_PASSWORD}@example.com/x"
+        )),
+    );
+    let receipt = complete_secret_bearing_ingest(&server, &staged).await;
+    assert_absent_everywhere(&server, URL_USERINFO_PASSWORD, Some(&receipt));
+}
+
+#[tokio::test]
+async fn auto_ingest_masks_non_token_query_credentials() {
+    let server = make_server();
+    let path = "/wiki/general/auto-ingest-url-session";
+    let staged = stage_with_text_and_url(
+        &server,
+        path,
+        "public article body for session-query fixture",
+        Some(&format!(
+            "https://example.com/x?session={URL_SESSION_CREDENTIAL}"
+        )),
+    );
+    let receipt = complete_secret_bearing_ingest(&server, &staged).await;
+    assert_absent_everywhere(&server, URL_SESSION_CREDENTIAL, Some(&receipt));
+}
+
+#[tokio::test]
+async fn legacy_v1_oversized_forensic_is_allowlisted_without_url_secrets() {
+    let server = make_server();
+    let job_id = "legacy-v1-oversized-url-forensic-job";
+    let source_url = format!("https://user:{LEGACY_URL_USERINFO}@example.com/a");
+    let request_source_url = format!("https://example.com/b?session={LEGACY_URL_SESSION}");
+    let legacy_payload = json!({
+        "schema": "tachi.admitted_mcp_ingest.v1",
+        "job_id": job_id,
+        "source": {
+            "capability_id": "mcp:legacy-reader",
+            "tool_name": "read",
+            "label": "legacy-reader:read",
+            "url": source_url,
+            "arguments": {
+                "Authorization": SECRET_LEGACY_V1
+            }
+        },
+        "content_digest": "deadbeef",
+        "target": {
+            "scope": "global",
+            "project": null,
+            "domain": "general",
+            "path_prefix": "/wiki/general/legacy-v1-oversized"
+        },
+        "target_digest": "deadbeef",
+        "policy": {
+            "auto_chunk": true,
+            "auto_summarize": true,
+            "auto_link": true,
+            "importance": 0.7,
+            "chunk_size_chars": 1200,
+            "chunk_overlap_chars": 120
+        },
+        "policy_digest": "deadbeef",
+        "idempotency_key": "deadbeef",
+        "request": {
+            "content": "x".repeat(5000),
+            "source_url": request_source_url,
+            "source": "legacy-reader:read",
+            "path_prefix": "/wiki/general/legacy-v1-oversized",
+            "auto_chunk": true,
+            "auto_summarize": true,
+            "auto_link": true,
+            "importance": 0.7,
+            "scope": "global",
+            "domain": "general",
+            "chunk_size_chars": 1200,
+            "chunk_overlap_chars": 120,
+            "metadata": {
+                "capability_id": "mcp:legacy-reader",
+                "tool_name": "read",
+                "arguments": {
+                    "Authorization": SECRET_LEGACY_V1
+                },
+                "auto_ingest": true
+            }
+        }
+    });
+    assert!(
+        legacy_payload.to_string().len() > 4096,
+        "legacy fixture must exceed the forensic byte cap"
+    );
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
+                     VALUES (?1, ?2, 'auto_ingest_job', STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    rusqlite::params![job_id, legacy_payload.to_string()],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject oversized legacy v1 staged job");
+
+    let replay = crate::pipeline_ops::run_staged_auto_ingest(
+        &server,
+        crate::pipeline_ops::StagedAutoIngest {
+            job_id: job_id.to_string(),
+        },
+    )
+    .await
+    .expect("legacy v1 must quarantine");
+    assert!(replay.is_none(), "legacy v1 must never execute: {replay:?}");
+
+    let forensic = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT event_id FROM processed_events \
+                     WHERE event_hash = ?1 AND worker = 'auto_ingest_job_dead_letter'",
+                    [job_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("load oversized legacy forensic");
+    assert!(
+        forensic.contains("legacy_v1_staged_job_quarantined_unredacted_arguments"),
+        "quarantine must name the legacy reason: {forensic}"
+    );
+    assert!(
+        !forensic.contains(LEGACY_URL_USERINFO),
+        "forensic kept source.url userinfo: {forensic}"
+    );
+    assert!(
+        !forensic.contains(LEGACY_URL_SESSION),
+        "forensic kept request.source_url session: {forensic}"
+    );
+    assert!(
+        !forensic.contains(SECRET_LEGACY_V1),
+        "forensic kept argument secret: {forensic}"
+    );
+    let forensic_json: Value = serde_json::from_str(&forensic).expect("forensic JSON");
+    assert_eq!(
+        forensic_json["schema"], "tachi.admitted_mcp_ingest.v1",
+        "allowlist must carry the schema tag: {forensic}"
+    );
+    assert_eq!(forensic_json["job_id"], job_id);
+    assert_eq!(forensic_json["capability_id"], "mcp:legacy-reader");
+    assert_eq!(forensic_json["tool_name"], "read");
+    let keys = forensic_json["argument_keys"]
+        .as_array()
+        .expect("allowlist argument_keys");
+    assert!(
+        keys.iter().any(|key| key == "Authorization"),
+        "allowlist must keep argument key names: {keys:?}"
+    );
+    assert!(
+        forensic_json.get("url").is_none() && forensic_json.get("source_url").is_none(),
+        "allowlist must not copy url fields: {forensic}"
+    );
+    assert!(
+        forensic_json.get("content").is_none(),
+        "allowlist must not copy content: {forensic}"
+    );
+    assert!(
+        forensic_json.get("metadata").is_none(),
+        "allowlist must not copy metadata: {forensic}"
+    );
+}
