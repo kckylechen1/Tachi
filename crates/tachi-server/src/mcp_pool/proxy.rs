@@ -816,10 +816,8 @@ mod auto_ingest_response_tests {
             "dead letter argument_keys must retain names: {keys:?}"
         );
         assert!(
-            args.get("arguments_digest")
-                .and_then(|value| value.as_str())
-                .is_some_and(|digest| !digest.is_empty()),
-            "dead letter must carry arguments_digest: {encoded}"
+            args.get("arguments_digest").is_none(),
+            "dead letter must not persist arguments_digest: {encoded}"
         );
         assert!(
             args.get("Authorization").is_none(),

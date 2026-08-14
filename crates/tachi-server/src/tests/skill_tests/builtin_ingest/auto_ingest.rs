@@ -1633,7 +1633,27 @@ fn load_auto_ingest_job_payloads(server: &crate::server_state::MemoryServer) -> 
         .expect("load staged auto-ingest payloads")
 }
 
-fn assert_staged_payload_carries_keys_and_digest(payload: &Value) {
+fn json_must_not_contain_field(value: &Value, field: &str, context: &str) {
+    match value {
+        Value::Object(map) => {
+            assert!(
+                !map.contains_key(field),
+                "{context} must not persist {field}: {value}"
+            );
+            for child in map.values() {
+                json_must_not_contain_field(child, field, context);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                json_must_not_contain_field(child, field, context);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn assert_staged_payload_carries_keys(payload: &Value) {
     let source_keys = payload["source"]["argument_keys"]
         .as_array()
         .expect("staged source.argument_keys must exist");
@@ -1645,17 +1665,7 @@ fn assert_staged_payload_carries_keys_and_digest(payload: &Value) {
         "argument_keys must record admitted top-level names: {payload}"
     );
     assert_eq!(source_keys, metadata_keys);
-    let source_digest = payload["source"]["arguments_digest"]
-        .as_str()
-        .expect("staged source.arguments_digest must exist");
-    let metadata_digest = payload["request"]["metadata"]["arguments_digest"]
-        .as_str()
-        .expect("staged request.metadata.arguments_digest must exist");
-    assert!(
-        !source_digest.is_empty(),
-        "arguments_digest must be non-empty"
-    );
-    assert_eq!(source_digest, metadata_digest);
+    json_must_not_contain_field(payload, "arguments_digest", "staged payload");
     assert!(
         payload["source"].get("arguments").is_none(),
         "staged source must not keep a raw arguments object: {payload}"
@@ -1712,7 +1722,7 @@ async fn auto_ingest_staging_does_not_persist_secret_argument_values() {
     let staged = stage_secret_bearing_auto_ingest(&server, path);
     let staged_payloads = load_auto_ingest_job_payloads(&server);
     assert_eq!(staged_payloads.len(), 1, "one staged job after admission");
-    assert_staged_payload_carries_keys_and_digest(&staged_payloads[0]);
+    assert_staged_payload_carries_keys(&staged_payloads[0]);
     let keys = staged_payloads[0]["source"]["argument_keys"]
         .as_array()
         .expect("argument_keys");
@@ -1763,11 +1773,7 @@ async fn auto_ingest_staging_does_not_persist_secret_argument_values() {
         "memory metadata must carry argument_keys: {}",
         entries[0].metadata
     );
-    assert!(
-        entries[0].metadata.get("arguments_digest").is_some(),
-        "memory metadata must carry arguments_digest: {}",
-        entries[0].metadata
-    );
+    json_must_not_contain_field(&entries[0].metadata, "arguments_digest", "memory metadata");
     let status = crate::pipeline_ops::handle_get_pipeline_status(&server)
         .await
         .expect("pipeline status");
@@ -1931,13 +1937,18 @@ async fn legacy_v1_auto_ingest_job_is_quarantined_without_secret_forensics() {
 }
 
 #[tokio::test]
-async fn auto_ingest_arguments_digest_binds_idempotency() {
+async fn auto_ingest_idempotency_collapses_identical_content() {
     let server = make_server();
-    let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
-        "content": [{"type": "text", "text": "idempotency digest fixture"}],
+    let same_content: rmcp::model::CallToolResult = serde_json::from_value(json!({
+        "content": [{"type": "text", "text": "idempotency collapse fixture"}],
         "isError": false
     }))
-    .expect("build digest fixture result");
+    .expect("build collapse fixture result");
+    let different_content: rmcp::model::CallToolResult = serde_json::from_value(json!({
+        "content": [{"type": "text", "text": "idempotency distinct fixture"}],
+        "isError": false
+    }))
+    .expect("build distinct fixture result");
     let definition = json!({
         "auto_ingest": true,
         "ingest_scope": "global",
@@ -1954,77 +1965,60 @@ async fn auto_ingest_arguments_digest_binds_idempotency() {
         "read",
         &definition,
         Some(&first_arguments),
-        &result,
+        &same_content,
     )
     .expect("first staging succeeds")
     .expect("first job is admitted");
-    let second = crate::pipeline_ops::stage_auto_ingest_from_mcp(
-        &server,
-        "mcp:digest-reader",
-        "read",
-        &definition,
-        Some(&first_arguments),
-        &result,
-    )
-    .expect("identical restage is not an error");
-    assert!(
-        second.is_none()
-            || second.as_ref().map(|job| job.job_id.as_str()) == Some(first.job_id.as_str()),
-        "identical arguments must not create a second logical job: {second:?}"
-    );
-    let after_duplicate = load_auto_ingest_job_payloads(&server);
-    assert_eq!(
-        after_duplicate.len(),
-        1,
-        "identical restage must keep a single pending job"
-    );
-    assert_staged_payload_carries_keys_and_digest(&after_duplicate[0]);
-    let first_digest = after_duplicate[0]["source"]["arguments_digest"]
-        .as_str()
-        .expect("first arguments_digest")
-        .to_string();
-
     let mutated_arguments = serde_json::Map::from_iter([
         ("note".to_string(), json!("beta")),
         ("n".to_string(), json!(1)),
     ]);
-    let third = crate::pipeline_ops::stage_auto_ingest_from_mcp(
+    let collapsed = crate::pipeline_ops::stage_auto_ingest_from_mcp(
         &server,
         "mcp:digest-reader",
         "read",
         &definition,
         Some(&mutated_arguments),
-        &result,
+        &same_content,
     )
-    .expect("value-divergent staging succeeds")
-    .expect("a different argument value is a different job");
-    assert_ne!(
-        third.job_id, first.job_id,
-        "argument value changes must change the idempotency-bound job id"
+    .expect("value-divergent same-content staging is not an error");
+    assert!(
+        collapsed.is_none()
+            || collapsed.as_ref().map(|job| job.job_id.as_str()) == Some(first.job_id.as_str()),
+        "same content with different argument values must collapse to one job: {collapsed:?}"
     );
-    let after_divergent = load_auto_ingest_job_payloads(&server);
+    let after_collapse = load_auto_ingest_job_payloads(&server);
     assert_eq!(
-        after_divergent.len(),
+        after_collapse.len(),
+        1,
+        "identical durable effect must keep a single pending job"
+    );
+    assert_eq!(after_collapse[0]["job_id"], first.job_id);
+    assert_staged_payload_carries_keys(&after_collapse[0]);
+
+    let distinct = crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        &server,
+        "mcp:digest-reader",
+        "read",
+        &definition,
+        Some(&mutated_arguments),
+        &different_content,
+    )
+    .expect("content-divergent staging succeeds")
+    .expect("different content is a different job");
+    assert_ne!(
+        distinct.job_id, first.job_id,
+        "different content must produce a different job"
+    );
+    let after_distinct = load_auto_ingest_job_payloads(&server);
+    assert_eq!(
+        after_distinct.len(),
         2,
-        "divergent arguments create a second job"
+        "different content creates a second job"
     );
-    let digests: Vec<String> = after_divergent
-        .iter()
-        .map(|payload| {
-            payload["source"]["arguments_digest"]
-                .as_str()
-                .expect("arguments_digest on every staged job")
-                .to_string()
-        })
-        .collect();
-    assert!(
-        digests.iter().any(|digest| digest == &first_digest),
-        "original digest must remain: {digests:?}"
-    );
-    assert!(
-        digests.iter().any(|digest| digest != &first_digest),
-        "changed argument value must produce a different arguments_digest: {digests:?}"
-    );
+    for payload in &after_distinct {
+        json_must_not_contain_field(payload, "arguments_digest", "persisted staged payload");
+    }
 }
 
 const ECHOED_PASSWORD: &str = "hunter2secret";

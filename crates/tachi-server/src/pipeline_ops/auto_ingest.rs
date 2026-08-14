@@ -9,6 +9,7 @@ use crate::memory_search_ops::scrub_secrets;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::IngestSourceParams;
 use crate::utils::{sanitize_safe_path_name, stable_hash};
+use url::Url;
 
 use super::audit::{
     claim_retryable_ingest_event, ingest_audit_key, ingest_success_audit_exists,
@@ -43,7 +44,6 @@ struct StagedMcpSourceV1 {
     label: Option<String>,
     url: Option<String>,
     argument_keys: Vec<String>,
-    arguments_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -272,9 +272,10 @@ fn prepare_auto_ingest_from_mcp(
         return Ok(None);
     }
 
-    let Some(content) = extract_text_from_tool_result(result) else {
+    let Some(raw_content) = extract_text_from_tool_result(result) else {
         return Ok(None);
     };
+    let content = scrub_secrets(&raw_content).0;
     if content.len() > ADMITTED_INGEST_RAW_PAYLOAD_MAX_BYTES {
         return Err(format!(
             "admitted ingest payload exceeds {} byte limit",
@@ -284,7 +285,7 @@ fn prepare_auto_ingest_from_mcp(
 
     let resolved_server = capability_id.strip_prefix("mcp:").unwrap_or(capability_id);
     let raw_arguments = arguments.cloned().unwrap_or_default();
-    let (argument_keys, arguments_digest) = admit_mcp_arguments(&raw_arguments)?;
+    let argument_keys = argument_keys_from_map(&raw_arguments);
     let source_url = arguments
         .and_then(|args| args.get("url"))
         .and_then(|value| value.as_str())
@@ -295,7 +296,7 @@ fn prepare_auto_ingest_from_mcp(
                 .and_then(|value| value.as_str())
                 .map(|value| value.to_string())
         })
-        .map(|value| scrub_secrets(&value).0);
+        .map(|value| sanitize_admitted_source_url(&value));
 
     let domain = resolve_domain(
         definition
@@ -325,7 +326,6 @@ fn prepare_auto_ingest_from_mcp(
         "capability_id": capability_id,
         "tool_name": tool_name,
         "argument_keys": argument_keys,
-        "arguments_digest": arguments_digest,
         "auto_ingest": true,
     });
 
@@ -487,18 +487,12 @@ fn staged_source_from_request(
         })
         .unwrap_or_default();
     argument_keys.sort();
-    let arguments_digest = metadata
-        .and_then(|value| value.get("arguments_digest"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
     StagedMcpSourceV1 {
         capability_id: capability_id.to_string(),
         tool_name: tool_name.to_string(),
         label: request.source.clone(),
         url: request.source_url.clone(),
         argument_keys,
-        arguments_digest,
     }
 }
 
@@ -527,43 +521,8 @@ fn staged_metadata(source: &StagedMcpSourceV1) -> serde_json::Value {
         "capability_id": source.capability_id,
         "tool_name": source.tool_name,
         "argument_keys": source.argument_keys,
-        "arguments_digest": source.arguments_digest,
         "auto_ingest": true,
     })
-}
-
-/// Canonical JSON used for `arguments_digest`.
-///
-/// Objects are encoded with lexicographically sorted keys at every nesting
-/// level so two maps with the same logical content produce the same digest
-/// regardless of insertion order. Arrays keep element order. Atoms use
-/// `serde_json`'s default serialization. The digest is `stable_hash` of this
-/// encoding; admission computes it from the raw arguments map, and replay
-/// rebuilds the v2 envelope from the stored keys+digest rather than from
-/// secret-bearing values.
-fn canonical_json(value: &serde_json::Value) -> Result<String, String> {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let mut parts = Vec::with_capacity(keys.len());
-            for key in keys {
-                let encoded_key = serde_json::to_string(key)
-                    .map_err(|error| format!("canonicalize admitted MCP argument key: {error}"))?;
-                parts.push(format!("{}:{}", encoded_key, canonical_json(&map[key])?));
-            }
-            Ok(format!("{{{}}}", parts.join(",")))
-        }
-        serde_json::Value::Array(items) => {
-            let mut parts = Vec::with_capacity(items.len());
-            for item in items {
-                parts.push(canonical_json(item)?);
-            }
-            Ok(format!("[{}]", parts.join(",")))
-        }
-        other => serde_json::to_string(other)
-            .map_err(|error| format!("canonicalize admitted MCP argument atom: {error}")),
-    }
 }
 
 fn argument_keys_from_map(arguments: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
@@ -572,27 +531,42 @@ fn argument_keys_from_map(arguments: &serde_json::Map<String, serde_json::Value>
     keys
 }
 
-fn admit_mcp_arguments(
-    arguments: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(Vec<String>, String), String> {
-    let digest = stable_hash(&canonical_json(&serde_json::Value::Object(
-        arguments.clone(),
-    ))?);
-    Ok((argument_keys_from_map(arguments), digest))
-}
-
 pub(crate) fn redacted_mcp_arguments_map(
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let raw = arguments.cloned().unwrap_or_default();
-    let keys = argument_keys_from_map(&raw);
-    let digest = admit_mcp_arguments(&raw)
-        .map(|(_, digest)| digest)
-        .unwrap_or_else(|_| "canonicalization_failed".to_string());
     let mut map = serde_json::Map::new();
-    map.insert("argument_keys".to_string(), json!(keys));
-    map.insert("arguments_digest".to_string(), json!(digest));
+    map.insert(
+        "argument_keys".to_string(),
+        json!(argument_keys_from_map(&raw)),
+    );
     map
+}
+
+fn sanitize_admitted_source_url(raw: &str) -> String {
+    let sanitized = match Url::parse(raw) {
+        Ok(mut parsed) => {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            let query_names: Vec<String> = parsed
+                .query_pairs()
+                .map(|(name, _)| name.into_owned())
+                .collect();
+            if query_names.is_empty() {
+                parsed.set_query(None);
+            } else {
+                let masked = query_names
+                    .iter()
+                    .map(|name| format!("{name}=[REDACTED]"))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                parsed.set_query(Some(&masked));
+            }
+            parsed.to_string()
+        }
+        Err(_) => raw.to_string(),
+    };
+    scrub_secrets(&sanitized).0
 }
 
 fn json_contains_raw_arguments_object(value: &serde_json::Value) -> bool {
@@ -619,38 +593,82 @@ fn is_legacy_unredacted_arguments_job(payload: &str) -> bool {
         || json_contains_raw_arguments_object(&value)
 }
 
-fn redact_argument_values_in_json(value: &mut serde_json::Value) {
+fn collect_argument_key_names(value: &serde_json::Value, keys: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(map) => {
-            if let Some(arguments) = map.get_mut("arguments") {
-                if let Some(object) = arguments.as_object_mut() {
-                    let keys: Vec<String> = object.keys().cloned().collect();
-                    for key in keys {
-                        object.insert(key, json!("[REDACTED]"));
-                    }
-                }
+            if let Some(arguments) = map.get("arguments").and_then(serde_json::Value::as_object) {
+                keys.extend(arguments.keys().cloned());
             }
-            for child in map.values_mut() {
-                redact_argument_values_in_json(child);
+            for child in map.values() {
+                collect_argument_key_names(child, keys);
             }
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                redact_argument_values_in_json(item);
+                collect_argument_key_names(item, keys);
             }
         }
         _ => {}
     }
 }
 
-fn redact_forensic_payload(payload: &str) -> String {
-    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) {
-        redact_argument_values_in_json(&mut value);
-        if let Ok(serialized) = serde_json::to_string(&value) {
-            return scrub_secrets(&serialized).0;
-        }
-    }
-    scrub_secrets(payload).0
+fn allowlist_legacy_forensic(
+    payload: &serde_json::Value,
+    job_id: &str,
+    classification: &str,
+) -> serde_json::Value {
+    let schema = payload
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(ADMITTED_MCP_INGEST_SCHEMA_V1);
+    let recorded_job_id = payload
+        .get("job_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(job_id);
+    let capability_id = payload
+        .pointer("/source/capability_id")
+        .or_else(|| payload.pointer("/request/metadata/capability_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let tool_name = payload
+        .pointer("/source/tool_name")
+        .or_else(|| payload.pointer("/request/metadata/tool_name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let mut argument_keys = Vec::new();
+    collect_argument_key_names(payload, &mut argument_keys);
+    argument_keys.sort();
+    argument_keys.dedup();
+    json!({
+        "classification": classification,
+        "reason": classification,
+        "schema": schema,
+        "job_id": recorded_job_id,
+        "capability_id": capability_id,
+        "tool_name": tool_name,
+        "argument_keys": argument_keys,
+    })
+}
+
+fn scrubbed_truncated_forensic(
+    payload: &str,
+    decode_error: &str,
+    classification: &str,
+) -> Result<String, String> {
+    let redacted_payload = scrub_secrets(payload).0;
+    let (payload, payload_truncated) =
+        bounded_utf8(&redacted_payload, AUTO_INGEST_FORENSIC_PAYLOAD_MAX_BYTES);
+    let (decode_error, decode_error_truncated) =
+        bounded_utf8(decode_error, AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES);
+    serde_json::to_string(&json!({
+        "classification": classification,
+        "reason": classification,
+        "original_payload": payload,
+        "payload_truncated": payload_truncated,
+        "decode_error": decode_error,
+        "decode_error_truncated": decode_error_truncated,
+    }))
+    .map_err(|error| format!("serialize auto-ingest quarantine forensics: {error}"))
 }
 
 fn load_auto_ingest_receipt(server: &MemoryServer, job_id: &str) -> Result<Option<String>, String> {
@@ -1014,20 +1032,19 @@ async fn quarantine_auto_ingest_payload(
     decode_error: &str,
     classification: &str,
 ) -> Result<(), String> {
-    let redacted_payload = redact_forensic_payload(payload);
-    let (payload, payload_truncated) =
-        bounded_utf8(&redacted_payload, AUTO_INGEST_FORENSIC_PAYLOAD_MAX_BYTES);
-    let (decode_error, decode_error_truncated) =
-        bounded_utf8(decode_error, AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES);
-    let forensic = serde_json::to_string(&json!({
-        "classification": classification,
-        "reason": classification,
-        "original_payload": payload,
-        "payload_truncated": payload_truncated,
-        "decode_error": decode_error,
-        "decode_error_truncated": decode_error_truncated,
-    }))
-    .map_err(|error| format!("serialize auto-ingest quarantine forensics: {error}"))?;
+    let forensic = if classification == LEGACY_V1_UNREDACTED_ARGUMENTS_REASON {
+        match serde_json::from_str::<serde_json::Value>(payload) {
+            Ok(value) => {
+                serde_json::to_string(&allowlist_legacy_forensic(&value, job_id, classification))
+                    .map_err(|error| {
+                        format!("serialize auto-ingest quarantine forensics: {error}")
+                    })?
+            }
+            Err(_) => scrubbed_truncated_forensic(payload, decode_error, classification)?,
+        }
+    } else {
+        scrubbed_truncated_forensic(payload, decode_error, classification)?
+    };
     lease
         .write_owned(|store| {
             let quarantined = store
