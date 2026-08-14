@@ -658,6 +658,20 @@ fn allowlist_legacy_forensic(
     })
 }
 
+fn classify_json_decode_error(error: &serde_json::Error) -> String {
+    let category = match error.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    };
+    format!(
+        "decode failed ({category}) at line {} column {}",
+        error.line(),
+        error.column()
+    )
+}
+
 /// Invariant: secret-negative durable surfaces outrank forensic convenience.
 /// A payload that fails JSON parsing never persists raw bytes — only the
 /// decode error, the byte length, and `stable_hash(payload)` for correlation.
@@ -768,8 +782,10 @@ pub(crate) async fn run_staged_auto_ingest(
         let Some(receipt) = load_auto_ingest_receipt(server, &staged.job_id)? else {
             return Ok(None);
         };
-        let mut receipt: serde_json::Value = serde_json::from_str(&receipt)
-            .map_err(|error| format!("decode durable auto-ingest receipt: {error}"))?;
+        let mut receipt: serde_json::Value = serde_json::from_str(&receipt).map_err(|error| {
+            tracing::error!(error = %error, "decode durable auto-ingest receipt failed");
+            classify_json_decode_error(&error)
+        })?;
         receipt["status"] = json!("replayed");
         return serde_json::to_string(&receipt)
             .map(Some)
@@ -839,7 +855,12 @@ pub(crate) async fn run_staged_auto_ingest(
     let job: StagedMcpIngestJobV1 = match serde_json::from_str(&persisted_payload) {
         Ok(job) => job,
         Err(decode_error) => {
-            let decode_error = format!("decode durable auto-ingest job: {decode_error}");
+            tracing::error!(
+                job_id = %staged.job_id,
+                error = %decode_error,
+                "decode durable auto-ingest job failed"
+            );
+            let decode_error = classify_json_decode_error(&decode_error);
             let quarantine = quarantine_malformed_auto_ingest(
                 &lease,
                 &staged.job_id,
