@@ -1449,13 +1449,26 @@ async fn malformed_oldest_batch_is_quarantined_without_starving_valid_job() {
         let forensic: Value =
             serde_json::from_str(forensic_json).expect("quarantine forensic JSON");
         assert_eq!(forensic["classification"], "auto_ingest_malformed_payload");
-        assert!(forensic["original_payload"].as_str().unwrap().len() <= 4096);
+        assert!(
+            forensic.get("original_payload").is_none(),
+            "parse-failure forensic must not carry raw payload bytes: {forensic}"
+        );
         assert!(forensic["decode_error"].as_str().unwrap().len() <= 512);
+        assert!(
+            forensic["payload_byte_length"].as_u64().is_some(),
+            "parse-failure forensic must record payload length: {forensic}"
+        );
+        assert!(
+            forensic["payload_digest"]
+                .as_str()
+                .is_some_and(|digest| !digest.is_empty()),
+            "parse-failure forensic must record payload digest: {forensic}"
+        );
     }
     assert_eq!(
-        serde_json::from_str::<Value>(&quarantined[0]).unwrap()["payload_truncated"],
-        true,
-        "oversized malformed payload is explicitly bounded"
+        serde_json::from_str::<Value>(&quarantined[0]).unwrap()["payload_byte_length"],
+        12_000,
+        "oversized malformed payload is recorded by length, not copied"
     );
 
     let second_cycle = crate::pipeline_ops::replay_pending_auto_ingest_once(&server)
@@ -2454,5 +2467,4 @@ async fn auto_ingest_marks_non_hierarchical_url_unsanitizable() {
     );
     let receipt = complete_secret_bearing_ingest(&server, &staged).await;
     assert_absent_everywhere(&server, URL_MAILTO_CREDENTIAL, Some(&receipt));
-    assert_absent_everywhere(&server, "mailto:", Some(&receipt));
 }

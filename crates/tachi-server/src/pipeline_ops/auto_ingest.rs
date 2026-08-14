@@ -24,8 +24,8 @@ const AUTO_INGEST_RECEIPT_WORKER: &str = "auto_ingest_job_receipt";
 const AUTO_INGEST_JOB_LABEL: &str = "auto_ingest_job";
 const AUTO_INGEST_REPLAY_BATCH_SIZE: usize = 16;
 const AUTO_INGEST_REPLAY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-const AUTO_INGEST_FORENSIC_PAYLOAD_MAX_BYTES: usize = 4096;
 const AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES: usize = 512;
+const UNSANITIZABLE_URL_MARKER: &str = "[unsanitizable-url]";
 const ADMITTED_MCP_INGEST_SCHEMA_V1: &str = "tachi.admitted_mcp_ingest.v1";
 const ADMITTED_MCP_INGEST_SCHEMA_V2: &str = "tachi.admitted_mcp_ingest.v2";
 const LEGACY_V1_UNREDACTED_ARGUMENTS_REASON: &str =
@@ -544,29 +544,37 @@ pub(crate) fn redacted_mcp_arguments_map(
 }
 
 fn sanitize_admitted_source_url(raw: &str) -> String {
-    let sanitized = match Url::parse(raw) {
-        Ok(mut parsed) => {
-            let _ = parsed.set_username("");
-            let _ = parsed.set_password(None);
-            let query_names: Vec<String> = parsed
-                .query_pairs()
-                .map(|(name, _)| name.into_owned())
-                .collect();
-            if query_names.is_empty() {
-                parsed.set_query(None);
-            } else {
-                let masked = query_names
-                    .iter()
-                    .map(|name| format!("{name}=[REDACTED]"))
-                    .collect::<Vec<_>>()
-                    .join("&");
-                parsed.set_query(Some(&masked));
-            }
-            parsed.to_string()
-        }
-        Err(_) => raw.to_string(),
+    // Scheme-relative inputs (`//host/...`) cannot be parsed without a base.
+    // Prepend a synthetic `https:` and emit the resulting absolute URL.
+    let to_parse = if raw.starts_with("//") {
+        format!("https:{raw}")
+    } else {
+        raw.to_string()
     };
-    scrub_secrets(&sanitized).0
+    let Ok(mut parsed) = Url::parse(&to_parse) else {
+        return UNSANITIZABLE_URL_MARKER.to_string();
+    };
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        return UNSANITIZABLE_URL_MARKER.to_string();
+    }
+    parsed.set_fragment(None);
+    let query_names: Vec<String> = parsed
+        .query_pairs()
+        .map(|(name, _)| name.into_owned())
+        .collect();
+    if query_names.is_empty() {
+        parsed.set_query(None);
+    } else {
+        let masked = query_names
+            .iter()
+            .map(|name| format!("{name}=[REDACTED]"))
+            .collect::<Vec<_>>()
+            .join("&");
+        parsed.set_query(Some(&masked));
+    }
+    // Defense-in-depth only after successful structural sanitization.
+    // Never fall back to scrubbing any portion of the raw input.
+    scrub_secrets(parsed.as_str()).0
 }
 
 fn json_contains_raw_arguments_object(value: &serde_json::Value) -> bool {
@@ -650,23 +658,23 @@ fn allowlist_legacy_forensic(
     })
 }
 
-fn scrubbed_truncated_forensic(
+/// Invariant: secret-negative durable surfaces outrank forensic convenience.
+/// A payload that fails JSON parsing never persists raw bytes — only the
+/// decode error, the byte length, and `stable_hash(payload)` for correlation.
+fn parse_failure_forensic(
     payload: &str,
     decode_error: &str,
     classification: &str,
 ) -> Result<String, String> {
-    let redacted_payload = scrub_secrets(payload).0;
-    let (payload, payload_truncated) =
-        bounded_utf8(&redacted_payload, AUTO_INGEST_FORENSIC_PAYLOAD_MAX_BYTES);
     let (decode_error, decode_error_truncated) =
         bounded_utf8(decode_error, AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES);
     serde_json::to_string(&json!({
         "classification": classification,
         "reason": classification,
-        "original_payload": payload,
-        "payload_truncated": payload_truncated,
         "decode_error": decode_error,
         "decode_error_truncated": decode_error_truncated,
+        "payload_byte_length": payload.len(),
+        "payload_digest": stable_hash(payload),
     }))
     .map_err(|error| format!("serialize auto-ingest quarantine forensics: {error}"))
 }
@@ -1032,18 +1040,17 @@ async fn quarantine_auto_ingest_payload(
     decode_error: &str,
     classification: &str,
 ) -> Result<(), String> {
-    let forensic = if classification == LEGACY_V1_UNREDACTED_ARGUMENTS_REASON {
-        match serde_json::from_str::<serde_json::Value>(payload) {
-            Ok(value) => {
-                serde_json::to_string(&allowlist_legacy_forensic(&value, job_id, classification))
-                    .map_err(|error| {
-                        format!("serialize auto-ingest quarantine forensics: {error}")
-                    })?
-            }
-            Err(_) => scrubbed_truncated_forensic(payload, decode_error, classification)?,
+    // Legacy classification is assigned only after JSON parse succeeded
+    // (`is_legacy_unredacted_arguments_job`). There is no parse-failure
+    // arm on that path. Unparseable input always takes the no-raw-bytes
+    // forensic below.
+    // Invariant: secret-negative durable surfaces outrank forensic convenience.
+    let forensic = match serde_json::from_str::<serde_json::Value>(payload) {
+        Ok(value) if classification == LEGACY_V1_UNREDACTED_ARGUMENTS_REASON => {
+            serde_json::to_string(&allowlist_legacy_forensic(&value, job_id, classification))
+                .map_err(|error| format!("serialize auto-ingest quarantine forensics: {error}"))?
         }
-    } else {
-        scrubbed_truncated_forensic(payload, decode_error, classification)?
+        _ => parse_failure_forensic(payload, decode_error, classification)?,
     };
     lease
         .write_owned(|store| {
