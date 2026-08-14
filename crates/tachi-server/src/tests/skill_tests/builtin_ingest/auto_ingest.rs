@@ -2497,11 +2497,7 @@ fn assert_decode_error_is_allowlisted(decode_error: &str, forensic: &str) {
 async fn type_invalid_json_forensic_omits_serde_display_input() {
     let server = make_server();
     let job_id = "type-invalid-secret-forensic-job";
-    let payload = json!({
-        "schema": 12345,
-        "source": TYPE_INVALID_SECRET
-    })
-    .to_string();
+    let payload = json!(TYPE_INVALID_SECRET).to_string();
     assert!(
         serde_json::from_str::<Value>(&payload).is_ok(),
         "fixture must be valid JSON so the leak is the typed deserialize Display"
