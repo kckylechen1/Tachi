@@ -343,6 +343,7 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         let saved_text = "stdio proxy e2e writes only the bound project db";
@@ -426,6 +427,7 @@ fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(bound_name.clone()),
+            resolved_agent_identity: Default::default(),
         };
         let result = call_tool_via_stdio_proxy(
             proxy,
@@ -502,6 +504,7 @@ fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
             global_db_path: global.clone(),
             project_db_path: Some(bound_project.clone()),
             client_project: Some(bound_project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         let rejected_text = "stdio proxy e2e rejects cross-project override";
@@ -575,6 +578,7 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         for (id, scope, summary) in [
@@ -683,6 +687,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
             global_db_path: global.clone(),
             project_db_path: Some(bound_project.clone()),
             client_project: Some(bound_project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
         let other_proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
@@ -691,6 +696,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
             global_db_path: global.clone(),
             project_db_path: Some(other_project.clone()),
             client_project: Some(other_project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         let result = call_tool_via_stdio_proxy(
@@ -787,6 +793,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         for (id, scope, summary) in [
@@ -939,6 +946,7 @@ fn stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot() {
             global_db_path: global.clone(),
             project_db_path: None,
             client_project: None,
+            resolved_agent_identity: Default::default(),
         };
 
         let first = call_tool_via_stdio_proxy(proxy.clone(), "runtime_info", serde_json::Map::new())
@@ -1042,6 +1050,7 @@ fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
             global_db_path: global.clone(),
             project_db_path: None,
             client_project: None,
+            resolved_agent_identity: Default::default(),
         };
 
         let result = call_tool_via_stdio_proxy(proxy, "runtime_info", serde_json::Map::new())
@@ -1108,6 +1117,7 @@ fn stdio_proxy_archives_global_row_with_bound_project() {
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         let result = call_tool_via_stdio_proxy(
@@ -2258,4 +2268,65 @@ fn http_direct_connect_bound_session_rejects_cross_project_write() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
+}
+
+fn initialize_request(meta: Option<rmcp::model::Meta>) -> rmcp::model::InitializeRequestParams {
+    let mut request = rmcp::model::InitializeRequestParams::new(
+        rmcp::model::ClientCapabilities::default(),
+        rmcp::model::Implementation::new("1761-test", "0"),
+    );
+    request.meta = meta;
+    request
+}
+
+fn identity_probe_proxy() -> StdioProxyServer {
+    StdioProxyServer {
+        adapter_started_at: chrono::Utc::now(),
+        daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon(None, None))),
+        app_home: PathBuf::from("/tmp"),
+        global_db_path: PathBuf::from("/tmp/global.db"),
+        project_db_path: None,
+        client_project: None,
+        resolved_agent_identity: Default::default(),
+    }
+}
+
+#[test]
+fn capture_initialize_identity_meta_wins_blank_omits_absent_uses_env() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let _env = EnvRestore::set(crate::session_identity::ENV_AGENT_IDENTITY, "agent.env");
+    let proxy = identity_probe_proxy();
+
+    let mut meta_wins = serde_json::Map::new();
+    meta_wins.insert(
+        crate::session_identity::META_AGENT_IDENTITY.to_string(),
+        serde_json::json!("agent.meta"),
+    );
+    proxy.capture_initialize_identity(&initialize_request(Some(rmcp::model::Meta(meta_wins))));
+    assert_eq!(
+        proxy.forwarded_agent_identity(),
+        crate::cli_client::ProxyIdentityForward::Header("agent.meta".to_string()),
+        "present _meta must win over env"
+    );
+
+    let mut blank = serde_json::Map::new();
+    blank.insert(
+        crate::session_identity::META_AGENT_IDENTITY.to_string(),
+        serde_json::json!("   "),
+    );
+    proxy.capture_initialize_identity(&initialize_request(Some(rmcp::model::Meta(blank))));
+    assert_eq!(
+        proxy.forwarded_agent_identity(),
+        crate::cli_client::ProxyIdentityForward::Omit,
+        "present-but-blank _meta must omit, not fall through to env"
+    );
+
+    proxy.capture_initialize_identity(&initialize_request(None));
+    assert_eq!(
+        proxy.forwarded_agent_identity(),
+        crate::cli_client::ProxyIdentityForward::Header("agent.env".to_string()),
+        "absent _meta key may take a valid process env"
+    );
 }

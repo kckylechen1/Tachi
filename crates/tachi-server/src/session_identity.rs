@@ -496,6 +496,22 @@ pub(crate) fn agent_identity_from_env_value(raw: Option<&str>) -> Option<String>
         .filter(|value| valid_agent_identity_assertion(value))
 }
 
+/// Resolve the identity a stdio proxy should forward to the daemon.
+///
+/// When the initialize identity key is present, env is not consulted —
+/// blank/illegal stay absent so admission remains a reject. Env is the
+/// fallback only when the key is genuinely absent (#1761).
+pub(crate) fn resolve_proxy_agent_identity(
+    explicit_raw: Option<&str>,
+    explicit_key_present: bool,
+    env: Option<&str>,
+) -> Option<String> {
+    if explicit_key_present {
+        return agent_identity_from_env_value(explicit_raw);
+    }
+    agent_identity_from_env_value(env)
+}
+
 /// #1251: resolve a caller's dispatch recursion depth from the (optional) wire
 /// marker carried by [`HEADER_DISPATCH_DEPTH`] / [`ENV_DISPATCH_DEPTH`]. The
 /// accounting is fail-closed by construction:
@@ -631,6 +647,29 @@ mod tests {
             agent_identity_from_env_value(Some("agent identity")),
             None,
             "spaces are not a valid assertion"
+        );
+    }
+
+    #[test]
+    fn resolve_proxy_agent_identity_uses_env_only_when_explicit_key_absent() {
+        assert_eq!(
+            resolve_proxy_agent_identity(None, false, Some("agent.cursor.local")).as_deref(),
+            Some("agent.cursor.local")
+        );
+        assert_eq!(
+            resolve_proxy_agent_identity(Some("agent.meta"), true, Some("agent.env")).as_deref(),
+            Some("agent.meta"),
+            "present meta must win over env"
+        );
+        assert_eq!(
+            resolve_proxy_agent_identity(Some("   "), true, Some("agent.env")),
+            None,
+            "present-but-blank meta must not fall through to env"
+        );
+        assert_eq!(
+            resolve_proxy_agent_identity(Some("agent identity"), true, Some("agent.env")),
+            None,
+            "illegal meta must not fall through to env"
         );
     }
 
