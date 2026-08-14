@@ -2041,6 +2041,7 @@ const URL_SESSION_CREDENTIAL: &str = "weakpass456";
 const URL_FRAGMENT_CREDENTIAL: &str = "weakpass789";
 const URL_MAILTO_CREDENTIAL: &str = "weakpassAAA";
 const MALFORMED_LEGACY_SECRET: &str = "opaque-secret-value-XK9";
+const TYPE_INVALID_SECRET: &str = "opaque-secret-value-TY7";
 const UNSANITIZABLE_URL_MARKER: &str = "[unsanitizable-url]";
 const LEGACY_URL_USERINFO: &str = "legacyurlpass111";
 const LEGACY_URL_SESSION: &str = "legacysession222";
@@ -2467,4 +2468,98 @@ async fn auto_ingest_marks_non_hierarchical_url_unsanitizable() {
     );
     let receipt = complete_secret_bearing_ingest(&server, &staged).await;
     assert_absent_everywhere(&server, URL_MAILTO_CREDENTIAL, Some(&receipt));
+}
+
+fn assert_decode_error_is_allowlisted(decode_error: &str, forensic: &str) {
+    let Some(rest) = decode_error.strip_prefix("decode failed (") else {
+        panic!("decode_error must use the allowlist prefix: {forensic}");
+    };
+    let Some((category, location)) = rest.split_once(") at line ") else {
+        panic!("decode_error must carry category and line: {forensic}");
+    };
+    assert!(
+        matches!(category, "syntax" | "data" | "eof" | "io"),
+        "decode_error category must be allowlisted: {forensic}"
+    );
+    let Some((line, column)) = location.split_once(" column ") else {
+        panic!("decode_error must carry column: {forensic}");
+    };
+    assert!(
+        line.chars().all(|ch| ch.is_ascii_digit())
+            && column.chars().all(|ch| ch.is_ascii_digit())
+            && !line.is_empty()
+            && !column.is_empty(),
+        "decode_error line/column must be digits: {forensic}"
+    );
+}
+
+#[tokio::test]
+async fn type_invalid_json_forensic_omits_serde_display_input() {
+    let server = make_server();
+    let job_id = "type-invalid-secret-forensic-job";
+    let payload = json!({
+        "schema": 12345,
+        "source": TYPE_INVALID_SECRET
+    })
+    .to_string();
+    assert!(
+        serde_json::from_str::<Value>(&payload).is_ok(),
+        "fixture must be valid JSON so the leak is the typed deserialize Display"
+    );
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
+                     VALUES (?1, ?2, 'auto_ingest_job', STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    rusqlite::params![job_id, payload],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject type-invalid staged payload");
+
+    let replay = crate::pipeline_ops::run_staged_auto_ingest(
+        &server,
+        crate::pipeline_ops::StagedAutoIngest {
+            job_id: job_id.to_string(),
+        },
+    )
+    .await
+    .expect("type-invalid payload must quarantine");
+    assert!(
+        replay.is_none(),
+        "type-invalid payload must never execute: {replay:?}"
+    );
+
+    let forensic = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT event_id FROM processed_events \
+                     WHERE event_hash = ?1 AND worker = 'auto_ingest_job_dead_letter'",
+                    [job_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("load type-invalid forensic");
+    assert!(
+        !forensic.contains(TYPE_INVALID_SECRET),
+        "forensic kept typed-deserialize secret: {forensic}"
+    );
+    let forensic_json: Value = serde_json::from_str(&forensic).expect("forensic JSON");
+    let decode_error = forensic_json["decode_error"]
+        .as_str()
+        .expect("type-invalid forensic must carry decode_error");
+    assert_decode_error_is_allowlisted(decode_error, &forensic);
+    assert_absent_everywhere(&server, TYPE_INVALID_SECRET, None);
+    for cell in table_cell_strings(&server, "audit_log") {
+        assert!(
+            !cell.contains(TYPE_INVALID_SECRET),
+            "audit_log leaked typed-deserialize secret: {cell}"
+        );
+    }
 }
