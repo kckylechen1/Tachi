@@ -1575,17 +1575,19 @@ fn table_cell_strings(server: &crate::server_state::MemoryServer, table: &str) -
             let mut cells = Vec::new();
             while let Some(row) = rows.next().map_err(|error| error.to_string())? {
                 for index in 0..column_count {
-                    cells.push(match row.get_ref(index).map_err(|error| error.to_string())? {
-                        rusqlite::types::ValueRef::Null => String::new(),
-                        rusqlite::types::ValueRef::Integer(value) => value.to_string(),
-                        rusqlite::types::ValueRef::Real(value) => value.to_string(),
-                        rusqlite::types::ValueRef::Text(value) => {
-                            String::from_utf8_lossy(value).into_owned()
-                        }
-                        rusqlite::types::ValueRef::Blob(value) => {
-                            String::from_utf8_lossy(value).into_owned()
-                        }
-                    });
+                    cells.push(
+                        match row.get_ref(index).map_err(|error| error.to_string())? {
+                            rusqlite::types::ValueRef::Null => String::new(),
+                            rusqlite::types::ValueRef::Integer(value) => value.to_string(),
+                            rusqlite::types::ValueRef::Real(value) => value.to_string(),
+                            rusqlite::types::ValueRef::Text(value) => {
+                                String::from_utf8_lossy(value).into_owned()
+                            }
+                            rusqlite::types::ValueRef::Blob(value) => {
+                                String::from_utf8_lossy(value).into_owned()
+                            }
+                        },
+                    );
                 }
             }
             Ok(cells)
@@ -1649,7 +1651,10 @@ fn assert_staged_payload_carries_keys_and_digest(payload: &Value) {
     let metadata_digest = payload["request"]["metadata"]["arguments_digest"]
         .as_str()
         .expect("staged request.metadata.arguments_digest must exist");
-    assert!(!source_digest.is_empty(), "arguments_digest must be non-empty");
+    assert!(
+        !source_digest.is_empty(),
+        "arguments_digest must be non-empty"
+    );
     assert_eq!(source_digest, metadata_digest);
     assert!(
         payload["source"].get("arguments").is_none(),
@@ -1787,7 +1792,10 @@ async fn auto_ingest_replay_stays_secret_free_after_completion() {
     let pending_cycle = crate::pipeline_ops::replay_pending_auto_ingest_once(&server)
         .await
         .expect("pending replay after completion is a no-op");
-    assert_eq!(pending_cycle, 0, "completed jobs must not re-enter pending replay");
+    assert_eq!(
+        pending_cycle, 0,
+        "completed jobs must not re-enter pending replay"
+    );
 
     assert_processed_events_secret_free(&server);
     assert_memories_secret_free(&server);
@@ -1885,10 +1893,7 @@ async fn legacy_v1_auto_ingest_job_is_quarantined_without_secret_forensics() {
     )
     .await
     .expect("legacy v1 must quarantine rather than fail closed as retryable drift");
-    assert!(
-        replay.is_none(),
-        "legacy v1 must never execute: {replay:?}"
-    );
+    assert!(replay.is_none(), "legacy v1 must never execute: {replay:?}");
 
     let (pending, forensic) = server
         .with_global_store_read(|store| {
@@ -1939,8 +1944,10 @@ async fn auto_ingest_arguments_digest_binds_idempotency() {
         "ingest_domain": "general",
         "ingest_path_prefix": "/wiki/general/auto-ingest-digest-bind",
     });
-    let first_arguments =
-        serde_json::Map::from_iter([("note".to_string(), json!("alpha")), ("n".to_string(), json!(1))]);
+    let first_arguments = serde_json::Map::from_iter([
+        ("note".to_string(), json!("alpha")),
+        ("n".to_string(), json!(1)),
+    ]);
     let first = crate::pipeline_ops::stage_auto_ingest_from_mcp(
         &server,
         "mcp:digest-reader",
@@ -1961,7 +1968,8 @@ async fn auto_ingest_arguments_digest_binds_idempotency() {
     )
     .expect("identical restage is not an error");
     assert!(
-        second.is_none() || second.as_ref().map(|job| job.job_id.as_str()) == Some(first.job_id.as_str()),
+        second.is_none()
+            || second.as_ref().map(|job| job.job_id.as_str()) == Some(first.job_id.as_str()),
         "identical arguments must not create a second logical job: {second:?}"
     );
     let after_duplicate = load_auto_ingest_job_payloads(&server);
@@ -1976,8 +1984,10 @@ async fn auto_ingest_arguments_digest_binds_idempotency() {
         .expect("first arguments_digest")
         .to_string();
 
-    let mutated_arguments =
-        serde_json::Map::from_iter([("note".to_string(), json!("beta")), ("n".to_string(), json!(1))]);
+    let mutated_arguments = serde_json::Map::from_iter([
+        ("note".to_string(), json!("beta")),
+        ("n".to_string(), json!(1)),
+    ]);
     let third = crate::pipeline_ops::stage_auto_ingest_from_mcp(
         &server,
         "mcp:digest-reader",
@@ -1993,7 +2003,11 @@ async fn auto_ingest_arguments_digest_binds_idempotency() {
         "argument value changes must change the idempotency-bound job id"
     );
     let after_divergent = load_auto_ingest_job_payloads(&server);
-    assert_eq!(after_divergent.len(), 2, "divergent arguments create a second job");
+    assert_eq!(
+        after_divergent.len(),
+        2,
+        "divergent arguments create a second job"
+    );
     let digests: Vec<String> = after_divergent
         .iter()
         .map(|payload| {

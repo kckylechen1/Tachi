@@ -7,7 +7,8 @@ mod sync;
 
 pub(crate) use auto_ingest::replay_pending_auto_ingest_once;
 pub(crate) use auto_ingest::{
-    run_auto_ingest_replay_consumer, run_staged_auto_ingest, stage_auto_ingest_from_mcp,
+    redacted_mcp_arguments_map, run_auto_ingest_replay_consumer, run_staged_auto_ingest,
+    stage_auto_ingest_from_mcp,
 };
 #[cfg(test)]
 pub(crate) use auto_ingest::{validate_admitted_ingest_bounds_for_test, StagedAutoIngest};

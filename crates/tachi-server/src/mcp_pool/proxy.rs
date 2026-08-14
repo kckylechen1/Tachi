@@ -39,7 +39,7 @@ fn return_with_background_auto_ingest(
             let dead_letter = DeadLetter {
                 id: failure_id.clone(),
                 tool_name: format!("mcp_auto_ingest:{tool_name}"),
-                arguments: arguments.cloned(),
+                arguments: Some(crate::pipeline_ops::redacted_mcp_arguments_map(arguments)),
                 error: error.clone(),
                 error_category: "durability".to_string(),
                 timestamp: now.to_rfc3339(),
