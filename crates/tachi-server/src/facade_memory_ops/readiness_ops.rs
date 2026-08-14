@@ -27,8 +27,18 @@ pub(crate) async fn handle_memory_alerts(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
-    let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
-    let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
+    let mut warnings = crate::status_ops::collect_agent_warning_lines(server).await;
+    let wiki_counts = match crate::wiki_ops::wiki_hygiene_counts(server).await {
+        Ok(counts) => counts,
+        Err(err) => {
+            warnings.push(format!("wiki hygiene unavailable: {err}"));
+            json!({
+                "orphans": 0,
+                "stale_nodes": 0,
+                "duplicates": 0,
+            })
+        }
+    };
     if wants_json(params.format.as_deref()) {
         return json_string(&json!({
             "status": "completed",

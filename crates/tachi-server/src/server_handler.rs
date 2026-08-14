@@ -542,6 +542,9 @@ struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
     agent_identity_id: Option<String>,
+    /// Present-but-blank/illegal `tachiAgentIdentity` / `X-Tachi-Agent-Identity`
+    /// must not collapse to "absent" and fall through to process env (#1761).
+    agent_identity_error: Option<String>,
     project: Option<String>,
     /// A caller that sent a malformed project identity must not silently
     /// become an unbound session. In particular, HTTP permits opaque obs-text
@@ -623,6 +626,12 @@ impl MemoryServer {
                 None,
             ));
         }
+        if let Some(err) = identity.agent_identity_error.as_deref() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("malformed agent identity assertion: {err}"),
+                None,
+            ));
+        }
         let profile = identity
             .profile
             .as_deref()
@@ -681,9 +690,18 @@ fn http_session_identity(
             header_string(parts, crate::session_identity::HEADER_PROFILE).or(identity.profile);
         identity.client =
             header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
-        identity.agent_identity_id =
-            header_string(parts, crate::session_identity::HEADER_AGENT_IDENTITY)
-                .or(identity.agent_identity_id);
+        match header_string_result(parts, crate::session_identity::HEADER_AGENT_IDENTITY) {
+            Ok(Some(value)) => {
+                if let Err(err) = assign_explicit_agent_identity(&mut identity, value) {
+                    identity.agent_identity_error = Some(err);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                identity.agent_identity_id = None;
+                identity.agent_identity_error = Some(err);
+            }
+        }
         match header_string_result(parts, crate::session_identity::HEADER_PROJECT) {
             Ok(Some(value)) => {
                 identity.project = Some(value);
@@ -716,12 +734,37 @@ fn http_session_identity(
             Ok(None) => {}
             Err(err) => identity.workspace_root_error = Some(err),
         }
+        // HTTP has request Parts. Env fallback is stdio/local only
+        // (#1761): a daemon process env must not confer identity on a
+        // direct-connect session that omitted both `_meta` and header.
+        return identity;
+    }
+    if identity.agent_identity_id.is_none() && identity.agent_identity_error.is_none() {
+        identity.agent_identity_id = crate::session_identity::agent_identity_from_env_value(
+            std::env::var(crate::session_identity::ENV_AGENT_IDENTITY)
+                .ok()
+                .as_deref(),
+        );
     }
     identity
 }
 
 /// Extract session identity fields from MCP initialize `_meta` (#732).
 /// Headers still win when both are present (applied after this helper).
+fn assign_explicit_agent_identity(
+    identity: &mut HttpSessionIdentity,
+    value: String,
+) -> Result<(), String> {
+    if crate::session_identity::valid_agent_identity_assertion(&value) {
+        identity.agent_identity_id = Some(value);
+        identity.agent_identity_error = None;
+        Ok(())
+    } else {
+        identity.agent_identity_id = None;
+        Err("agent identity assertion is invalid".to_string())
+    }
+}
+
 fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessionIdentity {
     let mut identity = HttpSessionIdentity::default();
     let Some(meta) = meta else {
@@ -731,8 +774,21 @@ fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessio
         .or_else(|| meta_string(meta, "tachi.profile"));
     identity.client = meta_string(meta, crate::session_identity::META_CLIENT)
         .or_else(|| meta_string(meta, "tachi.client"));
-    identity.agent_identity_id = meta_string(meta, crate::session_identity::META_AGENT_IDENTITY)
-        .or_else(|| meta_string(meta, "tachi.agentIdentity"));
+    match meta_string_result(meta, crate::session_identity::META_AGENT_IDENTITY) {
+        Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
+            Ok(()) => {}
+            Err(err) => identity.agent_identity_error = Some(err),
+        },
+        Ok(None) => match meta_string_result(meta, "tachi.agentIdentity") {
+            Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
+                Ok(()) => {}
+                Err(err) => identity.agent_identity_error = Some(err),
+            },
+            Ok(None) => {}
+            Err(err) => identity.agent_identity_error = Some(err),
+        },
+        Err(err) => identity.agent_identity_error = Some(err),
+    }
     match meta_string_result(meta, crate::session_identity::META_PROJECT) {
         Ok(Some(value)) => identity.project = Some(value),
         Ok(None) => match meta_string_result(meta, "tachi.project") {
@@ -1677,6 +1733,31 @@ mod tests {
         assert!(identity.client.is_none());
         assert!(identity.project.is_none());
         assert!(identity.project_error.is_none());
+        assert!(identity.agent_identity_id.is_none());
+        assert!(
+            identity.agent_identity_error.is_none(),
+            "absent identity key must stay error-free so env can fill (#1761)"
+        );
+    }
+
+    #[test]
+    fn initialize_meta_blank_or_illegal_agent_identity_is_error_not_absence() {
+        for value in [json!("   "), json!("agent identity"), json!(12345)] {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                crate::session_identity::META_AGENT_IDENTITY.to_string(),
+                value,
+            );
+            let identity = identity_from_initialize_meta(Some(&rmcp::model::Meta(map)));
+            assert!(
+                identity.agent_identity_id.is_none(),
+                "a present unusable identity must not bind"
+            );
+            assert!(
+                identity.agent_identity_error.is_some(),
+                "present-but-blank/illegal identity must block env fallback (#1761)"
+            );
+        }
     }
 
     #[test]
@@ -1896,6 +1977,7 @@ mod tests {
             profile: None,
             client: None,
             agent_identity_id: None,
+            agent_identity_error: None,
             project: Some("sigil".to_string()),
             project_error: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
@@ -1914,6 +1996,7 @@ mod tests {
             profile: None,
             client: None,
             agent_identity_id: None,
+            agent_identity_error: None,
             project: None,
             project_error: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),

@@ -16,6 +16,13 @@ use rmcp::model::JsonObject;
 pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";
 pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
 pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
+/// Process-env twin of [`HEADER_AGENT_IDENTITY`] / [`META_AGENT_IDENTITY`].
+/// Stdio hosts (Cursor `mcp.json`) cannot set initialize `_meta`; they can
+/// stamp this on `tachi serve`. Absent/invalid stays absent — never minted
+/// (#1761). Header and `_meta` still win when present. HTTP direct-connect
+/// (request Parts present) does not read this env; the proxy/CLI forwards
+/// it as a header instead.
+pub(crate) const ENV_AGENT_IDENTITY: &str = "TACHI_AGENT_IDENTITY";
 pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
 /// #1120 PR1: same shape as `HEADER_PROJECT`, but carries a filesystem path
 /// (a git repo root, or any path beneath one) instead of an already-registered
@@ -484,6 +491,29 @@ pub(crate) fn valid_agent_identity_assertion(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
+/// Parse a `TACHI_AGENT_IDENTITY` env value. Blank or illegal assertions
+/// stay `None` so admission remains a loud reject rather than a minted id.
+pub(crate) fn agent_identity_from_env_value(raw: Option<&str>) -> Option<String> {
+    raw.and_then(normalize_identity_value)
+        .filter(|value| valid_agent_identity_assertion(value))
+}
+
+/// Resolve the identity a stdio proxy should forward to the daemon.
+///
+/// When the initialize identity key is present, env is not consulted —
+/// blank/illegal stay absent so admission remains a reject. Env is the
+/// fallback only when the key is genuinely absent (#1761).
+pub(crate) fn resolve_proxy_agent_identity(
+    explicit_raw: Option<&str>,
+    explicit_key_present: bool,
+    env: Option<&str>,
+) -> Option<String> {
+    if explicit_key_present {
+        return agent_identity_from_env_value(explicit_raw);
+    }
+    agent_identity_from_env_value(env)
+}
+
 /// #1251: resolve a caller's dispatch recursion depth from the (optional) wire
 /// marker carried by [`HEADER_DISPATCH_DEPTH`] / [`ENV_DISPATCH_DEPTH`]. The
 /// accounting is fail-closed by construction:
@@ -600,6 +630,49 @@ mod tests {
         .expect("serialize manifest");
         std::fs::write(tachi_home.join("manifest.json"), &bytes).expect("write manifest");
         bytes
+    }
+
+    #[test]
+    fn agent_identity_from_env_value_accepts_valid_and_rejects_blank_or_illegal() {
+        assert_eq!(
+            agent_identity_from_env_value(Some("agent.cursor.local")).as_deref(),
+            Some("agent.cursor.local")
+        );
+        assert_eq!(
+            agent_identity_from_env_value(Some("  agent.cursor.local  ")).as_deref(),
+            Some("agent.cursor.local")
+        );
+        assert_eq!(agent_identity_from_env_value(None), None);
+        assert_eq!(agent_identity_from_env_value(Some("")), None);
+        assert_eq!(agent_identity_from_env_value(Some("   ")), None);
+        assert_eq!(
+            agent_identity_from_env_value(Some("agent identity")),
+            None,
+            "spaces are not a valid assertion"
+        );
+    }
+
+    #[test]
+    fn resolve_proxy_agent_identity_uses_env_only_when_explicit_key_absent() {
+        assert_eq!(
+            resolve_proxy_agent_identity(None, false, Some("agent.cursor.local")).as_deref(),
+            Some("agent.cursor.local")
+        );
+        assert_eq!(
+            resolve_proxy_agent_identity(Some("agent.meta"), true, Some("agent.env")).as_deref(),
+            Some("agent.meta"),
+            "present meta must win over env"
+        );
+        assert_eq!(
+            resolve_proxy_agent_identity(Some("   "), true, Some("agent.env")),
+            None,
+            "present-but-blank meta must not fall through to env"
+        );
+        assert_eq!(
+            resolve_proxy_agent_identity(Some("agent identity"), true, Some("agent.env")),
+            None,
+            "illegal meta must not fall through to env"
+        );
     }
 
     #[test]

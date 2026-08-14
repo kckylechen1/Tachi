@@ -102,7 +102,7 @@ pub(crate) async fn handle_tachi_task_brief(
 ) -> Result<String, String> {
     let top_k = crate::clamp_facade_top_k(params.top_k);
     let wiki_plan = WikiReadPlan::from_project(params.project.as_deref())?;
-    let wiki_rows = crate::wiki_ops::search_wiki_rows_for_plan(
+    let (wiki_rows, wiki_warning) = match crate::wiki_ops::search_wiki_rows_for_plan(
         server,
         SearchMemoryParams {
             query: params.task.clone(),
@@ -131,8 +131,11 @@ pub(crate) async fn handle_tachi_task_brief(
         None,
         false,
     )
-    .await?
-    .rows;
+    .await
+    {
+        Ok(result) => (result.rows, None),
+        Err(err) => (Vec::new(), Some(format!("wiki recall unavailable: {err}"))),
+    };
     let memory_rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -177,6 +180,7 @@ pub(crate) async fn handle_tachi_task_brief(
         "agent_id": params.agent_id,
         "project": params.project,
         "wiki_hits": compact_rows(wiki_rows, top_k),
+        "wiki_warning": wiki_warning,
         "memory_hits": compact_rows(memory_rows, top_k),
         "intent": intent,
         "selected_sops": selected_sops,
@@ -349,15 +353,15 @@ pub(crate) async fn handle_tachi_feature_briefing(
             !params.include_global,
         ),
     );
-    // #1575 fix-round: these used to swallow any search error (including a
-    // named-project miss) into an empty-rows default, which is exactly the
-    // silent-degrade shape #1575 is about — a caller could not tell "found
-    // nothing" from "the search itself failed" (e.g. an existence-check
-    // error slipping through, or a genuine store error). The
-    // `require_named_project_exists` guard above already turns an explicit
-    // nonexistent `project=` into a loud error before any of these run, so
-    // propagating here surfaces real failures instead of masking them.
-    let wiki_rows = wiki_rows?.rows;
+    // #1575: memory/eval search errors stay loud. Wiki federation is
+    // best-effort (#1761): a leftover wiki-schema refuse must not kill the
+    // rest of the brief. Explicit missing `project=` is already loud above.
+    // Empty-without-warning is silent degradation — fold the refuse into
+    // `wiki_warning` so the tray stays usable and the leftover is visible.
+    let (wiki_rows, wiki_warning) = match wiki_rows {
+        Ok(result) => (result.rows, None),
+        Err(err) => (Vec::new(), Some(format!("wiki recall unavailable: {err}"))),
+    };
     let memory_rows = memory_rows?;
     let eval_rows = eval_rows?;
 
@@ -462,6 +466,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         "feedback_rules": feedback_rules_trace,
         "memory_fragments": memory_fragments,
         "eval_evidence": eval_evidence,
+        "wiki_warning": wiki_warning,
         "doc_index": doc_index,
         "next_action": next_action,
         "open_loops": open_loops,
