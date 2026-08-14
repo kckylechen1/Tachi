@@ -717,6 +717,13 @@ fn http_session_identity(
             Err(err) => identity.workspace_root_error = Some(err),
         }
     }
+    if identity.agent_identity_id.is_none() {
+        identity.agent_identity_id = crate::session_identity::agent_identity_from_env_value(
+            std::env::var(crate::session_identity::ENV_AGENT_IDENTITY)
+                .ok()
+                .as_deref(),
+        );
+    }
     identity
 }
 

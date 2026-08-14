@@ -1,5 +1,6 @@
 use super::{
-    ensure_test_env, make_entry, make_server, make_server_with_temp_home, seed_wiki_project_entries,
+    ensure_test_env, make_entry, make_server, make_server_with_project_fixture,
+    make_server_with_temp_home, plant_leftover_shared_wiki, seed_wiki_project_entries,
 };
 use crate::tool_params::{
     InitProjectDbParams, TachiDomainAdapterParams, TachiEventParams, TachiMemoryParams,

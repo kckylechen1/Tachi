@@ -16,6 +16,11 @@ use rmcp::model::JsonObject;
 pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";
 pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
 pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
+/// Process-env twin of [`HEADER_AGENT_IDENTITY`] / [`META_AGENT_IDENTITY`].
+/// Stdio hosts (Cursor `mcp.json`) cannot set initialize `_meta`; they can
+/// stamp this on `tachi serve`. Absent/invalid stays absent — never minted
+/// (#1761). Header and `_meta` still win when present.
+pub(crate) const ENV_AGENT_IDENTITY: &str = "TACHI_AGENT_IDENTITY";
 pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
 /// #1120 PR1: same shape as `HEADER_PROJECT`, but carries a filesystem path
 /// (a git repo root, or any path beneath one) instead of an already-registered
@@ -484,6 +489,13 @@ pub(crate) fn valid_agent_identity_assertion(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
+/// Parse a `TACHI_AGENT_IDENTITY` env value. Blank or illegal assertions
+/// stay `None` so admission remains a loud reject rather than a minted id.
+pub(crate) fn agent_identity_from_env_value(raw: Option<&str>) -> Option<String> {
+    raw.and_then(normalize_identity_value)
+        .filter(|value| valid_agent_identity_assertion(value))
+}
+
 /// #1251: resolve a caller's dispatch recursion depth from the (optional) wire
 /// marker carried by [`HEADER_DISPATCH_DEPTH`] / [`ENV_DISPATCH_DEPTH`]. The
 /// accounting is fail-closed by construction:
@@ -600,6 +612,26 @@ mod tests {
         .expect("serialize manifest");
         std::fs::write(tachi_home.join("manifest.json"), &bytes).expect("write manifest");
         bytes
+    }
+
+    #[test]
+    fn agent_identity_from_env_value_accepts_valid_and_rejects_blank_or_illegal() {
+        assert_eq!(
+            agent_identity_from_env_value(Some("agent.cursor.local")).as_deref(),
+            Some("agent.cursor.local")
+        );
+        assert_eq!(
+            agent_identity_from_env_value(Some("  agent.cursor.local  ")).as_deref(),
+            Some("agent.cursor.local")
+        );
+        assert_eq!(agent_identity_from_env_value(None), None);
+        assert_eq!(agent_identity_from_env_value(Some("")), None);
+        assert_eq!(agent_identity_from_env_value(Some("   ")), None);
+        assert_eq!(
+            agent_identity_from_env_value(Some("agent identity")),
+            None,
+            "spaces are not a valid assertion"
+        );
     }
 
     #[test]

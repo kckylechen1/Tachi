@@ -285,14 +285,25 @@ pub(crate) async fn handle_memory_briefing(
     } else {
         memory_rows
     });
+    let mut wiki_warnings = Vec::new();
     let wiki = if include_wiki {
-        let rows = wiki_result?;
-        let wiki_rows = Value::Array(rows);
-        slim_memory_rows(if compact {
-            apply_compact_relevance_floor(wiki_rows)
-        } else {
-            wiki_rows
-        })
+        match wiki_result {
+            Ok(rows) => {
+                let wiki_rows = Value::Array(rows);
+                slim_memory_rows(if compact {
+                    apply_compact_relevance_floor(wiki_rows)
+                } else {
+                    wiki_rows
+                })
+            }
+            Err(err) => {
+                // Wiki federation is best-effort (#1761). A leftover schema
+                // or stamp refuse must not kill session-start memory/kanban.
+                // Explicit missing `project=` stays loud above.
+                wiki_warnings.push(format!("wiki recall unavailable: {err}"));
+                json!([])
+            }
+        }
     } else {
         json!([])
     };
@@ -327,11 +338,22 @@ pub(crate) async fn handle_memory_briefing(
         },
         async { crate::wiki_ops::wiki_hygiene_counts(server).await },
     );
-    let warnings: Vec<String> = warnings_res;
+    let mut warnings: Vec<String> = warnings_res;
+    warnings.extend(wiki_warnings);
     let board = slim_kanban(parse_json_or_empty(board_res?));
     let checkpoints = json!(checkpoints_res);
     let verification = crate::verify_ops::recent_verification_summaries(verification_cap);
-    let wiki_counts: Value = wiki_counts_res?;
+    let wiki_counts: Value = match wiki_counts_res {
+        Ok(counts) => counts,
+        Err(err) => {
+            warnings.push(format!("wiki hygiene unavailable: {err}"));
+            json!({
+                "orphans": 0,
+                "stale_nodes": 0,
+                "duplicates": 0,
+            })
+        }
+    };
     let mut health_summary = if compact {
         compact_health_summary(server, wiki_counts).await
     } else {
@@ -355,6 +377,25 @@ pub(crate) async fn handle_memory_briefing(
             "wiki": wiki_counts,
         })
     };
+    if let Some(health_obj) = health_summary.as_object_mut() {
+        let health_warnings = health_obj
+            .entry("warnings".to_string())
+            .or_insert_with(|| json!([]))
+            .as_array_mut();
+        if let Some(health_warnings) = health_warnings {
+            for line in &warnings {
+                if health_warnings.len() >= 10 {
+                    break;
+                }
+                if !health_warnings
+                    .iter()
+                    .any(|existing| existing.as_str() == Some(line.as_str()))
+                {
+                    health_warnings.push(json!(line));
+                }
+            }
+        }
+    }
 
     // Cross-flow closure debt: surface unclosed loops / stale specs at the
     // session-start surface the agent actually opens, not just the per-flow

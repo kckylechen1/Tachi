@@ -315,6 +315,32 @@ pub(crate) fn make_server() -> TestServer {
     make_test_server(None).0
 }
 
+/// Plant `projects/wiki/tachi-memory.db` at an older `PRAGMA user_version`
+/// so an ordinary Deny-authority open hits `#1119`
+/// `SchemaMigrationOptInRequired`. Discriminates leftover-schema federation
+/// (#1761): tray surfaces must degrade; `tachi migrate --apply` is the
+/// authorized path. Does not weaken the stamp or the ordinary-open gate.
+pub(crate) fn plant_leftover_shared_wiki(server: &MemoryServer) {
+    let wiki_dir = server.tachi_home_dir().join("projects").join("wiki");
+    std::fs::create_dir_all(&wiki_dir).expect("create leftover wiki dir");
+    let wiki_db = wiki_dir.join(memcore::MEMORY_DB_FILENAME);
+    {
+        let _store = MemoryStore::open_with_label(
+            wiki_db.to_str().expect("utf8 leftover wiki path"),
+            "wiki",
+        )
+        .expect("seed leftover wiki at current schema");
+    }
+    let conn = rusqlite::Connection::open(&wiki_db).expect("reopen leftover wiki");
+    conn.execute_batch(&format!(
+        "PRAGMA user_version = {}",
+        memcore::db::migrations::EXPECTED_SCHEMA_VERSION.saturating_sub(2)
+    ))
+    .expect("roll leftover wiki schema stamp back");
+    drop(conn);
+    let _ = std::fs::remove_file(format!("{}.migration-marker", wiki_db.display()));
+}
+
 pub(crate) fn register_logical_shared_wiki(server: &MemoryServer) {
     let db_path = server
         .tachi_home_dir()
