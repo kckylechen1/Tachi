@@ -2025,6 +2025,10 @@ const ECHOED_PASSWORD: &str = "hunter2secret";
 const ECHOED_BEARER: &str = "echo-token-REDTEST888";
 const URL_USERINFO_PASSWORD: &str = "weakpass123";
 const URL_SESSION_CREDENTIAL: &str = "weakpass456";
+const URL_FRAGMENT_CREDENTIAL: &str = "weakpass789";
+const URL_MAILTO_CREDENTIAL: &str = "weakpassAAA";
+const MALFORMED_LEGACY_SECRET: &str = "opaque-secret-value-XK9";
+const UNSANITIZABLE_URL_MARKER: &str = "[unsanitizable-url]";
 const LEGACY_URL_USERINFO: &str = "legacyurlpass111";
 const LEGACY_URL_SESSION: &str = "legacysession222";
 
@@ -2101,6 +2105,21 @@ async fn auto_ingest_scrubs_echoed_secret_content() {
     assert_absent_everywhere(&server, ECHOED_BEARER, Some(&receipt));
 }
 
+fn assert_staged_payload_absent(server: &crate::server_state::MemoryServer, needle: &str) -> Value {
+    let staged_payloads = load_auto_ingest_job_payloads(server);
+    assert_eq!(
+        staged_payloads.len(),
+        1,
+        "expected one staged job before execution"
+    );
+    let encoded = staged_payloads[0].to_string();
+    assert!(
+        !encoded.contains(needle),
+        "staged payload kept {needle:?}: {encoded}"
+    );
+    staged_payloads.into_iter().next().expect("one staged job")
+}
+
 #[tokio::test]
 async fn auto_ingest_strips_url_userinfo_credentials() {
     let server = make_server();
@@ -2113,6 +2132,7 @@ async fn auto_ingest_strips_url_userinfo_credentials() {
             "https://user:{URL_USERINFO_PASSWORD}@example.com/x"
         )),
     );
+    assert_staged_payload_absent(&server, URL_USERINFO_PASSWORD);
     let receipt = complete_secret_bearing_ingest(&server, &staged).await;
     assert_absent_everywhere(&server, URL_USERINFO_PASSWORD, Some(&receipt));
 }
@@ -2129,6 +2149,7 @@ async fn auto_ingest_masks_non_token_query_credentials() {
             "https://example.com/x?session={URL_SESSION_CREDENTIAL}"
         )),
     );
+    assert_staged_payload_absent(&server, URL_SESSION_CREDENTIAL);
     let receipt = complete_secret_bearing_ingest(&server, &staged).await;
     assert_absent_everywhere(&server, URL_SESSION_CREDENTIAL, Some(&receipt));
 }
@@ -2276,4 +2297,162 @@ async fn legacy_v1_oversized_forensic_is_allowlisted_without_url_secrets() {
         forensic_json.get("metadata").is_none(),
         "allowlist must not copy metadata: {forensic}"
     );
+}
+
+#[tokio::test]
+async fn malformed_truncated_legacy_forensic_carries_no_payload_bytes() {
+    let server = make_server();
+    let job_id = "malformed-truncated-legacy-forensic-job";
+    let payload = format!(
+        r#"{{"schema":"tachi.admitted_mcp_ingest.v1","source":{{"arguments":{{"custom":"{MALFORMED_LEGACY_SECRET}"#
+    );
+    assert!(
+        serde_json::from_str::<Value>(&payload).is_err(),
+        "fixture must be truncated mid-string so JSON parse fails"
+    );
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
+                     VALUES (?1, ?2, 'auto_ingest_job', STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    rusqlite::params![job_id, payload],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject truncated legacy-shaped payload");
+
+    let replay = crate::pipeline_ops::run_staged_auto_ingest(
+        &server,
+        crate::pipeline_ops::StagedAutoIngest {
+            job_id: job_id.to_string(),
+        },
+    )
+    .await
+    .expect("truncated payload must quarantine");
+    assert!(
+        replay.is_none(),
+        "truncated payload must never execute: {replay:?}"
+    );
+
+    let forensic = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT event_id FROM processed_events \
+                     WHERE event_hash = ?1 AND worker = 'auto_ingest_job_dead_letter'",
+                    [job_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("load truncated-legacy forensic");
+    assert!(
+        !forensic.contains(MALFORMED_LEGACY_SECRET),
+        "forensic kept unrecognized secret bytes: {forensic}"
+    );
+    let forensic_json: Value = serde_json::from_str(&forensic).expect("forensic JSON");
+    assert!(
+        forensic_json.get("original_payload").is_none(),
+        "parse-failure forensic must not carry raw payload bytes: {forensic}"
+    );
+    assert!(
+        forensic_json.get("payload_truncated").is_none(),
+        "parse-failure forensic must not keep a truncated payload copy: {forensic}"
+    );
+    assert_eq!(
+        forensic_json["payload_byte_length"],
+        payload.len(),
+        "parse-failure forensic must record payload length: {forensic}"
+    );
+    let digest = forensic_json["payload_digest"]
+        .as_str()
+        .expect("parse-failure forensic must record payload digest");
+    assert_eq!(
+        digest,
+        tachi_params::util::stable_hash(&payload),
+        "payload_digest must be stable_hash(payload): {forensic}"
+    );
+    assert!(
+        forensic_json["decode_error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "parse-failure forensic must carry the decode error: {forensic}"
+    );
+}
+
+#[tokio::test]
+async fn auto_ingest_sanitizes_scheme_relative_url_credentials() {
+    let server = make_server();
+    let path = "/wiki/general/auto-ingest-url-scheme-relative";
+    let staged = stage_with_text_and_url(
+        &server,
+        path,
+        "public article body for scheme-relative fixture",
+        Some(&format!(
+            "//user:{URL_USERINFO_PASSWORD}@example.com/x?session={URL_SESSION_CREDENTIAL}"
+        )),
+    );
+    let staged_payload = assert_staged_payload_absent(&server, URL_USERINFO_PASSWORD);
+    let encoded = staged_payload.to_string();
+    assert!(
+        !encoded.contains(URL_SESSION_CREDENTIAL),
+        "staged payload kept query credential: {encoded}"
+    );
+    let receipt = complete_secret_bearing_ingest(&server, &staged).await;
+    assert_absent_everywhere(&server, URL_USERINFO_PASSWORD, Some(&receipt));
+    assert_absent_everywhere(&server, URL_SESSION_CREDENTIAL, Some(&receipt));
+}
+
+#[tokio::test]
+async fn auto_ingest_strips_url_fragment_credentials() {
+    let server = make_server();
+    let path = "/wiki/general/auto-ingest-url-fragment";
+    let staged = stage_with_text_and_url(
+        &server,
+        path,
+        "public article body for fragment fixture",
+        Some(&format!(
+            "https://example.com/x#session={URL_FRAGMENT_CREDENTIAL}"
+        )),
+    );
+    let staged_payload = assert_staged_payload_absent(&server, URL_FRAGMENT_CREDENTIAL);
+    let url = staged_payload["source"]["url"]
+        .as_str()
+        .expect("staged source.url");
+    assert!(
+        !url.contains('#'),
+        "sanitized URL must not keep a fragment: {url}"
+    );
+    let receipt = complete_secret_bearing_ingest(&server, &staged).await;
+    assert_absent_everywhere(&server, URL_FRAGMENT_CREDENTIAL, Some(&receipt));
+}
+
+#[tokio::test]
+async fn auto_ingest_marks_non_hierarchical_url_unsanitizable() {
+    let server = make_server();
+    let path = "/wiki/general/auto-ingest-url-mailto";
+    let staged = stage_with_text_and_url(
+        &server,
+        path,
+        "public article body for mailto fixture",
+        Some(&format!(
+            "mailto:user@example.com?password={URL_MAILTO_CREDENTIAL}"
+        )),
+    );
+    let staged_payload = assert_staged_payload_absent(&server, URL_MAILTO_CREDENTIAL);
+    assert_eq!(
+        staged_payload["source"]["url"], UNSANITIZABLE_URL_MARKER,
+        "non-hierarchical URL must persist the unsanitizable marker: {staged_payload}"
+    );
+    assert_eq!(
+        staged_payload["request"]["source_url"],
+        UNSANITIZABLE_URL_MARKER
+    );
+    let receipt = complete_secret_bearing_ingest(&server, &staged).await;
+    assert_absent_everywhere(&server, URL_MAILTO_CREDENTIAL, Some(&receipt));
+    assert_absent_everywhere(&server, "mailto:", Some(&receipt));
 }
