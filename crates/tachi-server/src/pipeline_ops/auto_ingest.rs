@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
 
+use crate::memory_search_ops::scrub_secrets;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::IngestSourceParams;
 use crate::utils::{sanitize_safe_path_name, stable_hash};
+use url::Url;
 
 use super::audit::{
     claim_retryable_ingest_event, ingest_audit_key, ingest_success_audit_exists,
@@ -22,8 +24,12 @@ const AUTO_INGEST_RECEIPT_WORKER: &str = "auto_ingest_job_receipt";
 const AUTO_INGEST_JOB_LABEL: &str = "auto_ingest_job";
 const AUTO_INGEST_REPLAY_BATCH_SIZE: usize = 16;
 const AUTO_INGEST_REPLAY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-const AUTO_INGEST_FORENSIC_PAYLOAD_MAX_BYTES: usize = 4096;
 const AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES: usize = 512;
+const UNSANITIZABLE_URL_MARKER: &str = "[unsanitizable-url]";
+const ADMITTED_MCP_INGEST_SCHEMA_V1: &str = "tachi.admitted_mcp_ingest.v1";
+const ADMITTED_MCP_INGEST_SCHEMA_V2: &str = "tachi.admitted_mcp_ingest.v2";
+const LEGACY_V1_UNREDACTED_ARGUMENTS_REASON: &str =
+    "legacy_v1_staged_job_quarantined_unredacted_arguments";
 
 /// Named limits for the already-acquired MCP text admission boundary. This
 /// path owns no fetch, filesystem, or command authority.
@@ -37,7 +43,7 @@ struct StagedMcpSourceV1 {
     tool_name: String,
     label: Option<String>,
     url: Option<String>,
-    arguments: serde_json::Map<String, serde_json::Value>,
+    argument_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,7 +105,7 @@ impl StagedMcpIngestJobV1 {
         ));
         let job_id = stable_hash(&format!("mcp-admitted-ingest-job:{idempotency_key}"));
         Ok(Self {
-            schema: "tachi.admitted_mcp_ingest.v1".to_string(),
+            schema: ADMITTED_MCP_INGEST_SCHEMA_V2.to_string(),
             job_id,
             source,
             content_digest,
@@ -266,9 +272,10 @@ fn prepare_auto_ingest_from_mcp(
         return Ok(None);
     }
 
-    let Some(content) = extract_text_from_tool_result(result) else {
+    let Some(raw_content) = extract_text_from_tool_result(result) else {
         return Ok(None);
     };
+    let content = scrub_secrets(&raw_content).0;
     if content.len() > ADMITTED_INGEST_RAW_PAYLOAD_MAX_BYTES {
         return Err(format!(
             "admitted ingest payload exceeds {} byte limit",
@@ -277,6 +284,8 @@ fn prepare_auto_ingest_from_mcp(
     }
 
     let resolved_server = capability_id.strip_prefix("mcp:").unwrap_or(capability_id);
+    let raw_arguments = arguments.cloned().unwrap_or_default();
+    let argument_keys = argument_keys_from_map(&raw_arguments);
     let source_url = arguments
         .and_then(|args| args.get("url"))
         .and_then(|value| value.as_str())
@@ -286,7 +295,8 @@ fn prepare_auto_ingest_from_mcp(
                 .and_then(|args| args.get("source_url"))
                 .and_then(|value| value.as_str())
                 .map(|value| value.to_string())
-        });
+        })
+        .map(|value| sanitize_admitted_source_url(&value));
 
     let domain = resolve_domain(
         definition
@@ -311,11 +321,11 @@ fn prepare_auto_ingest_from_mcp(
         .and_then(|value| value.as_str())
         .unwrap_or("global")
         .to_string();
-    let source = format!("{}:{}", resolved_server, tool_name);
+    let source = scrub_secrets(&format!("{resolved_server}:{tool_name}")).0;
     let metadata = json!({
         "capability_id": capability_id,
         "tool_name": tool_name,
-        "arguments": arguments.cloned().unwrap_or_default(),
+        "argument_keys": argument_keys,
         "auto_ingest": true,
     });
 
@@ -431,7 +441,7 @@ pub(crate) fn validate_admitted_ingest_bounds_for_test(
 }
 
 fn validate_staged_job(job: &StagedMcpIngestJobV1, expected_job_id: &str) -> Result<(), String> {
-    if job.schema != "tachi.admitted_mcp_ingest.v1" {
+    if job.schema != ADMITTED_MCP_INGEST_SCHEMA_V2 {
         return Err("admitted ingest staged-job schema drift".to_string());
     }
     validate_admitted_ingest_bounds(&job.request)
@@ -466,18 +476,23 @@ fn staged_source_from_request(
     tool_name: &str,
     request: &IngestSourceParams,
 ) -> StagedMcpSourceV1 {
+    let metadata = request.metadata.as_ref();
+    let mut argument_keys = metadata
+        .and_then(|value| value.get("argument_keys"))
+        .and_then(serde_json::Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| key.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    argument_keys.sort();
     StagedMcpSourceV1 {
         capability_id: capability_id.to_string(),
         tool_name: tool_name.to_string(),
         label: request.source.clone(),
         url: request.source_url.clone(),
-        arguments: request
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("arguments"))
-            .and_then(serde_json::Value::as_object)
-            .cloned()
-            .unwrap_or_default(),
+        argument_keys,
     }
 }
 
@@ -505,9 +520,177 @@ fn staged_metadata(source: &StagedMcpSourceV1) -> serde_json::Value {
     json!({
         "capability_id": source.capability_id,
         "tool_name": source.tool_name,
-        "arguments": source.arguments,
+        "argument_keys": source.argument_keys,
         "auto_ingest": true,
     })
+}
+
+fn argument_keys_from_map(arguments: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let mut keys: Vec<String> = arguments.keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+pub(crate) fn redacted_mcp_arguments_map(
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let raw = arguments.cloned().unwrap_or_default();
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "argument_keys".to_string(),
+        json!(argument_keys_from_map(&raw)),
+    );
+    map
+}
+
+fn sanitize_admitted_source_url(raw: &str) -> String {
+    // Scheme-relative inputs (`//host/...`) cannot be parsed without a base.
+    // Prepend a synthetic `https:` and emit the resulting absolute URL.
+    let to_parse = if raw.starts_with("//") {
+        format!("https:{raw}")
+    } else {
+        raw.to_string()
+    };
+    let Ok(mut parsed) = Url::parse(&to_parse) else {
+        return UNSANITIZABLE_URL_MARKER.to_string();
+    };
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        return UNSANITIZABLE_URL_MARKER.to_string();
+    }
+    parsed.set_fragment(None);
+    let query_names: Vec<String> = parsed
+        .query_pairs()
+        .map(|(name, _)| name.into_owned())
+        .collect();
+    if query_names.is_empty() {
+        parsed.set_query(None);
+    } else {
+        let masked = query_names
+            .iter()
+            .map(|name| format!("{name}=[REDACTED]"))
+            .collect::<Vec<_>>()
+            .join("&");
+        parsed.set_query(Some(&masked));
+    }
+    // Defense-in-depth only after successful structural sanitization.
+    // Never fall back to scrubbing any portion of the raw input.
+    scrub_secrets(parsed.as_str()).0
+}
+
+fn json_contains_raw_arguments_object(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map
+                .get("arguments")
+                .is_some_and(serde_json::Value::is_object)
+            {
+                return true;
+            }
+            map.values().any(json_contains_raw_arguments_object)
+        }
+        serde_json::Value::Array(items) => items.iter().any(json_contains_raw_arguments_object),
+        _ => false,
+    }
+}
+
+fn is_legacy_unredacted_arguments_job(payload: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return false;
+    };
+    value.get("schema").and_then(serde_json::Value::as_str) == Some(ADMITTED_MCP_INGEST_SCHEMA_V1)
+        || json_contains_raw_arguments_object(&value)
+}
+
+fn collect_argument_key_names(value: &serde_json::Value, keys: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(arguments) = map.get("arguments").and_then(serde_json::Value::as_object) {
+                keys.extend(arguments.keys().cloned());
+            }
+            for child in map.values() {
+                collect_argument_key_names(child, keys);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_argument_key_names(item, keys);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn allowlist_legacy_forensic(
+    payload: &serde_json::Value,
+    job_id: &str,
+    classification: &str,
+) -> serde_json::Value {
+    let schema = payload
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(ADMITTED_MCP_INGEST_SCHEMA_V1);
+    let recorded_job_id = payload
+        .get("job_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(job_id);
+    let capability_id = payload
+        .pointer("/source/capability_id")
+        .or_else(|| payload.pointer("/request/metadata/capability_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let tool_name = payload
+        .pointer("/source/tool_name")
+        .or_else(|| payload.pointer("/request/metadata/tool_name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let mut argument_keys = Vec::new();
+    collect_argument_key_names(payload, &mut argument_keys);
+    argument_keys.sort();
+    argument_keys.dedup();
+    json!({
+        "classification": classification,
+        "reason": classification,
+        "schema": schema,
+        "job_id": recorded_job_id,
+        "capability_id": capability_id,
+        "tool_name": tool_name,
+        "argument_keys": argument_keys,
+    })
+}
+
+fn classify_json_decode_error(error: &serde_json::Error) -> String {
+    let category = match error.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    };
+    format!(
+        "decode failed ({category}) at line {} column {}",
+        error.line(),
+        error.column()
+    )
+}
+
+/// Invariant: secret-negative durable surfaces outrank forensic convenience.
+/// A payload that fails JSON parsing never persists raw bytes — only the
+/// decode error, the byte length, and `stable_hash(payload)` for correlation.
+fn parse_failure_forensic(
+    payload: &str,
+    decode_error: &str,
+    classification: &str,
+) -> Result<String, String> {
+    let (decode_error, decode_error_truncated) =
+        bounded_utf8(decode_error, AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES);
+    serde_json::to_string(&json!({
+        "classification": classification,
+        "reason": classification,
+        "decode_error": decode_error,
+        "decode_error_truncated": decode_error_truncated,
+        "payload_byte_length": payload.len(),
+        "payload_digest": stable_hash(payload),
+    }))
+    .map_err(|error| format!("serialize auto-ingest quarantine forensics: {error}"))
 }
 
 fn load_auto_ingest_receipt(server: &MemoryServer, job_id: &str) -> Result<Option<String>, String> {
@@ -599,8 +782,10 @@ pub(crate) async fn run_staged_auto_ingest(
         let Some(receipt) = load_auto_ingest_receipt(server, &staged.job_id)? else {
             return Ok(None);
         };
-        let mut receipt: serde_json::Value = serde_json::from_str(&receipt)
-            .map_err(|error| format!("decode durable auto-ingest receipt: {error}"))?;
+        let mut receipt: serde_json::Value = serde_json::from_str(&receipt).map_err(|error| {
+            tracing::error!(error = %error, "decode durable auto-ingest receipt failed");
+            classify_json_decode_error(&error)
+        })?;
         receipt["status"] = json!("replayed");
         return serde_json::to_string(&receipt)
             .map(Some)
@@ -637,10 +822,45 @@ pub(crate) async fn run_staged_auto_ingest(
                 .await);
         }
     };
+    if is_legacy_unredacted_arguments_job(&persisted_payload) {
+        tracing::error!(
+            job_id = %staged.job_id,
+            reason = LEGACY_V1_UNREDACTED_ARGUMENTS_REASON,
+            "refusing to replay unredacted legacy auto-ingest job"
+        );
+        let quarantine = quarantine_auto_ingest_payload(
+            &lease,
+            &staged.job_id,
+            &persisted_payload,
+            LEGACY_V1_UNREDACTED_ARGUMENTS_REASON,
+            LEGACY_V1_UNREDACTED_ARGUMENTS_REASON,
+        )
+        .await;
+        return match quarantine {
+            Ok(()) => {
+                lease.finish().await?;
+                Ok(None)
+            }
+            Err(error) => Err(lease
+                .fail(
+                    AUTO_INGEST_JOB_LABEL,
+                    &audit_key,
+                    "auto_ingest_quarantine_failed",
+                    error,
+                )
+                .await),
+        };
+    }
+
     let job: StagedMcpIngestJobV1 = match serde_json::from_str(&persisted_payload) {
         Ok(job) => job,
         Err(decode_error) => {
-            let decode_error = format!("decode durable auto-ingest job: {decode_error}");
+            tracing::error!(
+                job_id = %staged.job_id,
+                error = %decode_error,
+                "decode durable auto-ingest job failed"
+            );
+            let decode_error = classify_json_decode_error(&decode_error);
             let quarantine = quarantine_malformed_auto_ingest(
                 &lease,
                 &staged.job_id,
@@ -824,18 +1044,35 @@ async fn quarantine_malformed_auto_ingest(
     payload: &str,
     decode_error: &str,
 ) -> Result<(), String> {
-    let (payload, payload_truncated) =
-        bounded_utf8(payload, AUTO_INGEST_FORENSIC_PAYLOAD_MAX_BYTES);
-    let (decode_error, decode_error_truncated) =
-        bounded_utf8(decode_error, AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES);
-    let forensic = serde_json::to_string(&json!({
-        "classification": "auto_ingest_malformed_payload",
-        "original_payload": payload,
-        "payload_truncated": payload_truncated,
-        "decode_error": decode_error,
-        "decode_error_truncated": decode_error_truncated,
-    }))
-    .map_err(|error| format!("serialize auto-ingest quarantine forensics: {error}"))?;
+    quarantine_auto_ingest_payload(
+        lease,
+        job_id,
+        payload,
+        decode_error,
+        "auto_ingest_malformed_payload",
+    )
+    .await
+}
+
+async fn quarantine_auto_ingest_payload(
+    lease: &RetryableIngestLease,
+    job_id: &str,
+    payload: &str,
+    decode_error: &str,
+    classification: &str,
+) -> Result<(), String> {
+    // Legacy classification is assigned only after JSON parse succeeded
+    // (`is_legacy_unredacted_arguments_job`). There is no parse-failure
+    // arm on that path. Unparseable input always takes the no-raw-bytes
+    // forensic below.
+    // Invariant: secret-negative durable surfaces outrank forensic convenience.
+    let forensic = match serde_json::from_str::<serde_json::Value>(payload) {
+        Ok(value) if classification == LEGACY_V1_UNREDACTED_ARGUMENTS_REASON => {
+            serde_json::to_string(&allowlist_legacy_forensic(&value, job_id, classification))
+                .map_err(|error| format!("serialize auto-ingest quarantine forensics: {error}"))?
+        }
+        _ => parse_failure_forensic(payload, decode_error, classification)?,
+    };
     lease
         .write_owned(|store| {
             let quarantined = store
