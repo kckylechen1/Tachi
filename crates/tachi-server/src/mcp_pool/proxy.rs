@@ -728,4 +728,102 @@ mod auto_ingest_response_tests {
             .expect("count auto-ingest durable rows after staging failure");
         assert_eq!(durable_rows, 0, "staging failure must not fake durability");
     }
+
+    #[tokio::test]
+    async fn failed_auto_ingest_staging_dead_letter_redacts_arguments() {
+        let server = crate::tests::make_server();
+        let arguments = serde_json::Map::from_iter([
+            (
+                "Authorization".to_string(),
+                json!("Bearer sk-live-REDTEST111"),
+            ),
+            ("api_key".to_string(), json!("sk-live-REDTEST-api-key-222")),
+            (
+                "token".to_string(),
+                json!("ghp_REDTESTTOKEN3333333333333333333333"),
+            ),
+            ("password".to_string(), json!("REDTEST-password-444")),
+            ("secret".to_string(), json!("REDTEST-secret-555")),
+            (
+                "custom".to_string(),
+                json!("zq8Kx2vN9mPl4wR7tY3uB6sD1fG5hJ0a"),
+            ),
+        ]);
+        let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+            "content": [{
+                "type": "text",
+                "text": "x".repeat(2 * 1024 * 1024 + 1)
+            }],
+            "isError": false
+        }))
+        .expect("oversized MCP result fixture");
+        let returned = return_with_background_auto_ingest(
+            &server,
+            "mcp:test-server",
+            "secret-stage-failure-tool",
+            &json!({"auto_ingest": true}),
+            Some(&arguments),
+            result,
+        );
+        let returned_json = serde_json::to_value(&returned).expect("serialize returned MCP result");
+        let encoded_result = returned_json.to_string();
+        for secret in [
+            "Bearer sk-live-REDTEST111",
+            "sk-live-REDTEST-api-key-222",
+            "ghp_REDTESTTOKEN3333333333333333333333",
+            "REDTEST-password-444",
+            "REDTEST-secret-555",
+            "zq8Kx2vN9mPl4wR7tY3uB6sD1fG5hJ0a",
+        ] {
+            assert!(
+                !encoded_result.contains(secret),
+                "returned MCP result leaked {secret}: {encoded_result}"
+            );
+        }
+
+        let dead_letters = server.dead_letters_lock();
+        let failure = dead_letters
+            .front()
+            .expect("staging failure must create a dead letter");
+        assert_eq!(
+            failure.tool_name,
+            "mcp_auto_ingest:secret-stage-failure-tool"
+        );
+        let args = failure
+            .arguments
+            .as_ref()
+            .expect("dead letter must carry a redacted arguments map");
+        let encoded = serde_json::to_string(args).expect("encode dead-letter arguments");
+        for secret in [
+            "Bearer sk-live-REDTEST111",
+            "sk-live-REDTEST-api-key-222",
+            "ghp_REDTESTTOKEN3333333333333333333333",
+            "REDTEST-password-444",
+            "REDTEST-secret-555",
+            "zq8Kx2vN9mPl4wR7tY3uB6sD1fG5hJ0a",
+        ] {
+            assert!(
+                !encoded.contains(secret),
+                "dead letter leaked secret {secret}: {encoded}"
+            );
+        }
+        let keys = args
+            .get("argument_keys")
+            .and_then(|value| value.as_array())
+            .expect("dead letter arguments must carry argument_keys");
+        assert!(
+            keys.iter().any(|key| key == "Authorization"),
+            "dead letter argument_keys must retain names: {keys:?}"
+        );
+        assert!(
+            args.get("arguments_digest")
+                .and_then(|value| value.as_str())
+                .is_some_and(|digest| !digest.is_empty()),
+            "dead letter must carry arguments_digest: {encoded}"
+        );
+        assert!(
+            args.get("Authorization").is_none(),
+            "dead letter must not keep raw Authorization: {encoded}"
+        );
+    }
 }

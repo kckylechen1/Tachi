@@ -1,3 +1,5 @@
+use rusqlite::OptionalExtension;
+
 use super::*;
 
 async fn spawn_admitted_ingest_embedding_provider() -> (
@@ -1511,5 +1513,502 @@ async fn malformed_oldest_batch_is_quarantined_without_starving_valid_job() {
     assert_eq!(
         quarantine_count, 16,
         "quarantine remains terminal and stable"
+    );
+}
+
+const SECRET_AUTHORIZATION: &str = "Bearer sk-live-REDTEST111";
+const SECRET_API_KEY: &str = "sk-live-REDTEST-api-key-222";
+const SECRET_TOKEN: &str = "ghp_REDTESTTOKEN3333333333333333333333";
+const SECRET_PASSWORD: &str = "REDTEST-password-444";
+const SECRET_SECRET: &str = "REDTEST-secret-555";
+const SECRET_CUSTOM_ENTROPY: &str = "zq8Kx2vN9mPl4wR7tY3uB6sD1fG5hJ0a";
+const SECRET_URL_QUERY: &str = "ghp_URLQUERYSECRET7777777777777777777777";
+const SECRET_LEGACY_V1: &str = "Bearer sk-live-LEGACYV1SECRET999";
+
+fn secret_argument_values() -> [&'static str; 7] {
+    [
+        SECRET_AUTHORIZATION,
+        SECRET_API_KEY,
+        SECRET_TOKEN,
+        SECRET_PASSWORD,
+        SECRET_SECRET,
+        SECRET_CUSTOM_ENTROPY,
+        SECRET_URL_QUERY,
+    ]
+}
+
+fn secret_bearing_arguments() -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([
+        ("Authorization".to_string(), json!(SECRET_AUTHORIZATION)),
+        ("api_key".to_string(), json!(SECRET_API_KEY)),
+        ("token".to_string(), json!(SECRET_TOKEN)),
+        ("password".to_string(), json!(SECRET_PASSWORD)),
+        ("secret".to_string(), json!(SECRET_SECRET)),
+        ("custom".to_string(), json!(SECRET_CUSTOM_ENTROPY)),
+        (
+            "url".to_string(),
+            json!(format!(
+                "https://example.com/article?token={SECRET_URL_QUERY}"
+            )),
+        ),
+    ])
+}
+
+fn assert_no_secret_values(surface: &str, haystack: &str) {
+    for secret in secret_argument_values() {
+        assert!(
+            !haystack.contains(secret),
+            "{surface} leaked secret value {secret:?}: {haystack}"
+        );
+    }
+}
+
+fn table_cell_strings(server: &crate::server_state::MemoryServer, table: &str) -> Vec<String> {
+    server
+        .with_global_store_read(|store| {
+            let mut statement = store
+                .connection()
+                .prepare(&format!("SELECT * FROM {table}"))
+                .map_err(|error| error.to_string())?;
+            let column_count = statement.column_count();
+            let mut rows = statement.query([]).map_err(|error| error.to_string())?;
+            let mut cells = Vec::new();
+            while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+                for index in 0..column_count {
+                    cells.push(match row.get_ref(index).map_err(|error| error.to_string())? {
+                        rusqlite::types::ValueRef::Null => String::new(),
+                        rusqlite::types::ValueRef::Integer(value) => value.to_string(),
+                        rusqlite::types::ValueRef::Real(value) => value.to_string(),
+                        rusqlite::types::ValueRef::Text(value) => {
+                            String::from_utf8_lossy(value).into_owned()
+                        }
+                        rusqlite::types::ValueRef::Blob(value) => {
+                            String::from_utf8_lossy(value).into_owned()
+                        }
+                    });
+                }
+            }
+            Ok(cells)
+        })
+        .unwrap_or_else(|error| panic!("dump {table} cells: {error}"))
+}
+
+fn assert_processed_events_secret_free(server: &crate::server_state::MemoryServer) {
+    for cell in table_cell_strings(server, "processed_events") {
+        assert_no_secret_values("processed_events", &cell);
+        assert!(
+            !cell.contains(SECRET_LEGACY_V1),
+            "processed_events leaked legacy v1 secret: {cell}"
+        );
+    }
+}
+
+fn assert_memories_secret_free(server: &crate::server_state::MemoryServer) {
+    for cell in table_cell_strings(server, "memories") {
+        assert_no_secret_values("memories", &cell);
+    }
+}
+
+fn load_auto_ingest_job_payloads(server: &crate::server_state::MemoryServer) -> Vec<Value> {
+    server
+        .with_global_store_read(|store| {
+            let mut statement = store
+                .connection()
+                .prepare(
+                    "SELECT event_id FROM processed_events WHERE worker = 'auto_ingest_job' \
+                     ORDER BY created_at, event_hash",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            rows.map(|row| {
+                let payload = row.map_err(|error| error.to_string())?;
+                serde_json::from_str(&payload).map_err(|error| error.to_string())
+            })
+            .collect()
+        })
+        .expect("load staged auto-ingest payloads")
+}
+
+fn assert_staged_payload_carries_keys_and_digest(payload: &Value) {
+    let source_keys = payload["source"]["argument_keys"]
+        .as_array()
+        .expect("staged source.argument_keys must exist");
+    let metadata_keys = payload["request"]["metadata"]["argument_keys"]
+        .as_array()
+        .expect("staged request.metadata.argument_keys must exist");
+    assert!(
+        !source_keys.is_empty(),
+        "argument_keys must record admitted top-level names: {payload}"
+    );
+    assert_eq!(source_keys, metadata_keys);
+    let source_digest = payload["source"]["arguments_digest"]
+        .as_str()
+        .expect("staged source.arguments_digest must exist");
+    let metadata_digest = payload["request"]["metadata"]["arguments_digest"]
+        .as_str()
+        .expect("staged request.metadata.arguments_digest must exist");
+    assert!(!source_digest.is_empty(), "arguments_digest must be non-empty");
+    assert_eq!(source_digest, metadata_digest);
+    assert!(
+        payload["source"].get("arguments").is_none(),
+        "staged source must not keep a raw arguments object: {payload}"
+    );
+    assert!(
+        payload["request"]["metadata"].get("arguments").is_none(),
+        "staged request metadata must not keep a raw arguments object: {payload}"
+    );
+}
+
+fn stage_secret_bearing_auto_ingest(
+    server: &crate::server_state::MemoryServer,
+    path: &str,
+) -> crate::pipeline_ops::StagedAutoIngest {
+    let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+        "content": [{"type": "text", "text": "public article body for secret-redaction fixture"}],
+        "isError": false
+    }))
+    .expect("build secret-redaction tool result");
+    let definition = json!({
+        "auto_ingest": true,
+        "ingest_scope": "global",
+        "ingest_domain": "general",
+        "ingest_path_prefix": path,
+    });
+    let arguments = secret_bearing_arguments();
+    crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        server,
+        "mcp:secret-reader",
+        "read",
+        &definition,
+        Some(&arguments),
+        &result,
+    )
+    .expect("secret-bearing staging must succeed")
+    .expect("auto-ingest definition admits text")
+}
+
+async fn complete_secret_bearing_ingest(
+    server: &crate::server_state::MemoryServer,
+    staged: &crate::pipeline_ops::StagedAutoIngest,
+) -> String {
+    complete_admitted_enrichment_stage(server, staged).await;
+    crate::pipeline_ops::run_staged_auto_ingest(server, staged.clone())
+        .await
+        .expect("secret-bearing ingest must complete")
+        .expect("completed ingest returns a receipt")
+}
+
+#[tokio::test]
+async fn auto_ingest_staging_does_not_persist_secret_argument_values() {
+    let server = make_server();
+    let path = "/wiki/general/auto-ingest-secret-redaction";
+    let staged = stage_secret_bearing_auto_ingest(&server, path);
+    let staged_payloads = load_auto_ingest_job_payloads(&server);
+    assert_eq!(staged_payloads.len(), 1, "one staged job after admission");
+    assert_staged_payload_carries_keys_and_digest(&staged_payloads[0]);
+    let keys = staged_payloads[0]["source"]["argument_keys"]
+        .as_array()
+        .expect("argument_keys");
+    for expected in [
+        "Authorization",
+        "api_key",
+        "custom",
+        "password",
+        "secret",
+        "token",
+        "url",
+    ] {
+        assert!(
+            keys.iter().any(|key| key == expected),
+            "argument_keys missing {expected}: {keys:?}"
+        );
+    }
+    assert_processed_events_secret_free(&server);
+
+    let receipt = complete_secret_bearing_ingest(&server, &staged).await;
+    assert_no_secret_values("returned receipt", &receipt);
+    let durable_receipt = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT event_id FROM processed_events \
+                     WHERE event_hash = ?1 AND worker = 'auto_ingest_job_receipt'",
+                    [&staged.job_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("load durable auto-ingest receipt");
+    assert_no_secret_values("durable receipt", &durable_receipt);
+    assert_processed_events_secret_free(&server);
+    assert_memories_secret_free(&server);
+    let entries = server
+        .with_global_store_read(|store| {
+            store
+                .list_by_path(path, 10, false)
+                .map_err(|error| error.to_string())
+        })
+        .expect("list ingested memories");
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0].metadata.get("argument_keys").is_some(),
+        "memory metadata must carry argument_keys: {}",
+        entries[0].metadata
+    );
+    assert!(
+        entries[0].metadata.get("arguments_digest").is_some(),
+        "memory metadata must carry arguments_digest: {}",
+        entries[0].metadata
+    );
+    let status = crate::pipeline_ops::handle_get_pipeline_status(&server)
+        .await
+        .expect("pipeline status");
+    assert_no_secret_values("pipeline status JSON", &status);
+}
+
+#[tokio::test]
+async fn auto_ingest_replay_stays_secret_free_after_completion() {
+    let server = make_server();
+    let path = "/wiki/general/auto-ingest-secret-replay";
+    let staged = stage_secret_bearing_auto_ingest(&server, path);
+    let _receipt = complete_secret_bearing_ingest(&server, &staged).await;
+
+    let replayed = crate::pipeline_ops::run_staged_auto_ingest(&server, staged.clone())
+        .await
+        .expect("completed job replay remains available")
+        .expect("replay returns the durable receipt");
+    assert_no_secret_values("replayed receipt", &replayed);
+    let replayed_json: Value = serde_json::from_str(&replayed).expect("replay receipt JSON");
+    assert_eq!(replayed_json["status"], "replayed");
+
+    let pending_cycle = crate::pipeline_ops::replay_pending_auto_ingest_once(&server)
+        .await
+        .expect("pending replay after completion is a no-op");
+    assert_eq!(pending_cycle, 0, "completed jobs must not re-enter pending replay");
+
+    assert_processed_events_secret_free(&server);
+    assert_memories_secret_free(&server);
+    let durable_receipt = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT event_id FROM processed_events \
+                     WHERE event_hash = ?1 AND worker = 'auto_ingest_job_receipt'",
+                    [&staged.job_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("load durable receipt after replay");
+    assert_no_secret_values("durable receipt after replay", &durable_receipt);
+}
+
+#[tokio::test]
+async fn legacy_v1_auto_ingest_job_is_quarantined_without_secret_forensics() {
+    let server = make_server();
+    let job_id = "legacy-v1-unredacted-arguments-job";
+    let legacy_payload = json!({
+        "schema": "tachi.admitted_mcp_ingest.v1",
+        "job_id": job_id,
+        "source": {
+            "capability_id": "mcp:legacy-reader",
+            "tool_name": "read",
+            "label": "legacy-reader:read",
+            "url": null,
+            "arguments": {
+                "Authorization": SECRET_LEGACY_V1
+            }
+        },
+        "content_digest": "deadbeef",
+        "target": {
+            "scope": "global",
+            "project": null,
+            "domain": "general",
+            "path_prefix": "/wiki/general/legacy-v1-quarantine"
+        },
+        "target_digest": "deadbeef",
+        "policy": {
+            "auto_chunk": true,
+            "auto_summarize": true,
+            "auto_link": true,
+            "importance": 0.7,
+            "chunk_size_chars": 1200,
+            "chunk_overlap_chars": 120
+        },
+        "policy_digest": "deadbeef",
+        "idempotency_key": "deadbeef",
+        "request": {
+            "content": "legacy v1 replay fixture",
+            "source": "legacy-reader:read",
+            "path_prefix": "/wiki/general/legacy-v1-quarantine",
+            "auto_chunk": true,
+            "auto_summarize": true,
+            "auto_link": true,
+            "importance": 0.7,
+            "scope": "global",
+            "domain": "general",
+            "chunk_size_chars": 1200,
+            "chunk_overlap_chars": 120,
+            "metadata": {
+                "capability_id": "mcp:legacy-reader",
+                "tool_name": "read",
+                "arguments": {
+                    "Authorization": SECRET_LEGACY_V1
+                },
+                "auto_ingest": true
+            }
+        }
+    });
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO processed_events (event_hash, event_id, worker, created_at) \
+                     VALUES (?1, ?2, 'auto_ingest_job', STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    rusqlite::params![job_id, legacy_payload.to_string()],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject legacy v1 staged job");
+
+    let replay = crate::pipeline_ops::run_staged_auto_ingest(
+        &server,
+        crate::pipeline_ops::StagedAutoIngest {
+            job_id: job_id.to_string(),
+        },
+    )
+    .await
+    .expect("legacy v1 must quarantine rather than fail closed as retryable drift");
+    assert!(
+        replay.is_none(),
+        "legacy v1 must never execute: {replay:?}"
+    );
+
+    let (pending, forensic) = server
+        .with_global_store_read(|store| {
+            let pending = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM processed_events WHERE worker = 'auto_ingest_job'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let forensic = store
+                .connection()
+                .query_row(
+                    "SELECT event_id FROM processed_events \
+                     WHERE event_hash = ?1 AND worker = 'auto_ingest_job_dead_letter'",
+                    [job_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            Ok((pending, forensic))
+        })
+        .expect("read legacy v1 quarantine state");
+    assert_eq!(pending, 0, "legacy v1 pending row must be removed");
+    let forensic = forensic.expect("legacy v1 must leave a forensic dead-letter");
+    assert!(
+        forensic.contains("legacy_v1_staged_job_quarantined_unredacted_arguments"),
+        "quarantine must name the legacy reason loudly: {forensic}"
+    );
+    assert!(
+        !forensic.contains(SECRET_LEGACY_V1),
+        "forensic dead-letter must not copy the verbatim secret: {forensic}"
+    );
+}
+
+#[tokio::test]
+async fn auto_ingest_arguments_digest_binds_idempotency() {
+    let server = make_server();
+    let result: rmcp::model::CallToolResult = serde_json::from_value(json!({
+        "content": [{"type": "text", "text": "idempotency digest fixture"}],
+        "isError": false
+    }))
+    .expect("build digest fixture result");
+    let definition = json!({
+        "auto_ingest": true,
+        "ingest_scope": "global",
+        "ingest_domain": "general",
+        "ingest_path_prefix": "/wiki/general/auto-ingest-digest-bind",
+    });
+    let first_arguments =
+        serde_json::Map::from_iter([("note".to_string(), json!("alpha")), ("n".to_string(), json!(1))]);
+    let first = crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        &server,
+        "mcp:digest-reader",
+        "read",
+        &definition,
+        Some(&first_arguments),
+        &result,
+    )
+    .expect("first staging succeeds")
+    .expect("first job is admitted");
+    let second = crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        &server,
+        "mcp:digest-reader",
+        "read",
+        &definition,
+        Some(&first_arguments),
+        &result,
+    )
+    .expect("identical restage is not an error");
+    assert!(
+        second.is_none() || second.as_ref().map(|job| job.job_id.as_str()) == Some(first.job_id.as_str()),
+        "identical arguments must not create a second logical job: {second:?}"
+    );
+    let after_duplicate = load_auto_ingest_job_payloads(&server);
+    assert_eq!(
+        after_duplicate.len(),
+        1,
+        "identical restage must keep a single pending job"
+    );
+    assert_staged_payload_carries_keys_and_digest(&after_duplicate[0]);
+    let first_digest = after_duplicate[0]["source"]["arguments_digest"]
+        .as_str()
+        .expect("first arguments_digest")
+        .to_string();
+
+    let mutated_arguments =
+        serde_json::Map::from_iter([("note".to_string(), json!("beta")), ("n".to_string(), json!(1))]);
+    let third = crate::pipeline_ops::stage_auto_ingest_from_mcp(
+        &server,
+        "mcp:digest-reader",
+        "read",
+        &definition,
+        Some(&mutated_arguments),
+        &result,
+    )
+    .expect("value-divergent staging succeeds")
+    .expect("a different argument value is a different job");
+    assert_ne!(
+        third.job_id, first.job_id,
+        "argument value changes must change the idempotency-bound job id"
+    );
+    let after_divergent = load_auto_ingest_job_payloads(&server);
+    assert_eq!(after_divergent.len(), 2, "divergent arguments create a second job");
+    let digests: Vec<String> = after_divergent
+        .iter()
+        .map(|payload| {
+            payload["source"]["arguments_digest"]
+                .as_str()
+                .expect("arguments_digest on every staged job")
+                .to_string()
+        })
+        .collect();
+    assert!(
+        digests.iter().any(|digest| digest == &first_digest),
+        "original digest must remain: {digests:?}"
+    );
+    assert!(
+        digests.iter().any(|digest| digest != &first_digest),
+        "changed argument value must produce a different arguments_digest: {digests:?}"
     );
 }
