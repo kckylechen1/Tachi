@@ -19,7 +19,7 @@ pub(crate) use api_keys::{collect_api_key_status_with_probe_cache, KeyClass, API
 pub(crate) use inference::{
     apply_inferred_provider_failures, format_elapsed, infer_provider_from_failed_job,
 };
-pub(crate) use model::model_lanes_json;
+pub(crate) use model::{model_lanes_json, model_lanes_json_for_running_client};
 pub(crate) use probe_cache::{
     read_provider_probe_cache, refresh_provider_probe_cache, write_provider_probe_cache_report,
 };
