@@ -6,9 +6,7 @@ use serde::Deserialize;
 mod ingest;
 mod search;
 mod wiki;
-pub use ingest::{
-    ExtractFactsParams, IngestEventParams, IngestParams, IngestSourceParams, Message,
-};
+pub use ingest::{ExtractFactsParams, IngestEventParams, IngestSourceParams, Message};
 pub use search::{
     FindSimilarMemoryParams, HybridWeightsParam, SearchMemoryParams,
     MAX_SEARCH_CANDIDATES_PER_CHANNEL, MAX_SEARCH_TOP_K,
@@ -276,16 +274,6 @@ pub struct ListMemoriesParams {
     pub include_archived: bool,
 
     /// Optional project name to list a specific project DB.
-    #[serde(default)]
-    pub project: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub struct DeleteMemoryParams {
-    /// Memory entry ID to delete
-    pub id: String,
-
-    /// Optional project name to delete from a specific project DB.
     #[serde(default)]
     pub project: Option<String>,
 }

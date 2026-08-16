@@ -1,4 +1,5 @@
 pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
+    "tachi_a2a",
     "tachi_tools",
     "tachi_wiki_search",
     "recommend_capability",
@@ -42,6 +43,7 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
 ];
 
 pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
+    "tachi_a2a",
     "tachi_wiki_write",
     "tachi_wiki_ingest",
     "extract_facts",
@@ -65,7 +67,7 @@ pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
 
 pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // #1099: `handoff_check`/`handoff_leave` direct routes retired (leave/
-    // check superseded by sticky/orchestrator, see #1016). `tachi_handoff`
+    // check superseded by A2A/orchestrator, see #1016). `tachi_handoff`
     // survives, narrowed to its one action without a replacement
     // (`promote_issue`).
     // Facade coordination tools
@@ -110,6 +112,7 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
 /// Standard profile allow-list. Intersected with all bundles so the IDE/CLI
 /// tool tray stays small and focused on daily facade entrypoints.
 pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    "tachi_a2a",
     // Active tool discovery for the current profile
     "tachi_tools",
     // Runtime identity / DB routing self-check for embedded clients
@@ -157,6 +160,7 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
 /// delegate tray — workers use `tachi_skill(action='run')`. The tool stays
 /// registered for explicit allow-lists / older injection paths.
 pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    "tachi_a2a",
     "tachi_tools",
     "runtime_info",
     // Unified memory facade (daily actions only under action policy)

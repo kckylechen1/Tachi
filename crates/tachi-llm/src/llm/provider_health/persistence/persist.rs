@@ -112,17 +112,13 @@ impl super::super::super::LlmClient {
             // #1585 D2: this writes `vault_key_health`, a product table.
             required_profile: memcore::StoreProfile::TachiFull,
         };
-        match memcore::MemoryStore::open_with_context_and_busy_timeout(
+        match memcore::MemoryStore::open_and_vault_upsert_key_health_with_context_and_busy_timeout(
             db_path,
             &open_context,
             PROVIDER_HEALTH_PERSIST_SQLITE_BUSY_TIMEOUT,
+            &health,
         ) {
-            Ok(store) => {
-                store
-                    .vault_upsert_key_health(&health)
-                    .map_err(|err| Self::provider_health_persist_error(&target, err))?;
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(err) => Err(Self::provider_health_persist_error(&target, err)),
         }
     }

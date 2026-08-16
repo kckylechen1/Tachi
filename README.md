@@ -46,10 +46,10 @@ This line makes Tachi's project-cycle direction explicit:
 - Continuity memory is now typed: session captures, memory writes, outcome
   labels, projections, and active patterns can be stored and queried as durable
   project context.
-- Pattern memory now has an explicit feedback loop: `tachi_memory`
-  `action="search" scope="patterns"` records `seen`, while `tachi_memory`
-  `action="pattern_feedback"` records reviewed `hit`, `miss`, and `stale`
-  signals without promoting anything into skills automatically.
+- Pattern memory has an explicit evidence loop: pattern search remains read-only,
+  while admitted completion and close-loop paths append context-bound,
+  replay-idempotent evidence internally. Models cannot submit feedback that
+  retunes ranking or promotes patterns into skills.
 - `tachi_task` can guide a full issue/PR/doc lifecycle: intake, doc index,
   verification status, PR handoff, release notes, reference
   building, and close-loop writes back to memory/wiki/docs.
@@ -307,7 +307,7 @@ tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
 ### 7. Agent Coordination
 - **Ghost Whispers** — persistent topic-based pub/sub between agents (`ghost_publish`, `ghost_subscribe`, `ghost_ack`, `ghost_reflect`, `ghost_promote`).
 - **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (`post_card`, `check_inbox`, `update_card`).
-- **Handoff issue promotion** — create/link a GitHub issue from an existing handoff memo (`tachi_handoff(action='promote_issue')`). #1099: the older `handoff_leave`/`handoff_check` memo-passing routes are retired — use `tachi_memory(action='sticky_leave'|'sticky_check')` for a short agent-to-agent note, or `tachi_orchestrator(action='handoff_write'|'handoff_read')` for a structured task baton.
+- **Handoff issue promotion** — create/link a GitHub issue from an existing handoff memo (`tachi_handoff(action='promote_issue')`). #1099: the older `handoff_leave`/`handoff_check` memo-passing routes are retired — use `tachi_a2a(action='respond')` for same-host advisory messaging, or `tachi_orchestrator(action='handoff_write'|'handoff_read')` for a structured task baton.
 
 > Ghost and Kanban tools are native `admin`-profile surfaces (not bundled into `standard`/`coordinate`). Most agents coordinate through the `tachi_handoff`, `tachi_gh(action='close_loop')`, `tachi_orchestrator`, and `tachi_task` facades instead.
 

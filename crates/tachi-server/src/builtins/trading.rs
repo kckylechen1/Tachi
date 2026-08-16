@@ -81,7 +81,7 @@ pub(super) fn builtin_trading_skills() -> Result<Vec<HubCapability>, String> {
             "Ephemeral position snapshot template and integration contract.",
             json!({
                 "prompt": "Capture a position snapshot. Input:\n{{input}}",
-                "content": "# /skills/trading/position-snapshot\n\nCapture current holdings, cost basis, stop, and shadow-book diff.\n\n## Retention\nEphemeral unless promoted into a thesis or lesson.\n\n## Integration point\nAfter `PortfolioManager.buy()` / `PortfolioManager.sell()`, call:\n`tachi_memory(action=\"ingest\", ingest_type=\"event\", event_type=\"trade_execution\", content={...}, domain=\"trading\", path_prefix=f\"/trading/journal/{ticker}\")`",
+                "content": "# /skills/trading/position-snapshot\n\nCapture current holdings, cost basis, stop, and shadow-book diff.\n\n## Retention\nEphemeral unless promoted into a thesis or lesson.\n\n## Integration point\nAfter `PortfolioManager.buy()` / `PortfolioManager.sell()`, save a concise position snapshot with:\n`tachi_memory(action=\"save\", text=\"Position snapshot: {holdings, cost_basis, stop, shadow_book_diff}\", domain=\"trading\", path=f\"/trading/journal/{ticker}\", retention_policy=\"ephemeral\")`",
                 "policy": { "visibility": "discoverable" },
                 "domain": "trading",
                 "skill_path": "/skills/trading/position-snapshot",
@@ -90,7 +90,7 @@ pub(super) fn builtin_trading_skills() -> Result<Vec<HubCapability>, String> {
                 "integration_points": [
                     {
                         "system": "PortfolioManager.buy()/sell()",
-                        "call": "tachi_memory(action='ingest', ingest_type='event', event_type='trade_execution', content={...}, domain='trading', path_prefix='/trading/journal/{ticker}')"
+                        "call": "tachi_memory(action='save', text='Position snapshot: {holdings, cost_basis, stop, shadow_book_diff}', domain='trading', path='/trading/journal/{ticker}', retention_policy='ephemeral')"
                     }
                 ],
                 "tags": ["trading", "position", "preset"]

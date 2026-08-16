@@ -772,20 +772,6 @@ export class MemoryMcpClient {
     return out;
   }
 
-  async deleteMemory(id: string): Promise<boolean> {
-    if (!this.availableTools.has("tachi_memory")) {
-      throw new Error("tachi_memory tool is unavailable");
-    }
-    const payload = await this.callJson<unknown>("tachi_memory", {
-      action: "delete",
-      id,
-    });
-    if (!isRecord(payload)) {
-      return false;
-    }
-    return payload.deleted === true;
-  }
-
   async memoryStats(): Promise<unknown> {
     return await this.callJson<unknown>("memory_stats", {});
   }

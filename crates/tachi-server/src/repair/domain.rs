@@ -1,5 +1,6 @@
 //! R9 — deterministic domain normalization/backfill.
 
+use rusqlite::{Transaction, TransactionBehavior};
 use serde_json::json;
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
@@ -126,8 +127,8 @@ pub(crate) fn repair_target(
 
 type Candidate = (String, String, String);
 
-fn collect_candidates(ctx: &DbContext) -> Result<Vec<Candidate>, RepairError> {
-    let mut stmt = ctx.conn.prepare(
+fn collect_candidates(tx: &Transaction<'_>) -> Result<Vec<Candidate>, RepairError> {
+    let mut stmt = tx.prepare(
         "SELECT id, path, category, source, domain
          FROM memories
          ORDER BY id",
@@ -146,7 +147,11 @@ fn collect_candidates(ctx: &DbContext) -> Result<Vec<Candidate>, RepairError> {
     for row in rows {
         let (id, path, category, source, domain) = row?;
         if let Some(target) = repair_target(domain.as_deref(), &path, &category, &source) {
-            out.push((id, target, path));
+            match memcore::db::refuse_retired_sticky_row_within_tx(tx, &id, "domain-repaired") {
+                Ok(()) => out.push((id, target, path)),
+                Err(memcore::MemoryError::InvalidArg(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     Ok(out)
@@ -163,7 +168,10 @@ impl RepairRule for DomainRepair {
 
     fn dry_run(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut report = RuleReport::new(self.id(), self.name(), ctx.label.clone());
-        let candidates = collect_candidates(ctx)?;
+        let tx = ctx
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let candidates = collect_candidates(&tx)?;
         if !candidates.is_empty() {
             let mut by_target = std::collections::BTreeMap::<String, usize>::new();
             for (_, target, _) in &candidates {
@@ -175,17 +183,20 @@ impl RepairRule for DomainRepair {
                 })),
             );
         }
+        tx.commit()?;
         Ok(report)
     }
 
     fn apply(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
-        let candidates = collect_candidates(ctx)?;
         let mut report = RuleReport::new(self.id(), self.name(), ctx.label.clone());
+        let tx = ctx
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let candidates = collect_candidates(&tx)?;
         if candidates.is_empty() {
+            tx.commit()?;
             return Ok(report);
         }
-
-        let tx = ctx.conn.transaction()?;
         let mut by_target = std::collections::BTreeMap::<String, usize>::new();
         for (id, target, _) in &candidates {
             tx.execute(

@@ -34,7 +34,6 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             valid_from: None,
             valid_until: None,
             metadata: None,
-            emit_continuity: false,
             files: Vec::new(),
             format: None,
         }))

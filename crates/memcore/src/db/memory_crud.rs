@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{Map, Value};
 use std::sync::{Mutex, MutexGuard};
 
@@ -920,22 +920,7 @@ impl crate::MemoryStore {
         mutations: &[ValidatedReferenceMutation],
         policy: NearDuplicatePolicy,
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
-        if self.path_validation && !self.policy.path_validation_escape_hatch {
-            let allow_cross = entry
-                .metadata
-                .get("allow_cross_project")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if let Err(error) =
-                crate::path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
-            {
-                eprintln!(
-                    "warning: path-routing validation rejected write db_label={} path={} error={}",
-                    self.db_label, entry.path, error
-                );
-                return Err(MemoryError::InvalidArg(error.to_string()));
-            }
-        }
+        self.validate_write_path(entry)?;
 
         let db_label = self.db_label.clone();
         let vec_available = self.vec_available;
@@ -964,15 +949,7 @@ impl crate::MemoryStore {
         metadata_patch: &Map<String, Value>,
         mutations: &[ValidatedReferenceMutation],
     ) -> Result<InsertMemoryResult, MemoryError> {
-        if self.path_validation && !self.policy.path_validation_escape_hatch {
-            let allow_cross = entry
-                .metadata
-                .get("allow_cross_project")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            crate::path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
-                .map_err(|error| MemoryError::InvalidArg(error.to_string()))?;
-        }
+        self.validate_write_path(entry)?;
         let db_label = self.db_label.clone();
         let vec_available = self.vec_available;
         let authorization = self.reserved_reference_write.clone();
@@ -3758,9 +3735,27 @@ pub fn delete(
     if trimmed.is_empty() {
         return Err(MemoryError::InvalidArg("empty ID".to_string()));
     }
-    refuse_reserved_rem_operation_mutation(trimmed, "deleted")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let deleted = delete_memory_within_tx(&tx, trimmed, vec_available, profile)?;
+    tx.commit()?;
+    Ok(deleted)
+}
 
-    let tx = conn.transaction()?;
+/// Canonical exact-id deletion inside a caller-owned writer transaction.
+/// Operator maintenance uses this seam so prepared-receipt publication and
+/// every associated-index cleanup share one commit boundary.
+pub(crate) fn delete_memory_within_tx(
+    tx: &Connection,
+    id: &str,
+    vec_available: bool,
+    profile: StoreProfile,
+) -> Result<bool, MemoryError> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(MemoryError::InvalidArg("empty ID".to_string()));
+    }
+    refuse_reserved_rem_operation_mutation(trimmed, "deleted")?;
+    refuse_retired_sticky_row_within_tx(tx, trimmed, "deleted")?;
     // Delete from main table and check if anything was actually removed
     tx.execute("DELETE FROM memories WHERE id = ?1", params![trimmed])?;
     let deleted = tx.changes() > 0;
@@ -3768,7 +3763,7 @@ pub fn delete(
     if deleted {
         // Clean up FTS index
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![trimmed])?;
-        delete_memories_symbolic_fts(&tx, trimmed)?;
+        delete_memories_symbolic_fts(tx, trimmed)?;
 
         if vec_available {
             tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed])?;
@@ -3797,11 +3792,13 @@ pub fn delete(
         }
     }
 
-    tx.commit()?;
     Ok(deleted)
 }
 
-fn refuse_reserved_rem_operation_mutation(id: &str, action: &str) -> Result<(), MemoryError> {
+pub(crate) fn refuse_reserved_rem_operation_mutation(
+    id: &str,
+    action: &str,
+) -> Result<(), MemoryError> {
     if crate::namespace::is_reserved_wiki_rem_id(id) {
         return Err(MemoryError::InvalidArg(format!(
             "invariant: reserved REM operation {id} cannot be {action} through a generic lifecycle seam"
@@ -3810,14 +3807,51 @@ fn refuse_reserved_rem_operation_mutation(id: &str, action: &str) -> Result<(), 
     Ok(())
 }
 
-pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
+/// Refuse every ordinary mutation of a pre-existing retired sticky row.
+///
+/// The lookup deliberately accepts only a caller-owned transaction so the
+/// retirement decision and the mutation share one writer snapshot. A missing
+/// row is not retired and preserves each public by-id API's established no-op
+/// semantics. The typed sticky-cutover implementation does not call this
+/// ordinary-writer seam; its frozen-plan CAS remains the sole exception.
+pub fn refuse_retired_sticky_row_within_tx(
+    tx: &Connection,
+    id: &str,
+    operation: &str,
+) -> Result<(), MemoryError> {
+    let row = tx
+        .query_row(
+            "SELECT path, category FROM memories WHERE id = ?1",
+            [id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if let Some((path, category)) = row {
+        crate::path_router::validate_retired_sticky_write(&path, &category).map_err(|error| {
+            MemoryError::InvalidArg(format!(
+                "retired sticky row {id} cannot be {operation} through an ordinary writer: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn archive_memory_within_tx(tx: &Connection, id: &str) -> Result<bool, MemoryError> {
     refuse_reserved_rem_operation_mutation(id, "archived")?;
+    refuse_retired_sticky_row_within_tx(tx, id, "archived")?;
     let now = now_utc_iso();
-    conn.execute(
+    tx.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0",
         params![now, id],
     )?;
-    Ok(conn.changes() > 0)
+    Ok(tx.changes() > 0)
+}
+
+pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let changed = archive_memory_within_tx(&tx, id)?;
+    tx.commit()?;
+    Ok(changed)
 }
 
 pub fn archive_memory_if_revision(
@@ -3825,13 +3859,26 @@ pub fn archive_memory_if_revision(
     id: &str,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let changed = archive_memory_revision_within_tx(&tx, id, expected_revision)?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub fn archive_memory_revision_within_tx(
+    tx: &Connection,
+    id: &str,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
     refuse_reserved_rem_operation_mutation(id, "archived")?;
+    refuse_retired_sticky_row_within_tx(tx, id, "revision-archived")?;
     let now = now_utc_iso();
-    conn.execute(
+    tx.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0 AND revision = ?3",
         params![now, id, expected_revision],
     )?;
-    Ok(conn.changes() > 0)
+    let changed = tx.changes() > 0;
+    Ok(changed)
 }
 
 pub fn restore_archived_if_revision(
@@ -3839,13 +3886,26 @@ pub fn restore_archived_if_revision(
     id: &str,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let changed = restore_archived_revision_within_tx(&tx, id, expected_revision)?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub fn restore_archived_revision_within_tx(
+    tx: &Connection,
+    id: &str,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
     refuse_reserved_rem_operation_mutation(id, "restored")?;
+    refuse_retired_sticky_row_within_tx(tx, id, "restored")?;
     let now = now_utc_iso();
-    conn.execute(
+    tx.execute(
         "UPDATE memories SET archived = 0, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 1 AND revision = ?3",
         params![now, id, expected_revision],
     )?;
-    Ok(conn.changes() > 0)
+    let changed = tx.changes() > 0;
+    Ok(changed)
 }
 
 /// Mark a memory as superseded by a newer/canonical memory. Superseded rows are
@@ -3855,10 +3915,23 @@ pub fn supersede_memory(
     id: &str,
     superseded_by: &str,
 ) -> Result<bool, MemoryError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let changed = supersede_memory_within_tx(&tx, id, superseded_by)?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub(crate) fn supersede_memory_within_tx(
+    tx: &Connection,
+    id: &str,
+    superseded_by: &str,
+) -> Result<bool, MemoryError> {
     if id == superseded_by {
         return Ok(false);
     }
     refuse_reserved_rem_operation_mutation(id, "superseded")?;
+    refuse_retired_sticky_row_within_tx(tx, id, "superseded")?;
+    refuse_retired_sticky_row_within_tx(tx, superseded_by, "used as a supersession target")?;
     let now = now_utc_iso();
     // Closing valid_until at supersession time turns the superseded row into a
     // point-in-time-recoverable version: `as_of` before `now` still returns it,
@@ -3866,14 +3939,14 @@ pub fn supersede_memory(
     // an explicitly-set validity window intact. NOTE: this invalidation is
     // specific to supersession; archive_memory (stale/dedup eviction) must NOT
     // close valid_until, since a GC'd fact may still have been true.
-    conn.execute(
+    tx.execute(
         "UPDATE memories
          SET superseded_by = ?1, updated_at = ?2, revision = revision + 1,
              valid_until = COALESCE(valid_until, ?2)
          WHERE id = ?3 AND superseded_by IS NULL",
         params![superseded_by, now, id],
     )?;
-    Ok(conn.changes() > 0)
+    Ok(tx.changes() > 0)
 }
 
 /// Mark a memory as superseded only when its revision is the one the caller
@@ -3889,15 +3962,20 @@ pub fn supersede_memory_if_revision(
         return Ok(false);
     }
     refuse_reserved_rem_operation_mutation(id, "superseded")?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    refuse_retired_sticky_row_within_tx(&tx, id, "revision-superseded")?;
+    refuse_retired_sticky_row_within_tx(&tx, superseded_by, "used as a supersession target")?;
     let now = now_utc_iso();
-    conn.execute(
+    tx.execute(
         "UPDATE memories
          SET superseded_by = ?1, updated_at = ?2, revision = revision + 1,
              valid_until = COALESCE(valid_until, ?2)
          WHERE id = ?3 AND superseded_by IS NULL AND revision = ?4",
         params![superseded_by, now, id, expected_revision],
     )?;
-    Ok(conn.changes() > 0)
+    let changed = tx.changes() > 0;
+    tx.commit()?;
+    Ok(changed)
 }
 
 #[cfg(test)]
@@ -3911,12 +3989,15 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE memories (
                 id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                category TEXT NOT NULL,
                 superseded_by TEXT,
                 updated_at TEXT,
                 valid_until TEXT,
                 revision INTEGER NOT NULL
             );
-            INSERT INTO memories (id, revision) VALUES ('source', 4);",
+            INSERT INTO memories (id, path, category, revision)
+            VALUES ('source', '/ordinary/source', 'fact', 4);",
         )
         .unwrap();
 

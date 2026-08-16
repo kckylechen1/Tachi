@@ -3,6 +3,11 @@ use super::super::*;
 pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
     let mut out = Vec::new();
     out.push("# Feature Briefing".to_string());
+    out.push(markdown_section(
+        "A2A Responses",
+        value.get("a2a_responses").and_then(Value::as_array),
+        "No pending A2A responses.",
+    ));
     out.push(format!(
         "\n## Objective\n{}",
         value
@@ -74,10 +79,15 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
         value.get("relevant_profiles").and_then(Value::as_array),
         "No dispatch profiles ranked.",
     ));
+    let wiki_empty = value
+        .get("wiki_warning")
+        .and_then(Value::as_str)
+        .filter(|warning| !warning.is_empty())
+        .unwrap_or("No wiki hits.");
     out.push(markdown_section(
         "Wiki Decisions / Lessons",
         value.get("wiki_hits").and_then(Value::as_array),
-        "No wiki hits.",
+        wiki_empty,
     ));
     out.push(markdown_section(
         "Memory Fragments / Checkpoints",

@@ -36,6 +36,20 @@ pub fn label_for(entry: &DbEntry) -> String {
 /// files like openclaw_legacy `.sqlite`).
 pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Result<Vec<DbEntry>, String> {
     let want = filter.map(|s| s.trim().to_string());
+    let mut entries = select_manifest_dbs(manifest, want.as_deref())?;
+
+    if entries.is_empty() {
+        if let Some(w) = want.as_deref() {
+            if let Some(entry) = explicit_path_entry(w) {
+                entries.push(entry);
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+fn select_manifest_dbs(manifest: &Manifest, filter: Option<&str>) -> Result<Vec<DbEntry>, String> {
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
 
@@ -50,7 +64,7 @@ pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Result<Vec<DbEnt
         if !crate::path_utils::manifest_db_leaf_exists(entry)? {
             continue;
         }
-        if want.as_ref().is_some_and(|want| !matches(entry, want)) {
+        if filter.is_some_and(|want| !matches(entry, want)) {
             continue;
         }
         let key = std::fs::canonicalize(&entry.path)
@@ -59,14 +73,6 @@ pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Result<Vec<DbEnt
             .to_string();
         if seen.insert(key) {
             entries.push(entry.clone());
-        }
-    }
-
-    if entries.is_empty() {
-        if let Some(w) = want.as_deref() {
-            if let Some(entry) = explicit_path_entry(w) {
-                entries.push(entry);
-            }
         }
     }
 
@@ -120,6 +126,19 @@ fn explicit_path_entry(want: &str) -> Option<DbEntry> {
 /// ambiguous.
 pub fn resolve_one(manifest: &Manifest, want: &str) -> Result<Option<DbEntry>, String> {
     let hits = select_dbs(manifest, Some(want))?;
+    if hits.len() == 1 {
+        Ok(hits.into_iter().next())
+    } else {
+        Ok(None)
+    }
+}
+
+/// Resolve exactly one entry originating in the manifest itself.
+///
+/// Unlike [`resolve_one`], this never synthesizes an explicit-path repair
+/// entry for a valid Tachi DB outside the manifest inventory.
+pub fn resolve_manifest_one(manifest: &Manifest, want: &str) -> Result<Option<DbEntry>, String> {
+    let hits = select_manifest_dbs(manifest, Some(want.trim()))?;
     if hits.len() == 1 {
         Ok(hits.into_iter().next())
     } else {

@@ -46,6 +46,11 @@ pub(super) const FOUNDRY_CHANNEL_CAPACITY: usize = 256;
 #[derive(Clone)]
 pub(crate) struct EnrichmentRuntime {
     pub(crate) enrich_tx: mpsc::Sender<EnrichmentItem>,
+    /// Process-lifetime identity used to deduplicate dispatch of durable
+    /// admitted-ingest intents while making a restart eligible to re-dispatch.
+    pub(crate) durable_dispatch_runtime_id: Arc<str>,
+    #[cfg(test)]
+    pub(crate) retained_enrich_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<EnrichmentItem>>>>,
 }
 
 #[derive(Clone)]

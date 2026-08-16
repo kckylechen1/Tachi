@@ -2,8 +2,7 @@ use super::*;
 
 #[test]
 fn setup_report_detects_readiness_from_local_state() {
-    let home =
-        crate::utils::test_fixture_path(format!("tachi-setup-report-{}", uuid::Uuid::new_v4()));
+    let home = test_fixture_path(format!("tachi-setup-report-{}", uuid::Uuid::new_v4()));
     let app_home = home.join(".tachi");
     let global_db = app_home.join("global").join("memory.db");
     let project_db = home.join("repo").join(".tachi").join("memory.db");
@@ -32,7 +31,7 @@ fn setup_report_detects_readiness_from_local_state() {
         ("ENABLE_PIPELINE".to_string(), "true".to_string()),
     ]);
 
-    let report = crate::bootstrap::build_setup_report(
+    let report = api::build_setup_report(
         &home,
         &app_home,
         &global_db,

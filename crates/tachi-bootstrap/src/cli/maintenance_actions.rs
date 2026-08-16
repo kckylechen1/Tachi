@@ -8,6 +8,60 @@ pub const DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS: u64 = 7;
 /// part of a live build.
 pub const DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS: u64 = 7;
 
+/// Canonical operator-only garbage-collection workflow.
+///
+/// Planning is read-only. Applying is irreversible and accepts only a saved
+/// plan whose exact database identity and candidate set still match.
+#[derive(Subcommand, Debug, Clone)]
+pub enum GcAction {
+    /// Inspect one manifest-authorized Tachi database and write a body-free plan.
+    Plan {
+        /// Exact physical database selected through the manifest.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// New plan artifact path. Existing files are never overwritten.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
+    /// Irreversibly apply one previously saved plan.
+    Apply {
+        /// Saved plan artifact to validate and apply.
+        #[arg(long, value_name = "PATH")]
+        plan: PathBuf,
+        /// Acknowledge that garbage collection is irreversible.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// Canonical operator-only exact-memory deletion workflow.
+///
+/// There is deliberately no query, path, category, bulk, or restore form.
+#[derive(Subcommand, Debug, Clone)]
+pub enum DeleteAction {
+    /// Inspect one exact memory id in one manifest-authorized Tachi database.
+    Plan {
+        /// Exact physical database selected through the manifest.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// Exact memory id. Missing ids produce an honest no-op plan.
+        #[arg(long)]
+        id: String,
+        /// New plan artifact path. Existing files are never overwritten.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
+    /// Irreversibly apply one previously saved exact-id plan.
+    Apply {
+        /// Saved plan artifact to validate and apply.
+        #[arg(long, value_name = "PATH")]
+        plan: PathBuf,
+        /// Acknowledge that deletion is irreversible.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 /// Machine-local execution profile. This is separate from agent dispatch
 /// profiles: it controls the highest side-effect level allowed on this host.
 #[derive(Subcommand, Debug, Clone)]

@@ -22,13 +22,8 @@ pub const DEFAULT_RECALL_COVERAGE_CANDIDATES_PER_CHANNEL: usize = 20;
 pub const RECALL_COVERAGE_EQUIVALENCE_SCHEMA_VERSION: &str =
     "tachi.recall_coverage.reviewed_equivalence.v1";
 
-const PATH_LIST_ONLY_NAMESPACES: [&str; 5] = [
-    "/guide",
-    "/cards",
-    "/sticky",
-    "/components/v0",
-    "/agent/checkpoints",
-];
+const PATH_LIST_ONLY_NAMESPACES: [&str; 4] =
+    ["/guide", "/cards", "/components/v0", "/agent/checkpoints"];
 
 /// Explicit, action-scoped options for [`run_recall_coverage_probe`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

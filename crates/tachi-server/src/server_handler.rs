@@ -175,15 +175,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     let destructive = matches!(
         name,
         "archive_memory"
-            // #757-fold fix (gpt-5.6-terra review): `delete_memory`/
-            // `memory_gc` were destructive on main; folding them into
-            // `tachi_memory(action='delete'|'gc')` dropped the tool off this
-            // list entirely (falling to the `false` default below), which
-            // fails open on the MCP destructive_hint. `tachi_task` is
-            // already annotated destructive wholesale despite having
-            // read-only actions (status/plan/board/...) — same tool-level
-            // (not action-aware) precedent applies here.
-            | "tachi_memory"
             | "tachi_task"
             | "tachi_staff"
             | "tachi_orchestrator"
@@ -273,10 +264,9 @@ fn describe_allowed_task_actions(allowed: &[&str]) -> String {
     }
 }
 
-/// Intersect the advertised `tachi_task.action` enum with the same action
-/// policy used at call time. This keeps ordinary profiles from planning around
-/// operator-only Tachi dispatch and prevents restricted profiles from seeing
-/// capabilities they cannot invoke. Admin retains the complete schema.
+/// Intersect each gated facade's advertised action enum with the same policy
+/// used at call time. This keeps projected schemas from teaching a caller an
+/// action the server will deny. Admin retains the complete schema.
 fn narrow_gated_action_schemas(
     tools: &mut [rmcp::model::Tool],
     profile: Option<tachi_hub::ToolProfile>,
@@ -286,23 +276,69 @@ fn narrow_gated_action_schemas(
         return;
     }
     for tool in tools.iter_mut() {
-        if tool.name.as_ref() != "tachi_task" {
-            continue;
+        match tool.name.as_ref() {
+            "tachi_task" => {
+                let allowed: Vec<&str> = tachi_params::TachiTaskAction::primary_wire_strings()
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_task", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required task memory, policy, or ledger action. Ordinary local delegation uses the host harness's native subagent. Recommendations are advisory and do not authorize an execution backend. GitHub PR lifecycle is tachi_gh only.",
+                );
+                hide_operator_dispatch_properties(tool);
+                let action_summary = describe_allowed_task_actions(&allowed);
+                tool.description = Some(std::borrow::Cow::Owned(format!(
+                    "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
+                )));
+            }
+            "tachi_a2a" => {
+                let allowed: Vec<&str> = tachi_params::TACHI_A2A_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_a2a", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required same-host advisory-mailbox action allowed by the active profile.",
+                );
+                if !allowed.contains(&"respond") {
+                    hide_a2a_respond_properties(tool);
+                }
+            }
+            _ => {}
         }
-        let allowed: Vec<&str> = tachi_params::TachiTaskAction::primary_wire_strings()
-            .iter()
-            .copied()
-            .filter(|action| {
-                tachi_hub::facade_action_allowed("tachi_task", Some(action), Some(profile))
-            })
-            .collect();
-        narrow_action_enum_property(tool, &allowed);
-        hide_operator_dispatch_properties(tool);
-        let action_summary = describe_allowed_task_actions(&allowed);
-        tool.description = Some(std::borrow::Cow::Owned(format!(
-            "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
-        )));
     }
+}
+
+fn hide_a2a_respond_properties(tool: &mut rmcp::model::Tool) {
+    let mut schema = (*tool.input_schema).clone();
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        schema.clear();
+        schema.insert("not".to_string(), serde_json::json!({}));
+        tool.input_schema = std::sync::Arc::new(schema);
+        return;
+    };
+    for property in [
+        "recipient_agent_identity_id",
+        "subject_ref",
+        "text",
+        "idempotency_key",
+        "ttl_days",
+    ] {
+        properties.remove(property);
+    }
+    tool.input_schema = std::sync::Arc::new(schema);
 }
 
 /// Apply the production profile, action-schema, and annotation projection used
@@ -420,8 +456,19 @@ fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
 /// Intersect the existing `properties.action.enum` with `allowed`. An absent
 /// enum fails closed to an empty set rather than advertising an action that
 /// runtime policy rejects.
-fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
+fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str], description: &str) {
     let mut schema = (*tool.input_schema).clone();
+    let referenced_values = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|properties| properties.get("action"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|action| action.get("$ref"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .and_then(|name| schema.get("$defs")?.get(name))
+        .and_then(|definition| definition.get("enum"))
+        .cloned();
     let Some(action_prop) = schema
         .get_mut("properties")
         .and_then(|p| p.as_object_mut())
@@ -433,6 +480,16 @@ fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
         tool.input_schema = std::sync::Arc::new(schema);
         return;
     };
+    // schemars may emit a small enum directly or behind a local `$defs`
+    // reference. Inline the latter before filtering so the projected wire is
+    // self-contained and the same helper covers every gated facade.
+    if !action_prop.contains_key("enum") {
+        action_prop.remove("$ref");
+        if let Some(values) = referenced_values {
+            action_prop.insert("enum".to_string(), values);
+            action_prop.insert("type".to_string(), serde_json::json!("string"));
+        }
+    }
     let values = action_prop
         .entry("enum")
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
@@ -447,10 +504,7 @@ fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
     }
     action_prop.insert(
         "description".to_string(),
-        serde_json::Value::String(
-            "Required task memory, policy, or ledger action. Ordinary local delegation uses the host harness's native subagent. Recommendations are advisory and do not authorize an execution backend. GitHub PR lifecycle is tachi_gh only."
-                .to_string(),
-        ),
+        serde_json::Value::String(description.to_string()),
     );
     tool.input_schema = std::sync::Arc::new(schema);
 }
@@ -488,6 +542,9 @@ struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
     agent_identity_id: Option<String>,
+    /// Present-but-blank/illegal `tachiAgentIdentity` / `X-Tachi-Agent-Identity`
+    /// must not collapse to "absent" and fall through to process env (#1761).
+    agent_identity_error: Option<String>,
     project: Option<String>,
     /// A caller that sent a malformed project identity must not silently
     /// become an unbound session. In particular, HTTP permits opaque obs-text
@@ -569,6 +626,12 @@ impl MemoryServer {
                 None,
             ));
         }
+        if let Some(err) = identity.agent_identity_error.as_deref() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("malformed agent identity assertion: {err}"),
+                None,
+            ));
+        }
         let profile = identity
             .profile
             .as_deref()
@@ -627,9 +690,18 @@ fn http_session_identity(
             header_string(parts, crate::session_identity::HEADER_PROFILE).or(identity.profile);
         identity.client =
             header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
-        identity.agent_identity_id =
-            header_string(parts, crate::session_identity::HEADER_AGENT_IDENTITY)
-                .or(identity.agent_identity_id);
+        match header_string_result(parts, crate::session_identity::HEADER_AGENT_IDENTITY) {
+            Ok(Some(value)) => {
+                if let Err(err) = assign_explicit_agent_identity(&mut identity, value) {
+                    identity.agent_identity_error = Some(err);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                identity.agent_identity_id = None;
+                identity.agent_identity_error = Some(err);
+            }
+        }
         match header_string_result(parts, crate::session_identity::HEADER_PROJECT) {
             Ok(Some(value)) => {
                 identity.project = Some(value);
@@ -662,12 +734,37 @@ fn http_session_identity(
             Ok(None) => {}
             Err(err) => identity.workspace_root_error = Some(err),
         }
+        // HTTP has request Parts. Env fallback is stdio/local only
+        // (#1761): a daemon process env must not confer identity on a
+        // direct-connect session that omitted both `_meta` and header.
+        return identity;
+    }
+    if identity.agent_identity_id.is_none() && identity.agent_identity_error.is_none() {
+        identity.agent_identity_id = crate::session_identity::agent_identity_from_env_value(
+            std::env::var(crate::session_identity::ENV_AGENT_IDENTITY)
+                .ok()
+                .as_deref(),
+        );
     }
     identity
 }
 
 /// Extract session identity fields from MCP initialize `_meta` (#732).
 /// Headers still win when both are present (applied after this helper).
+fn assign_explicit_agent_identity(
+    identity: &mut HttpSessionIdentity,
+    value: String,
+) -> Result<(), String> {
+    if crate::session_identity::valid_agent_identity_assertion(&value) {
+        identity.agent_identity_id = Some(value);
+        identity.agent_identity_error = None;
+        Ok(())
+    } else {
+        identity.agent_identity_id = None;
+        Err("agent identity assertion is invalid".to_string())
+    }
+}
+
 fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessionIdentity {
     let mut identity = HttpSessionIdentity::default();
     let Some(meta) = meta else {
@@ -677,8 +774,21 @@ fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessio
         .or_else(|| meta_string(meta, "tachi.profile"));
     identity.client = meta_string(meta, crate::session_identity::META_CLIENT)
         .or_else(|| meta_string(meta, "tachi.client"));
-    identity.agent_identity_id = meta_string(meta, crate::session_identity::META_AGENT_IDENTITY)
-        .or_else(|| meta_string(meta, "tachi.agentIdentity"));
+    match meta_string_result(meta, crate::session_identity::META_AGENT_IDENTITY) {
+        Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
+            Ok(()) => {}
+            Err(err) => identity.agent_identity_error = Some(err),
+        },
+        Ok(None) => match meta_string_result(meta, "tachi.agentIdentity") {
+            Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
+                Ok(()) => {}
+                Err(err) => identity.agent_identity_error = Some(err),
+            },
+            Ok(None) => {}
+            Err(err) => identity.agent_identity_error = Some(err),
+        },
+        Err(err) => identity.agent_identity_error = Some(err),
+    }
     match meta_string_result(meta, crate::session_identity::META_PROJECT) {
         Ok(Some(value)) => identity.project = Some(value),
         Ok(None) => match meta_string_result(meta, "tachi.project") {
@@ -954,30 +1064,13 @@ impl ServerHandler for MemoryServer {
                 self.check_session_rate_limit(name, &args_hash)?
             };
 
-            // #757-fold fix (gpt-5.6-terra review, CONCERN): `tachi_doctor_scan`
-            // was in CACHEABLE_TOOLS pre-fold (read-only). Folding it into
-            // `tachi_memory(action='doctor_scan')` moved it under the
-            // tool-name-level `tachi_memory` entry in CACHE_INVALIDATING_TOOLS
-            // (needed because every OTHER tachi_memory action is a genuine
-            // read/write mix), which would invalidate the whole tool cache —
-            // including unrelated cached reads from other tools — on every
-            // doctor_scan call. The cache key already hashes the full
-            // arguments (including `action`), so this facade's one read-only
-            // action can be carved out precisely without touching the
-            // mutating actions' invalidation.
-            let is_memory_doctor_scan_read = name == "tachi_memory"
-                && action_arg
-                    .as_deref()
-                    .map(|action| action.eq_ignore_ascii_case("doctor_scan"))
-                    .unwrap_or(false);
-
             // ─── Phantom Tools: cache invalidation on write ops ──────────
-            if CACHE_INVALIDATING_TOOLS.contains(&name) && !is_memory_doctor_scan_read {
+            if CACHE_INVALIDATING_TOOLS.contains(&name) {
                 self.tool_cache_lock().clear();
             }
 
             // ─── Phantom Tools: check cache for read-only tools ──────────
-            let is_cacheable = CACHEABLE_TOOLS.contains(&name) || is_memory_doctor_scan_read;
+            let is_cacheable = CACHEABLE_TOOLS.contains(&name);
             let cache_key = if is_cacheable {
                 let args_str = params
                     .arguments
@@ -1183,7 +1276,8 @@ mod tests {
     /// router-sum listing has exactly one copy to keep in sync with
     /// `server_state/init.rs`.
     fn native_tools() -> Vec<rmcp::model::Tool> {
-        (MemoryServer::continuity_tool_router()
+        (MemoryServer::a2a_tool_router()
+            + MemoryServer::continuity_tool_router()
             + MemoryServer::component_tool_router()
             + MemoryServer::copilot_tool_router()
             + MemoryServer::dispatch_tool_router()
@@ -1216,6 +1310,72 @@ mod tests {
         let ann = tool.annotations.expect("annotations set");
         assert_eq!(ann.read_only_hint, Some(true));
         assert_eq!(ann.destructive_hint, Some(false));
+    }
+
+    /// Break caught: tools/list exposing a write action or its payload fields
+    /// to a profile whose call-time gate permits only status.
+    #[test]
+    fn projected_a2a_schema_matches_profile_action_gate() {
+        fn projected(profile: tachi_hub::ToolProfile) -> rmcp::model::Tool {
+            project_tool_definitions(native_tools(), Some(profile), None)
+                .into_iter()
+                .find(|tool| tool.name.as_ref() == "tachi_a2a")
+                .expect("profile-visible tachi_a2a")
+        }
+
+        let observe = projected(tachi_hub::ToolProfile::observe());
+        let observe_properties = observe.input_schema["properties"]
+            .as_object()
+            .expect("observe a2a properties");
+        assert_eq!(
+            observe_properties["action"]["enum"],
+            json!(["status"]),
+            "projection must advertise exactly the call-time-allowed action"
+        );
+        for respond_only in [
+            "recipient_agent_identity_id",
+            "subject_ref",
+            "text",
+            "idempotency_key",
+            "ttl_days",
+        ] {
+            assert!(
+                !observe_properties.contains_key(respond_only),
+                "observe schema leaked respond-only field {respond_only}"
+            );
+        }
+        assert!(observe_properties.contains_key("limit"));
+        assert!(tachi_hub::facade_action_allowed(
+            "tachi_a2a",
+            Some("status"),
+            Some(tachi_hub::ToolProfile::observe())
+        ));
+        assert!(!tachi_hub::facade_action_allowed(
+            "tachi_a2a",
+            Some("respond"),
+            Some(tachi_hub::ToolProfile::observe())
+        ));
+
+        let remember = projected(tachi_hub::ToolProfile::remember());
+        let remember_properties = remember.input_schema["properties"]
+            .as_object()
+            .expect("remember a2a properties");
+        assert_eq!(
+            remember_properties["action"]["enum"],
+            json!(["respond", "status"])
+        );
+        for respond_field in [
+            "recipient_agent_identity_id",
+            "subject_ref",
+            "text",
+            "idempotency_key",
+            "ttl_days",
+        ] {
+            assert!(
+                remember_properties.contains_key(respond_field),
+                "remember schema lost respond field {respond_field}"
+            );
+        }
     }
 
     #[test]
@@ -1573,6 +1733,31 @@ mod tests {
         assert!(identity.client.is_none());
         assert!(identity.project.is_none());
         assert!(identity.project_error.is_none());
+        assert!(identity.agent_identity_id.is_none());
+        assert!(
+            identity.agent_identity_error.is_none(),
+            "absent identity key must stay error-free so env can fill (#1761)"
+        );
+    }
+
+    #[test]
+    fn initialize_meta_blank_or_illegal_agent_identity_is_error_not_absence() {
+        for value in [json!("   "), json!("agent identity"), json!(12345)] {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                crate::session_identity::META_AGENT_IDENTITY.to_string(),
+                value,
+            );
+            let identity = identity_from_initialize_meta(Some(&rmcp::model::Meta(map)));
+            assert!(
+                identity.agent_identity_id.is_none(),
+                "a present unusable identity must not bind"
+            );
+            assert!(
+                identity.agent_identity_error.is_some(),
+                "present-but-blank/illegal identity must block env fallback (#1761)"
+            );
+        }
     }
 
     #[test]
@@ -1792,6 +1977,7 @@ mod tests {
             profile: None,
             client: None,
             agent_identity_id: None,
+            agent_identity_error: None,
             project: Some("sigil".to_string()),
             project_error: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
@@ -1810,6 +1996,7 @@ mod tests {
             profile: None,
             client: None,
             agent_identity_id: None,
+            agent_identity_error: None,
             project: None,
             project_error: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
@@ -1831,13 +2018,8 @@ mod tests {
         );
     }
 
-    /// #757-fold fix (gpt-5.6-terra review): `delete_memory`/`memory_gc` were
-    /// destructive-annotated on main; the fold into `tachi_memory(action=
-    /// 'delete'|'gc')` dropped `tachi_memory` off the destructive list
-    /// entirely, so it fell through to `destructive_hint=false`. Assert the
-    /// unified facade is annotated destructive again.
     #[test]
-    fn tachi_memory_facade_is_annotated_destructive() {
+    fn tachi_memory_facade_is_not_destructive_after_maintenance_retirement() {
         let mut tool: rmcp::model::Tool = serde_json::from_value(json!({
             "name": "tachi_memory",
             "description": "tool tachi_memory",
@@ -1850,8 +2032,8 @@ mod tests {
         annotate_tool(&mut tool);
         assert_eq!(
             tool.annotations.expect("annotations set").destructive_hint,
-            Some(true),
-            "tachi_memory must be destructive_hint=true (fronts delete/gc, both destructive)"
+            Some(false),
+            "tachi_memory no longer fronts delete or GC"
         );
     }
 

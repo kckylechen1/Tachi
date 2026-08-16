@@ -1,0 +1,49 @@
+{
+  "schema_version": "memory_action_contract.v1",
+  "active_examples": [
+    { "action": "search", "query": "deployment decision" },
+    { "action": "get", "id": "memory-id" },
+    { "action": "save", "text": "A reviewed decision", "path": "/project/decisions/example" },
+    { "action": "briefing" },
+    { "action": "checkpoint", "summary": "Completed the bounded slice" },
+    { "action": "alerts" },
+    { "action": "ask", "query": "What evidence supports this?" },
+    { "action": "extract_facts", "text": "Raw session notes" },
+    { "action": "consolidate", "ids": ["memory-a", "memory-b"] }
+  ],
+  "retired_actions": [
+    "pattern_feedback",
+    "progress",
+    "readiness",
+    "delete",
+    "gc",
+    "doctor_scan",
+    "ingest",
+    "ingest_source"
+  ],
+  "active_contract_files": [
+    "README.md",
+    "prompts/tachi_addendum.md",
+    "docs/INSTALL.md",
+    "docs/engineering/architecture/downstream-sync-surface.md",
+    "docs/engineering/architecture/facade-granularity-and-profile-alignment.md",
+    "docs/engineering/architecture/host-adapter-lifecycle-v1.md",
+    "docs/engineering/architecture/kernel-surface-v1.fixture.json",
+    "docs/engineering/architecture/library-identity-runtime.md",
+    "docs/engineering/architecture/pattern-timeline-bonding-memory.md",
+    "docs/engineering/architecture/tachi-continuity-memory-architecture.md",
+    "integrations/openclaw/README.md",
+    "integrations/openclaw/index.ts",
+    "integrations/openclaw/mcp-client.ts",
+    "crates/tachi-server/src/builtins/trading.rs",
+    "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs"
+  ],
+  "historical_exclusions": [
+    "CHANGELOG.md",
+    "docs/archive/",
+    "docs/engineering/receipts/",
+    "docs/wiki/",
+    "historical plans",
+    "docs/engineering/architecture/execution-surface-census-v1.fixture.json"
+  ]
+}

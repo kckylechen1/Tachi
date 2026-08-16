@@ -189,7 +189,7 @@ per-user calibration as the unit until there is a second user.
 Constraint 1 is the *input* side (who produces the label). This is the *output* side
 (what a produced label does), and it is currently a no-op. Code-verified 2026-07-04:
 
-- `pattern_feedback(event="miss")` records the miss end-to-end into
+- The former explicit model feedback route recorded a `miss` end-to-end into
   `metadata.counters.miss` (`continuity_ops/projection/entry.rs:281,392-394,422-426`) —
   so a miss is *visible*.
 - But nothing *consumes* it. `build_projection_entry` discards it (`entry.rs:510`,
@@ -215,7 +215,7 @@ Design decision — split by cost:
   discarding `_miss`. The exact threshold is calibration-pending (Constraint 3), but the
   floor invariant is non-negotiable: **`miss >= hit` must not promote and must
   down-weight** — a falsified pattern may not rank as a confirmed one. This makes manual
-  `pattern_feedback(miss)` and cold-seat down-marks lower a pattern's standing *today*.
+  reviewed miss evidence and cold-seat down-marks lower a pattern's standing *today*.
 - **Hard, gated on Constraint 1:** automatic hit/miss from `fwd_return`. Until it exists,
   the cheap half at least honors a *human / cold-seat* miss instead of swallowing it.
 
