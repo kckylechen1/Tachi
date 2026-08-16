@@ -607,7 +607,7 @@ async fn handle_tachi_status_detail(
             "provider_health": status_provider_health_json(server),
             "provider_pools": server.llm.provider_pool_statuses(),
             "provider_probe_cache": snapshot.provider_probe_cache,
-            "models": status_health::model_lanes_json(),
+            "models": status_health::model_lanes_json_for_running_client(&server.llm.runtime_config()),
             "agent_readiness": readiness,
         });
         render_status_response(&value, format)

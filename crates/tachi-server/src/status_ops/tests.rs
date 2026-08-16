@@ -24,6 +24,7 @@ fn daemon_running() -> serde_json::Value {
 mod coldpath_scoping;
 mod daemon_manifest;
 mod dispatch_eval;
+mod embedding_dimension_pin;
 mod markers_errors;
 mod snapshot_labels;
 mod unregistered_project_dbs;

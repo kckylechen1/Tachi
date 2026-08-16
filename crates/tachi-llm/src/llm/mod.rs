@@ -8,9 +8,17 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 mod auth_probe;
+/// tachi#1681 D3/D7 PR-B: env-chain → catalog import. Public because the
+/// status projection (tachi-server) and the #1685 consumer cutover both
+/// consume the projection; nothing in this crate reads the catalog back.
+pub mod catalog_import;
 mod chat_lanes;
 mod circuit_breaker;
 mod embedding;
+/// tachi#1681 D3: the guarded escape hatch for the embedding model —
+/// an override must declare its output dimension, and a declaration that
+/// disagrees with the stored index is refused at resolution.
+pub mod embedding_config;
 mod helpers;
 mod provider_health;
 mod rerank;
@@ -22,6 +30,7 @@ pub use auth_probe::{
 };
 pub use chat_lanes::ReasoningOutcome;
 pub(crate) use circuit_breaker::{CircuitBreakerRegistry, LaneOutageTracker};
+pub use embedding::voyage_embeddings_endpoint;
 pub use provider_health::ProviderSecret;
 pub use provider_health::{
     ChatLaneConfig, CompletionStatusV1, Generated, LaneFallbackConfig, ModelEngineKindV1,
@@ -117,6 +126,32 @@ impl LlmClient {
     /// Configured rerank provider (resolved at construction).
     pub fn rerank_config(&self) -> &RerankConfig {
         &self.rerank_config
+    }
+
+    /// The lane configuration this client is **actually running on**.
+    ///
+    /// Reassembled from the client's own fields rather than re-read from env,
+    /// which is the whole point: a caller that calls
+    /// `ProviderRuntimeConfig::from_env()` a second time gets *a* config, not
+    /// *this client's* config, and the two differ exactly where it matters —
+    /// a client built through [`Self::new_with_config`] (every injected-config
+    /// caller, and every test) would be described by somebody else's process
+    /// environment. `catalog_import`'s deployment rows are a projection of
+    /// this value, so "the catalog equals the env resolution" is a statement
+    /// about the running client instead of a tautology about two calls to the
+    /// same env reader.
+    ///
+    /// Cross-provider fallbacks (#1197) are deliberately not included:
+    /// `ProviderRuntimeConfig` does not model them, and a fallback lane is a
+    /// separate deployment question that #1681 D2's alias governance owns.
+    pub fn runtime_config(&self) -> ProviderRuntimeConfig {
+        ProviderRuntimeConfig {
+            extract: self.extract.clone(),
+            summary: self.summary.clone(),
+            reasoning: self.reasoning.clone(),
+            distill: self.distill.clone(),
+            rerank: self.rerank_config.clone(),
+        }
     }
 
     pub(crate) fn provider_materialization_guard(&self) -> Result<MutexGuard<'_, ()>, String> {

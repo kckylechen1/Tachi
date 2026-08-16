@@ -47,6 +47,8 @@ mod events;
 mod gc;
 mod gc_candidates_ops;
 mod graph;
+#[cfg(feature = "admin")]
+mod model_catalog_ops;
 mod read_ops;
 #[cfg(feature = "admin")]
 mod sandbox_ops;

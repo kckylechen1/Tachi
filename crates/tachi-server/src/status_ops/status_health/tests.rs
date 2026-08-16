@@ -822,3 +822,275 @@ fn auth_probe_targets_resolve_by_env_name_and_refuse_everything_else() {
     );
     assert_eq!(auth_probe_descriptor_for_env_name(""), None);
 }
+
+// ─── model lanes are a projection, not a mirror (tachi#1681 D7 PR-B, item 3) ──
+
+/// The mirror-is-dead discriminator. A hand-maintained JSON copy would keep
+/// reporting the compiled-in default no matter what the env chain resolved;
+/// the projection cannot.
+#[test]
+fn model_lanes_report_the_resolved_extract_lane_not_a_hardcoded_literal() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _model = EnvRestore::set("EXTRACT_MODEL", "Qwen/Qwen3.5-480B-status-projection");
+    let _base = EnvRestore::set("EXTRACT_BASE_URL", "https://status-projection.test/v1/chat");
+
+    let lanes = model_lanes_json();
+
+    assert_eq!(
+        lanes["extract"]["model"],
+        json!("Qwen/Qwen3.5-480B-status-projection"),
+        "status must report the model the env chain actually resolved"
+    );
+    assert_eq!(
+        lanes["extract"]["endpoint"],
+        json!("https://status-projection.test/v1/chat")
+    );
+    assert_eq!(
+        lanes["extract"]["catalog_source"],
+        json!("env"),
+        "and say where that came from"
+    );
+    assert_eq!(lanes["extract"]["deployment_id"], json!("env:extract"));
+    assert_eq!(
+        lanes["extract"]["keys"],
+        json!(["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"]),
+        "the key precedence chain keeps the shape its consumers read"
+    );
+}
+
+/// Status and catalog are one derivation, so they cannot disagree — and, per
+/// the module doc's "which config" section, that derivation must be the
+/// *running client's* config, not a fresh read of ambient env. The prior
+/// revision of this test called `ProviderRuntimeConfig::from_env()` for both
+/// the catalog import and (transitively, through the env-reading
+/// `model_lanes_json()`) the status side, so the two calls could only ever
+/// agree tautologically: it would have stayed green even if status had kept
+/// reading env after a daemon's client was built from an injected config.
+///
+/// This version builds the config the way `server_running_injected_config()`
+/// does in `provider_config.rs`'s tests — a `ProviderRuntimeConfig` literal,
+/// not `from_env()` — and poisons the ambient `EXTRACT_*` env on top of it,
+/// mirroring `provider_config`'s
+/// `the_import_projects_the_running_client_not_the_ambient_environment`. The
+/// import side takes the injected config explicitly (as production does, via
+/// `LlmClient::runtime_config()`); the status side goes through
+/// `model_lanes_json_for_running_client(&config)`, the same production entry
+/// point `status_ops::runtime` calls with `server.llm.runtime_config()`. If
+/// status ever regresses to reading env instead, `extract`'s reported model
+/// and endpoint would flip to the poisoned ambient values and the divergence
+/// assertion below would catch it — proving status follows the running
+/// client, not the environment.
+#[test]
+fn model_lane_status_equals_the_catalog_rows_the_running_client_imports() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _ambient_model = EnvRestore::set("EXTRACT_MODEL", "__ambient-must-not-be-reported");
+    let _ambient_base = EnvRestore::set("EXTRACT_BASE_URL", "https://ambient.test/v1");
+
+    let config = tachi_llm::ProviderRuntimeConfig {
+        extract: tachi_llm::llm::ChatLaneConfig {
+            base_url: "https://injected-extract.test/v1/chat/completions".to_string(),
+            model: "injected/extract-model".to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+        },
+        summary: tachi_llm::llm::ChatLaneConfig {
+            base_url: "https://injected-summary.test/v1/chat/completions".to_string(),
+            model: "injected/summary-model".to_string(),
+            api_key_envs: vec!["SUMMARY_API_KEY"],
+        },
+        reasoning: tachi_llm::llm::ChatLaneConfig {
+            base_url: "https://injected-reasoning.test/v1/chat/completions".to_string(),
+            model: "injected/reasoning-model".to_string(),
+            api_key_envs: vec!["REASONING_API_KEY"],
+        },
+        distill: tachi_llm::llm::ChatLaneConfig {
+            base_url: "https://injected-distill.test/v1/chat/completions".to_string(),
+            model: "injected/distill-model".to_string(),
+            api_key_envs: vec!["DISTILL_API_KEY"],
+        },
+        rerank: tachi_llm::RerankConfig {
+            provider: tachi_llm::RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let _embedding_model = EnvRestore::remove(tachi_llm::EMBEDDING_MODEL_ENV);
+    let _embedding_dimension = EnvRestore::remove(tachi_llm::EMBEDDING_DIMENSION_ENV);
+    let embedding = tachi_llm::EmbeddingConfig::from_env().expect("embedding config resolves");
+    let observed_at = memcore::db::now_utc_iso();
+    // Open through the real store front door, not a bare `Connection` +
+    // `init_schema`: `MemoryStore::open_in_memory` registers the `simple` FTS
+    // tokenizer auto-extension before the schema (which creates FTS tables
+    // that depend on it) runs. A raw connection skips that registration and
+    // panics with "no such tokenizer: simple" the moment schema init tries to
+    // create those tables.
+    let store = memcore::MemoryStore::open_in_memory().expect("in-memory store");
+    let conn = store.connection();
+    tachi_llm::import_env_chat_lanes(conn, &config, &observed_at).expect("import succeeds");
+    // The embedding lane is imported into the same store and compared the same
+    // way. Comparing only the four chat lanes left the embedding half of the
+    // projection — the one carrying the dimension declaration the #1681 D3
+    // escape hatch turns on — free to drift out of the status surface unseen.
+    tachi_llm::import_env_embedding_lane(
+        conn,
+        &embedding,
+        &tachi_llm::voyage_embeddings_endpoint(),
+        &observed_at,
+    )
+    .expect("embedding import succeeds");
+
+    let stored = memcore::db::model_catalog::list_model_deployments_by_source(
+        conn,
+        memcore::catalog::CatalogSource::Env,
+    )
+    .expect("rows read");
+    assert_eq!(stored.len(), 5, "four chat lanes plus the embedding lane");
+
+    let lanes = model_lanes_json_for_running_client(&config);
+    assert_eq!(
+        lanes["extract"]["model"],
+        json!("injected/extract-model"),
+        "status must report the running client's model, not the poisoned ambient EXTRACT_MODEL"
+    );
+    assert_eq!(
+        lanes["extract"]["endpoint"],
+        json!("https://injected-extract.test/v1/chat/completions"),
+        "status must report the running client's endpoint, not the poisoned ambient \
+         EXTRACT_BASE_URL"
+    );
+    for lane in ["extract", "summary", "reasoning", "distill"] {
+        let row = stored
+            .iter()
+            .find(|row| row.deployment_id == format!("env:{lane}"))
+            .unwrap_or_else(|| panic!("catalog is missing lane {lane}"));
+
+        assert_eq!(
+            lanes[lane]["model"],
+            json!(row.provider_model_id),
+            "lane {lane}: status and catalog must report the same model"
+        );
+        assert_eq!(
+            lanes[lane]["endpoint"],
+            json!(row.endpoint_ref),
+            "lane {lane}: status and catalog must report the same endpoint"
+        );
+        assert_eq!(
+            lanes[lane]["deployment_id"],
+            json!(row.deployment_id),
+            "lane {lane}: status must name the catalog row it is projecting"
+        );
+        assert_eq!(
+            lanes[lane]["provider_account_ref"],
+            json!(row.provider_account_id),
+            "lane {lane}: status and catalog must agree on the account handle"
+        );
+    }
+
+    let embedding_row = stored
+        .iter()
+        .find(|row| row.deployment_id == "env:embedding")
+        .expect("catalog is missing the embedding lane");
+    assert_eq!(
+        lanes["embedding"]["model"],
+        json!(embedding_row.provider_model_id),
+        "the embedding lane's model must be the one the catalog recorded"
+    );
+    assert_eq!(
+        lanes["embedding"]["endpoint"],
+        json!(embedding_row.endpoint_ref),
+        "and the endpoint a request actually uses"
+    );
+    assert_eq!(
+        lanes["embedding"]["deployment_id"],
+        json!(embedding_row.deployment_id)
+    );
+    assert_eq!(
+        lanes["embedding"]["provider_account_ref"],
+        json!(embedding_row.provider_account_id)
+    );
+    assert_eq!(
+        lanes["embedding"]["catalog_source"],
+        json!(embedding_row.catalog_source.as_str())
+    );
+    assert_eq!(
+        lanes["embedding"]["expected_dimension"],
+        json!(
+            embedding_row
+                .capabilities
+                .embeddings
+                .as_ref()
+                .expect("the embedding row declares a dimension")
+                .dimension
+        ),
+        "the width status reports and the width the catalog declares are one value"
+    );
+}
+
+#[test]
+fn model_lanes_report_a_deliberate_embedding_swap_as_an_override() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _model = EnvRestore::set(tachi_llm::EMBEDDING_MODEL_ENV, "voyage-3-large");
+    let stored_width = tachi_llm::STORED_INDEX_DIMENSION.to_string();
+    let _dimension = EnvRestore::set(tachi_llm::EMBEDDING_DIMENSION_ENV, &stored_width);
+
+    let lanes = model_lanes_json();
+    assert_eq!(lanes["embedding"]["model"], json!("voyage-3-large"));
+    assert_eq!(lanes["embedding"]["model_source"], json!("env_override"));
+    assert_eq!(
+        lanes["embedding"]["expected_dimension"],
+        json!(tachi_llm::STORED_INDEX_DIMENSION)
+    );
+    assert_eq!(
+        lanes["embedding"]["deployment_id"],
+        json!("env:embedding"),
+        "the embedding lane is a catalog row like any other"
+    );
+    assert!(
+        lanes["embedding"]["config_error"].is_null(),
+        "a valid same-width swap is not an error"
+    );
+}
+
+#[test]
+fn model_lanes_report_a_refused_embedding_config_instead_of_a_plausible_model() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _model = EnvRestore::set(tachi_llm::EMBEDDING_MODEL_ENV, "some-2048-dim-model");
+    let _dimension = EnvRestore::set(tachi_llm::EMBEDDING_DIMENSION_ENV, "2048");
+
+    let lanes = model_lanes_json();
+    assert!(
+        lanes["embedding"]["config_error"]
+            .as_str()
+            .is_some_and(|err| err.contains("2048")),
+        "a refused embedding configuration must surface as an error: {}",
+        lanes["embedding"]
+    );
+    assert!(
+        lanes["embedding"]["model"].is_null(),
+        "status must not report a model it refused to configure — that is the mirror's habit \
+         this projection exists to end"
+    );
+}
+
+#[test]
+fn model_lanes_report_the_embedding_default_against_the_stored_index_width() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _model = EnvRestore::remove(tachi_llm::EMBEDDING_MODEL_ENV);
+    let _dimension = EnvRestore::remove(tachi_llm::EMBEDDING_DIMENSION_ENV);
+
+    let lanes = model_lanes_json();
+    assert_eq!(lanes["embedding"]["model"], json!("voyage-4"));
+    assert_eq!(lanes["embedding"]["model_source"], json!("default"));
+    assert_eq!(
+        lanes["embedding"]["expected_dimension"], lanes["embedding"]["stored_index_dimension"],
+        "an operator has to be able to see both numbers and that they agree"
+    );
+}
