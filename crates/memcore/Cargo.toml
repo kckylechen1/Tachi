@@ -28,6 +28,9 @@ default = ["admin"]
 # portable kernel on exactly one hash family, which is what that note was
 # protecting; a portable build resolves no `blake2` at all.
 admin = ["dep:blake2"]
+# Dependency-visible hooks used only by downstream regression tests. Normal
+# production builds never compile these seams.
+test-support = []
 # Test scaffolding for the #1681/#1682 model-broker seam: compiles
 # `model_broker_seam::StaticFixtureResolver`, a deliberately simplified
 # stand-in for #1681 PR-D's real operational resolver. Off by default and
@@ -35,9 +38,6 @@ admin = ["dep:blake2"]
 # to route through it (codex PR #1739 CONCERN-5). Enables no dependency, so it
 # is inert for the portable-kernel split.
 broker-fixtures = []
-# Dependency-visible hooks used only by downstream regression tests. Normal
-# production builds never compile these seams.
-test-support = []
 
 [dependencies]
 # Keyed-hash (MAC) primitive for tachi#1680's credential fingerprints. Optional

@@ -51,8 +51,6 @@
 //! neither of which has a live `LlmClient` to disagree with — env is the only
 //! config those two ever had, so nothing about their behavior changes.
 
-use std::path::Path;
-
 use serde_json::{json, Value};
 use tachi_llm::{
     env_chat_lane_deployments, env_embedding_deployment, voyage_embeddings_endpoint,

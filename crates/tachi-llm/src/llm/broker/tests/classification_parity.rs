@@ -204,11 +204,16 @@ fn the_transcribed_retry_phase_still_matches_the_lane_calls_source() {
     );
 
     // 429 → retry within the tier, unconditionally, while attempts remain.
+    // Re-derived 2026-08-16 for #1681 PR-C: `mark_secret_rate_limited` gained
+    // the `attribution` argument (deployment/credential dual-record) — the
+    // retry semantics the oracle transcribes are unchanged: 429 always
+    // continues within the tier while attempts remain, still fed by the
+    // delta-seconds-only `retry_after` read pinned above.
     assert_lane_calls_block(
         "429 retry",
         r#"            if status.as_u16() == 429 {
                 last_class = ProviderInvocationFailureClass::ProviderExhausted;
-                self.mark_secret_rate_limited(&selected, retry_after);
+                self.mark_secret_rate_limited(&selected, retry_after, attribution);
                 last_err = format!(
                     "API error {status}: {}",
                     redact_provider_response(&resp_text)
@@ -237,9 +242,21 @@ fn the_transcribed_retry_phase_still_matches_the_lane_calls_source() {
     // loop stopped actually sleeping and retrying — the operative half of
     // "retry within the tier" is the `sleep(...).await; continue;`, not just
     // the delay value it never uses.
+    // Re-derived 2026-08-16 for #1681 PR-C: the 5xx arm gained the
+    // deployment-only `note_deployment_http_status` record (#1681 D4) before
+    // `last_class`. The transcribed semantics are unchanged: Transient class,
+    // retry within the tier, `Retry-After` honoured for the sleep.
     assert_lane_calls_block(
         "5xx retry",
         r#"            if status.is_server_error() {
+                // #1681 D4: a 5xx is the deployment's own failure and nobody
+                // else's — deployment-only, and it cools the row down only if
+                // the provider named a `Retry-After`.
+                self.note_deployment_http_status(
+                    attribution,
+                    status.as_u16(),
+                    retry_after_header.as_deref(),
+                );
                 last_class = ProviderInvocationFailureClass::Transient;
                 last_err = format!(
                     "API error {status}: {}",
@@ -263,9 +280,23 @@ fn the_transcribed_retry_phase_still_matches_the_lane_calls_source() {
     );
 
     // Every other non-success status → return immediately, no retry at all.
+    // Re-derived 2026-08-16 for #1681 PR-C: the no-retry return gained the
+    // deployment-only observation record (402/quota + plain refusals) before
+    // returning. The oracle semantics are unchanged: everything left over
+    // returns immediately with no retry.
     assert_lane_calls_block(
         "non-success no-retry return",
         r#"            if !status.is_success() {
+                // Everything left over: a `402` (quota spent behind this
+                // deployment — throttling, per #1681 D4's 429/quota rule) and
+                // the plain refusals, `400`/`404`/`422`. The lane still fails
+                // exactly as it did; what changed is that the observation is
+                // no longer thrown away.
+                self.note_deployment_http_status(
+                    attribution,
+                    status.as_u16(),
+                    retry_after_header.as_deref(),
+                );
                 return Err(ProviderTierFailure {
                     class: ProviderInvocationFailureClass::LaneOutage,"#,
     );

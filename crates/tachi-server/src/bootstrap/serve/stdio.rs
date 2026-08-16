@@ -673,10 +673,11 @@ impl rmcp::ServerHandler for StdioProxyServer {
             let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
             let current = self.current_daemon();
             let identity = self.forwarded_agent_identity();
-            match crate::cli_client::call_daemon_tool_raw_with_identity(
+            match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
                 &current,
                 request.clone(),
                 self.client_project.as_deref(),
+                self.tool_profile,
                 identity.clone(),
             )
             .await
@@ -688,14 +689,17 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 // as-is to avoid replaying a possibly-applied write.
                 Err(err) if err.allows_in_process_fallback() => {
                     match self.refresh_daemon(&current.url).await {
-                        Some(fresh) => crate::cli_client::call_daemon_tool_raw_with_identity(
-                            &fresh,
-                            request,
-                            self.client_project.as_deref(),
-                            identity,
-                        )
-                        .await
-                        .map_err(daemon_error_data),
+                        Some(fresh) => {
+                            crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
+                                &fresh,
+                                request,
+                                self.client_project.as_deref(),
+                                self.tool_profile,
+                                identity,
+                            )
+                            .await
+                            .map_err(daemon_error_data)
+                        }
                         None => Err(daemon_error_data(err)),
                     }
                 }

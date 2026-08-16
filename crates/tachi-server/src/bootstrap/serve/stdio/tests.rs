@@ -273,6 +273,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
         let delegate_proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
             tool_profile: Some(tachi_hub::ToolProfile::delegate()),
+            resolved_agent_identity: Default::default(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -330,6 +331,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             let proxy = StdioProxyServer {
                 adapter_started_at: chrono::Utc::now(),
                 tool_profile: Some(tachi_hub::ToolProfile::observe()),
+                resolved_agent_identity: Default::default(),
                 daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
                 app_home: tachi_home.clone(),
                 global_db_path: global.clone(),
@@ -2420,6 +2422,7 @@ fn initialize_request(meta: Option<rmcp::model::Meta>) -> rmcp::model::Initializ
 fn identity_probe_proxy() -> StdioProxyServer {
     StdioProxyServer {
         adapter_started_at: chrono::Utc::now(),
+        tool_profile: None,
         daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon(None, None))),
         app_home: PathBuf::from("/tmp"),
         global_db_path: PathBuf::from("/tmp/global.db"),

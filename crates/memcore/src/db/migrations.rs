@@ -961,7 +961,7 @@ mod tests {
         run_data_migrations_with_profile(&mut conn, "global", tmp.path(), StoreProfile::TachiFull)
             .expect("v31 fixture must migrate");
 
-        assert_eq!(read_schema_version(&conn).unwrap(), 32);
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
         let body: Option<String> = conn
             .query_row(
                 "SELECT body FROM a2a_envelopes WHERE envelope_id='a2a-v32-envelope'",
@@ -1622,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn private_fresh_init_installs_v25_through_v31_migrations_once() {
+    fn private_fresh_init_installs_v25_through_v33_migrations_once() {
         let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open in-memory");
@@ -1645,6 +1645,8 @@ mod tests {
         assert_eq!(sentinel_version("v29_memory_outbox"), 1);
         assert_eq!(sentinel_version("v30_memory_outbox_destination_apply"), 1);
         assert_eq!(sentinel_version("v31_a2a_mailbox"), 1);
+        assert_eq!(sentinel_version("v32_a2a_body_retention"), 1);
+        assert_eq!(sentinel_version("v33_harness_session_attachments"), 1);
         crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
         crate::db::schema::validate_typo_fallback_attribution_schema(&conn).unwrap();
         crate::db::schema::validate_wiki_recovery_ledgers_schema(&conn).unwrap();
@@ -1708,29 +1710,29 @@ mod tests {
     }
 
     #[test]
-    fn stamped_v30_db_migrates_the_v31_attachment_ledger_before_restamping() {
+    fn stamped_v30_db_migrates_the_v33_attachment_ledger_before_restamping() {
         let (mut conn, tmp) = open_test_db();
         write_schema_version(&conn, 30).unwrap();
 
         let report = run_data_migrations(&mut conn, "global", tmp.path())
-            .expect("a stamped v30 database must receive v31");
+            .expect("a stamped v30 database must receive v33");
 
         assert_eq!(report.harness_session_attachments_schema_objects_created, 3);
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
         assert!(table_exists(&conn, "harness_session_attachments").unwrap());
-        assert!(was_run(&conn, "v31_harness_session_attachments").unwrap());
-        validate_current_schema_integrity(&conn).expect("the completed v31 shape is valid");
+        assert!(was_run(&conn, "v33_harness_session_attachments").unwrap());
+        validate_current_schema_integrity(&conn).expect("the completed v33 shape is valid");
     }
 
     #[test]
-    fn stamped_current_v31_missing_attachment_index_fails_closed_without_repair() {
+    fn stamped_current_v33_missing_attachment_index_fails_closed_without_repair() {
         let (mut conn, tmp) = open_test_db();
-        run_data_migrations(&mut conn, "global", tmp.path()).expect("current v31 fixture");
+        run_data_migrations(&mut conn, "global", tmp.path()).expect("current v33 fixture");
         conn.execute("DROP INDEX idx_harness_session_attachments_claim", [])
             .unwrap();
 
         let error = validate_current_schema_integrity(&conn)
-            .expect_err("current schema with a missing v31 index must refuse");
+            .expect_err("current schema with a missing v33 index must refuse");
         assert!(error
             .to_string()
             .contains("idx_harness_session_attachments_claim"));

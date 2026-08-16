@@ -269,6 +269,8 @@ fn an_embedding_endpoint_carrying_userinfo_is_refused_like_a_chat_lane() {
     // `VOYAGE_BASE_URL` is operator-supplied and reaches `endpoint_ref`
     // verbatim, so the embedding lane needs the same door as the chat lanes —
     // not a scrub, and not an exemption for being "just the embedding row".
+    let _ = memcore::db::enable_simple_auto_extension();
+    memcore::db::register_sqlite_vec();
     let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
     memcore::db::init_schema(&conn).expect("schema");
 

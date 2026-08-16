@@ -103,7 +103,9 @@ pub(super) struct SseFramer {
 }
 
 impl SseFramer {
-    /// A framer with no bytes seen.
+    /// A framer with no bytes seen. Only the stream-bounds tests construct a
+    /// framer directly; production always starts from the decoder.
+    #[cfg(test)]
     pub(super) fn new() -> Self {
         Self::default()
     }
