@@ -26,9 +26,9 @@
 //! The invariant every decoder must hold is
 //! `decode(rechunk(bytes, any_split)) == decode(bytes)`: an event split across
 //! two network reads must decode identically to the same bytes delivered
-//! whole. It is stated here, tested in the next slice against the transcript
-//! fixtures, because it is the property that a hand-rolled line reader almost
-//! always gets wrong.
+//! whole. It is stated here and fuzzed against the transcript corpus in
+//! `tests::stream_chunk_invariance`, because it is the property that a
+//! hand-rolled line reader almost always gets wrong.
 //!
 //! # Not one grammar
 //!
@@ -38,11 +38,13 @@
 //! shape. The fixture families are therefore per *grammar*, not per provider —
 //! which is exactly the test of whether this vocabulary is OpenAI-biased.
 //!
-//! **Nothing in this module is implemented in this slice.** The trait is
-//! defined; the OpenAI-compat adapter answers
+//! **This module is the vocabulary and the contract; no decoder lives here.**
+//! The `delta` and Anthropic-event grammars are implemented against this trait
+//! in [`super::openai_stream`] and [`super::anthropic_stream`], and
 //! [`ProviderWire::new_stream_decoder`](super::ProviderWire::new_stream_decoder)
-//! with a typed [`StreamDecoderUnavailable`] rather than a panic or a silent
-//! non-streaming downgrade.
+//! still answers with a typed [`StreamDecoderUnavailable`] — rather than a
+//! panic or a silent non-streaming downgrade — for any surface that has no
+//! decoder to hand back.
 
 use serde::{Deserialize, Serialize};
 
@@ -363,7 +365,19 @@ impl TransportErrorKind {
 /// Why a dialect handed back no stream decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StreamDecoderUnavailableReason {
-    /// The dialect has no streaming grammar at all.
+    /// No streaming grammar exists on the negotiated surface — the
+    /// intersection of what the dialect implements and what the deployment
+    /// admits. Both halves reach it: a dialect with no streaming grammar at
+    /// all, and a dialect that has one for a deployment narrowed to
+    /// `streaming: false`, which may not be handed a decoder it was told it
+    /// must not use.
+    ///
+    /// The distinction that matters to the caller is the one against
+    /// [`Self::NotImplementedYet`] — *nothing here streams* versus *the
+    /// grammar exists and this Broker has not written it* — because only the
+    /// second is a gap this Broker can close. The variant name and its wire
+    /// spelling are frozen and describe the first half of the reading above;
+    /// this note is the whole of it.
     #[serde(rename = "dialect_does_not_stream")]
     DialectDoesNotStream,
     /// The grammar exists and this Broker has not implemented it yet. A
