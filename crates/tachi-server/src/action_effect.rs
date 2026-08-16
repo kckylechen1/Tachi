@@ -169,6 +169,7 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_skill",
     "tachi_verify",
     "tachi_staff",
+    "tachi_a2a",
     // #757 Cut3-S1: folded sandbox verb is mixed read/write (set_rule/
     // set_policy mutate) — invalidate like the legacy sandbox_set_* aliases
     // above, matching the whole-facade invalidation used for tachi_memory.
@@ -244,30 +245,14 @@ pub(crate) fn facade_action_effect(
         // `handle_search_memory_with_access(..., true)` and is therefore not
         // replay-safe. The remaining classifications are preserved.
         "tachi_memory" => (
-            &[
-                "get",
-                "briefing",
-                "alerts",
-                "ask",
-                "readiness",
-                "doctor_scan",
-            ],
-            &["progress"],
+            &["get", "briefing", "alerts", "ask"],
+            &[],
             &[
                 "search",
                 "save",
                 "extract_facts",
                 "checkpoint",
                 "consolidate",
-                "pattern_feedback",
-                "delete",
-                "gc",
-                "ingest",
-                "ingest_source",
-                "claim",
-                "release",
-                "sticky_leave",
-                "sticky_check",
             ],
         ),
         "tachi_event" => (
@@ -275,6 +260,7 @@ pub(crate) fn facade_action_effect(
             &["label_eval", "context"],
             &["emit", "project", "promote"],
         ),
+        "tachi_a2a" => (&["status"], &[], &["respond"]),
         "tachi_wiki" => (&["search", "browse", "read"], &[], &["write"]),
         "tachi_task" => (
             &["status", "board", "brief"],
@@ -435,14 +421,7 @@ mod tests {
         // the raw name "remote__tachi_memory", which never matched
         // "tachi_memory" exactly, so this returned `false` (safe to replay) —
         // the exact bug the owner's adjudication comment named.
-        for action in [
-            "save",
-            "gc",
-            "claim",
-            "release",
-            "sticky_leave",
-            "sticky_check",
-        ] {
+        for action in ["save", "gc", "claim", "release"] {
             assert!(
                 dlq_unsafe("remote__tachi_memory", Some(action)),
                 "remote__tachi_memory(action='{action}') must be unsafe to replay post-#1098"
@@ -534,7 +513,6 @@ mod tests {
         for (tool, action) in [
             ("tachi_memory", "get"),
             ("tachi_memory", "briefing"),
-            ("tachi_memory", "doctor_scan"),
             ("tachi_event", "query"),
             ("tachi_event", "metrics"),
             ("tachi_wiki", "search"),
@@ -558,7 +536,6 @@ mod tests {
         for (tool, action) in [
             ("tachi_memory", "search"),
             ("tachi_memory", "save"),
-            ("tachi_memory", "delete"),
             ("tachi_event", "emit"),
             ("tachi_wiki", "write"),
             ("tachi_task", "complete"),
@@ -583,6 +560,22 @@ mod tests {
                 dlq_unsafe("tachi_task", Some(action)),
                 "retired task action {action} must fail closed for replay"
             );
+        }
+    }
+
+    #[test]
+    fn retired_memory_actions_are_unclassified() {
+        for action in [
+            "progress",
+            "readiness",
+            "delete",
+            "gc",
+            "doctor_scan",
+            "ingest",
+            "ingest_source",
+            "pattern_feedback",
+        ] {
+            assert_eq!(facade_action_effect("tachi_memory", Some(action)), None);
         }
     }
 
@@ -625,6 +618,7 @@ mod tests {
         let task_actions = tachi_params::TachiTaskAction::primary_wire_strings();
         assert_all_classified("tachi_task", &task_actions);
         assert_all_classified("tachi_event", tachi_params::TACHI_EVENT_ACTIONS);
+        assert_all_classified("tachi_a2a", tachi_params::TACHI_A2A_ACTIONS);
         assert_all_classified("tachi_wiki", tachi_params::TACHI_WIKI_ACTIONS);
         assert_all_classified("tachi_staff", tachi_params::TACHI_STAFF_ACTIONS);
         // codex checkpoint 3: "Typed TachiVerifyAction::ALL exists in

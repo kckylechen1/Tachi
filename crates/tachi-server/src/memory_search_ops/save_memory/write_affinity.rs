@@ -93,7 +93,7 @@
 //!   silently dropped from the enumeration.
 //! - **Other direct memory-row writers**: `component_governance_ops/mod.rs`,
 //!   `copilot_ops/support/skills.rs`, `memory_search_ops/eval_capture.rs`,
-//!   `handoff_ops/handlers.rs`, `kanban/handlers.rs`, `sticky_ops/handlers.rs`,
+//!   `handoff_ops/handlers.rs`, `kanban/handlers.rs`,
 //!   `wiki_ops/ingest.rs`, `wiki_ops/log.rs`.
 //!
 //! Why the remaining paths above still don't close via `with_store_for_scope`:
@@ -109,7 +109,7 @@
 //! `MemoryServer` itself — IS reachable from tachi-server, but it is shared
 //! by every read AND write in the server (reads already use the separate
 //! `_read` variants) across row kinds that are NOT domain-classified memory
-//! content in the `SaveMemoryParams` sense: a kanban card, a sticky note, a
+//! content in the `SaveMemoryParams` sense: a kanban card, a
 //! handoff memo, a component-governance record. Running THIS gate's
 //! `resolve_save_domain`/`RoutingConfig::domain_routes` logic against those
 //! would risk actively wrong behavior (e.g. rerouting a kanban card away

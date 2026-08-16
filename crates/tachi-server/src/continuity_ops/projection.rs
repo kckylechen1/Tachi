@@ -22,6 +22,8 @@ use self::entry::{
 };
 pub(super) use self::entry::{projected_path_prefix, projection_filters, projection_kind_metadata};
 
+const NON_PROJECTABLE_PATTERN_EVIDENCE_ADAPTER: &str = "tachi.pattern_evidence.v1";
+
 pub(crate) fn project_continuity_events(
     server: &MemoryServer,
     params: &TachiEventParams,
@@ -65,6 +67,25 @@ pub(crate) fn project_auto_continuity_events_for_target(
     project_continuity_events_inner(server, &target, query, Vec::new(), false, true, true)
 }
 
+/// Compute the ordinary auto-projection receipt over an in-memory event
+/// overlay. `dry_run=true` reaches the real routing, merge, counter, tier,
+/// graph, and promotion logic without persisting a projection or edge.
+pub(super) fn preview_auto_projection_with_events(
+    server: &MemoryServer,
+    target: &ContinuityEventTarget,
+    limit: usize,
+    synthetic_events: Vec<TachiEventRecord>,
+) -> Result<Value, String> {
+    let query = TachiEventQuery {
+        limit: query_limit(limit),
+        ..TachiEventQuery::default()
+    };
+    let mut events = synthetic_events;
+    events.extend(read_events(server, target, &query)?);
+    events.truncate(query_limit(limit));
+    project_continuity_event_batch(server, target, events, Vec::new(), true, true, true)
+}
+
 fn auto_projectable_event(event: &TachiEventRecord) -> bool {
     if event_projections(event).is_empty() {
         return false;
@@ -105,12 +126,40 @@ fn project_continuity_events_inner(
     project_explicit: bool,
 ) -> Result<Value, String> {
     let events = read_events(server, target, &query)?;
+    project_continuity_event_batch(
+        server,
+        target,
+        events,
+        filters,
+        dry_run,
+        auto_only,
+        project_explicit,
+    )
+}
+
+fn project_continuity_event_batch(
+    server: &MemoryServer,
+    target: &ContinuityEventTarget,
+    events: Vec<TachiEventRecord>,
+    filters: Vec<ProjectionKind>,
+    dry_run: bool,
+    auto_only: bool,
+    project_explicit: bool,
+) -> Result<Value, String> {
     let mut projected = Vec::new();
     let mut skipped = Vec::new();
     let mut errors = Vec::new();
     let mut promotion_candidates = Vec::new();
 
     for event in events {
+        if event.adapter == NON_PROJECTABLE_PATTERN_EVIDENCE_ADAPTER {
+            skipped.push(json!({
+                "event_id": event.id,
+                "event_type": event.event_type,
+                "reason": "append-only pattern evidence is not projectable",
+            }));
+            continue;
+        }
         if auto_only && !auto_projectable_event(&event) {
             skipped.push(json!({
                 "event_id": event.id,

@@ -2,7 +2,7 @@
 
 use crate::{db, error::MemoryError, types::ExpectedMemoryState, MemoryStore};
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
-use rusqlite::params;
+use rusqlite::{params, TransactionBehavior};
 
 pub const ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS: i64 = 3;
 
@@ -332,7 +332,9 @@ impl MemoryStore {
         let limit = limit.min(256) as i64;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let rows = {
             let mut stmt = tx.prepare(
@@ -384,6 +386,10 @@ impl MemoryStore {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
+
+        for row in &rows {
+            db::refuse_retired_sticky_row_within_tx(&tx, &row.id, "claimed for enrichment retry")?;
+        }
 
         for row in &rows {
             let next_attempt = row.attempts + 1;

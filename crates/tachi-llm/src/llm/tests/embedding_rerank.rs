@@ -13,7 +13,7 @@ fn voyage_batch_embeddings_accept_matching_response_indexes() {
     ];
 
     let embeddings =
-        parse_voyage_batch_embeddings(&data, 2).expect("matching indexes should parse");
+        parse_voyage_batch_embeddings(&data, 2, 1024).expect("matching indexes should parse");
 
     assert_eq!(embeddings.len(), 2);
     assert_eq!(embeddings[0][0], 0.0);
@@ -27,7 +27,7 @@ fn voyage_batch_embeddings_reject_mismatched_response_index() {
         json!({"index": 0, "embedding": embedding_values(0.0)}),
     ];
 
-    let err = parse_voyage_batch_embeddings(&data, 2)
+    let err = parse_voyage_batch_embeddings(&data, 2, 1024)
         .expect_err("out-of-order response indexes should fail");
 
     assert!(err.contains("index mismatch"));

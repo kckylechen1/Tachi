@@ -6,3 +6,4 @@ mod payload_diet;
 mod project_routing;
 mod recency;
 mod verification;
+mod wiki_degrade;

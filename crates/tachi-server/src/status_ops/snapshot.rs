@@ -298,13 +298,6 @@ pub(crate) fn list_recent_checkpoint_entries_for_project(
     rows
 }
 
-pub(crate) fn list_recent_kanban_entries(
-    server: &crate::MemoryServer,
-    limit: usize,
-) -> Vec<serde_json::Value> {
-    list_recent_entries_by_path(server, "/kanban/tasks/", limit)
-}
-
 fn list_recent_entries_by_path(
     server: &crate::MemoryServer,
     path_prefix: &str,

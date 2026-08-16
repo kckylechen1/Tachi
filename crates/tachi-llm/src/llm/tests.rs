@@ -53,9 +53,12 @@ impl Drop for EnvRestore {
 }
 
 mod auth_probe;
+mod catalog_import;
 mod chat_lanes;
 mod client_env;
 mod config_json;
+mod deployment_health;
+mod embedding_config;
 mod embedding_rerank;
 mod extract_quality_golden;
 mod provider_key_persistence;

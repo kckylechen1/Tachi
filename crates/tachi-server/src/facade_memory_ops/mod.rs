@@ -9,8 +9,6 @@ mod checkpoint_ops;
 pub(crate) mod consolidate_ops;
 mod current_work_anchor;
 mod evidence_format;
-mod pattern_feedback_ops;
-mod progress_ops;
 mod readiness_ops;
 
 use crate::facade_save_ops::finalize_tachi_save_response;
@@ -218,7 +216,6 @@ pub(crate) async fn handle_tachi_memory(
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
                 metadata,
-                emit_continuity: params.emit_continuity,
                 files: params.files.clone(),
                 format: params.format.clone(),
             };
@@ -255,182 +252,6 @@ pub(crate) async fn handle_tachi_memory(
         "alerts" => readiness_ops::handle_memory_alerts(server, &params).await,
         "ask" => readiness_ops::handle_memory_ask(server, &params).await,
         "consolidate" => consolidate_ops::handle_memory_consolidate(server, &params).await,
-        "pattern_feedback" => {
-            if let Some(body) =
-                crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)
-                    .await?
-            {
-                return Ok(body);
-            }
-            pattern_feedback_ops::handle_pattern_feedback(server, &params)
-        }
-        "progress" => progress_ops::handle_memory_progress(server, &params).await,
-        "readiness" => readiness_ops::handle_memory_readiness(server, &params).await,
-        // #1001: manual claim/release backstop for harness-native work that
-        // never routes through the briefing/intake/dispatch auto-hooks. The
-        // zero-ceremony auto-register/heartbeat path lives in
-        // `claims_ops::auto_register_or_heartbeat_claim`, called directly from
-        // those call sites; these two actions are the fallback entrypoint.
-        "claim" => {
-            let result = crate::claims_ops::handle_manual_claim(
-                server,
-                params.issue_ref.clone(),
-                params.flow_id.clone(),
-                params.branch.clone(),
-                if params.declared_file_scope.is_empty() {
-                    None
-                } else {
-                    Some(params.declared_file_scope.clone())
-                },
-            )?;
-            json_string(&result)
-        }
-        "release" => {
-            let result = crate::claims_ops::handle_manual_release(
-                server,
-                params.claim_id.clone(),
-                params.dispatch_id.clone(),
-                params.release_reason.clone(),
-            )?;
-            json_string(&result)
-        }
-        // #757 fold: standalone memory-admin + pipeline tools re-fronted as
-        // tachi_memory actions. Each arm delegates to the SAME handler the old
-        // #[tool] entry point used — re-fronting, not re-implementation.
-        "delete" => {
-            if let Some(body) =
-                crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)
-                    .await?
-            {
-                return Ok(body);
-            }
-            let id = params
-                .id
-                .clone()
-                .ok_or_else(|| "id is required when action='delete'".to_string())?;
-            crate::memory_ops::handle_delete_memory(
-                server,
-                crate::tool_params::DeleteMemoryParams {
-                    id,
-                    project: params.project.clone(),
-                },
-            )
-            .await
-        }
-        "gc" => crate::memory_ops::handle_memory_gc(server).await,
-        "doctor_scan" => crate::doctor_ops::handle_tachi_doctor_scan().await,
-        "ingest" => {
-            crate::pipeline_ops::handle_ingest(
-                server,
-                crate::tool_params::IngestParams {
-                    ingest_type: params.ingest_type.clone(),
-                    content: params.content.clone(),
-                    source_url: params.source_url.clone(),
-                    source: params.source.clone(),
-                    path_prefix: params.path_prefix.clone(),
-                    auto_chunk: params.auto_chunk,
-                    auto_summarize: params.auto_summarize,
-                    auto_link: params.auto_link,
-                    importance: params.importance.unwrap_or(0.7),
-                    scope: params
-                        .scope
-                        .clone()
-                        .unwrap_or_else(|| "project".to_string()),
-                    project: params.project.clone(),
-                    domain: params.domain.clone(),
-                    chunk_size_chars: params.chunk_size_chars,
-                    chunk_overlap_chars: params.chunk_overlap_chars,
-                    conversation_id: params.conversation_id.clone(),
-                    turn_id: params.turn_id.clone(),
-                    event_type: params.event_type.clone(),
-                    messages: params.messages.clone(),
-                    metadata: params.metadata.clone(),
-                },
-            )
-            .await
-        }
-        "ingest_source" => {
-            // #757-fold fix (gpt-5.6-terra review): the standalone
-            // `ingest_source` tool required `content: String` — a missing or
-            // non-string `content` failed deserialization before the handler
-            // ever ran (tachi-params/src/memory/ingest.rs `IngestSourceParams`).
-            // The fold silently widened that to "any JSON value, coerced to
-            // text, defaulting to empty on omission" — restore the original
-            // boundary: reject omission and non-string content with a clear
-            // error instead of coercing. (Handler-level whitespace/empty
-            // *string* content is still a legitimate, deterministic no-op
-            // "skipped" response — that behavior belongs to
-            // `handle_ingest_source` itself, see
-            // `ingest_source_empty_content_records_skip_audit`, and is
-            // unaffected by this type-level check.)
-            let content = match params.content.clone() {
-                Some(serde_json::Value::String(text)) => text,
-                Some(_) => {
-                    return Err(
-                        "content must be a string when action='ingest_source' (matches the \
-                         standalone ingest_source tool's required content: String contract)"
-                            .to_string(),
-                    )
-                }
-                None => {
-                    return Err(
-                        "content is required when action='ingest_source' (matches the \
-                         standalone ingest_source tool's required content: String contract)"
-                            .to_string(),
-                    )
-                }
-            };
-            crate::pipeline_ops::handle_ingest_source(
-                server,
-                crate::tool_params::IngestSourceParams {
-                    content,
-                    source_url: params.source_url.clone(),
-                    source: params.source.clone(),
-                    path_prefix: params.path_prefix.clone(),
-                    auto_chunk: params.auto_chunk,
-                    auto_summarize: params.auto_summarize,
-                    auto_link: params.auto_link,
-                    importance: params.importance.unwrap_or(0.7),
-                    scope: params
-                        .scope
-                        .clone()
-                        .unwrap_or_else(|| "project".to_string()),
-                    project: params.project.clone(),
-                    domain: params.domain.clone(),
-                    chunk_size_chars: params.chunk_size_chars,
-                    chunk_overlap_chars: params.chunk_overlap_chars,
-                    metadata: params.metadata.clone(),
-                },
-            )
-            .await
-        }
-        "sticky_leave" => {
-            let text = params
-                .text
-                .clone()
-                .ok_or_else(|| "text is required when action='sticky_leave'".to_string())?;
-            crate::sticky_ops::handle_sticky_leave(
-                server,
-                crate::sticky_ops::StickyLeaveInput {
-                    text,
-                    to: params.to.clone(),
-                    ttl_days: params.ttl_days,
-                    agent_id: params.agent_id.clone(),
-                },
-            )
-            .await
-        }
-        "sticky_check" => {
-            crate::sticky_ops::handle_sticky_check(
-                server,
-                crate::sticky_ops::StickyCheckInput {
-                    agent_id: params.agent_id.clone(),
-                    include_read: params.include_read,
-                    limit: Some(crate::clamp_facade_top_k(params.top_k)),
-                },
-            )
-            .await
-        }
         "recall_simulate" => Err(
             "Invalid tachi_memory action 'recall_simulate'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_simulate').".to_string()
         ),
@@ -443,18 +264,14 @@ pub(crate) async fn handle_tachi_memory(
         "apply_recall_proposals" => Err(
             "Invalid tachi_memory action 'apply_recall_proposals'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_apply').".to_string()
         ),
-        _ => Err(format!(
-            "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'pattern_feedback', 'progress', 'readiness', 'claim', 'release', 'delete', 'gc', 'doctor_scan', 'ingest', 'ingest_source', 'sticky_leave', or 'sticky_check'. Recall tuning lives on tachi_tune.",
-            params.action
-        )),
+        _ => Err(action
+            .parse::<TachiMemoryAction>()
+            .expect_err("unmatched Memory action must remain invalid")),
     }
 }
 
 fn should_forward_facade_read(action: &str) -> bool {
-    matches!(
-        action,
-        "search" | "get" | "briefing" | "alerts" | "ask" | "readiness"
-    )
+    matches!(action, "search" | "get" | "briefing" | "alerts" | "ask")
 }
 
 /// #1043 D1: build the `ExtractFactsParams` the facade hands to the real
@@ -501,7 +318,7 @@ mod tests {
 
     #[test]
     fn facade_read_actions_include_briefing_forwarding() {
-        for action in ["search", "get", "briefing", "alerts", "ask", "readiness"] {
+        for action in ["search", "get", "briefing", "alerts", "ask"] {
             assert!(
                 should_forward_facade_read(action),
                 "{action} should use daemon read forwarding"

@@ -65,6 +65,8 @@
 
 use chrono::{DateTime, Utc};
 use memcore::MemoryStore;
+use rusqlite::OptionalExtension;
+use sha2::{Digest, Sha256};
 
 use crate::claims_ops::{project_peer_presence, PeerPresenceProjection, CLAIM_TTL_SECONDS};
 use crate::server_state::MemoryServer;
@@ -161,38 +163,84 @@ impl PeerPublicationRead {
         Ok(project_peer_presence(&candidates, now_render, ttl_seconds))
     }
 
-    /// Resolve `target`'s (session_client) most-recently-heartbeated ACTIVE
-    /// claim to its `dispatch_id`, through the same single read-only
-    /// transaction / snapshot-clock discipline as [`Self::read_presence`].
-    ///
-    /// Returns `Ok(None)` — never a fabricated id — when `target` has no live
-    /// claim, or its live claim(s) carry no `dispatch_id` (a claim made
-    /// through the manual `claim`/`release` facade actions, never through
-    /// `tachi_dispatch`, legitimately has none). The caller must present this
-    /// as `empty`, not `unavailable` (sol invariant 3: the source WAS read
-    /// successfully, there is just nothing to report).
-    fn resolve_active_dispatch_id(
+    /// Resolve one target session to exactly one live, locally-admitted
+    /// AgentIdentity before teaching any response callback. A missing identity
+    /// on even one matching row is unresolved rather than a seat fallback.
+    fn resolve_active_peer_target(
         &self,
         target: &str,
         now_query: DateTime<Utc>,
         ttl_seconds: i64,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<ResolvedPeerTarget, String> {
         let conn = self.store.connection();
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let now_iso = now_query.to_rfc3339();
         let candidates =
             memcore::list_active_claims(&tx, &now_iso, ttl_seconds).map_err(|e| e.to_string())?;
+        let matching = candidates
+            .iter()
+            .filter(|claim| claim.session_client.as_deref() == Some(target))
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Err(format!(
+                "no active claim maps target '{target}' to an AgentIdentity"
+            ));
+        }
+        if matching.iter().any(|claim| {
+            claim
+                .agent_identity_id
+                .as_deref()
+                .is_none_or(|identity| identity.trim().is_empty())
+        }) {
+            return Err(format!(
+                "target '{target}' has an active claim without AgentIdentity evidence"
+            ));
+        }
+        let identities = matching
+            .iter()
+            .filter_map(|claim| claim.agent_identity_id.as_deref())
+            .collect::<std::collections::BTreeSet<_>>();
+        if identities.len() != 1 {
+            return Err(format!(
+                "target '{target}' maps to conflicting active AgentIdentity rows"
+            ));
+        }
+        let agent_identity_id = (*identities.iter().next().expect("one identity")).to_string();
+        // Automatic callbacks are live addressing, unlike direct A2A respond:
+        // the latter deliberately accepts historical locality evidence so an
+        // offline peer can receive mail at its next briefing. Here the newest
+        // admission row itself must still be local/current; a later unavailable
+        // row revokes callback eligibility without erasing that history.
+        let current_admission_state = tx
+            .query_row(
+                "SELECT state FROM identity_admissions
+                 WHERE agent_identity_id=?1
+                 ORDER BY created_at DESC,admission_id DESC LIMIT 1",
+                [&agent_identity_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "target '{target}' AgentIdentity '{agent_identity_id}' lacks a current admission"
+                )
+            })?;
+        if current_admission_state != "self_asserted" {
+            return Err(format!(
+                "target '{target}' AgentIdentity '{agent_identity_id}' current admission is '{current_admission_state}', not same-host available"
+            ));
+        }
+        let dispatch_id = matching.iter().find_map(|claim| claim.dispatch_id.clone());
         drop(tx);
-
-        // `list_active_claims` orders newest-heartbeat-first (see
-        // `project_peer_presence`'s doc comment), so the first match carrying
-        // a dispatch_id is the freshest.
-        Ok(candidates
-            .into_iter()
-            .find(|claim| {
-                claim.session_client.as_deref() == Some(target) && claim.dispatch_id.is_some()
-            })
-            .and_then(|claim| claim.dispatch_id))
+        let peer_publication_id =
+            stable_peer_publication_id(target, &agent_identity_id, dispatch_id.as_deref());
+        Ok(ResolvedPeerTarget {
+            agent_identity_id,
+            identity_assurance: current_admission_state,
+            dispatch_id,
+            peer_publication_id,
+        })
     }
 
     /// Test-only: attempt a raw write through the held connection to PROVE it is
@@ -223,19 +271,39 @@ enum RunSourceOutcome {
 
 /// Outcome of a `noun=run` read for one `target`.
 enum RunOutcome {
-    /// The claims source itself (the addressing step) could not be read.
-    ClaimsUnavailable(String),
-    /// The claims source WAS read; `target` simply has no active claim
-    /// carrying a `dispatch_id` right now. Never fabricated — `empty`, not
-    /// `unavailable` (sol invariant 3).
-    NoActiveDispatch,
+    /// Identity/addressing failed closed. The caller gets one typed error and
+    /// no callback, even when the claims table itself was readable.
+    RecipientUnresolved(String),
+    /// Identity was resolved, but that active target has no dispatch artifact.
+    NoActiveDispatch(ResolvedPeerTarget),
     /// A `dispatch_id` was resolved; its run-dir sources were (independently)
     /// attempted.
     Found {
+        peer: ResolvedPeerTarget,
         dispatch_id: String,
         status: RunSourceOutcome,
         recent_events: RunSourceOutcome,
     },
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPeerTarget {
+    agent_identity_id: String,
+    identity_assurance: String,
+    dispatch_id: Option<String>,
+    peer_publication_id: String,
+}
+
+fn stable_peer_publication_id(
+    target: &str,
+    agent_identity_id: &str,
+    dispatch_id: Option<&str>,
+) -> String {
+    let canonical = format!(
+        "{PEER_PUBLICATION_CONTRACT}\0run\0{target}\0{agent_identity_id}\0{}",
+        dispatch_id.unwrap_or("")
+    );
+    format!("pp-{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
 /// The ONLY keys a `run` noun's progress tail may ever surface (fix-round,
@@ -355,12 +423,15 @@ fn read_run(
 ) -> RunOutcome {
     let read = match PeerPublicationRead::open_global(server) {
         Ok(read) => read,
-        Err(err) => return RunOutcome::ClaimsUnavailable(err),
+        Err(err) => return RunOutcome::RecipientUnresolved(err),
     };
-    let dispatch_id = match read.resolve_active_dispatch_id(target, now_query, ttl_seconds) {
-        Ok(Some(id)) => id,
-        Ok(None) => return RunOutcome::NoActiveDispatch,
-        Err(err) => return RunOutcome::ClaimsUnavailable(err),
+    let peer = match read.resolve_active_peer_target(target, now_query, ttl_seconds) {
+        Ok(peer) => peer,
+        Err(err) => return RunOutcome::RecipientUnresolved(err),
+    };
+    let dispatch_id = match peer.dispatch_id.clone() {
+        Some(id) => id,
+        None => return RunOutcome::NoActiveDispatch(peer),
     };
     let status = match crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id) {
         Ok(Some(value)) => RunSourceOutcome::Ok(value),
@@ -376,31 +447,26 @@ fn read_run(
         }
     };
     RunOutcome::Found {
+        peer,
         dispatch_id,
         status,
         recent_events,
     }
 }
 
-/// Advisory "how to actually get a reply" pointer, attached to every `run`
-/// answer that has a `target`. MCP is client→server — nothing here can
-/// interrupt a live peer turn, so the only honest answer mechanism is the
-/// EXISTING sticky facade (#964), used as-is (this noun does not own sticky
-/// CAS or reimplement it). Deliberately hedged: the peer-addressing spine
-/// (`session_client`) and sticky's own `to`/seat identity chain
-/// (`sticky_ops::identity::resolve_caller_agent_id`) are NOT yet unified —
-/// asserting `to=<session_client>` always resolves the same seat would be
-/// overclaiming a linkage that doesn't exist yet.
-fn turn_boundary_callback(target: &str) -> serde_json::Value {
+/// Advisory "how to actually get a reply" pointer, attached only after the
+/// target has resolved to one active same-host admitted AgentIdentity. MCP is
+/// client→server, so the callback teaches the durable A2A mailbox rather than
+/// claiming it can interrupt a live peer turn.
+fn turn_boundary_callback(peer: &ResolvedPeerTarget) -> serde_json::Value {
     serde_json::json!({
-        "mechanism": "tachi_memory(action='sticky_leave', to=<peer's agent seat>)",
-        "note": format!(
-            "peers only answer at their own turn boundary (MCP is client->server, \
-             never interrupt-capable); leave a sticky note for an async reply. \
-             session_client ('{target}') and sticky's seat identity are separate \
-             addressing spaces today — resolve the peer's seat name if you don't \
-             already know it (#1016 follow-up unifies them)."
-        ),
+        "mechanism": "tachi_a2a",
+        "action": "respond",
+        "recipient_agent_identity_id": peer.agent_identity_id,
+        "subject_ref": format!("peer_publication:{}", peer.peer_publication_id),
+        "kind": "turn_response/v1",
+        "required": ["text", "idempotency_key"],
+        "note": "The response is same-host advisory text delivered at the recipient's next briefing; it grants no work or execution authority.",
     })
 }
 
@@ -538,7 +604,7 @@ fn run_envelope(
     outcome: RunOutcome,
 ) -> serde_json::Value {
     match outcome {
-        RunOutcome::ClaimsUnavailable(err) => serde_json::json!({
+        RunOutcome::RecipientUnresolved(err) => serde_json::json!({
             "contract": PEER_PUBLICATION_CONTRACT,
             "status": "unreachable",
             "target": target_block(Some(target)),
@@ -550,13 +616,16 @@ fn run_envelope(
             "result": {},
             "errors": [ {
                 "name": "claims",
-                "code": "source_unavailable",
+                "code": "recipient_unresolved",
                 "message": err,
             } ],
         }),
-        RunOutcome::NoActiveDispatch => serde_json::json!({
+        RunOutcome::NoActiveDispatch(peer) => serde_json::json!({
             "contract": PEER_PUBLICATION_CONTRACT,
             "status": "ok",
+            "peer_publication_id": peer.peer_publication_id,
+            "recipient_agent_identity_id": peer.agent_identity_id,
+            "recipient_identity_assurance": peer.identity_assurance,
             "target": target_block(Some(target)),
             "snapshot": {
                 "snapshot_at": snapshot_at,
@@ -569,9 +638,10 @@ fn run_envelope(
                 "recent_events": serde_json::Value::Null,
             },
             "errors": [],
-            "turn_boundary_callback": turn_boundary_callback(target),
+            "turn_boundary_callback": turn_boundary_callback(&peer),
         }),
         RunOutcome::Found {
+            peer,
             dispatch_id,
             status,
             recent_events,
@@ -610,6 +680,9 @@ fn run_envelope(
             serde_json::json!({
                 "contract": PEER_PUBLICATION_CONTRACT,
                 "status": overall_status,
+                "peer_publication_id": peer.peer_publication_id,
+                "recipient_agent_identity_id": peer.agent_identity_id,
+                "recipient_identity_assurance": peer.identity_assurance,
                 "target": target_block(Some(target)),
                 "snapshot": {
                     "snapshot_at": snapshot_at,
@@ -626,7 +699,7 @@ fn run_envelope(
                     "recent_events": events_value,
                 },
                 "errors": errors,
-                "turn_boundary_callback": turn_boundary_callback(target),
+                "turn_boundary_callback": turn_boundary_callback(&peer),
             })
         }
     }
@@ -1083,13 +1156,28 @@ mod tests {
         crate::MemoryServer::new(global_db, None).expect("test memory server")
     }
 
+    fn bind_run_claim_to_local_identity(
+        server: &crate::MemoryServer,
+        global_db: &std::path::Path,
+        claim_id: &str,
+    ) {
+        crate::claims_ops::admit_agent_connection(server, Some("agent.codex".to_string()), true)
+            .expect("same-host identity admission");
+        let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE session_claims SET agent_identity_id='agent.codex' WHERE claim_id=?1",
+                [claim_id],
+            )
+            .expect("bind claim to identity");
+    }
+
     #[test]
     fn run_noun_without_target_is_target_required_not_noun_not_whitelisted() {
-        // On origin/main (no `run` variant) this same call returns `denied` /
-        // `noun_not_whitelisted` (the noun itself isn't parsed). Post-fix it
-        // parses fine and is denied for a DIFFERENT, more specific reason —
-        // a real behavioral flip through the actual `handle_peer_query` entry
-        // point, not a compile-time difference.
+        // Baseline-green preservation test: `run` without a target already
+        // returned this specific denial before the A2A callback work. It guards
+        // the existing entry-point behavior and is not counted as a RED proof.
         let dir = tempfile::tempdir().unwrap();
         let server = run_test_server(dir.path());
         let body = handle_peer_query(
@@ -1107,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn run_noun_with_no_active_claim_is_empty_not_unavailable() {
+    fn run_noun_with_no_active_claim_refuses_unresolved_a2a_recipient() {
         let dir = tempfile::tempdir().unwrap();
         let server = run_test_server(dir.path());
         // No claim seeded at all for "codex".
@@ -1120,18 +1208,225 @@ mod tests {
         )
         .unwrap();
         let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(envelope["status"], "ok");
-        assert_eq!(envelope["snapshot"]["sources"][0]["name"], "claims");
-        assert_eq!(envelope["snapshot"]["sources"][0]["state"], "empty");
-        assert_eq!(envelope["result"]["dispatch_id"], serde_json::Value::Null);
+        assert_eq!(envelope["status"], "unreachable");
+        assert_eq!(envelope["errors"][0]["code"], "recipient_unresolved");
         assert!(
-            envelope["turn_boundary_callback"]["mechanism"]
-                .as_str()
-                .unwrap()
-                .contains("sticky_leave"),
-            "no-active-dispatch answer must still point at the sticky callback: {envelope}"
+            envelope.get("turn_boundary_callback").is_none(),
+            "an unresolved recipient must never receive a seat/sticky fallback callback: {envelope}"
         );
         assert_no_forbidden_keys(&envelope);
+    }
+
+    /// Break caught: teaching a seat/session callback instead of binding the
+    /// response to one active AgentIdentity and one stable publication ref.
+    #[test]
+    fn run_noun_teaches_only_identity_bound_a2a_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+        crate::claims_ops::admit_agent_connection(&server, Some("agent.codex".to_string()), true)
+            .expect("same-host recipient admission");
+        {
+            let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            memcore::insert_claim(
+                store.connection(),
+                &memcore::NewSessionClaim {
+                    claim_id: "claim-a2a-run".to_string(),
+                    session_client: Some("codex".to_string()),
+                    issue_ref: Some("org/repo#1751".to_string()),
+                    flow_id: None,
+                    dispatch_id: Some("d-a2a-run".to_string()),
+                    branch: "leaf/1751".to_string(),
+                    declared_file_scope: None,
+                    created_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
+            store
+                .connection()
+                .execute(
+                    "UPDATE session_claims SET agent_identity_id='agent.codex' WHERE claim_id='claim-a2a-run'",
+                    [],
+                )
+                .unwrap();
+        }
+        let run_dir = dir.path().join("runs").join("d-a2a-run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({"dispatch_id":"d-a2a-run"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(run_dir.join("progress.jsonl"), "").unwrap();
+
+        let query = || {
+            let body = handle_peer_query(
+                &server,
+                PeerQueryParams {
+                    target_session_client: Some("codex".to_string()),
+                    noun: "run".to_string(),
+                },
+            )
+            .unwrap();
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        };
+        let first = query();
+        let second = query();
+        let callback = &first["turn_boundary_callback"];
+        assert_eq!(callback["mechanism"], "tachi_a2a");
+        assert_eq!(callback["action"], "respond");
+        assert_eq!(callback["recipient_agent_identity_id"], "agent.codex");
+        assert!(callback["subject_ref"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("peer_publication:")));
+        assert_eq!(
+            first["peer_publication_id"], second["peer_publication_id"],
+            "the same target/noun/identity must retain one stable publication ref"
+        );
+        let serialized = callback.to_string();
+        assert!(!serialized.contains("sticky"), "{serialized}");
+        assert!(!serialized.contains("seat"), "{serialized}");
+    }
+
+    /// Break caught: arbitrarily choosing one identity when a session-client
+    /// target currently maps to conflicting live AgentIdentity rows.
+    #[test]
+    fn run_noun_refuses_conflicting_current_identity_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+        for identity in ["agent.one", "agent.two"] {
+            crate::claims_ops::admit_agent_connection(&server, Some(identity.to_string()), true)
+                .expect("same-host admission");
+        }
+        {
+            let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            for (index, identity) in ["agent.one", "agent.two"].into_iter().enumerate() {
+                let claim_id = format!("claim-conflict-{index}");
+                memcore::insert_claim(
+                    store.connection(),
+                    &memcore::NewSessionClaim {
+                        claim_id: claim_id.clone(),
+                        session_client: Some("codex".to_string()),
+                        issue_ref: Some(format!("org/repo#{}", 1751 + index)),
+                        flow_id: None,
+                        dispatch_id: Some(format!("d-conflict-{index}")),
+                        branch: "leaf/1751".to_string(),
+                        declared_file_scope: None,
+                        created_at: Utc::now().to_rfc3339(),
+                    },
+                )
+                .unwrap();
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE session_claims SET agent_identity_id=?1 WHERE claim_id=?2",
+                        rusqlite::params![identity, claim_id],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: Some("codex".to_string()),
+                noun: "run".to_string(),
+            },
+        )
+        .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["status"], "unreachable");
+        assert_eq!(envelope["errors"][0]["code"], "recipient_unresolved");
+        assert!(envelope.get("turn_boundary_callback").is_none());
+    }
+
+    /// Break caught: historical local admission is enough for a direct A2A
+    /// response, but it must not keep an automatic peer callback alive after
+    /// the recipient's newer, current admission becomes unavailable.
+    #[test]
+    fn run_noun_requires_current_local_admission_for_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+
+        memcore::insert_claim(
+            memcore::MemoryStore::open(global_db.to_str().unwrap())
+                .unwrap()
+                .connection(),
+            &memcore::NewSessionClaim {
+                claim_id: "claim-current-admission".to_string(),
+                session_client: Some("codex".to_string()),
+                issue_ref: Some("org/repo#1751".to_string()),
+                flow_id: None,
+                dispatch_id: None,
+                branch: "leaf/1751".to_string(),
+                declared_file_scope: None,
+                created_at: Utc::now().to_rfc3339(),
+            },
+        )
+        .unwrap();
+        bind_run_claim_to_local_identity(&server, &global_db, "claim-current-admission");
+
+        let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+        memcore::record_unverified_admission(
+            store.connection(),
+            "admission-current-unavailable",
+            "agent.codex",
+            "connection-current-unavailable",
+            memcore::UnverifiedAdmissionState::Unavailable,
+        )
+        .unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE identity_admissions SET created_at='2098-08-13T00:00:00.000Z' WHERE admission_id='admission-current-unavailable'",
+                [],
+            )
+            .unwrap();
+
+        let query = || {
+            let body = handle_peer_query(
+                &server,
+                PeerQueryParams {
+                    target_session_client: Some("codex".to_string()),
+                    noun: "run".to_string(),
+                },
+            )
+            .unwrap();
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        };
+        let unavailable = query();
+        assert_eq!(unavailable["status"], "unreachable");
+        assert_eq!(unavailable["errors"][0]["code"], "recipient_unresolved");
+        assert!(
+            unavailable.get("turn_boundary_callback").is_none(),
+            "a later unavailable admission must suppress the automatic callback: {unavailable}"
+        );
+
+        memcore::record_unverified_admission(
+            store.connection(),
+            "admission-current-recovered",
+            "agent.codex",
+            "connection-current-recovered",
+            memcore::UnverifiedAdmissionState::SelfAsserted,
+        )
+        .unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE identity_admissions SET created_at='2099-08-13T00:00:00.000Z' WHERE admission_id='admission-current-recovered'",
+                [],
+            )
+            .unwrap();
+
+        let recovered = query();
+        assert_eq!(recovered["status"], "ok");
+        assert_eq!(
+            recovered["turn_boundary_callback"]["recipient_agent_identity_id"],
+            "agent.codex"
+        );
+        assert_eq!(recovered["recipient_identity_assurance"], "self_asserted");
     }
 
     #[test]
@@ -1158,6 +1453,7 @@ mod tests {
             )
             .unwrap();
         }
+        bind_run_claim_to_local_identity(&server, &global_db, "claim-run-1");
 
         // Write a real run-dir: <tmp>/runs/d-run-123/{status.json,progress.jsonl}
         let run_dir = dir.path().join("runs").join("d-run-123");
@@ -1228,6 +1524,7 @@ mod tests {
             )
             .unwrap();
         }
+        bind_run_claim_to_local_identity(&server, &global_db, "claim-run-2");
         // No run_dir written on disk for d-missing-456.
 
         let body = handle_peer_query(
@@ -1289,6 +1586,7 @@ mod tests {
             )
             .unwrap();
         }
+        bind_run_claim_to_local_identity(&server, &global_db, "claim-run-3");
 
         let run_dir = dir.path().join("runs").join("d-run-789");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -1383,6 +1681,7 @@ mod tests {
             )
             .unwrap();
         }
+        bind_run_claim_to_local_identity(&server, &global_db, "claim-run-4");
         let run_dir = dir.path().join("runs").join("d-run-999");
         std::fs::create_dir_all(&run_dir).unwrap();
         std::fs::write(

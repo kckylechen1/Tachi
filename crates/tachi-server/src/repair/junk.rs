@@ -9,6 +9,7 @@
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
 use memcore::namespace::FOUNDRY_RECALL_CACHE_SOURCE;
+use rusqlite::TransactionBehavior;
 
 pub struct JunkCleanup;
 
@@ -86,15 +87,32 @@ impl RepairRule for JunkCleanup {
         let has_memories_vec = has_table(ctx, "memories_vec");
         let has_access_history = has_table(ctx, "access_history");
         let has_memory_edges = has_table(ctx, "memory_edges");
-        let tx = ctx.conn.transaction()?;
+        let tx = ctx
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let targets = {
+            let mut stmt = tx.prepare(&rerank_cache_sql())?;
+            let targets = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            targets
+        };
+        let mut ordinary_targets = Vec::new();
+        for id in targets {
+            match memcore::db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &id,
+                "deleted by junk cleanup",
+            ) {
+                Ok(()) => ordinary_targets.push(id),
+                Err(memcore::MemoryError::InvalidArg(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         tx.execute_batch("CREATE TEMP TABLE cleanup_targets(id TEXT PRIMARY KEY);")?;
-        tx.execute(
-            &format!(
-                "INSERT OR IGNORE INTO cleanup_targets {}",
-                rerank_cache_sql()
-            ),
-            [],
-        )?;
+        for id in ordinary_targets {
+            tx.execute("INSERT INTO cleanup_targets(id) VALUES (?1)", [id])?;
+        }
         let target_count = tx.query_row("SELECT COUNT(*) FROM cleanup_targets", [], |row| {
             row.get::<_, i64>(0)
         })? as usize;

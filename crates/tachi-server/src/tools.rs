@@ -46,6 +46,7 @@ pub(crate) const TASK_CONTROL_TIMEOUT_CAP_SECS: u64 = 300;
 // runtime surfaces (e.g. a deprecation listing) can read it. Until such a
 // runtime consumer exists, suppress dead_code only in non-test builds — test
 // builds keep the lint strict so genuinely-unused entries still surface.
+mod a2a_facade;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod alias_manifest;
 mod component_facade;

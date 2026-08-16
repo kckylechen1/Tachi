@@ -16,7 +16,7 @@ fn params(action: &str) -> TachiHandoffParams {
 
 /// #1099 discrimination: on origin/main, `action='leave'` created a new
 /// handoff memo (nominal success). The route is retired now — this must be
-/// a loud, actionable refusal (`Err`) pointing at the sticky replacement,
+/// a loud, actionable refusal (`Err`) pointing at the A2A replacement,
 /// not a silent no-op and not a panic on the now-removed params fields.
 /// Red on origin/main (old code returns `Ok("memo_left"...)`), green after
 /// this change (returns `Err(..)` mentioning the replacement action).
@@ -28,7 +28,7 @@ async fn tachi_handoff_leave_is_retired_not_silently_accepted() {
         .await
         .expect_err("action='leave' must be refused, not accepted");
     assert!(err.contains("#1099"), "{err}");
-    assert!(err.contains("sticky_leave"), "{err}");
+    assert!(err.contains("tachi_a2a"), "{err}");
 }
 
 /// Same discrimination for `action='check'` (on origin/main this listed
@@ -41,7 +41,7 @@ async fn tachi_handoff_check_is_retired_not_silently_accepted() {
         .await
         .expect_err("action='check' must be refused, not accepted");
     assert!(err.contains("#1099"), "{err}");
-    assert!(err.contains("sticky_check"), "{err}");
+    assert!(err.contains("tachi_a2a"), "{err}");
 }
 
 /// `promote_issue` is the one action that must still work end-to-end

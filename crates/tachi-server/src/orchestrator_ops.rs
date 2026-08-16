@@ -5,8 +5,8 @@
 //! `HandoffPacket` (below) is the **canonical structured baton** per the
 //! #1016 ruling (owner-ratified 2026-07-11): `handoff_ops`'s memo-shaped
 //! `handoff_leave`/`handoff_check` (#157-era) is deprecated in favor of this
-//! packet for resumable task state, and `sticky_ops` (#964) for short
-//! ephemeral agent-to-agent notes. See `handoff_ops` module doc for the
+//! packet for resumable task state, and typed A2A envelopes for same-host
+//! advisory messages. See `handoff_ops` module doc for the
 //! full split.
 
 use crate::server_state::MemoryServer;

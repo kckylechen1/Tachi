@@ -155,7 +155,7 @@ fn probe_db_ownership(_db_path: &Path) -> DbOwnership {
 // depending on real lsof behavior (a genuinely erroring lsof is not
 // reliably reproducible across CI environments). `pub(crate)` so every
 // call-site module's own tests can drive it via `set_ownership_inject_for_test`.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "bootstrap-test-api"), unix))]
 thread_local! {
     static INJECT_OWNERSHIP: std::cell::RefCell<Option<DbOwnership>> =
         const { std::cell::RefCell::new(None) };
@@ -166,7 +166,7 @@ thread_local! {
 /// (not `probe_db_ownership` directly) so tests can deterministically force
 /// `Owned`/`Unknown` without a real lsof/daemon fixture.
 pub(crate) fn daemon_ownership(db_path: &Path) -> DbOwnership {
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "bootstrap-test-api"), unix))]
     {
         if let Some(forced) = INJECT_OWNERSHIP.with(|c| c.borrow_mut().take()) {
             return forced;
@@ -177,7 +177,7 @@ pub(crate) fn daemon_ownership(db_path: &Path) -> DbOwnership {
 
 /// Test-only hook: force the next `daemon_ownership` call (on any thread-local
 /// caller in this test) to return `value`, or clear the override with `None`.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "bootstrap-test-api"), unix))]
 pub(crate) fn set_ownership_inject_for_test(value: Option<DbOwnership>) {
     INJECT_OWNERSHIP.with(|c| *c.borrow_mut() = value);
 }

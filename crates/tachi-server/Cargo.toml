@@ -44,6 +44,11 @@ full = [
 # staged source-gating work tracked by #924.
 portable = []
 
+# Non-default friend surface for the external bootstrap test crate (#1714).
+# It is intentionally absent from `full`: ordinary product builds must not
+# expose test fault injection, lock fixtures, or migration authority wrappers.
+bootstrap-test-api = []
+
 [dependencies]
 memcore = { path = "../memcore" }
 memory-server-capture-gate = { path = "../memory-server-capture-gate" }

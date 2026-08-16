@@ -457,6 +457,17 @@ pub(crate) async fn handle_close_loop(
         params.wiki_summary.as_deref().unwrap_or_default(),
         text.chars().take(500).collect::<String>()
     );
+    let closure_source_revision = crate::tool_params::canonical_json_sha256(&json!({
+        "issue_ref": &issue_ref,
+        "title": &title,
+        "text": &text,
+        "wiki_path": &params.wiki_path,
+        "wiki_topic": &params.wiki_topic,
+        "wiki_summary": &params.wiki_summary,
+        "doc_paths": &doc_paths,
+        "spec_paths": &spec_paths,
+        "related_issues": &related_issues,
+    }));
 
     let wiki_params = WikiWriteParams {
         title,
@@ -504,21 +515,71 @@ pub(crate) async fn handle_close_loop(
         .unwrap_or_default();
     let pattern_feedback = if pattern_refs.is_empty() {
         json!("skipped (no pattern refs attached)")
-    } else {
-        crate::continuity_ops::emit_pattern_feedback_for_refs(
-            server,
-            params.project.as_deref(),
-            &pattern_refs,
-            "hit",
-            Some(&comment_body),
-            Some("close_loop promoted a reviewed closure artifact that referenced this pattern"),
-            "tachi_gh.close_loop",
-            json!({
-                "source": "close_loop.pattern_refs",
-                "issue_ref": issue_ref,
-                "wiki_path": params.wiki_path,
+    } else if let Some(flow_id) = params
+        .flow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let verified_flow_revision =
+            crate::task_lifecycle::verified_flow_revision(flow_id, Some(&issue_ref), None);
+        let evidence_digest = crate::tool_params::canonical_json_sha256(&json!({
+            "wiki_id": wiki_json.get("id"),
+            "wiki_path": wiki_json.get("wiki_path"),
+            "pattern_refs": &pattern_refs,
+        }));
+        match (
+            verified_flow_revision,
+            closure_source_revision,
+            evidence_digest,
+        ) {
+            (Ok(Some(flow_revision)), Ok(closure_revision), Ok(evidence_digest)) => {
+                let source_revision =
+                    format!("flow:{};closure:sha256:{closure_revision}", flow_revision);
+                let evidence_digest = format!("sha256:{evidence_digest}");
+                crate::continuity_ops::append_pattern_evidence_for_refs(
+                    server,
+                    crate::continuity_ops::PatternEvidenceBatchInput {
+                        project: params.project.as_deref(),
+                        refs: &pattern_refs,
+                        default_outcome: "hit",
+                        source: crate::continuity_ops::PatternEvidenceSource::WorkflowClosure,
+                        run_id: flow_id,
+                        source_revision: &source_revision,
+                        evidence_digest: &evidence_digest,
+                    },
+                )
+            }
+            (Ok(None), _, _) => json!({
+                "status": "skipped",
+                "reason": "unverified_flow_identity",
+                "saved_count": 0,
+                "error_count": 0,
+                "events": [],
+                "errors": [],
             }),
-        )
+            (Err(error), _, _) => json!({
+                "status": "failed",
+                "reason": "flow_identity_read_failed",
+                "error": error,
+                "saved_count": 0,
+            }),
+            (_, Err(error), _) | (_, _, Err(error)) => json!({
+                "status": "failed",
+                "reason": "workflow_closure_evidence_digest_failed",
+                "error": error,
+                "saved_count": 0,
+            }),
+        }
+    } else {
+        json!({
+            "status": "skipped",
+            "reason": "missing_real_flow_id",
+            "saved_count": 0,
+            "error_count": 0,
+            "events": [],
+            "errors": [],
+        })
     };
 
     // Write-back arc: post the closure comment to the source issue (and

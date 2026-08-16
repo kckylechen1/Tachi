@@ -69,6 +69,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use memcore::db::migrations::EXPECTED_SCHEMA_VERSION;
+use memcore::path_router::UNKNOWN_DB_LABEL;
 use memcore::{DbOpenContext, MemoryStore};
 use serde::Serialize;
 
@@ -353,7 +354,14 @@ fn apply_one(
     };
 
     let ctx = DbOpenContext::open_existing_allow(MIGRATE_APPLY_APPROVED_BY);
-    match MemoryStore::open_with_label_and_context(path_str, &lib.label, &ctx) {
+    // Enumeration labels (`project:<dirname>`) are inventory names, not
+    // store-identity claims. Opening with that claim against a stamped
+    // role (`wiki`, a Plan-C hash, a bare project name) is
+    // `StoreRoleConflict` and rolls the authorized migration back — the
+    // 2026-08-14 leftover that left wiki/Sigil/Quant at schema 28 after
+    // global had already moved (#1761 / #1579). `unknown` confers nothing
+    // and lets `resolve_role` keep the stamp.
+    match MemoryStore::open_with_label_and_context(path_str, UNKNOWN_DB_LABEL, &ctx) {
         Ok(_store) => {
             let old_version_display = plan_stored_version_display(&finding);
             finding.stored_version = Some(EXPECTED_SCHEMA_VERSION);
@@ -464,6 +472,23 @@ mod tests {
     fn read_user_version(path: &Path) -> u32 {
         let conn = Connection::open(path).expect("open for version read");
         memcore::db::migrations::read_schema_version(&conn).expect("read schema version")
+    }
+
+    fn read_role_stamp(path: &Path) -> String {
+        let conn = Connection::open(path).expect("open for role stamp");
+        let value_json: String = conn
+            .query_row(
+                "SELECT value_json FROM hard_state WHERE namespace = 'store_identity' AND key = 'role'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("role stamp present");
+        let parsed: serde_json::Value = serde_json::from_str(&value_json).expect("role stamp json");
+        parsed
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .expect("role stamp value")
+            .to_string()
     }
 
     /// Build a fixture at a fully-current schema, then roll `PRAGMA
@@ -617,6 +642,72 @@ mod tests {
             has_backup,
             "#1188 migration-bak trail must be left behind by an authorized migration"
         );
+    }
+
+    #[test]
+    fn apply_migrates_when_enumeration_label_disagrees_with_store_stamp() {
+        crate::test_support::with_tachi_home(|home| {
+            let dir = tempfile::tempdir().expect("tmp");
+            let db_path = dir.path().join("wiki.db");
+            MemoryStore::open_with_label(db_path.to_str().expect("utf8"), "wiki")
+                .expect("seed wiki-stamped store");
+            {
+                let conn = Connection::open(&db_path).expect("reopen to roll back stamp");
+                conn.execute_batch(&format!(
+                    "PRAGMA user_version = {}",
+                    EXPECTED_SCHEMA_VERSION - 2
+                ))
+                .expect("stamp older schema version");
+            }
+            let _ = std::fs::remove_file(format!("{}.migration-marker", db_path.display()));
+            assert_eq!(read_role_stamp(&db_path), "wiki");
+            assert_eq!(read_user_version(&db_path), EXPECTED_SCHEMA_VERSION - 2);
+
+            let lib = Library {
+                label: "project:wiki".to_string(),
+                path: db_path.clone(),
+            };
+            let plan = plan_one(&lib);
+            assert_eq!(plan.status, GapStatus::NeedsMigration);
+            // Acceptance #2: the pre-fix open-with-`lib.label` path must
+            // StoreRoleConflict this fixture. Without that red, a future
+            // revert to conferring the inventory name would still look green.
+            match MemoryStore::open_with_label_and_context(
+                db_path.to_str().expect("utf8"),
+                &lib.label,
+                &DbOpenContext::open_existing_allow(MIGRATE_APPLY_APPROVED_BY),
+            ) {
+                Err(memcore::MemoryError::StoreRoleConflict {
+                    claimed, stored, ..
+                }) => {
+                    assert_eq!(claimed, "project:wiki");
+                    assert_eq!(stored, "wiki");
+                }
+                Err(err) => panic!(
+                    "pre-fix open-with-lib.label must StoreRoleConflict this fixture, got: {err}"
+                ),
+                Ok(_) => panic!(
+                    "pre-fix open-with-lib.label must StoreRoleConflict this fixture, but the open succeeded"
+                ),
+            }
+            assert_eq!(
+                read_user_version(&db_path),
+                EXPECTED_SCHEMA_VERSION - 2,
+                "the conflicting open must roll back and leave the leftover stamp"
+            );
+            let finding = apply_one(&lib, plan, home, &db_path);
+            assert_eq!(
+                finding.applied,
+                Some(AppliedOutcome::Migrated),
+                "enumeration label must not StoreRoleConflict a stamped wiki store: {finding:?}"
+            );
+            assert_eq!(read_user_version(&db_path), EXPECTED_SCHEMA_VERSION);
+            assert_eq!(
+                read_role_stamp(&db_path),
+                "wiki",
+                "migrate must not rewrite the write-once role stamp"
+            );
+        });
     }
 
     #[test]

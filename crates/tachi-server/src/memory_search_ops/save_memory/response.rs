@@ -38,12 +38,7 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_response(
     response.insert("path".into(), json!(entry.path.clone()));
     response.insert("timestamp".into(), json!(timestamp));
     response.insert("db".into(), json!(target_db.as_str()));
-    let status = if enrichment_enqueued {
-        "saved (enrichment pending)"
-    } else {
-        "saved"
-    };
-    response.insert("status".into(), json!(status));
+    response.insert("status".into(), json!("saved"));
     // #1435 slice 3 / #2059: the save-visibility contract. `lexical` is
     // always "immediate" — the FTS/keyword index a plain-text `search_memory`
     // call reads is populated synchronously by the same upsert that just

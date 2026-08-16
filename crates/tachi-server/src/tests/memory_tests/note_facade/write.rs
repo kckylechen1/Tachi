@@ -28,7 +28,6 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             valid_from: None,
             valid_until: None,
             metadata: None,
-            emit_continuity: false,
             files: Vec::new(),
             format: None,
         }))
@@ -99,7 +98,6 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
             valid_from: None,
             valid_until: None,
             metadata: None,
-            emit_continuity: false,
             files: Vec::new(),
             format: None,
         }))
@@ -143,7 +141,6 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
             valid_from: None,
             valid_until: None,
             metadata: None,
-            emit_continuity: false,
             files: Vec::new(),
             format: None,
         }))
