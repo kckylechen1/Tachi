@@ -6,8 +6,8 @@ use super::current_work_anchor::{
     prepend_anchor_evidence_rows, resolve_current_work_anchors,
 };
 use super::evidence_format::{
-    build_thinking_scaffold, evidence_rows, format_agent_status, json_string, parse_json_or_empty,
-    sections_to_evidence, synthesis_markdown_text, wants_json,
+    build_thinking_scaffold, evidence_rows, format_agent_status, json_string, sections_to_evidence,
+    synthesis_markdown_text, wants_json,
 };
 use crate::agent_markdown;
 use crate::facade_search_ops::collect_tachi_search_sections;
@@ -27,8 +27,18 @@ pub(crate) async fn handle_memory_alerts(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
-    let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
-    let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
+    let mut warnings = crate::status_ops::collect_agent_warning_lines(server).await;
+    let wiki_counts = match crate::wiki_ops::wiki_hygiene_counts(server).await {
+        Ok(counts) => counts,
+        Err(err) => {
+            warnings.push(format!("wiki hygiene unavailable: {err}"));
+            json!({
+                "orphans": 0,
+                "stale_nodes": 0,
+                "duplicates": 0,
+            })
+        }
+    };
     if wants_json(params.format.as_deref()) {
         return json_string(&json!({
             "status": "completed",
@@ -409,228 +419,6 @@ fn inject_project_tags(evidence: Value) -> Value {
         })
         .collect();
     Value::Array(tagged)
-}
-
-// ---------------------------------------------------------------------------
-// Readiness
-// ---------------------------------------------------------------------------
-// Note: consolidate lifecycle (propose/review/apply) lives in consolidate_ops.rs
-// (#775). The old dry_run-only search scaffold was replaced.
-
-pub(crate) async fn handle_memory_readiness(
-    server: &MemoryServer,
-    params: &TachiMemoryParams,
-) -> Result<String, String> {
-    // tachi#1201 k3: tachi_status now defaults to markdown when `format` is
-    // omitted; this internal consumer parses the body as JSON, so it must
-    // opt in explicitly to keep this call's shape unchanged.
-    let status = parse_json_or_empty(
-        crate::status_ops::handle_tachi_status_full(server, Some("json")).await?,
-    );
-    let runtime = parse_json_or_empty(crate::memory_ops::handle_runtime_info(server).await?);
-    let core_tool_names = [
-        "tachi_tools",
-        "runtime_info",
-        "tachi_status",
-        "tachi_memory",
-        "tachi_save",
-        "tachi_wiki",
-        "tachi_briefing",
-    ];
-    let advanced_tool_names = ["tachi_staff", "tachi_orchestrator"];
-    let native_tools = server.native_tool_visibility();
-    let total_tools = native_tools.len();
-    let tool_rows = native_tools
-        .iter()
-        .map(|(name, description, visible)| {
-            let tier = if core_tool_names.contains(&name.as_str()) {
-                "core"
-            } else if advanced_tool_names.contains(&name.as_str()) {
-                "advanced"
-            } else {
-                "native"
-            };
-            json!({
-                "name": name,
-                "tier": tier,
-                "visible": *visible,
-                "description": description,
-                "reason": if *visible {
-                    "exposed by active profile/TACHI_EXPOSED_TOOLS".to_string()
-                } else {
-                    "filtered out by active profile or TACHI_EXPOSED_TOOLS".to_string()
-                },
-            })
-        })
-        .collect::<Vec<_>>();
-    let recent_kanban = crate::status_ops::list_recent_kanban_entries(server, 5);
-    let kanban_count = recent_kanban.len();
-    let health_score = status
-        .get("health_score")
-        .map(Value::to_string)
-        .unwrap_or_else(|| "?".to_string());
-    let visible_tools = tool_rows
-        .iter()
-        .filter(|tool| {
-            tool.get("visible")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
-        .count();
-    let hidden_tools: Vec<String> = tool_rows
-        .iter()
-        .filter(|tool| {
-            !tool
-                .get("visible")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
-        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-        .map(ToOwned::to_owned)
-        .collect();
-    let hidden_core_tools: Vec<String> = tool_rows
-        .iter()
-        .filter(|tool| tool.get("tier").and_then(Value::as_str) == Some("core"))
-        .filter(|tool| {
-            !tool
-                .get("visible")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
-        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-        .map(ToOwned::to_owned)
-        .collect();
-    let hidden_advanced_tools: Vec<String> = tool_rows
-        .iter()
-        .filter(|tool| tool.get("tier").and_then(Value::as_str) == Some("advanced"))
-        .filter(|tool| {
-            !tool
-                .get("visible")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
-        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-        .map(ToOwned::to_owned)
-        .collect();
-    let tool_profile = server
-        .active_tool_profile()
-        .map(|profile| profile.as_str())
-        .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str());
-    let suggestions = readiness_suggestions(&hidden_core_tools, &hidden_advanced_tools);
-    let vector_health =
-        crate::status_ops::database_vector_health_json(&server.global_db_path_buf());
-    let pending_vectors = vector_health
-        .get("pending_vectors")
-        .or_else(|| vector_health.get("missing_vectors"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let readiness_warnings = status
-        .get("warnings")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if wants_json(params.format.as_deref()) {
-        return json_string(&json!({
-            "status": "completed",
-            "health": status,
-            "runtime": runtime,
-            "readiness_warnings": readiness_warnings,
-            "tool_profile": tool_profile,
-            "tools": tool_rows,
-            "tool_visibility_summary": {
-                "visible_count": visible_tools,
-                "total_count": total_tools,
-                "hidden": hidden_tools,
-                "hidden_core": hidden_core_tools,
-                "hidden_advanced": hidden_advanced_tools,
-            },
-            "suggestions": suggestions,
-            "vector_health": vector_health,
-            "recent_kanban": recent_kanban,
-        }));
-    }
-    let tool_summary = if hidden_tools.is_empty() {
-        format!("{visible_tools}/{total_tools} visible (all exposed)")
-    } else {
-        format!(
-            "{visible_tools}/{} visible — hidden: {}",
-            total_tools,
-            hidden_tools.join(", ")
-        )
-    };
-    let core_summary = if hidden_core_tools.is_empty() {
-        "ok".to_string()
-    } else {
-        format!("missing: {}", hidden_core_tools.join(", "))
-    };
-    let advanced_summary = if hidden_advanced_tools.is_empty() {
-        "visible".to_string()
-    } else {
-        format!("hidden by profile: {}", hidden_advanced_tools.join(", "))
-    };
-    let warning_summary = if readiness_warnings.is_empty() {
-        "none".to_string()
-    } else {
-        readiness_warnings
-            .iter()
-            .filter_map(Value::as_str)
-            .take(3)
-            .collect::<Vec<_>>()
-            .join(" | ")
-    };
-    Ok(format_agent_status(
-        "Tachi readiness",
-        &[
-            ("status", "completed".to_string()),
-            ("health_score", health_score),
-            ("warnings", warning_summary),
-            ("tool_profile", tool_profile),
-            ("tool_visibility", tool_summary),
-            ("core_tools", core_summary),
-            ("advanced_tools", advanced_summary),
-            ("pending_vectors", pending_vectors.to_string()),
-            ("recent_kanban", kanban_count.to_string()),
-            (
-                "runtime",
-                runtime
-                    .get("runtime")
-                    .map(|r: &serde_json::Value| {
-                        let name = r.get("name").and_then(Value::as_str).unwrap_or("tachi");
-                        let ver = r.get("version").and_then(Value::as_str).unwrap_or("?");
-                        format!("{name} v{ver}")
-                    })
-                    .unwrap_or_else(|| "available".to_string()),
-            ),
-        ],
-        None,
-        Some(&suggestions.join("\n")),
-    ))
-}
-
-fn readiness_suggestions(
-    hidden_core_tools: &[String],
-    hidden_advanced_tools: &[String],
-) -> Vec<String> {
-    let mut suggestions = Vec::new();
-    if !hidden_core_tools.is_empty() {
-        suggestions.push(format!(
-            "- Core tools are hidden: {}. Check TACHI_PROFILE/TACHI_EXPOSED_TOOLS or run `tachi setup`.",
-            hidden_core_tools.join(", ")
-        ));
-    }
-    if !hidden_advanced_tools.is_empty() {
-        suggestions.push(
-            "- Heavy coordination tools are intentionally hidden in minimal profiles; use `TACHI_PROFILE=coordinate` or `admin` for shell/orchestrator workflows."
-                .to_string(),
-        );
-    }
-    if suggestions.is_empty() {
-        suggestions.push(
-            "- Start with `tachi_briefing()` or `tachi_memory(action='briefing')`; call `tachi_tools()` before unfamiliar tool names."
-                .to_string(),
-        );
-    }
-    suggestions
 }
 
 // ---------------------------------------------------------------------------

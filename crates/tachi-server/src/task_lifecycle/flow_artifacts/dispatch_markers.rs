@@ -218,6 +218,37 @@ fn dispatch_marker_projections_complete(
     Ok(has_dispatch_id && has_card_list_entry && has_canonical_map && card_is_valid)
 }
 
+pub(crate) fn verified_dispatch_marker_revision(
+    flow_id: &str,
+    dispatch_id: &str,
+) -> Result<Option<String>, String> {
+    if !is_safe_dispatch_marker_id(dispatch_id) {
+        return Ok(None);
+    }
+    let run_dir = run_dir_for_flow_id(flow_id)?;
+    let Some(status) = read_json_file(&run_dir.join("status.json"))? else {
+        return Ok(None);
+    };
+    let card_path = run_dir
+        .join("artifacts")
+        .join(format!("dispatch-{dispatch_id}.json"));
+    if !dispatch_marker_projections_complete(&status, flow_id, dispatch_id, &card_path)? {
+        return Ok(None);
+    }
+    let Some(card) = read_dispatch_marker_card(&card_path)? else {
+        return Ok(None);
+    };
+    let revision = tachi_params::canonical_json_sha256(&json!({
+        "flow_id": flow_id,
+        "dispatch_id": dispatch_id,
+        "recorded_at": card.get("recorded_at"),
+        "task": card.get("task"),
+        "agent": card.get("agent"),
+        "profile": card.get("profile"),
+    }))?;
+    Ok(Some(format!("sha256:{revision}")))
+}
+
 /// Card JSON is a repairable projection. A malformed canonical or legacy
 /// card must not make the dispatch marker itself unavailable: retain a valid
 /// sibling when present, otherwise rebuild from the incoming dispatch data.

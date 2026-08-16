@@ -17,6 +17,21 @@ pub(super) fn classify_one_with_provider(
     path: &Path,
     routing_config: &RoutingConfigProvider,
 ) -> DoctorFinding {
+    classify_one_with_provider_mode(path, routing_config, false)
+}
+
+pub(super) fn classify_one_immutable_with_provider(
+    path: &Path,
+    routing_config: &RoutingConfigProvider,
+) -> DoctorFinding {
+    classify_one_with_provider_mode(path, routing_config, true)
+}
+
+fn classify_one_with_provider_mode(
+    path: &Path,
+    routing_config: &RoutingConfigProvider,
+    immutable: bool,
+) -> DoctorFinding {
     let path_str = path.display().to_string();
     let scope_hint = scope_hint_for(path);
     let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -73,7 +88,11 @@ pub(super) fn classify_one_with_provider(
     // 3. Open read-only without `immutable=1`. Immutable SQLite handles ignore
     // committed WAL frames, so they undercount a healthy live store. The
     // shared inventory opener cannot create/migrate a DB or mutate authority.
-    let conn = match crate::physical_db_identity::open_read_only_connection(path) {
+    let conn = match if immutable {
+        memcore::db::open_immutable_readonly(&make_immutable_uri(path))
+    } else {
+        crate::physical_db_identity::open_read_only_connection(path)
+    } {
         Ok(c) => c,
         Err(e) => {
             return DoctorFinding {

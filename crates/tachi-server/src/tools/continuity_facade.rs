@@ -3,7 +3,7 @@ use super::*;
 #[tool_router(router = continuity_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
-        description = "Unified memory facade. Actions: search (hybrid recall), get (fetch one memory by id), save (persist entry; prefer tachi_save for decisions), extract_facts (LLM atomize logs), briefing (session start), checkpoint (handoff), alerts (warnings when stuck), ask (Q&A over evidence), consolidate (merge duplicates), progress (long-running flow), readiness (health/tools). Use tachi_briefing for zero-arg briefing alias."
+        description = "Unified memory facade. Actions: search (hybrid recall), get (fetch one memory by id), save (persist entry; prefer tachi_save for decisions), extract_facts (LLM atomize logs), briefing (session start), checkpoint (handoff), alerts (warnings when stuck), ask (Q&A over evidence), consolidate (merge duplicates). Use tachi_briefing for zero-arg briefing alias."
     )]
     pub(crate) async fn tachi_memory(
         &self,
@@ -65,6 +65,7 @@ impl MemoryServer {
             .map(|name| format!("{name} current task recent decisions blockers next steps"));
         let params = TachiMemoryParams {
             action: "briefing".to_string(),
+            issue_ref: None,
             format: Some("markdown".to_string()),
             query,
             scope: None,
@@ -95,14 +96,10 @@ impl MemoryServer {
             source: None,
             valid_from: None,
             valid_until: None,
-            flow_id: None,
-            event: None,
-            state: None,
             project: named,
             project_explicit: false,
             domain: None,
             metadata: None,
-            emit_continuity: false,
             files: Vec::new(),
             references: Vec::new(),
             compact: true,
@@ -111,28 +108,6 @@ impl MemoryServer {
             notes: None,
             confirm: false,
             state_filter: None,
-            content: None,
-            ingest_type: "source".to_string(),
-            source_url: None,
-            auto_chunk: true,
-            auto_summarize: true,
-            auto_link: true,
-            chunk_size_chars: 1200,
-            chunk_overlap_chars: 120,
-            conversation_id: None,
-            turn_id: None,
-            event_type: None,
-            messages: Vec::new(),
-            issue_ref: None,
-            branch: None,
-            declared_file_scope: Vec::new(),
-            claim_id: None,
-            dispatch_id: None,
-            release_reason: None,
-            to: None,
-            ttl_days: None,
-            include_read: false,
-            agent_id: None,
         };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }

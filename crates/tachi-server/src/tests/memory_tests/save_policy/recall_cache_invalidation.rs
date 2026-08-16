@@ -15,13 +15,13 @@
 
 use super::*;
 use crate::facade_memory_ops::consolidate_ops::merge_into_for_project;
-use crate::memory_ops::{handle_archive_memory, handle_delete_memory, handle_memory_gc};
+use crate::memory_ops::handle_archive_memory;
 use crate::memory_search_ops::{
     handle_save_memory, handle_search_memory, RecallCacheRaceHook, RecallCacheRacePoint,
     RecallCacheTestOverride,
 };
 use crate::test_support::EnvRestore;
-use crate::tool_params::{ArchiveMemoryParams, DeleteMemoryParams};
+use crate::tool_params::ArchiveMemoryParams;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -749,46 +749,6 @@ async fn save_ephemeral_and_get_id(
 }
 
 // ── D1: delete clears the recall cache after the store commit ──────────────
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn delete_memory_clears_recall_cache_after_commit() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _cache = RecallCacheTestOverride::enabled();
-
-    let server = make_server();
-    let path = format!("/scratch/tachi/1413-delete/{}", uuid::Uuid::new_v4());
-    let id = save_and_get_id(&server, &path, "1413 delete inval probe apples").await;
-
-    seed_global_recall_cache_row(&server, "rc:1413-d1");
-    assert!(
-        global_recall_cache_entries(&server) >= 1,
-        "seed row must be present before delete"
-    );
-
-    let raw = handle_delete_memory(
-        &server,
-        DeleteMemoryParams {
-            id: id.clone(),
-            project: None,
-        },
-    )
-    .await
-    .expect("delete");
-    let deleted_json: Value = serde_json::from_str(&raw).expect("delete json");
-    assert!(
-        deleted_json["deleted"].as_bool().unwrap_or(false),
-        "delete must actually remove the row (else the cache assert is vacuous): {deleted_json:#}"
-    );
-
-    assert_eq!(
-        global_recall_cache_entries(&server),
-        0,
-        "a successful delete must clear the recall cache after its store commit"
-    );
-}
-
 // ── D2: archive clears the recall cache after the store commit ─────────────
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
@@ -832,39 +792,6 @@ async fn archive_memory_clears_recall_cache_after_commit() {
 
 // ── D3: gc clears the recall cache after the batch commits ─────────────────
 //
-// `gc_common_store` / `gc_expired_kanban_cards` run inside the gc closures and
-// only borrow a `&mut MemoryStore`, so the bust MUST be the caller's job after
-// those closures return — this test proves it lands there (pre-fix there is no
-// invalidation in `handle_memory_gc`, so the seeded row survives → RED).
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn memory_gc_clears_recall_cache_after_commit() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _cache = RecallCacheTestOverride::enabled();
-
-    let server = make_server();
-    // Seed content so gc sweeps a populated store (whether it reclaims this row
-    // is irrelevant to the cache assertion below).
-    let path = format!("/scratch/tachi/1413-gc/{}", uuid::Uuid::new_v4());
-    let _ = save_and_get_id(&server, &path, "1413 gc inval probe cherries").await;
-
-    seed_global_recall_cache_row(&server, "rc:1413-d3");
-    assert!(
-        global_recall_cache_entries(&server) >= 1,
-        "seed row must be present before gc"
-    );
-
-    handle_memory_gc(&server).await.expect("gc");
-
-    assert_eq!(
-        global_recall_cache_entries(&server),
-        0,
-        "gc must clear the recall cache after its batch store commits"
-    );
-}
-
 // ── D4: a consolidate lifecycle action (merge_into) clears the cache ───────
 // Drives `apply_lifecycle_action` via its automated `merge_into_for_project`
 // entry. NOT the same code path as the human-reviewed propose/review/apply

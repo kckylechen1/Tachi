@@ -298,7 +298,7 @@ async fn briefing_surfaces_file_scope_collision_using_the_calling_sessions_own_d
 
 /// A session's own live claim must never be reported as colliding with
 /// itself once `presence_briefing_section` starts passing a real scope
-/// through (self-exclusion parity with `handle_manual_claim`).
+/// through (self-exclusion for the canonical presence hook).
 #[tokio::test]
 async fn briefing_does_not_self_collide_on_its_own_declared_scope() {
     let server = make_server();

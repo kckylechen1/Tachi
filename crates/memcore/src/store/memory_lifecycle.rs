@@ -997,6 +997,15 @@ fn apply_lifecycle_proposal_once(
         ));
     }
 
+    db::refuse_retired_sticky_row_within_tx(&tx, &source_id, "mutated by lifecycle apply")?;
+    if let Some(target_id) = target_id.as_deref() {
+        db::refuse_retired_sticky_row_within_tx(
+            &tx,
+            target_id,
+            "used as a lifecycle apply target",
+        )?;
+    }
+
     let source_revision = stored_payload.source.revision;
 
     // ── Mutate memory INSIDE the same tx ──────────────────────────────────
@@ -2109,6 +2118,49 @@ mod tests {
             .get(id)
             .expect("load seeded row")
             .expect("seeded row exists")
+    }
+
+    #[test]
+    fn apply_refuses_retired_source_or_target_before_any_side_effect() {
+        for retired_id in ["source", "target"] {
+            let mut store = MemoryStore::open_in_memory().expect("open test store");
+            let source = seed(&mut store, "source", "source text", &["source"]);
+            let target = seed(&mut store, "target", "target text", &["target"]);
+            {
+                let _authorization =
+                    db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                        .expect("authorize raw legacy sticky fixture");
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE memories SET path='/sticky/legacy', category='sticky' WHERE id=?1",
+                        [retired_id],
+                    )
+                    .expect("retire fixture endpoint");
+            }
+            let source = store.get("source").unwrap().unwrap_or(source);
+            let target = store.get("target").unwrap().unwrap_or(target);
+            let payload = build_apply_payload(ACTION_SUPERSEDE, &source, Some(&target));
+            let proposal_id = persist_and_approve(&store, &payload);
+            let proposal_before = store
+                .get_state_kv(LIFECYCLE_PROPOSAL_NS, &proposal_id)
+                .unwrap();
+            let changes_before = store.connection().total_changes();
+
+            let error = apply_lifecycle_proposal(&mut store, &proposal_id)
+                .expect_err("retired endpoint must refuse lifecycle apply");
+            assert!(error.to_string().contains("tachi_a2a"), "{error}");
+            assert_eq!(store.connection().total_changes(), changes_before);
+            assert_eq!(
+                store
+                    .get_state_kv(LIFECYCLE_PROPOSAL_NS, &proposal_id)
+                    .unwrap(),
+                proposal_before,
+                "proposal receipt must remain byte-for-byte unchanged"
+            );
+            assert!(!store.get("source").unwrap().unwrap().archived);
+            assert_eq!(store.get("source").unwrap().unwrap().revision, 1);
+        }
     }
 
     /// THE discriminating test for "the identity must bind every execution

@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use rusqlite::Transaction;
+use rusqlite::{Transaction, TransactionBehavior};
 use serde_json::json;
 
 use super::{backup_db, fts::FtsRebuild, DbContext, Finding, RepairError, RepairRule, RuleReport};
@@ -192,7 +192,10 @@ fn merge_alias_into_canonical(
 
 #[cfg(unix)]
 fn merge_attached_alias(ctx: &mut DbContext) -> Result<PlanCMergeStats, RepairError> {
-    let tx = ctx.conn.transaction()?;
+    let tx = ctx
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    refuse_retired_sticky_alias_candidates(&tx)?;
     tx.execute_batch(
         "DROP TABLE IF EXISTS temp.plan_c_imported_ids;
          CREATE TEMP TABLE plan_c_imported_ids(id TEXT PRIMARY KEY);",
@@ -247,6 +250,30 @@ fn merge_attached_alias(ctx: &mut DbContext) -> Result<PlanCMergeStats, RepairEr
     tx.execute_batch("DROP TABLE IF EXISTS temp.plan_c_imported_ids;")?;
     tx.commit()?;
     Ok(stats)
+}
+
+#[cfg(unix)]
+fn refuse_retired_sticky_alias_candidates(tx: &Transaction<'_>) -> Result<(), RepairError> {
+    let alias_only_ids = {
+        let mut stmt = tx.prepare(
+            "SELECT a.id FROM plan_c_alias.memories a
+             WHERE NOT EXISTS (SELECT 1 FROM main.memories m WHERE m.id=a.id)
+             ORDER BY a.id",
+        )?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    tx.execute_batch(
+        "CREATE TEMP VIEW memories AS
+         SELECT id,path,category FROM plan_c_alias.memories;",
+    )?;
+    for id in alias_only_ids {
+        memcore::db::refuse_retired_sticky_row_within_tx(tx, &id, "copied by Plan C alias repair")?;
+    }
+    tx.execute_batch("DROP VIEW temp.memories;")?;
+    Ok(())
 }
 
 #[cfg(unix)]

@@ -145,18 +145,9 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
     }
 }
 
-// ─── CP2 (round-3): dispatch-id seat, not profile-derived seat ────────────
-//
-// CP2 (codex final review of #964/PR #1003): `agent_seat` used to be derived
-// from `params.profile` (falling back to `agent_norm`) — but `params.profile`
-// is a `DispatchProfile` (e.g. "codex_55_review"), a capability-surface
-// selector shared by every worker dispatched on that profile, NOT a seat.
-// Two workers dispatched with the SAME `profile` therefore got the SAME
-// `TACHI_AGENT_SEAT`, and could cross-consume each other's `to:`-addressed
-// stickies. The seat is now the dispatch's own `dispatch_id` (unique per
-// lane by construction — see `new_dispatch_id`), so this collision is
-// structurally impossible regardless of what `profile`/`agent` two
-// concurrent dispatches share.
+// Dispatch identity is lane-specific, not profile-derived. Two workers may
+// share a capability profile but must retain distinct `TACHI_AGENT_SEAT`
+// values for claims and runtime attribution.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn migration_plan_targets_only_legacy_dbs_and_skips_keep_actions() {
-    let root = crate::utils::test_fixture_path(format!("tachi-tidy-plan-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-plan-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let target_db = home.join(".tachi").join("global").join("memory.db");
     let archive_root = home.join(".tachi").join("archive").join("ts-fake");
@@ -18,9 +18,9 @@ fn migration_plan_targets_only_legacy_dbs_and_skips_keep_actions() {
     }
     let (legacy_a, legacy_b) = build_legacy_openclaw_fixture(&home, 2);
 
-    let report = crate::bootstrap::build_tidy_report(&[home.clone()], Some(&home.join("repo")))
+    let report = api::build_tidy_report(std::slice::from_ref(&home), Some(&home.join("repo")))
         .expect("build report");
-    let plan = crate::bootstrap::build_migration_plan(&report, &target_db, &archive_root, &home);
+    let plan = api::build_migration_plan(&report, &target_db, &archive_root, &home);
 
     let plan_sources: std::collections::HashSet<String> =
         plan.iter().map(|m| m.source_path.clone()).collect();
@@ -42,8 +42,7 @@ fn migration_plan_targets_only_legacy_dbs_and_skips_keep_actions() {
 
 #[test]
 fn manifest_update_drops_migrated_sources_and_inserts_target() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-manifest-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-manifest-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join(".tachi")).expect("create .tachi");
     let manifest_path = root.join(".tachi").join("manifest.json");
 
@@ -80,14 +79,14 @@ fn manifest_update_drops_migrated_sources_and_inserts_target() {
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&initial).unwrap())
         .expect("write manifest");
 
-    let cfg = crate::bootstrap::MigrationConfig {
+    let cfg = api::MigrationConfig {
         target_db: root.join(".tachi").join("global").join("memory.db"),
         manifest_path: manifest_path.clone(),
         dry_run: false,
         interactive: false,
         app_home: root.join(".tachi"),
     };
-    let outcomes = vec![crate::bootstrap::TidyMigrationOutcome {
+    let outcomes = vec![api::TidyMigrationOutcome {
         source_path: "/tmp/legacy/memory.db".to_string(),
         target_path: cfg.target_db.display().to_string(),
         archive_path: Some("/tmp/archive/legacy/memory.db".to_string()),
@@ -98,18 +97,26 @@ fn manifest_update_drops_migrated_sources_and_inserts_target() {
         message: "ok".to_string(),
     }];
 
-    crate::bootstrap::update_manifest_after_migration(&cfg, &outcomes)
-        .expect("manifest update should succeed");
+    api::update_manifest_after_migration(&cfg, &outcomes).expect("manifest update should succeed");
 
-    let updated = crate::manifest::Manifest::load(&manifest_path).expect("load updated manifest");
-    let paths: Vec<&str> = updated.dbs.iter().map(|e| e.path.as_str()).collect();
+    let updated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read updated manifest"))
+            .expect("parse updated manifest");
+    let dbs = updated["dbs"].as_array().expect("manifest db array");
+    let paths: Vec<&str> = dbs
+        .iter()
+        .filter_map(|entry| entry["path"].as_str())
+        .collect();
     assert!(!paths.contains(&"/tmp/legacy/memory.db"));
     assert!(paths.contains(&"/tmp/keep/memory.db"));
     // Target entry was inserted.
-    assert!(updated
-        .dbs
-        .iter()
-        .any(|e| e.path.ends_with("global/memory.db") && e.scope_hint == "global"));
+    assert!(dbs.iter().any(|entry| {
+        entry["path"]
+            .as_str()
+            .map(|path| path.ends_with("global/memory.db"))
+            .unwrap_or(false)
+            && entry["scope_hint"] == "global"
+    }));
 
     let _ = std::fs::remove_dir_all(&root);
 }

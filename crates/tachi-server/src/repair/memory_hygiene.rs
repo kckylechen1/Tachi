@@ -4,6 +4,7 @@
 //! distill runs wrote durable summaries but left the raw source rows active.
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
+use rusqlite::TransactionBehavior;
 
 pub struct MemoryHygiene;
 
@@ -238,7 +239,32 @@ impl RepairRule for MemoryHygiene {
             return Ok(report);
         }
 
-        let tx = ctx.conn.transaction()?;
+        let tx = ctx
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let all_ids = {
+            let mut stmt = tx.prepare("SELECT id FROM memories ORDER BY id")?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        let mut retired_sticky = Vec::new();
+        for id in all_ids {
+            match memcore::db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &id,
+                "mutated or projected by memory hygiene",
+            ) {
+                Ok(()) => {}
+                Err(memcore::MemoryError::InvalidArg(_)) => retired_sticky.push(id),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        tx.execute_batch("CREATE TEMP TABLE r12_retired_sticky(id TEXT PRIMARY KEY);")?;
+        for id in retired_sticky {
+            tx.execute("INSERT INTO r12_retired_sticky(id) VALUES (?1)", [id])?;
+        }
         // The batch below re-states COVERED_SAFE_RAW_SQL and
         // SAFE_DUPLICATE_RAW_SQL inline; both copies of the
         // `access_count`/`recall_count` guard carry the tachi#1459 caveat
@@ -272,7 +298,9 @@ impl RepairRule for MemoryHygiene {
             LEFT JOIN memory_edges e ON e.source_id=source_ids.distill_id
                                     AND e.target_id=source_ids.source_id
                                     AND e.relation='distilled_from'
-            WHERE e.source_id IS NULL;
+            WHERE e.source_id IS NULL
+              AND source_ids.distill_id NOT IN (SELECT id FROM r12_retired_sticky)
+              AND source_ids.source_id NOT IN (SELECT id FROM r12_retired_sticky);
 
             CREATE TEMP TABLE r12_covered_raw(
                 source_id TEXT PRIMARY KEY,
@@ -317,7 +345,10 @@ impl RepairRule for MemoryHygiene {
                 AND COALESCE(s.retention_policy,'') NOT IN ('pinned','permanent')
                 AND COALESCE(s.importance,0)<0.85
             )
-            SELECT source_id, distill_id FROM ranked WHERE rn=1;
+            SELECT source_id, distill_id FROM ranked
+            WHERE rn=1
+              AND source_id NOT IN (SELECT id FROM r12_retired_sticky)
+              AND distill_id NOT IN (SELECT id FROM r12_retired_sticky);
 
             CREATE TEMP TABLE r12_duplicate_raw(
                 source_id TEXT PRIMARY KEY,
@@ -342,6 +373,7 @@ impl RepairRule for MemoryHygiene {
                      END AS normalized_text
               FROM memories
               WHERE COALESCE(archived,0)=0
+                AND id NOT IN (SELECT id FROM r12_retired_sticky)
             ),
             ranked AS (
               SELECT *,
@@ -394,7 +426,8 @@ impl RepairRule for MemoryHygiene {
                  )
              WHERE COALESCE(archived,0)=0
                AND source='foundry_distill'
-               AND tier='raw'",
+               AND tier='raw'
+               AND id NOT IN (SELECT id FROM r12_retired_sticky)",
             [],
         )?;
 
@@ -416,7 +449,8 @@ impl RepairRule for MemoryHygiene {
              FROM memories m
              WHERE COALESCE(m.archived,0)=0
                AND m.source='foundry_distill'
-               AND m.tier='consolidated'",
+               AND m.tier='consolidated'
+               AND m.id NOT IN (SELECT id FROM r12_retired_sticky)",
             [],
         )?;
 
@@ -508,7 +542,8 @@ impl RepairRule for MemoryHygiene {
         tx.execute_batch(
             "DROP TABLE r12_missing_edges;
              DROP TABLE r12_covered_raw;
-             DROP TABLE r12_duplicate_raw;",
+             DROP TABLE r12_duplicate_raw;
+             DROP TABLE r12_retired_sticky;",
         )?;
         tx.commit()?;
 

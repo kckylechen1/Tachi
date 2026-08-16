@@ -1,0 +1,17 @@
+[package]
+name = "tachi-bootstrap-tests"
+version = "1.9.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "External bootstrap topology tests extracted from tachi-server (#1714 Track T)."
+
+[dependencies]
+
+[dev-dependencies]
+chrono = { workspace = true }
+memcore = { path = "../memcore" }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+tachi-server = { path = "../tachi-server", features = ["bootstrap-test-api"] }
+uuid = { workspace = true }

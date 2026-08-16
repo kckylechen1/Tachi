@@ -6,8 +6,7 @@
 //! here (`crate::handoff_ops::list_pending_handoffs_for_briefing`) is
 //! retired along with `handoff_ops`'s write path — see `handoff_ops.rs`'s
 //! module doc for the caller-sweep evidence and legacy-row data policy.
-//! Cross-session coordination now goes through the `stickies` section
-//! (`sticky_ops`, #964) below.
+//! Cross-session coordination uses the typed A2A briefing projection.
 
 use super::evidence_format::{
     json_string, parse_evidence_array, parse_json_or_empty, slim_kanban, slim_memory_rows,
@@ -124,6 +123,56 @@ async fn compact_health_summary(server: &MemoryServer, wiki_counts: Value) -> Va
         "wiki": wiki_counts,
         "compact": true,
     })
+}
+
+fn is_wiki_failure_warning(line: &str) -> bool {
+    line.contains("wiki recall unavailable") || line.contains("wiki hygiene unavailable")
+}
+
+fn warning_already_present(target: &[Value], line: &str) -> bool {
+    target.iter().any(|warning| warning.as_str() == Some(line))
+}
+
+/// Keep leftover-wiki refuse visible when the health warning list is full.
+fn evict_non_priority_warning(target: &mut Vec<Value>) -> bool {
+    if let Some(index) = target.iter().rposition(|warning| {
+        warning
+            .as_str()
+            .is_none_or(|line| !is_wiki_failure_warning(line))
+    }) {
+        target.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
+fn ensure_priority_warnings(target: &mut Vec<Value>, lines: &[String], cap: usize) {
+    for line in lines {
+        if warning_already_present(target, line) {
+            continue;
+        }
+        if target.len() >= cap && !evict_non_priority_warning(target) {
+            continue;
+        }
+        target.insert(0, json!(line));
+    }
+}
+
+fn push_warning_capped(target: &mut Vec<Value>, line: &str, cap: usize) {
+    if warning_already_present(target, line) {
+        return;
+    }
+    if target.len() >= cap {
+        if is_wiki_failure_warning(line) {
+            if !evict_non_priority_warning(target) {
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+    target.push(json!(line));
 }
 
 fn default_briefing_query(named_project: Option<&str>) -> String {
@@ -268,10 +317,8 @@ pub(crate) async fn handle_memory_briefing(
         None
     };
 
-    let sticky_cap = if compact { 3 } else { 5 };
-    let (memories_result, wiki_result, sticky_result) = tokio::join!(
-        handle_search_memory(server, mem_params, true),
-        async {
+    let (memories_result, wiki_result) =
+        tokio::join!(handle_search_memory(server, mem_params, true), async {
             if let Some(wp) = wiki_params {
                 let plan = WikiReadPlan::from_project(wp.project.as_deref())?;
                 crate::wiki_ops::search_wiki_rows_for_plan(server, wp, &plan, None, false)
@@ -280,29 +327,7 @@ pub(crate) async fn handle_memory_briefing(
             } else {
                 Ok(vec![])
             }
-        },
-        // #964: unread stickies for the caller. A caller with no seat
-        // identity (agent_id absent) is treated as leader (frozen semantics
-        // #3/#4) — worker seats only see stickies explicitly addressed to
-        // their seat name. Inclusion here IS the read: each row returned is
-        // atomically claimed (read-once) as a side effect.
-        //
-        // CP2: identity is resolved server-side (params.agent_id ->
-        // agent_profile -> TACHI_AGENT_SEAT env -> leader), NOT trusted from
-        // params.agent_id alone — an unauthenticated/param-less worker
-        // briefing call must not be silently treated as the leader and
-        // consume broadcast (`to`-absent) stickies meant for the real
-        // leader. See sticky_ops::identity::resolve_caller_agent_id.
-        async {
-            let resolved_agent_id =
-                crate::sticky_ops::resolve_caller_agent_id(server, params.agent_id.as_deref());
-            crate::sticky_ops::claim_unread_stickies_for_briefing(
-                server,
-                resolved_agent_id.as_deref(),
-                sticky_cap,
-            )
-        },
-    );
+        },);
 
     let memory_rows = parse_evidence_array(memories_result?);
     let memories = slim_memory_rows(if compact {
@@ -310,19 +335,28 @@ pub(crate) async fn handle_memory_briefing(
     } else {
         memory_rows
     });
+    let mut wiki_warnings = Vec::new();
     let wiki = if include_wiki {
-        let rows = wiki_result?;
-        let wiki_rows = Value::Array(rows);
-        slim_memory_rows(if compact {
-            apply_compact_relevance_floor(wiki_rows)
-        } else {
-            wiki_rows
-        })
+        match wiki_result {
+            Ok(rows) => {
+                let wiki_rows = Value::Array(rows);
+                slim_memory_rows(if compact {
+                    apply_compact_relevance_floor(wiki_rows)
+                } else {
+                    wiki_rows
+                })
+            }
+            Err(err) => {
+                // Wiki federation is best-effort (#1761). A leftover schema
+                // or stamp refuse must not kill session-start memory/kanban.
+                // Explicit missing `project=` stays loud above.
+                wiki_warnings.push(format!("wiki recall unavailable: {err}"));
+                json!([])
+            }
+        }
     } else {
         json!([])
     };
-    let stickies = json!(sticky_result?);
-
     let (warnings_res, board_res, checkpoints_res, wiki_counts_res) = tokio::join!(
         async {
             if compact {
@@ -354,11 +388,27 @@ pub(crate) async fn handle_memory_briefing(
         },
         async { crate::wiki_ops::wiki_hygiene_counts(server).await },
     );
-    let warnings: Vec<String> = warnings_res;
+    let mut priority_warnings = wiki_warnings;
+    let mut warnings: Vec<String> = Vec::new();
     let board = slim_kanban(parse_json_or_empty(board_res?));
     let checkpoints = json!(checkpoints_res);
     let verification = crate::verify_ops::recent_verification_summaries(verification_cap);
-    let wiki_counts: Value = wiki_counts_res?;
+    let wiki_counts: Value = match wiki_counts_res {
+        Ok(counts) => counts,
+        Err(err) => {
+            priority_warnings.push(format!("wiki hygiene unavailable: {err}"));
+            json!({
+                "orphans": 0,
+                "stale_nodes": 0,
+                "duplicates": 0,
+            })
+        }
+    };
+    // Wiki refuse stays in front so take(6)/cap-10 cannot hide it behind
+    // a full status-warning list (#1761 review: empty wiki + dropped
+    // warning is silent degradation).
+    warnings.extend(priority_warnings.iter().cloned());
+    warnings.extend(warnings_res);
     let mut health_summary = if compact {
         compact_health_summary(server, wiki_counts).await
     } else {
@@ -382,6 +432,18 @@ pub(crate) async fn handle_memory_briefing(
             "wiki": wiki_counts,
         })
     };
+    if let Some(health_obj) = health_summary.as_object_mut() {
+        let health_warnings = health_obj
+            .entry("warnings".to_string())
+            .or_insert_with(|| json!([]))
+            .as_array_mut();
+        if let Some(health_warnings) = health_warnings {
+            ensure_priority_warnings(health_warnings, &priority_warnings, 10);
+            for line in &warnings {
+                push_warning_capped(health_warnings, line, 10);
+            }
+        }
+    }
 
     // Cross-flow closure debt: surface unclosed loops / stale specs at the
     // session-start surface the agent actually opens, not just the per-flow
@@ -396,8 +458,8 @@ pub(crate) async fn handle_memory_briefing(
     let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
 
     // Presence 工位表 (#1001): read-only, failure-safe projection of live
-    // session claims + advisory collision warnings against any explicit
-    // issue_ref this briefing call was scoped to. Never fails briefing.
+    // session claims. `issue_ref` only scopes these read-only collision
+    // warnings; WorkClaim ownership and mutation remain on tachi_task.
     // Single call point (Scope item 3) — see `claims_ops::presence_briefing_section`.
     let presence_section =
         crate::claims_ops::presence_briefing_section(server, params.issue_ref.as_deref());
@@ -433,15 +495,7 @@ pub(crate) async fn handle_memory_briefing(
         for line in crate::component_governance_ops::component_governance_warning_lines(
             &component_governance,
         ) {
-            if health_warnings.len() >= 8 {
-                break;
-            }
-            if !health_warnings
-                .iter()
-                .any(|w| w.as_str() == Some(line.as_str()))
-            {
-                health_warnings.push(json!(line));
-            }
+            push_warning_capped(health_warnings, &line, 8);
         }
     }
 
@@ -457,11 +511,8 @@ pub(crate) async fn handle_memory_briefing(
         if let Some(health_warnings) = health_warnings {
             if let Some(binding_warnings) = binding.get("warnings").and_then(Value::as_array) {
                 for w in binding_warnings {
-                    if health_warnings.len() >= 10 {
-                        break;
-                    }
-                    if !health_warnings.contains(w) {
-                        health_warnings.push(w.clone());
+                    if let Some(line) = w.as_str() {
+                        push_warning_capped(health_warnings, line, 10);
                     }
                 }
             }
@@ -477,7 +528,6 @@ pub(crate) async fn handle_memory_briefing(
             response.insert("available_projects".to_string(), json!(available_projects));
             response.insert("binding".to_string(), binding);
             response.insert("health".to_string(), health_summary);
-            insert_non_empty_compact_section(&mut response, "stickies", stickies.clone());
             insert_non_empty_compact_section(&mut response, "memories", memories);
             insert_non_empty_compact_section(&mut response, "wiki", wiki);
             insert_non_empty_compact_section(&mut response, "verification", json!(verification));
@@ -514,7 +564,6 @@ pub(crate) async fn handle_memory_briefing(
             "project": named_project,
             "available_projects": available_projects,
             "binding": binding,
-            "stickies": stickies,
             "memories": memories,
             "wiki": wiki,
             "health": health_summary,
@@ -555,7 +604,6 @@ pub(crate) async fn handle_memory_briefing(
     let mut markdown = agent_markdown::format_briefing(
         &query,
         named_project.as_deref(),
-        &stickies,
         &memories,
         &wiki,
         &health_summary,
@@ -613,5 +661,29 @@ mod tests {
 
         assert!(!response.contains_key("empty_null"));
         assert!(response.contains_key("non_empty"));
+    }
+
+    #[test]
+    fn wiki_failure_warning_survives_a_full_health_cap() {
+        let mut warnings = (0..10)
+            .map(|i| json!(format!("status warning {i}")))
+            .collect::<Vec<_>>();
+        ensure_priority_warnings(
+            &mut warnings,
+            &["wiki recall unavailable: leftover schema".to_string()],
+            10,
+        );
+        assert_eq!(warnings.len(), 10);
+        assert_eq!(
+            warnings[0],
+            json!("wiki recall unavailable: leftover schema")
+        );
+        push_warning_capped(&mut warnings, "another status warning", 10);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.as_str() == Some("wiki recall unavailable: leftover schema")),
+            "a later capped push must not evict the leftover wiki refuse: {warnings:?}"
+        );
     }
 }

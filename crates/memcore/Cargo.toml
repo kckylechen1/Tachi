@@ -28,6 +28,9 @@ default = ["admin"]
 # portable kernel on exactly one hash family, which is what that note was
 # protecting; a portable build resolves no `blake2` at all.
 admin = ["dep:blake2"]
+# Dependency-visible hooks used only by downstream regression tests. Normal
+# production builds never compile these seams.
+test-support = []
 
 [dependencies]
 # Keyed-hash (MAC) primitive for tachi#1680's credential fingerprints. Optional

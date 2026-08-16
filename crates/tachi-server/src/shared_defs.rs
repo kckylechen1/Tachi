@@ -477,14 +477,7 @@ mod dlq_tests {
     /// the server has no per-remote-tool replay authority.
     #[test]
     fn f1098_should_enqueue_dlq_closes_remote_facade_mutation_bypass() {
-        for action in [
-            "save",
-            "gc",
-            "claim",
-            "release",
-            "sticky_leave",
-            "sticky_check",
-        ] {
+        for action in ["save", "gc", "claim", "release"] {
             let args = serde_json::Map::from_iter([("action".to_string(), json!(action))]);
             assert!(
                 !should_enqueue_dlq("remote__tachi_memory", Some(&args), false),

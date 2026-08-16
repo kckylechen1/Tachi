@@ -90,8 +90,8 @@ implemented_now:
     features:
       - "#1099 (2026-07-17): handoff_leave/handoff_check routes and tachi_handoff's
         'leave'/'check' actions retired — zero live external callers found in the
-        caller sweep. Short agent-to-agent notes now go through
-        tachi_memory(action='sticky_leave'|'sticky_check') (#964); structured
+        caller sweep. Same-host advisory messages now go through
+        tachi_a2a(action='respond') (#1751); structured
         task batons go through tachi_orchestrator(action='handoff_write'|'handoff_read')."
       - "promote_issue (memo -> GitHub issue) survives as the one documented
         capability without a replacement (#1037 is the deferred future leaf for
