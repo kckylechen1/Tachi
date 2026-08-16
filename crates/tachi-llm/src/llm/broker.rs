@@ -9,8 +9,8 @@
 //! outcome, how an error response is classified — behind one trait,
 //! [`ProviderWire`], whose implementations are **pure functions**. An adapter
 //! holds no HTTP client, opens no connection, sleeps for no retry, and reads
-//! no credential material. The single executor (a later slice) owns the
-//! connection, the pool, the retry clock and the cancellation token; the
+//! no credential material. The single executor owns the connection, the
+//! injected pool and the cancellation token; the
 //! adapter owns only the grammar.
 //!
 //! Three properties fall out of that, and they are the reason for the shape:
@@ -69,16 +69,11 @@
 //!
 //! # What is deliberately not here (slice boundaries)
 //!
-//! - **No executor, no cancellation state machine, no HTTP.** The three stream
-//!   grammars are here now — OpenAI-compatible SSE, Anthropic SSE, and
-//!   Ollama-shaped NDJSON — but the machine that owns the connection, drives
-//!   cancellation and records the final receipt still lands later.
-//!   The disposition vocabulary that the state machine will drive is frozen here
-//!   ([`InvocationDispositionV1`]); the machine that walks it is not. "No
-//!   HTTP" means no client, no socket, no send and no wait — not "no mention
-//!   of the HTTP crate": [`EndpointUrl`] borrows its URL *parser* and nothing
-//!   else, which `tests::sans_io` states as an allowlist of exactly one line
-//!   rather than as a claim about a crate name.
+//! - **No durable receipt wiring.** The single HTTP executor and cancellation
+//!   state machine are present, but the durable invocation wrapper lands in a
+//!   later slice. Provider adapters stay
+//!   sans-IO; `tests::sans_io` exempts the exact executor module and continues
+//!   to scan every adapter module.
 //! - **No gateway, no listener, no admission.** [`AdmittedRefs`] is the
 //!   recorded-never-authorizing shape those will fill in.
 //! - **No consumer cutover.** `chat_lanes::lane_calls` keeps serving all four
@@ -89,6 +84,7 @@ mod anthropic;
 mod anthropic_stream;
 mod canonical;
 mod disposition;
+mod executor;
 mod ollama_stream;
 mod openai_compat;
 mod openai_stream;
@@ -115,6 +111,10 @@ pub use disposition::{
     BeforeSendRefusal, BeforeSendRefusalKind, CancellationEvidence, CompletionKindV1,
     InvocationDispositionKind, InvocationDispositionV1, ProtocolViolation, ProtocolViolationKind,
     RetryPosture, SendPhase, UnsupportedCapability, MAX_FINISH_REASON_CHARS,
+};
+pub use executor::{
+    BrokerExecutionOutcome, BrokerHttpExecutor, LeasedAuthMaterial, MAX_ERROR_BODY_EXCERPT_BYTES,
+    MAX_RESPONSE_BODY_BYTES,
 };
 pub use stream::{
     CanonicalStreamEvent, CanonicalStreamEventKind, StreamDecodeError, StreamDecodeErrorKind,

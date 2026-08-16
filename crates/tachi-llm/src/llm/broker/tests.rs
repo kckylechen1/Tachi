@@ -13,6 +13,7 @@
 //! | [`canonical_bounds`] | that the caps hold on both construction paths |
 //! | [`capability_refusals`] | each capability gate, one refusal at a time |
 //! | [`disposition_goldens`] | the disposition/usage vocabularies' serialized shape and their safety semantics |
+//! | [`executor`] | one-shot HTTP, cancellation truth, body bounds, and secret-free outcomes |
 //! | [`two_gate`] | that no credential can be named, selected, or leaked |
 //! | [`sans_io`] | that the adapter layer contains no way to perform IO |
 //! | [`classification_parity`] | that the new classifier reproduces the legacy one, fixture for fixture |
@@ -32,6 +33,7 @@ mod canonical_bounds;
 mod capability_refusals;
 mod classification_parity;
 mod disposition_goldens;
+mod executor;
 mod openai_compat_goldens;
 mod provider_adapters;
 mod sans_io;

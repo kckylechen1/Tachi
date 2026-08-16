@@ -51,6 +51,12 @@ const NON_SHIPPED_ALLOWLIST: &[(&str, &str)] = &[(
      module that ships",
 )];
 
+/// Shipped Broker modules that are intentionally not provider adapters.
+const SHIPPED_NON_ADAPTER_ALLOWLIST: &[(&str, &str)] = &[(
+    "broker/executor.rs",
+    "the single injected-client HTTP executor; provider adapters remain sans-IO",
+)];
+
 /// Every `.rs` file directly under `src/llm/broker/`, recursively, except
 /// anything inside a directory literally named `tests` (the fixture loader
 /// reads directories by design, and the test tree is excluded on purpose —
@@ -111,6 +117,9 @@ fn adapter_sources() -> Vec<(String, String)> {
         if NON_SHIPPED_ALLOWLIST
             .iter()
             .any(|(exempt, _)| *exempt == rel)
+            || SHIPPED_NON_ADAPTER_ALLOWLIST
+                .iter()
+                .any(|(exempt, _)| *exempt == rel)
         {
             continue;
         }
@@ -274,7 +283,10 @@ fn every_broker_rs_file_is_scanned_or_explicitly_exempt() {
         let is_scanned = scanned.iter().any(|(name, _)| name == rel);
         let is_exempt = NON_SHIPPED_ALLOWLIST
             .iter()
-            .any(|(exempt, _)| *exempt == rel.as_str());
+            .any(|(exempt, _)| *exempt == rel.as_str())
+            || SHIPPED_NON_ADAPTER_ALLOWLIST
+                .iter()
+                .any(|(exempt, _)| *exempt == rel.as_str());
         assert!(
             is_scanned || is_exempt,
             "{rel} is on disk under src/llm/broker/ but is neither scanned for \
@@ -282,6 +294,22 @@ fn every_broker_rs_file_is_scanned_or_explicitly_exempt() {
              must be one or the other, never silently neither"
         );
     }
+}
+
+#[test]
+fn the_executor_exemption_is_exact_and_still_executes_http() {
+    assert_eq!(
+        SHIPPED_NON_ADAPTER_ALLOWLIST,
+        &[(
+            "broker/executor.rs",
+            "the single injected-client HTTP executor; provider adapters remain sans-IO",
+        )]
+    );
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/llm/broker/executor.rs");
+    let source =
+        fs::read_to_string(&path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+    assert!(source.contains("reqwest::Client"));
+    assert!(source.contains("self.http.execute(http_request)"));
 }
 
 #[test]

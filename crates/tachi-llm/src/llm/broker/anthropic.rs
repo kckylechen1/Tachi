@@ -380,7 +380,7 @@ impl ProviderWire for AnthropicWire {
 
     fn parse_response(&self, status: u16, headers: &ResponseHeaders, body: &[u8]) -> WireOutcome {
         if !(200..300).contains(&status) {
-            let excerpt = String::from_utf8_lossy(&body).into_owned();
+            let excerpt = String::from_utf8_lossy(body).into_owned();
             return WireOutcome::Rejected {
                 status,
                 classification: self.classify_error(status, headers, &excerpt),
