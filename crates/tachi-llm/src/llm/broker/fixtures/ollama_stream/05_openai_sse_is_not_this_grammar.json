@@ -1,0 +1,23 @@
+{
+  "grammar": "ollama_ndjson",
+  "why": "The per-grammar discrimination in the other direction: SSE lines fed to the NDJSON decoder must fail where they are wrong, as malformed NDJSON, not limp through to a later fake truncation.",
+  "chunks": [
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"nope\"},\"finish_reason\":null}]}\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "none"
+  },
+  "expected": {
+    "events": [],
+    "error": "malformed_frame",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "malformed_frame"
+      }
+    }
+  }
+}

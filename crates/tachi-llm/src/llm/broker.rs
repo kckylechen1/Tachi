@@ -69,14 +69,11 @@
 //!
 //! # What is deliberately not here (slice boundaries)
 //!
-//! - **No NDJSON decoder.** The SSE grammars land in slice-2
-//!   ([`OpenAiCompatStreamDecoder`] and [`AnthropicEventStreamDecoder`]); an
-//!   Ollama-shaped deployment streams NDJSON, which is a third grammar with its
-//!   own transcript family and is not implemented here. What *is* pinned is
-//!   that feeding NDJSON to an SSE decoder is a typed refusal rather than a
-//!   silent misread.
-//! - **No executor, no cancellation state machine, no HTTP.** The disposition
-//!   vocabulary that the state machine will drive is frozen here
+//! - **No executor, no cancellation state machine, no HTTP.** The three stream
+//!   grammars are here now — OpenAI-compatible SSE, Anthropic SSE, and
+//!   Ollama-shaped NDJSON — but the machine that owns the connection, drives
+//!   cancellation and records the final receipt still lands later.
+//!   The disposition vocabulary that the state machine will drive is frozen here
 //!   ([`InvocationDispositionV1`]); the machine that walks it is not. "No
 //!   HTTP" means no client, no socket, no send and no wait — not "no mention
 //!   of the HTTP crate": [`EndpointUrl`] borrows its URL *parser* and nothing
@@ -88,11 +85,14 @@
 //!   lanes untouched. This module copies its *classification semantics* and
 //!   pins the copy with a parity test; it changes nothing there.
 
+mod anthropic;
 mod anthropic_stream;
 mod canonical;
 mod disposition;
+mod ollama_stream;
 mod openai_compat;
 mod openai_stream;
+mod provider_family;
 mod sse;
 mod stream;
 mod stream_grammar;
@@ -129,6 +129,12 @@ pub use wire::{
     WireHttpRequest, WireOutcome, MAX_RETRY_AFTER_CHARS,
 };
 
+pub use anthropic::{AnthropicWire, ANTHROPIC_DIALECT};
 pub use anthropic_stream::AnthropicEventStreamDecoder;
+pub use ollama_stream::OllamaNdjsonStreamDecoder;
 pub use openai_compat::{OpenAiCompatWire, OPENAI_COMPAT_DIALECT};
 pub use openai_stream::OpenAiCompatStreamDecoder;
+pub use provider_family::{
+    GenericCompatWire, OpenRouterWire, XaiWire, GENERIC_COMPAT_DIALECT, OPEN_ROUTER_DIALECT,
+    XAI_DIALECT,
+};

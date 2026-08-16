@@ -35,14 +35,13 @@
 //!
 //! # What is deliberately not here
 //!
-//! An Anthropic [`ProviderWire`](super::ProviderWire) — request building,
-//! non-streaming response parsing, error classification. This module is the
-//! stream grammar only, which is what the design asked slice-2 to prove. Two
-//! consequences, stated so neither is mistaken for an oversight: nothing
-//! constructs this decoder in production yet, and `thinking_delta` /
-//! `signature_delta` fragments are read and dropped, because the canonical
-//! vocabulary has no event for reasoning traces and inventing one is a
-//! vocabulary change, not a decoder change.
+//! An Anthropic request/response adapter lives next door now
+//! ([`super::anthropic::AnthropicWire`]); this module stays stream-grammar
+//! only so the request/response mapping and the event-state machine cannot
+//! quietly diverge. What still is deliberately absent is a canonical event for
+//! reasoning traces: `thinking_delta` / `signature_delta` fragments are read
+//! and dropped, because inventing one would be a vocabulary change, not a
+//! decoder change.
 
 use serde_json::Value;
 

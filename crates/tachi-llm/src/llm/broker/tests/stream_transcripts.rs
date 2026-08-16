@@ -66,11 +66,14 @@ const OPENAI_SSE_DIR: &str = "openai_compat_stream";
 
 /// The Anthropic event-grammar corpus.
 const ANTHROPIC_SSE_DIR: &str = "anthropic_stream";
+/// The Ollama NDJSON corpus.
+const OLLAMA_NDJSON_DIR: &str = "ollama_stream";
 
 /// Every corpus directory, with the grammar each one speaks.
 pub(super) const STREAM_CORPORA: &[(&str, &str)] = &[
     (OPENAI_SSE_DIR, "openai_compat_sse"),
     (ANTHROPIC_SSE_DIR, "anthropic_sse"),
+    (OLLAMA_NDJSON_DIR, "ollama_ndjson"),
 ];
 
 /// What a fixture does once its chunks are exhausted.
@@ -115,6 +118,7 @@ pub(super) fn decoder_for(grammar: &str) -> Box<dyn WireStreamDecoder> {
         // so here is cheaper than letting a reader infer a dialect that is not
         // there.
         "anthropic_sse" => Box::new(AnthropicEventStreamDecoder::new()),
+        "ollama_ndjson" => Box::new(OllamaNdjsonStreamDecoder::new()),
         other => panic!("fixture names a grammar this harness does not know: {other}"),
     }
 }
@@ -279,12 +283,12 @@ fn every_transcript() -> Vec<(String, String, Value)> {
 fn every_transcript_decodes_to_its_golden() {
     let fixtures = every_transcript();
     assert!(
-        fixtures.len() >= 47,
+        fixtures.len() >= 53,
         "the transcript corpus shrank to {} fixtures",
         fixtures.len()
     );
     assert!(
-        STREAM_CORPORA.len() >= 2,
+        STREAM_CORPORA.len() >= 3,
         "one grammar cannot answer whether the vocabulary is shaped around it"
     );
 

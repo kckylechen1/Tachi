@@ -1,0 +1,44 @@
+{
+  "grammar": "ollama_ndjson",
+  "why": "A terminal Ollama tool call is not SSE deltas: the full call lands as one NDJSON line, its object arguments stay an object until the wire boundary serializes them once, and `done_reason: stop` plus tool calls still means `tool_calls`, not `complete`.",
+  "chunks": [
+    {
+      "text": "{\"model\":\"qwen3\",\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"search\",\"arguments\":{\"q\":\"cats\"}}}]},\"done\":true,\"done_reason\":\"stop\"}\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "qwen3"
+        }
+      },
+      {
+        "event": "tool_call_delta",
+        "fragment": {
+          "index": 0,
+          "name": "search",
+          "arguments_delta": "{\"q\":\"cats\"}"
+        }
+      },
+      {
+        "event": "tool_call_completed",
+        "index": 0
+      },
+      {
+        "event": "completed",
+        "completion": "tool_calls"
+      }
+    ],
+    "error": null,
+    "terminal_disposition": {
+      "disposition": "completed",
+      "completion": "tool_calls"
+    }
+  }
+}

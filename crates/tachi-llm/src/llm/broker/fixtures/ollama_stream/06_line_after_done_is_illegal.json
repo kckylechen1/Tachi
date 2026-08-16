@@ -1,0 +1,38 @@
+{
+  "grammar": "ollama_ndjson",
+  "why": "Once `done: true` sealed the answer, later NDJSON lines are trailing garbage. The decoder reports the illegal sequence without moving the already-sealed completion.",
+  "chunks": [
+    {
+      "text": "{\"model\":\"qwen3\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":true,\"done_reason\":\"stop\"}\n"
+    },
+    {
+      "text": "{\"model\":\"qwen3\",\"message\":{\"role\":\"assistant\",\"content\":\"late\"},\"done\":false}\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "none"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "qwen3"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "ok"
+      },
+      {
+        "event": "completed",
+        "completion": "complete"
+      }
+    ],
+    "error": "illegal_sequence",
+    "terminal_disposition": {
+      "disposition": "completed",
+      "completion": "complete"
+    }
+  }
+}

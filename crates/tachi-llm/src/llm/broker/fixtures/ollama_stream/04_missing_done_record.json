@@ -1,0 +1,35 @@
+{
+  "grammar": "ollama_ndjson",
+  "why": "NDJSON has no out-of-band terminator. A clean EOF without a `done: true` record is the provider breaking its own grammar, so the failure is `unterminated_stream`, not a synthetic completion.",
+  "chunks": [
+    {
+      "text": "{\"model\":\"qwen3\",\"message\":{\"role\":\"assistant\",\"content\":\"hello\"},\"done\":false}\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "qwen3"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "hello"
+      }
+    ],
+    "error": "unterminated_stream",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "unterminated_stream"
+      }
+    }
+  }
+}

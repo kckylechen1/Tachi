@@ -540,4 +540,12 @@ fn dialect_name_matches_the_seam_wire_dialect_spelling() {
     // Not serde's snake_case of `OpenAiCompat` (which is `open_ai_compat`).
     assert_eq!(OPENAI_COMPAT_DIALECT, "openai_compat");
     assert_eq!(OpenAiCompatWire::new().dialect(), "openai_compat");
+    assert_eq!(ANTHROPIC_DIALECT, "anthropic");
+    assert_eq!(AnthropicWire::new().dialect(), "anthropic");
+    assert_eq!(XAI_DIALECT, "xai");
+    assert_eq!(XaiWire::new().dialect(), "xai");
+    assert_eq!(OPEN_ROUTER_DIALECT, "open_router");
+    assert_eq!(OpenRouterWire::new().dialect(), "open_router");
+    assert_eq!(GENERIC_COMPAT_DIALECT, "generic_compat");
+    assert_eq!(GenericCompatWire::new().dialect(), "generic_compat");
 }

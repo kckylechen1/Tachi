@@ -1,0 +1,54 @@
+{
+  "grammar": "ollama_ndjson",
+  "why": "The floor for Ollama chat streaming: NDJSON lines, assistant text in `message.content`, zero-valued prompt usage retained as authoritative, and the terminal `done: true` record sealing the answer instead of an SSE sentinel.",
+  "chunks": [
+    {
+      "text": "{\"model\":\"qwen3\",\"created_at\":\"2026-08-16T12:00:00Z\",\"message\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"done\":false}\n"
+    },
+    {
+      "text": "{\"model\":\"qwen3\",\"created_at\":\"2026-08-16T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":\"lo\"},\"done\":false}\n"
+    },
+    {
+      "text": "{\"model\":\"qwen3\",\"created_at\":\"2026-08-16T12:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":0,\"eval_count\":2}\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "qwen3"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "Hel"
+      },
+      {
+        "event": "text_delta",
+        "text": "lo"
+      },
+      {
+        "event": "usage",
+        "usage": {
+          "prompt_tokens": 0,
+          "completion_tokens": 2,
+          "provenance": "provider_authoritative"
+        }
+      },
+      {
+        "event": "completed",
+        "completion": "complete"
+      }
+    ],
+    "error": null,
+    "terminal_disposition": {
+      "disposition": "completed",
+      "completion": "complete"
+    }
+  }
+}
