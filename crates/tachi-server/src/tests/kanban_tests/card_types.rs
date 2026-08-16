@@ -2,7 +2,6 @@ use super::*;
 
 #[tokio::test]
 async fn post_card_accepts_acpx_card_types() {
-    std::env::set_var("KANBAN_CLASSIFY_ENABLED", "false");
     let server = make_server();
 
     for card_type in ["ack", "progress", "result"] {

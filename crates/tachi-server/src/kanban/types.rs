@@ -62,13 +62,3 @@ pub(crate) struct UpdateCardParams {
     #[serde(default)]
     pub response_text: Option<String>,
 }
-
-#[derive(Debug, Deserialize)]
-pub(super) struct KanbanClassification {
-    #[serde(default)]
-    pub(super) topic: Option<String>,
-    #[serde(default)]
-    pub(super) keywords: Vec<String>,
-    #[serde(default)]
-    pub(super) priority_suggestion: Option<String>,
-}

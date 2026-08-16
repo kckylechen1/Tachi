@@ -2,7 +2,6 @@ use super::*;
 
 #[tokio::test]
 async fn check_inbox_respects_broadcast_toggle() {
-    std::env::set_var("KANBAN_CLASSIFY_ENABLED", "false");
     let server = make_server();
 
     server
@@ -57,7 +56,6 @@ async fn check_inbox_respects_broadcast_toggle() {
 
 #[tokio::test]
 async fn check_inbox_workspace_and_conversation_filters_require_exact_match() {
-    std::env::set_var("KANBAN_CLASSIFY_ENABLED", "false");
     let server = make_server();
 
     server
