@@ -130,7 +130,7 @@ fn text_block(text: impl Into<String>) -> AnthropicContentBlock {
     AnthropicContentBlock::Text { text: text.into() }
 }
 
-fn content_blocks(content: &MessageContent) -> Vec<AnthropicContentBlock> {
+fn user_content_blocks(content: &MessageContent) -> Vec<AnthropicContentBlock> {
     match content {
         MessageContent::Text { text } => vec![text_block(text.clone())],
         MessageContent::Parts { parts } => parts
@@ -145,13 +145,42 @@ fn content_blocks(content: &MessageContent) -> Vec<AnthropicContentBlock> {
     }
 }
 
+fn text_content_blocks(
+    content: &MessageContent,
+    image_detail: &'static str,
+) -> Result<Vec<AnthropicContentBlock>, BeforeSendRefusal> {
+    match content {
+        MessageContent::Text { text } => Ok(vec![text_block(text.clone())]),
+        MessageContent::Parts { parts } => parts
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => Ok(text_block(text.clone())),
+                ContentPart::ImageUrl { .. } => Err(BeforeSendRefusal::UnrepresentableRequest {
+                    detail: image_detail,
+                }),
+            })
+            .collect(),
+    }
+}
+
 fn request_messages(
     messages: &[CanonicalMessage],
 ) -> Result<Vec<AnthropicMessage>, BeforeSendRefusal> {
     let mut out = Vec::new();
     for message in messages {
+        if message.name.is_some() {
+            return Err(BeforeSendRefusal::UnrepresentableRequest {
+                detail: "Anthropic Messages has no slot for CanonicalMessage.name",
+            });
+        }
         let blocks = match message.role {
-            MessageRole::System => continue,
+            MessageRole::System => {
+                text_content_blocks(
+                    &message.content,
+                    "Anthropic system content cannot contain images",
+                )?;
+                continue;
+            }
             MessageRole::Tool => vec![AnthropicContentBlock::ToolResult {
                 tool_use_id: message.tool_call_id.clone().ok_or(
                     BeforeSendRefusal::UnrepresentableRequest {
@@ -167,7 +196,11 @@ fn request_messages(
                     }
                 },
             }],
-            MessageRole::User | MessageRole::Assistant => content_blocks(&message.content),
+            MessageRole::User => user_content_blocks(&message.content),
+            MessageRole::Assistant => text_content_blocks(
+                &message.content,
+                "Anthropic assistant content cannot contain images",
+            )?,
         };
         out.push(AnthropicMessage {
             role: match message.role {
@@ -181,15 +214,20 @@ fn request_messages(
     Ok(out)
 }
 
-fn system_blocks(messages: &[CanonicalMessage]) -> Option<Vec<AnthropicContentBlock>> {
+fn system_blocks(
+    messages: &[CanonicalMessage],
+) -> Result<Option<Vec<AnthropicContentBlock>>, BeforeSendRefusal> {
     let mut out = Vec::new();
     for message in messages
         .iter()
         .filter(|message| message.role == MessageRole::System)
     {
-        out.extend(content_blocks(&message.content));
+        out.extend(text_content_blocks(
+            &message.content,
+            "Anthropic system content cannot contain images",
+        )?);
     }
-    (!out.is_empty()).then_some(out)
+    Ok((!out.is_empty()).then_some(out))
 }
 
 fn tools_value(tools: &[ToolDeclaration]) -> Option<Vec<AnthropicTool<'_>>> {
@@ -241,16 +279,25 @@ fn parse_usage(usage: Option<&Value>) -> UsageObservationV1 {
     )
 }
 
-fn parse_tool_call(block: &Value) -> Option<ToolCallV1> {
-    let input = block.get("input")?;
-    Some(ToolCallV1 {
-        id: block
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        name: block.get("name").and_then(Value::as_str)?.to_string(),
-        arguments: serde_json::to_string(input).ok()?,
+fn parse_tool_call(block: &Value) -> Result<ToolCallV1, &'static str> {
+    let id = block
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("/content/0/id")?;
+    let name = block
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or("/content/0/name")?;
+    let input = block
+        .get("input")
+        .filter(|input| input.is_object())
+        .ok_or("/content/0/input")?;
+    Ok(ToolCallV1 {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments: serde_json::to_string(input).map_err(|_| "/content/0/input")?,
     })
 }
 
@@ -307,7 +354,7 @@ impl ProviderWire for AnthropicWire {
             model: target.provider_model_id(),
             max_tokens,
             messages: request_messages(request.messages())?,
-            system: system_blocks(request.messages()),
+            system: system_blocks(request.messages())?,
             tools: tools_value(request.tools()),
             tool_choice: tool_choice_value(request.tool_choice(), !request.tools().is_empty()),
             temperature: request.sampling().temperature,
@@ -371,12 +418,13 @@ impl ProviderWire for AnthropicWire {
                     }
                 }
                 "tool_use" => {
-                    let Some(call) = parse_tool_call(block) else {
-                        return WireOutcome::ProtocolViolation {
-                            violation: ProtocolViolation::SchemaViolation {
-                                pointer: "/content/0/input",
-                            },
-                        };
+                    let call = match parse_tool_call(block) {
+                        Ok(call) => call,
+                        Err(pointer) => {
+                            return WireOutcome::ProtocolViolation {
+                                violation: ProtocolViolation::SchemaViolation { pointer },
+                            };
+                        }
                     };
                     tool_calls.push(call);
                 }

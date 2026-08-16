@@ -57,6 +57,27 @@ fn anthropic_request() -> CanonicalInvocationRequest {
     CanonicalInvocationRequest::new(parts).expect("anthropic fixture request must be valid")
 }
 
+fn anthropic_request_with_message(message: CanonicalMessage) -> CanonicalInvocationRequest {
+    let mut parts = minimal_parts();
+    parts.messages = vec![message];
+    parts.sampling.max_output_tokens = Some(32);
+    CanonicalInvocationRequest::new(parts).expect("Anthropic negative fixture must be canonical")
+}
+
+fn image_message(role: MessageRole) -> CanonicalMessage {
+    CanonicalMessage {
+        role,
+        content: MessageContent::Parts {
+            parts: vec![ContentPart::ImageUrl {
+                url: "https://example.test/forbidden.png".to_string(),
+                detail: None,
+            }],
+        },
+        tool_call_id: None,
+        name: None,
+    }
+}
+
 #[test]
 fn anthropic_builds_a_messages_request_without_executor_state() {
     let built = AnthropicWire::new()
@@ -135,6 +156,47 @@ fn anthropic_requires_a_max_output_cap_and_an_api_key() {
 }
 
 #[test]
+fn anthropic_rejects_system_images_before_send() {
+    let request = anthropic_request_with_message(image_message(MessageRole::System));
+    assert_eq!(
+        AnthropicWire::new()
+            .build_request(&request, api_key_lease())
+            .expect_err("system images have no Anthropic representation"),
+        BeforeSendRefusal::UnrepresentableRequest {
+            detail: "Anthropic system content cannot contain images",
+        }
+    );
+}
+
+#[test]
+fn anthropic_rejects_assistant_images_before_send() {
+    let request = anthropic_request_with_message(image_message(MessageRole::Assistant));
+    assert_eq!(
+        AnthropicWire::new()
+            .build_request(&request, api_key_lease())
+            .expect_err("assistant images have no Anthropic representation"),
+        BeforeSendRefusal::UnrepresentableRequest {
+            detail: "Anthropic assistant content cannot contain images",
+        }
+    );
+}
+
+#[test]
+fn anthropic_rejects_canonical_message_names_before_send() {
+    let mut message = user_message("hello");
+    message.name = Some("participant".to_string());
+    let request = anthropic_request_with_message(message);
+    assert_eq!(
+        AnthropicWire::new()
+            .build_request(&request, api_key_lease())
+            .expect_err("message names have no Anthropic slot"),
+        BeforeSendRefusal::UnrepresentableRequest {
+            detail: "Anthropic Messages has no slot for CanonicalMessage.name",
+        }
+    );
+}
+
+#[test]
 fn anthropic_parses_text_and_tool_use_without_leaking_provider_prose() {
     let outcome = AnthropicWire::new().parse_response(
         200,
@@ -196,6 +258,47 @@ fn anthropic_empty_content_is_a_protocol_violation_even_with_stop_reason() {
                 "finish_reason": "refusal"
             }
         }),
+    );
+}
+
+fn assert_anthropic_tool_use_schema_violation(body: &[u8], pointer: &'static str) {
+    assert_eq!(
+        AnthropicWire::new().parse_response(200, &ResponseHeaders::new(), body),
+        WireOutcome::ProtocolViolation {
+            violation: ProtocolViolation::SchemaViolation { pointer },
+        }
+    );
+}
+
+#[test]
+fn anthropic_tool_use_missing_id_is_a_protocol_violation() {
+    assert_anthropic_tool_use_schema_violation(
+        br#"{"content":[{"type":"tool_use","name":"search","input":{}}]}"#,
+        "/content/0/id",
+    );
+}
+
+#[test]
+fn anthropic_tool_use_blank_id_is_a_protocol_violation() {
+    assert_anthropic_tool_use_schema_violation(
+        br#"{"content":[{"type":"tool_use","id":"  ","name":"search","input":{}}]}"#,
+        "/content/0/id",
+    );
+}
+
+#[test]
+fn anthropic_tool_use_blank_name_is_a_protocol_violation() {
+    assert_anthropic_tool_use_schema_violation(
+        br#"{"content":[{"type":"tool_use","id":"toolu_1","name":"\t","input":{}}]}"#,
+        "/content/0/name",
+    );
+}
+
+#[test]
+fn anthropic_tool_use_non_object_input_is_a_protocol_violation() {
+    assert_anthropic_tool_use_schema_violation(
+        br#"{"content":[{"type":"tool_use","id":"toolu_1","name":"search","input":[]}]}"#,
+        "/content/0/input",
     );
 }
 
