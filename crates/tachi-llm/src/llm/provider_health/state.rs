@@ -249,6 +249,7 @@ impl ProviderState {
         state
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::llm) fn get_or_insert_health(
         &mut self,
         logical_name: &str,
@@ -288,6 +289,7 @@ impl ProviderState {
             .insert(key_id, snapshot);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::llm) fn set_health_snapshot(
         &mut self,
         logical_name: &str,

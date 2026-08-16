@@ -22,6 +22,10 @@ use crate::{RerankConfig, RerankProviderKind};
 const OBSERVED_AT: &str = "2026-08-11T00:00:00.000Z";
 
 fn catalog_conn() -> Connection {
+    // nextest runs each test in its own process; register the FTS tokenizer
+    // instead of relying on a sibling test having done it.
+    let _ = memcore::db::enable_simple_auto_extension();
+    memcore::db::register_sqlite_vec();
     let conn = Connection::open_in_memory().expect("open in-memory db");
     memcore::db::init_schema(&conn).expect("schema initializes");
     conn

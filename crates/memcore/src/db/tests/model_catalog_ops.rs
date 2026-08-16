@@ -41,6 +41,10 @@ use crate::db::model_catalog::{
 use crate::vault::health::EvidenceKind;
 
 fn catalog_conn() -> Connection {
+    // nextest runs each test in its own process, so the FTS tokenizer must be
+    // registered here rather than inherited from a sibling test's setup.
+    let _ = crate::db::enable_simple_auto_extension();
+    crate::db::register_sqlite_vec();
     let conn = Connection::open_in_memory().expect("open in-memory db");
     init_schema(&conn).expect("schema initializes");
     conn

@@ -153,6 +153,7 @@ where
     materialize_provider_secrets_under_guard(llm, &vault_pools, provider_keys, availability, None)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn materialize_provider_secrets_inner<I, S>(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,

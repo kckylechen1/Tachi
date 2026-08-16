@@ -45,7 +45,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 /// Build the pre-sentinel fixture used only by migration unit tests. Production
 /// fresh initialization must use [`init_schema`] so versioned schema is never
 /// installed outside the migration runner.
-/// Canonical v31 installer for host-owned ACP attachment receipts (#1733).
+/// Canonical v33 installer for host-owned ACP attachment receipts (#1733).
 /// The descriptor itself is projected at request time; this table stores only
 /// the identity/revision/policy receipt needed to reproduce that projection.
 pub(crate) fn install_harness_session_attachments_schema(
@@ -84,7 +84,7 @@ pub(crate) fn install_harness_session_attachments_schema(
     )
 }
 
-/// Refuse a drifted v31 attachment receipt shape before a current-schema open
+/// Refuse a drifted v33 attachment receipt shape before a current-schema open
 /// can hand it to a typed writer.  The state CHECK is checked separately from
 /// `pragma_table_info`, because SQLite does not expose CHECK constraints in
 /// that pragma.
@@ -110,7 +110,7 @@ pub(crate) fn validate_harness_session_attachments_schema(
         };
         if !present {
             return Err(MemoryError::InvalidArg(format!(
-                "incomplete v31 ACP attachment ledger: required {object_type} '{name}' is missing"
+                "incomplete v33 ACP attachment ledger: required {object_type} '{name}' is missing"
             )));
         }
     }
@@ -157,7 +157,7 @@ pub(crate) fn validate_harness_session_attachments_schema(
         .collect::<Vec<_>>();
     if actual != expected {
         return Err(MemoryError::InvalidArg(
-            "incomplete v31 ACP attachment ledger: table has non-canonical column shape"
+            "incomplete v33 ACP attachment ledger: table has non-canonical column shape"
                 .to_string(),
         ));
     }
@@ -177,7 +177,7 @@ pub(crate) fn validate_harness_session_attachments_schema(
     ] {
         if !normalized.contains(&normalize_schema_sql(clause)) {
             return Err(MemoryError::InvalidArg(format!(
-                "incomplete v31 ACP attachment ledger: table is missing canonical clause {clause:?}"
+                "incomplete v33 ACP attachment ledger: table is missing canonical clause {clause:?}"
             )));
         }
     }
@@ -2606,8 +2606,11 @@ mod a2a_schema_tests {
         assert_ne!(mutant, ddl::A2A_MAILBOX_V32_SQL);
         conn.execute_batch(&mutant)
             .expect("recreate widened current-v32 mailbox");
-        conn.execute_batch("PRAGMA user_version=32;")
-            .expect("stamp current-v32 fixture");
+        conn.execute_batch(&format!(
+            "PRAGMA user_version={};",
+            crate::db::migrations::EXPECTED_SCHEMA_VERSION
+        ))
+        .expect("stamp current-schema fixture");
 
         let error = crate::db::migrations::run_data_migrations_with_profile(
             &mut conn,

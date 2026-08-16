@@ -257,13 +257,18 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
     .0
 }
 
-pub(crate) async fn call_daemon_tool_raw_with_identity(
+/// Raw call carrying BOTH the connection's immutable tool profile and the
+/// forwarded agent identity. The profile rides the same header rail as
+/// `list_daemon_tools_with_profile`, so the call surface cannot silently
+/// widen beyond what discovery already showed for this connection.
+pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
+    profile: Option<tachi_hub::ToolProfile>,
     identity: ProxyIdentityForward,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases_and_profile(info, params, proxy_project, None, identity)
+    call_daemon_tool_raw_with_phases_and_profile(info, params, proxy_project, profile, identity)
         .await
         .0
 }

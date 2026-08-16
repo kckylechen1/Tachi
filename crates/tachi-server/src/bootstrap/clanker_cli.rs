@@ -471,7 +471,7 @@ fn scrub_opt(text: Option<String>) -> Option<String> {
 fn count_jsonl_lines(path: &Path) -> Option<u64> {
     let file = fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
-    Some(reader.lines().filter_map(|l| l.ok()).count() as u64)
+    Some(reader.lines().map_while(Result::ok).count() as u64)
 }
 
 fn count_json_array_entries(path: &Path) -> Option<u64> {

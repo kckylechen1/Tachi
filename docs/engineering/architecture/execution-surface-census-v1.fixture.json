@@ -2,9 +2,9 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-08-14",
-    "revision": "fcb8c1cf794fb17495bdfc6553bba50339f2c634",
-    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms; environment exposure override unset"
+    "date": "2026-08-16",
+    "revision": "c3fc6e6e467a955cf1855f80765ffb88cda15ae7",
+    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738); environment exposure override unset"
   },
   "provisional_budgets": {
     "status": "provisional",
@@ -13,31 +13,31 @@
         "max_visible_tools": 17,
         "max_total_input_schema_bytes": 60246,
         "max_total_tool_definition_bytes": 70184,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       },
       "delegate": {
         "max_visible_tools": 12,
         "max_total_input_schema_bytes": 61857,
         "max_total_tool_definition_bytes": 67623,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       },
       "coordinate": {
         "max_visible_tools": 39,
-        "max_total_input_schema_bytes": 124039,
-        "max_total_tool_definition_bytes": 142353,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 126159,
+        "max_total_tool_definition_bytes": 144473,
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       },
       "operate": {
         "max_visible_tools": 51,
-        "max_total_input_schema_bytes": 119608,
-        "max_total_tool_definition_bytes": 139054,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 121728,
+        "max_total_tool_definition_bytes": 141174,
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       },
       "admin": {
         "max_visible_tools": 103,
-        "max_total_input_schema_bytes": 181692,
-        "max_total_tool_definition_bytes": 219347,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for admin; any regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 183812,
+        "max_total_tool_definition_bytes": 221467,
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for admin; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       }
     },
     "surfaces": {
@@ -201,8 +201,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 181692,
-        "total_tool_definition_bytes": 219347,
+        "total_input_schema_bytes": 183812,
+        "total_tool_definition_bytes": 221467,
         "visible_tool_count": 103,
         "visible_tools": [
           "archive_memory",
@@ -311,8 +311,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 124039,
-        "total_tool_definition_bytes": 142353,
+        "total_input_schema_bytes": 126159,
+        "total_tool_definition_bytes": 144473,
         "visible_tool_count": 39,
         "visible_tools": [
           "extract_facts",
@@ -376,8 +376,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 119608,
-        "total_tool_definition_bytes": 139054,
+        "total_input_schema_bytes": 121728,
+        "total_tool_definition_bytes": 141174,
         "visible_tool_count": 51,
         "visible_tools": [
           "archive_memory",
