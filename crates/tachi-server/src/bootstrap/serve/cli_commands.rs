@@ -269,6 +269,10 @@ pub(super) async fn run_pre_serve_command(
             .await?;
             Ok(true)
         }
+        Commands::Clanker { action } => {
+            super::super::clanker_cli::run_clanker_command(action.clone(), global_db_path).await?;
+            Ok(true)
+        }
         Commands::Serve => Ok(false),
         _ => {
             super::super::cli_tool::run_cli_command(

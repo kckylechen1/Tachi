@@ -341,6 +341,29 @@ pub enum CleanAction {
     },
 }
 
+/// tachi#1735: ingest terminal Clanker run evidence (`~/.cache/clanker/runs/<id>/`)
+/// into the existing mirror-eval spine (#1066 tables) — the `vault`/`doctor`
+/// convention of one noun-grouped subcommand with room to grow, even though
+/// this leaf ships exactly one verb.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ClankerAction {
+    /// Sweep terminal Clanker run directories and register/observe them on
+    /// the mirror-eval spine. Idempotent by run id — re-sweeping produces
+    /// zero duplicate rows.
+    Sweep {
+        /// Root directory of Clanker run directories. Defaults to
+        /// `~/.cache/clanker/runs`.
+        #[arg(long, value_name = "PATH")]
+        runs_dir: Option<PathBuf>,
+        /// Process at most N run directories (deterministic, sorted by name).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Emit machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum EvalAction {
     /// Run the local /eval recall corpus and publish aggregate-only health.
