@@ -18,8 +18,10 @@ mod state;
 mod types;
 
 pub use self::config::{LaneFallbackConfig, ProviderRuntimeConfig};
+pub use self::state::DeploymentHealthRecordCounts;
 pub(super) use self::state::{
-    ProviderHealthPersistState, ProviderHealthReloadState, ProviderHealthSnapshot, ProviderState,
+    DeploymentHealthCounters, ProviderHealthPersistState, ProviderHealthReloadState,
+    ProviderHealthSnapshot, ProviderState,
 };
 pub use self::types::ProviderSecret;
 pub(super) use self::types::{

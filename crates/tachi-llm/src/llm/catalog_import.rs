@@ -87,6 +87,62 @@ pub fn env_deployment_id(lane: &str) -> String {
     format!("{ENV_CATALOG_PREFIX}{lane}")
 }
 
+/// Which catalog deployment an outcome belongs to, if any (#1681 D4, PR-C).
+///
+/// The lane name alone is not enough to attribute an outcome, which is why
+/// this carries the endpoint and model the request actually used: #1197's
+/// cross-provider fallback tier and a caller-supplied `model_override` both
+/// send a lane's request somewhere its `env:{lane}` row does not describe.
+/// The store checks the pair against the row and skips a mismatch
+/// (`memcore::db::model_catalog::DeploymentOutcomeTarget`), so a fallback
+/// provider's 429 can never cool down the primary deployment.
+///
+/// [`Self::Unattributed`] is not a failure — it is the honest answer for every
+/// channel that has no catalog row behind it: the rerank lane (which the env
+/// import does not project), and the MCP/CLI `record-key-result` channel, which
+/// reports a credential's outcome without saying which deployment served it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::llm) enum DeploymentAttribution<'a> {
+    /// The request went to the deployment the env import recorded for `lane`,
+    /// at `endpoint`, naming `model`.
+    EnvLane {
+        lane: &'a str,
+        endpoint: &'a str,
+        model: &'a str,
+    },
+    /// Nothing in the catalog describes this request.
+    Unattributed,
+}
+
+impl<'a> DeploymentAttribution<'a> {
+    /// The `env:{lane}` deployment id this attribution names, if it names one.
+    ///
+    /// Returned as an owned `String` because the id is *derived* from the lane
+    /// name (`env_deployment_id`) rather than stored anywhere — deriving it in
+    /// one place is what keeps the seam and the import from disagreeing about
+    /// the id format.
+    pub(in crate::llm) fn env_deployment_id(&self) -> Option<String> {
+        match self {
+            Self::EnvLane { lane, .. } => Some(env_deployment_id(lane)),
+            Self::Unattributed => None,
+        }
+    }
+
+    pub(in crate::llm) fn endpoint(&self) -> Option<&'a str> {
+        match self {
+            Self::EnvLane { endpoint, .. } => Some(endpoint),
+            Self::Unattributed => None,
+        }
+    }
+
+    pub(in crate::llm) fn model(&self) -> Option<&'a str> {
+        match self {
+            Self::EnvLane { model, .. } => Some(model),
+            Self::Unattributed => None,
+        }
+    }
+}
+
 /// Why an env resolution could not become catalog rows.
 ///
 /// **Carries no endpoint, no URL and no secret material** — only the lane

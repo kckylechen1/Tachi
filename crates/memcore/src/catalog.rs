@@ -32,6 +32,7 @@
 //!   the account row (ddl.rs:776-782).
 
 pub mod fold;
+pub mod health;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -361,6 +362,14 @@ pub enum DeploymentEventKind {
     DeploymentUpdated,
     /// The deployment left `active`.
     DeploymentRetired,
+    /// The deployment served a request ([`health::DeploymentOutcome::Served`]).
+    HealthServed,
+    /// The deployment was throttled and is cooling down.
+    HealthCooldown,
+    /// The deployment failed in a way that is its own (unreachable, `5xx`,
+    /// unusable response). Never an auth failure — see
+    /// [`health::DeploymentOutcome`].
+    HealthError,
 }
 
 impl DeploymentEventKind {
@@ -369,6 +378,9 @@ impl DeploymentEventKind {
             Self::DeploymentImported => "deployment_imported",
             Self::DeploymentUpdated => "deployment_updated",
             Self::DeploymentRetired => "deployment_retired",
+            Self::HealthServed => "deployment_health_served",
+            Self::HealthCooldown => "deployment_health_cooldown",
+            Self::HealthError => "deployment_health_error",
         }
     }
 
@@ -377,7 +389,39 @@ impl DeploymentEventKind {
             "deployment_imported" => Some(Self::DeploymentImported),
             "deployment_updated" => Some(Self::DeploymentUpdated),
             "deployment_retired" => Some(Self::DeploymentRetired),
+            "deployment_health_served" => Some(Self::HealthServed),
+            "deployment_health_cooldown" => Some(Self::HealthCooldown),
+            "deployment_health_error" => Some(Self::HealthError),
             _ => None,
+        }
+    }
+
+    /// Whether this kind belongs to the health authority (#1681 D4) rather
+    /// than to catalog metadata.
+    ///
+    /// The distinction is load-bearing for the fold: a health event records how
+    /// a deployment is *behaving* and must never be read as a change to what it
+    /// *is*. Two authorities, one append-only log, and the fold keeps them in
+    /// separate fields (#1681 D1's table-boundary rule, applied to the
+    /// projection).
+    pub fn is_health(self) -> bool {
+        self.health_state().is_some()
+    }
+
+    /// The `model_deployment_health.state` a health event of this kind put the
+    /// row in; `None` for the catalog-metadata kinds.
+    ///
+    /// This is the mapping that lets the fold reconstruct health state from the
+    /// log alone — which is what makes replaying the log a check on the table
+    /// rather than a second copy of it. It is the same mapping
+    /// [`health::DeploymentOutcome::state`] applies when writing, and a test
+    /// pins the two together.
+    pub fn health_state(self) -> Option<&'static str> {
+        match self {
+            Self::HealthServed => Some(health::DEPLOYMENT_HEALTH_STATE_OK),
+            Self::HealthCooldown => Some(health::DEPLOYMENT_HEALTH_STATE_COOLDOWN),
+            Self::HealthError => Some(health::DEPLOYMENT_HEALTH_STATE_ERROR),
+            Self::DeploymentImported | Self::DeploymentUpdated | Self::DeploymentRetired => None,
         }
     }
 }
@@ -616,11 +660,13 @@ impl PricingSnapshot {
 // ─── model_deployment_health ─────────────────────────────────────────────────
 
 /// Deployment-level operational health (#1681 D4) — the *type*; the single
-/// writer `record_deployment_outcome` is PR-C's.
+/// writer is [`health::record_deployment_outcome`].
 ///
 /// One of four authorities that are never merged into one score. 401/403
-/// never reach this table: an auth failure says nothing about the deployment,
-/// and the discriminating test for that lives with the catalog store.
+/// never reach this table: an auth failure says nothing about the deployment.
+/// That is enforced in the writer's type face — [`health::DeploymentOutcome`]
+/// has no auth variant to construct — not by a runtime check, and the
+/// discriminating tests for it live with the writer and with the catalog store.
 ///
 /// No serde derive: `EvidenceKind` (#1680 D6) carries none, and inventing a
 /// serialization for it here would fork that vocabulary's wire form away from

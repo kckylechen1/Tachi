@@ -5,6 +5,7 @@
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
+use super::catalog_import::{DeploymentAttribution, ENV_EMBEDDING_LANE};
 use super::embedding_config::EmbeddingConfig;
 
 /// Voyage API base URL. Defaults to the public endpoint; `VOYAGE_BASE_URL`
@@ -128,7 +129,7 @@ impl super::LlmClient {
                 "input": chunk,
                 "input_type": input_type
             });
-            let mut response_json: Option<Value> = None;
+            let mut chunk_embeddings: Option<Vec<Vec<f32>>> = None;
             let mut last_err = String::new();
             // Recall-path bounds (#926): fewer attempts + a per-request deadline
             // so a blackholed provider cannot freeze recall for minutes.
@@ -140,9 +141,21 @@ impl super::LlmClient {
                 else {
                     continue;
                 };
+                // Bound here rather than hoisted out of the attempt loop so
+                // the endpoint is still resolved exactly once per attempt, in
+                // the same order, as before (#1681 D3's per-call resolution).
+                let endpoint = voyage_endpoint("/v1/embeddings");
+                // The embedding lane has a catalog row of its own
+                // (`env:embedding`, #1681 D7 PR-B), so its outcomes are
+                // attributable the same way a chat lane's are.
+                let attribution = DeploymentAttribution::EnvLane {
+                    lane: ENV_EMBEDDING_LANE,
+                    endpoint: &endpoint,
+                    model: embedding.model(),
+                };
                 let response = self
                     .http_client()
-                    .post(voyage_endpoint("/v1/embeddings"))
+                    .post(&endpoint)
                     .timeout(Self::recall_request_timeout())
                     .header(CONTENT_TYPE, "application/json")
                     .header(AUTHORIZATION, format!("Bearer {}", selected.value))
@@ -157,6 +170,9 @@ impl super::LlmClient {
                     // the body forever isn't recorded as a success.
                     Ok(response) => response,
                     Err(err) => {
+                        // No status line: deployment-only evidence (#1681 D4),
+                        // exactly as on the chat lanes.
+                        self.note_deployment_transport_failure(attribution);
                         self.note_recall_provider_outcome(err.is_timeout());
                         last_err = format!("Voyage batch API request failed: {err}");
                         if attempt < max_attempts {
@@ -173,7 +189,19 @@ impl super::LlmClient {
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok());
+                // The raw header for the deployment authority, parsed through
+                // `RetryAfter::parse` so all three RFC 9110 date forms land —
+                // see the same read in `lane_calls.rs` on why it is a second
+                // read rather than a widening of `retry_after`.
+                let retry_after_header = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
                 let text = response.text().await.map_err(|e| {
+                    // The body stalled: whatever the status line said, nothing
+                    // usable came back.
+                    self.note_deployment_unusable_body(attribution);
                     // Headers-then-stall (#926 review): the body read carries
                     // its own share of the request's `.timeout()` budget and
                     // can time out even though `send()` already returned Ok.
@@ -191,7 +219,7 @@ impl super::LlmClient {
                 // 429 rate-limit path (which returns before reaching parse).
                 self.note_recall_provider_outcome(false);
                 if status.as_u16() == 429 {
-                    self.mark_secret_rate_limited(&selected, retry_after);
+                    self.mark_secret_rate_limited(&selected, retry_after, attribution);
                     last_err = format!("Voyage batch API error: {} - {}", status, text);
                     if attempt < max_attempts {
                         continue;
@@ -202,36 +230,65 @@ impl super::LlmClient {
                     self.mark_secret_auth_failed(
                         &selected,
                         Some(&format!("Voyage batch auth failure {status}")),
+                        attribution,
                     );
                     return Err(format!("Voyage batch API error: {} - {}", status, text));
                 }
                 if !status.is_success() {
+                    // 402, 5xx and the plain refusals — the same gap the chat
+                    // lanes had (#1681 D4, codex CP6).
+                    self.note_deployment_http_status(
+                        attribution,
+                        status.as_u16(),
+                        retry_after_header.as_deref(),
+                    );
                     return Err(format!("Voyage batch API error: {} - {}", status, text));
                 }
-                response_json = Some(
-                    serde_json::from_str(&text)
-                        .map_err(|e| format!("Failed to parse Voyage batch response: {}", e))?,
-                );
-                self.mark_secret_success(&selected);
+                let json: Value = serde_json::from_str(&text).map_err(|e| {
+                    // Protocol failure: a 2xx body that is not the protocol.
+                    self.note_deployment_unusable_body(attribution);
+                    format!("Failed to parse Voyage batch response: {}", e)
+                })?;
+                // Read **before** the success is recorded, not after it. A
+                // body that parses as JSON and is not a batch — no `data`
+                // array, the wrong number of embeddings, mismatched indexes,
+                // the wrong width — is an unusable response, and the deployment
+                // authority has to hear about it as one. Validating after
+                // `mark_secret_success` recorded `Served`, which clears the
+                // cooldown and resets the error count, while the caller was
+                // handed an error: the seam's own accounting said the
+                // deployment was fine at the moment it demonstrably was not
+                // (codex re-review of PR-C, CP6). This is the chat lane's rule
+                // too — an empty completion is `note_deployment_unusable_body`
+                // and no success (`lane_calls.rs`).
+                let embeddings = match json["data"]
+                    .as_array()
+                    .ok_or_else(|| "Invalid Voyage batch response: missing data array".to_string())
+                    .and_then(|data| {
+                        parse_voyage_batch_embeddings(
+                            data,
+                            chunk.len(),
+                            embedding.dimension() as usize,
+                        )
+                    }) {
+                    Ok(embeddings) => embeddings,
+                    Err(err) => {
+                        self.note_deployment_unusable_body(attribution);
+                        return Err(err);
+                    }
+                };
+                self.mark_secret_success(&selected, attribution);
+                chunk_embeddings = Some(embeddings);
                 break;
             }
 
-            let json = response_json.ok_or_else(|| {
+            all_embeddings.extend(chunk_embeddings.ok_or_else(|| {
                 if last_err.is_empty() {
                     "Voyage batch API failed without a response".to_string()
                 } else {
                     last_err
                 }
-            })?;
-
-            let data = json["data"]
-                .as_array()
-                .ok_or("Invalid Voyage batch response: missing data array")?;
-            all_embeddings.extend(parse_voyage_batch_embeddings(
-                data,
-                chunk.len(),
-                embedding.dimension() as usize,
-            )?);
+            })?);
         }
 
         Ok(all_embeddings)
