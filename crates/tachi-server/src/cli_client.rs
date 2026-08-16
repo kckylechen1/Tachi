@@ -27,8 +27,8 @@ pub(crate) use forward::{maybe_forward_server_read, maybe_forward_server_write};
 #[cfg(test)]
 pub(crate) use transport::call_daemon_tool_raw;
 pub(crate) use transport::{
-    call_daemon_tool, call_daemon_tool_raw_with_profile, call_daemon_tool_with_profile,
-    list_daemon_tools_with_profile, DaemonCallError,
+    call_daemon_tool, call_daemon_tool_raw_with_identity, call_daemon_tool_with_profile,
+    list_daemon_tools_with_profile, DaemonCallError, ProxyIdentityForward,
 };
 
 #[cfg(test)]

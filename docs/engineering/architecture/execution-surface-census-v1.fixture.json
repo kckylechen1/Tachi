@@ -2,42 +2,42 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-08-11",
-    "revision": "fed4f6b714d292633c1f85620a9ca8c3ff8f9a72",
-    "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
+    "date": "2026-08-14",
+    "revision": "fcb8c1cf794fb17495bdfc6553bba50339f2c634",
+    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms; environment exposure override unset"
   },
   "provisional_budgets": {
     "status": "provisional",
     "profiles": {
       "standard": {
-        "max_visible_tools": 16,
-        "max_total_input_schema_bytes": 64994,
-        "max_total_tool_definition_bytes": 74510,
-        "rationale": "Exact live observed #1687 C1c census for standard; any regrowth requires explicit adjudication."
+        "max_visible_tools": 17,
+        "max_total_input_schema_bytes": 60246,
+        "max_total_tool_definition_bytes": 70184,
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "delegate": {
-        "max_visible_tools": 11,
-        "max_total_input_schema_bytes": 66470,
-        "max_total_tool_definition_bytes": 71814,
-        "rationale": "Exact live observed #1687 C1c census for delegate; any regrowth requires explicit adjudication."
+        "max_visible_tools": 12,
+        "max_total_input_schema_bytes": 61857,
+        "max_total_tool_definition_bytes": 67623,
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "coordinate": {
-        "max_visible_tools": 38,
-        "max_total_input_schema_bytes": 130928,
-        "max_total_tool_definition_bytes": 148842,
-        "rationale": "Exact live observed census for coordinate; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); #1733 trusted-local ACP attachment fields are pinned after the final schema; any further regrowth requires explicit adjudication."
+        "max_visible_tools": 39,
+        "max_total_input_schema_bytes": 124039,
+        "max_total_tool_definition_bytes": 142353,
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "operate": {
-        "max_visible_tools": 50,
-        "max_total_input_schema_bytes": 126476,
-        "max_total_tool_definition_bytes": 145500,
-        "rationale": "Exact live observed census for operate; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); #1733 trusted-local ACP attachment fields are pinned after the final schema; any further regrowth requires explicit adjudication."
+        "max_visible_tools": 51,
+        "max_total_input_schema_bytes": 119608,
+        "max_total_tool_definition_bytes": 139054,
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "admin": {
-        "max_visible_tools": 102,
-        "max_total_input_schema_bytes": 188683,
-        "max_total_tool_definition_bytes": 225938,
-        "rationale": "Exact live observed census for admin; #1687 C1c pin re-based on the explicitly adjudicated #1675 eval-ledger schema growth (PR1 tachi_agent_eval.rubric +2352 B, tachi_staff.recommendation_ref +513 B; PR2 tachi_agent_eval.projection +1944 B for the route_projection decision-fact projection); #1733 trusted-local ACP attachment fields are pinned after the final schema; any further regrowth requires explicit adjudication."
+        "max_visible_tools": 103,
+        "max_total_input_schema_bytes": 181692,
+        "max_total_tool_definition_bytes": 219347,
+        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for admin; any regrowth requires explicit adjudication."
       }
     },
     "surfaces": {
@@ -47,9 +47,9 @@
         "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
       },
       "standard.tachi_memory": {
-        "max_top_level_properties": 68,
-        "max_input_schema_bytes": 13650,
-        "rationale": "Daily memory facade baseline under the facade-width review."
+        "max_top_level_properties": 43,
+        "max_input_schema_bytes": 7736,
+        "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
       },
       "standard.tachi_gh": {
         "max_top_level_properties": 57,
@@ -112,29 +112,17 @@
         ]
       },
       "tachi_memory": {
-        "action_count": 21,
+        "action_count": 9,
         "actions": [
           "alerts",
           "ask",
           "briefing",
           "checkpoint",
-          "claim",
           "consolidate",
-          "delete",
-          "doctor_scan",
           "extract_facts",
-          "gc",
           "get",
-          "ingest",
-          "ingest_source",
-          "pattern_feedback",
-          "progress",
-          "readiness",
-          "release",
           "save",
-          "search",
-          "sticky_check",
-          "sticky_leave"
+          "search"
         ]
       },
       "tachi_orchestrator": {
@@ -213,9 +201,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 188683,
-        "total_tool_definition_bytes": 225938,
-        "visible_tool_count": 102,
+        "total_input_schema_bytes": 181692,
+        "total_tool_definition_bytes": 219347,
+        "visible_tool_count": 103,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -267,6 +255,7 @@
           "section_build",
           "skill_evolve",
           "sync_memories",
+          "tachi_a2a",
           "tachi_agent_eval",
           "tachi_agents",
           "tachi_audit_log",
@@ -322,9 +311,9 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 130928,
-        "total_tool_definition_bytes": 148842,
-        "visible_tool_count": 38,
+        "total_input_schema_bytes": 124039,
+        "total_tool_definition_bytes": 142353,
+        "visible_tool_count": 39,
         "visible_tools": [
           "extract_facts",
           "hub_discover",
@@ -336,6 +325,7 @@
           "recommend_skill",
           "recommend_toolchain",
           "runtime_info",
+          "tachi_a2a",
           "tachi_agent_eval",
           "tachi_agents",
           "tachi_briefing",
@@ -367,12 +357,13 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 66470,
-        "total_tool_definition_bytes": 71814,
-        "visible_tool_count": 11,
+        "total_input_schema_bytes": 61857,
+        "total_tool_definition_bytes": 67623,
+        "visible_tool_count": 12,
         "visible_tools": [
           "peer_query",
           "runtime_info",
+          "tachi_a2a",
           "tachi_browse",
           "tachi_complete",
           "tachi_event",
@@ -385,9 +376,9 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 126476,
-        "total_tool_definition_bytes": 145500,
-        "visible_tool_count": 50,
+        "total_input_schema_bytes": 119608,
+        "total_tool_definition_bytes": 139054,
+        "visible_tool_count": 51,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -413,6 +404,7 @@
           "runtime_info",
           "section_build",
           "sync_memories",
+          "tachi_a2a",
           "tachi_agent_eval",
           "tachi_briefing",
           "tachi_browse",
@@ -442,12 +434,13 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 64994,
-        "total_tool_definition_bytes": 74510,
-        "visible_tool_count": 16,
+        "total_input_schema_bytes": 60246,
+        "total_tool_definition_bytes": 70184,
+        "visible_tool_count": 17,
         "visible_tools": [
           "peer_query",
           "runtime_info",
+          "tachi_a2a",
           "tachi_briefing",
           "tachi_gh",
           "tachi_memory",
@@ -466,7 +459,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 102,
+      "tool_count": 103,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -518,6 +511,7 @@
         "section_build",
         "skill_evolve",
         "sync_memories",
+        "tachi_a2a",
         "tachi_agent_eval",
         "tachi_agents",
         "tachi_audit_log",
@@ -872,6 +866,19 @@
         }
       },
       "standard": {
+        "tachi_a2a": {
+          "input_schema_bytes": 1301,
+          "property_count": 7,
+          "property_names": [
+            "action",
+            "idempotency_key",
+            "limit",
+            "recipient_agent_identity_id",
+            "subject_ref",
+            "text",
+            "ttl_days"
+          ]
+        },
         "tachi_briefing": {
           "input_schema_bytes": 33,
           "property_count": 0,
@@ -941,49 +948,30 @@
           ]
         },
         "tachi_memory": {
-          "input_schema_bytes": 13650,
-          "property_count": 68,
+          "input_schema_bytes": 7736,
+          "property_count": 43,
           "property_names": [
             "action",
-            "agent_id",
             "agent_role",
             "as_of",
-            "auto_chunk",
-            "auto_link",
-            "auto_summarize",
-            "branch",
             "category",
-            "chunk_overlap_chars",
-            "chunk_size_chars",
-            "claim_id",
             "compact",
             "confirm",
-            "content",
-            "conversation_id",
-            "declared_file_scope",
-            "dispatch_id",
             "domain",
-            "emit_continuity",
             "enable_rerank",
             "entities",
             "error_context",
-            "event",
-            "event_type",
             "file_context",
             "files",
-            "flow_id",
             "force",
             "format",
             "id",
             "importance",
             "include_archived",
-            "include_read",
             "include_training",
-            "ingest_type",
             "issue_ref",
             "keywords",
             "kind",
-            "messages",
             "metadata",
             "model",
             "notes",
@@ -993,34 +981,27 @@
             "proposal_id",
             "query",
             "references",
-            "release_reason",
             "retention_policy",
             "review_status",
             "scope",
             "source",
-            "source_url",
-            "state",
             "state_filter",
             "summary",
             "synthesize",
             "text",
             "title",
-            "to",
             "top_k",
             "topic",
-            "ttl_days",
-            "turn_id",
             "valid_from",
             "valid_until"
           ]
         },
         "tachi_save": {
-          "input_schema_bytes": 3718,
-          "property_count": 24,
+          "input_schema_bytes": 3583,
+          "property_count": 23,
           "property_names": [
             "category",
             "domain",
-            "emit_continuity",
             "entities",
             "files",
             "force",

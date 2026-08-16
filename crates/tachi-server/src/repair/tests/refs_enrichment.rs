@@ -176,3 +176,89 @@ fn r10_enrichment_failure_reset_clears_failed_markers_only() {
         .unwrap();
     assert_eq!(complete_status.as_deref(), Some("complete"));
 }
+
+#[test]
+fn r7_and_r10_skip_retired_sticky_candidates_while_ordinary_rows_progress() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "retired-sticky-refs-enrichment.db");
+    for (id, memory_path) in [
+        ("ordinary", "/notes/ordinary"),
+        ("sticky-canonical", "/sticky/legacy"),
+        ("sticky-malformed", "//STICKY///legacy"),
+    ] {
+        insert_memory(
+            &conn,
+            id,
+            memory_path,
+            id,
+            &serde_json::json!({
+                "enrichment": {"status": "failed", "attempts": 3}
+            })
+            .to_string(),
+            None,
+            None,
+        );
+        conn.execute(
+            "UPDATE memories SET superseded_by='missing-target' WHERE id=?1",
+            [id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_edges
+             (source_id,target_id,relation,weight,metadata,created_at)
+             VALUES (?1,'missing-target','rel',1.0,'{}','2026-01-01T00:00:00Z')",
+            [id],
+        )
+        .unwrap();
+    }
+    let sticky_before = ["sticky-canonical", "sticky-malformed"].map(|id| {
+        conn.query_row(
+            "SELECT superseded_by,metadata FROM memories WHERE id=?1",
+            [id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap()
+    });
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let refs = OrphanRefs.apply(&mut ctx).unwrap();
+    assert_eq!(refs.applied, 2, "ordinary edge and link should progress");
+    let enrichment = EnrichmentFailureReset.apply(&mut ctx).unwrap();
+    assert_eq!(enrichment.applied, 1, "only ordinary metadata should reset");
+
+    let ordinary: (Option<String>, Option<String>, i64) = ctx
+        .conn
+        .query_row(
+            "SELECT superseded_by,json_extract(metadata,'$.enrichment.status'),
+                    (SELECT COUNT(*) FROM memory_edges WHERE source_id='ordinary')
+             FROM memories WHERE id='ordinary'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(ordinary, (None, None, 0));
+    let sticky_after = ["sticky-canonical", "sticky-malformed"].map(|id| {
+        ctx.conn
+            .query_row(
+                "SELECT superseded_by,metadata FROM memories WHERE id=?1",
+                [id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap()
+    });
+    assert_eq!(sticky_after, sticky_before);
+    for id in ["sticky-canonical", "sticky-malformed"] {
+        assert_eq!(
+            ctx.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_edges WHERE source_id=?1",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "R7 must retain the dangling edge owned by retired sticky row {id}"
+        );
+    }
+}

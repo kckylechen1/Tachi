@@ -57,11 +57,12 @@ Constants live in `crates/tachi-server/src/session_identity.rs`:
 Read allow-list (representative; source of truth is `explicit_project_can_cross_binding`):
 
 - Legacy: `search_memory`, `get_memory`, `list_memories`, `find_similar_memory`, `tachi_search` (`memory_graph` / `get_edges` dropped from this list in #757 — internalized off the MCP surface, so there's no tool call left to cross-binding-check)
-- `tachi_memory` actions: `search`, `get`, `ask`, `briefing`, `alerts`, `readiness`, `recall_simulate`, `consolidate`
+- `tachi_memory` actions: `search`, `get`, `ask`, `briefing`, `alerts`, `consolidate`
 - `tachi_wiki`: `browse`, `read`, `search`
 - `tachi_event`: `metrics`, `query`
 
-Writes (`save`, `delete`, `archive`, `extract_facts`, `checkpoint`, …) stay bound.
+Writes (`save`, `archive`, `extract_facts`, `checkpoint`, …) stay bound. Permanent
+delete is an identity-targeted operator CLI operation rather than a Memory action.
 
 **Invariant protected:** single-writer isolation + no cross-tenant write routing.
 Cross-library **reads** use daemon read-only opens and do not threaten that invariant.

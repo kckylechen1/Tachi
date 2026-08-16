@@ -7212,7 +7212,8 @@ mod tests {
         let legacy_scan = fixture_scan(LogicalStore::LegacyGlobal, &legacy_path);
         let error = validate_apply_inventory(&[legacy_scan]).unwrap_err();
         assert!(error.contains(&format!(
-            "stored Some(18), expected {EXPECTED_SCHEMA_VERSION}"
+            "stored Some(18), expected {}",
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION
         )));
         assert_eq!(db_snapshot(&legacy_path), before_legacy);
     }

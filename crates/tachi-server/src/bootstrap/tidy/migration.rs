@@ -10,7 +10,7 @@ use super::classify::tidy_rationale;
 
 /// Configuration controlling how migrations are executed.
 #[derive(Debug, Clone)]
-pub(crate) struct MigrationConfig {
+pub struct MigrationConfig {
     pub target_db: PathBuf,
     pub manifest_path: PathBuf,
     /// When true, do not perform any write. Used by integration tests and
@@ -27,12 +27,13 @@ pub(crate) struct MigrationConfig {
     pub app_home: PathBuf,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bootstrap-test-api"))]
 thread_local! {
     static FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bootstrap-test-api"))]
+#[cfg_attr(all(test, not(feature = "bootstrap-test-api")), allow(dead_code))]
 pub(crate) fn force_boundary_failure_after_archive_stage(enabled: bool) {
     FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE.with(|flag| flag.set(enabled));
 }
@@ -421,7 +422,7 @@ fn migrate_single_db(
                 .revalidate_for_mutation(Some(&target_path))
                 .map_err(memcore::MemoryError::InvalidArg)?;
             stage_archive_copy(&source_path, &archive_path)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bootstrap-test-api"))]
             FORCE_BOUNDARY_FAILURE_AFTER_ARCHIVE_STAGE.with(|flag| {
                 if flag.get() {
                     return Err(memcore::MemoryError::InvalidArg(

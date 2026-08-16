@@ -1,4 +1,6 @@
-//! v31: durable, host-owned ACP session attachment admission (#1733).
+//! v33: durable, host-owned ACP session attachment admission (#1733).
+//! Renumbered from v31 in the 2026-08-16 merge resolution (v31/v32 went to
+//! the A2A mailbox pair on main); the migration itself is unchanged.
 //!
 //! The table is deliberately additive and profile-neutral.  A portable store
 //! may carry the receipt ledger even though the typed attachment writers live
@@ -9,7 +11,7 @@ use rusqlite::Connection;
 
 use crate::error::MemoryError;
 
-pub(super) fn migrate_v31_harness_session_attachments(
+pub(super) fn migrate_v33_harness_session_attachments(
     conn: &Connection,
 ) -> Result<usize, MemoryError> {
     crate::db::schema::install_harness_session_attachments_schema(conn)?;
@@ -25,10 +27,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v31_creates_the_attachment_receipt_ledger_idempotently() {
+    fn v33_creates_the_attachment_receipt_ledger_idempotently() {
         let conn = Connection::open_in_memory().unwrap();
-        assert_eq!(migrate_v31_harness_session_attachments(&conn).unwrap(), 3);
-        assert_eq!(migrate_v31_harness_session_attachments(&conn).unwrap(), 3);
+        assert_eq!(migrate_v33_harness_session_attachments(&conn).unwrap(), 3);
+        assert_eq!(migrate_v33_harness_session_attachments(&conn).unwrap(), 3);
         crate::db::schema::validate_harness_session_attachments_schema(&conn).unwrap();
     }
 }

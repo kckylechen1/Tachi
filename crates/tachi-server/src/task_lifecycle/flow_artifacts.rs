@@ -191,7 +191,9 @@ mod github;
 mod refs;
 
 pub(crate) use close_loop::mark_task_close_loop;
-pub(crate) use dispatch_markers::{mark_task_dispatch, mark_task_dispatch_completion};
+pub(crate) use dispatch_markers::{
+    mark_task_dispatch, mark_task_dispatch_completion, verified_dispatch_marker_revision,
+};
 pub(crate) use github::{write_intake_flow_artifacts, write_link_pr_artifacts};
 pub(crate) use refs::{flow_status_doc_refs, resolve_link_pr_issue_ref};
 

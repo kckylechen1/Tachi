@@ -257,6 +257,9 @@ fn run_search_vec_query(
            WHERE v.embedding MATCH ?1
               AND k = ?3
               AND (?2 = 1 OR m.archived = 0)
+               AND lower(trim(m.category)) <> 'sticky'
+               AND lower(trim(m.path)) <> '/sticky'
+               AND lower(trim(m.path)) NOT LIKE '/sticky/%'
                AND (?4 = 1 OR m.superseded_by IS NULL)
                AND (?5 IS NULL OR m.path LIKE ?5)
                AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
@@ -384,6 +387,9 @@ fn search_fts_match(
            JOIN memories m ON m.id = memories_fts.id
            WHERE memories_fts MATCH {match_operand}
               AND (?2 = 1 OR m.archived = 0)
+              AND lower(trim(m.category)) <> 'sticky'
+              AND lower(trim(m.path)) <> '/sticky'
+              AND lower(trim(m.path)) NOT LIKE '/sticky/%'
               AND (?4 = 1 OR m.superseded_by IS NULL)
               AND (?5 IS NULL OR m.path LIKE ?5)
               AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
@@ -556,6 +562,9 @@ pub const SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE: &str = "SELECT {columns}
          FROM memories_symbolic_fts
          JOIN memories m ON m.id = memories_symbolic_fts.id
          WHERE (?1 = 1 OR m.archived = 0)
+           AND lower(trim(m.category)) <> 'sticky'
+           AND lower(trim(m.path)) <> '/sticky'
+           AND lower(trim(m.path)) NOT LIKE '/sticky/%'
            AND (?2 = 1 OR m.superseded_by IS NULL)
            AND (?3 IS NULL OR m.path LIKE ?3)
            AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
@@ -669,6 +678,9 @@ fn search_symbolic_via_table_scan(
     let mut sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS} FROM memories
          WHERE (?1 = 1 OR archived = 0)
+           AND lower(trim(category)) <> 'sticky'
+           AND lower(trim(path)) <> '/sticky'
+           AND lower(trim(path)) NOT LIKE '/sticky/%'
            AND (?2 = 1 OR superseded_by IS NULL)
            AND (?3 IS NULL OR path LIKE ?3)
            AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))

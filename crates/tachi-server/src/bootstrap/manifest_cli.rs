@@ -42,6 +42,7 @@ fn model_lane_lines() -> [&'static str; 6] {
 fn collect_hub_caps_for_lint(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
+    immutable: bool,
 ) -> Vec<memcore::HubCapability> {
     let mut caps = Vec::new();
     for path in std::iter::once(Some(global_db_path)).chain(std::iter::once(project_db_path)) {
@@ -49,14 +50,24 @@ fn collect_hub_caps_for_lint(
         if !path.exists() {
             continue;
         }
-        let Some(path_str) = path.to_str() else {
-            continue;
-        };
-        let Ok(store) = memcore::MemoryStore::open_read_only(path_str) else {
-            continue;
-        };
-        if let Ok(mut found) = store.hub_list(None, false) {
-            caps.append(&mut found);
+        if immutable {
+            let uri = crate::doctor::make_immutable_uri(path);
+            let Ok(conn) = memcore::db::open_immutable_readonly(&uri) else {
+                continue;
+            };
+            if let Ok(mut found) = memcore::db::hub_list(&conn, None, false) {
+                caps.append(&mut found);
+            }
+        } else {
+            let Some(path_str) = path.to_str() else {
+                continue;
+            };
+            let Ok(store) = memcore::MemoryStore::open_read_only(path_str) else {
+                continue;
+            };
+            if let Ok(mut found) = store.hub_list(None, false) {
+                caps.append(&mut found);
+            }
         }
     }
     caps
@@ -86,7 +97,12 @@ pub(super) async fn run_doctor_command(
         auto_fix: fix,
         max_depth: 10,
     };
-    let mut report = crate::doctor::scan(&roots, &quarantine_dir, opts);
+    let strict_read_only = !fix && !run_daily && !probe_keys;
+    let mut report = if strict_read_only {
+        crate::doctor::scan_strict_read_only(&roots, &quarantine_dir, opts)
+    } else {
+        crate::doctor::scan(&roots, &quarantine_dir, opts)
+    };
     report
         .warnings
         .extend(crate::doctor::project_secret_file_warnings(
@@ -95,7 +111,7 @@ pub(super) async fn run_doctor_command(
     report
         .warnings
         .extend(crate::doctor::hub_capability_discovery_status_warnings(
-            &collect_hub_caps_for_lint(global_db_path, project_db_path),
+            &collect_hub_caps_for_lint(global_db_path, project_db_path, strict_read_only),
         ));
     // #1119: proactively surface any DB already skewed vs this binary's schema
     // version (the incident shape), computed from the just-scanned findings.
@@ -106,27 +122,36 @@ pub(super) async fn run_doctor_command(
     // CARGO_TARGET_DIR-shaped dirs + managed-worktree inspection notes).
     // REPORT-ONLY — see `doctor::build_resources` module docs; never gated on
     // `fix`, since neither half of this patrol deletes or reconciles anything.
-    report
-        .warnings
-        .extend(crate::doctor::scan_orphan_build_resources(
+    report.warnings.extend(if strict_read_only {
+        crate::doctor::scan_orphan_build_resources_strict(
             crate::doctor::DEFAULT_ORPHAN_MAX_AGE_DAYS,
             global_db_path,
-        ));
+        )
+    } else {
+        crate::doctor::scan_orphan_build_resources(
+            crate::doctor::DEFAULT_ORPHAN_MAX_AGE_DAYS,
+            global_db_path,
+        )
+    });
     report
         .warnings
         .extend(crate::doctor::worktree_inspection_report(
             crate::doctor::DEFAULT_WORKTREE_STALE_DAYS,
         ));
 
-    // Always update the manifest after a doctor run (idempotent; preserves notes).
+    // The default doctor is a read-only report. Keep the populated manifest in
+    // memory for report sections, but persist it only when the operator chose
+    // one of doctor's explicit mutation intents.
     let manifest_path = manifest_path(app_home);
     let mut m = crate::manifest::Manifest::load_or_empty(&manifest_path);
     m.populate_from_doctor(&report);
-    if let Err(e) = m.save(&manifest_path) {
-        eprintln!(
-            "[doctor] warning: failed to update manifest at {}: {e}",
-            manifest_path.display()
-        );
+    if fix || run_daily {
+        if let Err(e) = m.save(&manifest_path) {
+            eprintln!(
+                "[doctor] warning: failed to update manifest at {}: {e}",
+                manifest_path.display()
+            );
+        }
     }
 
     // --run-daily: unified remediation verb for stale distill marker + probe cache.
@@ -155,13 +180,14 @@ pub(super) async fn run_doctor_command(
 
     // Branch #5: optional foundry job-status histogram per manifest DB.
     let jobs_section = if jobs_report {
-        Some(collect_job_histograms(&m))
+        Some(collect_job_histograms(&m, strict_read_only))
     } else {
         None
     };
     let provider_section = collect_provider_key_report(
         &app_home.join("global").join(memcore::MEMORY_DB_FILENAME),
         probe_keys,
+        strict_read_only,
     )
     .await;
 
@@ -258,6 +284,88 @@ pub(super) async fn run_doctor_command(
 mod tests {
     use super::*;
 
+    fn snapshot_regular_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(path).expect("read snapshot directory") {
+                let entry = entry.expect("read snapshot entry");
+                let file_type = entry.file_type().expect("read snapshot file type");
+                if file_type.is_dir() {
+                    visit(root, &entry.path(), out);
+                } else if file_type.is_file() {
+                    let relative = entry
+                        .path()
+                        .strip_prefix(root)
+                        .expect("snapshot entry below root")
+                        .to_path_buf();
+                    out.insert(
+                        relative,
+                        std::fs::read(entry.path()).expect("read snapshot file"),
+                    );
+                }
+            }
+        }
+
+        let mut out = std::collections::BTreeMap::new();
+        visit(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn doctor_default_preserves_every_database_and_config_byte() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let dir = tempfile::tempdir().expect("tmp");
+        let home = dir.path().join("home");
+        let app_home = dir.path().join("app-home");
+        let global_dir = app_home.join("global");
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::create_dir_all(&global_dir).expect("create global dir");
+        let global_db = global_dir.join(memcore::MEMORY_DB_FILENAME);
+        drop(
+            memcore::MemoryStore::open(global_db.to_str().expect("utf8 db path"))
+                .expect("seed current database"),
+        );
+        let config = app_home.join("config.env");
+        std::fs::write(&config, b"DOCTOR_READ_ONLY_SENTINEL=1\n").expect("seed config");
+        let before = snapshot_regular_files(&app_home);
+
+        tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(run_doctor_command(
+                false,
+                false,
+                vec![app_home.clone()],
+                false,
+                false,
+                false,
+                &home,
+                &app_home,
+                &global_db,
+                None,
+                None,
+                &memcore::MigrationAuthority::Deny,
+            ))
+            .expect("default doctor scan");
+
+        let after = snapshot_regular_files(&app_home);
+        for path in before.keys().chain(after.keys()) {
+            if before.get(path) != after.get(path) {
+                eprintln!(
+                    "doctor default changed {} (before={} bytes, after={} bytes)",
+                    path.display(),
+                    before.get(path).map_or(0, Vec::len),
+                    after.get(path).map_or(0, Vec::len)
+                );
+            }
+        }
+        assert_eq!(
+            after,
+            before,
+            "default doctor must not create or alter a manifest, DB, WAL/SHM, marker, provider-health cache, or config file"
+        );
+    }
+
     #[test]
     fn manifest_path_lives_directly_under_app_home() {
         let app_home = std::path::Path::new("/tmp/tachi-app-home");
@@ -321,7 +429,7 @@ mod tests {
         store.hub_register(&cap).expect("register cap");
         drop(store);
 
-        let caps = collect_hub_caps_for_lint(&db_path, None);
+        let caps = collect_hub_caps_for_lint(&db_path, None, false);
         assert!(
             caps.iter().any(|c| c.id == "mcp:UPPER"),
             "collector must return the uppercase cap_type=MCP row so the lint's \
@@ -990,10 +1098,15 @@ fn provider_probe_refresh_summary(
     summary
 }
 
-async fn collect_provider_key_report(global_db_path: &Path, probe_keys: bool) -> ProviderKeyReport {
+async fn collect_provider_key_report(
+    global_db_path: &Path,
+    probe_keys: bool,
+    strict_read_only: bool,
+) -> ProviderKeyReport {
     let (keys, probes) = crate::status_ops::status_health::collect_doctor_provider_key_report(
         global_db_path,
         probe_keys,
+        strict_read_only,
     )
     .await;
     ProviderKeyReport {
@@ -1009,15 +1122,25 @@ struct DbJobReport {
     error: String,
 }
 
-fn collect_job_histograms(manifest: &crate::manifest::Manifest) -> Vec<DbJobReport> {
+fn collect_job_histograms(
+    manifest: &crate::manifest::Manifest,
+    immutable: bool,
+) -> Vec<DbJobReport> {
     let mut out = Vec::new();
     for entry in &manifest.dbs {
         // Read-only: open the connection directly without going through MemoryStore::open
         // which would try to write schema. We use rusqlite OpenFlags to be paranoid.
-        let conn = match rusqlite::Connection::open_with_flags(
-            &entry.path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ) {
+        let conn = match if immutable {
+            memcore::db::open_immutable_readonly(&crate::doctor::make_immutable_uri(Path::new(
+                &entry.path,
+            )))
+        } else {
+            rusqlite::Connection::open_with_flags(
+                &entry.path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+        } {
             Ok(c) => c,
             Err(e) => {
                 out.push(DbJobReport {

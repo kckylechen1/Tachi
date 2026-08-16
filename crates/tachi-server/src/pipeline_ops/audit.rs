@@ -1599,6 +1599,7 @@ mod tests {
             std::time::Duration::from_secs(1),
         );
 
+        let mut stale_edges_written = 0usize;
         let stale_error = super::super::auto_ingest::build_similarity_edges(
             &server,
             DbScope::Global,
@@ -1606,6 +1607,7 @@ mod tests {
             Some("general"),
             std::slice::from_ref(&source),
             &lease_a,
+            &mut stale_edges_written,
         )
         .await
         .expect_err("A must be fenced after heartbeat failure and takeover");
@@ -1622,6 +1624,7 @@ mod tests {
             )
             .await;
 
+        let mut current_edges_written = 0usize;
         super::super::auto_ingest::build_similarity_edges(
             &server,
             DbScope::Global,
@@ -1629,6 +1632,7 @@ mod tests {
             Some("general"),
             std::slice::from_ref(&source),
             &lease_b,
+            &mut current_edges_written,
         )
         .await
         .expect("current owner writes graph observation");

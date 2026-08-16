@@ -17,6 +17,28 @@ use crate::tools::{TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_S
 
 const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How the stdio proxy / CLI should stamp `X-Tachi-Agent-Identity` on a
+/// daemon hop. `AutoEnv` is the CLI default (read process env). The proxy
+/// resolves once at initialize so `_meta` wins and blank/illegal stay omit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProxyIdentityForward {
+    AutoEnv,
+    Header(String),
+    Omit,
+}
+
+/// Map a proxy-process `TACHI_AGENT_IDENTITY` env value to the daemon
+/// header. Blank/illegal stay `None` so admission remains a loud reject.
+fn proxy_env_agent_identity_header(raw: Option<&str>) -> Option<(HeaderName, HeaderValue)> {
+    let value = crate::session_identity::agent_identity_from_env_value(raw)?;
+    HeaderValue::from_str(&value).ok().map(|header| {
+        (
+            HeaderName::from_static(crate::session_identity::HEADER_AGENT_IDENTITY),
+            header,
+        )
+    })
+}
+
 /// Headroom added on top of a caller-supplied poll/control timeout so the
 /// outer RPC timeout comfortably outlives the daemon-side wait/control loop
 /// (which returns its own terminal payload — e.g. `"status":"timeout"` — as
@@ -224,7 +246,24 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
     proxy_project: Option<&str>,
     profile: Option<tachi_hub::ToolProfile>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases_and_profile(info, params, proxy_project, profile)
+    call_daemon_tool_raw_with_phases_and_profile(
+        info,
+        params,
+        proxy_project,
+        profile,
+        ProxyIdentityForward::AutoEnv,
+    )
+    .await
+    .0
+}
+
+pub(crate) async fn call_daemon_tool_raw_with_identity(
+    info: &DaemonInfo,
+    params: CallToolRequestParams,
+    proxy_project: Option<&str>,
+    identity: ProxyIdentityForward,
+) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
+    call_daemon_tool_raw_with_phases_and_profile(info, params, proxy_project, None, identity)
         .await
         .0
 }
@@ -241,7 +280,14 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
     Result<rmcp::model::CallToolResult, DaemonCallError>,
     DaemonCallPhaseTiming,
 ) {
-    call_daemon_tool_raw_with_phases_and_profile(info, params, proxy_project, None).await
+    call_daemon_tool_raw_with_phases_and_profile(
+        info,
+        params,
+        proxy_project,
+        None,
+        ProxyIdentityForward::AutoEnv,
+    )
+    .await
 }
 
 async fn call_daemon_tool_raw_with_phases_and_profile(
@@ -249,6 +295,7 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
     profile: Option<tachi_hub::ToolProfile>,
+    identity: ProxyIdentityForward,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
     DaemonCallPhaseTiming,
@@ -312,6 +359,29 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
     // consults the SESSION value, not the daemon's own (always-0) env. A raw
     // value is forwarded verbatim — malformed/negative content is caught and
     // fails closed at the gate's `resolve_dispatch_depth`, not here.
+    // #1761: Cursor `mcp.json` stamps TACHI_AGENT_IDENTITY on `tachi serve`.
+    // That process is a stdio proxy; the daemon's own env is the brew
+    // plist (no identity). Forward the proxy's env as the same header
+    // `http_session_identity` already honors, so A2A admission sees the
+    // host assertion instead of rejecting a missing identity. Absent or
+    // illegal values stay absent — never minted.
+    match identity {
+        ProxyIdentityForward::AutoEnv => {
+            if let Some((name, value)) = proxy_env_agent_identity_header(
+                std::env::var(crate::session_identity::ENV_AGENT_IDENTITY)
+                    .ok()
+                    .as_deref(),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+        ProxyIdentityForward::Header(value) => {
+            if let Some((name, header)) = proxy_env_agent_identity_header(Some(&value)) {
+                headers.insert(name, header);
+            }
+        }
+        ProxyIdentityForward::Omit => {}
+    }
     if let Ok(depth) = std::env::var(crate::session_identity::ENV_DISPATCH_DEPTH) {
         let depth = depth.trim();
         if !depth.is_empty() {
@@ -478,6 +548,29 @@ mod tests {
     /// in `mcp_connection/tests.rs::ensure_test_tls_provider`.
     fn ensure_test_tls_provider() {
         crate::ensure_tls_provider();
+    }
+
+    #[test]
+    fn proxy_env_agent_identity_header_forwards_valid_and_drops_blank_or_illegal() {
+        let (name, value) = proxy_env_agent_identity_header(Some("agent.cursor.local"))
+            .expect("valid assertion must become a header");
+        assert_eq!(
+            name,
+            HeaderName::from_static(crate::session_identity::HEADER_AGENT_IDENTITY)
+        );
+        assert_eq!(value, HeaderValue::from_static("agent.cursor.local"));
+        assert!(
+            proxy_env_agent_identity_header(None).is_none(),
+            "absent env must not mint an identity header"
+        );
+        assert!(
+            proxy_env_agent_identity_header(Some("")).is_none(),
+            "blank env must not mint an identity header"
+        );
+        assert!(
+            proxy_env_agent_identity_header(Some("agent identity")).is_none(),
+            "illegal assertion must not mint an identity header"
+        );
     }
 
     #[test]
