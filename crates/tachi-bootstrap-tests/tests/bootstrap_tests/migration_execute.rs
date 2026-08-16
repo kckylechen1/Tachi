@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn tidy_execute_migrates_rows_and_archives_source() {
-    let root = crate::utils::test_fixture_path(format!("tachi-tidy-exec-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-exec-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -18,12 +18,12 @@ fn tidy_execute_migrates_rows_and_archives_source() {
 
     let (legacy_a, legacy_b) = build_legacy_openclaw_fixture(&home, 3);
 
-    let report = crate::bootstrap::build_tidy_report(&[home.clone()], None).expect("report");
-    let plan = crate::bootstrap::build_migration_plan(&report, &target_db, &archive_root, &home);
+    let report = api::build_tidy_report(std::slice::from_ref(&home), None).expect("report");
+    let plan = api::build_migration_plan(&report, &target_db, &archive_root, &home);
     assert_eq!(plan.len(), 2, "expected 2 legacy DBs in the plan");
 
     // First: dry-run via MigrationConfig — verify zero writes.
-    let dry_cfg = crate::bootstrap::MigrationConfig {
+    let dry_cfg = api::MigrationConfig {
         target_db: target_db.clone(),
         manifest_path: app_home.join("manifest.json"),
         dry_run: true,
@@ -31,9 +31,8 @@ fn tidy_execute_migrates_rows_and_archives_source() {
         app_home: app_home.clone(),
     };
     let authorized_sources = authorized_plan_sources(&plan);
-    let dry_summary =
-        crate::bootstrap::execute_tidy_migrations(&plan, &dry_cfg, &authorized_sources)
-            .expect("dry-run summary");
+    let dry_summary = api::execute_tidy_migrations(&plan, &dry_cfg, &authorized_sources)
+        .expect("dry-run summary");
     assert!(dry_summary.dry_run);
     assert_eq!(dry_summary.migrated_count, 0);
     assert_eq!(dry_summary.outcomes.len(), 2);
@@ -60,14 +59,14 @@ fn tidy_execute_migrates_rows_and_archives_source() {
     drop(tgt_check);
 
     // Second: real execute.
-    let exec_cfg = crate::bootstrap::MigrationConfig {
+    let exec_cfg = api::MigrationConfig {
         target_db: target_db.clone(),
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
         interactive: false,
         app_home: app_home.clone(),
     };
-    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &exec_cfg, &authorized_sources)
+    let summary = api::execute_tidy_migrations(&plan, &exec_cfg, &authorized_sources)
         .expect("execute summary");
     let exec_messages: Vec<&str> = summary
         .outcomes
@@ -97,12 +96,16 @@ fn tidy_execute_migrates_rows_and_archives_source() {
     assert_eq!(tgt_after.stats(true).unwrap().total, 7);
     drop(tgt_after);
     // Manifest contains target entry.
-    let manifest =
-        crate::manifest::Manifest::load(&app_home.join("manifest.json")).expect("load manifest");
-    assert!(manifest
-        .dbs
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(app_home.join("manifest.json")).expect("read manifest"),
+    )
+    .expect("parse manifest");
+    assert!(manifest["dbs"]
+        .as_array()
+        .expect("manifest db array")
         .iter()
-        .any(|e| e.path.contains("global") && e.path.ends_with("memory.db")));
+        .filter_map(|entry| entry["path"].as_str())
+        .any(|path| path.contains("global") && path.ends_with("memory.db")));
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -110,10 +113,7 @@ fn tidy_execute_migrates_rows_and_archives_source() {
 #[cfg(unix)]
 #[test]
 fn tidy_execute_never_archives_symlink_target_selected_as_inventory_open_path() {
-    let root = crate::utils::test_fixture_path(format!(
-        "tachi-tidy-symlink-auth-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = test_fixture_path(format!("tachi-tidy-symlink-auth-{}", uuid::Uuid::new_v4()));
     let home = root.join("home");
     let app_home = home.join(".tachi");
     let target_db = app_home.join("global/memory.db");
@@ -129,9 +129,9 @@ fn tidy_execute_never_archives_symlink_target_selected_as_inventory_open_path() 
     drop(real_store);
     std::os::unix::fs::symlink(&real_db, &alias).expect("create discovered alias");
 
-    let report = crate::bootstrap::build_tidy_report(&[home.clone()], None).expect("report");
+    let report = api::build_tidy_report(std::slice::from_ref(&home), None).expect("report");
     let archive_root = app_home.join("archive/ts-symlink-auth");
-    let plan = crate::bootstrap::build_migration_plan(&report, &target_db, &archive_root, &home);
+    let plan = api::build_migration_plan(&report, &target_db, &archive_root, &home);
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].source_path, alias.display().to_string());
     let canonical_real_db = std::fs::canonicalize(&real_db).expect("canonical real DB");
@@ -141,8 +141,8 @@ fn tidy_execute_never_archives_symlink_target_selected_as_inventory_open_path() 
         "fixture must force the read probe through the real target"
     );
 
-    let authorized_sources = crate::bootstrap::authorized_migration_sources(&report);
-    let cfg = crate::bootstrap::MigrationConfig {
+    let authorized_sources = api::authorized_migration_sources(&report);
+    let cfg = api::MigrationConfig {
         target_db: target_db.clone(),
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
@@ -152,9 +152,8 @@ fn tidy_execute_never_archives_symlink_target_selected_as_inventory_open_path() 
 
     let mut probe_path_plan = plan.clone();
     probe_path_plan[0].source_path = real_db.display().to_string();
-    let refused =
-        crate::bootstrap::execute_tidy_migrations(&probe_path_plan, &cfg, &authorized_sources)
-            .expect("unauthorized probe path must produce a refusal outcome");
+    let refused = api::execute_tidy_migrations(&probe_path_plan, &cfg, &authorized_sources)
+        .expect("unauthorized probe path must produce a refusal outcome");
     assert_eq!(refused.failed_count, 1);
     assert!(refused.outcomes[0]
         .message
@@ -162,7 +161,7 @@ fn tidy_execute_never_archives_symlink_target_selected_as_inventory_open_path() 
     assert!(real_db.exists(), "refusal must not archive the real target");
     assert!(alias.is_symlink(), "refusal must not move the alias either");
 
-    let executed = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorized_sources)
+    let executed = api::execute_tidy_migrations(&plan, &cfg, &authorized_sources)
         .expect("authorized alias migration");
     assert_eq!(executed.migrated_count, 1, "{executed:?}");
     assert!(
@@ -190,11 +189,11 @@ fn planned_mutation_authority_fixture(
     std::path::PathBuf,
     std::path::PathBuf,
     std::path::PathBuf,
-    Vec<crate::bootstrap::TidyMigration>,
-    std::collections::BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority>,
-    crate::bootstrap::MigrationConfig,
+    Vec<api::TidyMigration>,
+    api::AuthorizedMigrationSources,
+    api::MigrationConfig,
 ) {
-    let root = crate::utils::test_fixture_path(format!(
+    let root = test_fixture_path(format!(
         "tachi-tidy-physical-authority-{label}-{}",
         uuid::Uuid::new_v4()
     ));
@@ -215,17 +214,17 @@ fn planned_mutation_authority_fixture(
         .unwrap();
     drop(source_store);
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
+    let report = api::build_tidy_report(std::slice::from_ref(&root), None).unwrap();
     let archive_root = app_home.join("archive/physical-authority");
-    let plan = crate::bootstrap::build_migration_plan(&report, &target, &archive_root, &root);
+    let plan = api::build_migration_plan(&report, &target, &archive_root, &root);
     assert_eq!(plan.len(), 1, "fixture must produce one migration plan");
-    let authorities = crate::bootstrap::authorized_migration_sources(&report);
+    let authorities = api::authorized_migration_sources(&report);
     assert_eq!(
         authorities.len(),
         1,
         "fixture must bind one physical source"
     );
-    let cfg = crate::bootstrap::MigrationConfig {
+    let cfg = api::MigrationConfig {
         target_db: target.clone(),
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
@@ -252,7 +251,7 @@ fn tidy_execute_refuses_symlink_substitution_after_scan_before_source_open() {
     std::fs::rename(&source, source.with_extension("scanned.db")).unwrap();
     std::os::unix::fs::symlink(&replacement, &source).unwrap();
 
-    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorities).unwrap();
+    let summary = api::execute_tidy_migrations(&plan, &cfg, &authorities).unwrap();
     assert_eq!(summary.failed_count, 1);
     assert_eq!(summary.migrated_count, 0);
     assert!(summary.outcomes[0].message.contains("canonical identity"));
@@ -290,7 +289,7 @@ fn tidy_execute_refuses_replaced_source_inode_after_plan_before_source_open() {
     std::fs::rename(&source, source.with_extension("scanned.db")).unwrap();
     std::fs::rename(&replacement, &source).unwrap();
 
-    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorities).unwrap();
+    let summary = api::execute_tidy_migrations(&plan, &cfg, &authorities).unwrap();
     assert_eq!(summary.failed_count, 1);
     assert_eq!(summary.migrated_count, 0);
     assert!(summary.outcomes[0].message.contains("physical identity"));
@@ -314,7 +313,7 @@ fn tidy_execute_refuses_source_becoming_target_after_plan() {
     std::fs::rename(&source, source.with_extension("scanned.db")).unwrap();
     std::fs::hard_link(&target, &source).unwrap();
 
-    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorities).unwrap();
+    let summary = api::execute_tidy_migrations(&plan, &cfg, &authorities).unwrap();
     assert_eq!(summary.failed_count, 1);
     assert_eq!(summary.migrated_count, 0);
     assert!(summary.outcomes[0]
@@ -353,7 +352,7 @@ fn tidy_execute_archive_failure_rolls_back_overwritten_target_rows_atomically() 
     std::fs::create_dir_all(&archive_path)
         .expect("an existing directory forces the post-copy archive operation to fail");
 
-    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorities)
+    let summary = api::execute_tidy_migrations(&plan, &cfg, &authorities)
         .expect("archive failure is represented by a failed migration outcome");
     assert_eq!(summary.failed_count, 1);
     let error = &summary.outcomes[0].message;
@@ -383,10 +382,10 @@ fn tidy_execute_boundary_failure_keeps_live_source_after_archive_staging() {
     let (root, source, target, plan, authorities, cfg) =
         planned_mutation_authority_fixture("boundary-failure-source-retained");
 
-    crate::bootstrap::force_boundary_failure_after_archive_stage(true);
-    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorities)
+    api::force_boundary_failure_after_archive_stage(true);
+    let summary = api::execute_tidy_migrations(&plan, &cfg, &authorities)
         .expect("boundary failure is represented by a failed migration outcome");
-    crate::bootstrap::force_boundary_failure_after_archive_stage(false);
+    api::force_boundary_failure_after_archive_stage(false);
 
     assert_eq!(summary.failed_count, 1, "{summary:?}");
     assert!(
@@ -419,19 +418,9 @@ fn tidy_execute_boundary_failure_keeps_live_source_after_archive_staging() {
 /// risks a torn archived copy. Injection drives `daemon_ownership`
 /// deterministically instead of depending on a real lsof/daemon fixture.
 #[cfg(unix)]
-struct ClearOwnershipInject;
-#[cfg(unix)]
-impl Drop for ClearOwnershipInject {
-    fn drop(&mut self) {
-        crate::db_ownership::set_ownership_inject_for_test(None);
-    }
-}
-
-#[cfg(unix)]
 #[test]
 fn tidy_execute_rolls_back_when_source_db_is_owned() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-owned-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-owned-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -454,7 +443,7 @@ fn tidy_execute_rolls_back_when_source_db_is_owned() {
         .join("archive")
         .join("ts-owned-test")
         .join("legacy-owned-memory.db");
-    let migration = crate::bootstrap::TidyMigration {
+    let migration = api::TidyMigration {
         source_path: source_db.display().to_string(),
         target_path: target_db.display().to_string(),
         archive_path: archive_path.display().to_string(),
@@ -463,7 +452,7 @@ fn tidy_execute_rolls_back_when_source_db_is_owned() {
         source_row_count: 1,
         reason: "test fixture".to_string(),
     };
-    let cfg = crate::bootstrap::MigrationConfig {
+    let cfg = api::MigrationConfig {
         target_db: target_db.clone(),
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
@@ -471,18 +460,12 @@ fn tidy_execute_rolls_back_when_source_db_is_owned() {
         app_home: app_home.clone(),
     };
 
-    let _clear = ClearOwnershipInject;
-    crate::db_ownership::set_ownership_inject_for_test(Some(
-        crate::db_ownership::DbOwnership::Owned,
-    ));
+    let _ownership = api::inject_ownership(api::OwnershipInjection::Owned);
 
     let authorized_sources = authorized_plan_sources(std::slice::from_ref(&migration));
-    let summary = crate::bootstrap::execute_tidy_migrations(
-        std::slice::from_ref(&migration),
-        &cfg,
-        &authorized_sources,
-    )
-    .expect("execute summary");
+    let summary =
+        api::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg, &authorized_sources)
+            .expect("execute summary");
 
     assert_eq!(summary.migrated_count, 0, "must not report migrated");
     assert_eq!(summary.failed_count, 1, "must report failed (refused)");
@@ -526,8 +509,7 @@ fn tidy_execute_rolls_back_when_source_db_is_owned() {
 #[cfg(unix)]
 #[test]
 fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-unknown-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-unknown-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -550,7 +532,7 @@ fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
         .join("archive")
         .join("ts-unknown-test")
         .join("legacy-unknown-memory.db");
-    let migration = crate::bootstrap::TidyMigration {
+    let migration = api::TidyMigration {
         source_path: source_db.display().to_string(),
         target_path: target_db.display().to_string(),
         archive_path: archive_path.display().to_string(),
@@ -559,7 +541,7 @@ fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
         source_row_count: 1,
         reason: "test fixture".to_string(),
     };
-    let cfg = crate::bootstrap::MigrationConfig {
+    let cfg = api::MigrationConfig {
         target_db: target_db.clone(),
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
@@ -567,18 +549,14 @@ fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
         app_home: app_home.clone(),
     };
 
-    let _clear = ClearOwnershipInject;
-    crate::db_ownership::set_ownership_inject_for_test(Some(
-        crate::db_ownership::DbOwnership::Unknown("lsof unavailable: test".to_string()),
+    let _ownership = api::inject_ownership(api::OwnershipInjection::Unknown(
+        "lsof unavailable: test".to_string(),
     ));
 
     let authorized_sources = authorized_plan_sources(std::slice::from_ref(&migration));
-    let summary = crate::bootstrap::execute_tidy_migrations(
-        std::slice::from_ref(&migration),
-        &cfg,
-        &authorized_sources,
-    )
-    .expect("execute summary");
+    let summary =
+        api::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg, &authorized_sources)
+            .expect("execute summary");
 
     assert_eq!(summary.failed_count, 1);
     let outcome = &summary.outcomes[0];
@@ -607,8 +585,7 @@ fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
 /// lsof-based ownership probe ever runs.
 #[test]
 fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-srclock-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-srclock-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -629,22 +606,14 @@ fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
 
     // Simulate "source DB's own daemon is running": pre-acquire the scoped
     // lock for `source_db` (a different scope than `target_db`).
-    let source_scoped_lock_path =
-        crate::daemon_lock::scoped_daemon_lock_path(&app_home, &source_db);
-    let target_scoped_lock_path =
-        crate::daemon_lock::scoped_daemon_lock_path(&app_home, &target_db);
-    assert_ne!(
-        source_scoped_lock_path, target_scoped_lock_path,
-        "fixture must exercise a genuinely different scope than the target"
-    );
-    let _source_daemon = crate::daemon_lock::DaemonLock::acquire(&source_scoped_lock_path)
+    let _source_daemon = api::hold_source_scope_lock(&app_home, &source_db, &target_db)
         .expect("pre-acquire source-scope lock to simulate its own live daemon");
 
     let archive_path = app_home
         .join("archive")
         .join("ts-srclock-test")
         .join("legacy-src-locked-memory.db");
-    let migration = crate::bootstrap::TidyMigration {
+    let migration = api::TidyMigration {
         source_path: source_db.display().to_string(),
         target_path: target_db.display().to_string(),
         archive_path: archive_path.display().to_string(),
@@ -653,7 +622,7 @@ fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
         source_row_count: 1,
         reason: "test fixture".to_string(),
     };
-    let cfg = crate::bootstrap::MigrationConfig {
+    let cfg = api::MigrationConfig {
         target_db: target_db.clone(),
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
@@ -662,12 +631,9 @@ fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
     };
 
     let authorized_sources = authorized_plan_sources(std::slice::from_ref(&migration));
-    let summary = crate::bootstrap::execute_tidy_migrations(
-        std::slice::from_ref(&migration),
-        &cfg,
-        &authorized_sources,
-    )
-    .expect("execute summary");
+    let summary =
+        api::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg, &authorized_sources)
+            .expect("execute summary");
 
     assert_eq!(summary.migrated_count, 0, "must not report migrated");
     assert_eq!(summary.failed_count, 1, "must report failed (refused)");
@@ -735,8 +701,7 @@ fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
 /// `ScopedDaemonLock` (scoped-only, no legacy re-attempt) it is green.
 #[test]
 fn tidy_execute_migrates_cross_scope_source_while_outer_target_lock_is_held() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-crossscope-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-crossscope-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -757,20 +722,11 @@ fn tidy_execute_migrates_cross_scope_source_while_outer_target_lock_is_held() {
         .expect("seed source 2");
     drop(src);
 
-    let source_scoped_lock_path =
-        crate::daemon_lock::scoped_daemon_lock_path(&app_home, &source_db);
-    let target_scoped_lock_path =
-        crate::daemon_lock::scoped_daemon_lock_path(&app_home, &target_db);
-    assert_ne!(
-        source_scoped_lock_path, target_scoped_lock_path,
-        "fixture must exercise a genuinely different scope than the target"
-    );
-
     let archive_path = app_home
         .join("archive")
         .join("ts-crossscope-test")
         .join("legacy-cross-scope-memory.db");
-    let migration = crate::bootstrap::TidyMigration {
+    let migration = api::TidyMigration {
         source_path: source_db.display().to_string(),
         target_path: target_db.display().to_string(),
         archive_path: archive_path.display().to_string(),
@@ -779,7 +735,7 @@ fn tidy_execute_migrates_cross_scope_source_while_outer_target_lock_is_held() {
         source_row_count: 2,
         reason: "test fixture".to_string(),
     };
-    let cfg = crate::bootstrap::MigrationConfig {
+    let cfg = api::MigrationConfig {
         target_db: target_db.clone(),
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
@@ -792,16 +748,13 @@ fn tidy_execute_migrates_cross_scope_source_while_outer_target_lock_is_held() {
     // `execute_tidy_migrations` call, dropped after — exactly the window in
     // which the pre-fix source-side `DualDaemonLock::acquire` would have
     // self-collided on the shared legacy fd.
-    let _outer_lock = crate::daemon_lock::DualDaemonLock::acquire(&app_home, &target_db)
+    let _outer_lock = api::hold_outer_target_lock(&app_home, &target_db, &source_db)
         .expect("outer lock on target scope must succeed (nothing else holds it)");
 
     let authorized_sources = authorized_plan_sources(std::slice::from_ref(&migration));
-    let summary = crate::bootstrap::execute_tidy_migrations(
-        std::slice::from_ref(&migration),
-        &cfg,
-        &authorized_sources,
-    )
-    .expect("execute summary");
+    let summary =
+        api::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg, &authorized_sources)
+            .expect("execute summary");
 
     drop(_outer_lock);
 
@@ -843,8 +796,7 @@ fn tidy_execute_migrates_cross_scope_source_while_outer_target_lock_is_held() {
 /// anchors behind `ensure_anchor`'s back.
 #[test]
 fn tidy_execute_migrates_a_source_containing_an_anchor_row() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-anchor-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-anchor-{}", uuid::Uuid::new_v4()));
     let home = root.clone();
     let app_home = home.join(".tachi");
     std::fs::create_dir_all(&app_home).expect("create app_home");
@@ -872,11 +824,11 @@ fn tidy_execute_migrates_a_source_containing_an_anchor_row() {
         "fixture must actually be in the reserved namespace, got {anchor_id}"
     );
 
-    let report = crate::bootstrap::build_tidy_report(&[home.clone()], None).expect("report");
-    let plan = crate::bootstrap::build_migration_plan(&report, &target_db, &archive_root, &home);
+    let report = api::build_tidy_report(std::slice::from_ref(&home), None).expect("report");
+    let plan = api::build_migration_plan(&report, &target_db, &archive_root, &home);
     assert_eq!(plan.len(), 2, "expected 2 legacy DBs in the plan");
 
-    let cfg = crate::bootstrap::MigrationConfig {
+    let cfg = api::MigrationConfig {
         target_db: target_db.clone(),
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
@@ -884,8 +836,8 @@ fn tidy_execute_migrates_a_source_containing_an_anchor_row() {
         app_home: app_home.clone(),
     };
     let authorized_sources = authorized_plan_sources(&plan);
-    let summary = crate::bootstrap::execute_tidy_migrations(&plan, &cfg, &authorized_sources)
-        .expect("execute summary");
+    let summary =
+        api::execute_tidy_migrations(&plan, &cfg, &authorized_sources).expect("execute summary");
     let messages: Vec<&str> = summary
         .outcomes
         .iter()

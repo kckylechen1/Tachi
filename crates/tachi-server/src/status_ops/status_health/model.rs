@@ -59,7 +59,6 @@ use tachi_llm::{
     EmbeddingConfig, ProviderRuntimeConfig, RerankConfig,
 };
 
-use super::api_keys::collect_api_key_status;
 use crate::status_ops::EXPECTED_EMBEDDING_DIM;
 
 /// Prefix `catalog_import` puts on an api-key provenance entry. Stripped here
@@ -72,10 +71,6 @@ const EXTRACT_STRATEGY: &str = "openai-compatible";
 const SUMMARY_STRATEGY: &str = "openai-compatible";
 const DISTILL_STRATEGY: &str = "openai-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector (no Claude subprocess)";
 const REASONING_STRATEGY: &str = "claude-cli-first, openai-compatible fallback";
-
-pub(crate) fn provider_key_status_json(global_db_path: &Path) -> serde_json::Value {
-    json!(collect_api_key_status(global_db_path))
-}
 
 /// Env-sourced status projection. Unchanged signature and behavior: this
 /// stays the entry point for callers with no live `LlmClient` to read

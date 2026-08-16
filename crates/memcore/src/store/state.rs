@@ -29,7 +29,7 @@ impl MemoryStore {
         key: &str,
         value_json: &str,
     ) -> Result<bool, MemoryError> {
-        db::refuse_store_identity_namespace(namespace, "inserted")?;
+        db::refuse_general_mutation_namespace(namespace, "inserted")?;
         db::insert_state_if_absent(&self.conn, namespace, key, value_json)
     }
 

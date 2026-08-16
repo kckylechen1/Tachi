@@ -13,8 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/dev-install.sh"
 SENTINELS = (
-    "tachi_memory(action='sticky_leave')",
-    "tachi_memory(action='sticky_check')",
+    "[action=respond|required] Stable recipient AgentIdentity id.",
+    "[action=status] Header/receipt row limit",
     "FROM session_claims WHERE claim_id = ?1",
     "dispatch_outcomes row ",
 )
@@ -138,14 +138,15 @@ chmod +x \"$CARGO_TARGET_DIR/release/tachi\"
         destination.parent.mkdir()
         destination.write_text("old binary", encoding="utf-8")
         content = self.fake_binary().replace(
-            "tachi_memory(action='sticky_leave')", "handle_sticky_leave"
+            "[action=respond|required] Stable recipient AgentIdentity id.",
+            "handle_a2a_respond",
         )
 
         result = self.run_install(content)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
-            "release literal gate failed: missing tachi_memory(action='sticky_leave')",
+            "release literal gate failed: missing [action=respond|required] Stable recipient AgentIdentity id.",
             result.stderr,
         )
         self.assertEqual(destination.read_text(encoding="utf-8"), "old binary")

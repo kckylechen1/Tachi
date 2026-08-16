@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Presence claims and peer publication**: lease-based presence board with zero-ceremony hooks, advisory file-scope collision warnings, and the read-only `peer_query` broker (`presence` board plus an observe-only `run` projection) so same-host sessions can see each other's active work without Tachi owning their lifecycle (#1001, #1016).
-- **Sticky notes** for short agent-to-agent messages: `tachi_memory(action='sticky_leave'|'sticky_check')` with TTL and read-once claim semantics; the legacy `handoff_leave`/`handoff_check` memo routes are deprecated in favor of sticky notes and HandoffPacket (#1016, #1019).
+- **A2A envelopes** replace the retired read-once note surface with explicit AgentIdentity addressing, issuer-scoped idempotency, and delivery receipts; structured task batons remain HandoffPackets (#1751).
 - **Graph ontology and observation ledger**: edge relation ontology v1, `ensure_anchor`, retirement of the fuzzy `auto_link` fog, an append-only `edge_observations` ledger, and exact-dedupe durable receipt/restore with graph-edge transfer (#773, #774).
 - **Issue Refinery v1**: immutable evidence capture, disposition proposals, and a freshness layer (zombie scan, stale-candidate heuristics) with briefing queues and GitHub write-back (#1000, #1002).
 - **Dispatch evidence spine**: `dispatch_outcomes` execution facts, append-only `dispatch_adjudications` keyed by outcome, frozen dispatch identity receipts, verdict-driven terminal accounting, and principle-level precedent candidates decomposed from completion rulings (#1024, #1035, #1065, #1076).

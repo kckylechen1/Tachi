@@ -248,8 +248,9 @@ pub(crate) async fn handle_tachi_status_agent(
     handle_tachi_status_detail(server, false, format).await
 }
 
-/// Full diagnostic payload for tests, doctor flows, and readiness checks.
+/// Full diagnostic payload retained only for exercising the status builder in tests.
 /// Same `format` semantics as [`handle_tachi_status_agent`].
+#[cfg(test)]
 pub(crate) async fn handle_tachi_status_full(
     server: &crate::MemoryServer,
     format: Option<&str>,

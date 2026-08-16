@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use rusqlite::{OptionalExtension, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::db::ConfirmedContradictionOutcome;
 use crate::types::ExpectedMemoryState;
@@ -43,6 +43,18 @@ impl MemoryStore {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for id in [
+                contradicts_edge.source_id.as_str(),
+                contradicts_edge.target_id.as_str(),
+                supersedes_edge.source_id.as_str(),
+                supersedes_edge.target_id.as_str(),
+            ] {
+                db::refuse_retired_sticky_row_within_tx(
+                    &tx,
+                    id,
+                    "used by confirmed contradiction persistence",
+                )?;
+            }
             let outcome = db::persist_confirmed_contradiction_within_tx(
                 &tx,
                 contradicts_edge,
@@ -97,10 +109,18 @@ impl MemoryStore {
     ) -> Result<usize, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        let affected = self.conn.execute(
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        db::refuse_retired_sticky_row_within_tx(&tx, id, "superseded by auto-link")?;
+        db::refuse_retired_sticky_row_within_tx(
+            &tx,
+            superseded_by,
+            "used as an auto-link supersession target",
+        )?;
+        let affected = tx.execute(
             "UPDATE memories SET superseded_by = ?1, updated_at = ?2, valid_until = COALESCE(valid_until, ?2) WHERE id = ?3 AND superseded_by IS NULL",
             rusqlite::params![superseded_by, at, id],
         )?;
+        tx.commit()?;
         Ok(affected)
     }
 
@@ -114,7 +134,9 @@ impl MemoryStore {
     ) -> Result<(), MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        self.conn.execute(
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        db::refuse_retired_sticky_row_within_tx(&tx, id, "confidence-reinforced")?;
+        tx.execute(
             r#"UPDATE memories
                SET metadata = json_set(
                    CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
@@ -132,6 +154,7 @@ impl MemoryStore {
                WHERE id = ?3"#,
             rusqlite::params![increment, reinforced_at, id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

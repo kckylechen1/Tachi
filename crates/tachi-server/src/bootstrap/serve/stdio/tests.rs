@@ -343,6 +343,7 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         let saved_text = "stdio proxy e2e writes only the bound project db";
@@ -426,6 +427,7 @@ fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(bound_name.clone()),
+            resolved_agent_identity: Default::default(),
         };
         let result = call_tool_via_stdio_proxy(
             proxy,
@@ -502,6 +504,7 @@ fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
             global_db_path: global.clone(),
             project_db_path: Some(bound_project.clone()),
             client_project: Some(bound_project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         let rejected_text = "stdio proxy e2e rejects cross-project override";
@@ -575,6 +578,7 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         for (id, scope, summary) in [
@@ -683,6 +687,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
             global_db_path: global.clone(),
             project_db_path: Some(bound_project.clone()),
             client_project: Some(bound_project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
         let other_proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
@@ -691,6 +696,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
             global_db_path: global.clone(),
             project_db_path: Some(other_project.clone()),
             client_project: Some(other_project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         let result = call_tool_via_stdio_proxy(
@@ -787,6 +793,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
         for (id, scope, summary) in [
@@ -939,6 +946,7 @@ fn stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot() {
             global_db_path: global.clone(),
             project_db_path: None,
             client_project: None,
+            resolved_agent_identity: Default::default(),
         };
 
         let first = call_tool_via_stdio_proxy(proxy.clone(), "runtime_info", serde_json::Map::new())
@@ -1042,6 +1050,7 @@ fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
             global_db_path: global.clone(),
             project_db_path: None,
             client_project: None,
+            resolved_agent_identity: Default::default(),
         };
 
         let result = call_tool_via_stdio_proxy(proxy, "runtime_info", serde_json::Map::new())
@@ -1077,7 +1086,7 @@ fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
 }
 
 #[test]
-fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
+fn stdio_proxy_archives_global_row_with_bound_project() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -1085,7 +1094,7 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
     let global = tachi_home.join("global/memory.db");
-    let project_name = "Sigil-proxy-delete-e2e";
+    let project_name = "Sigil-proxy-archive-e2e";
     let project = tachi_home
         .join("projects")
         .join(project_name)
@@ -1108,54 +1117,38 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
             global_db_path: global.clone(),
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
+            resolved_agent_identity: Default::default(),
         };
 
-        for (id, summary) in [
-            ("global-proxy-delete-e2e", "global delete fallback row"),
-            ("global-proxy-archive-e2e", "global archive fallback row"),
-        ] {
-            let result = call_tool_via_stdio_proxy(
-                proxy.clone(),
-                "tachi_memory",
-                serde_json::Map::from_iter([
-                    ("action".to_string(), serde_json::json!("save")),
-                    ("id".to_string(), serde_json::json!(id)),
-                    (
-                        "text".to_string(),
-                        serde_json::json!(format!("{summary} PROXYMUTATEGLOBAL")),
-                    ),
-                    ("summary".to_string(), serde_json::json!(summary)),
-                    (
-                        "path".to_string(),
-                        serde_json::json!("/tests/stdio-proxy-mutate-global"),
-                    ),
-                    ("category".to_string(), serde_json::json!("fact")),
-                    ("scope".to_string(), serde_json::json!("global")),
-                    ("force".to_string(), serde_json::json!(true)),
-                ]),
-            )
-            .await
-            .unwrap_or_else(|err| panic!("seed {id}: {err}"));
-            assert_tool_ok(&result);
-        }
-
-        let deleted = call_tool_via_stdio_proxy(
+        let result = call_tool_via_stdio_proxy(
             proxy.clone(),
             "tachi_memory",
             serde_json::Map::from_iter([
-                ("action".to_string(), serde_json::json!("delete")),
+                ("action".to_string(), serde_json::json!("save")),
                 (
                     "id".to_string(),
-                    serde_json::json!("global-proxy-delete-e2e"),
+                    serde_json::json!("global-proxy-archive-e2e"),
                 ),
+                (
+                    "text".to_string(),
+                    serde_json::json!("global archive fallback row PROXYMUTATEGLOBAL"),
+                ),
+                (
+                    "summary".to_string(),
+                    serde_json::json!("global archive fallback row"),
+                ),
+                (
+                    "path".to_string(),
+                    serde_json::json!("/tests/stdio-proxy-mutate-global"),
+                ),
+                ("category".to_string(), serde_json::json!("fact")),
+                ("scope".to_string(), serde_json::json!("global")),
+                ("force".to_string(), serde_json::json!(true)),
             ]),
         )
         .await
-        .expect("proxied delete should succeed");
-        assert_tool_ok(&deleted);
-        let deleted = first_text_json(&deleted);
-        assert_eq!(deleted["deleted"], serde_json::json!(true));
-        assert_eq!(deleted["db"], serde_json::json!("global"));
+        .expect("seed archive row");
+        assert_tool_ok(&result);
 
         let archived = call_tool_via_stdio_proxy(
             proxy,
@@ -1175,12 +1168,10 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
         (ct, daemon_task)
     });
 
-    assert_eq!(memory_id_count(&global, "global-proxy-delete-e2e"), 0);
     assert_eq!(
         memory_archived_value(&global, "global-proxy-archive-e2e"),
         1
     );
-    assert_eq!(memory_id_count(&project, "global-proxy-delete-e2e"), 0);
     assert_eq!(memory_id_count(&project, "global-proxy-archive-e2e"), 0);
 
     ct.cancel();
@@ -1420,24 +1411,15 @@ fn preflight_maps_tachi_memory_project_actions_without_injecting() {
         "preflight must not inject a default project for search"
     );
 
-    for action in [
-        "consolidate",
-        "pattern_feedback",
-        // #757 fold: delete/ingest/ingest_source now default to bound project
-        // (previously standalone delete_memory/ingest/ingest_source did).
-        "delete",
-        "ingest",
-        "ingest_source",
-    ] {
-        let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
-            serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
-        );
-        let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("action mapped");
-        assert!(
-            !mapped.arguments.expect("args").contains_key("project"),
-            "{action} preflight must not inject a default project"
-        );
-    }
+    let action = "consolidate";
+    let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
+        serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
+    );
+    let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("action mapped");
+    assert!(
+        !mapped.arguments.expect("args").contains_key("project"),
+        "{action} preflight must not inject a default project"
+    );
 }
 
 #[test]
@@ -1510,7 +1492,6 @@ fn proxy_rejects_explicit_cross_project_write_override() {
         ("tachi_memory", Some("save")),
         ("tachi_memory", Some("extract_facts")),
         ("tachi_memory", Some("checkpoint")),
-        ("tachi_memory", Some("delete")),
         ("save_memory", None),
         ("tachi_event", Some("emit")),
         // #1426: the tuning writes kept their cross-project refusal when they
@@ -1547,7 +1528,6 @@ fn proxy_allows_explicit_cross_project_read_override() {
             ("tachi_memory", Some("get")),
             ("tachi_memory", Some("briefing")),
             ("tachi_memory", Some("consolidate")),
-            ("tachi_memory", Some("readiness")),
             // #1426: recall_simulate kept its read-only cross-project
             // standing when it moved to the admin-only tachi_tune surface.
             ("tachi_tune", Some("recall_simulate")),
@@ -2285,6 +2265,127 @@ fn http_direct_connect_bound_session_rejects_cross_project_write() {
 
     assert_eq!(memory_text_count(&other_project, other_text), 0);
     assert_eq!(memory_id_count(&other_project, other_id), 0);
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+}
+
+fn initialize_request(meta: Option<rmcp::model::Meta>) -> rmcp::model::InitializeRequestParams {
+    let mut request = rmcp::model::InitializeRequestParams::new(
+        rmcp::model::ClientCapabilities::default(),
+        rmcp::model::Implementation::new("1761-test", "0"),
+    );
+    request.meta = meta;
+    request
+}
+
+fn identity_probe_proxy() -> StdioProxyServer {
+    StdioProxyServer {
+        adapter_started_at: chrono::Utc::now(),
+        daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon(None, None))),
+        app_home: PathBuf::from("/tmp"),
+        global_db_path: PathBuf::from("/tmp/global.db"),
+        project_db_path: None,
+        client_project: None,
+        resolved_agent_identity: Default::default(),
+    }
+}
+
+#[test]
+fn capture_initialize_identity_meta_wins_blank_omits_absent_uses_env() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let _env = EnvRestore::set(crate::session_identity::ENV_AGENT_IDENTITY, "agent.env");
+    let proxy = identity_probe_proxy();
+
+    let mut meta_wins = serde_json::Map::new();
+    meta_wins.insert(
+        crate::session_identity::META_AGENT_IDENTITY.to_string(),
+        serde_json::json!("agent.meta"),
+    );
+    proxy.capture_initialize_identity(&initialize_request(Some(rmcp::model::Meta(meta_wins))));
+    assert_eq!(
+        proxy.forwarded_agent_identity(),
+        crate::cli_client::ProxyIdentityForward::Header("agent.meta".to_string()),
+        "present _meta must win over env"
+    );
+
+    let mut blank = serde_json::Map::new();
+    blank.insert(
+        crate::session_identity::META_AGENT_IDENTITY.to_string(),
+        serde_json::json!("   "),
+    );
+    proxy.capture_initialize_identity(&initialize_request(Some(rmcp::model::Meta(blank))));
+    assert_eq!(
+        proxy.forwarded_agent_identity(),
+        crate::cli_client::ProxyIdentityForward::Omit,
+        "present-but-blank _meta must omit, not fall through to env"
+    );
+
+    proxy.capture_initialize_identity(&initialize_request(None));
+    assert_eq!(
+        proxy.forwarded_agent_identity(),
+        crate::cli_client::ProxyIdentityForward::Header("agent.env".to_string()),
+        "absent _meta key may take a valid process env"
+    );
+}
+
+/// #1761 review: daemon-process env must not confer identity on a direct
+/// HTTP session that omitted both `_meta` and `X-Tachi-Agent-Identity`.
+/// Pre-fix that leak admits the session as `unavailable` (has identity,
+/// not local). Post-fix it stays identity-less → `rejected`.
+#[test]
+fn http_direct_connect_does_not_inherit_daemon_process_env_identity() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    let _env = EnvRestore::set(
+        crate::session_identity::ENV_AGENT_IDENTITY,
+        "agent.daemon.env",
+    );
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let headers = http_headers(&[]);
+        let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+
+        let a2a = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers,
+            2,
+            "tachi_a2a",
+            serde_json::Map::from_iter([("action".to_string(), serde_json::json!("status"))]),
+        )
+        .await;
+        let text = a2a
+            .get("error")
+            .and_then(|err| err.get("message"))
+            .and_then(|message| message.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| http_tool_text(&a2a));
+        assert!(
+            text.contains("a2a issuer admission rejected"),
+            "direct HTTP must stay identity-less when env is the only assertion: {text}\n{a2a:#}"
+        );
+        assert!(
+            !text.contains("unavailable"),
+            "daemon env leak would admit as unavailable, not rejected: {text}\n{a2a:#}"
+        );
+        (ct, daemon_task)
+    });
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");

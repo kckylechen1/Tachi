@@ -148,6 +148,11 @@ fn validate_envelope(envelope: &OutboxDestinationApplyEnvelope) -> Result<(), Me
             event.event_id
         )));
     }
+    crate::path_router::validate_retired_sticky_write(
+        &envelope.payload.path,
+        &envelope.payload.category,
+    )
+    .map_err(|error| MemoryError::InvalidArg(error.to_string()))?;
     Ok(())
 }
 
@@ -546,6 +551,20 @@ mod tests {
         )
     }
 
+    fn envelope_with_retired_payload(
+        source_path: &Path,
+        object_id: &str,
+        path: &str,
+        category: &str,
+    ) -> OutboxDestinationApplyEnvelope {
+        let (_source, mut envelope) = source_and_envelope(source_path, object_id);
+        envelope.payload.path = path.into();
+        envelope.payload.category = category.into();
+        envelope.claimed.event.payload_digest =
+            crate::outbox_payload_digest(&envelope.payload).expect("retired payload digest");
+        envelope
+    }
+
     fn open_destination(path: &Path) -> MemoryStore {
         let path = path.to_string_lossy().into_owned();
         MemoryStore::open_with_label(&path, "global").expect("open destination store")
@@ -570,11 +589,149 @@ mod tests {
         .expect("read destination partition stamp")
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct DestinationMutationState {
+        memory: Option<Vec<u8>>,
+        memory_count: i64,
+        receipt_count: i64,
+        event_count: i64,
+        outbox_health: db::OutboxHealth,
+        identity_rows: Vec<(String, String, String, i64, String, String)>,
+        partition_stamp: Option<String>,
+    }
+
+    fn destination_mutation_state(
+        store: &MemoryStore,
+        object_id: &str,
+    ) -> DestinationMutationState {
+        let memory = store
+            .get_with_options(object_id, true)
+            .expect("read destination memory")
+            .map(|entry| serde_json::to_vec(&entry).expect("serialize destination memory"));
+        let memory_count = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE id = ?1",
+                params![object_id],
+                |row| row.get(0),
+            )
+            .expect("count destination memory");
+        let receipt_count = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_outbox_destination_apply_receipts",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count destination receipts");
+        let event_count = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM memory_outbox_events", [], |row| {
+                row.get(0)
+            })
+            .expect("count destination outbox events");
+        let mut identity_rows = store
+            .conn
+            .prepare(
+                "SELECT namespace, key, value_json, version, created_at, updated_at
+                 FROM hard_state ORDER BY namespace, key",
+            )
+            .expect("prepare identity snapshot")
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .expect("read identity snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect identity snapshot");
+        identity_rows.shrink_to_fit();
+
+        DestinationMutationState {
+            memory,
+            memory_count,
+            receipt_count,
+            event_count,
+            outbox_health: store
+                .outbox_health()
+                .expect("read destination outbox health"),
+            identity_rows,
+            partition_stamp: partition_stamp(store),
+        }
+    }
+
     fn flip_digest(digest: &str) -> String {
         let mut changed = digest.to_string();
         let replacement = if changed.starts_with('0') { '1' } else { '0' };
         changed.replace_range(0..1, &replacement.to_string());
         changed
+    }
+
+    #[test]
+    fn destination_apply_rejects_retired_sticky_payload_before_any_mutation() {
+        for (case, path, category) in [
+            ("path", "/sticky/legacy-bucket", "fact"),
+            ("category", "/scratch/memcore/destination-apply", "Sticky"),
+        ] {
+            let source_dir = tempdir().expect("source tempdir");
+            let destination_dir = tempdir().expect("destination tempdir");
+            let object_id = format!("unit-destination-apply-retired-{case}");
+            let envelope = envelope_with_retired_payload(
+                &source_dir.path().join("memory.db"),
+                &object_id,
+                path,
+                category,
+            );
+            let mut destination = open_destination(&destination_dir.path().join("memory.db"));
+            let before = destination_mutation_state(&destination, &object_id);
+
+            let error = destination
+                .apply_outbox_destination(&envelope)
+                .expect_err("retired sticky payload must be refused");
+            assert!(
+                matches!(error, MemoryError::InvalidArg(_))
+                    && error.to_string().contains("retired"),
+                "retired {case} refusal must be typed and explicit: {error}"
+            );
+
+            assert_eq!(
+                destination_mutation_state(&destination, &object_id),
+                before,
+                "retired {case} refusal must leave destination state byte-equivalent"
+            );
+            assert!(destination
+                .get_with_options(&object_id, true)
+                .expect("read refused destination memory")
+                .is_none());
+            assert_eq!(receipt_count(&destination), 0);
+            assert_eq!(
+                destination
+                    .outbox_health()
+                    .expect("read refused destination outbox health"),
+                db::OutboxHealth {
+                    local_store_status: db::LocalStoreStatus::Healthy,
+                    remote_sync_status: db::RemoteSyncStatus::Unconfigured,
+                    pending_count: 0,
+                    in_flight_count: 0,
+                    acknowledged_count: 0,
+                    rejected_count: 0,
+                    conflicted_count: 0,
+                    quarantined_count: 0,
+                    oldest_pending_at: None,
+                    oldest_in_flight_at: None,
+                    last_successful_sync: None,
+                    last_error_class: None,
+                    resolved_count: 0,
+                    stale_lease_count: 0,
+                }
+            );
+            assert!(partition_stamp(&destination).is_none());
+        }
     }
 
     #[test]

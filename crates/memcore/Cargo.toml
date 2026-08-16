@@ -35,6 +35,9 @@ admin = ["dep:blake2"]
 # to route through it (codex PR #1739 CONCERN-5). Enables no dependency, so it
 # is inert for the portable-kernel split.
 broker-fixtures = []
+# Dependency-visible hooks used only by downstream regression tests. Normal
+# production builds never compile these seams.
+test-support = []
 
 [dependencies]
 # Keyed-hash (MAC) primitive for tachi#1680's credential fingerprints. Optional

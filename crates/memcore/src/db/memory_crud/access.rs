@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{params_from_iter, Connection, Transaction, TransactionBehavior};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -247,7 +247,7 @@ pub(crate) fn record_access_with_updates(
     // `record_access` is called from search paths that only hold `&Connection`.
     // The unchecked transaction keeps the access_count/history/recall updates
     // atomic without widening the public search API to require `&mut Connection`.
-    let tx = conn.unchecked_transaction()?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
     let mut candidate_ids = unique_id_order(displayed_ids);
     let displayed_set: HashSet<&str> = candidate_ids.iter().copied().collect();
@@ -279,6 +279,9 @@ pub(crate) fn record_access_with_updates(
     if existing_ids.is_empty() {
         tx.commit()?;
         return Ok(HashMap::new());
+    }
+    for id in &existing_ids {
+        super::refuse_retired_sticky_row_within_tx(&tx, id, "recorded as recalled")?;
     }
 
     let displayed_set: HashSet<&str> = displayed_ids.iter().map(String::as_str).collect();
@@ -527,12 +530,11 @@ pub(crate) fn record_access_with_updates(
 /// the display-side counters; a use event must not be able to reach them or
 /// the two provenances re-merge and the whole discriminator is decorative.
 ///
-/// **No transaction is opened here.** The caller owns atomicity — every
-/// production caller runs inside the save's own `BEGIN IMMEDIATE`, and
-/// `rusqlite::Transaction` derefs to `Connection`, so `&tx` is accepted
-/// directly. Ids with no row in `memories` are skipped (same
-/// existence-filtered contract as `record_access_with_updates`); the return
-/// value is the number of ids that actually existed and were marked.
+/// The existence scan, retired-row preflight, timestamp update, and history
+/// append share one `BEGIN IMMEDIATE` transaction. Ids with no row in
+/// `memories` are skipped (same existence-filtered contract as
+/// `record_access_with_updates`); the return value is the number of ids that
+/// actually existed and were marked.
 pub fn record_memory_use(
     conn: &Connection,
     ids: &[String],
@@ -542,6 +544,7 @@ pub fn record_memory_use(
         return Ok(0);
     }
 
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let unique_ids = unique_id_order(ids);
     let mut existing_set = HashSet::with_capacity(unique_ids.len());
     for batch in unique_ids.chunks(IN_BATCH_SIZE) {
@@ -551,7 +554,7 @@ pub fn record_memory_use(
             .iter()
             .map(|id| Value::Text((*id).to_string()))
             .collect::<Vec<_>>();
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = tx.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
             row.get::<_, String>(0)
         })?;
@@ -564,7 +567,11 @@ pub fn record_memory_use(
         .filter(|id| existing_set.contains(*id))
         .collect::<Vec<_>>();
     if existing_ids.is_empty() {
+        tx.commit()?;
         return Ok(0);
+    }
+    for id in &existing_ids {
+        super::refuse_retired_sticky_row_within_tx(&tx, id, "recorded as used")?;
     }
 
     for batch in existing_ids.chunks(IN_BATCH_SIZE) {
@@ -573,7 +580,7 @@ pub fn record_memory_use(
         let mut values = Vec::with_capacity(batch.len() + 1);
         values.push(Value::Text(at.to_string()));
         values.extend(batch.iter().map(|id| Value::Text((*id).to_string())));
-        conn.execute(&sql, params_from_iter(values.iter()))?;
+        tx.execute(&sql, params_from_iter(values.iter()))?;
     }
 
     // Four bound parameters per row, so the chunk divisor is 4 (the display
@@ -594,10 +601,12 @@ pub fn record_memory_use(
             values.push(Value::Text(String::new()));
             values.push(Value::Text(AccessEventKind::Use.as_str().to_string()));
         }
-        conn.execute(&sql, params_from_iter(values.iter()))?;
+        tx.execute(&sql, params_from_iter(values.iter()))?;
     }
 
-    Ok(existing_ids.len())
+    let marked = existing_ids.len();
+    tx.commit()?;
+    Ok(marked)
 }
 
 /// Per-`memory_id` cap on rows `get_access_times` will read from
@@ -835,6 +844,59 @@ mod get_access_times_tests {
             .expect("seed memory row through typed store API");
     }
 
+    fn retire_existing_fixture(store: &MemoryStore, id: &str) {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize raw legacy sticky fixture");
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET path='/sticky/legacy', category='sticky' WHERE id=?1",
+                [id],
+            )
+            .expect("turn ordinary seed into raw legacy sticky fixture");
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct AccessRow {
+        id: String,
+        access_count: i64,
+        scored_count: i64,
+        last_access: Option<String>,
+        last_use_at: Option<String>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct AccessSnapshot {
+        memories: Vec<AccessRow>,
+        history: i64,
+    }
+
+    fn access_snapshot(conn: &Connection) -> AccessSnapshot {
+        let memories = conn
+            .prepare(
+                "SELECT id,access_count,scored_count,last_access,last_use_at \
+                 FROM memories ORDER BY id",
+            )
+            .expect("prepare access snapshot")
+            .query_map([], |row| {
+                Ok(AccessRow {
+                    id: row.get(0)?,
+                    access_count: row.get(1)?,
+                    scored_count: row.get(2)?,
+                    last_access: row.get(3)?,
+                    last_use_at: row.get(4)?,
+                })
+            })
+            .expect("read access snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect access snapshot");
+        let history = conn
+            .query_row("SELECT COUNT(*) FROM access_history", [], |row| row.get(0))
+            .expect("count access history");
+        AccessSnapshot { memories, history }
+    }
+
     /// Inserts `count` `access_history` rows for `id`, each one second older
     /// than the last (row 0 = most recent = `now`), so the returned ages are
     /// deterministic and ordering is unambiguous.
@@ -975,6 +1037,42 @@ mod get_access_times_tests {
             "a use event must not touch the display-side counters, or the two provenances \
              re-merge and the discriminator is decorative"
         );
+    }
+
+    #[test]
+    fn access_batches_refuse_retired_sticky_without_partially_mutating_ordinary_rows() {
+        for operation in ["display", "use"] {
+            let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+            seed_memory(&mut store, "ordinary-first");
+            seed_memory(&mut store, "sticky-second");
+            retire_existing_fixture(&store, "sticky-second");
+            let ids = vec!["ordinary-first".to_string(), "sticky-second".to_string()];
+            let before = access_snapshot(store.connection());
+
+            let error = match operation {
+                "display" => record_access_with_updates(
+                    store.connection(),
+                    &ids,
+                    &ids,
+                    &ids,
+                    Some("sticky batch"),
+                    &crate::RecallConfig::default(),
+                    None,
+                )
+                .map(|_| ()),
+                "use" => {
+                    record_memory_use(store.connection(), &ids, "2026-08-13T00:00:00Z").map(|_| ())
+                }
+                _ => unreachable!(),
+            }
+            .expect_err("a sticky member must refuse the complete access batch");
+            assert!(error.to_string().contains("tachi_a2a"), "{error}");
+            assert_eq!(
+                access_snapshot(store.connection()),
+                before,
+                "{operation} refusal must not partially mutate the ordinary first row"
+            );
+        }
     }
 
     /// tachi#1446: the density instrument returns a number on a fixture,

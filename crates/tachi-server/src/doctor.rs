@@ -32,8 +32,8 @@ mod types;
 /// `CARGO_TARGET_DIR`-shaped dirs + managed-worktree inspection notes),
 /// folded into `report.warnings` by `bootstrap::manifest_cli::run_doctor_command`.
 pub(crate) use build_resources::{
-    scan_orphan_build_resources, worktree_inspection_report, DEFAULT_ORPHAN_MAX_AGE_DAYS,
-    DEFAULT_WORKTREE_STALE_DAYS,
+    scan_orphan_build_resources, scan_orphan_build_resources_strict, worktree_inspection_report,
+    DEFAULT_ORPHAN_MAX_AGE_DAYS, DEFAULT_WORKTREE_STALE_DAYS,
 };
 #[cfg(test)]
 pub use classify::classify_one;
@@ -44,6 +44,7 @@ pub use classify::classify_one;
 pub(crate) use classify::make_immutable_uri;
 pub use hub_lint::hub_capability_discovery_status_warnings;
 pub use render::render_report;
+pub(crate) use scan::scan_strict_read_only;
 pub use scan::{default_scan_roots, scan, ScanOptions};
 pub use schema_skew::schema_version_skew_warnings;
 // Unit tests assert on backup filename classification via `super::*`.

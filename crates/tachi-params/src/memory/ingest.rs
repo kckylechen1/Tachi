@@ -6,10 +6,6 @@ fn default_extraction_source() -> String {
     "extraction".to_string()
 }
 
-fn default_ingest_type() -> String {
-    "source".to_string()
-}
-
 fn default_auto_chunk() -> bool {
     true
 }
@@ -132,7 +128,7 @@ pub struct IngestEventParams {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub struct IngestSourceParams {
     /// Raw source content to ingest
     pub content: String,
@@ -184,85 +180,6 @@ pub struct IngestSourceParams {
     /// Overlap between adjacent chunks in characters
     #[serde(default = "default_chunk_overlap_chars")]
     pub chunk_overlap_chars: usize,
-
-    /// Optional extra metadata
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct IngestParams {
-    /// Ingest mode: "event" or "source"
-    #[serde(default = "default_ingest_type")]
-    pub ingest_type: String,
-
-    /// Raw source content or structured event payload
-    #[serde(default)]
-    pub content: Option<serde_json::Value>,
-
-    /// Optional source URL or canonical reference
-    #[serde(default)]
-    pub source_url: Option<String>,
-
-    /// Optional logical source identifier
-    #[serde(default)]
-    pub source: Option<String>,
-
-    /// Optional path prefix used for chunk paths
-    #[serde(default)]
-    pub path_prefix: Option<String>,
-
-    /// Whether to chunk long content before storage
-    #[serde(default = "default_auto_chunk")]
-    pub auto_chunk: bool,
-
-    /// Whether to generate summaries for stored chunks
-    #[serde(default = "default_true")]
-    pub auto_summarize: bool,
-
-    /// Whether to build graph edges against similar memories
-    #[serde(default = "default_true")]
-    pub auto_link: bool,
-
-    /// Base importance for stored chunks
-    #[serde(default = "default_importance")]
-    pub importance: f64,
-
-    /// Target scope for writes
-    #[serde(default = "default_scope")]
-    pub scope: String,
-
-    /// Optional named project target
-    #[serde(default)]
-    pub project: Option<String>,
-
-    /// Optional domain tag
-    #[serde(default)]
-    pub domain: Option<String>,
-
-    /// Chunk size in characters
-    #[serde(default = "default_chunk_size_chars")]
-    pub chunk_size_chars: usize,
-
-    /// Overlap between adjacent chunks in characters
-    #[serde(default = "default_chunk_overlap_chars")]
-    pub chunk_overlap_chars: usize,
-
-    /// Conversation identifier for event ingestion
-    #[serde(default)]
-    pub conversation_id: Option<String>,
-
-    /// Turn identifier for event ingestion
-    #[serde(default)]
-    pub turn_id: Option<String>,
-
-    /// Event type label for event ingestion
-    #[serde(default)]
-    pub event_type: Option<String>,
-
-    /// Messages in the conversation turn
-    #[serde(default)]
-    pub messages: Vec<Message>,
 
     /// Optional extra metadata
     #[serde(default)]

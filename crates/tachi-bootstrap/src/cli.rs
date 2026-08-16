@@ -84,19 +84,22 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+mod a2a_actions;
 mod broker_actions;
 mod commands;
 mod maintenance_actions;
 mod vault_actions;
 
+pub use a2a_actions::{A2aAction, StickyCutoverAction};
 pub use broker_actions::BrokerAction;
 pub use commands::{Commands, RecallCoverageArgs};
 pub use maintenance_actions::{
-    BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DedupeAction, DistillAction,
-    EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction,
-    LifecycleConsistencyAction, ManifestAction, McpAction, PokeAction, QuarantineAction,
-    RepairAction, RescueAction, SkillSurfaceAction, WatcherAction, WikiAction, WorktreeAction,
-    WorktreeOpenArgs, DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS, DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
+    BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DedupeAction, DeleteAction,
+    DistillAction, EvalAction, FoundryAction, GcAction, HarnessAction, HostAction, HubAction,
+    InjectionSurfaceAction, LifecycleConsistencyAction, ManifestAction, McpAction, PokeAction,
+    QuarantineAction, RepairAction, RescueAction, SkillSurfaceAction, WatcherAction, WikiAction,
+    WorktreeAction, WorktreeOpenArgs, DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS,
+    DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
 };
 pub use vault_actions::{EnvAction, VaultAction, VaultIntakeAction, VaultReconcileAction};
 
