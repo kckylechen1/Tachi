@@ -2531,3 +2531,59 @@ fn http_direct_connect_does_not_inherit_daemon_process_env_identity() {
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
 }
+
+/// #1761 live follow-through: the stdio adapter forwards its explicitly
+/// resolved identity over the daemon's loopback HTTP rail. The daemon's
+/// `loopback-trust-v1` posture must retain that assertion as local so A2A can
+/// use it, while the adjacent no-header test proves daemon env cannot mint it.
+#[test]
+fn http_loopback_explicit_agent_identity_is_self_asserted_for_a2a() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    let _daemon_env = EnvRestore::remove(crate::session_identity::ENV_AGENT_IDENTITY);
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let headers = http_headers(&[(
+            crate::session_identity::HEADER_AGENT_IDENTITY,
+            "agent.cursor.loopback",
+        )]);
+        let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+
+        let a2a = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers,
+            2,
+            "tachi_a2a",
+            serde_json::Map::from_iter([("action".to_string(), serde_json::json!("status"))]),
+        )
+        .await;
+        assert!(a2a.get("error").is_none(), "A2A status failed: {a2a:#}");
+        let body: serde_json::Value =
+            serde_json::from_str(&http_tool_text(&a2a)).expect("A2A status JSON");
+        assert_eq!(body["contract"], serde_json::json!("tachi.a2a.v1"));
+        assert_eq!(body["status"], serde_json::json!("completed"));
+        assert_eq!(
+            body["actor_agent_identity_id"],
+            serde_json::json!("agent.cursor.loopback"),
+            "the exact explicit loopback identity must become the A2A issuer"
+        );
+        (ct, daemon_task)
+    });
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+}

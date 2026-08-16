@@ -49,9 +49,16 @@ HTTP has no per-process env. Send identity at **initialize**:
 | Project binding | `X-Tachi-Project` | `tachiProject` (alias `tachi.project`) |
 | Tool profile | `X-Tachi-Profile` | `tachiProfile` |
 | Client label | `X-Tachi-Client` | `tachiClient` |
+| Agent identity | `X-Tachi-Agent-Identity` | `tachiAgentIdentity` (alias `tachi.agentIdentity`) |
 
 Headers win over meta when both are present. Project must resolve via
 `resolve_named_project_db_path` (same as stdio).
+
+A valid, explicit AgentIdentity assertion on this loopback-only transport is
+recorded as `self_asserted`, never `verified`. An absent assertion stays
+identity-less and rejected; the daemon process environment is not an identity
+fallback for HTTP clients. This is the local attribution posture frozen in
+`identity-workclaim-spine-v1.md`, not remote identity proof.
 
 ### Claude Code / host config sketch
 
@@ -121,6 +128,8 @@ the compatibility path, not a failure of HTTP migration.
 | `http_direct_connect_header_identity_binds_profile_and_project` | Headers bind; save+search global+project |
 | `initialize_meta_binds_profile_client_and_project` | `_meta` key extraction (headers still preferred on the wire) |
 | `http_direct_connect_initialize_advertises_http_guidance` | initialize instructions mention HTTP reconnect |
+| `http_loopback_explicit_agent_identity_is_self_asserted_for_a2a` | explicit loopback identity is local self-asserted attribution; A2A sees the exact actor |
+| `http_direct_connect_does_not_inherit_daemon_process_env_identity` | absent HTTP identity stays rejected even when daemon env is set |
 | `http_direct_connect_rejects_admin_profile_without_authorization_policy` | admin refused |
 | `http_direct_connect_unbound_session_rejects_explicit_cross_project_write` | C1 unbound write |
 | `http_direct_connect_bound_session_rejects_cross_project_write` | Bound write isolation |
