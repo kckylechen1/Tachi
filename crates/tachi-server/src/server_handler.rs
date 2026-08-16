@@ -663,13 +663,23 @@ impl MemoryServer {
             ProjectBindingSource::None => None,
         };
         self.set_session_identity(identity.client.clone(), project, profile);
+        // The daemon HTTP listener is loopback-only and advertises
+        // `loopback-trust-v1`. A valid identity explicitly carried by that
+        // connection is therefore a local self-assertion, matching the
+        // frozen AgentIdentity v1 contract. Absence stays rejected: direct
+        // HTTP never inherits the daemon process env, so this cannot turn a
+        // missing assertion into an identity. If the listener ever grows a
+        // non-loopback bind, this trust decision must move to authenticated
+        // transport evidence before that bind is enabled.
+        let local_agent_assertion = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .is_none()
+            || identity.agent_identity_id.is_some();
         crate::claims_ops::admit_agent_connection(
             self,
             identity.agent_identity_id,
-            context
-                .extensions
-                .get::<axum::http::request::Parts>()
-                .is_none(),
+            local_agent_assertion,
         )
         .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
         // #1251: persist the wire depth into this session's runtime so the
