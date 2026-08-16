@@ -448,6 +448,52 @@ async fn trailing_data_in_a_later_transport_chunk_is_reported_too() {
 }
 
 #[tokio::test]
+async fn a_later_provider_close_marker_does_not_corrupt_an_existing_terminal_failure() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let (mut writer, reader) = tokio::io::duplex(4_096);
+            tokio::spawn(async move {
+                writer
+                    .write_all(b"data: {\"error\":{\"message\":\"overloaded\"}}\n\n")
+                    .await
+                    .expect("write provider error chunk");
+                writer.flush().await.expect("flush provider error chunk");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                writer
+                    .write_all(b"data: [DONE]\n\n")
+                    .await
+                    .expect("write provider close marker");
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from_stream(ReaderStream::new(reader)))
+                .expect("split provider error stream")
+        }),
+    );
+    let (endpoint, task) = serve(app).await;
+
+    let outcome = executor()
+        .execute(
+            &OpenAiCompatWire::new(),
+            &request_for(&endpoint, StreamSelection::Enabled),
+            api_key_lease(),
+            Some(&lease("PROVIDER-ERROR-CLOSE-CANARY")),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+    assert!(matches!(
+        outcome.terminal_disposition(),
+        InvocationDispositionV1::ProtocolError { .. }
+    ));
+    assert_eq!(outcome.stream_decode_error(), None);
+    task.abort();
+}
+
+#[tokio::test]
 async fn a_blank_lease_reference_refuses_before_network() {
     let hits = Arc::new(AtomicUsize::new(0));
     let route_hits = Arc::clone(&hits);

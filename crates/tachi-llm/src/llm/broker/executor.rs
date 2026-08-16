@@ -472,11 +472,25 @@ impl BrokerHttpExecutor {
                     if chunk.is_empty() {
                         continue;
                     }
-                    let trailing_error = decoder
-                        .push_bytes(&chunk)
-                        .err()
-                        .map_or(StreamDecodeErrorKind::IllegalSequence, |error| error.kind);
-                    return terminal_outcome(decoder, Some(trailing_error));
+                    match decoder.push_bytes(&chunk) {
+                        Ok(events) if events.is_empty() => match decoder.push_bytes(&[]) {
+                            Ok(events) if events.is_empty() => continue,
+                            Ok(_) => {
+                                return terminal_outcome(
+                                    decoder,
+                                    Some(StreamDecodeErrorKind::IllegalSequence),
+                                )
+                            }
+                            Err(error) => return terminal_outcome(decoder, Some(error.kind)),
+                        },
+                        Ok(_) => {
+                            return terminal_outcome(
+                                decoder,
+                                Some(StreamDecodeErrorKind::IllegalSequence),
+                            )
+                        }
+                        Err(error) => return terminal_outcome(decoder, Some(error.kind)),
+                    }
                 }
                 Ok(Some(chunk)) => match decoder.push_bytes(&chunk) {
                     Ok(events) => {
