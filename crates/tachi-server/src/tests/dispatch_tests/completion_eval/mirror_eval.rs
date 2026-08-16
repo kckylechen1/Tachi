@@ -30,6 +30,7 @@ fn agent_eval_params(action: &str) -> TachiAgentEvalParams {
         get: None,
         // tachi#1675 PR2: route_projection payload, unused by these tests.
         projection: None,
+        ..Default::default()
     }
 }
 
@@ -455,6 +456,7 @@ async fn complete_projects_only_eligible_eval_run_ids_into_aggregation() {
             get: None,
             // tachi#1675 PR2: route_projection payload, unused here.
             projection: None,
+            ..Default::default()
         }))
         .await
         .expect("aggregate_live should succeed");

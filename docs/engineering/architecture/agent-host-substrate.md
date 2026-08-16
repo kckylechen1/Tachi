@@ -29,6 +29,30 @@ foreground brokers: OpenClaw / ZeroClaw
 background workers: Codex / Claude / OpenCode / Hermes / Cursor
 ```
 
+## Trusted-local ACP attachment v1 (#1733)
+
+This leaf defines a deliberately narrow trust model. A trusted local host owns
+the ACP process and lifecycle; Tachi owns only admission, the durable receipt,
+and a provider-neutral data descriptor. The current host identity and its
+admission/connection are runtime evidence, while `agent_identity_id` and the
+fresh `WorkClaim` identify the distinct worker that receives the binding.
+Receipts written by this path carry the closed
+`identity_attribution_basis=trusted_local_host_declared` tier. This is a
+declared local attribution, not proof of a verified writer or a remote host.
+
+The worker profile is selected once at MCP initialize for the stdio connection
+(`TACHI_PROFILE` is trusted-host launch configuration) and is reused for
+`tools/list` and every `tools/call`. Attachment actions are coordinate/admin
+surfaces; observe/delegate calls are denied before the handler. ACP negotiated
+version 1 is the only stable version accepted by this leaf.
+
+Tachi does not claim hostile same-user isolation, cryptographic host
+authentication, remote authority, bearer-token issuance, verified-writer
+attribution, process/session lifecycle ownership, or a provider-specific stdio
+proxy. The emitted `mcpServers` value is an array of data-only descriptors
+(`command`, `args`, and named environment values); the host performs any ACP
+`session/new`, `session/load`, or `session/resume` operation itself.
+
 ## Current Code Inventory
 
 The repo already has most of the substrate pieces:

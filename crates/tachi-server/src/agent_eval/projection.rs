@@ -536,6 +536,7 @@ mod tests {
             adjudicate: None,
             get: None,
             projection,
+            ..Default::default()
         }
     }
 

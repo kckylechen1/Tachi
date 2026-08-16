@@ -62,6 +62,9 @@
 //! - v32: rebuild the Product A2A table pair so terminal envelope bodies can
 //!   be scrubbed after their bounded retention window while immutable digests
 //!   and delivery receipts remain (#1751).
+//! - v33: host-owned ACP session attachment admission receipts (#1733).
+//!   Renumbered from the PR's original v31 slot in the 2026-08-16 merge
+//!   resolution: main had already taken v31/v32 for the A2A mailbox pair.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -105,7 +108,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 32;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 33;
 
 mod a2a_body_retention;
 mod basic;
@@ -117,6 +120,7 @@ mod dispatch_outcomes_reported;
 mod domain_retire;
 mod exec_env_class;
 mod hard_state_index;
+mod harness_session_attachments;
 mod identity_workclaim_spine;
 mod idless_identity;
 mod legacy_columns;
@@ -136,6 +140,7 @@ use dispatch_outcomes_reported::*;
 use domain_retire::*;
 use exec_env_class::*;
 use hard_state_index::*;
+use harness_session_attachments::*;
 use identity_workclaim_spine::*;
 use idless_identity::*;
 use legacy_columns::*;
@@ -190,6 +195,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v30_memory_outbox_destination_apply",
     "v31_a2a_mailbox",
     "v32_a2a_body_retention",
+    "v33_harness_session_attachments",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -228,6 +234,7 @@ pub struct MigrationReport {
     pub memory_outbox_destination_apply_schema_objects_created: usize,
     pub a2a_mailbox_schema_objects_created: usize,
     pub a2a_body_retention_schema_objects_rebuilt: usize,
+    pub harness_session_attachments_schema_objects_created: usize,
 }
 
 #[cfg(test)]
@@ -330,6 +337,7 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
     crate::db::schema::validate_wiki_recovery_ledgers_schema(conn)?;
     crate::db::schema::validate_memory_outbox_schema(conn)?;
     crate::db::schema::validate_memory_outbox_destination_apply_schema(conn)?;
+    crate::db::schema::validate_harness_session_attachments_schema(conn)?;
     let product_schema: i64 = conn.query_row(
         "SELECT COUNT(*) FROM main.sqlite_schema WHERE type='table' AND name='identity_admissions'",
         [],
@@ -736,6 +744,12 @@ pub(crate) fn run_data_migrations_in_tx(
             migrate_v32_a2a_body_retention(conn, profile)
         })?
         .unwrap_or(0);
+    report.harness_session_attachments_schema_objects_created = apply_versioned_migration(
+        conn,
+        "v33_harness_session_attachments",
+        migrate_v33_harness_session_attachments,
+    )?
+    .unwrap_or(0);
 
     Ok(report)
 }
@@ -1691,6 +1705,39 @@ mod tests {
         // report is all-zero; the assertion under test is the re-stamp.
         assert_eq!(report.domains_table_dropped, 0);
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn stamped_v30_db_migrates_the_v31_attachment_ledger_before_restamping() {
+        let (mut conn, tmp) = open_test_db();
+        write_schema_version(&conn, 30).unwrap();
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path())
+            .expect("a stamped v30 database must receive v31");
+
+        assert_eq!(report.harness_session_attachments_schema_objects_created, 3);
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+        assert!(table_exists(&conn, "harness_session_attachments").unwrap());
+        assert!(was_run(&conn, "v31_harness_session_attachments").unwrap());
+        validate_current_schema_integrity(&conn).expect("the completed v31 shape is valid");
+    }
+
+    #[test]
+    fn stamped_current_v31_missing_attachment_index_fails_closed_without_repair() {
+        let (mut conn, tmp) = open_test_db();
+        run_data_migrations(&mut conn, "global", tmp.path()).expect("current v31 fixture");
+        conn.execute("DROP INDEX idx_harness_session_attachments_claim", [])
+            .unwrap();
+
+        let error = validate_current_schema_integrity(&conn)
+            .expect_err("current schema with a missing v31 index must refuse");
+        assert!(error
+            .to_string()
+            .contains("idx_harness_session_attachments_claim"));
+        assert!(!index_present(
+            &conn,
+            "idx_harness_session_attachments_claim"
+        ));
     }
 
     #[test]
