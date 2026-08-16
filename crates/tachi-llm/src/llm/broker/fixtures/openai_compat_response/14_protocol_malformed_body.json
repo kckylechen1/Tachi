@@ -1,0 +1,10 @@
+{
+  "why": "A 200 carrying something that is not JSON. The detail is a static string: the body is untrusted input and must not be retained in a durable disposition.",
+  "status": 200,
+  "headers": [],
+  "body": "upstream proxy says: not json at all",
+  "expected": {
+    "outcome": "protocol_violation",
+    "violation": {"kind": "malformed_body", "detail": "response body was not valid JSON"}
+  }
+}

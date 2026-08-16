@@ -1,11 +1,97 @@
-use serde_json::json;
-use tachi_llm::RerankConfig;
+//! Model-lane status, as a **projection** rather than a mirror (tachi#1681 D3).
+//!
+//! This file used to hand-maintain a JSON copy of every lane's provider, base
+//! URL, model and key chain. Nothing kept it in step with
+//! `provider_health/config.rs`, which is where those values actually come
+//! from, so it was guaranteed to drift — and it had already half-converted
+//! itself for rerank (the old comment at line 14: "report the actually
+//! configured rerank provider, not a hardcoded 'voyage'"). Same disease, same
+//! cure, now applied to the other five lanes: every value below is read from
+//! the live `ProviderRuntimeConfig` / `EmbeddingConfig` / `RerankConfig`, and
+//! the chat and embedding lanes are rendered from the *same* catalog
+//! projection (`tachi_llm::catalog_import`) that produces the
+//! `catalog_source='env'` deployment rows. Status and catalog cannot disagree,
+//! because they are one derivation.
+//!
+//! # What is still prose, and why
+//!
+//! Each lane keeps a `provider` string describing its **call strategy**
+//! ("claude-cli-first, openai-compatible fallback"). That is not a resolved
+//! value and is not something the catalog knows — it is a statement about
+//! which code path runs — so it stays a literal here, pinned by the existing
+//! `model_lanes_distinguish_api_only_distill_from_cli_first_reasoning` test.
+//! The drift risk this file existed to create was in the *values*, and those
+//! are gone.
+//!
+//! # Failure reporting
+//!
+//! A config that does not resolve surfaces as a `config_error` field rather
+//! than a plausible-looking default, keeping the rule the rerank half already
+//! followed: status must not lie about what is configured.
+//!
+//! # Which config, mirroring `provider_config::import_env_catalog_deployments`
+//!
+//! `provider_config.rs`'s production import reads the chat-lane config from
+//! `LlmClient::runtime_config()` — the config the *running client* holds —
+//! specifically so a process built from an injected/frozen config is
+//! described by its own config rather than by re-reading ambient env
+//! (`crate::provider_config`'s module doc). This file used to
+//! call `ProviderRuntimeConfig::from_env()` unconditionally, so a live daemon
+//! whose client was constructed from an injected config would have the
+//! catalog rows describe one config and status describe another — "library
+//! has one config, status renders another."
+//!
+//! [`model_lanes_json_for_running_client`] closes that gap for the one call
+//! site that actually has a running client to ask
+//! (`status_ops::runtime::runtime_observability_json`, which already holds
+//! `&MemoryServer`): it takes the same `ProviderRuntimeConfig` the import
+//! path reads, rather than resolving its own. [`model_lanes_json`] keeps its
+//! original zero-argument, env-reading behavior for its other two callers
+//! (`doctor_ops`'s MCP scan and `manifest_cli`'s standalone CLI report),
+//! neither of which has a live `LlmClient` to disagree with — env is the only
+//! config those two ever had, so nothing about their behavior changes.
+
+use std::path::Path;
+
+use serde_json::{json, Value};
+use tachi_llm::{
+    env_chat_lane_deployments, env_embedding_deployment, voyage_embeddings_endpoint,
+    EmbeddingConfig, ProviderRuntimeConfig, RerankConfig,
+};
 
 use crate::status_ops::EXPECTED_EMBEDDING_DIM;
 
+/// Prefix `catalog_import` puts on an api-key provenance entry. Stripped here
+/// so the `keys` array keeps the shape consumers already read.
+const ENV_API_KEY_SOURCE_PREFIX: &str = "env_api_key:";
+
+/// Per-lane call-strategy descriptions. Not resolved values — see the module
+/// note.
+const EXTRACT_STRATEGY: &str = "openai-compatible";
+const SUMMARY_STRATEGY: &str = "openai-compatible";
+const DISTILL_STRATEGY: &str = "openai-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector (no Claude subprocess)";
+const REASONING_STRATEGY: &str = "claude-cli-first, openai-compatible fallback";
+
+/// Env-sourced status projection. Unchanged signature and behavior: this
+/// stays the entry point for callers with no live `LlmClient` to read
+/// instead (`doctor_ops`'s MCP scan, `manifest_cli`'s standalone report).
 pub(crate) fn model_lanes_json() -> serde_json::Value {
-    // Report the actually configured rerank provider (not a hardcoded "voyage").
-    // Invalid config surfaces as a status error field rather than lying.
+    model_lanes_json_from(None)
+}
+
+/// Status projection sourced from the *running client's* config, not env —
+/// the daemon `status` surface's call, which already holds `&MemoryServer`
+/// and can pass `server.llm.runtime_config()` straight through. See the
+/// module doc's "which config" section: this is what makes status agree with
+/// the `catalog_source='env'` rows `provider_config::import_env_catalog_deployments`
+/// writes from the same config.
+pub(crate) fn model_lanes_json_for_running_client(
+    config: &ProviderRuntimeConfig,
+) -> serde_json::Value {
+    model_lanes_json_from(Some(config))
+}
+
+fn model_lanes_json_from(config_override: Option<&ProviderRuntimeConfig>) -> serde_json::Value {
     let rerank_cfg = RerankConfig::from_env();
     let (rerank_provider, rerank_model, rerank_keys, local_endpoint, rerank_config_error) =
         match &rerank_cfg {
@@ -54,41 +140,135 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
         }
     };
 
+    let chat_lanes = chat_lane_projection(config_override);
+    let lane = |name: &str, strategy: &str| -> Value {
+        match &chat_lanes {
+            Ok(lanes) => lanes
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| json!({ "provider": strategy })),
+            Err(err) => json!({ "provider": strategy, "config_error": err }),
+        }
+    };
+
     json!({
-        "embedding": {
-            "provider": "voyage",
-            "model": "voyage-4",
-            "expected_dimension": EXPECTED_EMBEDDING_DIM,
-            "key": "VOYAGE_API_KEY",
-        },
+        "embedding": embedding_lane_json(),
         "rerank": rerank_lane,
         "recall_rerank_cache": {
             "query_generation_provider": "extract/SiliconFlow",
             "rerank_provider": rerank_provider,
             "auth_failure_hint": auth_failure_hint,
         },
-        "extract": {
-            "provider": "openai-compatible",
-            "default_base_url": "https://api.siliconflow.cn/v1/chat/completions",
-            "default_model": "Qwen/Qwen3.5-27B",
-            "keys": ["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
-        },
-        "summary": {
-            "provider": "openai-compatible",
-            "inherits": "extract",
-            "keys": ["SUMMARY_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
-        },
-        "distill": {
-            "provider": "openai-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector (no Claude subprocess)",
-            "default_base_url_when_deepseek_key_selected": "https://api.deepseek.com/chat/completions",
-            "default_model_when_deepseek_key_selected": "deepseek-chat",
-            "keys": ["DISTILL_API_KEY", "DEEPSEEK_API_KEY", "REASONING_API_KEY", "ZAI_API_KEY", "BIGMODEL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
-        },
-        "reasoning": {
-            "provider": "claude-cli-first, openai-compatible fallback",
-            "default_base_url_when_deepseek_key_selected": "https://api.deepseek.com/chat/completions",
-            "default_model_when_deepseek_key_selected": "deepseek-reasoner",
-            "keys": ["DEEPSEEK_API_KEY", "REASONING_API_KEY", "ZAI_API_KEY", "BIGMODEL_API_KEY", "DISTILL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
-        }
+        "extract": lane("extract", EXTRACT_STRATEGY),
+        "summary": lane("summary", SUMMARY_STRATEGY),
+        "distill": lane("distill", DISTILL_STRATEGY),
+        "reasoning": lane("reasoning", REASONING_STRATEGY),
     })
+}
+
+/// Resolve the four chat lanes and render each as the catalog row it would be
+/// imported as. Keyed by lane name so the caller can pair each with its
+/// strategy prose without re-deriving the order.
+///
+/// `config_override` is `Some` for the running-client call
+/// ([`model_lanes_json_for_running_client`]) and `None` for the env-reading
+/// call ([`model_lanes_json`]) — see the module doc's "which config" section.
+fn chat_lane_projection(
+    config_override: Option<&ProviderRuntimeConfig>,
+) -> Result<std::collections::BTreeMap<String, Value>, String> {
+    let config = match config_override {
+        Some(config) => config.clone(),
+        None => ProviderRuntimeConfig::from_env()?,
+    };
+    let observed_at = memcore::db::now_utc_iso();
+    // A refused projection (a lane whose base URL carries userinfo) is a
+    // config error, reported the same way an unresolvable chain is. The error
+    // is metadata-only by construction, so rendering it into status JSON
+    // cannot leak the credential that caused it.
+    let lanes = env_chat_lane_deployments(&config, &observed_at).map_err(|err| err.to_string())?;
+    Ok(lanes
+        .into_iter()
+        .map(|lane| {
+            let strategy = match lane.lane {
+                "extract" => EXTRACT_STRATEGY,
+                "summary" => SUMMARY_STRATEGY,
+                "distill" => DISTILL_STRATEGY,
+                "reasoning" => REASONING_STRATEGY,
+                other => other,
+            };
+            (
+                lane.lane.to_string(),
+                json!({
+                    "provider": strategy,
+                    "deployment_id": lane.deployment.deployment_id,
+                    "catalog_source": lane.deployment.catalog_source.as_str(),
+                    "provider_account_ref": lane.deployment.provider_account_id,
+                    "endpoint": lane.deployment.endpoint_ref,
+                    "model": lane.deployment.provider_model_id,
+                    "keys": key_names(&lane.deployment.source_refs),
+                }),
+            )
+        })
+        .collect())
+}
+
+fn embedding_lane_json() -> Value {
+    let config = match EmbeddingConfig::from_env() {
+        Ok(config) => config,
+        Err(err) => {
+            // A refused embedding configuration is the loud failure #1681 D3
+            // asks for; status reports the refusal rather than the model it
+            // would have used.
+            return json!({
+                "provider": "voyage",
+                "config_error": err,
+                "stored_index_dimension": EXPECTED_EMBEDDING_DIM,
+                "key": "VOYAGE_API_KEY",
+            });
+        }
+    };
+
+    let endpoint = voyage_embeddings_endpoint();
+    let observed_at = memcore::db::now_utc_iso();
+    let row = match env_embedding_deployment(&config, &endpoint, &observed_at) {
+        Ok(row) => row.deployment,
+        Err(err) => {
+            // `VOYAGE_BASE_URL` carrying userinfo is refused, not scrubbed —
+            // reported here exactly like a refused `EmbeddingConfig`, and with
+            // no `endpoint` field, because there is no publishable form of the
+            // endpoint that caused it.
+            return json!({
+                "provider": "voyage",
+                "config_error": err.to_string(),
+                "stored_index_dimension": EXPECTED_EMBEDDING_DIM,
+                "key": "VOYAGE_API_KEY",
+            });
+        }
+    };
+
+    json!({
+        "provider": "voyage",
+        "model": row.provider_model_id,
+        "model_source": config.source().as_str(),
+        "expected_dimension": config.dimension(),
+        "stored_index_dimension": EXPECTED_EMBEDDING_DIM,
+        "endpoint": row.endpoint_ref,
+        "deployment_id": row.deployment_id,
+        "catalog_source": row.catalog_source.as_str(),
+        "provider_account_ref": row.provider_account_id,
+        "key": "VOYAGE_API_KEY",
+    })
+}
+
+/// `["env_api_key:EXTRACT_API_KEY", …]` → `["EXTRACT_API_KEY", …]`.
+///
+/// Entries that are not api-key provenance (an override's variable name, say)
+/// are dropped rather than rendered, so `keys` stays what its consumers read
+/// it as: the credential precedence chain, in order.
+fn key_names(source_refs: &[String]) -> Vec<String> {
+    source_refs
+        .iter()
+        .filter_map(|source_ref| source_ref.strip_prefix(ENV_API_KEY_SOURCE_PREFIX))
+        .map(str::to_string)
+        .collect()
 }

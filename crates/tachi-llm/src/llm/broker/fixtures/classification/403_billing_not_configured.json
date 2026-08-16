@@ -1,0 +1,13 @@
+{
+  "why": "The bare `billing` marker. Needs a human, not a clock — which is why it must not flatten into the rate-limit member.",
+  "status": 403,
+  "headers": [],
+  "body": "{\"error\":{\"message\":\"Billing has not been configured for this organization\",\"type\":\"billing_not_active\"}}",
+  "expected": {
+    "class": "billing_or_quota",
+    "advice": "retry_other_credential",
+    "legacy_failure_class": "provider_exhausted",
+    "legacy_retry_intent": "retry_within_tier_if_another_key",
+    "retry_after": null
+  }
+}

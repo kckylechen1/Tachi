@@ -92,11 +92,11 @@ mod vault_actions;
 pub use a2a_actions::{A2aAction, StickyCutoverAction};
 pub use commands::{Commands, RecallCoverageArgs};
 pub use maintenance_actions::{
-    BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DedupeAction, DeleteAction,
-    DistillAction, EvalAction, FoundryAction, GcAction, HarnessAction, HostAction, HubAction,
-    InjectionSurfaceAction, LifecycleConsistencyAction, ManifestAction, McpAction, PokeAction,
-    QuarantineAction, RepairAction, RescueAction, SkillSurfaceAction, WatcherAction, WikiAction,
-    WorktreeAction, WorktreeOpenArgs, DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS,
+    BuildAction, CardAction, CardsAction, ClankerAction, CleanAction, DaemonAction, DedupeAction,
+    DeleteAction, DistillAction, EvalAction, FoundryAction, GcAction, HarnessAction, HostAction,
+    HubAction, InjectionSurfaceAction, LifecycleConsistencyAction, ManifestAction, McpAction,
+    PokeAction, QuarantineAction, RepairAction, RescueAction, SkillSurfaceAction, WatcherAction,
+    WikiAction, WorktreeAction, WorktreeOpenArgs, DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS,
     DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
 };
 pub use vault_actions::{EnvAction, VaultAction, VaultIntakeAction, VaultReconcileAction};

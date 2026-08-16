@@ -777,6 +777,22 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  valid only while this file names no MemoryStore doorway.",
     },
     Exemption {
+        path: "crates/memcore/src/db/tests/model_catalog_ops.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[Site {
+            symbol: "break_the_event_append",
+            trigger: "REFUSE_EVENT_APPEND",
+            ddl: "0aba31b541e6e02d",
+            occurrences: 1,
+        }],
+        reason: "break_the_event_append installs its RAISE(ABORT) trigger on the \
+                 bare in-memory rusqlite Connection returned by catalog_conn and \
+                 the append-failure rollback and connection-state tests execute \
+                 the store door on that same unguarded connection — #1443's \
+                 sanctioned memcore pattern. Body read 2026-08-13. The proof \
+                 remains valid only while this file names no MemoryStore doorway.",
+    },
+    Exemption {
         path: "crates/memcore/src/db/tests/search_generation.rs",
         basis: ExemptionBasis::Proven(MachineProof::MemcoreArmsTheMigrationToken),
         sites: &[

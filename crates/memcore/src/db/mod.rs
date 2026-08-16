@@ -39,6 +39,11 @@ mod memory_crud;
 pub mod migrations;
 #[cfg(feature = "admin")]
 pub mod mirror_eval;
+/// SQL for tachi#1681's six model-broker catalog tables. `admin`-gated for
+/// the same reason `vault_accounts` is: every one of them is
+/// `SchemaScope::Product`.
+#[cfg(feature = "admin")]
+pub mod model_catalog;
 mod open;
 pub mod open_context;
 // tachi#1643: NOT admin-gated. #1630's premise is a host-owned sync loop with
@@ -192,6 +197,15 @@ pub(crate) use memory_crud::{
 pub(crate) use memory_crud::{
     insert_if_absent, insert_if_absent_within_tx, insert_rem_operation_if_absent_within_tx, upsert,
     upsert_idless, upsert_within_tx, upsert_within_tx_allowing_reserved_anchor_ids,
+};
+#[cfg(feature = "admin")]
+pub use model_catalog::{
+    advance_catalog_projection, append_model_deployment_event, get_model_deployment,
+    get_model_deployment_health, get_pricing_snapshot, list_all_model_deployment_events,
+    list_authoritative_deployments, list_model_alias_bindings, list_model_aliases,
+    list_model_deployment_events, list_model_deployment_events_after, list_model_deployments,
+    list_model_deployments_by_source, replay_catalog_projection, retire_model_deployment,
+    upsert_model_deployment, upsert_pricing_snapshot, DeploymentWrite, PricingSnapshotWrite,
 };
 /// Public: see `open::ensure_reserved_reference_write_guard`'s doc comment.
 pub use open::ensure_reserved_reference_write_guard;

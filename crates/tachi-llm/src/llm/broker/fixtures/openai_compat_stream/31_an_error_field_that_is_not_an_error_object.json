@@ -1,0 +1,35 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "The failure-channel split is about who is at fault, and it turns on the shape. An error *object* is the provider reporting a failure in its own grammar, which is the event channel (fixture 05). A `false` — or a string, a number, an array — under `/error` is not a failure report at all; it is a document this decoder does not know. Admitting it would let any wrong-typed field seal a stream as provider-declared failure, which reads in a receipt as 'the provider said it failed' when nobody said anything of the kind.",
+  "chunks": [
+    {
+      "text": "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"test-model-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"error\":false,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "test-model-1",
+          "provider_request_id": "chatcmpl-1"
+        }
+      }
+    ],
+    "error": "unknown_event_shape",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "unknown_event_shape"
+      }
+    }
+  }
+}

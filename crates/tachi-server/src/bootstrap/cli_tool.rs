@@ -156,6 +156,9 @@ pub(super) async fn run_cli_command(
         Commands::Eval { .. } => {
             unreachable!("Eval is handled in async context before generic CLI dispatch")
         }
+        Commands::Clanker { .. } => {
+            unreachable!("Clanker is handled in async context before generic CLI dispatch")
+        }
         Commands::Card { action } => {
             cards::run_card_command(action, db_path, project_db_path, app_home).await
         }
