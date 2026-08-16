@@ -8,6 +8,60 @@ pub const DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS: u64 = 7;
 /// part of a live build.
 pub const DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS: u64 = 7;
 
+/// Canonical operator-only garbage-collection workflow.
+///
+/// Planning is read-only. Applying is irreversible and accepts only a saved
+/// plan whose exact database identity and candidate set still match.
+#[derive(Subcommand, Debug, Clone)]
+pub enum GcAction {
+    /// Inspect one manifest-authorized Tachi database and write a body-free plan.
+    Plan {
+        /// Exact physical database selected through the manifest.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// New plan artifact path. Existing files are never overwritten.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
+    /// Irreversibly apply one previously saved plan.
+    Apply {
+        /// Saved plan artifact to validate and apply.
+        #[arg(long, value_name = "PATH")]
+        plan: PathBuf,
+        /// Acknowledge that garbage collection is irreversible.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// Canonical operator-only exact-memory deletion workflow.
+///
+/// There is deliberately no query, path, category, bulk, or restore form.
+#[derive(Subcommand, Debug, Clone)]
+pub enum DeleteAction {
+    /// Inspect one exact memory id in one manifest-authorized Tachi database.
+    Plan {
+        /// Exact physical database selected through the manifest.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// Exact memory id. Missing ids produce an honest no-op plan.
+        #[arg(long)]
+        id: String,
+        /// New plan artifact path. Existing files are never overwritten.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
+    /// Irreversibly apply one previously saved exact-id plan.
+    Apply {
+        /// Saved plan artifact to validate and apply.
+        #[arg(long, value_name = "PATH")]
+        plan: PathBuf,
+        /// Acknowledge that deletion is irreversible.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 /// Machine-local execution profile. This is separate from agent dispatch
 /// profiles: it controls the highest side-effect level allowed on this host.
 #[derive(Subcommand, Debug, Clone)]
@@ -282,6 +336,29 @@ pub enum CleanAction {
         #[arg(long)]
         dry_run: bool,
         /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// tachi#1735: ingest terminal Clanker run evidence (`~/.cache/clanker/runs/<id>/`)
+/// into the existing mirror-eval spine (#1066 tables) — the `vault`/`doctor`
+/// convention of one noun-grouped subcommand with room to grow, even though
+/// this leaf ships exactly one verb.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ClankerAction {
+    /// Sweep terminal Clanker run directories and register/observe them on
+    /// the mirror-eval spine. Idempotent by run id — re-sweeping produces
+    /// zero duplicate rows.
+    Sweep {
+        /// Root directory of Clanker run directories. Defaults to
+        /// `~/.cache/clanker/runs`.
+        #[arg(long, value_name = "PATH")]
+        runs_dir: Option<PathBuf>,
+        /// Process at most N run directories (deterministic, sorted by name).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Emit machine-readable JSON instead of the human summary.
         #[arg(long)]
         json: bool,
     },

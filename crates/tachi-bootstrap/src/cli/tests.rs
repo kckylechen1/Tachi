@@ -2,6 +2,131 @@ use super::*;
 use clap::{CommandFactory, Parser};
 
 #[test]
+fn maintenance_cli_exposes_only_nested_plan_and_apply_forms() {
+    let gc_plan = Cli::try_parse_from([
+        "tachi",
+        "gc",
+        "plan",
+        "--db",
+        "/tmp/memory.db",
+        "--out",
+        "/tmp/gc.plan.json",
+    ])
+    .expect("gc plan should require one explicit physical DB and output path");
+    assert!(matches!(
+        gc_plan.command,
+        Some(Commands::Gc {
+            action: GcAction::Plan { db, out }
+        }) if db == std::path::Path::new("/tmp/memory.db")
+            && out == std::path::Path::new("/tmp/gc.plan.json")
+    ));
+
+    let gc_apply = Cli::try_parse_from([
+        "tachi",
+        "gc",
+        "apply",
+        "--plan",
+        "/tmp/gc.plan.json",
+        "--yes",
+    ])
+    .expect("gc apply should parse one saved plan plus explicit confirmation");
+    assert!(matches!(
+        gc_apply.command,
+        Some(Commands::Gc {
+            action: GcAction::Apply { plan, yes: true }
+        }) if plan == std::path::Path::new("/tmp/gc.plan.json")
+    ));
+
+    let delete_plan = Cli::try_parse_from([
+        "tachi",
+        "delete",
+        "plan",
+        "--db",
+        "/tmp/memory.db",
+        "--id",
+        "memory-123",
+        "--out",
+        "/tmp/delete.plan.json",
+    ])
+    .expect("delete plan should parse one exact id on one explicit physical DB");
+    assert!(matches!(
+        delete_plan.command,
+        Some(Commands::Delete {
+            action: DeleteAction::Plan { db, id, out }
+        }) if db == std::path::Path::new("/tmp/memory.db")
+            && id == "memory-123"
+            && out == std::path::Path::new("/tmp/delete.plan.json")
+    ));
+
+    let delete_apply = Cli::try_parse_from([
+        "tachi",
+        "delete",
+        "apply",
+        "--plan",
+        "/tmp/delete.plan.json",
+        "--yes",
+    ])
+    .expect("delete apply should parse one saved plan plus explicit confirmation");
+    assert!(matches!(
+        delete_apply.command,
+        Some(Commands::Delete {
+            action: DeleteAction::Apply { plan, yes: true }
+        }) if plan == std::path::Path::new("/tmp/delete.plan.json")
+    ));
+
+    for argv in [
+        vec!["tachi", "gc"],
+        vec!["tachi", "delete"],
+        vec!["tachi", "delete", "plan", "--db", "/tmp/memory.db"],
+        vec![
+            "tachi",
+            "delete",
+            "plan",
+            "--db",
+            "/tmp/memory.db",
+            "--query",
+            "broad authority is forbidden",
+            "--out",
+            "/tmp/delete.plan.json",
+        ],
+    ] {
+        Cli::try_parse_from(argv)
+            .expect_err("bare or authority-widening maintenance form must be rejected");
+    }
+}
+
+#[test]
+fn a2a_sticky_cutover_exposes_only_plan_and_confirmed_apply() {
+    Cli::try_parse_from(["tachi", "a2a", "sticky-cutover", "plan"])
+        .expect("the read-only sticky cutover plan command must parse");
+    Cli::try_parse_from([
+        "tachi",
+        "a2a",
+        "sticky-cutover",
+        "apply",
+        "--plan",
+        "sticky-cutover-plan.json",
+        "--confirm",
+    ])
+    .expect("sticky cutover apply must require an explicit plan and confirmation");
+
+    for argv in [
+        vec!["tachi", "a2a", "sticky-cutover", "apply"],
+        vec![
+            "tachi",
+            "a2a",
+            "sticky-cutover",
+            "apply",
+            "--plan",
+            "sticky-cutover-plan.json",
+        ],
+    ] {
+        Cli::try_parse_from(argv)
+            .expect_err("sticky cutover apply without both --plan and --confirm must fail");
+    }
+}
+
+#[test]
 fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
     let preview =
         Cli::try_parse_from(["tachi", "wiki", "corpus"]).expect("wiki corpus preview should parse");
@@ -684,6 +809,60 @@ fn eval_cli_parses_recall_gate() {
             assert_eq!(min_recall, 0.95);
             assert_eq!(min_mrr, 0.0);
             assert!(enable_rerank);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn clanker_cli_parses_sweep_with_defaults() {
+    let parsed =
+        Cli::try_parse_from(["tachi", "clanker", "sweep"]).expect("clanker sweep should parse");
+    match parsed.command.expect("command") {
+        Commands::Clanker {
+            action:
+                ClankerAction::Sweep {
+                    runs_dir,
+                    limit,
+                    json,
+                },
+        } => {
+            assert!(runs_dir.is_none());
+            assert!(limit.is_none());
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn clanker_cli_parses_sweep_with_explicit_flags() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "clanker",
+        "sweep",
+        "--runs-dir",
+        "/tmp/clanker-runs",
+        "--limit",
+        "5",
+        "--json",
+    ])
+    .expect("clanker sweep with flags should parse");
+    match parsed.command.expect("command") {
+        Commands::Clanker {
+            action:
+                ClankerAction::Sweep {
+                    runs_dir,
+                    limit,
+                    json,
+                },
+        } => {
+            assert_eq!(
+                runs_dir,
+                Some(std::path::PathBuf::from("/tmp/clanker-runs"))
+            );
+            assert_eq!(limit, Some(5));
             assert!(json);
         }
         other => panic!("unexpected command: {other:?}"),

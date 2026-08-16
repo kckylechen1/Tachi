@@ -1,4 +1,6 @@
-//! Provider API key resolution: Vault, config.env `vault:` aliases, and env fallbacks.
+//! Provider runtime bootstrap: API key resolution (Vault, config.env `vault:`
+//! aliases, env fallbacks) and the env→catalog deployment import that records
+//! what those chains resolved to.
 //!
 //! Single path for daemon, MCP, CLI backfill, and vector sweep so background jobs
 //! do not re-implement Keychain/Vault reads with different behavior.
@@ -511,6 +513,127 @@ pub fn bootstrap_provider_runtime(server: &MemoryServer) {
     }
 }
 
+/// What one env→catalog import actually did. Counts only — the caller logs
+/// this at boot, and a deployment row's contents are not boot-log material.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct EnvCatalogImport {
+    /// Rows imported: the four chat lanes, plus the embedding lane when its
+    /// configuration resolved.
+    pub rows: usize,
+    /// How many of those were a create or a revision advance. Zero is the
+    /// steady state — a restart that resolves the same chains is not a catalog
+    /// change and must append nothing.
+    pub changed: usize,
+    /// Set when `EmbeddingConfig::from_env()` refused, so the embedding row
+    /// was deliberately not written. Reported, never silently swallowed: the
+    /// catalog must not claim an embedding deployment the process refused to
+    /// configure.
+    pub embedding_refused: Option<String>,
+}
+
+/// Import the live provider resolution into the catalog as
+/// `catalog_source='env'` deployment rows (#1681 D7 PR-B).
+///
+/// This is the production caller the projection was written for. Without it,
+/// `catalog_import` is a function only tests call, and #1685's cutover would
+/// be reading a table nothing populates.
+///
+/// # Which config
+///
+/// The chat lanes come from [`tachi_llm::LlmClient::runtime_config`] — the
+/// config *this server's client is running on* — not a fresh
+/// `ProviderRuntimeConfig::from_env()`. Re-reading env here would make the
+/// catalog describe an environment rather than a process, and the two diverge
+/// exactly where it matters (any client built from an injected config).
+///
+/// The embedding lane is the opposite case and is read from env on purpose:
+/// `LlmClient::embed_batch` resolves `EmbeddingConfig::from_env()` per call, so
+/// there is no cached copy for the catalog to disagree with — env *is* the live
+/// resolution for that lane.
+///
+/// # Idempotence
+///
+/// `upsert_model_deployment` compares content digests, so a restart that
+/// resolves the same chains reports `Unchanged` for every row and appends no
+/// events. One transaction wraps the whole write so a mid-way store failure
+/// cannot leave a half-described catalog.
+///
+/// # Refusal precedes every write, not just the ones after it
+///
+/// Every lane's projection — the four chat lanes *and* the embedding lane —
+/// is built before any connection is opened. `env_chat_lane_deployments` and
+/// `env_embedding_deployment` are pure functions with no store access; their
+/// only failure mode is a credential-bearing endpoint
+/// (`CatalogImportError::EndpointCarriesUserinfo`). Building all five here,
+/// before `with_global_store` is even called, means a userinfo-carrying
+/// `VOYAGE_BASE_URL` is refused with zero write calls having happened at
+/// all — not "refused after the four chat rows were written into a
+/// transaction that then rolled back." A prior revision built the embedding
+/// projection *inside* the transaction, after the chat lanes had already
+/// been upserted into it; correctness leaned on `unchecked_transaction`'s
+/// rollback-on-drop to erase those writes, which is invisible from the
+/// caller's `Result` but not equivalent to the writes never having been
+/// issued.
+pub(crate) fn import_env_catalog_deployments(
+    server: &MemoryServer,
+) -> Result<EnvCatalogImport, String> {
+    use memcore::db::model_catalog::{upsert_model_deployment, DeploymentWrite};
+
+    let config = server.llm.runtime_config();
+    let embedding = tachi_llm::EmbeddingConfig::from_env();
+    let embeddings_endpoint = tachi_llm::voyage_embeddings_endpoint();
+    let observed_at = memcore::db::now_utc_iso();
+
+    let chat_deployments = tachi_llm::env_chat_lane_deployments(&config, &observed_at)
+        .map_err(|err| err.to_string())?;
+    let mut embedding_deployment = None;
+    let mut embedding_refused = None;
+    match &embedding {
+        Ok(resolved) => {
+            embedding_deployment = Some(
+                tachi_llm::env_embedding_deployment(resolved, &embeddings_endpoint, &observed_at)
+                    .map_err(|err| err.to_string())?,
+            );
+        }
+        Err(err) => embedding_refused = Some(err.clone()),
+    }
+
+    server.with_global_store(|store| {
+        let conn = store.connection();
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("open catalog import transaction: {e}"))?;
+
+        let mut summary = EnvCatalogImport {
+            embedding_refused,
+            ..EnvCatalogImport::default()
+        };
+
+        for lane in &chat_deployments {
+            let write = upsert_model_deployment(&transaction, &lane.deployment)
+                .map_err(|e| e.to_string())?;
+            summary.rows += 1;
+            if !matches!(write, DeploymentWrite::Unchanged { .. }) {
+                summary.changed += 1;
+            }
+        }
+
+        if let Some(row) = &embedding_deployment {
+            let write = upsert_model_deployment(&transaction, &row.deployment)
+                .map_err(|e| e.to_string())?;
+            summary.rows += 1;
+            if !matches!(write, DeploymentWrite::Unchanged { .. }) {
+                summary.changed += 1;
+            }
+        }
+
+        transaction
+            .commit()
+            .map_err(|e| format!("commit catalog import: {e}"))?;
+        Ok(summary)
+    })
+}
+
 /// Parse `~/.tachi/config.env` (and peers) into key → value (non-empty values only).
 ///
 /// `resolved_home`, when given, is unioned into the scan locations alongside
@@ -559,6 +682,311 @@ pub fn collect_config_env_values(resolved_home: Option<&Path>) -> HashMap<String
         }
     }
     values
+}
+
+#[cfg(test)]
+mod catalog_import_tests {
+    use super::*;
+    use crate::test_support::EnvRestore;
+    use memcore::catalog::CatalogSource;
+    use memcore::db::model_catalog::{
+        list_all_model_deployment_events, list_model_deployments_by_source,
+    };
+    use tachi_llm::llm::{ChatLaneConfig, ProviderRuntimeConfig};
+    use tachi_llm::{RerankConfig, RerankProviderKind};
+
+    /// Four deliberately distinct lanes, none of which any env chain would
+    /// resolve to. Distinctness is what lets the assertions below tell "the
+    /// import projected the client" from "the import re-read the environment".
+    fn injected_config() -> ProviderRuntimeConfig {
+        ProviderRuntimeConfig {
+            extract: ChatLaneConfig {
+                base_url: "https://injected-extract.test/v1/chat/completions".to_string(),
+                model: "injected/extract-model".to_string(),
+                api_key_envs: vec!["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+            },
+            summary: ChatLaneConfig {
+                base_url: "https://injected-summary.test/v1/chat/completions".to_string(),
+                model: "injected/summary-model".to_string(),
+                api_key_envs: vec!["SUMMARY_API_KEY"],
+            },
+            reasoning: ChatLaneConfig {
+                base_url: "https://injected-reasoning.test/chat/completions".to_string(),
+                model: "injected/reasoning-model".to_string(),
+                api_key_envs: vec!["DEEPSEEK_API_KEY"],
+            },
+            distill: ChatLaneConfig {
+                base_url: "https://injected-distill.test/chat/completions".to_string(),
+                model: "injected/distill-model".to_string(),
+                api_key_envs: vec!["DISTILL_API_KEY"],
+            },
+            rerank: RerankConfig {
+                provider: RerankProviderKind::Voyage,
+                local_endpoint: None,
+            },
+        }
+    }
+
+    /// Pin the embedding lane to its built-in default so the row count below
+    /// is a statement about this import, not about whatever the machine
+    /// running the suite happens to export.
+    fn default_embedding_env() -> (EnvRestore, EnvRestore) {
+        (
+            EnvRestore::remove(tachi_llm::EMBEDDING_MODEL_ENV),
+            EnvRestore::remove(tachi_llm::EMBEDDING_DIMENSION_ENV),
+        )
+    }
+
+    fn server_running_injected_config() -> crate::tests::TestServer {
+        let mut server = crate::tests::make_server();
+        server.replace_llm(
+            tachi_llm::LlmClient::new_with_config(injected_config(), None)
+                .expect("injected-config client"),
+        );
+        server
+    }
+
+    /// The production caller exists and reaches every lane. Before this, the
+    /// projection was a function only tests called — five deployment rows the
+    /// #1685 cutover would have found empty.
+    #[test]
+    fn the_serve_path_import_records_every_lane_including_embedding() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _embedding_env = default_embedding_env();
+        let server = server_running_injected_config();
+
+        let summary =
+            import_env_catalog_deployments(&server).expect("import runs against a live server");
+        assert_eq!(
+            summary.embedding_refused, None,
+            "the default embedding configuration must resolve"
+        );
+        assert_eq!(summary.rows, 5, "four chat lanes plus the embedding lane");
+        assert_eq!(summary.changed, 5, "a first import creates every row");
+
+        let stored = server
+            .with_global_store_read(|store| {
+                list_model_deployments_by_source(store.connection(), CatalogSource::Env)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("rows read");
+        let mut ids: Vec<&str> = stored
+            .iter()
+            .map(|row| row.deployment_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec![
+                "env:distill",
+                "env:embedding",
+                "env:extract",
+                "env:reasoning",
+                "env:summary"
+            ],
+            "the embedding lane is not optional — it carries the dimension declaration"
+        );
+    }
+
+    /// A daemon restart is not a catalog change. Without this, every boot
+    /// appends five rows of audit noise forever.
+    #[test]
+    fn a_restart_that_resolves_the_same_chains_appends_nothing() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _embedding_env = default_embedding_env();
+        let server = server_running_injected_config();
+
+        import_env_catalog_deployments(&server).expect("first boot");
+        let events_after_first = server
+            .with_global_store_read(|store| {
+                list_all_model_deployment_events(store.connection()).map_err(|e| e.to_string())
+            })
+            .expect("events read")
+            .len();
+
+        let second = import_env_catalog_deployments(&server).expect("second boot");
+        assert_eq!(second.rows, 5, "the same five rows are still described");
+        assert_eq!(
+            second.changed, 0,
+            "re-resolving the same chains must report no change"
+        );
+
+        let events_after_second = server
+            .with_global_store_read(|store| {
+                list_all_model_deployment_events(store.connection()).map_err(|e| e.to_string())
+            })
+            .expect("events read")
+            .len();
+        assert_eq!(
+            events_after_first, events_after_second,
+            "an unchanged re-import must append no events"
+        );
+    }
+
+    /// The import describes the process, not the process's environment. A
+    /// server whose client was built from an injected config must produce rows
+    /// for *that* config even while the ambient env says something else —
+    /// otherwise the catalog silently describes somebody else's resolution.
+    #[test]
+    fn the_import_projects_the_running_client_not_the_ambient_environment() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _extract_model = EnvRestore::set("EXTRACT_MODEL", "__ambient-must-not-be-imported");
+        let _extract_base = EnvRestore::set("EXTRACT_BASE_URL", "https://ambient.test/v1");
+        let server = server_running_injected_config();
+
+        import_env_catalog_deployments(&server).expect("import");
+
+        let stored = server
+            .with_global_store_read(|store| {
+                list_model_deployments_by_source(store.connection(), CatalogSource::Env)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("rows read");
+        let extract = stored
+            .iter()
+            .find(|row| row.deployment_id == "env:extract")
+            .expect("extract row");
+        assert_eq!(
+            extract.provider_model_id, "injected/extract-model",
+            "the catalog must carry the running client's model"
+        );
+        assert_eq!(
+            extract.endpoint_ref.as_deref(),
+            Some("https://injected-extract.test/v1/chat/completions"),
+            "and the running client's endpoint"
+        );
+    }
+
+    /// A refusable config never reaches the store, even through the server
+    /// seam that wraps the import in a transaction.
+    #[test]
+    fn a_client_running_a_userinfo_base_url_imports_nothing() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut config = injected_config();
+        config.extract.base_url =
+            "https://svc-account:sk-live-SECRET@proxy.internal:8443/v1/chat".to_string();
+        let mut server = crate::tests::make_server();
+        server.replace_llm(tachi_llm::LlmClient::new_with_config(config, None).expect("client"));
+
+        let err = import_env_catalog_deployments(&server)
+            .expect_err("a userinfo base URL must refuse the whole import");
+        assert!(!err.contains("sk-live-SECRET"), "{err}");
+        assert!(!err.contains("proxy.internal"), "{err}");
+        assert!(
+            err.contains("extract"),
+            "the refusal must name the lane: {err}"
+        );
+
+        let stored = server
+            .with_global_store_read(|store| {
+                list_model_deployments_by_source(store.connection(), CatalogSource::Env)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("rows read");
+        assert!(
+            stored.is_empty(),
+            "not even the clean lanes may land: {} row(s)",
+            stored.len()
+        );
+    }
+
+    /// The mirror of the test above, with the credential on the *embedding*
+    /// endpoint instead of a chat lane: the four clean chat lanes must not
+    /// land either, and — the part a bare "is the store empty" assertion
+    /// cannot tell apart from "wrote then rolled back" — no event may have
+    /// been appended along the way. `upsert_model_deployment` appends an
+    /// event on every create/change and only on those; if the four chat rows
+    /// had actually been upserted into the transaction (as a prior revision
+    /// did, before the embedding endpoint's userinfo check ran), each would
+    /// append a `Create` event to the same in-transaction event log this read
+    /// inspects after rollback. Rollback erases the *rows*; it does not
+    /// retroactively make the write calls not have happened. Zero events is
+    /// therefore evidence about the write path, not just about final state.
+    #[test]
+    fn a_userinfo_embedding_endpoint_writes_no_chat_rows_or_events_either() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _embedding_env = default_embedding_env();
+        let _voyage_base = EnvRestore::set(
+            "VOYAGE_BASE_URL",
+            "https://svc-account:sk-live-SECRET@voyage.internal/v1",
+        );
+        let server = server_running_injected_config();
+
+        let err = import_env_catalog_deployments(&server)
+            .expect_err("a userinfo embedding endpoint must refuse the whole import");
+        assert!(!err.contains("sk-live-SECRET"), "{err}");
+        assert!(
+            err.contains("embedding"),
+            "the refusal must name the embedding lane: {err}"
+        );
+
+        let stored = server
+            .with_global_store_read(|store| {
+                list_model_deployments_by_source(store.connection(), CatalogSource::Env)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("rows read");
+        assert!(
+            stored.is_empty(),
+            "the four clean chat lanes must not land either: {} row(s)",
+            stored.len()
+        );
+
+        let events = server
+            .with_global_store_read(|store| {
+                list_all_model_deployment_events(store.connection()).map_err(|e| e.to_string())
+            })
+            .expect("events read");
+        assert!(
+            events.is_empty(),
+            "no chat-lane upsert may have run at all, so none may have appended an \
+             event: {} event(s)",
+            events.len()
+        );
+    }
+
+    /// The strongest form of the claim: the embedding refusal must be
+    /// decidable with **no connection in scope at all**, not merely "decided
+    /// early in a transaction that then gets rolled back". This test builds
+    /// no `MemoryServer`, opens no store, and calls exactly the two pure
+    /// projections `import_env_catalog_deployments` calls before it ever asks
+    /// for one — `env_chat_lane_deployments` (which takes no connection) and
+    /// `env_embedding_deployment` (likewise). Getting the refusal back here,
+    /// with literally nothing to write to in scope, is proof by construction
+    /// that no write is reachable before this check runs — a property a
+    /// black-box "is the store empty afterward" assertion cannot distinguish
+    /// from "wrote, then a transaction rolled the writes back."
+    #[test]
+    fn the_embedding_refusal_is_decidable_with_no_connection_in_scope() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _embedding_env = default_embedding_env();
+
+        let config = injected_config();
+        let observed_at = memcore::db::now_utc_iso();
+
+        let chat_deployments = tachi_llm::env_chat_lane_deployments(&config, &observed_at)
+            .expect("the four injected chat lanes carry no userinfo");
+        assert_eq!(chat_deployments.len(), 4, "all four lanes projected");
+
+        let embedding = tachi_llm::EmbeddingConfig::from_env()
+            .expect("the default embedding configuration must resolve");
+        let poisoned_endpoint = "https://svc-account:sk-live-SECRET@voyage.internal/v1";
+        let err = tachi_llm::env_embedding_deployment(&embedding, poisoned_endpoint, &observed_at)
+            .expect_err("a userinfo embedding endpoint must refuse");
+        assert!(!err.to_string().contains("sk-live-SECRET"), "{err}");
+    }
 }
 
 #[cfg(test)]

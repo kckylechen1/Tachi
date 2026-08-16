@@ -1,5 +1,144 @@
 use super::*;
 
+#[test]
+fn provider_health_open_waits_for_the_prior_real_health_write() {
+    const LOGICAL_NAME: &str = "TACHI_TEST_ONLY_PROVIDER_HEALTH_STARTUP_OWNERSHIP";
+    const KEY_A: &str = "TACHI_TEST_ONLY_PROVIDER_HEALTH_STARTUP_OWNERSHIP_A";
+    const KEY_B: &str = "TACHI_TEST_ONLY_PROVIDER_HEALTH_STARTUP_OWNERSHIP_B";
+
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let temp = tempfile::tempdir().expect("temp vault db");
+    let db_path = temp.path().join("vault.db");
+    drop(memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("initialize vault db"));
+
+    let client_a = LlmClient::new_with_vault_db(Some(&db_path)).expect("client A");
+    let client_b = LlmClient::new_with_vault_db(Some(&db_path)).expect("client B");
+    let (write_held_tx, write_held_rx) = std::sync::mpsc::channel();
+    let (release_write_tx, release_write_rx) = std::sync::mpsc::channel();
+    let _write_hook = memcore::db::install_vault_key_health_write_hook_for_tests(
+        LOGICAL_NAME,
+        KEY_A,
+        move || {
+            write_held_tx.send(()).expect("report held health write");
+            release_write_rx
+                .recv()
+                .expect("release held health write after overlap assertion");
+        },
+    );
+
+    let writer_a = std::thread::spawn(move || {
+        client_a.record_provider_key_result(
+            LOGICAL_NAME,
+            KEY_A,
+            Some(429),
+            None,
+            Some(30),
+            Some("provider A throttled"),
+        );
+        client_a.provider_health_status()
+    });
+    write_held_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("A must hold the real vault health transaction");
+
+    let (startup_owned_tx, startup_owned_rx) = std::sync::mpsc::channel();
+    let (startup_attempted_tx, startup_attempted_rx) = std::sync::mpsc::channel();
+    let _startup_hook = memcore::MemoryStore::install_startup_ownership_hook_for_tests(
+        db_path.to_str().expect("utf8 db path"),
+        move || {
+            startup_attempted_tx
+                .send(())
+                .expect("report B arriving before startup ownership");
+        },
+        move || {
+            startup_owned_tx
+                .send(())
+                .expect("report B crossing the startup boundary");
+        },
+    );
+    let (writer_b_started_tx, writer_b_started_rx) = std::sync::mpsc::channel();
+    let (writer_b_done_tx, writer_b_done_rx) = std::sync::mpsc::channel();
+    let writer_b = std::thread::spawn(move || {
+        writer_b_started_tx
+            .send(())
+            .expect("report B entering real provider persistence");
+        client_b.record_provider_key_result(
+            LOGICAL_NAME,
+            KEY_B,
+            Some(429),
+            None,
+            Some(30),
+            Some("provider B throttled"),
+        );
+        let status = client_b.provider_health_status();
+        writer_b_done_tx.send(()).expect("report B terminal");
+        status
+    });
+    writer_b_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("B must enter real provider persistence");
+    startup_attempted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("B must arrive before the Memcore startup lock");
+
+    let crossed_while_a_held = startup_owned_rx
+        .recv_timeout(Duration::from_millis(100))
+        .is_ok();
+    let completed_while_a_held = if crossed_while_a_held {
+        writer_b_done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .is_ok()
+    } else {
+        writer_b_done_rx.try_recv().is_ok()
+    };
+
+    release_write_tx.send(()).expect("release A health write");
+    if !crossed_while_a_held {
+        startup_owned_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("B enters open after A releases startup ownership");
+    }
+    let status_a = writer_a.join().expect("join provider writer A");
+    let status_b = writer_b.join().expect("join provider writer B");
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("read health rows");
+    let row_a = store
+        .vault_get_key_health(LOGICAL_NAME, KEY_A)
+        .expect("read provider health row A");
+    let row_b = store
+        .vault_get_key_health(LOGICAL_NAME, KEY_B)
+        .expect("read provider health row B");
+
+    assert!(
+        !crossed_while_a_held,
+        "B crossed Memcore startup/open while A held the real health write: \
+         completed_before_release={completed_while_a_held}, \
+         b_error={:?}, b_row_present={}",
+        status_b.persist_last_error,
+        row_b.is_some()
+    );
+    assert!(
+        !completed_while_a_held,
+        "B completed before A released the real health write"
+    );
+    assert!(
+        status_a.persist_last_error.is_none(),
+        "A persist failed: {status_a:?}"
+    );
+    assert!(
+        status_b.persist_last_error.is_none(),
+        "B persist failed: {status_b:?}"
+    );
+    assert!(
+        row_a.is_some(),
+        "missing durable provider health row for {KEY_A}"
+    );
+    assert!(
+        row_b.is_some(),
+        "missing durable provider health row for {KEY_B}"
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn provider_key_health_blocking_persist_honors_test_disable_env() {

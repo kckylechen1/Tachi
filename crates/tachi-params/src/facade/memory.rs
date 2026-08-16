@@ -1,8 +1,7 @@
 use super::string_enum_schema;
 use rmcp::schemars::{self, JsonSchema};
-use serde::Deserialize;
-
-use crate::memory::Message;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::{fmt, str::FromStr};
 
 fn default_facade_search_scope() -> String {
     "all".to_string()
@@ -10,25 +9,6 @@ fn default_facade_search_scope() -> String {
 
 fn default_facade_top_k() -> usize {
     6
-}
-
-// ─── Ingest action defaults (mirror crates/tachi-params/src/memory/ingest.rs) ─
-//
-// `tachi_memory(action='ingest'|'ingest_source')` fronts the same pipeline
-// handlers as the standalone tools, so the wire defaults must match byte-for-byte.
-// Scope/importance defaults are applied in the handler arm (the shared `scope`
-// and `importance` fields already carry their own serde defaults).
-
-fn default_facade_ingest_type() -> String {
-    "source".to_string()
-}
-
-fn default_facade_chunk_size_chars() -> usize {
-    1200
-}
-
-fn default_facade_chunk_overlap_chars() -> usize {
-    120
 }
 
 fn default_facade_true() -> bool {
@@ -45,36 +25,96 @@ fn tachi_memory_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &[
-            "search",
-            "get",
-            "save",
-            "extract_facts",
-            "briefing",
-            "checkpoint",
-            "alerts",
-            "ask",
-            "consolidate",
-            "pattern_feedback",
-            "progress",
-            "readiness",
-            // #757 fold: memory-admin + pipeline tools re-fronted as actions.
-            "delete",
-            "gc",
-            "doctor_scan",
-            "ingest",
-            "ingest_source",
-            // #1253 compatibility aliases: canonical claim/release live on
-            // tachi_task and use the WorkClaim ledger.
-            "claim",
-            "release",
-            // #964: read-once agent-to-agent ephemeral notes.
-            "sticky_leave",
-            "sticky_check",
-        ],
+        super::action_inventory::TACHI_MEMORY_ACTIONS,
         "Required Tachi memory facade action.",
         generator,
     )
+}
+
+/// Closed action vocabulary for the model-facing Memory facade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TachiMemoryAction {
+    Search,
+    Get,
+    Save,
+    Briefing,
+    Checkpoint,
+    Alerts,
+    Ask,
+    ExtractFacts,
+    Consolidate,
+}
+
+impl TachiMemoryAction {
+    pub const ALL: &'static [Self] = &[
+        Self::Search,
+        Self::Get,
+        Self::Save,
+        Self::Briefing,
+        Self::Checkpoint,
+        Self::Alerts,
+        Self::Ask,
+        Self::ExtractFacts,
+        Self::Consolidate,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Get => "get",
+            Self::Save => "save",
+            Self::Briefing => "briefing",
+            Self::Checkpoint => "checkpoint",
+            Self::Alerts => "alerts",
+            Self::Ask => "ask",
+            Self::ExtractFacts => "extract_facts",
+            Self::Consolidate => "consolidate",
+        }
+    }
+}
+
+impl fmt::Display for TachiMemoryAction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TachiMemoryAction {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "search" => Ok(Self::Search),
+            "get" => Ok(Self::Get),
+            "save" => Ok(Self::Save),
+            "briefing" => Ok(Self::Briefing),
+            "checkpoint" => Ok(Self::Checkpoint),
+            "alerts" => Ok(Self::Alerts),
+            "ask" => Ok(Self::Ask),
+            "extract_facts" => Ok(Self::ExtractFacts),
+            "consolidate" => Ok(Self::Consolidate),
+            "progress" => Err("retired tachi_memory action 'progress'; use tachi_task(action='status')".to_string()),
+            "readiness" => Err("retired tachi_memory action 'readiness'; use tachi_status".to_string()),
+            "delete" => Err("retired tachi_memory action 'delete'; use tachi delete plan|apply".to_string()),
+            "gc" => Err("retired tachi_memory action 'gc'; use tachi gc plan|apply".to_string()),
+            "doctor_scan" => Err("retired tachi_memory action 'doctor_scan'; use tachi doctor".to_string()),
+            "ingest" | "ingest_source" => Err(format!("retired tachi_memory action '{value}'; use admitted adapter/operator ingest API")),
+            "pattern_feedback" => Err("retired tachi_memory action 'pattern_feedback'; use internal pattern-evidence API".to_string()),
+            other => Err(format!("invalid tachi_memory action '{other}'; use search, get, save, briefing, checkpoint, alerts, ask, extract_facts, or consolidate")),
+        }
+    }
+}
+
+fn deserialize_memory_action<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    value
+        .parse::<TachiMemoryAction>()
+        .map(|action| action.as_str().to_string())
+        .map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
@@ -285,10 +325,6 @@ pub struct TachiSaveParams {
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
 
-    /// Also append a typed continuity ledger event for this memory save.
-    #[serde(default)]
-    pub emit_continuity: bool,
-
     /// Source files this memory references (stored as `metadata.files`). Surfaced
     /// inline on search results so agents can jump to the referenced file without
     /// a follow-up `get_memory`. Merged with paths auto-parsed from `spec:` pointers.
@@ -309,9 +345,10 @@ fn default_memory_top_k() -> usize {
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub struct TachiMemoryParams {
+    #[serde(deserialize_with = "deserialize_memory_action")]
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility), claim (register/heartbeat a manual presence claim on an issue_ref/flow_id; advisory only, never a lock), release (release a claim by claim_id or dispatch_id), delete (permanently remove a memory entry by id; folded from delete_memory), gc (run garbage collection on growing tables; folded from memory_gc), doctor_scan (read-only scan of memory.db roots; folded from tachi_doctor_scan), ingest (unified event/source ingest; folded from ingest), ingest_source (batch source ingest with chunking/enrichment; folded from ingest_source), sticky_leave (leave a read-once ephemeral note for the leader or a named seat), sticky_check (claim/list unread stickies addressed to the caller; include_read=true shows the read/expired archive). Recall tuning lives on tachi_tune."
+        description = "Required. One of: search, get, save, briefing, checkpoint, alerts, ask, extract_facts, consolidate. Work status lives on tachi_task; health lives on tachi_status; maintenance lives on the operator CLI; ingestion and pattern evidence use admitted internal APIs."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -389,17 +426,15 @@ pub struct TachiMemoryParams {
     // --- save fields ---
     #[serde(default)]
     #[schemars(
-        description = "[action=save|checkpoint|extract_facts|sticky_leave] Full text to persist (or atomize source; sticky note body)."
+        description = "[action=save|checkpoint|extract_facts] Full text to persist (or atomize source)."
     )]
     pub text: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=save|checkpoint] Title for the saved entry or checkpoint (also used as a title override by briefing/progress)."
-    )]
+    #[schemars(description = "[action=save|checkpoint] Title for the saved entry or checkpoint.")]
     pub title: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=save|checkpoint|progress] Short summary stored alongside the saved entry, checkpoint, or progress state."
+        description = "[action=save|checkpoint] Short summary stored alongside the saved entry or checkpoint."
     )]
     pub summary: Option<String>,
     #[serde(default)]
@@ -463,11 +498,6 @@ pub struct TachiMemoryParams {
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
     #[schemars(
-        description = "[action=save] Also append a typed continuity ledger event for this memory save."
-    )]
-    pub emit_continuity: bool,
-    #[serde(default)]
-    #[schemars(
         description = "[action=save] Referenced source files, e.g. docs/SPEC.md, src/lib.rs."
     )]
     pub files: Vec<String>,
@@ -483,19 +513,6 @@ pub struct TachiMemoryParams {
         description = "[action=save|checkpoint] External references: URLs, absolute paths, or GitHub shorthands (#N, repo#N, owner/repo#N)."
     )]
     pub references: Vec<String>,
-
-    // --- progress / long-running command fields ---
-    #[serde(default)]
-    #[schemars(description = "[action=progress] Flow id (create or resume a tracked command).")]
-    pub flow_id: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=progress] Event name, e.g. step_done, failed. [action=pattern_feedback] Outcome: hit, miss, stale, or seen."
-    )]
-    pub event: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=progress] State payload or status line.")]
-    pub state: Option<String>,
 
     // --- shared ---
     #[serde(default)]
@@ -540,107 +557,10 @@ pub struct TachiMemoryParams {
     #[schemars(description = "[action=consolidate] Optional proposal status filter.")]
     pub state_filter: Option<String>,
 
-    // --- ingest / ingest_source fields (#757 fold from standalone pipeline tools) ---
-    //
-    // All additive + #[serde(default)] so existing callers are byte-compatible.
-    // Defaults mirror crates/tachi-params/src/memory/ingest.rs exactly so the
-    // folded actions produce handler-identical results.
+    // --- read-only briefing scope ---
     #[serde(default)]
     #[schemars(
-        description = "[action=ingest|ingest_source] Raw source content or structured event payload. For ingest_source a JSON string is unwrapped to text."
-    )]
-    pub content: Option<serde_json::Value>,
-    #[serde(default = "default_facade_ingest_type")]
-    #[schemars(description = "[action=ingest] Ingest mode: \"event\" or \"source\" (default).")]
-    pub ingest_type: String,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=ingest|ingest_source] Optional source URL or canonical reference."
-    )]
-    pub source_url: Option<String>,
-    #[serde(default = "default_facade_true")]
-    #[schemars(
-        description = "[action=ingest|ingest_source] Whether to chunk long content before storage."
-    )]
-    pub auto_chunk: bool,
-    #[serde(default = "default_facade_true")]
-    #[schemars(
-        description = "[action=ingest|ingest_source] Whether to generate summaries for stored chunks."
-    )]
-    pub auto_summarize: bool,
-    #[serde(default = "default_facade_true")]
-    #[schemars(
-        description = "[action=ingest|ingest_source] Whether to build graph edges against similar memories."
-    )]
-    pub auto_link: bool,
-    #[serde(default = "default_facade_chunk_size_chars")]
-    #[schemars(description = "[action=ingest|ingest_source] Chunk size in characters.")]
-    pub chunk_size_chars: usize,
-    #[serde(default = "default_facade_chunk_overlap_chars")]
-    #[schemars(
-        description = "[action=ingest|ingest_source] Overlap between adjacent chunks in characters."
-    )]
-    pub chunk_overlap_chars: usize,
-    #[serde(default)]
-    #[schemars(description = "[action=ingest] Conversation identifier for event ingestion.")]
-    pub conversation_id: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=ingest] Turn identifier for event ingestion.")]
-    pub turn_id: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=ingest] Event type label for event ingestion.")]
-    pub event_type: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=ingest] Messages in the conversation turn.")]
-    pub messages: Vec<Message>,
-
-    // --- WorkClaim compatibility-alias fields (#1253) ---
-    #[serde(default)]
-    #[schemars(
-        description = "[action=claim] GitHub issue this session is working (e.g. org/repo#123). At least one of issue_ref/flow_id is required."
+        description = "[action=briefing] Optional GitHub issue to scope the read-only presence collision warnings."
     )]
     pub issue_ref: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=claim] Branch/worktree name this claim is associated with (advisory)."
-    )]
-    pub branch: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=claim] File paths this session declares it is touching; used for advisory file-scope-overlap collision warnings against other live claims."
-    )]
-    pub declared_file_scope: Vec<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=release] Claim id to release.")]
-    pub claim_id: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=release] Release the active claim for this dispatch id instead of a claim_id."
-    )]
-    pub dispatch_id: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "[action=release] Optional human-readable release reason.")]
-    pub release_reason: Option<String>,
-
-    // --- sticky fields (#964) ---
-    #[serde(default)]
-    #[schemars(
-        description = "[action=sticky_leave] Seat/agent name this sticky is addressed to. Omit for a leader-only broadcast (worker seats never see unaddressed stickies)."
-    )]
-    pub to: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=sticky_leave] Days until an unread sticky auto-archives (1-30, default 7; clamped to this range)."
-    )]
-    pub ttl_days: Option<u32>,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=sticky_check] When true, show the read/expired archive instead of claiming unread stickies (read-only, does not consume anything)."
-    )]
-    pub include_read: bool,
-    #[serde(default)]
-    #[schemars(
-        description = "[action=sticky_leave|sticky_check|briefing] Caller's seat/agent name for addressing. Omit to be treated as the leader/main session; for sticky_leave, omit to fall back to server-resolved identity."
-    )]
-    pub agent_id: Option<String>,
 }

@@ -419,7 +419,7 @@ Tachi uses SQLite with zero external dependencies:
 
 Plan C project routing keeps the repo-local project DB as canonical and uses
 `~/.tachi/projects/<sanitized-repo-name>/tachi-memory.db` only as a symlink alias.
-If `tachi status`, `tachi_memory(action="readiness")`, or daemon startup reports
+If `tachi status`, `runtime_info`, or daemon startup reports
 “Plan C split-brain”, the alias is a stale regular SQLite file. Repair it
 explicitly:
 
@@ -506,9 +506,20 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 `save_memory`, `search_memory`, `get_memory`, `list_memories`, `archive_memory`, `memory_stats`, `remember`, `find_similar_memory`
 
 `get_memory` remains available in the full admin/backcompat catalog. Daily
-agent profiles should use `tachi_memory(action="get")` instead. Permanent
-deletion and garbage collection are folded into `tachi_memory(action="delete")`
-and `tachi_memory(action="gc")` (#757).
+agent profiles should use `tachi_memory(action="get")` instead. The canonical
+owners for permanent deletion and garbage collection are now the operator CLI:
+
+```bash
+tachi delete plan --db /path/to/tachi-memory.db --id <memory-id> --out delete-plan.json
+tachi delete apply --plan delete-plan.json --yes
+tachi gc plan --db /path/to/tachi-memory.db --out gc-plan.json
+tachi gc apply --plan gc-plan.json --yes
+```
+
+Both workflows are irreversible: their durable receipts are audit and
+reconciliation evidence, not backups, and there is no restore verb. They are
+operator-only; the model-facing Memory facade has no delete or garbage-collection
+action.
 
 ### Knowledge Graph & Domains
 
@@ -534,10 +545,10 @@ KV state.
 
 ### Extraction & Ingestion
 
-`extract_facts`, `ingest_event`
-
-Source/event ingestion is folded into `tachi_memory(action="ingest")` and
-`tachi_memory(action="ingest_source")` (#757).
+Ordinary model-authored memory uses `save` and `extract_facts`. File, URL,
+corpus, bulk, snapshot, and event ingestion requires an admitted typed adapter
+or operator path with bounded source identity, provenance, and a receipt; it is
+not a model-facing Memory action and is not hidden inside `save`.
 
 ### Neural Foundry (Context Lifecycle & Evolution)
 
@@ -563,7 +574,7 @@ Source/event ingestion is folded into `tachi_memory(action="ingest")` and
 
 ### Handoff
 
-`tachi_handoff(action='promote_issue')` — the only surviving handoff action (#1099 retired `handoff_leave`/`handoff_check`; use `tachi_memory(action='sticky_leave'|'sticky_check')` or `tachi_orchestrator(action='handoff_write'|'handoff_read')` instead).
+`tachi_handoff(action='promote_issue')` — the only surviving handoff action (#1099 retired `handoff_leave`/`handoff_check`; use `tachi_a2a(action='respond')` or `tachi_orchestrator(action='handoff_write'|'handoff_read')` instead).
 
 ### Kanban (Inter-Agent)
 
@@ -675,7 +686,10 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 `skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
 
-`tachi_doctor_scan` is folded into `tachi_memory(action="doctor_scan")` (#757).
+Default `tachi doctor` is the canonical read-only diagnostic owner. It does not
+write the manifest, database, sidecars, cache, or daily markers; `--fix` and
+`--run-daily` are explicit mutation intents. Doctor scans are not exposed as a
+model-facing Memory action.
 
 ---
 

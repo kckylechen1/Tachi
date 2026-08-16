@@ -27,6 +27,11 @@ members = [
     # default-members: it has an empty lib and only dev-dependencies, so
     # `cargo build --release` compiles nothing from it either way.
     "crates/tachi-contract-tests",
+    # Test-only member (#1714 Track T): the 24 bootstrap topology tests moved
+    # out of tachi-server's monolithic lib-test binary. The crate has an empty
+    # lib and activates tachi-server's non-default bootstrap-test-api feature
+    # only for its own integration-test target.
+    "crates/tachi-bootstrap-tests",
     "crates/tachi-credential-profile",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",

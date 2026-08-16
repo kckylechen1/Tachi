@@ -584,7 +584,7 @@ pub(crate) async fn handle_tachi_complete(
     let subagent_event_payloads = safe_subagents.as_array().cloned().unwrap_or_default();
     pipeline_status["continuity_events"] = crate::continuity_ops::emit_task_completion_events(
         server,
-        task_event_payload,
+        task_event_payload.clone(),
         &subagent_event_payloads,
         params.project.as_deref(),
     );
@@ -597,22 +597,103 @@ pub(crate) async fn handle_tachi_complete(
     };
     pipeline_status["pattern_feedback"] = if pattern_feedback_refs.is_empty() {
         json!("skipped (no pattern refs in evidence_refs)")
-    } else {
-        crate::continuity_ops::emit_pattern_feedback_for_refs(
-            server,
-            params.project.as_deref(),
-            &pattern_feedback_refs,
-            default_pattern_outcome,
-            Some(&safe_task),
-            safe_notes.as_deref(),
-            "tachi_complete",
-            json!({
-                "task_id": task_id,
-                "outcome": outcome_norm,
-                "eval_memory_id": eval_memory_id,
-                "source": "tachi_complete.evidence_refs",
+    } else if let Some(flow_id) = params
+        .flow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let expected_issue_ref = params
+            .issue_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let verified_flow_revision = params
+            .dispatch_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|dispatch_id| {
+                crate::task_lifecycle::verified_flow_revision(
+                    flow_id,
+                    expected_issue_ref,
+                    Some(dispatch_id),
+                )
+            })
+            .unwrap_or(Ok(None));
+        let mut completion_revision_payload = task_event_payload.clone();
+        if let Some(object) = completion_revision_payload.as_object_mut() {
+            // The eval row uses a wall-clock fallback when callers omit task_id.
+            // That row is a derived receipt, not the stable completion source:
+            // exact replay must retain the caller's None rather than hash the
+            // newly generated task/eval identity and collide with itself.
+            object.insert(
+                "task_id".to_string(),
+                params
+                    .task_id
+                    .as_ref()
+                    .map(|value| Value::String(value.clone()))
+                    .unwrap_or(Value::Null),
+            );
+            object.remove("eval_memory_id");
+            object.remove("eval_path");
+        }
+        let source_revision =
+            crate::tool_params::canonical_json_sha256(&completion_revision_payload);
+        let evidence_digest = crate::tool_params::canonical_json_sha256(&json!({
+            "pattern_refs": &pattern_feedback_refs,
+            "default_outcome": default_pattern_outcome,
+        }));
+        match (verified_flow_revision, source_revision, evidence_digest) {
+            (Ok(Some(flow_revision)), Ok(completion_revision), Ok(evidence_digest)) => {
+                let source_revision = format!(
+                    "flow:{};completion:sha256:{completion_revision}",
+                    flow_revision
+                );
+                let evidence_digest = format!("sha256:{evidence_digest}");
+                crate::continuity_ops::append_pattern_evidence_for_refs(
+                    server,
+                    crate::continuity_ops::PatternEvidenceBatchInput {
+                        project: params.project.as_deref(),
+                        refs: &pattern_feedback_refs,
+                        default_outcome: default_pattern_outcome,
+                        source: crate::continuity_ops::PatternEvidenceSource::TaskCompletion,
+                        run_id: flow_id,
+                        source_revision: &source_revision,
+                        evidence_digest: &evidence_digest,
+                    },
+                )
+            }
+            (Ok(None), _, _) => json!({
+                "status": "skipped",
+                "reason": "unverified_flow_identity",
+                "saved_count": 0,
+                "error_count": 0,
+                "events": [],
+                "errors": [],
             }),
-        )
+            (Err(error), _, _) => json!({
+                "status": "failed",
+                "reason": "flow_identity_read_failed",
+                "error": error,
+                "saved_count": 0,
+            }),
+            (_, Err(error), _) | (_, _, Err(error)) => json!({
+                "status": "failed",
+                "reason": "completion_evidence_digest_failed",
+                "error": error,
+                "saved_count": 0,
+            }),
+        }
+    } else {
+        json!({
+            "status": "skipped",
+            "reason": "missing_real_flow_id",
+            "saved_count": 0,
+            "error_count": 0,
+            "events": [],
+            "errors": [],
+        })
     };
 
     if let Some(ref trajectory) = safe_trajectory {

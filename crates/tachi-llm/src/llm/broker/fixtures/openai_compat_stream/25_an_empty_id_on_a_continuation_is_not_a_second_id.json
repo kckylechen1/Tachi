@@ -1,0 +1,58 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "Providers repeat `\"id\": \"\"` on continuation fragments. The fragment reports what the wire said — seen-and-empty is present, never-seen is absent, which is the distinction the vocabulary's `skip_serializing_if` pins — while the reconstruction treats only a non-empty value as identity. Reading them the same way makes every continuation look like an id conflict.",
+  "chunks": [
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"type\":\"function\",\"function\":{\"arguments\":\"{\\\"q\\\":1}\"}}]},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+    },
+    {
+      "text": "data: [DONE]\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started"
+      },
+      {
+        "event": "tool_call_delta",
+        "fragment": {
+          "index": 0,
+          "id": "call_1",
+          "name": "search"
+        }
+      },
+      {
+        "event": "tool_call_delta",
+        "fragment": {
+          "index": 0,
+          "id": "",
+          "arguments_delta": "{\"q\":1}"
+        }
+      },
+      {
+        "event": "tool_call_completed",
+        "index": 0
+      },
+      {
+        "event": "completed",
+        "completion": "tool_calls"
+      }
+    ],
+    "error": null,
+    "terminal_disposition": {
+      "disposition": "completed",
+      "completion": "tool_calls"
+    }
+  }
+}

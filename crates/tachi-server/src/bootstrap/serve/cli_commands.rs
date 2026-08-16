@@ -2,6 +2,18 @@ use std::error::Error;
 use std::path::PathBuf;
 use tachi_bootstrap::cli::Commands;
 
+pub(super) fn run_if_a2a_command(
+    command: &Commands,
+    app_home: &std::path::Path,
+    global_db_path: &std::path::Path,
+) -> Result<bool, Box<dyn Error>> {
+    let Commands::A2a { action } = command else {
+        return Ok(false);
+    };
+    super::super::sticky_cutover_cli::run(global_db_path, app_home, action.clone())?;
+    Ok(true)
+}
+
 pub(super) async fn run_pre_serve_command(
     command: &Commands,
     home: &PathBuf,
@@ -115,6 +127,14 @@ pub(super) async fn run_pre_serve_command(
                 schema_migration,
             )
             .await?;
+            Ok(true)
+        }
+        Commands::Gc { action } => {
+            crate::repair::memory_maintenance::run_gc(action.clone(), app_home)?;
+            Ok(true)
+        }
+        Commands::Delete { action } => {
+            crate::repair::memory_maintenance::run_delete(action.clone(), app_home)?;
             Ok(true)
         }
         Commands::Manifest { action } => {
@@ -247,6 +267,10 @@ pub(super) async fn run_pre_serve_command(
                 app_home,
             )
             .await?;
+            Ok(true)
+        }
+        Commands::Clanker { action } => {
+            super::super::clanker_cli::run_clanker_command(action.clone(), global_db_path).await?;
             Ok(true)
         }
         Commands::Serve => Ok(false),

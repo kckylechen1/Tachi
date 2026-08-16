@@ -993,31 +993,6 @@ export const memoryHybridBridgePlugin = {
 
     if (config.exposeExperimentalTachiTools) {
       api.registerTool({
-        name: "memory_delete",
-        label: "Memory Delete",
-        description: "Delete a specific memory entry by id from Tachi.",
-        parameters: Type.Object({
-          path: Type.String({
-            description: "Entry id (e.g. memory/m_1234) or raw id (m_1234)",
-          }),
-        }),
-        async execute(_toolCallId, params, _signal, context) {
-          const rawPath = (params as { path: string }).path;
-          const entryId = rawPath.replace(/^(?:shadow-store|memory)\//, "");
-          const agentId = resolveAgentId((context as AgentLikeContext | undefined)?.agentId);
-          const result = await runWithClient(
-            "memory_delete",
-            async (client) => await client.deleteMemory(entryId),
-            agentId,
-          );
-
-          return result.ok
-            ? formatJsonTextResult({ deleted: result.value, id: entryId })
-            : textResult("Tachi MCP client unavailable.");
-        },
-      });
-
-      api.registerTool({
         name: "compact_context",
         label: "Compact Context",
         description:
@@ -1121,7 +1096,7 @@ export const memoryHybridBridgePlugin = {
       // registered here would advertise tools that always return `tool not
       // found`, mirroring the ghost_whisper/ghost_listen precedent above.
       // Removed — agents that want a handoff-style memo should use
-      // tachi_memory(action='sticky_leave'|'sticky_check') or
+      // tachi_a2a(action='respond') or
       // tachi_orchestrator(action='handoff_write'|'handoff_read') instead.
       registerTachiPassthrough(
         "tachi_run_skill",

@@ -1,0 +1,80 @@
+{
+  "why": "Passthrough means byte-for-byte. The schema below carries $defs, $ref, additionalProperties, a vendor extension the adapter does not understand, and four levels of nesting — an adapter that rewrites, prunes or 'fixes' a schema produces output the caller did not ask for and cannot detect.",
+  "request": {
+    "target": {"kind": "resolved", "target": {"deployment_id": "dep-openai-compat-1", "endpoint": "https://provider.test/v1/chat/completions", "provider_model_id": "test-model-1"}},
+    "messages": [{"role": "user", "content": {"kind": "text", "text": "hello"}}],
+    "response_format": {
+      "kind": "json_schema",
+      "name": "verdict_v2",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["verdict", "findings"],
+        "x-tachi-unknown-extension": {"kept": true, "note": "the adapter has no idea what this is"},
+        "properties": {
+          "verdict": {"type": "string", "enum": ["ok", "concern", "bug"]},
+          "findings": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/finding"}
+          }
+        },
+        "$defs": {
+          "finding": {
+            "type": "object",
+            "required": ["file", "line"],
+            "properties": {
+              "file": {"type": "string"},
+              "line": {"type": "integer", "minimum": 1},
+              "evidence": {"type": "object", "properties": {"quote": {"type": "string"}}}
+            }
+          }
+        }
+      }
+    },
+    "data_policy": {"prohibit_training_on_input": true, "prohibit_retention": true},
+    "admitted": {"caller_ref": "uid:501"}
+  },
+  "expected": {
+    "method": "POST",
+    "url": "https://provider.test/v1/chat/completions",
+    "headers": [["content-type", "application/json"]],
+    "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body_bytes": "{\"model\":\"test-model-1\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"response_format\":{\"json_schema\":{\"name\":\"verdict_v2\",\"schema\":{\"$defs\":{\"finding\":{\"properties\":{\"evidence\":{\"properties\":{\"quote\":{\"type\":\"string\"}},\"type\":\"object\"},\"file\":{\"type\":\"string\"},\"line\":{\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"file\",\"line\"],\"type\":\"object\"}},\"additionalProperties\":false,\"properties\":{\"findings\":{\"items\":{\"$ref\":\"#/$defs/finding\"},\"type\":\"array\"},\"verdict\":{\"enum\":[\"ok\",\"concern\",\"bug\"],\"type\":\"string\"}},\"required\":[\"verdict\",\"findings\"],\"type\":\"object\",\"x-tachi-unknown-extension\":{\"kept\":true,\"note\":\"the adapter has no idea what this is\"}},\"strict\":true},\"type\":\"json_schema\"}}",
+    "body": {
+      "model": "test-model-1",
+      "messages": [{"role": "user", "content": "hello"}],
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "verdict_v2",
+          "strict": true,
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["verdict", "findings"],
+            "x-tachi-unknown-extension": {"kept": true, "note": "the adapter has no idea what this is"},
+            "properties": {
+              "verdict": {"type": "string", "enum": ["ok", "concern", "bug"]},
+              "findings": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/finding"}
+              }
+            },
+            "$defs": {
+              "finding": {
+                "type": "object",
+                "required": ["file", "line"],
+                "properties": {
+                  "file": {"type": "string"},
+                  "line": {"type": "integer", "minimum": 1},
+                  "evidence": {"type": "object", "properties": {"quote": {"type": "string"}}}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,3 +1,4 @@
+use super::catalog_import::DeploymentAttribution;
 use super::provider_health::SelectedProviderSecret;
 use super::{LlmClient, ProviderAuthProbeClass, ProviderAuthProbeFamily, ProviderAuthProbeResult};
 use memcore::vault::health::{EvidenceKind, TypedOutcome};
@@ -322,7 +323,18 @@ impl LlmClient {
             // member's identity, never its secret.
             value: String::new(),
         };
-        Some(self.apply_key_outcome(&member, outcome, EvidenceKind::Probed, None))
+        // Unattributed: an auth probe is a deliberate, non-generating request
+        // about a *credential*, and its outcomes are auth-class by
+        // construction. Deployment health takes nothing from it (#1681 D4) —
+        // a key being rejected says nothing about the deployment behind the
+        // endpoint.
+        Some(self.apply_key_outcome(
+            &member,
+            outcome,
+            EvidenceKind::Probed,
+            None,
+            DeploymentAttribution::Unattributed,
+        ))
     }
 
     async fn probe_member_auth_inner(

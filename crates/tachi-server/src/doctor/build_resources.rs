@@ -225,16 +225,25 @@ fn is_ledger_held(path: &Path, ledger_held: &HashSet<String>) -> bool {
 /// as though "no leases" were proven when it was merely never checked — the
 /// same BUG-3 discipline `exec_env_reaper::Protection::is_complete` applies,
 /// translated to a report-only diagnostic that skips rather than fails.
-fn ledger_held_paths(global_db_path: &Path) -> Result<HashSet<String>, String> {
+fn ledger_held_paths(global_db_path: &Path, immutable: bool) -> Result<HashSet<String>, String> {
     if !global_db_path.exists() {
         return Ok(HashSet::new());
     }
-    let path_str = global_db_path
-        .to_str()
-        .ok_or_else(|| "global db path is not valid UTF-8".to_string())?;
-    let store =
-        memcore::MemoryStore::open_read_only(path_str).map_err(|err| format!("open: {err}"))?;
-    memcore::list_bound_resource_paths(store.connection())
+    let paths = if immutable {
+        let connection = memcore::db::open_immutable_readonly(
+            &super::classify::make_immutable_uri(global_db_path),
+        )
+        .map_err(|err| format!("immutable open: {err}"))?;
+        memcore::list_bound_resource_paths(&connection)
+    } else {
+        let path_str = global_db_path
+            .to_str()
+            .ok_or_else(|| "global db path is not valid UTF-8".to_string())?;
+        let store =
+            memcore::MemoryStore::open_read_only(path_str).map_err(|err| format!("open: {err}"))?;
+        memcore::list_bound_resource_paths(store.connection())
+    };
+    paths
         .map(|paths| paths.into_iter().collect())
         .map_err(|err| format!("query exec_env_resources: {err}"))
 }
@@ -263,6 +272,18 @@ pub(crate) fn scan_orphan_build_resources(
     )
 }
 
+pub(crate) fn scan_orphan_build_resources_strict(
+    max_age_days: u64,
+    global_db_path: &Path,
+) -> Vec<DoctorWarning> {
+    scan_orphan_build_resources_with_roots_mode(
+        max_age_days,
+        global_db_path,
+        &crate::exec_env_reaper::default_orphan_roots(),
+        true,
+    )
+}
+
 /// [`scan_orphan_build_resources`]'s production body, with the scan roots
 /// INJECTED rather than read from `default_orphan_roots()` — the same "real
 /// production path, controlled inputs" idiom `exec_env_reaper`'s own CLI
@@ -277,7 +298,16 @@ fn scan_orphan_build_resources_with_roots(
     global_db_path: &Path,
     roots: &[std::path::PathBuf],
 ) -> Vec<DoctorWarning> {
-    let ledger_held = match ledger_held_paths(global_db_path) {
+    scan_orphan_build_resources_with_roots_mode(max_age_days, global_db_path, roots, false)
+}
+
+fn scan_orphan_build_resources_with_roots_mode(
+    max_age_days: u64,
+    global_db_path: &Path,
+    roots: &[std::path::PathBuf],
+    immutable: bool,
+) -> Vec<DoctorWarning> {
+    let ledger_held = match ledger_held_paths(global_db_path, immutable) {
         Ok(held) => held,
         Err(err) => {
             return vec![DoctorWarning {
@@ -576,7 +606,7 @@ mod tests {
                 .expect("bind resource fixture");
         }
 
-        let held = ledger_held_paths(&db_path).expect("ledger read should succeed");
+        let held = ledger_held_paths(&db_path, false).expect("ledger read should succeed");
         assert!(
             held.contains("/private/tmp/leased-build-private-target"),
             "{held:?}"
@@ -588,7 +618,8 @@ mod tests {
     fn ledger_held_paths_is_empty_when_the_global_db_does_not_exist_yet() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("never-provisioned.db");
-        let held = ledger_held_paths(&db_path).expect("a missing db is an empty ledger, not a gap");
+        let held =
+            ledger_held_paths(&db_path, false).expect("a missing db is an empty ledger, not a gap");
         assert!(held.is_empty());
     }
 
@@ -702,7 +733,7 @@ mod tests {
             candidate.exists(),
             "report-only: the directory must survive the scan"
         );
-        let held_after = ledger_held_paths(&db_path).expect("ledger read after scan");
+        let held_after = ledger_held_paths(&db_path, false).expect("ledger read after scan");
         assert!(
             held_after.contains(&candidate_str),
             "report-only: the ledger binding must survive the scan too"

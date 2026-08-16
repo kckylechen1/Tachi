@@ -1,0 +1,13 @@
+{
+  "why": "A 403 that is about permission rather than money. `insufficient permissions` contains `insufficient` and must not trip the balance arm.",
+  "status": 403,
+  "headers": [],
+  "body": "{\"error\":{\"message\":\"You have insufficient permissions to access this model\",\"type\":\"permission_error\"}}",
+  "expected": {
+    "class": "auth_invalid",
+    "advice": "retry_other_credential",
+    "legacy_failure_class": "auth_failed",
+    "legacy_retry_intent": "retry_within_tier_if_another_key",
+    "retry_after": null
+  }
+}

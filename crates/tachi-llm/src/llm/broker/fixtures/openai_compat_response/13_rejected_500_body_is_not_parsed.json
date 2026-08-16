@@ -1,0 +1,11 @@
+{
+  "why": "A non-success status never reaches the JSON parser. A 5xx whose body is an HTML error page must still classify as a server error rather than as a malformed body.",
+  "status": 500,
+  "headers": [],
+  "body": "<html><body><h1>500 Internal Server Error</h1></body></html>",
+  "expected": {
+    "outcome": "rejected",
+    "status": 500,
+    "classification": {"class": "server_error", "advice": "retry_same_deployment"}
+  }
+}

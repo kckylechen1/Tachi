@@ -281,8 +281,16 @@ impl MemoryServer {
             .unwrap_or(McpToolExposureMode::Flatten);
 
         let (enrich_tx, enrich_rx) = mpsc::channel(ENRICH_CHANNEL_CAPACITY);
+        let mut enrich_rx = Some(enrich_rx);
         let (foundry_tx, foundry_rx) = mpsc::channel(FOUNDRY_CHANNEL_CAPACITY);
         let foundry_stats = Arc::new(FoundryWorkerStats::default());
+        let start_background_workers = background_workers_enabled();
+        #[cfg(test)]
+        let retained_enrich_rx = Arc::new(StdMutex::new(if start_background_workers {
+            None
+        } else {
+            enrich_rx.take()
+        }));
 
         let db = DbRuntime {
             global_store: Arc::new(StdMutex::new(global_store)),
@@ -320,7 +328,8 @@ impl MemoryServer {
             // graph/state primitives (add_edge/get_edges/memory_graph/
             // set_state/get_state) were deleted outright (#757 surface prune;
             // #913 dead-code round found zero remaining in-crate callers).
-            tool_router: Self::continuity_tool_router()
+            tool_router: Self::a2a_tool_router()
+                + Self::continuity_tool_router()
                 + Self::component_tool_router()
                 + Self::copilot_tool_router()
                 + Self::dispatch_tool_router()
@@ -348,7 +357,12 @@ impl MemoryServer {
             last_activity_ms: Arc::new(std::sync::atomic::AtomicI64::new(
                 chrono::Utc::now().timestamp_millis(),
             )),
-            enrichment: EnrichmentRuntime { enrich_tx },
+            enrichment: EnrichmentRuntime {
+                enrich_tx,
+                durable_dispatch_runtime_id: Arc::from(uuid::Uuid::new_v4().to_string()),
+                #[cfg(test)]
+                retained_enrich_rx,
+            },
             foundry: FoundryRuntime {
                 foundry_tx,
                 foundry_stats,
@@ -379,11 +393,16 @@ impl MemoryServer {
             routing_config,
         };
 
-        if background_workers_enabled() {
+        if start_background_workers {
             // Spawn the enrichment batcher worker
             {
                 let batcher_server = server.clone();
-                tokio::spawn(Self::run_enrichment_batcher(batcher_server, enrich_rx));
+                tokio::spawn(Self::run_enrichment_batcher(
+                    batcher_server,
+                    enrich_rx
+                        .take()
+                        .expect("background enrichment worker owns its receiver"),
+                ));
             }
             {
                 let foundry_server = server.clone();

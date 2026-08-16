@@ -3,9 +3,8 @@
 //! Canonical path conventions:
 //!   /handoff/{agent_id}   - handoff memos (project-local by default;
 //!                           handoff_ops opts into cross-project for global DB)
-//!   /sticky/{to-or-broadcast} - sticky notes (project-local by default;
-//!                           sticky_ops opts into cross-project for global DB;
-//!                           "broadcast" bucket = no `to` addressee, leader-only)
+//!   /sticky/{legacy-bucket} - retired legacy rows retained for cutover reads;
+//!                             new writes fail loudly in favor of `/tachi_a2a`
 //!   /kanban/{board}       - kanban cards (project-local by default;
 //!                           kanban opts into cross-project for global DB)
 //!   /wiki/{category}/...  - wiki entries (wiki DB only)
@@ -43,6 +42,12 @@ pub(crate) enum PathRouting {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PathRoutingError {
+    /// The legacy `/sticky` namespace is read-only historical input. New
+    /// writers must use the typed A2A mailbox instead.
+    RetiredStickyPath { path: String },
+    /// The legacy `sticky` category is read-only historical input. New
+    /// writers must use the typed A2A mailbox instead.
+    RetiredStickyCategory { category: String },
     /// A `/wiki/...` path was written to a non-wiki DB.
     WikiPathInNonWikiDb { path: String, db_label: String },
 }
@@ -50,6 +55,16 @@ pub(crate) enum PathRoutingError {
 impl fmt::Display for PathRoutingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            PathRoutingError::RetiredStickyPath { path } => write!(
+                f,
+                "legacy sticky path {:?} is retired and read-only; use tachi_a2a instead",
+                path
+            ),
+            PathRoutingError::RetiredStickyCategory { category } => write!(
+                f,
+                "legacy sticky category {:?} is retired and read-only; use tachi_a2a instead",
+                category
+            ),
             PathRoutingError::WikiPathInNonWikiDb { path, db_label } => write!(
                 f,
                 "wiki path {:?} cannot be written to non-wiki DB {:?} \
@@ -136,9 +151,6 @@ pub(crate) fn classify_path(p: &str) -> PathRouting {
     if n == "/handoff" || n.starts_with("/handoff/") {
         return PathRouting::Project;
     }
-    if n == "/sticky" || n.starts_with("/sticky/") {
-        return PathRouting::Project;
-    }
     if n == "/agents" || n.starts_with("/agents/") {
         return PathRouting::Project;
     }
@@ -165,17 +177,22 @@ pub fn db_label_is_wiki_corpus(db_label: &str) -> bool {
 
 /// Validate that `path` is permitted in DB labelled `db_label`.
 ///
-/// `allow_cross_project=true` bypasses all rejections (used by handoff/kanban
-/// subsystems that intentionally write project-classified paths to global).
+/// `allow_cross_project=true` bypasses ordinary routing rejections (used by
+/// handoff/kanban subsystems that intentionally write project-classified paths
+/// to global). The retired `/sticky` namespace is checked before that escape
+/// hatch and is never writable through this validator.
 pub(crate) fn validate_path_for_db(
     path: &str,
     db_label: &str,
     allow_cross_project: bool,
 ) -> Result<(), PathRoutingError> {
+    let normalized = normalize_path(path);
+    if normalized == "/sticky" || normalized.starts_with("/sticky/") {
+        return Err(PathRoutingError::RetiredStickyPath { path: normalized });
+    }
     if allow_cross_project {
         return Ok(());
     }
-    let normalized = normalize_path(path);
     match classify_path(&normalized) {
         PathRouting::WikiOnly => {
             // Same predicate the read path consults through
@@ -198,24 +215,50 @@ pub(crate) fn validate_path_for_db(
     Ok(())
 }
 
+/// Validate the retirement boundary shared by every ordinary memory writer.
+/// This check deliberately has no store-label or policy escape hatch: legacy
+/// sticky rows remain readable for cutover, but no normal writer may recreate
+/// them after the A2A replacement.
+pub(crate) fn validate_retired_sticky_write(
+    path: &str,
+    category: &str,
+) -> Result<(), PathRoutingError> {
+    let normalized_category = crate::types::MemoryCategory::normalize(category);
+    if normalized_category == "sticky" {
+        return Err(PathRoutingError::RetiredStickyCategory {
+            category: normalized_category.to_string(),
+        });
+    }
+
+    let normalized_path = normalize_path(path);
+    if normalized_path == "/sticky" || normalized_path.starts_with("/sticky/") {
+        return Err(PathRoutingError::RetiredStickyPath {
+            path: normalized_path,
+        });
+    }
+    Ok(())
+}
+
+/// Validate an ordinary memory write's path and category together. The
+/// retired sticky category is checked before any cross-project or policy
+/// escape hatch, just like the retired path namespace, so no generic writer
+/// can resurrect the legacy producer accidentally.
+pub(crate) fn validate_memory_write_for_db(
+    path: &str,
+    category: &str,
+    db_label: &str,
+    allow_cross_project: bool,
+) -> Result<(), PathRoutingError> {
+    validate_retired_sticky_write(path, category)?;
+    validate_path_for_db(path, db_label, allow_cross_project)
+}
+
 // #1099: `standardize_handoff_path` (the `/handoff/<agent_id>` path builder)
 // is retired — its only caller was `handoff_ops::memo::memo_to_memory_entry`
 // (the `handoff_leave` writer), which is gone. `/handoff` path
 // classification/validation below (`classify_path`, `validate_path_for_db`)
 // stays: legacy `/handoff/*` rows are retained read-only and must still
 // route/validate correctly.
-
-/// Build the canonical sticky path bucket for a `to` addressee, defaulting to
-/// `/sticky/broadcast` when `to` is absent (frozen semantics: absent `to`
-/// means addressed to the leader/main session only — worker seats never
-/// consume unaddressed stickies).
-pub fn standardize_sticky_path(to: Option<&str>) -> String {
-    let id = to
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("broadcast");
-    format!("/sticky/{id}")
-}
 
 #[cfg(test)]
 mod tests {
@@ -228,7 +271,6 @@ mod tests {
             "/wiki/foo",
             "/wiki/Foo/Bar",
             "/handoff/agent-1",
-            "/sticky/broadcast",
             "/agents/X/notes",
         ] {
             let once = normalize_path(p);
@@ -274,9 +316,6 @@ mod tests {
         assert_eq!(classify_path("/Wiki/foo"), PathRouting::WikiOnly);
         assert_eq!(classify_path("/handoff"), PathRouting::Project);
         assert_eq!(classify_path("/handoff/agent-x"), PathRouting::Project);
-        assert_eq!(classify_path("/sticky"), PathRouting::Project);
-        assert_eq!(classify_path("/sticky/broadcast"), PathRouting::Project);
-        assert_eq!(classify_path("/sticky/oz"), PathRouting::Project);
         assert_eq!(classify_path("/kanban/board-1"), PathRouting::Project);
         assert_eq!(classify_path("/agents/x"), PathRouting::Project);
         assert_eq!(classify_path("/domain/domain-pack/notes"), PathRouting::Any);
@@ -285,17 +324,48 @@ mod tests {
     }
 
     #[test]
-    fn standardize_sticky_path_defaults_to_broadcast() {
-        assert_eq!(standardize_sticky_path(None), "/sticky/broadcast");
-        assert_eq!(standardize_sticky_path(Some("  ")), "/sticky/broadcast");
-        assert_eq!(standardize_sticky_path(Some("oz")), "/sticky/oz");
-        assert_eq!(standardize_sticky_path(Some(" oz ")), "/sticky/oz");
-    }
-
-    #[test]
     fn validate_rejects_wiki_in_non_wiki_db() {
         let err = validate_path_for_db("/wiki/foo", "hapi", false).unwrap_err();
         matches!(err, PathRoutingError::WikiPathInNonWikiDb { .. });
+    }
+
+    #[test]
+    fn validate_rejects_retired_sticky_paths_before_all_bypasses() {
+        for path in ["/sticky", "/sticky/legacy", "//STICKY///legacy/"] {
+            for (db_label, allow_cross_project) in
+                [("global", false), ("wiki", true), ("unknown", false)]
+            {
+                let error = validate_path_for_db(path, db_label, allow_cross_project)
+                    .expect_err("retired sticky paths must fail closed");
+                assert!(
+                    error.to_string().contains("tachi_a2a"),
+                    "error must name successor: {error}"
+                );
+                assert!(matches!(error, PathRoutingError::RetiredStickyPath { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn validate_rejects_retired_sticky_category_before_all_bypasses() {
+        for category in ["sticky", " Sticky ", "STICKY"] {
+            let error = validate_memory_write_for_db("/notes/ordinary", category, "wiki", true)
+                .expect_err("retired sticky category must fail closed");
+            assert!(error.to_string().contains("tachi_a2a"));
+            assert!(matches!(
+                error,
+                PathRoutingError::RetiredStickyCategory { .. }
+            ));
+        }
+        for path in ["/sticky", "//STICKY///legacy/"] {
+            let error = validate_memory_write_for_db(path, "fact", "global", true)
+                .expect_err("retired sticky path must fail before cross-project bypass");
+            assert!(error.to_string().contains("tachi_a2a"));
+            assert!(matches!(error, PathRoutingError::RetiredStickyPath { .. }));
+        }
+        for path in ["/notes", "/stickiness", "/sticky-old"] {
+            assert!(validate_memory_write_for_db(path, "fact", "global", true).is_ok());
+        }
     }
 
     #[test]

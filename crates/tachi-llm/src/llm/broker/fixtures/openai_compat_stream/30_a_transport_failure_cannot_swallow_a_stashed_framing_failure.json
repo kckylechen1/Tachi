@@ -1,0 +1,49 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "The same window as 29 reached from the other stash origin — a framing failure rather than a grammar one — and closed by the other infallible terminal input. The disposition that comes out is the framing fault, not `outcome_unknown`: the bytes were already unreadable when the connection dropped, and terminality is first-writer-wins, so a transport error arriving afterwards must not relabel a protocol fault as a lost observation the caller may retry against.",
+  "chunks": [
+    {
+      "text": "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"test-model-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "a line that is not a field at all\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "transport_error",
+    "error": "connection_reset"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "test-model-1",
+          "provider_request_id": "chatcmpl-1"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "Hi"
+      },
+      {
+        "event": "failed",
+        "disposition": {
+          "disposition": "protocol_error",
+          "violation": {
+            "kind": "stream_decode",
+            "rule": "malformed_frame"
+          }
+        }
+      }
+    ],
+    "error": "malformed_frame",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "malformed_frame"
+      }
+    }
+  }
+}

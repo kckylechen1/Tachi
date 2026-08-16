@@ -1,0 +1,24 @@
+{
+  "grammar": "anthropic_sse",
+  "why": "The third grammar, refused at the transport layer before any of this grammar's rules run — the same typed answer the delta corpus gets, which is how it should be: NDJSON is not SSE for anybody.",
+  "chunks": [
+    {
+      "text": "{\"model\":\"llama3\",\"response\":\"Hi\",\"done\":true}\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [],
+    "error": "malformed_frame",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "malformed_frame"
+      }
+    }
+  }
+}

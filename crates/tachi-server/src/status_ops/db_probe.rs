@@ -6,7 +6,7 @@
 use super::{
     latest_failed_job, latest_foundry_job, latest_foundry_job_with_statuses, paths_equal,
     EnrichmentFailureSummary, LatestFailedJob, LatestFoundryJob, NamespaceHealth, RelationCount,
-    EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
+    STUCK_THRESHOLD_SECS,
 };
 use crate::manifest::DbRole;
 use chrono::{DateTime, Utc};
@@ -16,7 +16,6 @@ use memcore::{
     JobStatusHistogram, MemoryStore, VectorBackfillScope,
 };
 use rusqlite::OptionalExtension;
-use serde_json::json;
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -320,53 +319,6 @@ fn enrichment_failure_summary(
         out.push(row?);
     }
     Ok(out)
-}
-
-pub(crate) fn database_vector_health_json(db_path: &Path) -> serde_json::Value {
-    let path_str = match db_path.to_str() {
-        Some(s) => s,
-        None => {
-            return json!({
-                "path": db_path.display().to_string(),
-                "error": "non-utf8 path",
-            });
-        }
-    };
-    match MemoryStore::open_read_only(path_str) {
-        Ok(store) => match vector_health(store.connection()) {
-            Ok(health) => {
-                let vector_sweep_result =
-                    crate::vector_backfill::read_vector_sweep_state_for_status(db_path);
-                let (vector_sweep, vector_sweep_error) = match vector_sweep_result {
-                    Ok(state) => (state, None),
-                    Err(err) => (None, Some(err)),
-                };
-                json!({
-                    "path": db_path.display().to_string(),
-                    "memory_total": health.total,
-                    "vector_count": health.with_vec,
-                    "vector_missing": health.missing,
-                    "vector_orphans": health.orphans,
-                    "coverage": health.coverage,
-                    "dimension": health.dimension,
-                    "expected_dimension": EXPECTED_EMBEDDING_DIM,
-                    "pending_enrichment": health.pending_enrichment,
-                    "enrichment_failed_recent": health.enrichment_failed_recent,
-                    "enrichment_failures": health.enrichment_failures,
-                    "vector_sweep": vector_sweep,
-                    "vector_sweep_error": vector_sweep_error,
-                })
-            }
-            Err(err) => json!({
-                "path": db_path.display().to_string(),
-                "error": err.to_string(),
-            }),
-        },
-        Err(err) => json!({
-            "path": db_path.display().to_string(),
-            "error": err.to_string(),
-        }),
-    }
 }
 
 fn infer_vector_dimension(conn: &rusqlite::Connection) -> Result<Option<usize>, rusqlite::Error> {

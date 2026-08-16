@@ -78,6 +78,17 @@ const PRODUCT_TABLES: &[&str] = &[
     "provider_account_aliases",
     "provider_account_events",
     "account_custody",
+    // tachi#1681 D1's six model-broker catalog tables. Listed in full for the
+    // same per-chunk reason as the provider-account group above: the failure
+    // mode this list guards is per-chunk, not per-family, and the frozen
+    // design's initial "four" was a cross-vendor-review-caught undercount —
+    // model_deployment_health's DDL moved into this same PR-A.
+    "model_deployments",
+    "model_deployment_events",
+    "model_aliases",
+    "model_alias_bindings",
+    "pricing_snapshots",
+    "model_deployment_health",
     "foundry_jobs",
     "exec_envs",
     "exec_env_resources",
@@ -87,6 +98,8 @@ const PRODUCT_TABLES: &[&str] = &[
     "session_claims",
     "agent_identities",
     "identity_admissions",
+    "a2a_envelopes",
+    "a2a_delivery_receipts",
 ];
 
 /// Kernel tables every store must carry, whatever its profile.
@@ -340,7 +353,10 @@ fn portable_opens_full_store_and_migrates_as_full() {
         table_exists(&conn, "rem_source_claims"),
         "the portable v28 migration must have run as well"
     );
-    assert_eq!(user_version(&conn), 30);
+    assert_eq!(
+        user_version(&conn),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
+    );
     let sentinels = marked_sentinels(&conn);
     for key in crate::db::migrations::MIGRATION_SENTINEL_KEYS {
         assert!(sentinels.contains(*key), "sentinel {key} was not marked");
@@ -739,6 +755,11 @@ fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
     assert_eq!(marked_sentinels(&portable), expected);
     assert_eq!(marked_sentinels(&full), expected);
     assert_eq!(user_version(&portable), user_version(&full));
+    assert_eq!(
+        user_version(&portable),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+        "both profiles carry the current v32 stamp even though PortableKernel owns no A2A tables"
+    );
 
     // 2. The portable schema is a STRICT subset of the full one — subset (no
     //    object a full store lacks) and strict (the product objects really are

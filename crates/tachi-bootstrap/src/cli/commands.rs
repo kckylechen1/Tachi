@@ -1,8 +1,9 @@
 use super::{
-    BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DistillAction, EnvAction,
-    EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction,
-    ManifestAction, McpAction, PokeAction, RepairAction, RescueAction, SkillSurfaceAction,
-    VaultAction, WatcherAction, WikiAction, WorktreeAction,
+    A2aAction, BuildAction, CardAction, CardsAction, ClankerAction, CleanAction, DaemonAction,
+    DeleteAction, DistillAction, EnvAction, EvalAction, FoundryAction, GcAction, HarnessAction,
+    HostAction, HubAction, InjectionSurfaceAction, ManifestAction, McpAction, PokeAction,
+    RepairAction, RescueAction, SkillSurfaceAction, VaultAction, WatcherAction, WikiAction,
+    WorktreeAction,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -34,6 +35,11 @@ pub struct RecallCoverageArgs {
 pub enum Commands {
     /// Start MCP Server (default when no subcommand is provided)
     Serve,
+    /// Same-host AgentIdentity envelope administration.
+    A2a {
+        #[command(subcommand)]
+        action: A2aAction,
+    },
     /// Search memories
     Search {
         query: String,
@@ -162,8 +168,16 @@ pub enum Commands {
         #[arg(long)]
         apply: bool,
     },
-    /// Run garbage collection
-    Gc,
+    /// Plan or apply irreversible garbage collection for one exact physical DB.
+    Gc {
+        #[command(subcommand)]
+        action: GcAction,
+    },
+    /// Plan or apply irreversible deletion of one exact memory id.
+    Delete {
+        #[command(subcommand)]
+        action: DeleteAction,
+    },
     /// Hub registry (list/show/bindings/stats/doctor) and capability management
     Hub {
         #[command(subcommand)]
@@ -216,6 +230,11 @@ pub enum Commands {
     Eval {
         #[command(subcommand)]
         action: EvalAction,
+    },
+    /// Ingest terminal Clanker run evidence into the mirror-eval spine (#1735).
+    Clanker {
+        #[command(subcommand)]
+        action: ClankerAction,
     },
     /// Backfill missing vector embeddings using Voyage API
     BackfillVectors {

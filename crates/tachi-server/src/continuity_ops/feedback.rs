@@ -1,11 +1,15 @@
 use std::collections::HashSet;
 
-use memcore::{MemoryEntry, ProjectionKind};
+use memcore::MemoryEntry;
 use serde_json::{json, Value};
 
 use crate::MemoryServer;
 
 use super::context::list_active_patterns;
+use super::pattern_evidence::{
+    append_pattern_evidence, receipt_json, PatternEvidenceInput, PatternEvidenceOutcome,
+    PatternEvidenceSource,
+};
 
 #[derive(Debug, Clone)]
 struct PatternFeedbackRef {
@@ -144,18 +148,6 @@ fn entry_projection_key(entry: &MemoryEntry) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-fn entry_projection(entry: &MemoryEntry) -> ProjectionKind {
-    match entry
-        .metadata
-        .get("projection_kind")
-        .and_then(Value::as_str)
-        .map(str::trim)
-    {
-        Some("bonding") => ProjectionKind::Bonding,
-        _ => ProjectionKind::Pattern,
-    }
-}
-
 fn ref_matches(entry: &MemoryEntry, pattern_ref: &str) -> bool {
     entry.id == pattern_ref
         || entry.path == pattern_ref
@@ -174,17 +166,21 @@ fn resolve_pattern(
         .ok_or_else(|| format!("no active pattern matched '{pattern_ref}'"))
 }
 
-pub(crate) fn emit_pattern_feedback_for_refs(
+pub(crate) struct PatternEvidenceBatchInput<'a> {
+    pub project: Option<&'a str>,
+    pub refs: &'a [Value],
+    pub default_outcome: &'a str,
+    pub source: PatternEvidenceSource,
+    pub run_id: &'a str,
+    pub source_revision: &'a str,
+    pub evidence_digest: &'a str,
+}
+
+pub(crate) fn append_pattern_evidence_for_refs(
     server: &MemoryServer,
-    project: Option<&str>,
-    refs: &[Value],
-    default_outcome: &str,
-    query: Option<&str>,
-    note: Option<&str>,
-    source: &str,
-    metadata: Value,
+    input: PatternEvidenceBatchInput<'_>,
 ) -> Value {
-    let default_outcome = match normalize_feedback_outcome(default_outcome) {
+    let default_outcome = match normalize_feedback_outcome(input.default_outcome) {
         Ok(outcome) => outcome,
         Err(error) => {
             return json!({
@@ -197,7 +193,7 @@ pub(crate) fn emit_pattern_feedback_for_refs(
     let mut saved = Vec::new();
     let mut errors = Vec::new();
 
-    for value in refs {
+    for value in input.refs {
         let Some(feedback_ref) = feedback_ref_from_value(value) else {
             continue;
         };
@@ -208,30 +204,42 @@ pub(crate) fn emit_pattern_feedback_for_refs(
             .outcome
             .as_deref()
             .unwrap_or(default_outcome.as_str());
-        match resolve_pattern(server, project, &feedback_ref.pattern_ref).and_then(|pattern| {
-            let projection_key = entry_projection_key(&pattern).ok_or_else(|| {
-                format!(
-                    "pattern '{}' is missing metadata.projection_key",
-                    pattern.id
+        let outcome = match outcome {
+            "hit" => PatternEvidenceOutcome::Hit,
+            "miss" => PatternEvidenceOutcome::Miss,
+            "stale" => PatternEvidenceOutcome::Stale,
+            "seen" => PatternEvidenceOutcome::Seen,
+            _ => unreachable!("feedback outcome was normalized above"),
+        };
+        match resolve_pattern(server, input.project, &feedback_ref.pattern_ref).and_then(
+            |pattern| {
+                let idempotency_key = crate::tool_params::canonical_json_sha256(&json!({
+                    "contract": "pattern_evidence_v1",
+                    "source": input.source.as_str(),
+                    "run_id": input.run_id,
+                    "pattern_id": pattern.id,
+                    "outcome": outcome.as_str(),
+                }))?;
+                append_pattern_evidence(
+                    server,
+                    PatternEvidenceInput {
+                        source: input.source,
+                        project: input.project.map(str::to_string),
+                        run_id: input.run_id.to_string(),
+                        source_revision: input.source_revision.to_string(),
+                        evidence_digest: input.evidence_digest.to_string(),
+                        pattern_id: pattern.id,
+                        outcome,
+                        idempotency_key,
+                    },
                 )
-            })?;
-            super::emit::emit_pattern_feedback_event(
-                server,
-                project,
-                &pattern.id,
-                projection_key,
-                entry_projection(&pattern),
-                outcome,
-                query,
-                feedback_ref.note.as_deref().or(note),
-                Some(source),
-                Some(metadata.clone()),
-            )
-        }) {
+                .map(receipt_json)
+            },
+        ) {
             Ok(value) => saved.push(value),
             Err(error) => errors.push(json!({
                 "pattern_ref": feedback_ref.pattern_ref,
-                "outcome": outcome,
+                "outcome": outcome.as_str(),
                 "error": error,
             })),
         }
@@ -239,7 +247,7 @@ pub(crate) fn emit_pattern_feedback_for_refs(
 
     json!({
         "status": if errors.is_empty() { "saved" } else { "partial" },
-        "requested_count": refs.len(),
+        "requested_count": input.refs.len(),
         "saved_count": saved.len(),
         "error_count": errors.len(),
         "events": saved,

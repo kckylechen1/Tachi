@@ -1,0 +1,43 @@
+{
+  "grammar": "anthropic_sse",
+  "why": "Block bookkeeping is the half of this grammar the delta grammar has no equivalent for, so it needs its own ordering fixture: a delta naming an index nothing ever opened is an illegal sequence, not a block to invent.",
+  "chunks": [
+    {
+      "text": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test-1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n"
+    },
+    {
+      "text": "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":5,\"delta\":{\"type\":\"text_delta\",\"text\":\"ghost\"}}\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "claude-test-1",
+          "provider_request_id": "msg_1"
+        }
+      },
+      {
+        "event": "usage",
+        "usage": {
+          "prompt_tokens": 10,
+          "completion_tokens": 1,
+          "provenance": "provider_authoritative"
+        }
+      }
+    ],
+    "error": "illegal_sequence",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "illegal_sequence"
+      }
+    }
+  }
+}

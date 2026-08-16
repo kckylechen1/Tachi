@@ -1,0 +1,13 @@
+{
+  "why": "The credential is bad. The shipped tier marks this key auth-failed and retries only if the pool holds another one.",
+  "status": 401,
+  "headers": [],
+  "body": "{\"error\":{\"message\":\"Incorrect API key provided\",\"type\":\"invalid_request_error\",\"code\":\"invalid_api_key\"}}",
+  "expected": {
+    "class": "auth_invalid",
+    "advice": "retry_other_credential",
+    "legacy_failure_class": "auth_failed",
+    "legacy_retry_intent": "retry_within_tier_if_another_key",
+    "retry_after": null
+  }
+}

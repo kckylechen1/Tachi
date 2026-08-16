@@ -4,8 +4,7 @@ mod cards_ledger;
 mod hub;
 mod tool_dispatch;
 
-use super::{open_cli_store, open_cli_store_read_only, print_pretty_json};
-use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
+use super::{open_cli_store_read_only, print_pretty_json};
 use crate::server_state::MemoryServer;
 use crate::tool_params::{
     ExtractFactsParams, GetMemoryParams, ListMemoriesParams, RememberParams, SearchMemoryParams,
@@ -32,6 +31,9 @@ pub(super) async fn run_cli_command(
             "recall coverage invariant: recall-coverage must run through the explicit in-process read-only route before generic CLI tool dispatch"
                 .into(),
         ),
+        Commands::A2a { .. } => {
+            unreachable!("A2a administration is handled before generic CLI tool dispatch")
+        }
         Commands::Search {
             query,
             path,
@@ -97,15 +99,8 @@ pub(super) async fn run_cli_command(
                 }
             }))
         }
-        Commands::Gc => {
-            let mut store = open_cli_store(db_path)?;
-            let mut gc = store.gc_tables(&memcore::GcConfig::default())?;
-            let kanban_deleted =
-                gc_expired_kanban_cards(&mut store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
-            if let Some(object) = gc.as_object_mut() {
-                object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
-            }
-            print_pretty_json(&gc)
+        Commands::Gc { .. } | Commands::Delete { .. } => {
+            Err("maintenance plan/apply command escaped the pre-serve dispatcher".into())
         }
         Commands::BackfillVectors { .. } => {
             unreachable!("BackfillVectors is handled in async context before this point")
@@ -160,6 +155,9 @@ pub(super) async fn run_cli_command(
         }
         Commands::Eval { .. } => {
             unreachable!("Eval is handled in async context before generic CLI dispatch")
+        }
+        Commands::Clanker { .. } => {
+            unreachable!("Clanker is handled in async context before generic CLI dispatch")
         }
         Commands::Card { action } => {
             cards::run_card_command(action, db_path, project_db_path, app_home).await
