@@ -1,7 +1,7 @@
 //! The Broker's single HTTP execution point.
 //!
-//! Provider adapters remain sans-IO. This module accepts an already-built,
-//! shared `reqwest::Client`, injects leased auth material in memory, sends
+//! Provider adapters remain sans-IO. This module holds one clone of the shared
+//! pooled `reqwest::Client`, injects leased auth material in memory, sends
 //! exactly once, and drives streaming decoders incrementally.
 
 use std::future::{poll_fn, Future};
@@ -28,6 +28,8 @@ pub const MAX_ERROR_BODY_EXCERPT_BYTES: usize = 64 * 1024;
 const BODY_CEILING_DETAIL: &str = "response body exceeded the executor byte ceiling";
 const REQUEST_BUILD_DETAIL: &str = "executor could not construct the admitted HTTP request";
 const LEASE_MISMATCH_DETAIL: &str = "leased auth material did not match its opaque reference";
+const CONNECT_DEADLINE_DETAIL: &str =
+    "connect deadline is shorter than the shared HTTP pool can enforce";
 
 /// Secret material resolved from one opaque lease.
 ///
@@ -112,16 +114,16 @@ impl BrokerExecutionOutcome {
     }
 }
 
-/// Executes provider wire requests through one injected pooled client.
+/// Executes provider wire requests through the existing shared pooled client.
 #[derive(Clone)]
 pub struct BrokerHttpExecutor {
     http: reqwest::Client,
 }
 
 impl BrokerHttpExecutor {
-    /// Bind the executor to the caller-owned pooled client.
-    pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Result<Self, String> {
+        crate::llm::LlmClient::build_http_client().map(|http| Self { http })
     }
 
     /// Build and execute one provider request. This method never retries.
@@ -138,12 +140,24 @@ impl BrokerHttpExecutor {
         W: ProviderWire + ?Sized,
         F: FnMut(CanonicalStreamEvent),
     {
-        let deadlines = ExecutionDeadlines::new(request.deadline());
         if cancellation.is_cancelled() {
             return BrokerExecutionOutcome::disposition(
                 InvocationDispositionV1::CancelledBeforeSend,
             );
         }
+        let deadline = request.deadline();
+        if deadline.connect_ms.is_some_and(|millis| {
+            millis < crate::llm::LlmClient::SHARED_CONNECT_TIMEOUT_SECS.saturating_mul(1_000)
+        }) {
+            return BrokerExecutionOutcome::disposition(
+                InvocationDispositionV1::RefusedBeforeSend {
+                    refusal: BeforeSendRefusal::UnrepresentableRequest {
+                        detail: CONNECT_DEADLINE_DETAIL,
+                    },
+                },
+            );
+        }
+        let deadlines = ExecutionDeadlines::new(deadline);
 
         let mut decoder = if request.stream() == StreamSelection::Enabled {
             match wire.new_stream_decoder() {
@@ -536,12 +550,11 @@ impl ExecutionDeadlines {
     fn new(context: super::DeadlineContext) -> Self {
         let started = tokio::time::Instant::now();
         let total = deadline_at(started, context.total_ms);
-        let connect = deadline_at(started, context.connect_ms);
         let first_byte = deadline_at(started, context.first_byte_ms);
         Self {
             total,
             first_byte,
-            response_head: earliest(earliest(total, connect), first_byte),
+            response_head: earliest(total, first_byte),
         }
     }
 
@@ -550,6 +563,18 @@ impl ExecutionDeadlines {
             self.total
         } else {
             earliest(self.total, self.first_byte)
+        }
+    }
+}
+
+impl crate::llm::LlmClient {
+    /// Bind the Broker executor to this client's existing credential-safe
+    /// pool. The raw client is deliberately not injectable: redirect and
+    /// proxy policy are send-safety invariants, and one logical Broker attempt
+    /// must remain one physical HTTP send.
+    pub fn broker_http_executor(&self) -> BrokerHttpExecutor {
+        BrokerHttpExecutor {
+            http: self.http_client(),
         }
     }
 }

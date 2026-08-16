@@ -301,7 +301,7 @@ impl super::super::LlmClient {
     // the client-wide 60s budget so long reasoning calls are not truncated.
     /// TCP connect timeout applied to the shared client — safe globally because
     /// no lane legitimately spends minutes *connecting*.
-    pub(in crate::llm) const RECALL_CONNECT_TIMEOUT_SECS: u64 = 3;
+    pub(in crate::llm) const SHARED_CONNECT_TIMEOUT_SECS: u64 = 3;
     /// Per-request read/response deadline for embed & rerank. Overridable via
     /// `TACHI_RECALL_PROVIDER_TIMEOUT_SECS` (see `recall_request_timeout`).
     pub(in crate::llm) const RECALL_PROVIDER_TIMEOUT_SECS: u64 = 10;
@@ -346,7 +346,7 @@ impl super::super::LlmClient {
             // logical attempt into multiple HTTP sends behind the Broker's
             // back, invalidating its cancellation and spend disposition.
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(Self::RECALL_CONNECT_TIMEOUT_SECS))
+            .connect_timeout(Duration::from_secs(Self::SHARED_CONNECT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {e}"))

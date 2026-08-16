@@ -146,6 +146,32 @@ fn anthropic_tool_results_refuse_until_history_can_bind_the_assistant_call() {
 }
 
 #[test]
+fn anthropic_refuses_to_move_a_mid_conversation_system_turn_to_the_prefix() {
+    let mut parts = minimal_parts();
+    parts.messages.push(CanonicalMessage {
+        role: MessageRole::System,
+        content: MessageContent::Text {
+            text: "From now on, answer in JSON.".to_string(),
+        },
+        tool_call_id: None,
+        name: None,
+    });
+    parts.sampling.max_output_tokens = Some(32);
+    let request =
+        CanonicalInvocationRequest::new(parts).expect("canonical mid-conversation system turn");
+
+    assert_eq!(
+        AnthropicWire::new()
+            .build_request(&request, api_key_lease())
+            .expect_err("Anthropic must not reorder a system turn"),
+        BeforeSendRefusal::UnrepresentableRequest {
+            detail:
+                "Anthropic mid-conversation system turns are not supported by every resolved model",
+        }
+    );
+}
+
+#[test]
 fn anthropic_requires_a_max_output_cap_and_an_api_key() {
     let mut parts = minimal_parts();
     parts.sampling = SamplingParams::none();

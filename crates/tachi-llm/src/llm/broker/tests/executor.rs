@@ -14,11 +14,9 @@ use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::llm::LlmClient;
-
 fn executor() -> BrokerHttpExecutor {
     crate::install_tls_provider();
-    BrokerHttpExecutor::new(LlmClient::build_http_client().expect("test HTTP client"))
+    BrokerHttpExecutor::for_test().expect("test HTTP executor")
 }
 
 fn request_parts_for(endpoint: &str, stream: StreamSelection) -> CanonicalInvocationRequestParts {
@@ -136,7 +134,7 @@ async fn one_429_is_one_send_and_preserves_retry_after() {
 }
 
 #[tokio::test]
-async fn shared_client_refuses_redirects_before_anthropic_key_can_cross_origins() {
+async fn executor_refuses_redirects_before_anthropic_key_can_cross_origins() {
     let destination_hits = Arc::new(AtomicUsize::new(0));
     let destination_key = Arc::new(Mutex::new(None::<String>));
     let route_hits = Arc::clone(&destination_hits);
@@ -191,6 +189,46 @@ async fn shared_client_refuses_redirects_before_anthropic_key_can_cross_origins(
     assert_eq!(*destination_key.lock().expect("destination key lock"), None);
     source_task.abort();
     destination_task.abort();
+}
+
+#[tokio::test]
+async fn a_connect_deadline_shorter_than_the_shared_pool_ceiling_refuses_before_send() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let route_hits = Arc::clone(&hits);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            route_hits.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::NO_CONTENT }
+        }),
+    );
+    let (endpoint, task) = serve(app).await;
+    let mut parts = request_parts_for(&endpoint, StreamSelection::Disabled);
+    parts.deadline.connect_ms = Some(1);
+    parts.deadline.first_byte_ms = Some(1_000);
+    let request = CanonicalInvocationRequest::new(parts).expect("short connect deadline request");
+
+    let outcome = executor()
+        .execute(
+            &OpenAiCompatWire::new(),
+            &request,
+            api_key_lease(),
+            Some(&lease("CONNECT-DEADLINE-CANARY")),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+    assert_eq!(
+        outcome.terminal_disposition(),
+        &InvocationDispositionV1::RefusedBeforeSend {
+            refusal: BeforeSendRefusal::UnrepresentableRequest {
+                detail: "connect deadline is shorter than the shared HTTP pool can enforce",
+            },
+        }
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    task.abort();
 }
 
 #[tokio::test]

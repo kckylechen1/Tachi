@@ -167,6 +167,7 @@ fn request_messages(
     messages: &[CanonicalMessage],
 ) -> Result<Vec<AnthropicMessage>, BeforeSendRefusal> {
     let mut out = Vec::new();
+    let mut saw_non_system = false;
     for message in messages {
         if message.name.is_some() {
             return Err(BeforeSendRefusal::UnrepresentableRequest {
@@ -175,6 +176,11 @@ fn request_messages(
         }
         let blocks = match message.role {
             MessageRole::System => {
+                if saw_non_system {
+                    return Err(BeforeSendRefusal::UnrepresentableRequest {
+                        detail: "Anthropic mid-conversation system turns are not supported by every resolved model",
+                    });
+                }
                 text_content_blocks(
                     &message.content,
                     "Anthropic system content cannot contain images",
@@ -202,6 +208,7 @@ fn request_messages(
                 "Anthropic assistant content cannot contain images",
             )?,
         };
+        saw_non_system = true;
         out.push(AnthropicMessage {
             role: match message.role {
                 MessageRole::User | MessageRole::Tool => "user",
@@ -220,7 +227,7 @@ fn system_blocks(
     let mut out = Vec::new();
     for message in messages
         .iter()
-        .filter(|message| message.role == MessageRole::System)
+        .take_while(|message| message.role == MessageRole::System)
     {
         out.extend(text_content_blocks(
             &message.content,
