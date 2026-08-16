@@ -1,3 +1,4 @@
+use crate::ADMIN_SURFACE_ENABLED;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,15 +366,24 @@ pub enum MemoryError {
     /// [`crate::db::DbOpenContext`] threaded through the DB-open call chain —
     /// there is no longer any process env var to set (#1119 redesign; the old
     /// `TACHI_ALLOW_SCHEMA_MIGRATION` opt-in was reverted as wrong-layer).
+    /// The remediation sentence is build-form-branched — see the private
+    /// `schema_migration_authority_hint` below. `--allow-schema-migration`
+    /// belongs to deploy entry points, never to the kernel: the admin build
+    /// points at tachi-server's ritual, while a portable build cannot name a
+    /// flag its embedding shell may not have (2026-08-16 Hyperion mis-chase:
+    /// the `hypermem` shell has no such flag — but tachi's own
+    /// `portable-server` does), so its text stays host-neutral: the shell's
+    /// own opt-in flag, else the shell's migrate ritual. Text only: the
+    /// refusal semantics and the authority gate are identical in both builds.
     #[error(
         "refusing to migrate db schema {stored} -> {expected} at {db_path} without explicit \
          authority: this looks like a dev/test/agent binary — or a fresh-provisioning open that \
          landed on a real older DB — opening a live database a deployed daemon may still depend \
          on schema {stored} for (see kckylechen1/Sigil#1119). Only the deploy ritual should \
-         migrate in place: pass --allow-schema-migration to tachi-server, which becomes a typed \
-         MigrationAuthority::Allow threaded to every DB open (never a process env var). A \
+         migrate in place: {migration_hint}. A \
          completed migration would leave a trail beside this DB: {backup_hint} (pre-migration \
-         backup) and {marker_hint} (fingerprint of the last migration run)."
+         backup) and {marker_hint} (fingerprint of the last migration run).",
+        migration_hint = schema_migration_authority_hint()
     )]
     SchemaMigrationOptInRequired {
         stored: u32,
@@ -465,4 +475,38 @@ pub enum MemoryError {
          database created by a portable-kernel build."
     )]
     StoreProfileUnstamped { db_path: String },
+}
+
+/// Remediation sentence for [`MemoryError::SchemaMigrationOptInRequired`],
+/// branched by build form. Text only — the typed refusal and the
+/// [`crate::db::MigrationAuthority`] gate behave identically in both builds.
+///
+/// The admin branch keeps the historical tachi-server deploy-ritual guidance:
+/// that flag is where the opt-in lives for the full product. The portable
+/// branch (memcore built without `admin` — the `portable-kernel` facade that
+/// embedded product shells such as Hyperion's `hypermem` consume) must NOT
+/// send the operator hunting for `tachi-server --allow-schema-migration`: a
+/// portable shell typically has no such flag and no tachi-server binary at
+/// all (2026-08-16: a Hyperion operator chased the canned hint for a flag
+/// that does not exist in that build). But memcore's feature bit cannot know
+/// which shell is embedding it — tachi's own `portable-server` DOES carry
+/// `--allow-schema-migration` — so the portable text stays host-neutral:
+/// name the shell's own opt-in flag first (when it has one), else the
+/// shell's migrate ritual (`hypermem migrate` for the shell that lacks one).
+///
+/// Private on purpose: the public contract is the typed variant, not this
+/// prose. Build-form assertions live next to the Display tests in
+/// `db::migrations` (admin form) and the `portable-kernel` contract test
+/// (portable form).
+fn schema_migration_authority_hint() -> &'static str {
+    if ADMIN_SURFACE_ENABLED {
+        "pass --allow-schema-migration to tachi-server, which becomes a typed \
+         MigrationAuthority::Allow threaded to every DB open (never a process env var)"
+    } else {
+        "this is a portable build without the tachi-server admin surface — authorize \
+         through the embedding product shell instead: its own schema-migration opt-in \
+         flag if it provides one (tachi's portable-server does have \
+         --allow-schema-migration), otherwise its migrate ritual (e.g. `hypermem migrate` \
+         for Hyperion HyperMemory)"
+    }
 }
