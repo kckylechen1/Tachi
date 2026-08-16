@@ -515,7 +515,14 @@ impl BrokerHttpExecutor {
                 },
                 Ok(None) => {
                     if terminal_seen {
-                        return terminal_outcome(decoder, None);
+                        return match decoder.finish(StreamEof::Clean) {
+                            Ok(events) if events.is_empty() => terminal_outcome(decoder, None),
+                            Ok(_) => terminal_outcome(
+                                decoder,
+                                Some(StreamDecodeErrorKind::IllegalSequence),
+                            ),
+                            Err(error) => terminal_outcome(decoder, Some(error.kind)),
+                        };
                     }
                     let (events, decode_error) = match decoder.finish(StreamEof::Clean) {
                         Ok(events) => (events, None),

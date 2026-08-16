@@ -461,7 +461,7 @@ async fn a_later_provider_close_marker_does_not_corrupt_an_existing_terminal_fai
                 writer.flush().await.expect("flush provider error chunk");
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 writer
-                    .write_all(b"data: [DONE]\n\n")
+                    .write_all(b"data: [DONE]")
                     .await
                     .expect("write provider close marker");
             });
@@ -490,6 +490,60 @@ async fn a_later_provider_close_marker_does_not_corrupt_an_existing_terminal_fai
         InvocationDispositionV1::ProtocolError { .. }
     ));
     assert_eq!(outcome.stream_decode_error(), None);
+    task.abort();
+}
+
+#[tokio::test]
+async fn pending_trailing_data_at_clean_eof_is_not_dropped_after_completion() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let (mut writer, reader) = tokio::io::duplex(4_096);
+            tokio::spawn(async move {
+                writer
+                    .write_all(
+                        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n\
+                          data: [DONE]\n\n",
+                    )
+                    .await
+                    .expect("write completed stream chunk");
+                writer.flush().await.expect("flush completed stream chunk");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                writer
+                    .write_all(
+                        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}",
+                    )
+                    .await
+                    .expect("write pending trailing frame");
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from_stream(ReaderStream::new(reader)))
+                .expect("pending trailing stream")
+        }),
+    );
+    let (endpoint, task) = serve(app).await;
+
+    let outcome = executor()
+        .execute(
+            &OpenAiCompatWire::new(),
+            &request_for(&endpoint, StreamSelection::Enabled),
+            api_key_lease(),
+            Some(&lease("PENDING-TRAILING-DATA-CANARY")),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+    assert!(matches!(
+        outcome.terminal_disposition(),
+        InvocationDispositionV1::Completed { .. }
+    ));
+    assert_eq!(
+        outcome.stream_decode_error(),
+        Some(StreamDecodeErrorKind::IllegalSequence)
+    );
     task.abort();
 }
 
