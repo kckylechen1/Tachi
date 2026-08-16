@@ -340,6 +340,12 @@ impl super::super::LlmClient {
             // `cargo test` (libtest shares one process; nextest's
             // process-per-test hid it).
             .no_proxy()
+            // Provider invocations carry credentials that reqwest does not
+            // universally strip on a cross-origin redirect (`x-api-key` is
+            // the important counterexample). A redirect would also turn one
+            // logical attempt into multiple HTTP sends behind the Broker's
+            // back, invalidating its cancellation and spend disposition.
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(Self::RECALL_CONNECT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(60))
             .build()

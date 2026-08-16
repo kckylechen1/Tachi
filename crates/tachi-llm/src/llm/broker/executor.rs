@@ -7,6 +7,7 @@
 use std::future::{poll_fn, Future};
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -14,8 +15,9 @@ use tokio_util::sync::CancellationToken;
 use super::{
     AuthMaterialKind, AuthMaterialRef, AuthPlacement, BeforeSendRefusal,
     CanonicalInvocationRequest, CanonicalStreamEvent, HttpMethod, InvocationDispositionV1,
-    ProtocolViolation, ProviderWire, ResponseHeaders, SendPhase, StreamEof, StreamSelection,
-    TransportErrorKind, WireHttpRequest, WireOutcome, WireStreamDecoder,
+    ProtocolViolation, ProviderWire, ResponseHeaders, SendPhase, StreamDecodeErrorKind, StreamEof,
+    StreamSelection, TransportErrorKind, UsageObservationV1, WireHttpRequest, WireOutcome,
+    WireStreamDecoder,
 };
 
 /// Maximum retained body for a successful non-streaming response.
@@ -62,6 +64,8 @@ pub struct BrokerExecutionOutcome {
     disposition: InvocationDispositionV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wire_outcome: Option<WireOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stream_decode_error: Option<StreamDecodeErrorKind>,
 }
 
 impl BrokerExecutionOutcome {
@@ -69,6 +73,7 @@ impl BrokerExecutionOutcome {
         Self {
             disposition,
             wire_outcome: None,
+            stream_decode_error: None,
         }
     }
 
@@ -76,6 +81,18 @@ impl BrokerExecutionOutcome {
         Self {
             disposition: wire_outcome.disposition(),
             wire_outcome: Some(wire_outcome),
+            stream_decode_error: None,
+        }
+    }
+
+    fn stream(
+        disposition: InvocationDispositionV1,
+        stream_decode_error: Option<StreamDecodeErrorKind>,
+    ) -> Self {
+        Self {
+            disposition,
+            wire_outcome: None,
+            stream_decode_error,
         }
     }
 
@@ -87,6 +104,11 @@ impl BrokerExecutionOutcome {
     /// The parsed non-streaming outcome, when this was a body response.
     pub fn wire_outcome(&self) -> Option<&WireOutcome> {
         self.wire_outcome.as_ref()
+    }
+
+    /// A decoder error observed alongside the first-writer-wins disposition.
+    pub fn stream_decode_error(&self) -> Option<StreamDecodeErrorKind> {
+        self.stream_decode_error
     }
 }
 
@@ -116,6 +138,7 @@ impl BrokerHttpExecutor {
         W: ProviderWire + ?Sized,
         F: FnMut(CanonicalStreamEvent),
     {
+        let deadlines = ExecutionDeadlines::new(request.deadline());
         if cancellation.is_cancelled() {
             return BrokerExecutionOutcome::disposition(
                 InvocationDispositionV1::CancelledBeforeSend,
@@ -171,6 +194,16 @@ impl BrokerHttpExecutor {
                 };
                 return BrokerExecutionOutcome::disposition(disposition);
             }
+            _ = wait_until(deadlines.response_head) => {
+                let phase = if send_was_polled.load(Ordering::Acquire) {
+                    SendPhase::AwaitingResponse
+                } else {
+                    SendPhase::Connecting
+                };
+                return BrokerExecutionOutcome::disposition(
+                    InvocationDispositionV1::OutcomeUnknown { phase },
+                );
+            }
             response = tracked_send => response,
         };
         let mut response = match response {
@@ -191,18 +224,38 @@ impl BrokerHttpExecutor {
         let headers = response_headers(response.headers());
         if !(200..300).contains(&status) {
             return self
-                .read_rejection(wire, status, &headers, &mut response, cancellation)
+                .read_rejection(
+                    wire,
+                    status,
+                    &headers,
+                    &mut response,
+                    cancellation,
+                    deadlines,
+                )
                 .await;
         }
 
         match decoder.as_mut() {
             Some(decoder) => {
-                self.drive_stream(decoder.as_mut(), &mut response, cancellation, &mut emit)
-                    .await
+                self.drive_stream(
+                    decoder.as_mut(),
+                    &mut response,
+                    cancellation,
+                    deadlines,
+                    &mut emit,
+                )
+                .await
             }
             None => {
-                self.read_non_streaming(wire, status, &headers, &mut response, cancellation)
-                    .await
+                self.read_non_streaming(
+                    wire,
+                    status,
+                    &headers,
+                    &mut response,
+                    cancellation,
+                    deadlines,
+                )
+                .await
             }
         }
     }
@@ -240,7 +293,7 @@ impl BrokerHttpExecutor {
                         offered: leased.kind.as_str().to_string(),
                     });
                 }
-                if leased.lease_ref != auth.lease_ref() {
+                if auth.lease_ref().trim().is_empty() || leased.lease_ref != auth.lease_ref() {
                     return Err(BeforeSendRefusal::UnrepresentableRequest {
                         detail: LEASE_MISMATCH_DETAIL,
                     });
@@ -262,16 +315,30 @@ impl BrokerHttpExecutor {
         headers: &ResponseHeaders,
         response: &mut reqwest::Response,
         cancellation: &CancellationToken,
+        deadlines: ExecutionDeadlines,
     ) -> BrokerExecutionOutcome {
         let mut body = Vec::new();
+        let mut first_byte_seen = false;
         loop {
             let chunk = tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => break,
+                _ = cancellation.cancelled() => {
+                    return BrokerExecutionOutcome::disposition(
+                        InvocationDispositionV1::CancelledOutcomeUnknown,
+                    );
+                }
+                _ = wait_until(deadlines.body(first_byte_seen)) => {
+                    return BrokerExecutionOutcome::disposition(
+                        InvocationDispositionV1::OutcomeUnknown {
+                            phase: SendPhase::Receiving,
+                        },
+                    );
+                }
                 chunk = response.chunk() => chunk,
             };
             match chunk {
                 Ok(Some(chunk)) => {
+                    first_byte_seen |= !chunk.is_empty();
                     let remaining = MAX_ERROR_BODY_EXCERPT_BYTES.saturating_sub(body.len());
                     body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
                     if body.len() == MAX_ERROR_BODY_EXCERPT_BYTES {
@@ -279,7 +346,13 @@ impl BrokerHttpExecutor {
                     }
                 }
                 Ok(None) => break,
-                Err(_) => break,
+                Err(_) => {
+                    return BrokerExecutionOutcome::disposition(
+                        InvocationDispositionV1::OutcomeUnknown {
+                            phase: SendPhase::Receiving,
+                        },
+                    );
+                }
             }
         }
         let excerpt = String::from_utf8_lossy(&body);
@@ -297,8 +370,10 @@ impl BrokerHttpExecutor {
         headers: &ResponseHeaders,
         response: &mut reqwest::Response,
         cancellation: &CancellationToken,
+        deadlines: ExecutionDeadlines,
     ) -> BrokerExecutionOutcome {
         let mut body = Vec::new();
+        let mut first_byte_seen = false;
         loop {
             let chunk = tokio::select! {
                 biased;
@@ -307,10 +382,18 @@ impl BrokerHttpExecutor {
                         InvocationDispositionV1::CancelledOutcomeUnknown,
                     );
                 }
+                _ = wait_until(deadlines.body(first_byte_seen)) => {
+                    return BrokerExecutionOutcome::disposition(
+                        InvocationDispositionV1::OutcomeUnknown {
+                            phase: SendPhase::Receiving,
+                        },
+                    );
+                }
                 chunk = response.chunk() => chunk,
             };
             match chunk {
                 Ok(Some(chunk)) => {
+                    first_byte_seen |= !chunk.is_empty();
                     if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY_BYTES {
                         return BrokerExecutionOutcome::disposition(
                             InvocationDispositionV1::ProtocolError {
@@ -340,49 +423,63 @@ impl BrokerHttpExecutor {
         decoder: &mut dyn WireStreamDecoder,
         response: &mut reqwest::Response,
         cancellation: &CancellationToken,
+        deadlines: ExecutionDeadlines,
         emit: &mut F,
     ) -> BrokerExecutionOutcome
     where
         F: FnMut(CanonicalStreamEvent),
     {
+        let mut first_byte_seen = false;
+        let mut saw_usage = false;
         loop {
             let chunk = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
                     let events = decoder.on_cancel();
-                    emit_events(events, emit);
-                    return terminal_outcome(decoder);
+                    emit_events(events, &mut saw_usage, emit);
+                    return terminal_outcome(decoder, None);
+                }
+                _ = wait_until(deadlines.body(first_byte_seen)) => {
+                    let events = decoder.on_transport_error(TransportErrorKind::ReadTimeout);
+                    emit_events(events, &mut saw_usage, emit);
+                    return terminal_outcome(decoder, None);
                 }
                 chunk = response.chunk() => chunk,
             };
             match chunk {
                 Ok(Some(chunk)) => match decoder.push_bytes(&chunk) {
                     Ok(events) => {
-                        let emitted_terminal = emit_events(events, emit);
+                        first_byte_seen |= !chunk.is_empty();
+                        let emitted_terminal = emit_events(events, &mut saw_usage, emit);
                         if decoder.terminal_disposition().is_some() {
                             if !emitted_terminal {
                                 emit_terminal_failure(decoder, emit);
                             }
-                            return terminal_outcome(decoder);
+                            let trailing_error =
+                                decoder.push_bytes(&[]).err().map(|error| error.kind);
+                            return terminal_outcome(decoder, trailing_error);
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
                         emit_terminal_failure(decoder, emit);
-                        return terminal_outcome(decoder);
+                        return terminal_outcome(decoder, Some(error.kind));
                     }
                 },
                 Ok(None) => {
-                    let events = decoder.finish(StreamEof::Clean).unwrap_or_default();
-                    let emitted_terminal = emit_events(events, emit);
+                    let (events, decode_error) = match decoder.finish(StreamEof::Clean) {
+                        Ok(events) => (events, None),
+                        Err(error) => (Vec::new(), Some(error.kind)),
+                    };
+                    let emitted_terminal = emit_events(events, &mut saw_usage, emit);
                     if !emitted_terminal {
                         emit_terminal_failure(decoder, emit);
                     }
-                    return terminal_outcome(decoder);
+                    return terminal_outcome(decoder, decode_error);
                 }
                 Err(error) => {
                     let events = decoder.on_transport_error(transport_error_kind(&error));
-                    emit_events(events, emit);
-                    return terminal_outcome(decoder);
+                    emit_events(events, &mut saw_usage, emit);
+                    return terminal_outcome(decoder, None);
                 }
             }
         }
@@ -407,16 +504,76 @@ fn transport_error_kind(error: &reqwest::Error) -> TransportErrorKind {
     }
 }
 
-fn emit_events<F>(events: Vec<CanonicalStreamEvent>, emit: &mut F) -> bool
+fn emit_events<F>(events: Vec<CanonicalStreamEvent>, saw_usage: &mut bool, emit: &mut F) -> bool
 where
     F: FnMut(CanonicalStreamEvent),
 {
     let mut emitted_terminal = false;
     for event in events {
+        if matches!(event, CanonicalStreamEvent::Usage { .. }) {
+            *saw_usage = true;
+        }
+        if matches!(event, CanonicalStreamEvent::Completed { .. }) && !*saw_usage {
+            emit(CanonicalStreamEvent::Usage {
+                usage: UsageObservationV1::unknown(),
+            });
+            *saw_usage = true;
+        }
         emitted_terminal |= event.is_terminal();
         emit(event);
     }
     emitted_terminal
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExecutionDeadlines {
+    total: Option<tokio::time::Instant>,
+    first_byte: Option<tokio::time::Instant>,
+    response_head: Option<tokio::time::Instant>,
+}
+
+impl ExecutionDeadlines {
+    fn new(context: super::DeadlineContext) -> Self {
+        let started = tokio::time::Instant::now();
+        let total = deadline_at(started, context.total_ms);
+        let connect = deadline_at(started, context.connect_ms);
+        let first_byte = deadline_at(started, context.first_byte_ms);
+        Self {
+            total,
+            first_byte,
+            response_head: earliest(earliest(total, connect), first_byte),
+        }
+    }
+
+    fn body(self, first_byte_seen: bool) -> Option<tokio::time::Instant> {
+        if first_byte_seen {
+            self.total
+        } else {
+            earliest(self.total, self.first_byte)
+        }
+    }
+}
+
+fn deadline_at(started: tokio::time::Instant, millis: Option<u64>) -> Option<tokio::time::Instant> {
+    millis.and_then(|millis| started.checked_add(Duration::from_millis(millis)))
+}
+
+fn earliest(
+    left: Option<tokio::time::Instant>,
+    right: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
+    }
+}
+
+async fn wait_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 fn emit_terminal_failure<F>(decoder: &dyn WireStreamDecoder, emit: &mut F)
@@ -433,10 +590,16 @@ where
     }
 }
 
-fn terminal_outcome(decoder: &dyn WireStreamDecoder) -> BrokerExecutionOutcome {
-    BrokerExecutionOutcome::disposition(decoder.terminal_disposition().unwrap_or(
-        InvocationDispositionV1::OutcomeUnknown {
-            phase: SendPhase::Receiving,
-        },
-    ))
+fn terminal_outcome(
+    decoder: &dyn WireStreamDecoder,
+    stream_decode_error: Option<StreamDecodeErrorKind>,
+) -> BrokerExecutionOutcome {
+    BrokerExecutionOutcome::stream(
+        decoder
+            .terminal_disposition()
+            .unwrap_or(InvocationDispositionV1::OutcomeUnknown {
+                phase: SendPhase::Receiving,
+            }),
+        stream_decode_error,
+    )
 }

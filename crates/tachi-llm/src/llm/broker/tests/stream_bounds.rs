@@ -40,6 +40,51 @@ fn decoder() -> Box<dyn WireStreamDecoder> {
         .expect("the dialect streams")
 }
 
+#[test]
+fn a_terminator_without_visible_output_is_never_a_clean_completion() {
+    let cases: Vec<(&str, Box<dyn WireStreamDecoder>, &[u8])> = vec![
+        (
+            "openai",
+            OpenAiCompatWire::new()
+                .new_stream_decoder()
+                .expect("OpenAI stream decoder"),
+            b"data: [DONE]\n\n",
+        ),
+        (
+            "anthropic",
+            AnthropicWire::new()
+                .new_stream_decoder()
+                .expect("Anthropic stream decoder"),
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ),
+        (
+            "ollama",
+            Box::new(OllamaNdjsonStreamDecoder::new()),
+            b"{\"model\":\"qwen3\",\"done\":true,\"done_reason\":\"stop\"}\n",
+        ),
+    ];
+
+    for (name, mut decoder, bytes) in cases {
+        let events = decoder.push_bytes(bytes).expect("failure is stashed");
+        assert!(
+            events.iter().all(|event| !event.is_terminal()),
+            "{name} emitted a clean terminal for an empty stream: {events:?}"
+        );
+        let error = decoder
+            .push_bytes(&[])
+            .expect_err("the stashed empty-stream error must drain");
+        assert_eq!(error.kind, StreamDecodeErrorKind::IllegalSequence, "{name}");
+        assert!(matches!(
+            decoder.terminal_disposition(),
+            Some(InvocationDispositionV1::ProtocolError {
+                violation: ProtocolViolation::StreamDecode {
+                    rule: StreamDecodeErrorKind::IllegalSequence
+                }
+            })
+        ));
+    }
+}
+
 /// One `tool_calls` delta frame.
 fn tool_frame(index: u32, id: Option<&str>, name: Option<&str>, arguments: &str) -> Vec<u8> {
     let mut call = serde_json::Map::new();

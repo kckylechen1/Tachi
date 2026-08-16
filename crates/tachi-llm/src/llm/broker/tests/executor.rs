@@ -21,7 +21,7 @@ fn executor() -> BrokerHttpExecutor {
     BrokerHttpExecutor::new(LlmClient::build_http_client().expect("test HTTP client"))
 }
 
-fn request_for(endpoint: &str, stream: StreamSelection) -> CanonicalInvocationRequest {
+fn request_parts_for(endpoint: &str, stream: StreamSelection) -> CanonicalInvocationRequestParts {
     let mut parts = minimal_parts();
     parts.target = InvocationTarget::Resolved {
         target: ResolvedWireTarget::new(ResolvedWireTargetParts {
@@ -32,6 +32,11 @@ fn request_for(endpoint: &str, stream: StreamSelection) -> CanonicalInvocationRe
         .expect("resolved target"),
     };
     parts.stream = stream;
+    parts
+}
+
+fn request_for(endpoint: &str, stream: StreamSelection) -> CanonicalInvocationRequest {
+    let parts = request_parts_for(endpoint, stream);
     CanonicalInvocationRequest::new(parts).expect("executor fixture request")
 }
 
@@ -127,6 +132,226 @@ async fn one_429_is_one_send_and_preserves_retry_after() {
         }
     ));
     assert_eq!(hits.load(Ordering::SeqCst), 1, "executor retried");
+    task.abort();
+}
+
+#[tokio::test]
+async fn shared_client_refuses_redirects_before_anthropic_key_can_cross_origins() {
+    let destination_hits = Arc::new(AtomicUsize::new(0));
+    let destination_key = Arc::new(Mutex::new(None::<String>));
+    let route_hits = Arc::clone(&destination_hits);
+    let route_key = Arc::clone(&destination_key);
+    let destination = Router::new().route(
+        "/stolen",
+        post(move |headers: HeaderMap| {
+            route_hits.fetch_add(1, Ordering::SeqCst);
+            *route_key.lock().expect("destination key lock") = headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            async { StatusCode::NO_CONTENT }
+        }),
+    );
+    let (destination_endpoint, destination_task) = serve(destination).await;
+    let redirect_target = destination_endpoint.replace("/v1/chat/completions", "/stolen");
+    let source = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let location = redirect_target.clone();
+            async move {
+                Response::builder()
+                    .status(StatusCode::TEMPORARY_REDIRECT)
+                    .header("location", location)
+                    .body(Body::empty())
+                    .expect("redirect response")
+            }
+        }),
+    );
+    let (source_endpoint, source_task) = serve(source).await;
+    let mut parts = request_parts_for(&source_endpoint, StreamSelection::Disabled);
+    parts.sampling.max_output_tokens = Some(16);
+    let request = CanonicalInvocationRequest::new(parts).expect("Anthropic redirect request");
+
+    let outcome = executor()
+        .execute(
+            &AnthropicWire::new(),
+            &request,
+            api_key_lease(),
+            Some(&lease("REDIRECT-CANARY-MATERIAL")),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+    assert!(matches!(
+        outcome.terminal_disposition(),
+        InvocationDispositionV1::ProviderRejected { status: 307, .. }
+    ));
+    assert_eq!(destination_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(*destination_key.lock().expect("destination key lock"), None);
+    source_task.abort();
+    destination_task.abort();
+}
+
+#[tokio::test]
+async fn first_byte_deadline_stops_an_accepted_response_body_as_outcome_unknown() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let (writer, reader) = tokio::io::duplex(64);
+            tokio::spawn(async move {
+                let _writer = writer;
+                std::future::pending::<()>().await;
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from_stream(ReaderStream::new(reader)))
+                .expect("stalling response")
+        }),
+    );
+    let (endpoint, task) = serve(app).await;
+    let mut parts = request_parts_for(&endpoint, StreamSelection::Disabled);
+    parts.deadline.first_byte_ms = Some(10);
+    let request = CanonicalInvocationRequest::new(parts).expect("deadline request");
+
+    let outcome = executor()
+        .execute(
+            &OpenAiCompatWire::new(),
+            &request,
+            api_key_lease(),
+            Some(&lease("DEADLINE-CANARY-MATERIAL")),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+    assert_eq!(
+        outcome.terminal_disposition(),
+        &InvocationDispositionV1::OutcomeUnknown {
+            phase: SendPhase::Receiving
+        }
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_completed_stream_emits_unknown_usage_before_completion_when_provider_omits_it() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n\
+                     data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                     data: [DONE]\n\n",
+                ))
+                .expect("completed stream")
+        }),
+    );
+    let (endpoint, task) = serve(app).await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+
+    let outcome = executor()
+        .execute(
+            &OpenAiCompatWire::new(),
+            &request_for(&endpoint, StreamSelection::Enabled),
+            api_key_lease(),
+            Some(&lease("USAGE-CANARY-MATERIAL")),
+            &CancellationToken::new(),
+            move |event| sink.lock().expect("events lock").push(event),
+        )
+        .await;
+
+    assert!(matches!(
+        outcome.terminal_disposition(),
+        InvocationDispositionV1::Completed { .. }
+    ));
+    let events = events.lock().expect("events lock");
+    assert!(matches!(
+        events.get(events.len() - 2),
+        Some(CanonicalStreamEvent::Usage { usage }) if usage == &UsageObservationV1::unknown()
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(CanonicalStreamEvent::Completed { .. })
+    ));
+    task.abort();
+}
+
+#[tokio::test]
+async fn trailing_data_in_the_terminal_chunk_is_reported_without_rewriting_completion() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n\
+                     data: [DONE]\n\n\
+                     data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}\n\n",
+                ))
+                .expect("stream with trailing data")
+        }),
+    );
+    let (endpoint, task) = serve(app).await;
+
+    let outcome = executor()
+        .execute(
+            &OpenAiCompatWire::new(),
+            &request_for(&endpoint, StreamSelection::Enabled),
+            api_key_lease(),
+            Some(&lease("TRAILING-DATA-CANARY")),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+    assert!(matches!(
+        outcome.terminal_disposition(),
+        InvocationDispositionV1::Completed { .. }
+    ));
+    assert_eq!(
+        outcome.stream_decode_error(),
+        Some(StreamDecodeErrorKind::IllegalSequence)
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_blank_lease_reference_refuses_before_network() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let route_hits = Arc::clone(&hits);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            route_hits.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::NO_CONTENT }
+        }),
+    );
+    let (endpoint, task) = serve(app).await;
+    let auth = AuthMaterialRef::leased(AuthMaterialKind::ApiKey, "");
+    let leased = LeasedAuthMaterial::new(AuthMaterialKind::ApiKey, "", "BLANK-LEASE-MATERIAL");
+
+    let outcome = executor()
+        .execute(
+            &OpenAiCompatWire::new(),
+            &request_for(&endpoint, StreamSelection::Disabled),
+            auth,
+            Some(&leased),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+    assert!(matches!(
+        outcome.terminal_disposition(),
+        InvocationDispositionV1::RefusedBeforeSend { .. }
+    ));
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
     task.abort();
 }
 

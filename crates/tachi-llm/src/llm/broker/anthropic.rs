@@ -315,6 +315,16 @@ impl ProviderWire for AnthropicWire {
         request: &CanonicalInvocationRequest,
         auth: AuthMaterialRef<'_>,
     ) -> Result<WireHttpRequest, BeforeSendRefusal> {
+        if request
+            .messages()
+            .iter()
+            .any(|message| message.role == MessageRole::Tool)
+        {
+            return Err(BeforeSendRefusal::UnrepresentableRequest {
+                detail:
+                    "canonical history cannot yet bind a tool result to its assistant tool call",
+            });
+        }
         let Some(target) = request.target().resolved() else {
             return Err(BeforeSendRefusal::UnresolvedTarget);
         };

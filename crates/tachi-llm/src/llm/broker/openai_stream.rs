@@ -425,6 +425,12 @@ impl DeltaGrammar {
         &mut self,
         lifecycle: &mut StreamLifecycle,
     ) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
+        if !lifecycle.saw_visible_output() {
+            return Err(decode_error(
+                StreamDecodeErrorKind::IllegalSequence,
+                "the stream terminated without assistant content or a tool call",
+            ));
+        }
         let mut events = Vec::new();
         // A stream may terminate without ever sending `finish_reason`; the
         // calls it opened are still calls, so they are closed and validated

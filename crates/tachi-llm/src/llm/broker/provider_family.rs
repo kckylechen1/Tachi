@@ -82,7 +82,10 @@ macro_rules! openai_family_wire {
             fn new_stream_decoder(
                 &self,
             ) -> Result<Box<dyn WireStreamDecoder>, StreamDecoderUnavailable> {
-                self.inner.new_stream_decoder()
+                self.inner.new_stream_decoder().map_err(|mut unavailable| {
+                    unavailable.dialect = $dialect;
+                    unavailable
+                })
             }
 
             fn classify_error(

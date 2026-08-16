@@ -111,13 +111,9 @@ pub(super) fn decoder_for(grammar: &str) -> Box<dyn WireStreamDecoder> {
         "openai_compat_sse" => OpenAiCompatWire::new()
             .new_stream_decoder()
             .expect("the OpenAI-compat dialect streams and must hand back a decoder"),
-        // Constructed directly, because there is no Anthropic `ProviderWire`
-        // yet: slice-2 builds this grammar to answer whether the canonical
-        // vocabulary is OpenAI-shaped, not to ship a second dialect. The
-        // request/response/classification halves are a later leaf, and saying
-        // so here is cheaper than letting a reader infer a dialect that is not
-        // there.
-        "anthropic_sse" => Box::new(AnthropicEventStreamDecoder::new()),
+        "anthropic_sse" => AnthropicWire::new()
+            .new_stream_decoder()
+            .expect("the Anthropic dialect streams and must hand back a decoder"),
         "ollama_ndjson" => Box::new(OllamaNdjsonStreamDecoder::new()),
         other => panic!("fixture names a grammar this harness does not know: {other}"),
     }

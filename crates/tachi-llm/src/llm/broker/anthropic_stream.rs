@@ -533,6 +533,12 @@ impl AnthropicEventGrammar {
         &mut self,
         lifecycle: &mut StreamLifecycle,
     ) -> Result<Vec<CanonicalStreamEvent>, StreamDecodeError> {
+        if !lifecycle.saw_visible_output() {
+            return Err(decode_error(
+                StreamDecodeErrorKind::IllegalSequence,
+                "the stream terminated without assistant content or a tool call",
+            ));
+        }
         let mut events = Vec::new();
         // A block that never got its `content_block_stop` is still a call the
         // model made; closing here validates it rather than dropping it.

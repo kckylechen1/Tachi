@@ -209,6 +209,12 @@ impl OllamaNdjsonStreamDecoder {
         }
 
         if object.get("done").and_then(Value::as_bool) == Some(true) {
+            if !self.lifecycle.saw_visible_output() {
+                return Err(decode_error(
+                    StreamDecodeErrorKind::IllegalSequence,
+                    "the stream terminated without assistant content or a tool call",
+                ));
+            }
             let completion = completion_kind(
                 object.get("done_reason").and_then(Value::as_str),
                 object

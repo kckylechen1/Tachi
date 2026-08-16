@@ -29,14 +29,6 @@ fn anthropic_request() -> CanonicalInvocationRequest {
             tool_call_id: None,
             name: None,
         },
-        CanonicalMessage {
-            role: MessageRole::Tool,
-            content: MessageContent::Text {
-                text: "{\"result\":\"warm\"}".to_string(),
-            },
-            tool_call_id: Some("toolu_1".to_string()),
-            name: None,
-        },
     ];
     parts.tools = vec![ToolDeclaration {
         name: "weather".to_string(),
@@ -111,9 +103,6 @@ fn anthropic_builds_a_messages_request_without_executor_state() {
                 {"role": "user", "content": [
                     {"type": "image", "source": {"type": "url", "url": "https://example.test/cat.png"}},
                     {"type": "text", "text": "Caption it"}
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "{\"result\":\"warm\"}"}
                 ]}
             ],
             "system": [{"type": "text", "text": "You are terse."}],
@@ -128,6 +117,31 @@ fn anthropic_builds_a_messages_request_without_executor_state() {
             "stop_sequences": ["DONE"],
             "stream": true
         })
+    );
+}
+
+#[test]
+fn anthropic_tool_results_refuse_until_history_can_bind_the_assistant_call() {
+    let mut parts = minimal_parts();
+    parts.messages.push(CanonicalMessage {
+        role: MessageRole::Tool,
+        content: MessageContent::Text {
+            text: "{\"result\":\"warm\"}".to_string(),
+        },
+        tool_call_id: Some("toolu_1".to_string()),
+        name: None,
+    });
+    parts.sampling.max_output_tokens = Some(32);
+    let request = CanonicalInvocationRequest::new(parts).expect("canonical tool result fixture");
+    let expected = BeforeSendRefusal::UnrepresentableRequest {
+        detail: "canonical history cannot yet bind a tool result to its assistant tool call",
+    };
+
+    assert_eq!(
+        AnthropicWire::new()
+            .build_request(&request, api_key_lease())
+            .expect_err("Anthropic must not send an orphan tool result"),
+        expected
     );
 }
 
@@ -362,4 +376,34 @@ fn family_wrappers_share_the_openai_wire_but_keep_distinct_dialects() {
     assert_eq!(XaiWire::new().dialect(), "xai");
     assert_eq!(OpenRouterWire::new().dialect(), "open_router");
     assert_eq!(GenericCompatWire::new().dialect(), "generic_compat");
+
+    let unavailable = [
+        (
+            XAI_DIALECT,
+            XaiWire::narrowed_to(WireCapabilities::default())
+                .new_stream_decoder()
+                .err()
+                .expect("narrowed xAI must refuse streaming")
+                .dialect,
+        ),
+        (
+            OPEN_ROUTER_DIALECT,
+            OpenRouterWire::narrowed_to(WireCapabilities::default())
+                .new_stream_decoder()
+                .err()
+                .expect("narrowed OpenRouter must refuse streaming")
+                .dialect,
+        ),
+        (
+            GENERIC_COMPAT_DIALECT,
+            GenericCompatWire::narrowed_to(WireCapabilities::default())
+                .new_stream_decoder()
+                .err()
+                .expect("narrowed generic compat must refuse streaming")
+                .dialect,
+        ),
+    ];
+    for (expected, actual) in unavailable {
+        assert_eq!(actual, expected);
+    }
 }

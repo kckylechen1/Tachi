@@ -345,6 +345,11 @@ impl StreamLifecycle {
         self.saw_visible_output = true;
     }
 
+    /// Whether assistant text or a tool-call fragment has been emitted.
+    pub(super) fn saw_visible_output(&self) -> bool {
+        self.saw_visible_output
+    }
+
     /// Whether the stream has announced itself yet.
     pub(super) fn started(&self) -> bool {
         self.started
