@@ -63,15 +63,14 @@
 //! clock that actually advances on an inode change. Neither is universal, so
 //! both are checked and both fail closed:
 //!
-//! * **A ctime witness must exist on this platform.** `ctime` is a POSIX
-//!   concept. On a platform where `std` exposes no change-time equivalent, there
-//!   is nothing for the barrier to observe *and* nothing for `compare_entry` to
-//!   convict with — substituting creation time (which does not move when a
-//!   file's contents change) would let the barrier "observe" an advance that can
-//!   never happen, i.e. manufacture a proof, which is strictly worse than the
-//!   bug this module exists to fix. So [`CtimeWitness`] is recorded in the image
-//!   and anything but [`CtimeWitness::PosixCtime`] is refused, at seal time and
-//!   again at gate time.
+//! * **A ctime witness must be established on every walk filesystem.** `ctime`
+//!   is a POSIX concept, but a Unix build can still run on a filesystem whose
+//!   reported ctime is derived from mtime. The parent therefore probes each
+//!   root's own device: it backdates and restores a parent-owned probe's mtime,
+//!   and accepts [`CtimeWitness::PosixCtime`] only when ctime advances
+//!   independently. Unsupported, failed, or ambiguous probes record
+//!   [`CtimeWitness::None`], which is refused at seal time and again at gate
+//!   time. Creation time is never a fallback.
 //! * **One walk root must be one filesystem.** The barrier is measured with a
 //!   probe beside the root, on the root's device. An entry *under* that root but
 //!   on a different device (a mount inside the workspace) is stamped by a
@@ -167,9 +166,9 @@ pub enum CtimeWitness {
     /// POSIX inode change time: bumped by the kernel on *every* inode change,
     /// with no call that sets it directly. The only value this gate accepts.
     PosixCtime,
-    /// This platform exposes no change-time equivalent through `std`, so the
-    /// `ctime_*` fields hold a constant placeholder that cannot testify to
-    /// anything.
+    /// The runtime probe could not establish an independent change-time
+    /// witness on the filesystem that was walked, so the `ctime_*` fields hold
+    /// a constant placeholder that cannot testify to anything.
     ///
     /// `#[default]` on purpose: an image that does not say which witness it used
     /// (an older binary, a truncated write) reads as the pessimistic value and
@@ -187,21 +186,27 @@ impl CtimeWitness {
     }
 }
 
-/// The ctime witness available on the platform this binary was built for.
+/// Probe one walk root's filesystem for an independent inode change-time
+/// witness.
+///
+/// The probe is deliberately runtime and root-specific: `cfg(unix)` says only
+/// that the binary can read Unix metadata, not that the mounted filesystem
+/// gives ctime POSIX semantics. Any failure, unsupported operation, or
+/// ambiguous observation returns [`CtimeWitness::None`], which the existing
+/// pre-image refusal path handles fail-closed. `Metadata::created()` and mtime
+/// are never accepted as substitutes.
 #[cfg(unix)]
-pub fn ctime_witness_kind() -> CtimeWitness {
-    CtimeWitness::PosixCtime
+pub fn ctime_witness_kind(root: &Path, walk_roots: &[PathBuf]) -> CtimeWitness {
+    if ctime_witness_probe(root, walk_roots).is_ok() {
+        CtimeWitness::PosixCtime
+    } else {
+        CtimeWitness::None
+    }
 }
 
-/// No change-time equivalent is reachable through `std` here.
-///
-/// `Metadata::created()` is deliberately NOT offered as a substitute: creation
-/// time does not advance when a file's contents change, so a barrier "proven"
-/// against it would be proven against a value that can never move — a
-/// manufactured proof, and a worse failure than the missing barrier this module
-/// was written to add.
+/// No supported runtime probe can establish a change-time witness here.
 #[cfg(not(unix))]
-pub fn ctime_witness_kind() -> CtimeWitness {
+pub fn ctime_witness_kind(_root: &Path, _walk_roots: &[PathBuf]) -> CtimeWitness {
     CtimeWitness::None
 }
 
@@ -399,7 +404,7 @@ impl WorkspaceManifest {
             let Some(must_exceed) = maxes.get(&label).copied() else {
                 continue;
             };
-            let observed = establish_clock_barrier(&root, must_exceed, &root_paths)
+            let observed = establish_clock_barrier_after_witness(&root, must_exceed, &root_paths)
                 .map_err(|e| format!("clock barrier for walk root {label}: {e}"))?;
             barriers.insert(label, observed);
         }
@@ -418,12 +423,12 @@ impl WorkspaceManifest {
     pub fn verify_timestamp_preconditions(&self) -> Result<(), String> {
         if self.ctime_witness != CtimeWitness::PosixCtime {
             return Err(format!(
-                "this image records ctime witness {:?}, not {:?}: the platform it was captured on \
-                 exposes no inode change time, so the ctime fields hold a placeholder that does \
-                 not advance when a file changes. A clock barrier measured against such a field \
-                 would prove an advance that cannot happen, and mutate-then-restore would be \
-                 invisible to the comparison. This gate refuses to run there rather than certify \
-                 a tree it cannot inspect",
+                "this image records ctime witness {:?}, not {:?}: the runtime filesystem probe could \
+                 not establish an independent inode change time, so the ctime fields hold a \
+                 placeholder that does not prove a file change. A clock barrier measured against \
+                 such a field would prove an advance that cannot happen, and mutate-then-restore \
+                 would be invisible to the comparison. This gate refuses to run there rather than \
+                 certify a tree it cannot inspect",
                 self.ctime_witness.as_str(),
                 CtimeWitness::PosixCtime.as_str(),
             ));
@@ -512,18 +517,43 @@ pub fn establish_clock_barrier(
     must_exceed: FsTime,
     walk_roots: &[PathBuf],
 ) -> Result<FsTime, String> {
-    // A public entry point, so it repeats the platform refusal instead of
+    // A public entry point, so it repeats the runtime refusal instead of
     // relying on its one caller having done it: what this function returns is a
-    // `FsTime` that a caller will treat as proof, and on a platform with no
-    // change-time witness there is nothing here that could be proof.
-    if ctime_witness_kind() != CtimeWitness::PosixCtime {
+    // `FsTime` that a caller will treat as proof, and a filesystem whose ctime
+    // follows mtime cannot provide that proof.
+    if ctime_witness_kind(root, walk_roots) != CtimeWitness::PosixCtime {
         return Err(format!(
-            "no inode change time is available on this platform, so there is no field for a clock \
-             barrier at {} to be observed in. Substituting creation time would prove an advance \
-             that cannot occur (creation time does not move when contents change); refusing",
+            "the runtime filesystem probe could not establish an independent inode change time at \
+             {}, so there is no field for a clock barrier to be observed in. Substituting creation \
+             time or mtime would prove an advance that cannot testify to an inode change; refusing",
             root.display()
         ));
     }
+    establish_clock_barrier_after_witness(root, must_exceed, walk_roots)
+}
+
+/// Establish the ordinary capture-time barrier after the caller has recorded a
+/// successful runtime ctime witness for this walk. Keeping the witness probe
+/// separate means `seal_with_clock_barrier` does not repeat the same mutation,
+/// while the public entry point above remains fail-closed on its own.
+fn establish_clock_barrier_after_witness(
+    root: &Path,
+    must_exceed: FsTime,
+    walk_roots: &[PathBuf],
+) -> Result<FsTime, String> {
+    let (probe, root_dev) = clock_probe_path(root, walk_roots)?;
+    let observed = barrier_spin(&probe, root, root_dev, must_exceed);
+    // Best-effort cleanup on every path: the probe is scratch, and it lives
+    // outside every walk root, so a leftover cannot affect a verdict.
+    let _ = std::fs::remove_file(&probe);
+    observed
+}
+
+/// Resolve the parent-owned probe location and the device of its walk root.
+/// The location check is shared by the ctime-semantics probe and the ordinary
+/// clock barrier so neither can accidentally write inside a walk root or use a
+/// probe from another filesystem.
+fn clock_probe_path(root: &Path, walk_roots: &[PathBuf]) -> Result<(PathBuf, Option<u64>), String> {
     let probe_dir = root.parent().ok_or_else(|| {
         format!(
             "walk root {} has no parent directory to hold the clock probe; the parent must be \
@@ -553,12 +583,157 @@ pub fn establish_clock_barrier(
         .map_err(|e| format!("lstat walk root {}: {e}", root.display()))?;
     let root_dev = device_id(&root_meta);
 
-    let probe = probe_dir.join(format!(".tachi-postflight-clock-probe.{}", probe_suffix()));
-    let observed = barrier_spin(&probe, root, root_dev, must_exceed);
-    // Best-effort cleanup on every path: the probe is scratch, and it lives
-    // outside every walk root, so a leftover cannot affect a verdict.
+    Ok((
+        probe_dir.join(format!(".tachi-postflight-clock-probe.{}", probe_suffix())),
+        root_dev,
+    ))
+}
+
+#[cfg(unix)]
+fn ctime_witness_probe(root: &Path, walk_roots: &[PathBuf]) -> Result<(), String> {
+    let (probe, root_dev) = clock_probe_path(root, walk_roots)?;
+    let result = ctime_probe_spin(&probe, root, root_dev);
+    // Best-effort cleanup on every path: the probe is parent-owned scratch and
+    // must not survive as a new entry beside the walk root.
     let _ = std::fs::remove_file(&probe);
-    observed
+    result
+}
+
+/// Check that backdating and then restoring mtime caused a ctime advance that
+/// is independent of the restored mtime. A derived-ctime filesystem can make
+/// the mtime round trip look successful, but its ctime returns to the original
+/// value and therefore fails this predicate.
+pub(crate) fn ctime_witness_from_observation(
+    initial_ctime: FsTime,
+    initial_mtime: FsTime,
+    backdated_mtime: FsTime,
+    restored_mtime: FsTime,
+    restored_ctime: FsTime,
+) -> CtimeWitness {
+    if backdated_mtime < initial_mtime
+        && restored_mtime == initial_mtime
+        && restored_ctime > initial_ctime
+    {
+        CtimeWitness::PosixCtime
+    } else {
+        CtimeWitness::None
+    }
+}
+
+#[cfg(unix)]
+fn ctime_probe_spin(probe: &Path, root: &Path, root_dev: Option<u64>) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::write(probe, b"tachi postflight ctime witness probe").map_err(|e| {
+        format!(
+            "write ctime witness probe {}: {e}; the parent must be able to write one file beside \
+             the walk root to validate that filesystem's ctime semantics",
+            probe.display()
+        )
+    })?;
+    let initial = std::fs::symlink_metadata(probe)
+        .map_err(|e| format!("lstat ctime witness probe {}: {e}", probe.display()))?;
+    ensure_probe_device(probe, root, root_dev, &initial)?;
+
+    let initial_ctime = FsTime::new(initial.ctime(), initial.ctime_nsec());
+    let initial_atime = FsTime::new(initial.atime(), initial.atime_nsec());
+    let initial_mtime = FsTime::new(initial.mtime(), initial.mtime_nsec());
+    // A one-second shift is large enough to survive coarse mtime resolution,
+    // while the restore below proves that the accepted ctime change is not the
+    // mtime value itself.
+    let backdated_mtime = FsTime::new(initial_mtime.sec.saturating_sub(1), initial_mtime.nsec);
+    let deadline = Instant::now() + CLOCK_BARRIER_TIMEOUT;
+
+    loop {
+        set_unix_file_times(probe, initial_atime, backdated_mtime)?;
+        let backdated = std::fs::symlink_metadata(probe).map_err(|e| {
+            format!(
+                "lstat backdated ctime witness probe {}: {e}",
+                probe.display()
+            )
+        })?;
+        let observed_backdated_mtime = FsTime::new(backdated.mtime(), backdated.mtime_nsec());
+        if observed_backdated_mtime != backdated_mtime {
+            return Err(format!(
+                "backdating ctime witness probe {} did not produce the requested mtime {} (got \
+                 {}); the filesystem's timestamp semantics are ambiguous",
+                probe.display(),
+                backdated_mtime,
+                observed_backdated_mtime
+            ));
+        }
+
+        set_unix_file_times(probe, initial_atime, initial_mtime)?;
+        let restored = std::fs::symlink_metadata(probe).map_err(|e| {
+            format!(
+                "lstat restored ctime witness probe {}: {e}",
+                probe.display()
+            )
+        })?;
+        let observed_restored_mtime = FsTime::new(restored.mtime(), restored.mtime_nsec());
+        if observed_restored_mtime != initial_mtime {
+            return Err(format!(
+                "restoring ctime witness probe {} did not restore mtime {} (got {}); the \
+                 filesystem's timestamp semantics are ambiguous",
+                probe.display(),
+                initial_mtime,
+                observed_restored_mtime
+            ));
+        }
+
+        let restored_ctime = FsTime::new(restored.ctime(), restored.ctime_nsec());
+        if ctime_witness_from_observation(
+            initial_ctime,
+            initial_mtime,
+            backdated_mtime,
+            observed_restored_mtime,
+            restored_ctime,
+        ) == CtimeWitness::PosixCtime
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "ctime of probe {} did not advance independently after an mtime backdate/restore \
+                 within {CLOCK_BARRIER_TIMEOUT:?} (initial {initial_ctime}, restored \
+                 {restored_ctime}); this filesystem cannot provide a trustworthy POSIX ctime \
+                 witness",
+                probe.display()
+            ));
+        }
+        std::thread::sleep(CLOCK_BARRIER_POLL);
+    }
+}
+
+#[cfg(unix)]
+fn set_unix_file_times(path: &Path, atime: FsTime, mtime: FsTime) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("ctime witness probe path contains NUL: {}", path.display()))?;
+    let times = [
+        libc::timespec {
+            tv_sec: atime.sec as libc::time_t,
+            tv_nsec: atime.nsec as _,
+        },
+        libc::timespec {
+            tv_sec: mtime.sec as libc::time_t,
+            tv_nsec: mtime.nsec as _,
+        },
+    ];
+    // SAFETY: `utimensat` receives a NUL-terminated path from a live CString
+    // and a two-element timespec array with the platform-declared layout.
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "utimensat ctime witness probe {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ))
+    }
 }
 
 fn barrier_spin(
@@ -581,18 +756,7 @@ fn barrier_spin(
             .map_err(|e| format!("lstat clock probe {}: {e}", probe.display()))?;
 
         if !device_checked {
-            let probe_dev = device_id(&meta);
-            if let (Some(root_dev), Some(probe_dev)) = (root_dev, probe_dev) {
-                if root_dev != probe_dev {
-                    return Err(format!(
-                        "clock probe {} is on device {probe_dev} but walk root {} is on device \
-                         {root_dev}; a barrier measured on another filesystem's clock proves \
-                         nothing about this one",
-                        probe.display(),
-                        root.display()
-                    ));
-                }
-            }
+            ensure_probe_device(probe, root, root_dev, &meta)?;
             device_checked = true;
         }
 
@@ -612,6 +776,27 @@ fn barrier_spin(
         }
         std::thread::sleep(CLOCK_BARRIER_POLL);
     }
+}
+
+fn ensure_probe_device(
+    probe: &Path,
+    root: &Path,
+    root_dev: Option<u64>,
+    probe_meta: &std::fs::Metadata,
+) -> Result<(), String> {
+    let probe_dev = device_id(probe_meta);
+    if let (Some(root_dev), Some(probe_dev)) = (root_dev, probe_dev) {
+        if root_dev != probe_dev {
+            return Err(format!(
+                "clock probe {} is on device {probe_dev} but walk root {} is on device \
+                 {root_dev}; a barrier measured on another filesystem's clock proves nothing \
+                 about this one",
+                probe.display(),
+                root.display(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn probe_suffix() -> String {
@@ -667,6 +852,9 @@ pub fn capture(spec: &CaptureSpec) -> Result<WorkspaceManifest, String> {
             workspace_root.display()
         ));
     }
+    let walk_roots: Vec<PathBuf> = std::iter::once(workspace_root.to_path_buf())
+        .chain(spec.gitdir_root.iter().map(|path| path.to_path_buf()))
+        .collect();
 
     let mut manifest = WorkspaceManifest {
         workspace_root: workspace_root.to_string_lossy().to_string(),
@@ -680,10 +868,10 @@ pub fn capture(spec: &CaptureSpec) -> Result<WorkspaceManifest, String> {
         // needs one. Leaving it empty here is what makes an unsealed image fail
         // closed at gate time.
         clock_barriers: BTreeMap::new(),
-        // Stamped from the build target, not inferred by a reader: it is what
-        // makes the platform refusal a property of the data (and therefore
-        // testable) rather than a `cfg` a test can never reach.
-        ctime_witness: ctime_witness_kind(),
+        // Pessimistic until the walk is complete and each actual root's
+        // filesystem has passed the runtime ctime semantics probe below. A
+        // bare capture must not manufacture a witness from the build target.
+        ctime_witness: CtimeWitness::None,
         foreign_device_paths: Vec::new(),
     };
 
@@ -702,7 +890,19 @@ pub fn capture(spec: &CaptureSpec) -> Result<WorkspaceManifest, String> {
         );
     }
     manifest.unhashed_roots.sort();
+    manifest.ctime_witness = ctime_witness_for_roots(&walk_roots);
     Ok(manifest)
+}
+
+fn ctime_witness_for_roots(walk_roots: &[PathBuf]) -> CtimeWitness {
+    if walk_roots
+        .iter()
+        .all(|root| ctime_witness_kind(root, walk_roots) == CtimeWitness::PosixCtime)
+    {
+        CtimeWitness::PosixCtime
+    } else {
+        CtimeWitness::None
+    }
 }
 
 /// Resolve a linked git worktree's external metadata dir. Returns `None` when
