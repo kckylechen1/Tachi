@@ -82,7 +82,7 @@
       "implementation_status": "current",
       "current_bindings": [
         "runtime_info",
-        "tachi_memory.readiness"
+        "tachi_status"
       ]
     },
     {
@@ -122,7 +122,7 @@
       "required": true,
       "implementation_status": "partial_current_target_api",
       "current_bindings": [
-        "tachi_memory.readiness",
+        "tachi_status",
         "recall_simulate.metrics"
       ],
       "target_terms": [

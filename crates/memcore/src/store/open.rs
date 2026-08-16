@@ -12,6 +12,45 @@ use crate::{
     MemoryEntry, MemoryStore,
 };
 
+#[cfg(feature = "test-support")]
+struct StartupOwnershipHook {
+    db_path: String,
+    before_lock: Option<Box<dyn FnOnce() + Send + 'static>>,
+    after_lock: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+#[cfg(feature = "test-support")]
+static STARTUP_OWNERSHIP_HOOK: std::sync::Mutex<Option<StartupOwnershipHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub struct StartupOwnershipHookGuard;
+
+#[cfg(feature = "test-support")]
+impl Drop for StartupOwnershipHookGuard {
+    fn drop(&mut self) {
+        *STARTUP_OWNERSHIP_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn take_startup_ownership_hook_for_tests(db_path: &str) -> Option<StartupOwnershipHook> {
+    let mut slot = STARTUP_OWNERSHIP_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let matches = slot
+        .as_ref()
+        .is_some_and(|candidate| candidate.db_path == db_path);
+    if matches {
+        slot.take()
+    } else {
+        None
+    }
+}
+
 #[cfg(unix)]
 fn has_stable_unix_file_identity(device: u64, inode: u64) -> bool {
     device != 0 && inode != 0
@@ -362,6 +401,25 @@ fn validate_read_only_backfill_compat_schema(
 }
 
 impl MemoryStore {
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn install_startup_ownership_hook_for_tests(
+        db_path: &str,
+        before_lock: impl FnOnce() + Send + 'static,
+        after_lock: impl FnOnce() + Send + 'static,
+    ) -> StartupOwnershipHookGuard {
+        let mut slot = STARTUP_OWNERSHIP_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(slot.is_none(), "startup ownership hook already installed");
+        *slot = Some(StartupOwnershipHook {
+            db_path: db_path.to_string(),
+            before_lock: Some(Box::new(before_lock)),
+            after_lock: Some(Box::new(after_lock)),
+        });
+        StartupOwnershipHookGuard
+    }
+
     /// Open (or create) a memory database at the given path.
     ///
     /// Uses the fail-closed default [`DbOpenContext`] (`OpenExisting + Deny`):
@@ -410,6 +468,60 @@ impl MemoryStore {
         Self::open_with_label_inner(db_path, UNKNOWN_DB_LABEL, false, ctx, Some(busy_timeout))
     }
 
+    /// Open a full-profile store and persist one provider-key health row while
+    /// retaining the same process startup ownership across both operations.
+    ///
+    /// SQLite auto-extension callbacks execute inside `Connection::open` and
+    /// may read the database.  A provider-health writer that released startup
+    /// ownership after open but before its upsert could therefore overlap the
+    /// next open in this process.  This narrow entry point closes exactly that
+    /// open-then-write gap; it is not a general write lock or retry wrapper.
+    #[cfg(feature = "admin")]
+    pub fn open_and_vault_upsert_key_health_with_context_and_busy_timeout(
+        db_path: &str,
+        ctx: &DbOpenContext,
+        busy_timeout: Duration,
+        health: &crate::vault::VaultKeyHealth,
+    ) -> Result<(), MemoryError> {
+        Self::with_open_store_and_busy_timeout(db_path, ctx, busy_timeout, |store| {
+            store.vault_upsert_key_health(health)
+        })
+    }
+
+    #[cfg(feature = "admin")]
+    fn with_open_store_and_busy_timeout<T>(
+        db_path: &str,
+        ctx: &DbOpenContext,
+        busy_timeout: Duration,
+        operation: impl FnOnce(&Self) -> Result<T, MemoryError>,
+    ) -> Result<T, MemoryError> {
+        Self::register_open_extensions()?;
+        #[cfg(feature = "test-support")]
+        let mut startup_hook = take_startup_ownership_hook_for_tests(db_path);
+        #[cfg(feature = "test-support")]
+        if let Some(before_lock) = startup_hook
+            .as_mut()
+            .and_then(|hook| hook.before_lock.take())
+        {
+            // The hook is one-shot and path-bound. Reaching this callback proves
+            // this exact open is about to contend for startup ownership.
+            before_lock();
+        }
+        let _startup_guard = db::acquire_startup_lock();
+        #[cfg(feature = "test-support")]
+        if let Some(after_lock) = startup_hook.and_then(|mut hook| hook.after_lock.take()) {
+            after_lock();
+        }
+        let store = Self::open_with_label_inner_while_startup_owned(
+            db_path,
+            UNKNOWN_DB_LABEL,
+            false,
+            ctx,
+            Some(busy_timeout),
+        )?;
+        operation(&store)
+    }
+
     /// Open (or create) with an explicit manifest label AND an explicit
     /// [`DbOpenContext`] — the entry point the deploy-time migrator and
     /// fresh-provisioning flows use to thread migration authority / open
@@ -429,10 +541,48 @@ impl MemoryStore {
         ctx: &DbOpenContext,
         busy_timeout: Option<Duration>,
     ) -> Result<Self, MemoryError> {
+        Self::register_open_extensions()?;
+        #[cfg(feature = "test-support")]
+        let mut startup_hook = take_startup_ownership_hook_for_tests(db_path);
+        #[cfg(feature = "test-support")]
+        if let Some(before_lock) = startup_hook
+            .as_mut()
+            .and_then(|hook| hook.before_lock.take())
+        {
+            before_lock();
+        }
+        let _startup_guard = db::acquire_startup_lock();
+        #[cfg(feature = "test-support")]
+        if let Some(after_lock) = startup_hook.and_then(|mut hook| hook.after_lock.take()) {
+            after_lock();
+        }
+        Self::open_with_label_inner_while_startup_owned(
+            db_path,
+            db_label,
+            path_validation,
+            ctx,
+            busy_timeout,
+        )
+    }
+
+    fn register_open_extensions() -> Result<(), MemoryError> {
         // Register extensions BEFORE opening the connection.
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
+        Ok(())
+    }
+
+    /// Open while the caller retains `db::acquire_startup_lock()` ownership.
+    /// Keeping this private prevents unrelated callers from bypassing the
+    /// process-wide startup boundary.
+    fn open_with_label_inner_while_startup_owned(
+        db_path: &str,
+        db_label: &str,
+        path_validation: bool,
+        ctx: &DbOpenContext,
+        busy_timeout: Option<Duration>,
+    ) -> Result<Self, MemoryError> {
         // Acquire the in-process startup lock BEFORE the #1132 rename-on-open
         // migration, not after (RESIDUAL-1). The migration's stat+rename+symlink
         // sequence and the `open_read_write` below (which CREATES the canonical
@@ -451,7 +601,6 @@ impl MemoryStore {
         // created canonical file. On kernels/filesystems/platforms without that
         // primitive it FAILS CLOSED (loud error) rather than degrading to a
         // plain rename, which would reopen the very clobber race it closes.
-        let _startup_guard = db::acquire_startup_lock();
         // A caller-owned busy budget covers the whole synchronous open path,
         // including schema initialization's explicit retry sleeps. Without
         // this guard a small per-operation SQLite timeout could still be
@@ -615,7 +764,23 @@ impl MemoryStore {
     /// for legacy/foreign/possibly-corrupt files, by design (see that
     /// module's doc comment).
     pub fn open_read_only(db_path: &str) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, None, UNKNOWN_DB_LABEL)
+        Self::open_read_only_inner(db_path, None, UNKNOWN_DB_LABEL, false)
+    }
+
+    /// Open one existing DB through SQLite's immutable URI mode.
+    ///
+    /// This is the strict operator-plan boundary: it cannot create or update
+    /// WAL/SHM sidecars. Because immutable mode intentionally ignores WAL, a
+    /// non-empty WAL is refused rather than returning a stale preview.
+    pub fn open_read_only_immutable(db_path: &str) -> Result<Self, MemoryError> {
+        let wal_path = std::path::PathBuf::from(format!("{db_path}-wal"));
+        if std::fs::metadata(&wal_path).is_ok_and(|metadata| metadata.len() != 0) {
+            return Err(MemoryError::InvalidArg(format!(
+                "immutable maintenance plan refuses non-empty WAL at {}",
+                wal_path.display()
+            )));
+        }
+        Self::open_read_only_inner(db_path, None, UNKNOWN_DB_LABEL, true)
     }
 
     /// [`Self::open_read_only`] for a caller that knows which store this is.
@@ -632,7 +797,7 @@ impl MemoryStore {
     /// Path-routing validation stays off (as for every read-only open): it is
     /// a write-time guard, and a read-only SQLite handle cannot write anyway.
     pub fn open_read_only_with_label(db_path: &str, db_label: &str) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, None, db_label)
+        Self::open_read_only_inner(db_path, None, db_label, false)
     }
 
     /// Open an existing DB read-only while tolerating a stamped older schema.
@@ -649,19 +814,49 @@ impl MemoryStore {
         db_path: &str,
         operation: ReadOnlyBackfillOperation,
     ) -> Result<Self, MemoryError> {
-        Self::open_read_only_inner(db_path, Some(operation), UNKNOWN_DB_LABEL)
+        Self::open_read_only_inner(db_path, Some(operation), UNKNOWN_DB_LABEL, false)
     }
 
     fn open_read_only_inner(
         db_path: &str,
         compat_operation: Option<ReadOnlyBackfillOperation>,
         db_label: &str,
+        immutable: bool,
     ) -> Result<Self, MemoryError> {
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
-        let conn = db::open_read_only(db_path)?;
+        let conn = if immutable {
+            let path = std::path::Path::new(db_path);
+            #[cfg(unix)]
+            let bytes = {
+                use std::os::unix::ffi::OsStrExt;
+                path.as_os_str().as_bytes()
+            };
+            #[cfg(not(unix))]
+            let owned = path.to_string_lossy().into_owned();
+            #[cfg(not(unix))]
+            let bytes = owned.as_bytes();
+            let mut encoded = String::with_capacity(bytes.len());
+            for &byte in bytes {
+                if byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~' | b':')
+                {
+                    encoded.push(char::from(byte));
+                } else {
+                    use std::fmt::Write as _;
+                    write!(&mut encoded, "%{byte:02X}").expect("write URI escape to string");
+                }
+            }
+            let uri = format!("file:{encoded}?mode=ro&immutable=1");
+            Connection::open_with_flags(
+                uri,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            )?
+        } else {
+            db::open_read_only(db_path)?
+        };
         let opened_physical_db_identity =
             validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
@@ -892,6 +1087,18 @@ impl MemoryStore {
     /// of it — a second copy is how the escape hatch and the `db_label`
     /// routing rule drift apart.
     pub(crate) fn validate_write_path(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        // Retirement is a global write boundary, not an ordinary routing
+        // decision. Check it before the cross-project metadata bypass and
+        // before the host-injected KernelPolicy escape hatch, and keep legacy
+        // `/sticky` rows available only to the read/cutover SQL paths.
+        if let Err(error) = path_router::validate_retired_sticky_write(&entry.path, &entry.category)
+        {
+            eprintln!(
+                "warning: retired-memory write rejected db_label={} path={} category={} error={}",
+                self.db_label, entry.path, entry.category, error
+            );
+            return Err(MemoryError::InvalidArg(error.to_string()));
+        }
         // tachi#1585 D5: this store's `KernelPolicy::path_validation_escape_hatch`,
         // not a `TACHI_DISABLE_PATH_VALIDATION` env read.
         if self.path_validation && !self.policy.path_validation_escape_hatch {
@@ -900,9 +1107,12 @@ impl MemoryStore {
                 .get("allow_cross_project")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if let Err(e) =
-                path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
-            {
+            if let Err(e) = path_router::validate_memory_write_for_db(
+                &entry.path,
+                &entry.category,
+                &self.db_label,
+                allow_cross,
+            ) {
                 eprintln!(
                     "warning: path-routing validation rejected write db_label={} path={} error={}",
                     self.db_label, entry.path, e
@@ -1878,6 +2088,80 @@ mod exact_dedupe_open_tests {
         store.upsert_batch(&[]).expect("empty batch is Ok");
         let stats = store.stats(true).expect("stats");
         assert_eq!(stats.total, 0, "empty batch must not write a row");
+    }
+
+    #[test]
+    fn retired_sticky_write_guard_precedes_cross_project_and_policy_bypasses() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let path = dir.path().join("retired-sticky-guard.db");
+        let policy = crate::KernelPolicy {
+            path_validation_escape_hatch: true,
+            ..Default::default()
+        };
+        let mut store = MemoryStore::open_with_label(&path.to_string_lossy(), "global")
+            .expect("open labelled store")
+            .with_kernel_policy(policy);
+
+        let mut rejected = |id: &str, path: &str, category: &str| {
+            let mut entry = test_memory_entry(id);
+            entry.path = path.to_string();
+            entry.category = category.to_string();
+            entry.metadata = serde_json::json!({"allow_cross_project": true});
+            let error = store
+                .upsert(&entry)
+                .expect_err("ordinary upsert must reject retired sticky input");
+            assert!(
+                error.to_string().contains("tachi_a2a"),
+                "unexpected error: {error}"
+            );
+            assert!(store.get(id).expect("get after refusal").is_none());
+        };
+
+        rejected("sticky-path-root", "/sticky", "fact");
+        rejected("sticky-path-alias", "//STICKY///legacy/", "fact");
+        rejected("sticky-category-case", "/notes/ordinary", " Sticky ");
+
+        let mut insert_only = test_memory_entry("sticky-insert-only");
+        insert_only.path = "/sticky/legacy".to_string();
+        insert_only.metadata = serde_json::json!({"allow_cross_project": true});
+        let error = store
+            .insert_if_absent(&insert_only)
+            .expect_err("insert-only writer must reject retired path");
+        assert!(error.to_string().contains("tachi_a2a"), "{error}");
+
+        let mut idless = test_memory_entry("sticky-idless");
+        idless.category = "STICKY".to_string();
+        let error = store
+            .upsert_idless(&idless, "retired-sticky-identity")
+            .expect_err("id-less writer must reject retired category");
+        assert!(error.to_string().contains("tachi_a2a"), "{error}");
+
+        let mut batch = test_memory_entry("sticky-batch");
+        batch.path = "/sticky/batch".to_string();
+        let error = store
+            .upsert_batch(&[batch])
+            .expect_err("batch writer must reject retired path");
+        assert!(error.to_string().contains("tachi_a2a"), "{error}");
+
+        let mut validated = test_memory_entry("sticky-validated");
+        validated.category = "sticky".to_string();
+        let error = store
+            .upsert_with_validated_reference_mutations(
+                &validated,
+                None,
+                &serde_json::Map::new(),
+                &[],
+            )
+            .expect_err("validated-reference writer must reject retired category");
+        assert!(error.to_string().contains("tachi_a2a"), "{error}");
+
+        let mut ordinary = test_memory_entry("ordinary-near-sticky");
+        ordinary.path = "/stickiness/allowed".to_string();
+        ordinary.category = "fact".to_string();
+        ordinary.metadata = serde_json::json!({"allow_cross_project": true});
+        store
+            .upsert(&ordinary)
+            .expect("near-match path remains allowed");
     }
 
     #[test]

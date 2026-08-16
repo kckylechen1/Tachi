@@ -1,0 +1,11 @@
+{
+  "why": "A rejection is not a protocol violation: the provider worked correctly and said no. The wait directive it sent survives into the outcome.",
+  "status": 429,
+  "headers": [["Retry-After", "30"]],
+  "body": "{\"error\":{\"message\":\"Rate limit reached\",\"type\":\"requests\"}}",
+  "expected": {
+    "outcome": "rejected",
+    "status": 429,
+    "classification": {"class": "rate_limited", "retry_after": {"kind": "seconds", "value": 30}, "advice": "retry_same_deployment"}
+  }
+}

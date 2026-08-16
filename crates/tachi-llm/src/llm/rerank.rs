@@ -7,6 +7,8 @@
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
+use super::catalog_import::DeploymentAttribution;
+
 /// Config env: `TACHI_RERANK_PROVIDER=voyage|local` (default: voyage).
 pub const RERANK_PROVIDER_ENV: &str = "TACHI_RERANK_PROVIDER";
 /// Config env: OpenAI-compatible `/rerank` HTTP endpoint for the local arm.
@@ -301,7 +303,14 @@ impl super::LlmClient {
             // rate-limit path (which returns before reaching parse).
             self.note_recall_provider_outcome(false);
             if status.as_u16() == 429 {
-                self.mark_secret_rate_limited(&selected, retry_after);
+                // Unattributed: the env import does not project a rerank
+                // deployment row (#1681 D7 PR-B), so there is nothing in the
+                // catalog this outcome could be evidence about.
+                self.mark_secret_rate_limited(
+                    &selected,
+                    retry_after,
+                    DeploymentAttribution::Unattributed,
+                );
                 last_err = format!("Voyage rerank API error: {} - {}", status, text);
                 if attempt < max_attempts {
                     continue;
@@ -312,6 +321,7 @@ impl super::LlmClient {
                 self.mark_secret_auth_failed(
                     &selected,
                     Some(&format!("Voyage rerank auth failure {status}")),
+                    DeploymentAttribution::Unattributed,
                 );
                 return Err(format!("Voyage rerank API error: {} - {}", status, text));
             }
@@ -322,7 +332,7 @@ impl super::LlmClient {
                 serde_json::from_str(&text)
                     .map_err(|e| format!("Failed to parse Voyage rerank response: {}", e))?,
             );
-            self.mark_secret_success(&selected);
+            self.mark_secret_success(&selected, DeploymentAttribution::Unattributed);
             break;
         }
         let json = json.ok_or_else(|| {

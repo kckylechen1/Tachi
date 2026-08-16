@@ -7,6 +7,7 @@ mod hypermem_gate;
 mod kernel_surface;
 mod library_identity_runtime;
 mod memories_writer_census;
+mod memory_action_contract;
 mod portable_kernel_split;
 mod release_distribution;
 mod store_trigger_ddl_census;

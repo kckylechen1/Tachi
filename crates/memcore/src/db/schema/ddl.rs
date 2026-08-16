@@ -790,6 +790,183 @@ pub(super) const BASE_SCHEMA_CHUNKS: &[(SchemaScope, &str)] = &[
         );
 "#,
     ),
+    // model_deployments
+    (
+        SchemaScope::Product,
+        r#"
+        -- Model-broker catalog (tachi#1681 D1, six physical tables -- corrected from
+        -- the frozen design's initial mistaken count of four by cross-vendor
+        -- review). Public-safe, revisioned operational metadata for one concrete
+        -- deployment of a model behind a provider account. No health column here on
+        -- purpose: the domain model's own "health state and observed-at" line
+        -- contradicts the four-separate-authorities law (#1681 D1/D4) and is
+        -- resolved the same way `account_custody` resolved auth vs. custody
+        -- (ddl.rs:776-782) -- a table boundary, not field discipline.
+        -- `provider_account_id` references `provider_accounts.account_id` (#1680) by
+        -- convention, not an enforced FK, matching every other cross-table reference
+        -- in this file. `pricing_snapshot_ref` points at
+        -- `pricing_snapshots.snapshot_id`; it is a live-catalog pointer only -- a
+        -- completed invocation's historical cost is frozen by snapshotting the
+        -- referenced snapshot_id onto the outcome row at write time (#1681 D6,
+        -- review finding 3), never by dereferencing this column after the fact.
+        CREATE TABLE IF NOT EXISTS model_deployments (
+            deployment_id        TEXT PRIMARY KEY,
+            provider_account_id  TEXT NOT NULL,
+            endpoint_ref         TEXT,
+            protocol_kind        TEXT NOT NULL,
+            provider_model_id    TEXT NOT NULL,
+            effective_version    TEXT,
+            capabilities         TEXT NOT NULL DEFAULT '{}',
+            context_window       INTEGER,
+            max_output           INTEGER,
+            attachment_bounds    TEXT NOT NULL DEFAULT '{}',
+            region               TEXT,
+            data_policy          TEXT,
+            pricing_snapshot_ref TEXT,
+            catalog_source       TEXT NOT NULL,
+            fetched_at           TEXT NOT NULL,
+            effective_at         TEXT NOT NULL,
+            expires_at           TEXT,
+            status               TEXT NOT NULL DEFAULT 'active',
+            revision             INTEGER NOT NULL DEFAULT 1,
+            source_refs          TEXT NOT NULL DEFAULT '[]',
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_deployments_account ON model_deployments(provider_account_id);
+        CREATE INDEX IF NOT EXISTS idx_model_deployments_status ON model_deployments(status);
+"#,
+    ),
+    // model_deployment_events
+    (
+        SchemaScope::Product,
+        r#"
+        -- Append-only audit of everything that ever changed a deployment row, shaped
+        -- like `provider_account_events` verbatim (#1680 census precedent reused,
+        -- #1681 D1): `revision` is the deployment revision the event produced;
+        -- `plan_digest` binds an event to the plan that caused it. Rows are never
+        -- updated or deleted -- no UPDATE/DELETE accessor exists for this table
+        -- anywhere in the codebase.
+        CREATE TABLE IF NOT EXISTS model_deployment_events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            deployment_id TEXT NOT NULL,
+            revision      INTEGER NOT NULL,
+            event_kind    TEXT NOT NULL,
+            plan_digest   TEXT,
+            evidence      TEXT NOT NULL DEFAULT '{}',
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_deployment_events_deployment ON model_deployment_events(deployment_id, id);
+"#,
+    ),
+    // model_aliases
+    (
+        SchemaScope::Product,
+        r#"
+        -- Stable ModelRef aliases (tachi#1681 D1/D2), e.g. `reasoning.high`,
+        -- `coding.review`. A reviewed operational intent, not permission or task-
+        -- quality truth: `required_capabilities` and `constraints`
+        -- (data/region/budget) are the binding conditions candidate deployments must
+        -- satisfy; candidate deployment ids live on the `model_alias_bindings`
+        -- junction table below, not as a JSON array here, so retiring a deployment
+        -- gets an indexed reverse lookup. `policy_digest` is the canonical-JSON
+        -- content digest of the alias set (the `route_policy_source_revision`
+        -- mechanism, reused not reinvented, #1681 D2); a binding change bumps
+        -- `revision`. Unknown/stale/ambiguous alias resolution fails loudly at the
+        -- call site, not here.
+        CREATE TABLE IF NOT EXISTS model_aliases (
+            alias_name            TEXT PRIMARY KEY,
+            required_capabilities TEXT NOT NULL DEFAULT '{}',
+            constraints           TEXT NOT NULL DEFAULT '{}',
+            status                TEXT NOT NULL DEFAULT 'active',
+            revision              INTEGER NOT NULL DEFAULT 1,
+            policy_digest         TEXT,
+            source_refs           TEXT NOT NULL DEFAULT '[]',
+            created_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_aliases_status ON model_aliases(status);
+"#,
+    ),
+    // model_alias_bindings
+    (
+        SchemaScope::Product,
+        r#"
+        -- Junction: which deployments (in priority order) an alias may resolve to.
+        -- Append-and-retire, never delete (the `provider_account_aliases` pattern,
+        -- #1680), so `deployment_id` stays an indexed reverse lookup -- "who
+        -- references this deployment" -- even for a retired binding. A binding
+        -- change bumps the owning `model_aliases.revision`; that bump is a write-
+        -- path responsibility (#1681 D2), not enforced here.
+        CREATE TABLE IF NOT EXISTS model_alias_bindings (
+            alias_name    TEXT NOT NULL,
+            deployment_id TEXT NOT NULL,
+            priority      INTEGER NOT NULL DEFAULT 0,
+            retired       INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            PRIMARY KEY (alias_name, deployment_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_alias_bindings_deployment ON model_alias_bindings(deployment_id);
+"#,
+    ),
+    // pricing_snapshots
+    (
+        SchemaScope::Product,
+        r#"
+        -- Content-addressed price sheet (tachi#1681 D1, cross-vendor review finding
+        -- 3): `snapshot_id` is the canonical-JSON digest of `pricing_data`, computed
+        -- by the existing `content_digest_hex` machinery (a memcore-resident digest
+        -- primitive, not duplicated in this file -- #1681 review finding 3). Re-
+        -- importing an unchanged price sheet dedupes onto the same id; any price
+        -- change necessarily mints a new one. Historical invocation cost is frozen
+        -- by copying this id onto the `dispatch_outcomes` row at write time, never
+        -- by dereferencing a mutable pointer after the fact -- immutability is a
+        -- property of the primary key, not a discipline.
+        CREATE TABLE IF NOT EXISTS pricing_snapshots (
+            snapshot_id    TEXT PRIMARY KEY,
+            provider_kind  TEXT NOT NULL,
+            pricing_data   TEXT NOT NULL DEFAULT '{}',
+            catalog_source TEXT,
+            fetched_at     TEXT NOT NULL,
+            created_at     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pricing_snapshots_provider_kind ON pricing_snapshots(provider_kind);
+"#,
+    ),
+    // model_deployment_health
+    (
+        SchemaScope::Product,
+        r#"
+        -- Deployment-level operational health (tachi#1681 D4), shaped after
+        -- `vault_key_health` but keyed singly by `deployment_id`. One of four
+        -- separate health authorities that are never merged into one score:
+        -- CredentialHealth (`vault_key_health`, #748/#1680), ProviderAccountHealth
+        -- (#1680 probe outcomes), ModelDeploymentHealth (this table --
+        -- 429/quota/latency/capability availability), and ModelQuality (#1675,
+        -- adjudicated task-class evidence). 401/403 never write here -- an auth
+        -- failure says nothing about the deployment; that stays on the
+        -- credential/account surfaces. The single writer
+        -- (`record_deployment_outcome`, #1681 D4) is out of scope for this schema-
+        -- only PR. `evidence_kind` records which outcome kind (`probed` vs.
+        -- `self_reported`) produced the row.
+        CREATE TABLE IF NOT EXISTS model_deployment_health (
+            deployment_id   TEXT PRIMARY KEY,
+            state           TEXT NOT NULL DEFAULT 'ok',
+            cooldown_until  TEXT,
+            last_success_at TEXT,
+            last_attempt_at TEXT,
+            last_error      TEXT,
+            error_count     INTEGER NOT NULL DEFAULT 0,
+            evidence_kind   TEXT,
+            observed_at     TEXT NOT NULL DEFAULT '',
+            metadata        TEXT NOT NULL DEFAULT '{}',
+            updated_at      TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_deployment_health_state ON model_deployment_health(state);
+        CREATE INDEX IF NOT EXISTS idx_model_deployment_health_cooldown ON model_deployment_health(cooldown_until);
+"#,
+    ),
     // foundry_jobs
     (
         SchemaScope::Product,
@@ -1542,6 +1719,168 @@ pub(super) const MEMORY_OUTBOX_DESTINATION_APPLY_V30_SQL: &str = r#"
 pub(super) const MEMORY_OUTBOX_DESTINATION_APPLY_APPLICATION_CHECK_CLAUSE: &str =
     "CHECK (application = 'applied')";
 
+/// Product-only local advisory mailbox. Installed by the v31 migration so a
+/// stamped v30 store cannot acquire a new write surface outside migration
+/// authority. PortableKernel stores intentionally never execute this SQL.
+pub(super) const A2A_KIND_CHECK_CLAUSE: &str = "CHECK (kind = 'turn_response/v1')";
+pub(super) const A2A_ISSUER_ASSURANCE_CHECK_CLAUSE: &str =
+    "CHECK (issuer_identity_assurance = 'self_asserted')";
+pub(super) const A2A_RECIPIENT_ASSURANCE_CHECK_CLAUSE: &str =
+    "CHECK (recipient_identity_assurance = 'self_asserted')";
+pub(super) const A2A_BODY_DIGEST_CHECK_CLAUSE: &str = "CHECK (length(body_digest) = 64 AND body_digest = lower(body_digest) AND body_digest NOT GLOB '*[^0-9a-f]*')";
+pub(super) const A2A_BODY_SIZE_CHECK_CLAUSE: &str = "CHECK (length(CAST(body AS BLOB)) <= 4096)";
+pub(super) const A2A_ISSUER_TRUST_DOMAIN_CHECK_CLAUSE: &str =
+    "CHECK (issuer_trust_domain = 'same_host')";
+pub(super) const A2A_RECIPIENT_TRUST_DOMAIN_CHECK_CLAUSE: &str =
+    "CHECK (recipient_trust_domain = 'same_host')";
+pub(super) const A2A_ISSUER_TRUST_BASIS_CHECK_CLAUSE: &str =
+    "CHECK (issuer_trust_basis = 'current_local_connection')";
+pub(super) const A2A_RECIPIENT_TRUST_BASIS_CHECK_CLAUSE: &str =
+    "CHECK (recipient_trust_basis = 'historical_local_admission')";
+pub(super) const A2A_EXPIRY_CHECK_CLAUSE: &str = "CHECK (expires_at > created_at)";
+pub(super) const A2A_IDEMPOTENCY_UNIQUE_CLAUSE: &str =
+    "UNIQUE (issuer_agent_identity_id, idempotency_key)";
+pub(super) const A2A_ISSUER_IDENTITY_FK_CLAUSE: &str =
+    "FOREIGN KEY (issuer_agent_identity_id) REFERENCES agent_identities(agent_identity_id)";
+pub(super) const A2A_RECIPIENT_IDENTITY_FK_CLAUSE: &str =
+    "FOREIGN KEY (recipient_agent_identity_id) REFERENCES agent_identities(agent_identity_id)";
+pub(super) const A2A_ISSUER_ADMISSION_FK_CLAUSE: &str =
+    "FOREIGN KEY (issuer_admission_id) REFERENCES identity_admissions(admission_id)";
+pub(super) const A2A_RECIPIENT_ADMISSION_FK_CLAUSE: &str =
+    "FOREIGN KEY (recipient_admission_id) REFERENCES identity_admissions(admission_id)";
+pub(super) const A2A_RECEIPT_ENVELOPE_FK_CLAUSE: &str =
+    "FOREIGN KEY (envelope_id) REFERENCES a2a_envelopes(envelope_id)";
+pub(super) const A2A_RECEIPT_ACTOR_IDENTITY_FK_CLAUSE: &str =
+    "FOREIGN KEY (actor_agent_identity_id) REFERENCES agent_identities(agent_identity_id)";
+pub(super) const A2A_RECEIPT_ACTOR_ADMISSION_FK_CLAUSE: &str =
+    "FOREIGN KEY (actor_admission_id) REFERENCES identity_admissions(admission_id)";
+pub(super) const A2A_BODY_SIZE_V32_CHECK_CLAUSE: &str =
+    "CHECK (body IS NULL OR length(CAST(body AS BLOB)) BETWEEN 1 AND 4096)";
+
+pub(super) const A2A_MAILBOX_V31_SQL: &str = r#"
+        CREATE TABLE IF NOT EXISTS a2a_envelopes (
+            envelope_id                    TEXT PRIMARY KEY NOT NULL,
+            kind                           TEXT NOT NULL CHECK (kind = 'turn_response/v1'),
+            issuer_agent_identity_id       TEXT NOT NULL,
+            issuer_admission_id             TEXT NOT NULL,
+            recipient_agent_identity_id    TEXT NOT NULL,
+            recipient_admission_id          TEXT NOT NULL,
+            subject_ref                    TEXT NOT NULL,
+            body                           TEXT NOT NULL,
+            body_digest                    TEXT NOT NULL CHECK (length(body_digest) = 64 AND body_digest = lower(body_digest) AND body_digest NOT GLOB '*[^0-9a-f]*'),
+            issuer_identity_assurance      TEXT NOT NULL CHECK (issuer_identity_assurance = 'self_asserted'),
+            recipient_identity_assurance   TEXT NOT NULL CHECK (recipient_identity_assurance = 'self_asserted'),
+            issuer_trust_domain            TEXT NOT NULL CHECK (issuer_trust_domain = 'same_host'),
+            recipient_trust_domain         TEXT NOT NULL CHECK (recipient_trust_domain = 'same_host'),
+            issuer_trust_basis             TEXT NOT NULL CHECK (issuer_trust_basis = 'current_local_connection'),
+            recipient_trust_basis          TEXT NOT NULL CHECK (recipient_trust_basis = 'historical_local_admission'),
+            idempotency_key                TEXT NOT NULL,
+            created_at                     TEXT NOT NULL,
+            expires_at                     TEXT NOT NULL,
+            current_state                  TEXT NOT NULL CHECK (current_state IN ('received','accepted','consumed','expired')),
+            state_version                  INTEGER NOT NULL CHECK (state_version > 0),
+            UNIQUE (issuer_agent_identity_id, idempotency_key),
+            CHECK (length(trim(subject_ref)) > 0),
+            CHECK (length(body) > 0),
+            CHECK (length(CAST(body AS BLOB)) <= 4096),
+            CHECK (expires_at > created_at),
+            FOREIGN KEY (issuer_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (issuer_admission_id) REFERENCES identity_admissions(admission_id),
+            FOREIGN KEY (recipient_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (recipient_admission_id) REFERENCES identity_admissions(admission_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_a2a_envelopes_recipient_state
+            ON a2a_envelopes(recipient_agent_identity_id, current_state, expires_at, created_at, envelope_id);
+        CREATE INDEX IF NOT EXISTS idx_a2a_envelopes_issuer_created
+            ON a2a_envelopes(issuer_agent_identity_id, created_at DESC, envelope_id DESC);
+
+        CREATE TABLE IF NOT EXISTS a2a_delivery_receipts (
+            receipt_id                     TEXT PRIMARY KEY NOT NULL,
+            envelope_id                    TEXT NOT NULL,
+            envelope_version               INTEGER NOT NULL CHECK (envelope_version > 0),
+            state                          TEXT NOT NULL CHECK (state IN ('received','accepted','consumed','expired')),
+            actor_agent_identity_id        TEXT NOT NULL,
+            actor_admission_id              TEXT NOT NULL,
+            identity_assurance             TEXT NOT NULL CHECK (identity_assurance = 'self_asserted'),
+            trust_domain                   TEXT NOT NULL CHECK (trust_domain = 'same_host'),
+            trust_basis                    TEXT NOT NULL CHECK (trust_basis IN ('current_local_connection','historical_local_admission')),
+            occurred_at                    TEXT NOT NULL,
+            UNIQUE (envelope_id, envelope_version),
+            UNIQUE (envelope_id, state),
+            FOREIGN KEY (envelope_id) REFERENCES a2a_envelopes(envelope_id),
+            FOREIGN KEY (actor_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (actor_admission_id) REFERENCES identity_admissions(admission_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_a2a_receipts_envelope_version
+            ON a2a_delivery_receipts(envelope_id, envelope_version);
+"#;
+
+/// Canonical Product A2A pair after v32 body-retention migration. This is
+/// intentionally separate from the v31 install DDL: a stamped v31 database
+/// must cross the explicit table-rebuild migration before a body can become
+/// nullable, and a current database must validate this exact shape.
+pub(super) const A2A_MAILBOX_V32_SQL: &str = r#"
+        CREATE TABLE a2a_envelopes (
+            envelope_id                    TEXT PRIMARY KEY NOT NULL,
+            kind                           TEXT NOT NULL CHECK (kind = 'turn_response/v1'),
+            issuer_agent_identity_id       TEXT NOT NULL,
+            issuer_admission_id            TEXT NOT NULL,
+            recipient_agent_identity_id    TEXT NOT NULL,
+            recipient_admission_id         TEXT NOT NULL,
+            subject_ref                    TEXT NOT NULL,
+            body                           TEXT,
+            body_digest                    TEXT NOT NULL CHECK (length(body_digest) = 64 AND body_digest = lower(body_digest) AND body_digest NOT GLOB '*[^0-9a-f]*'),
+            issuer_identity_assurance      TEXT NOT NULL CHECK (issuer_identity_assurance = 'self_asserted'),
+            recipient_identity_assurance   TEXT NOT NULL CHECK (recipient_identity_assurance = 'self_asserted'),
+            issuer_trust_domain            TEXT NOT NULL CHECK (issuer_trust_domain = 'same_host'),
+            recipient_trust_domain         TEXT NOT NULL CHECK (recipient_trust_domain = 'same_host'),
+            issuer_trust_basis             TEXT NOT NULL CHECK (issuer_trust_basis = 'current_local_connection'),
+            recipient_trust_basis          TEXT NOT NULL CHECK (recipient_trust_basis = 'historical_local_admission'),
+            idempotency_key                TEXT NOT NULL,
+            created_at                     TEXT NOT NULL,
+            expires_at                     TEXT NOT NULL,
+            current_state                  TEXT NOT NULL CHECK (current_state IN ('received','accepted','consumed','expired')),
+            state_version                  INTEGER NOT NULL CHECK (state_version > 0),
+            UNIQUE (issuer_agent_identity_id, idempotency_key),
+            CHECK (length(trim(subject_ref)) > 0),
+            CHECK (body IS NULL OR length(CAST(body AS BLOB)) BETWEEN 1 AND 4096),
+            CHECK (expires_at > created_at),
+            FOREIGN KEY (issuer_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (issuer_admission_id) REFERENCES identity_admissions(admission_id),
+            FOREIGN KEY (recipient_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (recipient_admission_id) REFERENCES identity_admissions(admission_id)
+        );
+        CREATE INDEX idx_a2a_envelopes_recipient_state
+            ON a2a_envelopes(recipient_agent_identity_id, current_state, expires_at, created_at, envelope_id);
+        CREATE INDEX idx_a2a_envelopes_issuer_created
+            ON a2a_envelopes(issuer_agent_identity_id, created_at DESC, envelope_id DESC);
+
+        CREATE TABLE a2a_delivery_receipts (
+            receipt_id                     TEXT PRIMARY KEY NOT NULL,
+            envelope_id                    TEXT NOT NULL,
+            envelope_version               INTEGER NOT NULL CHECK (envelope_version > 0),
+            state                          TEXT NOT NULL CHECK (state IN ('received','accepted','consumed','expired')),
+            actor_agent_identity_id        TEXT NOT NULL,
+            actor_admission_id             TEXT NOT NULL,
+            identity_assurance             TEXT NOT NULL CHECK (identity_assurance = 'self_asserted'),
+            trust_domain                   TEXT NOT NULL CHECK (trust_domain = 'same_host'),
+            trust_basis                    TEXT NOT NULL CHECK (trust_basis IN ('current_local_connection','historical_local_admission')),
+            occurred_at                    TEXT NOT NULL,
+            UNIQUE (envelope_id, envelope_version),
+            UNIQUE (envelope_id, state),
+            FOREIGN KEY (envelope_id) REFERENCES a2a_envelopes(envelope_id),
+            FOREIGN KEY (actor_agent_identity_id) REFERENCES agent_identities(agent_identity_id),
+            FOREIGN KEY (actor_admission_id) REFERENCES identity_admissions(admission_id)
+        );
+        CREATE INDEX idx_a2a_receipts_envelope_version
+            ON a2a_delivery_receipts(envelope_id, envelope_version);
+"#;
+
+pub(super) const A2A_ENVELOPE_STATE_CHECK_CLAUSE: &str =
+    "CHECK (current_state IN ('received','accepted','consumed','expired'))";
+pub(super) const A2A_RECEIPT_STATE_CHECK_CLAUSE: &str =
+    "CHECK (state IN ('received','accepted','consumed','expired'))";
+
 /// Historical v25 DDL for the sampled, content-free recall impression ledger
 /// (tachi#1447). It exists only so the versioned migration sequence can build
 /// the same v25 shape before v26 upgrades it; new databases end at
@@ -1770,11 +2109,14 @@ pub(super) const MIGRATED_INDEXES_CHUNKS: &[(SchemaScope, &str)] = &[
 /// way to touch this constant is to insert a new chunk's bytes verbatim, in the
 /// same position it occupies in [`BASE_SCHEMA_CHUNKS`], in the same commit that
 /// adds the chunk, changing not one byte of any existing statement. The one
-/// amendment so far: tachi#1680 D1's four provider-account tables, appended to
-/// the vault section (`provider_accounts`, `provider_account_aliases`,
-/// `provider_account_events`, `account_custody`). Rewriting an existing
-/// statement here to make a failing assertion pass is exactly the drift this
-/// golden exists to catch.
+/// amendments so far: tachi#1680 D1's four provider-account tables, appended
+/// to the vault section (`provider_accounts`, `provider_account_aliases`,
+/// `provider_account_events`, `account_custody`); and tachi#1681 D1's six
+/// model-broker catalog tables, appended right after that group
+/// (`model_deployments`, `model_deployment_events`, `model_aliases`,
+/// `model_alias_bindings`, `pricing_snapshots`, `model_deployment_health`).
+/// Rewriting an existing statement here to make a failing assertion pass is
+/// exactly the drift this golden exists to catch.
 #[cfg(test)]
 pub(super) const BASE_SCHEMA_SQL_V28_GOLDEN: &str = r#"
         CREATE TABLE IF NOT EXISTS memories (
@@ -2290,6 +2632,153 @@ pub(super) const BASE_SCHEMA_SQL_V28_GOLDEN: &str = r#"
             revision       INTEGER NOT NULL,
             updated_at     TEXT NOT NULL
         );
+
+        -- Model-broker catalog (tachi#1681 D1, six physical tables -- corrected from
+        -- the frozen design's initial mistaken count of four by cross-vendor
+        -- review). Public-safe, revisioned operational metadata for one concrete
+        -- deployment of a model behind a provider account. No health column here on
+        -- purpose: the domain model's own "health state and observed-at" line
+        -- contradicts the four-separate-authorities law (#1681 D1/D4) and is
+        -- resolved the same way `account_custody` resolved auth vs. custody
+        -- (ddl.rs:776-782) -- a table boundary, not field discipline.
+        -- `provider_account_id` references `provider_accounts.account_id` (#1680) by
+        -- convention, not an enforced FK, matching every other cross-table reference
+        -- in this file. `pricing_snapshot_ref` points at
+        -- `pricing_snapshots.snapshot_id`; it is a live-catalog pointer only -- a
+        -- completed invocation's historical cost is frozen by snapshotting the
+        -- referenced snapshot_id onto the outcome row at write time (#1681 D6,
+        -- review finding 3), never by dereferencing this column after the fact.
+        CREATE TABLE IF NOT EXISTS model_deployments (
+            deployment_id        TEXT PRIMARY KEY,
+            provider_account_id  TEXT NOT NULL,
+            endpoint_ref         TEXT,
+            protocol_kind        TEXT NOT NULL,
+            provider_model_id    TEXT NOT NULL,
+            effective_version    TEXT,
+            capabilities         TEXT NOT NULL DEFAULT '{}',
+            context_window       INTEGER,
+            max_output           INTEGER,
+            attachment_bounds    TEXT NOT NULL DEFAULT '{}',
+            region               TEXT,
+            data_policy          TEXT,
+            pricing_snapshot_ref TEXT,
+            catalog_source       TEXT NOT NULL,
+            fetched_at           TEXT NOT NULL,
+            effective_at         TEXT NOT NULL,
+            expires_at           TEXT,
+            status               TEXT NOT NULL DEFAULT 'active',
+            revision             INTEGER NOT NULL DEFAULT 1,
+            source_refs          TEXT NOT NULL DEFAULT '[]',
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_deployments_account ON model_deployments(provider_account_id);
+        CREATE INDEX IF NOT EXISTS idx_model_deployments_status ON model_deployments(status);
+
+        -- Append-only audit of everything that ever changed a deployment row, shaped
+        -- like `provider_account_events` verbatim (#1680 census precedent reused,
+        -- #1681 D1): `revision` is the deployment revision the event produced;
+        -- `plan_digest` binds an event to the plan that caused it. Rows are never
+        -- updated or deleted -- no UPDATE/DELETE accessor exists for this table
+        -- anywhere in the codebase.
+        CREATE TABLE IF NOT EXISTS model_deployment_events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            deployment_id TEXT NOT NULL,
+            revision      INTEGER NOT NULL,
+            event_kind    TEXT NOT NULL,
+            plan_digest   TEXT,
+            evidence      TEXT NOT NULL DEFAULT '{}',
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_deployment_events_deployment ON model_deployment_events(deployment_id, id);
+
+        -- Stable ModelRef aliases (tachi#1681 D1/D2), e.g. `reasoning.high`,
+        -- `coding.review`. A reviewed operational intent, not permission or task-
+        -- quality truth: `required_capabilities` and `constraints`
+        -- (data/region/budget) are the binding conditions candidate deployments must
+        -- satisfy; candidate deployment ids live on the `model_alias_bindings`
+        -- junction table below, not as a JSON array here, so retiring a deployment
+        -- gets an indexed reverse lookup. `policy_digest` is the canonical-JSON
+        -- content digest of the alias set (the `route_policy_source_revision`
+        -- mechanism, reused not reinvented, #1681 D2); a binding change bumps
+        -- `revision`. Unknown/stale/ambiguous alias resolution fails loudly at the
+        -- call site, not here.
+        CREATE TABLE IF NOT EXISTS model_aliases (
+            alias_name            TEXT PRIMARY KEY,
+            required_capabilities TEXT NOT NULL DEFAULT '{}',
+            constraints           TEXT NOT NULL DEFAULT '{}',
+            status                TEXT NOT NULL DEFAULT 'active',
+            revision              INTEGER NOT NULL DEFAULT 1,
+            policy_digest         TEXT,
+            source_refs           TEXT NOT NULL DEFAULT '[]',
+            created_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_aliases_status ON model_aliases(status);
+
+        -- Junction: which deployments (in priority order) an alias may resolve to.
+        -- Append-and-retire, never delete (the `provider_account_aliases` pattern,
+        -- #1680), so `deployment_id` stays an indexed reverse lookup -- "who
+        -- references this deployment" -- even for a retired binding. A binding
+        -- change bumps the owning `model_aliases.revision`; that bump is a write-
+        -- path responsibility (#1681 D2), not enforced here.
+        CREATE TABLE IF NOT EXISTS model_alias_bindings (
+            alias_name    TEXT NOT NULL,
+            deployment_id TEXT NOT NULL,
+            priority      INTEGER NOT NULL DEFAULT 0,
+            retired       INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            PRIMARY KEY (alias_name, deployment_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_alias_bindings_deployment ON model_alias_bindings(deployment_id);
+
+        -- Content-addressed price sheet (tachi#1681 D1, cross-vendor review finding
+        -- 3): `snapshot_id` is the canonical-JSON digest of `pricing_data`, computed
+        -- by the existing `content_digest_hex` machinery (a memcore-resident digest
+        -- primitive, not duplicated in this file -- #1681 review finding 3). Re-
+        -- importing an unchanged price sheet dedupes onto the same id; any price
+        -- change necessarily mints a new one. Historical invocation cost is frozen
+        -- by copying this id onto the `dispatch_outcomes` row at write time, never
+        -- by dereferencing a mutable pointer after the fact -- immutability is a
+        -- property of the primary key, not a discipline.
+        CREATE TABLE IF NOT EXISTS pricing_snapshots (
+            snapshot_id    TEXT PRIMARY KEY,
+            provider_kind  TEXT NOT NULL,
+            pricing_data   TEXT NOT NULL DEFAULT '{}',
+            catalog_source TEXT,
+            fetched_at     TEXT NOT NULL,
+            created_at     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pricing_snapshots_provider_kind ON pricing_snapshots(provider_kind);
+
+        -- Deployment-level operational health (tachi#1681 D4), shaped after
+        -- `vault_key_health` but keyed singly by `deployment_id`. One of four
+        -- separate health authorities that are never merged into one score:
+        -- CredentialHealth (`vault_key_health`, #748/#1680), ProviderAccountHealth
+        -- (#1680 probe outcomes), ModelDeploymentHealth (this table --
+        -- 429/quota/latency/capability availability), and ModelQuality (#1675,
+        -- adjudicated task-class evidence). 401/403 never write here -- an auth
+        -- failure says nothing about the deployment; that stays on the
+        -- credential/account surfaces. The single writer
+        -- (`record_deployment_outcome`, #1681 D4) is out of scope for this schema-
+        -- only PR. `evidence_kind` records which outcome kind (`probed` vs.
+        -- `self_reported`) produced the row.
+        CREATE TABLE IF NOT EXISTS model_deployment_health (
+            deployment_id   TEXT PRIMARY KEY,
+            state           TEXT NOT NULL DEFAULT 'ok',
+            cooldown_until  TEXT,
+            last_success_at TEXT,
+            last_attempt_at TEXT,
+            last_error      TEXT,
+            error_count     INTEGER NOT NULL DEFAULT 0,
+            evidence_kind   TEXT,
+            observed_at     TEXT NOT NULL DEFAULT '',
+            metadata        TEXT NOT NULL DEFAULT '{}',
+            updated_at      TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_deployment_health_state ON model_deployment_health(state);
+        CREATE INDEX IF NOT EXISTS idx_model_deployment_health_cooldown ON model_deployment_health(cooldown_until);
 
         -- Foundry job persistence (survives process restarts)
         CREATE TABLE IF NOT EXISTS foundry_jobs (
@@ -2965,6 +3454,16 @@ mod golden_tests {
             ("provider_account_aliases", SchemaScope::Product),
             ("provider_account_events", SchemaScope::Product),
             ("account_custody", SchemaScope::Product),
+            // tachi#1681 D1 — model-broker catalog. Six physical tables (the
+            // frozen design's initial "four" was a cross-vendor-review-caught
+            // undercount), listed individually rather than by family name for
+            // the same per-chunk reason as the provider-account group above.
+            ("model_deployments", SchemaScope::Product),
+            ("model_deployment_events", SchemaScope::Product),
+            ("model_aliases", SchemaScope::Product),
+            ("model_alias_bindings", SchemaScope::Product),
+            ("pricing_snapshots", SchemaScope::Product),
+            ("model_deployment_health", SchemaScope::Product),
             ("foundry_jobs", SchemaScope::Product),
             ("foundry_config", SchemaScope::Product),
             ("exec_envs", SchemaScope::Product),

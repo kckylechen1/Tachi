@@ -1,0 +1,35 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "The way around fixture 22's refusal, and the reason that refusal is not enough on its own. A provider answering `n > 1` does not put both choices in one chunk — it interleaves them, one choice per chunk, and every single chunk passes the 'more than one choice' check. Read as though each were the answer, two independent completions arrive spliced into one sentence and the caller cannot see it happened. The first completion is the one this decoder reads; a chunk about any other is refused rather than guessed at.",
+  "chunks": [
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":1,\"delta\":{\"content\":\"b\"},\"finish_reason\":null}]}\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started"
+      },
+      {
+        "event": "text_delta",
+        "text": "a"
+      }
+    ],
+    "error": "unknown_event_shape",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "unknown_event_shape"
+      }
+    }
+  }
+}

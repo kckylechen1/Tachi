@@ -1,0 +1,13 @@
+{
+  "why": "A quota wall arriving as a 403 rather than a 429 — the reason the marker list is not just about balances.",
+  "status": 403,
+  "headers": [],
+  "body": "{\"error\":{\"message\":\"Monthly quota exceeded for this organization\"}}",
+  "expected": {
+    "class": "billing_or_quota",
+    "advice": "retry_other_credential",
+    "legacy_failure_class": "provider_exhausted",
+    "legacy_retry_intent": "retry_within_tier_if_another_key",
+    "retry_after": null
+  }
+}

@@ -3,10 +3,8 @@
 //! `handoff_leave` / `handoff_check` predated two purpose-built replacements
 //! that split its two use cases cleanly:
 //!
-//! - **Short agent-to-agent memo, read-once** → `sticky_ops` (#964,
-//!   `tachi_memory(action='sticky_leave'|'sticky_check')`). Atomic-claim
-//!   delivery, TTL, addressing — everything the old read-then-write
-//!   acknowledge loop only approximated.
+//! - **Same-host agent advisory message** → `tachi_a2a(action='respond')`.
+//!   Delivery is bound to explicit admitted AgentIdentity rows and receipts.
 //! - **Structured baton for a resumed/handed-off task** →
 //!   `orchestrator_ops::HandoffPacket` (`tachi_orchestrator(action='handoff_write'|'handoff_read')`).
 //!   Carries objective/current_state/completed_steps/remaining_steps/

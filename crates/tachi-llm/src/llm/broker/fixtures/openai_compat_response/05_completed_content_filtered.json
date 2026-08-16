@@ -1,0 +1,13 @@
+{
+  "why": "A policy stop is not a clean stop and not a truncation. It flattens to Unknown in the durable receipt, which is exactly why the broker keeps the distinction on its own side.",
+  "status": 200,
+  "headers": [],
+  "body": "{\"id\":\"chatcmpl-cf\",\"model\":\"test-model-1\",\"choices\":[{\"message\":{\"content\":\"I can't help with that.\"},\"finish_reason\":\"content_filter\"}]}",
+  "expected": {
+    "outcome": "completed",
+    "message": {"text": "I can't help with that."},
+    "completion": "content_filtered",
+    "usage": {"provenance": "unknown"},
+    "metadata": {"effective_model": "test-model-1", "provider_request_id": "chatcmpl-cf"}
+  }
+}

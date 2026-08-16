@@ -1,0 +1,32 @@
+{
+  "why": "Multi-part content is an array of typed fragments, not a concatenated string. The optional `detail` hint is only present when the caller set it; emitting a default would change what the provider charges for.",
+  "request": {
+    "target": {"kind": "resolved", "target": {"deployment_id": "dep-openai-compat-1", "endpoint": "https://provider.test/v1/chat/completions", "provider_model_id": "test-model-1"}},
+    "messages": [
+      {"role": "user", "content": {"kind": "parts", "parts": [
+        {"kind": "text", "text": "what is in this image?"},
+        {"kind": "image_url", "url": "https://provider.test/cat.png", "detail": "high"},
+        {"kind": "image_url", "url": "https://provider.test/dog.png"}
+      ]}}
+    ],
+    "data_policy": {"prohibit_training_on_input": true, "prohibit_retention": true},
+    "admitted": {"caller_ref": "uid:501"}
+  },
+  "expected": {
+    "method": "POST",
+    "url": "https://provider.test/v1/chat/completions",
+    "headers": [["content-type", "application/json"]],
+    "auth_placement": {"kind": "header", "name": "authorization", "prefix": "Bearer "},
+    "body_bytes": "{\"model\":\"test-model-1\",\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"what is in this image?\",\"type\":\"text\"},{\"image_url\":{\"detail\":\"high\",\"url\":\"https://provider.test/cat.png\"},\"type\":\"image_url\"},{\"image_url\":{\"url\":\"https://provider.test/dog.png\"},\"type\":\"image_url\"}]}]}",
+    "body": {
+      "model": "test-model-1",
+      "messages": [
+        {"role": "user", "content": [
+          {"type": "text", "text": "what is in this image?"},
+          {"type": "image_url", "image_url": {"url": "https://provider.test/cat.png", "detail": "high"}},
+          {"type": "image_url", "image_url": {"url": "https://provider.test/dog.png"}}
+        ]}
+      ]
+    }
+  }
+}

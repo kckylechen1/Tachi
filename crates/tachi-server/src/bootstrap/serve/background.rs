@@ -129,17 +129,12 @@ fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, Strin
 
     let mut total = 0usize;
 
-    // Unconditional 90-day TTL: a build receipt/ticket/ticket-status row and a
-    // sticky claim row all have no "still open" concept — each is done being
-    // useful the instant it is written.
+    // Unconditional 90-day TTL: a build receipt/ticket/ticket-status row has
+    // no "still open" concept — each is done being useful when written.
     for namespace in [
         crate::build_broker::RECEIPT_NS,
         crate::build_broker::ticket::TICKET_NS,
         crate::build_broker::ticket::STATUS_NS,
-        // `sticky_ops::claim::STICKY_CLAIM_NAMESPACE` is `pub(super)` (visible
-        // only within `sticky_ops`, not from here) — hardcoded literal,
-        // source of truth: crates/tachi-server/src/sticky_ops/claim.rs:23.
-        "sticky_claim",
     ] {
         total += store
             .backfill_missing_expires_at(namespace, &ninety_days, None)

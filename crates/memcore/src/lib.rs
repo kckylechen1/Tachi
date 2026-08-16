@@ -47,6 +47,11 @@ const _: () = assert!(
 
 #[cfg(feature = "admin")]
 pub mod agent_profile;
+pub mod canonical_digest;
+/// Model-broker catalog row types (tachi#1681). `admin`-gated because all
+/// six catalog tables are `SchemaScope::Product`.
+#[cfg(feature = "admin")]
+pub mod catalog;
 pub mod db;
 pub mod embed_config;
 pub mod error;
@@ -55,6 +60,7 @@ pub mod foundry;
 #[cfg(feature = "admin")]
 pub mod hub;
 pub mod kernel_policy;
+pub mod model_broker_seam;
 pub mod namespace;
 pub mod near_dup;
 pub mod noise;
@@ -75,6 +81,26 @@ pub mod vector_backfill;
 pub use agent_profile::{
     AgentProfileIdentity, AgentProfilePack, AgentProfileRule, AgentProfileSource,
     RenderedAgentProfile, AGENT_PROFILE_PACK_SCHEMA_VERSION,
+};
+pub use canonical_digest::{canonical_json, canonical_json_digest_hex, canonical_json_eq};
+/// tachi#1681 model-broker catalog: the row types the six catalog tables
+/// carry, re-exported at the root so the env-import and status projection
+/// reach them without importing the internal `catalog::` module layout.
+#[cfg(feature = "admin")]
+pub use catalog::{
+    partition_authoritative_at, AttachmentBounds, AuthoritativeDeployment, AuthoritativePartition,
+    CatalogFreshness, CatalogSource, DeploymentCapabilities, DeploymentEventKind,
+    EmbeddingsCapability, ModelAlias, ModelAliasBinding, ModelDeployment, ModelDeploymentEvent,
+    ModelDeploymentHealth, NewModelDeployment, NewModelDeploymentEvent, NotAuthoritative,
+    PricingSnapshot, ProtocolKind, ALIAS_STATUS_ACTIVE, ALIAS_STATUS_RETIRED,
+    DEPLOYMENT_STATUS_ACTIVE, DEPLOYMENT_STATUS_RETIRED, PRICING_SNAPSHOT_SCHEME,
+};
+#[cfg(feature = "admin")]
+pub use db::a2a::{
+    consume_a2a_for_recipient, expire_a2a_for_recipient, insert_a2a_envelope, list_a2a_status,
+    resolve_a2a_recipient_eligibility, A2aDeliveryReceipt, A2aEnvelope, A2aInsertOutcome,
+    A2aRecipientEligibility, A2aStatusRow, A2aTransitionActor, NewA2aEnvelope,
+    A2A_SAME_HOST_TRUST_DOMAIN, A2A_TURN_RESPONSE_KIND, MAX_A2A_STORAGE_BATCH,
 };
 #[cfg(feature = "admin")]
 pub use db::dispatch_adjudications::{
@@ -175,6 +201,11 @@ pub use db::{
 };
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+pub use db::{
+    DeleteMaintenanceOutcome, GcMaintenanceOutcome, MaintenanceClassFact,
+    OperatorMaintenanceCommittedReceiptBinding, OperatorMaintenanceOperation,
+    OperatorMaintenancePlanBinding, OPERATOR_DELETE_CLASSES, OPERATOR_GC_CLASSES,
+};
 pub use embed_config::embed_raw_tier_enabled;
 pub use error::{
     MemoryError, OutboxOutcomeRefusal, ProviderPlanRefusal, WorkClaimTransitionReason,
@@ -188,6 +219,47 @@ pub use foundry::{
 #[cfg(feature = "admin")]
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use kernel_policy::{EmbedPolicy, KernelPolicy};
+/// The #1681/#1682 model-broker seam's fixture resolver: test scaffolding,
+/// never production routing, so its re-export carries the same
+/// `broker-fixtures` gate as the type itself (codex PR #1739 CONCERN-5).
+/// Downstream leaves opt in explicitly from `[dev-dependencies]`.
+#[cfg(any(test, feature = "broker-fixtures"))]
+pub use model_broker_seam::StaticFixtureResolver;
+/// Model-broker seam (#1681/#1682). This list is the *reachable closure* of the
+/// five frozen seam types, enumerated rather than assumed (codex PR #1739
+/// BUG-6): a type is here only if a consumer must be able to name it to build an
+/// input for, or read a field out of, one of the five.
+///
+/// - `ModelRef` → `SeamError` (its constructor's error).
+/// - `ResolvedDeployment` → `ResolvedDeploymentParts` (its constructor's input
+///   and wire shape), `WireDialect`, `DeploymentCapabilities`,
+///   `DeploymentBounds`.
+/// - `ResolutionOutcome` → `CandidateEvaluation` → `ExclusionReason`;
+///   `Selection` → `AbstainReason`; `ResolutionRevisions`; `BudgetEstimate`;
+///   `FALLBACK_ORDER_CAP` (the bound its constructor enforces, which callers
+///   must respect before calling).
+/// - `OperationalResolver` → `ResolverInput` → `CatalogSnapshot`,
+///   `HealthSnapshot` → `DeploymentCooldown`, `AccountSnapshot` →
+///   `AccountAvailability`, `BudgetContext`, `PinContext`, `RetryContext`.
+/// - `HealthObservation` → `InvocationErrorClass`, `RetryAfter`,
+///   `ObservationEvidence`.
+///
+/// Nothing else in the module is public, so the list is closed by construction;
+/// the module's internal deserialization shadows are private and deliberately
+/// unreachable.
+pub use model_broker_seam::{
+    AbstainReason, AccountAvailability, AccountSnapshot, BudgetContext, BudgetEstimate,
+    CandidateEvaluation, CatalogSnapshot, DeploymentBounds, DeploymentCooldown, ExclusionReason,
+    HealthObservation, HealthSnapshot, InvocationErrorClass, ModelRef, ObservationEvidence,
+    OperationalResolver, PinContext, ResolutionOutcome, ResolutionRevisions, ResolvedDeployment,
+    ResolvedDeploymentParts, ResolverInput, RetryAfter, RetryContext, SeamError, Selection,
+    WireDialect, FALLBACK_ORDER_CAP,
+};
+// `DeploymentCapabilities` (the seam's flat bool projection) is deliberately
+// NOT re-exported at the crate root: PR-B's catalog row type of the same name
+// (model_catalog) owns the root path. The seam type stays reachable as
+// `memcore::model_broker_seam::DeploymentCapabilities` — the ruling the #1757
+// vendoring note deferred to the merge (applied 2026-08-16).
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
     is_handoff_entry, is_internal_only_row, is_kanban_entry, is_namespace_search_noise,

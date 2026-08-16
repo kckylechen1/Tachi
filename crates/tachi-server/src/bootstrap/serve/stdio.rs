@@ -111,6 +111,7 @@ pub(super) async fn serve_stdio_proxy(
         global_db_path,
         project_db_path,
         client_project,
+        resolved_agent_identity: Default::default(),
     };
     let transport = (stdin(), stdout());
     let running = rmcp::service::serve_server(proxy, transport).await?;
@@ -417,11 +418,59 @@ struct StdioProxyServer {
     global_db_path: PathBuf,
     project_db_path: Option<PathBuf>,
     client_project: Option<String>,
+    /// Set at MCP initialize: `_meta` identity wins, env is fallback only
+    /// when the key is absent, blank/illegal omit the header (#1761).
+    /// `None` means initialize has not run yet — transport reads env.
+    resolved_agent_identity:
+        std::sync::Arc<std::sync::Mutex<Option<crate::cli_client::ProxyIdentityForward>>>,
 }
 
 impl StdioProxyServer {
     /// Snapshot the currently-targeted daemon. Cheap clone out of the lock so the
     /// guard is never held across an await.
+    fn forwarded_agent_identity(&self) -> crate::cli_client::ProxyIdentityForward {
+        self.resolved_agent_identity
+            .lock()
+            .expect("stdio proxy identity lock poisoned")
+            .clone()
+            .unwrap_or(crate::cli_client::ProxyIdentityForward::AutoEnv)
+    }
+
+    fn capture_initialize_identity(&self, request: &rmcp::model::InitializeRequestParams) {
+        let (explicit_key_present, explicit_raw) =
+            request.meta.as_ref().map_or((false, None), |meta| {
+                match meta
+                    .0
+                    .get(crate::session_identity::META_AGENT_IDENTITY)
+                    .or_else(|| meta.0.get("tachi.agentIdentity"))
+                {
+                    Some(value) => (true, value.as_str()),
+                    None => (false, None),
+                }
+            });
+        let resolved = crate::session_identity::resolve_proxy_agent_identity(
+            explicit_raw,
+            explicit_key_present,
+            std::env::var(crate::session_identity::ENV_AGENT_IDENTITY)
+                .ok()
+                .as_deref(),
+        );
+        let choice = match resolved {
+            Some(value) => crate::cli_client::ProxyIdentityForward::Header(value),
+            None => {
+                if explicit_key_present {
+                    crate::cli_client::ProxyIdentityForward::Omit
+                } else {
+                    crate::cli_client::ProxyIdentityForward::AutoEnv
+                }
+            }
+        };
+        *self
+            .resolved_agent_identity
+            .lock()
+            .expect("stdio proxy identity lock poisoned") = Some(choice);
+    }
+
     fn current_daemon(&self) -> crate::cli_client::DaemonInfo {
         self.daemon
             .read()
@@ -541,6 +590,19 @@ impl StdioProxyServer {
 }
 
 impl rmcp::ServerHandler for StdioProxyServer {
+    fn initialize(
+        &self,
+        request: rmcp::model::InitializeRequestParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl Future<Output = Result<rmcp::model::InitializeResult, rmcp::ErrorData>> + Send + '_
+    {
+        async move {
+            self.capture_initialize_identity(&request);
+            context.peer.set_peer_info(request);
+            Ok(self.get_info())
+        }
+    }
+
     fn get_info(&self) -> rmcp::model::ServerInfo {
         rmcp::model::ServerInfo::new(
             rmcp::model::ServerCapabilities::builder()
@@ -587,10 +649,12 @@ impl rmcp::ServerHandler for StdioProxyServer {
             }
             let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
             let current = self.current_daemon();
-            match crate::cli_client::call_daemon_tool_raw(
+            let identity = self.forwarded_agent_identity();
+            match crate::cli_client::call_daemon_tool_raw_with_identity(
                 &current,
                 request.clone(),
                 self.client_project.as_deref(),
+                identity.clone(),
             )
             .await
             {
@@ -601,10 +665,11 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 // as-is to avoid replaying a possibly-applied write.
                 Err(err) if err.allows_in_process_fallback() => {
                     match self.refresh_daemon(&current.url).await {
-                        Some(fresh) => crate::cli_client::call_daemon_tool_raw(
+                        Some(fresh) => crate::cli_client::call_daemon_tool_raw_with_identity(
                             &fresh,
                             request,
                             self.client_project.as_deref(),
+                            identity,
                         )
                         .await
                         .map_err(daemon_error_data),

@@ -183,3 +183,45 @@ pub(crate) use self::issue_flow::{
 };
 pub(crate) use self::release_ux::handle_task_release_note;
 pub(crate) use self::utils::read_json_file;
+
+/// Re-read the lifecycle owner before an internal evidence write. A safe-looking
+/// public `flow_id` is not admission: the durable status row must bind itself
+/// to the same id. The revision deliberately hashes only the immutable intake
+/// identity fields, because later lifecycle updates must not turn an exact
+/// evidence replay into a semantic collision.
+pub(crate) fn verified_flow_revision(
+    flow_id: &str,
+    expected_issue_ref: Option<&str>,
+    expected_dispatch_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let flow_id = flow_id.trim();
+    if flow_id.is_empty() {
+        return Ok(None);
+    }
+    let run_dir = run_dir_for_flow_id(flow_id)?;
+    let Some(status) = read_json_file(&run_dir.join("status.json"))? else {
+        return Ok(None);
+    };
+    if !status.is_object() || status.get("flow_id").and_then(Value::as_str) != Some(flow_id) {
+        return Ok(None);
+    }
+    if let Some(issue_ref) = expected_issue_ref {
+        if status.get("issue_ref").and_then(Value::as_str) != Some(issue_ref) {
+            return Ok(None);
+        }
+    }
+    let dispatch_revision = match expected_dispatch_id {
+        Some(dispatch_id) => match verified_dispatch_marker_revision(flow_id, dispatch_id)? {
+            Some(revision) => Some(revision),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let revision = tachi_params::canonical_json_sha256(&json!({
+        "flow_id": flow_id,
+        "issue_ref": status.get("issue_ref"),
+        "created_at": status.get("created_at"),
+        "dispatch_revision": dispatch_revision,
+    }))?;
+    Ok(Some(format!("sha256:{revision}")))
+}

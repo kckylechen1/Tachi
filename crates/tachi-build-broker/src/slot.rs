@@ -8,9 +8,8 @@
 //! Acquisition is `insert_state_if_absent` — a single SQLite
 //! `INSERT ... ON CONFLICT DO NOTHING`, so among any number of concurrent
 //! callers (threads, processes, daemons) exactly one observes `Acquired` and
-//! everyone else observes `Busy`. Same primitive the sticky claim gate uses
-//! (`sticky_ops::claim`), for the same reason: a read-then-write would be a
-//! race, and the race here costs a poisoned target dir.
+//! everyone else observes `Busy`. A read-then-write would be a race, and the
+//! race here costs a poisoned target dir.
 //!
 //! ## Why the slot is not stealable on a timeout
 //!

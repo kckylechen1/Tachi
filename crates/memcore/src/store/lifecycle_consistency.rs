@@ -4,7 +4,7 @@
 //! and apply/restore never delete or rebuild search, vector, access, or edge
 //! evidence. Ambiguous authority remains an operator-visible adjudication item.
 
-use super::super::{MemoryError, MemoryStore};
+use super::super::{db, MemoryError, MemoryStore};
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -764,6 +764,13 @@ impl MemoryStore {
                 "lifecycle-consistency relation membership drifted".into(),
             ));
         }
+        for row in &plan.frozen_rows {
+            db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &row.id,
+                "mutated by lifecycle consistency apply",
+            )?;
+        }
         let projection_counts_before = projection_counts(&tx)?;
         let frozen = plan
             .frozen_rows
@@ -858,6 +865,18 @@ impl MemoryStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for row in &receipt.rows {
+            db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &row.after.id,
+                "restored by lifecycle consistency",
+            )?;
+            db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &row.related_after.id,
+                "used as lifecycle consistency restore context",
+            )?;
+        }
         for row in &receipt.rows {
             if load_row(&tx, &row.after.id)?.as_ref() != Some(&row.after) {
                 return Err(MemoryError::InvalidArg(format!(

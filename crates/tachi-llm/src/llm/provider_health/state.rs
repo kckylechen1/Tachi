@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::super::LlmClient;
 use super::*;
 
@@ -339,5 +341,101 @@ impl ProviderState {
         if remove_logical {
             self.cooldowns.remove(logical_name);
         }
+    }
+}
+
+/// What the deployment-health seam did with the outcomes it saw
+/// (tachi#1681 D4, PR-C item 4).
+///
+/// Counts only. A deployment id is not log material, and the rows themselves
+/// are the record; these answer the one question counts can answer — whether
+/// anything is landing at all, and how much of it is being skipped.
+///
+/// Skips are counted rather than logged per event because the steady state of
+/// a fallback-heavy deployment is *many* of them, and a warning per throttled
+/// request would bury the one line that matters.
+#[derive(Debug, Default)]
+pub(in crate::llm) struct DeploymentHealthCounters {
+    recorded: AtomicU64,
+    skipped_unknown_deployment: AtomicU64,
+    skipped_different_request: AtomicU64,
+    skipped_stale_observation: AtomicU64,
+    skipped_auth_class_status: AtomicU64,
+    skipped_no_store: AtomicU64,
+    failed: AtomicU64,
+}
+
+/// A snapshot of [`DeploymentHealthCounters`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeploymentHealthRecordCounts {
+    pub recorded: u64,
+    /// Outcomes whose deployment id is not in the catalog — the fail-safe skip
+    /// (#1681 D4): a health record with nowhere to land must never make the
+    /// lane call that produced it fail.
+    pub skipped_unknown_deployment: u64,
+    /// Outcomes whose request went somewhere the catalog row does not describe
+    /// — a #1197 fallback tier, or a `model_override`.
+    pub skipped_different_request: u64,
+    /// Outcomes the row had already been overtaken by: health writes are
+    /// scheduled off the call path, so a 429's write can land after the retry
+    /// that succeeded, and the store keeps the later **observation** rather
+    /// than the later write (#1681 CP5).
+    pub skipped_stale_observation: u64,
+    /// Outcomes carrying a `401`/`403`. Unconstructable through the deployment
+    /// vocabulary, so a non-zero count means the type seal has been breached
+    /// somewhere and the store door caught it.
+    pub skipped_auth_class_status: u64,
+    /// Outcomes that named a deployment but had no database to write it to —
+    /// a client constructed without a vault path. Counted rather than dropped
+    /// silently: "recorded nothing" and "had nowhere to record" are different
+    /// states, and only one of them is a bug.
+    pub skipped_no_store: u64,
+    /// Writes the store refused (locked database, unreadable row).
+    pub failed: u64,
+}
+
+impl DeploymentHealthCounters {
+    pub(in crate::llm) fn snapshot(&self) -> DeploymentHealthRecordCounts {
+        DeploymentHealthRecordCounts {
+            recorded: self.recorded.load(Ordering::Relaxed),
+            skipped_unknown_deployment: self.skipped_unknown_deployment.load(Ordering::Relaxed),
+            skipped_different_request: self.skipped_different_request.load(Ordering::Relaxed),
+            skipped_stale_observation: self.skipped_stale_observation.load(Ordering::Relaxed),
+            skipped_auth_class_status: self.skipped_auth_class_status.load(Ordering::Relaxed),
+            skipped_no_store: self.skipped_no_store.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(in crate::llm) fn note_recorded(&self) {
+        self.recorded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::llm) fn note_unknown_deployment(&self) {
+        self.skipped_unknown_deployment
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::llm) fn note_different_request(&self) {
+        self.skipped_different_request
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::llm) fn note_stale_observation(&self) {
+        self.skipped_stale_observation
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::llm) fn note_auth_class_status(&self) {
+        self.skipped_auth_class_status
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::llm) fn note_no_store(&self) {
+        self.skipped_no_store.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::llm) fn note_failure(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
     }
 }

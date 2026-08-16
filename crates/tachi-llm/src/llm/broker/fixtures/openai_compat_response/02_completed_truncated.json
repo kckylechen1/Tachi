@@ -1,0 +1,13 @@
+{
+  "why": "`length` is the one finish reason besides `stop` that the durable #1519 status can express. Losing it turns a cut-off answer into a clean one.",
+  "status": 200,
+  "headers": [],
+  "body": "{\"id\":\"chatcmpl-t\",\"model\":\"test-model-1\",\"choices\":[{\"message\":{\"content\":\"it began like this and then\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1024,\"total_tokens\":1029}}",
+  "expected": {
+    "outcome": "completed",
+    "message": {"text": "it began like this and then"},
+    "completion": "truncated",
+    "usage": {"prompt_tokens": 5, "completion_tokens": 1024, "total_tokens": 1029, "provenance": "provider_authoritative"},
+    "metadata": {"effective_model": "test-model-1", "provider_request_id": "chatcmpl-t"}
+  }
+}

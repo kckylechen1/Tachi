@@ -2293,6 +2293,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-bootstrap-tests"
+version = "1.9.2"
+dependencies = [
+ "chrono",
+ "memcore",
+ "rusqlite",
+ "serde_json",
+ "tachi-server",
+ "uuid",
+]
+
+[[package]]
 name = "tachi-build-broker"
 version = "1.9.2"
 dependencies = [

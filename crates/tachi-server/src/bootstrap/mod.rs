@@ -26,6 +26,7 @@ mod serve;
 mod setup;
 pub(crate) mod setup_wizard;
 mod skill_surface_cli;
+mod sticky_cutover_cli;
 mod tidy;
 mod vault_sync;
 // Crate-visible so the Wiki search integration tests can drive
@@ -67,15 +68,17 @@ impl std::fmt::Display for VaultExecExit {
 
 impl std::error::Error for VaultExecExit {}
 
-// Re-exports preserving the legacy public surface so external callers
-// (`main.rs`, `tests.rs`) keep resolving symbols via `crate::bootstrap::<name>`.
-#[cfg(test)]
+// Feature-gated friend surface for the external bootstrap test crate. Product
+// builds keep these implementation functions private to their defining modules.
+#[cfg(feature = "bootstrap-test-api")]
 pub(crate) use setup::build_setup_report;
-#[cfg(test)]
+#[cfg(feature = "bootstrap-test-api")]
+pub use tidy::MigrationConfig;
+#[cfg(feature = "bootstrap-test-api")]
 pub(crate) use tidy::{
     authorized_migration_sources, build_migration_plan, build_tidy_report, execute_tidy_apply,
     execute_tidy_migrations, force_boundary_failure_after_archive_stage,
-    update_manifest_after_migration, MigrationConfig,
+    update_manifest_after_migration,
 };
 
 // Phase 2 (LLM 3-layer consolidation): Voyage covers vectors, SiliconFlow
@@ -156,7 +159,7 @@ pub(super) const DEFAULT_STANDARD_PROFILE_NOTICE: &str =
     "No profile specified; defaulting to 'standard'. Set TACHI_PROFILE=admin to restore legacy full surface (148 tools).";
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct SetupItem {
+pub struct SetupItem {
     pub id: String,
     pub label: String,
     pub status: String,
@@ -164,7 +167,7 @@ pub(crate) struct SetupItem {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct SetupReport {
+pub struct SetupReport {
     pub app_home: String,
     pub config_env_path: String,
     pub global_db_path: String,
@@ -175,7 +178,7 @@ pub(crate) struct SetupReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TidyFinding {
+pub struct TidyFinding {
     pub path: String,
     pub entry_count: Option<usize>,
     pub vec_available: bool,
@@ -195,14 +198,14 @@ pub(crate) struct TidyFinding {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TidyGroupSummary {
+pub struct TidyGroupSummary {
     pub group: String,
     pub database_count: usize,
     pub memory_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TidyPlanStep {
+pub struct TidyPlanStep {
     pub order: usize,
     pub scope: String,
     pub action: String,
@@ -212,7 +215,7 @@ pub(crate) struct TidyPlanStep {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TidyAppliedStep {
+pub struct TidyAppliedStep {
     pub order: usize,
     pub scope: String,
     pub action: String,
@@ -221,7 +224,7 @@ pub(crate) struct TidyAppliedStep {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TidyApplySummary {
+pub struct TidyApplySummary {
     pub report_path: String,
     pub applied_steps: Vec<TidyAppliedStep>,
     pub applied_count: usize,
@@ -230,7 +233,7 @@ pub(crate) struct TidyApplySummary {
 
 /// One source DB scheduled for fragment-consolidation migration.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TidyMigration {
+pub struct TidyMigration {
     pub source_path: String,
     pub target_path: String,
     pub archive_path: String,
@@ -242,7 +245,7 @@ pub(crate) struct TidyMigration {
 
 /// Result of a single migration execution.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TidyMigrationOutcome {
+pub struct TidyMigrationOutcome {
     pub source_path: String,
     pub target_path: String,
     pub archive_path: Option<String>,
@@ -255,7 +258,7 @@ pub(crate) struct TidyMigrationOutcome {
 
 /// Aggregate result of the `--execute` path.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TidyExecuteSummary {
+pub struct TidyExecuteSummary {
     pub target_db: String,
     pub planned: Vec<TidyMigration>,
     pub outcomes: Vec<TidyMigrationOutcome>,
@@ -266,7 +269,7 @@ pub(crate) struct TidyExecuteSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TidyReport {
+pub struct TidyReport {
     pub scanned_roots: Vec<String>,
     pub databases: Vec<TidyFinding>,
     pub groups: Vec<TidyGroupSummary>,

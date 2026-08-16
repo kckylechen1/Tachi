@@ -1,0 +1,56 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "The same stream as 01, delivered CRLF-framed and cut at hostile offsets — including one cut that lands between a CR and its LF, which is the single most common way a hand-rolled reader invents a blank line and dispatches half an event. Identical output to 01 is the whole point.",
+  "chunks": [
+    {
+      "text": "dat"
+    },
+    {
+      "text": "a: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"test-model-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\r"
+    },
+    {
+      "text": "\n"
+    },
+    {
+      "text": "\r\ndata: {\"choices\":[{\"index\":0,\"delta\":{"
+    },
+    {
+      "text": "\"content\":\"Hel\"},\"finish_reason\":null}]}\r\n\r\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\r\n\r\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\ndata: [DONE]\r"
+    },
+    {
+      "text": "\n\r\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "test-model-1",
+          "provider_request_id": "chatcmpl-1"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "Hel"
+      },
+      {
+        "event": "text_delta",
+        "text": "lo"
+      },
+      {
+        "event": "completed",
+        "completion": "complete"
+      }
+    ],
+    "error": null,
+    "terminal_disposition": {
+      "disposition": "completed",
+      "completion": "complete"
+    }
+  }
+}

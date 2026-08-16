@@ -798,6 +798,20 @@ impl MemoryStore {
                 }
             }
         }
+        for group in &plan.groups {
+            db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &group.winner.id,
+                "used as an exact-dedupe winner",
+            )?;
+            for loser in &group.losers {
+                db::refuse_retired_sticky_row_within_tx(
+                    &tx,
+                    &loser.id,
+                    "archived by exact dedupe",
+                )?;
+            }
+        }
         let now = db::now_utc_iso();
         let apply_id = uuid::Uuid::new_v4().to_string();
         // The complete text-digest revalidation above runs after BEGIN IMMEDIATE,
@@ -1033,6 +1047,18 @@ impl MemoryStore {
                )"
             .to_string()
         };
+        for row in view.rows {
+            db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &row.loser_id,
+                "restored by exact dedupe",
+            )?;
+            db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &row.winner_id,
+                "used as an exact-dedupe restore authority",
+            )?;
+        }
         for row in view.rows {
             let changed = tx.execute(
                 &restore_sql,

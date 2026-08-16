@@ -1,0 +1,63 @@
+{
+  "grammar": "anthropic_sse",
+  "why": "This grammar's terminator is an event, not a sentinel string, and its absence is the same fault: the body ended cleanly and the stream never did. The shared driver reaches the same `unterminated_stream` from a different grammar's rule, which is the point of it being shared.",
+  "chunks": [
+    {
+      "text": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test-1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n"
+    },
+    {
+      "text": "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+    },
+    {
+      "text": "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n"
+    },
+    {
+      "text": "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+    },
+    {
+      "text": "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":15}}\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "claude-test-1",
+          "provider_request_id": "msg_1"
+        }
+      },
+      {
+        "event": "usage",
+        "usage": {
+          "prompt_tokens": 10,
+          "completion_tokens": 1,
+          "provenance": "provider_authoritative"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "Hi"
+      },
+      {
+        "event": "usage",
+        "usage": {
+          "completion_tokens": 15,
+          "provenance": "provider_authoritative"
+        }
+      }
+    ],
+    "error": "unterminated_stream",
+    "terminal_disposition": {
+      "disposition": "protocol_error",
+      "violation": {
+        "kind": "stream_decode",
+        "rule": "unterminated_stream"
+      }
+    }
+  }
+}
