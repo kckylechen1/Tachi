@@ -108,6 +108,20 @@ pub fn facade_action_allowed(
 ) -> bool {
     let profile = profile.unwrap_or_else(default_tool_profile);
     let action = action.map(str::trim).filter(|a| !a.is_empty());
+    if tool_name == "tachi_agent_eval"
+        && action.is_some_and(|action| {
+            matches!(
+                action.to_ascii_lowercase().as_str(),
+                "attach_session" | "get_attachment"
+            )
+        })
+    {
+        // Attachment admission/projection is a host-coordination surface.
+        // Keep the existing eval actions unchanged, while requiring the
+        // explicit coordinate/admin profile before the attachment handler can
+        // run (the server handler repeats this gate for direct callers).
+        return profile.is_admin() || profile == ToolProfile::coordinate();
+    }
     if tool_name == "tachi_task"
         && action
             .map(|a| task_action_retired(&a.to_ascii_lowercase()))
@@ -810,6 +824,44 @@ mod tests {
                     profile.as_str()
                 );
             }
+        }
+    }
+    #[test]
+    fn f1733_attachment_actions_are_coordinate_or_admin_only() {
+        for action in ["attach_session", "get_attachment"] {
+            assert!(facade_action_allowed(
+                "tachi_agent_eval",
+                Some(action),
+                Some(ToolProfile::coordinate())
+            ));
+            assert!(facade_action_allowed(
+                "tachi_agent_eval",
+                Some(action),
+                Some(ToolProfile::admin())
+            ));
+            for profile in [ToolProfile::observe(), ToolProfile::delegate()] {
+                assert!(
+                    !facade_action_allowed("tachi_agent_eval", Some(action), Some(profile)),
+                    "{action} must be denied for {}",
+                    profile.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f1733_non_attachment_eval_actions_keep_existing_policy_behavior() {
+        for action in ["aggregate_live", "telemetry", "route_projection"] {
+            assert!(facade_action_allowed(
+                "tachi_agent_eval",
+                Some(action),
+                Some(ToolProfile::observe())
+            ));
+            assert!(!facade_action_allowed(
+                "tachi_agent_eval",
+                Some(action),
+                Some(ToolProfile::delegate())
+            ));
         }
     }
 }

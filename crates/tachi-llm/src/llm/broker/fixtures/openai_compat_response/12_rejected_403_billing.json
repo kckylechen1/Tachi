@@ -1,0 +1,11 @@
+{
+  "why": "A dead account needs a human; a busy one needs a clock. Both are ProviderExhausted downstream, so the split has to live here or it is lost.",
+  "status": 403,
+  "headers": [],
+  "body": "{\"error\":{\"message\":\"Insufficient Balance\",\"type\":\"insufficient_balance\"}}",
+  "expected": {
+    "outcome": "rejected",
+    "status": 403,
+    "classification": {"class": "billing_or_quota", "advice": "retry_other_credential"}
+  }
+}

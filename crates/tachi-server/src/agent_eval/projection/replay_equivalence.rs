@@ -619,6 +619,7 @@ async fn route_projection_payload(server: &MemoryServer) -> Value {
                 task_type: Some("fix_request".to_string()),
                 ..Default::default()
             }),
+            ..Default::default()
         },
     )
     .await

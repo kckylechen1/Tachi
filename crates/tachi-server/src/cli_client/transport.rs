@@ -240,7 +240,7 @@ pub(crate) async fn call_daemon_tool_raw(
         .0
 }
 
-async fn call_daemon_tool_raw_with_profile(
+pub(crate) async fn call_daemon_tool_raw_with_profile(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
@@ -468,13 +468,27 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// List daemon tools over Streamable HTTP. stdio proxy mode uses daemon-side
-/// discovery so it does not need to construct a local MemoryServer or open DBs.
-pub(crate) async fn list_daemon_tools(
+/// List daemon tools with the profile that is immutable for one stdio-proxy
+/// MCP connection.  The profile rides the same initialize header rail as raw
+/// tool calls, so discovery cannot silently widen the later call surface.
+pub(crate) async fn list_daemon_tools_with_profile(
     info: &DaemonInfo,
     params: Option<rmcp::model::PaginatedRequestParams>,
+    profile: Option<tachi_hub::ToolProfile>,
 ) -> Result<ListToolsResult, DaemonCallError> {
-    let transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    if let Some(profile) = profile {
+        let profile = profile.as_str();
+        let value = HeaderValue::from_str(&profile).map_err(|error| {
+            DaemonCallError::BeforeDispatch(format!("invalid proxy profile header value: {error}"))
+        })?;
+        let mut headers = HashMap::new();
+        headers.insert(
+            HeaderName::from_static(crate::session_identity::HEADER_PROFILE),
+            value,
+        );
+        transport_config = transport_config.custom_headers(headers);
+    }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
     let client = ServiceExt::serve((), transport).await.map_err(|e| {
         DaemonCallError::BeforeDispatch(format!("daemon handshake failed at {}: {e}", info.url))

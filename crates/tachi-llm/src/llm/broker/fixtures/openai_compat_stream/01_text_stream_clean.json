@@ -1,0 +1,53 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "The floor: the shape every other fixture deviates from. The opening chunk's `content: \"\"` must produce no event at all — emitting an empty text delta in front of every response is noise the caller has to learn to filter — and the identity a provider announces once must reach exactly one `started`.",
+  "chunks": [
+    {
+      "text": "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"test-model-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+    },
+    {
+      "text": "data: [DONE]\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "test-model-1",
+          "provider_request_id": "chatcmpl-1"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "Hel"
+      },
+      {
+        "event": "text_delta",
+        "text": "lo"
+      },
+      {
+        "event": "completed",
+        "completion": "complete"
+      }
+    ],
+    "error": null,
+    "terminal_disposition": {
+      "disposition": "completed",
+      "completion": "complete"
+    }
+  }
+}

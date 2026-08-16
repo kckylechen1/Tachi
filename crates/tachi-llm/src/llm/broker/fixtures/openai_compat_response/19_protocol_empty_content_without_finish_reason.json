@@ -1,0 +1,10 @@
+{
+  "why": "Empty and silent about why. `finish_reason` is absent rather than invented, and the field is skipped entirely rather than serialized as null.",
+  "status": 200,
+  "headers": [],
+  "body": "{\"model\":\"test-model-1\",\"choices\":[{\"message\":{\"content\":\"\"}}]}",
+  "expected": {
+    "outcome": "protocol_violation",
+    "violation": {"kind": "empty_assistant_content"}
+  }
+}

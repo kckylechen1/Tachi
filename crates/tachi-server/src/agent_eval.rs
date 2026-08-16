@@ -5,6 +5,7 @@ use crate::tool_params::TachiAgentEvalParams;
 use serde_json::Value;
 use std::path::Path;
 
+mod attachment;
 mod fixture;
 mod live;
 mod mirror;
@@ -29,10 +30,23 @@ pub(crate) const EVAL_MEMORY_RETIREMENT_NOTE: &str =
      tachi_agent_eval(action='route_projection')";
 
 pub(crate) async fn handle_agent_eval(
-    _server: &MemoryServer,
+    server: &MemoryServer,
     params: TachiAgentEvalParams,
 ) -> Result<String, String> {
     let action = params.action.trim().to_ascii_lowercase();
+    // ServerHandler applies this policy before dispatch, but keep the same
+    // deny-before-handler invariant for direct/in-process callers too.  The
+    // other eval actions retain their existing policy behavior; only the
+    // host-owned attachment actions are coordinate/admin surfaces.
+    if !tachi_hub::facade_action_allowed(
+        "tachi_agent_eval",
+        Some(&action),
+        server.active_tool_profile(),
+    ) {
+        return Err(format!(
+            "tool action '{action}' is not allowed for the active Tachi profile"
+        ));
+    }
     match action.as_str() {
         // #1066: first-class mirror eval intake for harness-native
         // subagents. Extends this SAME facade tool — not a second ledger —
@@ -43,25 +57,25 @@ pub(crate) async fn handle_agent_eval(
             let register = params
                 .register
                 .ok_or_else(|| "register payload is required for action='register'".to_string())?;
-            self::mirror::handle_register(_server, register)
+            self::mirror::handle_register(server, register)
         }
         "observe" => {
             let observe = params
                 .observe
                 .ok_or_else(|| "observe payload is required for action='observe'".to_string())?;
-            self::mirror::handle_observe(_server, observe)
+            self::mirror::handle_observe(server, observe)
         }
         "adjudicate" => {
             let adjudicate = params.adjudicate.ok_or_else(|| {
                 "adjudicate payload is required for action='adjudicate'".to_string()
             })?;
-            self::mirror::handle_adjudicate(_server, adjudicate)
+            self::mirror::handle_adjudicate(server, adjudicate)
         }
         "get" => {
             let get = params
                 .get
                 .ok_or_else(|| "get payload is required for action='get'".to_string())?;
-            self::mirror::handle_get(_server, get)
+            self::mirror::handle_get(server, get)
         }
         // tachi#1675 PR2 (design D6 phase 1): the ledger-backed routing
         // projection — and since PR4 (phase 2) the CANONICAL routing evidence
@@ -72,10 +86,12 @@ pub(crate) async fn handle_agent_eval(
         // The payload is optional: with none, the projection answers for an
         // unclassified task over the default window.
         "route_projection" => self::projection::handle_route_projection(
-            _server,
+            server,
             params.projection.unwrap_or_default(),
             params.limit,
         ),
+        "attach_session" => self::attachment::handle_attach_session(server, params),
+        "get_attachment" => self::attachment::handle_get_attachment(server, params),
         "aggregate" => {
             if !eval_fixture_replay_allowed() {
                 return Err(format!(
@@ -124,7 +140,7 @@ pub(crate) async fn handle_agent_eval(
         // the chain live again; it is a feature, not a rider on this cutover.
         // The card-feedback reader is display-only and feeds no route score.
         "aggregate_live" => {
-            let rows = load_live_eval_rows(_server, capped_eval_limit(params.limit))?;
+            let rows = load_live_eval_rows(server, capped_eval_limit(params.limit))?;
             let scores = aggregate_scores(&rows);
             let subagent_scores = aggregate_subagent_scores(&rows);
             let performance_matrix = aggregate_performance_matrix(&rows);
@@ -141,7 +157,7 @@ pub(crate) async fn handle_agent_eval(
             .map_err(|e| format!("serialize aggregate_live: {e}"))
         }
         "telemetry" | "perf" => {
-            let rows = load_live_eval_rows(_server, capped_eval_limit(params.limit))?;
+            let rows = load_live_eval_rows(server, capped_eval_limit(params.limit))?;
             let scores = aggregate_scores(&rows);
             let subagent_scores = aggregate_subagent_scores(&rows);
             let performance_matrix = aggregate_performance_matrix(&rows);
@@ -159,7 +175,8 @@ pub(crate) async fn handle_agent_eval(
         }
         _ => Err(format!(
             "Invalid eval action '{}'. Use aggregate, aggregate_live, telemetry, perf, \
-             register, observe, adjudicate, get, or route_projection.",
+             register, observe, adjudicate, get, route_projection, attach_session, or \
+             get_attachment.",
             params.action
         )),
     }

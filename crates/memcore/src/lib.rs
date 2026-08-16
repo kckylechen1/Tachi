@@ -81,28 +81,6 @@ pub mod foundry;
 #[cfg(feature = "admin")]
 pub mod hub;
 pub mod kernel_policy;
-/// The #1681/#1682 model-broker seam — the five frozen types both Broker
-/// chains build on (`ModelRef`, `ResolvedDeployment`, `ResolutionOutcome`,
-/// `OperationalResolver`, `HealthObservation`).
-///
-/// **Vendored, not authored here.** This module's bytes are the exact frozen
-/// content of `leaf/1681-1682-broker-seam` @ `4b53edcd`, which is still an
-/// open PR (#1739) and therefore not in this stack's ancestry. #1681 PR-D
-/// cannot restate the resolver's output vocabulary in a *different* shape
-/// without forking the contract, so it carries the frozen one verbatim: when
-/// #1739 merges, the two adds are byte-identical and collapse into one file.
-///
-/// Two follow-ups belong to that merge, not to this stack:
-/// - #1739's `lib.rs` also re-exports the seam's type list at the crate root.
-///   That list carries `DeploymentCapabilities`, which PR-A already re-exports
-///   here as the *catalog row* type of the same name. The two are different
-///   types (the seam's is a flat bool projection; the catalog's carries
-///   `EmbeddingsCapability`), so one of the two root re-exports must be
-///   path-qualified. This stack adds no root re-export at all — every consumer
-///   names `memcore::model_broker_seam::…` — which leaves the collision for
-///   the merge to rule on instead of pre-deciding it wrongly.
-/// - Any review fix that lands on #1739 after `4b53edcd` must be re-vendored
-///   here (or land as the merge resolution).
 pub mod model_broker_seam;
 pub mod namespace;
 pub mod near_dup;
@@ -198,6 +176,16 @@ pub use db::foundry_jobs::{
     InsertFoundryJobResult, JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
 #[cfg(feature = "admin")]
+pub use db::harness_session_attachments::{
+    attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
+    HarnessSessionAttachment, HarnessSessionAttachmentAdmission,
+    HarnessSessionAttachmentAuthorization, HarnessSessionAttachmentCapabilities,
+    HarnessSessionAttachmentReceipt, HarnessSessionAttachmentSelector,
+    HarnessSessionAttachmentState, HarnessSessionHostAdmission, NewHarnessSessionAttachment,
+    ACP_CAPABILITY_CLASSES, ACP_SESSION_CAPABILITIES, ACP_TOOL_PROFILES,
+    TRUSTED_LOCAL_HOST_DECLARED_BASIS,
+};
+#[cfg(feature = "admin")]
 pub use db::mirror_eval::{
     append_mirror_eval_adjudication, get_mirror_eval_run_view, get_observation, get_run_by_id,
     get_run_by_native_child_id, list_adjudications_for_run, record_mirror_eval_observation,
@@ -262,6 +250,47 @@ pub use foundry::{
 #[cfg(feature = "admin")]
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use kernel_policy::{EmbedPolicy, KernelPolicy};
+/// The #1681/#1682 model-broker seam's fixture resolver: test scaffolding,
+/// never production routing, so its re-export carries the same
+/// `broker-fixtures` gate as the type itself (codex PR #1739 CONCERN-5).
+/// Downstream leaves opt in explicitly from `[dev-dependencies]`.
+#[cfg(any(test, feature = "broker-fixtures"))]
+pub use model_broker_seam::StaticFixtureResolver;
+/// Model-broker seam (#1681/#1682). This list is the *reachable closure* of the
+/// five frozen seam types, enumerated rather than assumed (codex PR #1739
+/// BUG-6): a type is here only if a consumer must be able to name it to build an
+/// input for, or read a field out of, one of the five.
+///
+/// - `ModelRef` → `SeamError` (its constructor's error).
+/// - `ResolvedDeployment` → `ResolvedDeploymentParts` (its constructor's input
+///   and wire shape), `WireDialect`, `DeploymentCapabilities`,
+///   `DeploymentBounds`.
+/// - `ResolutionOutcome` → `CandidateEvaluation` → `ExclusionReason`;
+///   `Selection` → `AbstainReason`; `ResolutionRevisions`; `BudgetEstimate`;
+///   `FALLBACK_ORDER_CAP` (the bound its constructor enforces, which callers
+///   must respect before calling).
+/// - `OperationalResolver` → `ResolverInput` → `CatalogSnapshot`,
+///   `HealthSnapshot` → `DeploymentCooldown`, `AccountSnapshot` →
+///   `AccountAvailability`, `BudgetContext`, `PinContext`, `RetryContext`.
+/// - `HealthObservation` → `InvocationErrorClass`, `RetryAfter`,
+///   `ObservationEvidence`.
+///
+/// Nothing else in the module is public, so the list is closed by construction;
+/// the module's internal deserialization shadows are private and deliberately
+/// unreachable.
+pub use model_broker_seam::{
+    AbstainReason, AccountAvailability, AccountSnapshot, BudgetContext, BudgetEstimate,
+    CandidateEvaluation, CatalogSnapshot, DeploymentBounds, DeploymentCooldown, ExclusionReason,
+    HealthObservation, HealthSnapshot, InvocationErrorClass, ModelRef, ObservationEvidence,
+    OperationalResolver, PinContext, ResolutionOutcome, ResolutionRevisions, ResolvedDeployment,
+    ResolvedDeploymentParts, ResolverInput, RetryAfter, RetryContext, SeamError, Selection,
+    WireDialect, FALLBACK_ORDER_CAP,
+};
+// `DeploymentCapabilities` (the seam's flat bool projection) is deliberately
+// NOT re-exported at the crate root: PR-B's catalog row type of the same name
+// (model_catalog) owns the root path. The seam type stays reachable as
+// `memcore::model_broker_seam::DeploymentCapabilities` — the ruling the #1757
+// vendoring note deferred to the merge (applied 2026-08-16).
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
     is_handoff_entry, is_internal_only_row, is_kanban_entry, is_namespace_search_noise,

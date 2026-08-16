@@ -36,6 +36,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     validate_wiki_recovery_ledgers_schema(&tx)?;
     validate_memory_outbox_schema(&tx)?;
     validate_memory_outbox_destination_apply_schema(&tx)?;
+    validate_harness_session_attachments_schema(&tx)?;
     validate_a2a_mailbox_schema(&tx)?;
     tx.commit()?;
     Ok(())
@@ -44,6 +45,145 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 /// Build the pre-sentinel fixture used only by migration unit tests. Production
 /// fresh initialization must use [`init_schema`] so versioned schema is never
 /// installed outside the migration runner.
+/// Canonical v31 installer for host-owned ACP attachment receipts (#1733).
+/// The descriptor itself is projected at request time; this table stores only
+/// the identity/revision/policy receipt needed to reproduce that projection.
+pub(crate) fn install_harness_session_attachments_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    execute_batch_retry(
+        conn,
+        "CREATE TABLE IF NOT EXISTS harness_session_attachments (
+            attachment_id TEXT PRIMARY KEY NOT NULL,
+            host_identity TEXT NOT NULL CHECK (length(trim(host_identity)) > 0),
+            identity_attribution_basis TEXT NOT NULL CHECK (identity_attribution_basis IN ('trusted_local_host_declared', 'verified')),
+            protocol_version TEXT NOT NULL CHECK (length(trim(protocol_version)) > 0),
+            adapter_connection_identity TEXT NOT NULL CHECK (length(trim(adapter_connection_identity)) > 0),
+            remote_session_id TEXT NOT NULL CHECK (length(trim(remote_session_id)) > 0),
+            work_claim_id TEXT NOT NULL CHECK (length(trim(work_claim_id)) > 0),
+            expected_transition_version INTEGER NOT NULL CHECK (expected_transition_version >= 0),
+            agent_identity_id TEXT NOT NULL CHECK (length(trim(agent_identity_id)) > 0),
+            contract_digest TEXT NOT NULL CHECK (length(trim(contract_digest)) > 0),
+            capabilities_json TEXT NOT NULL CHECK (json_valid(capabilities_json)),
+            tool_profile TEXT NOT NULL CHECK (length(trim(tool_profile)) > 0),
+            capability_class TEXT NOT NULL CHECK (length(trim(capability_class)) > 0),
+            policy_digest TEXT NOT NULL CHECK (length(trim(policy_digest)) > 0),
+            descriptor_digest TEXT NOT NULL CHECK (length(trim(descriptor_digest)) > 0),
+            idempotency_key TEXT NOT NULL CHECK (length(trim(idempotency_key)) > 0),
+            admission_receipt_ref TEXT NOT NULL CHECK (length(trim(admission_receipt_ref)) > 0),
+            state TEXT NOT NULL CHECK (state IN ('attached', 'reconnect_failed', 'unknown')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (idempotency_key),
+            UNIQUE (host_identity, protocol_version, adapter_connection_identity, remote_session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_harness_session_attachments_claim
+            ON harness_session_attachments(work_claim_id, expected_transition_version);
+        CREATE INDEX IF NOT EXISTS idx_harness_session_attachments_receipt
+            ON harness_session_attachments(admission_receipt_ref, created_at);",
+    )
+}
+
+/// Refuse a drifted v31 attachment receipt shape before a current-schema open
+/// can hand it to a typed writer.  The state CHECK is checked separately from
+/// `pragma_table_info`, because SQLite does not expose CHECK constraints in
+/// that pragma.
+pub(crate) fn validate_harness_session_attachments_schema(
+    conn: &Connection,
+) -> Result<(), MemoryError> {
+    const REQUIRED_OBJECTS: &[(&str, &str)] = &[
+        ("table", "harness_session_attachments"),
+        ("index", "idx_harness_session_attachments_claim"),
+        ("index", "idx_harness_session_attachments_receipt"),
+    ];
+    for (object_type, name) in REQUIRED_OBJECTS {
+        let present = match conn.query_row(
+            "SELECT 1 FROM main.sqlite_schema
+             WHERE type = ?1 AND name = ?2
+               AND (type = 'table' OR tbl_name = 'harness_session_attachments')",
+            params![object_type, name],
+            |_| Ok(()),
+        ) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v31 ACP attachment ledger: required {object_type} '{name}' is missing"
+            )));
+        }
+    }
+
+    const REQUIRED_COLUMNS: &[(&str, &str, bool, i64)] = &[
+        ("attachment_id", "TEXT", true, 1),
+        ("host_identity", "TEXT", true, 0),
+        ("identity_attribution_basis", "TEXT", true, 0),
+        ("protocol_version", "TEXT", true, 0),
+        ("adapter_connection_identity", "TEXT", true, 0),
+        ("remote_session_id", "TEXT", true, 0),
+        ("work_claim_id", "TEXT", true, 0),
+        ("expected_transition_version", "INTEGER", true, 0),
+        ("agent_identity_id", "TEXT", true, 0),
+        ("contract_digest", "TEXT", true, 0),
+        ("capabilities_json", "TEXT", true, 0),
+        ("tool_profile", "TEXT", true, 0),
+        ("capability_class", "TEXT", true, 0),
+        ("policy_digest", "TEXT", true, 0),
+        ("descriptor_digest", "TEXT", true, 0),
+        ("idempotency_key", "TEXT", true, 0),
+        ("admission_receipt_ref", "TEXT", true, 0),
+        ("state", "TEXT", true, 0),
+        ("created_at", "TEXT", true, 0),
+        ("updated_at", "TEXT", true, 0),
+    ];
+    let mut stmt = conn.prepare(
+        "SELECT name, upper(type), [notnull] != 0, pk
+         FROM pragma_table_info('harness_session_attachments') ORDER BY cid",
+    )?;
+    let actual = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = REQUIRED_COLUMNS
+        .iter()
+        .map(|(name, ty, not_null, pk)| ((*name).to_string(), (*ty).to_string(), *not_null, *pk))
+        .collect::<Vec<_>>();
+    if actual != expected {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v31 ACP attachment ledger: table has non-canonical column shape"
+                .to_string(),
+        ));
+    }
+
+    let table_sql: String = conn.query_row(
+        "SELECT COALESCE(sql, '') FROM main.sqlite_schema
+         WHERE type = 'table' AND name = 'harness_session_attachments'",
+        [],
+        |row| row.get(0),
+    )?;
+    let normalized = normalize_schema_sql(&table_sql);
+    for clause in [
+        "CHECK (state IN ('attached', 'reconnect_failed', 'unknown'))",
+        "CHECK (identity_attribution_basis IN ('trusted_local_host_declared', 'verified'))",
+        "UNIQUE (idempotency_key)",
+        "UNIQUE (host_identity, protocol_version, adapter_connection_identity, remote_session_id)",
+    ] {
+        if !normalized.contains(&normalize_schema_sql(clause)) {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v31 ACP attachment ledger: table is missing canonical clause {clause:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn init_unversioned_schema_for_migration_tests(
     conn: &Connection,
@@ -128,6 +268,7 @@ pub fn init_schema_with_label_mut(
     validate_wiki_recovery_ledgers_schema(&tx)?;
     validate_memory_outbox_schema(&tx)?;
     validate_memory_outbox_destination_apply_schema(&tx)?;
+    validate_harness_session_attachments_schema(&tx)?;
     if identity.profile.includes_product() {
         validate_a2a_mailbox_schema(&tx)?;
     }

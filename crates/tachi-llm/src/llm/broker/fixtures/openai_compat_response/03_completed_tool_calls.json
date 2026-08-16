@@ -1,0 +1,16 @@
+{
+  "why": "A turn that ends in tool calls carries no text, and `is_empty` must not mistake that for the empty-content fault. `tool_calls` is a real ending the durable status flattens to Unknown, which is why the broker keeps its own member.",
+  "status": 200,
+  "headers": [],
+  "body": "{\"id\":\"chatcmpl-tc\",\"model\":\"test-model-1\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\\\"cats\\\"}\"}},{\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"fetch\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":18,\"total_tokens\":58}}",
+  "expected": {
+    "outcome": "completed",
+    "message": {"tool_calls": [
+      {"id": "call_1", "name": "search", "arguments": "{\"q\":\"cats\"}"},
+      {"id": "call_2", "name": "fetch", "arguments": "{}"}
+    ]},
+    "completion": "tool_calls",
+    "usage": {"prompt_tokens": 40, "completion_tokens": 18, "total_tokens": 58, "provenance": "provider_authoritative"},
+    "metadata": {"effective_model": "test-model-1", "provider_request_id": "chatcmpl-tc"}
+  }
+}

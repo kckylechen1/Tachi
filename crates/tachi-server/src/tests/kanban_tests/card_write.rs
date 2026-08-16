@@ -2,7 +2,6 @@ use super::*;
 
 #[tokio::test]
 async fn post_card_check_inbox_and_update_roundtrip() {
-    std::env::set_var("KANBAN_CLASSIFY_ENABLED", "false");
     let server = make_server();
 
     let posted = server
@@ -103,7 +102,6 @@ async fn post_card_check_inbox_and_update_roundtrip() {
 
 #[tokio::test]
 async fn post_card_includes_provenance_context() {
-    std::env::set_var("KANBAN_CLASSIFY_ENABLED", "false");
     let server = make_server();
 
     let posted = server

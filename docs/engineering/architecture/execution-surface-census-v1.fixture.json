@@ -570,17 +570,31 @@
       "comparisons": {
         "admin": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 11801,
-            "property_count": 8,
+            "input_schema_bytes": 13921,
+            "property_count": 22,
             "property_names": [
               "action",
+              "adapter_connection_identity",
               "adjudicate",
+              "admission_receipt_ref",
+              "agent_identity_id",
+              "attachment_id",
+              "capability_class",
+              "contract_digest",
+              "expected_transition_revision",
               "fixture_path",
               "get",
+              "host_identity",
+              "idempotency_key",
               "limit",
               "observe",
               "projection",
-              "register"
+              "protocol_version",
+              "register",
+              "remote_session_id",
+              "session_capabilities",
+              "tool_profile",
+              "work_claim_id"
             ]
           },
           "tachi_orchestrator": {
@@ -704,17 +718,31 @@
         },
         "coordinate": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 11801,
-            "property_count": 8,
+            "input_schema_bytes": 13921,
+            "property_count": 22,
             "property_names": [
               "action",
+              "adapter_connection_identity",
               "adjudicate",
+              "admission_receipt_ref",
+              "agent_identity_id",
+              "attachment_id",
+              "capability_class",
+              "contract_digest",
+              "expected_transition_revision",
               "fixture_path",
               "get",
+              "host_identity",
+              "idempotency_key",
               "limit",
               "observe",
               "projection",
-              "register"
+              "protocol_version",
+              "register",
+              "remote_session_id",
+              "session_capabilities",
+              "tool_profile",
+              "work_claim_id"
             ]
           },
           "tachi_orchestrator": {

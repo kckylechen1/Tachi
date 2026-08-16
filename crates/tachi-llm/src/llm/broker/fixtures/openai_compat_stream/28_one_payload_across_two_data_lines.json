@@ -1,0 +1,46 @@
+{
+  "grammar": "openai_compat_sse",
+  "why": "One frame, two `data:` lines, one JSON document. The SSE grammar joins a frame's data lines with a newline, and a gateway that wraps long payloads is the reason that rule exists. The decoder implements the join; nothing pinned it, so a 'last data line wins' or 'first data line wins' regression would have passed the whole corpus while silently truncating every wrapped payload into unparseable JSON.",
+  "chunks": [
+    {
+      "text": "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"test-model-1\",\n"
+    },
+    {
+      "text": "data: \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n"
+    },
+    {
+      "text": "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+    },
+    {
+      "text": "data: [DONE]\n\n"
+    }
+  ],
+  "terminal_input": {
+    "kind": "finish",
+    "eof": "clean"
+  },
+  "expected": {
+    "events": [
+      {
+        "event": "started",
+        "metadata": {
+          "effective_model": "test-model-1",
+          "provider_request_id": "chatcmpl-1"
+        }
+      },
+      {
+        "event": "text_delta",
+        "text": "Hi"
+      },
+      {
+        "event": "completed",
+        "completion": "complete"
+      }
+    ],
+    "error": null,
+    "terminal_disposition": {
+      "disposition": "completed",
+      "completion": "complete"
+    }
+  }
+}
