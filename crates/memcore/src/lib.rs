@@ -86,6 +86,7 @@ pub mod namespace;
 pub mod near_dup;
 pub mod noise;
 pub mod path_router;
+pub mod private_partition;
 pub mod recall_config;
 pub mod recall_coverage;
 mod recall_impressions;
@@ -286,6 +287,12 @@ pub use model_broker_seam::{
     ResolvedDeploymentParts, ResolverInput, RetryAfter, RetryContext, SeamError, Selection,
     WireDialect, FALLBACK_ORDER_CAP,
 };
+pub use private_partition::{
+    AdmittedPartition, CapabilityReceipt, PartitionCapability, PartitionKeyProvider,
+    PrivatePartition, PrivatePartitionOpenContext, StaticKeyProvider, SubjectId, TrustDomainId,
+    SEALED_MAGIC, STORE_PRIVATE_PARTITION_KEY,
+};
+pub use store::immutable_supersession::{SupersessionReceipt, SUPERSESSION_ROUTE_IMMUTABLE_CLAIM};
 // `DeploymentCapabilities` (the seam's flat bool projection) is deliberately
 // NOT re-exported at the crate root: PR-B's catalog row type of the same name
 // (model_catalog) owns the root path. The seam type stays reachable as
@@ -433,6 +440,9 @@ pub struct MemoryStore {
     /// see [`Self::with_kernel_policy`] for how a caller attaches a
     /// non-default policy after opening.
     pub(crate) policy: KernelPolicy,
+    /// tachi#1668: set only when this handle was opened through
+    /// [`PrivatePartition`]. Generic opens leave it `None`.
+    pub(crate) admitted_partition: Option<crate::private_partition::AdmittedPartition>,
 }
 
 #[cfg(test)]

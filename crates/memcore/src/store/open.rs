@@ -434,6 +434,7 @@ impl MemoryStore {
             false,
             &DbOpenContext::default(),
             None,
+            false,
         )
     }
 
@@ -443,13 +444,20 @@ impl MemoryStore {
     /// Uses the fail-closed default [`DbOpenContext`] (`OpenExisting + Deny`);
     /// see [`Self::open`] and [`Self::open_with_label_and_context`].
     pub fn open_with_label(db_path: &str, db_label: &str) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, db_label, true, &DbOpenContext::default(), None)
+        Self::open_with_label_inner(
+            db_path,
+            db_label,
+            true,
+            &DbOpenContext::default(),
+            None,
+            false,
+        )
     }
 
     /// Open (or create) with an explicit [`DbOpenContext`] and no manifest
     /// label (path-routing validation disabled, like [`Self::open`]).
     pub fn open_with_context(db_path: &str, ctx: &DbOpenContext) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, UNKNOWN_DB_LABEL, false, ctx, None)
+        Self::open_with_label_inner(db_path, UNKNOWN_DB_LABEL, false, ctx, None, false)
     }
 
     /// Open an existing store under an explicit SQLite busy budget while
@@ -465,7 +473,14 @@ impl MemoryStore {
         ctx: &DbOpenContext,
         busy_timeout: Duration,
     ) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, UNKNOWN_DB_LABEL, false, ctx, Some(busy_timeout))
+        Self::open_with_label_inner(
+            db_path,
+            UNKNOWN_DB_LABEL,
+            false,
+            ctx,
+            Some(busy_timeout),
+            false,
+        )
     }
 
     /// Open a full-profile store and persist one provider-key health row while
@@ -518,6 +533,7 @@ impl MemoryStore {
             false,
             ctx,
             Some(busy_timeout),
+            false,
         )?;
         operation(&store)
     }
@@ -531,7 +547,19 @@ impl MemoryStore {
         db_label: &str,
         ctx: &DbOpenContext,
     ) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, db_label, true, ctx, None)
+        Self::open_with_label_inner(db_path, db_label, true, ctx, None, false)
+    }
+
+    pub(crate) fn open_private_working_file(
+        db_path: &str,
+        ctx: &DbOpenContext,
+        identity: crate::private_partition::AdmittedPartition,
+    ) -> Result<Self, MemoryError> {
+        let mut store =
+            Self::open_with_label_inner(db_path, "private_partition", false, ctx, None, true)?;
+        crate::private_partition::stamp_private_identity(&store.conn, &identity)?;
+        store.admitted_partition = Some(identity);
+        Ok(store)
     }
 
     fn open_with_label_inner(
@@ -540,6 +568,7 @@ impl MemoryStore {
         path_validation: bool,
         ctx: &DbOpenContext,
         busy_timeout: Option<Duration>,
+        allow_private_partition: bool,
     ) -> Result<Self, MemoryError> {
         Self::register_open_extensions()?;
         #[cfg(feature = "test-support")]
@@ -562,6 +591,7 @@ impl MemoryStore {
             path_validation,
             ctx,
             busy_timeout,
+            allow_private_partition,
         )
     }
 
@@ -582,7 +612,9 @@ impl MemoryStore {
         path_validation: bool,
         ctx: &DbOpenContext,
         busy_timeout: Option<Duration>,
+        allow_private_partition: bool,
     ) -> Result<Self, MemoryError> {
+        crate::private_partition::refuse_generic_open_path(db_path)?;
         // Acquire the in-process startup lock BEFORE the #1132 rename-on-open
         // migration, not after (RESIDUAL-1). The migration's stat+rename+symlink
         // sequence and the `open_read_write` below (which CREATES the canonical
@@ -650,6 +682,9 @@ impl MemoryStore {
         // only the caller's claim and may legitimately be `unknown`. A conflict
         // between the two already failed the open above.
         let identity = schema_result?.identity;
+        if !allow_private_partition {
+            crate::private_partition::refuse_stamped_private_store(&conn)?;
+        }
         db::validate_persistent_trigger_inventory(&conn, true)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
             db_path,
@@ -690,6 +725,7 @@ impl MemoryStore {
             // tachi#1585 D5: pure default, no env. `with_kernel_policy`
             // attaches a host-injected policy after open.
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 
@@ -742,6 +778,7 @@ impl MemoryStore {
             path_validation,
             opened_physical_db_identity,
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 
@@ -823,6 +860,7 @@ impl MemoryStore {
         db_label: &str,
         immutable: bool,
     ) -> Result<Self, MemoryError> {
+        crate::private_partition::refuse_generic_open_path(db_path)?;
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
@@ -906,6 +944,7 @@ impl MemoryStore {
         }
         let resolved_label =
             db::store_identity::resolve_role(stored_role.as_deref(), db_label, path)?;
+        crate::private_partition::refuse_stamped_private_store(&conn)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -918,6 +957,7 @@ impl MemoryStore {
             path_validation: false,
             opened_physical_db_identity,
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 
@@ -926,6 +966,7 @@ impl MemoryStore {
     /// refuses an incomplete trigger inventory before exposing a write-capable
     /// connection.
     pub fn open_existing_read_write(db_path: &str) -> Result<Self, MemoryError> {
+        crate::private_partition::refuse_generic_open_path(db_path)?;
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
@@ -969,6 +1010,7 @@ impl MemoryStore {
         // whatever the file is stamped with, or `unknown` when it is unstamped.
         let path = std::path::Path::new(db_path);
         let (stored_role, stored_profile) = db::store_identity::read_identity(&conn, path)?;
+        crate::private_partition::refuse_stamped_private_store(&conn)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -978,6 +1020,7 @@ impl MemoryStore {
             path_validation: false,
             opened_physical_db_identity,
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 
@@ -1009,6 +1052,7 @@ impl MemoryStore {
             path_validation: false,
             opened_physical_db_identity: None,
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 

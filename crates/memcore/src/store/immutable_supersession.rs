@@ -24,12 +24,28 @@ use crate::{
 /// `refuse_supersession_cycle`), not an unbounded scan.
 const MAX_SUPERSESSION_CHAIN_WALK: u32 = 32;
 
+/// Route token stamped on every [`SupersessionReceipt`] from
+/// [`ImmutableSupersessionTransaction::claim_immutable_supersession`].
+pub const SUPERSESSION_ROUTE_IMMUTABLE_CLAIM: &str = "immutable_claim_v1";
+
+/// Durable facts for one successful immutable claim (tachi#1671).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupersessionReceipt {
+    pub source_id: String,
+    pub target_id: String,
+    pub source_revision_after: i64,
+    /// [`None`] on a generic store; private partitions carry their admitted id.
+    pub partition_id: Option<String>,
+    pub route: &'static str,
+}
+
 /// Narrow mutation handle passed only inside
 /// [`MemoryStore::with_immutable_supersession_transaction`].
 pub struct ImmutableSupersessionTransaction<'tx> {
     tx: Transaction<'tx>,
     vec_available: bool,
     reserved_reference_write: db::ReservedReferenceWriteFlag,
+    partition_id: Option<String>,
 }
 
 impl<'tx> ImmutableSupersessionTransaction<'tx> {
@@ -86,7 +102,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         &mut self,
         source_id: &str,
         target_id: &str,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<SupersessionReceipt, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         // Cycle guard first: it gives the more specific diagnosis when a
@@ -95,6 +111,13 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         // successor test below). Eligibility second: it catches every other
         // way a target can be retired (archived, or superseded by something
         // that does NOT lead back to `source_id`).
+        //
+        // tachi#1671 route decision: this is the semantic mutation route.
+        // `db::supersede_memory` / `supersede_memory_if_revision` stay the
+        // unguarded CAS primitive for fixtures, race-hook injection, and
+        // repair seeding — they are not a weaker production bypass of
+        // partition identity. Partition identity is the handle's admitted
+        // stamp (#1668), never `MemoryEntry::scope` or a path label.
         self.refuse_supersession_cycle(source_id, target_id)?;
         self.refuse_ineligible_supersession_target(target_id)?;
         let changed = db::supersede_memory_within_tx(&self.tx, source_id, target_id)?;
@@ -103,7 +126,18 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
                 "immutable supersession CAS refused for {source_id} -> {target_id}"
             )));
         }
-        Ok(())
+        let source_revision_after: i64 = self.tx.query_row(
+            "SELECT revision FROM memories WHERE id = ?1",
+            [source_id],
+            |row| row.get(0),
+        )?;
+        Ok(SupersessionReceipt {
+            source_id: source_id.to_string(),
+            target_id: target_id.to_string(),
+            source_revision_after,
+            partition_id: self.partition_id.clone(),
+            route: SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
+        })
     }
 
     /// tachi#1645 (#1635 finding 2): walk `target_id`'s `superseded_by`
@@ -511,6 +545,10 @@ impl MemoryStore {
                 tx,
                 vec_available: self.vec_available,
                 reserved_reference_write: reserved_reference_write.clone(),
+                partition_id: self
+                    .admitted_partition
+                    .as_ref()
+                    .map(|part| part.partition_id.clone()),
             };
             let result = operation(&mut replacement)?;
             replacement.tx.commit()?;
@@ -1066,26 +1104,14 @@ mod tests {
         );
     }
 
-    /// tachi#1635 (#1632 conformance, item 10) — FINDING, marked `#[ignore]`
-    /// because it pins the SPEC (a partition/authority boundary refusal) that
-    /// does not exist in the mechanism today, not current behavior.
-    /// `ImmutableSupersessionTransaction` carries no partition/project/
-    /// authority field at all (see the struct definition above); `grep -rn
-    /// '\bpartition\b' crates/memcore/src` only turns up SQL window-function
-    /// `PARTITION BY` clauses in `db/schema/ddl.rs` and `db/stats_gc.rs`,
-    /// never a memory-admission/authority concept. `MemoryEntry::scope`
-    /// ("general"/"project"/...) is the closest candidate field and is never
-    /// read by `claim_immutable_supersession` or `db::supersede_memory`. The
-    /// only boundary that exists is structural: source/target ids are looked
-    /// up on ONE SQLite connection (one project DB or the global DB), so a
-    /// literal cross-database supersession can't be expressed through this
-    /// API — but nothing stops two rows in the SAME connection with
-    /// different `scope`/`domain`/project-tag values from superseding each
-    /// other. Left `#[ignore]`d per #1635 task instructions ("write the test
-    /// #[ignore]d with a comment naming the gap"); not fixed here.
+    /// tachi#1671 / #1668: `MemoryEntry::scope` is **not** a partition.
+    /// Two rows on one generic store may still supersede each other even
+    /// when their scope labels differ — that is intentional. Cross-partition
+    /// refusal is proven by two [`crate::private_partition::PrivatePartition`]
+    /// handles (separate sealed files) in
+    /// `private_partition::tests::cross_partition_claim_cannot_see_foreign_rows`.
     #[test]
-    #[ignore = "tachi#1635 finding: no partition/authority boundary check exists on claim_immutable_supersession"]
-    fn claim_immutable_supersession_refuses_cross_partition_supersession() {
+    fn scope_labels_are_not_partition_authority() {
         let mut store = MemoryStore::open_in_memory().expect("open memory store");
         let mut source = fixture_entry("partition-a-source");
         source.scope = "project:alpha".to_string();
@@ -1093,19 +1119,19 @@ mod tests {
         target.scope = "project:beta".to_string();
         store
             .insert_if_absent(&source)
-            .expect("seed alpha-partition source");
+            .expect("seed alpha-scope source");
         store
             .insert_if_absent(&target)
-            .expect("seed beta-partition target");
+            .expect("seed beta-scope target");
 
-        let result = store.with_immutable_supersession_transaction(|operation| {
-            operation.claim_immutable_supersession("partition-a-source", "partition-b-target")
-        });
-        assert!(
-            result.is_err(),
-            "a source and target in different admitted partitions must refuse, \
-             not silently claim across the boundary: {result:?}"
-        );
+        let receipt = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("partition-a-source", "partition-b-target")
+            })
+            .expect("same-store scope labels are not a trust boundary");
+        assert_eq!(receipt.route, SUPERSESSION_ROUTE_IMMUTABLE_CLAIM);
+        assert!(receipt.partition_id.is_none());
+        assert!(receipt.source_revision_after >= 2);
     }
 
     #[test]
