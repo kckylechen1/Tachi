@@ -86,27 +86,24 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     "search",
     "get",
     "save",
-    "extract_facts",
     "briefing",
     "checkpoint",
     "alerts",
     "ask",
+    "extract_facts",
     "consolidate",
-    "pattern_feedback",
+];
+
+/// Memory actions retired from the model-facing facade by #1689.
+pub const TACHI_MEMORY_RETIRED_C2B_ACTIONS: &[&str] = &[
     "progress",
     "readiness",
-    // #757 fold: standalone memory-admin + pipeline tools re-fronted as actions.
     "delete",
     "gc",
     "doctor_scan",
     "ingest",
     "ingest_source",
-    // #1001: manual presence-claim backstop.
-    "claim",
-    "release",
-    // #964: read-once agent-to-agent ephemeral notes.
-    "sticky_leave",
-    "sticky_check",
+    "pattern_feedback",
 ];
 
 /// `tachi_tune` admin/operator actions. Introduced by #1426 to move route
@@ -135,6 +132,9 @@ pub const TACHI_EVENT_ACTIONS: &[&str] = &[
     "a2a",
     "label_eval",
 ];
+
+/// Closed local advisory-mailbox actions (#1751).
+pub const TACHI_A2A_ACTIONS: &[&str] = &["respond", "status"];
 
 /// `tachi_wiki` facade actions. Single source for `facade::tachi_wiki_action_schema`
 /// and #1098's `action_effect` completeness test.
@@ -237,18 +237,44 @@ mod tests {
 
     #[test]
     fn f0_memory_and_verify_counts() {
-        // Merge of #1001 (claim, release) and #964 (sticky_leave,
-        // sticky_check) landed at 25. #1426 moves four recall-tuning actions
-        // to tachi_tune: 25 -> 21.
-        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 21);
+        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 9);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
         assert_eq!(TachiVerifyAction::ALL.len(), 4);
     }
 
     #[test]
+    fn f1689_memory_inventory_is_exactly_the_nine_survivors() {
+        assert_eq!(
+            TACHI_MEMORY_ACTIONS,
+            &[
+                "search",
+                "get",
+                "save",
+                "briefing",
+                "checkpoint",
+                "alerts",
+                "ask",
+                "extract_facts",
+                "consolidate",
+            ],
+            "#1689 must pin the literal final nine-action Memory inventory",
+        );
+
+        assert_eq!(
+            crate::facade::memory::TachiMemoryAction::ALL
+                .iter()
+                .map(|action| action.as_str())
+                .collect::<Vec<_>>(),
+            TACHI_MEMORY_ACTIONS,
+            "the typed Memory action enum and published inventory must not drift",
+        );
+    }
+
+    #[test]
     fn f0_tune_inventory_count() {
         // #1426: route tuning leaves tachi_task (27 -> 23) and recall tuning
-        // leaves tachi_memory (25 -> 21). The eight moved actions live only on
+        // leaves tachi_memory (25 -> 21); #1688 then removes claim/release
+        // (21 -> 19). The eight moved actions live only on
         // this admin/operator inventory; keep the count exact so the next
         // tuning action gets explicit review instead of quietly widening the
         // surface.

@@ -5,6 +5,69 @@ use crate::error::MemoryError;
 use crate::vault::{VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
 use rusqlite::{params, Connection};
 
+#[cfg(feature = "test-support")]
+struct VaultKeyHealthWriteHook {
+    logical_name: String,
+    key_id: String,
+    hook: Box<dyn FnOnce() + Send + 'static>,
+}
+
+#[cfg(feature = "test-support")]
+static VAULT_KEY_HEALTH_WRITE_HOOK: std::sync::Mutex<Option<VaultKeyHealthWriteHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub struct VaultKeyHealthWriteHookGuard;
+
+#[cfg(feature = "test-support")]
+impl Drop for VaultKeyHealthWriteHookGuard {
+    fn drop(&mut self) {
+        *VAULT_KEY_HEALTH_WRITE_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn install_vault_key_health_write_hook_for_tests(
+    logical_name: &str,
+    key_id: &str,
+    hook: impl FnOnce() + Send + 'static,
+) -> VaultKeyHealthWriteHookGuard {
+    let mut slot = VAULT_KEY_HEALTH_WRITE_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        slot.is_none(),
+        "vault key-health write hook already installed"
+    );
+    *slot = Some(VaultKeyHealthWriteHook {
+        logical_name: logical_name.to_string(),
+        key_id: key_id.to_string(),
+        hook: Box::new(hook),
+    });
+    VaultKeyHealthWriteHookGuard
+}
+
+#[cfg(feature = "test-support")]
+fn take_vault_key_health_write_hook(
+    health: &VaultKeyHealth,
+) -> Option<Box<dyn FnOnce() + Send + 'static>> {
+    let mut slot = VAULT_KEY_HEALTH_WRITE_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let matches = slot.as_ref().is_some_and(|candidate| {
+        candidate.logical_name == health.logical_name && candidate.key_id == health.key_id
+    });
+    if matches {
+        slot.take().map(|candidate| candidate.hook)
+    } else {
+        None
+    }
+}
+
 fn parse_allowed_agents(raw: Option<String>) -> Result<Option<Vec<String>>, MemoryError> {
     Ok(raw
         .map(|value| serde_json::from_str(&value))
@@ -323,6 +386,22 @@ pub fn vault_list_rotations(conn: &Connection) -> Result<Vec<VaultKeyRotation>, 
 }
 
 pub fn vault_upsert_key_health(
+    conn: &Connection,
+    health: &VaultKeyHealth,
+) -> Result<(), MemoryError> {
+    #[cfg(feature = "test-support")]
+    if let Some(hook) = take_vault_key_health_write_hook(health) {
+        let tx = conn.unchecked_transaction()?;
+        vault_upsert_key_health_sql(&tx, health)?;
+        hook();
+        tx.commit()?;
+        return Ok(());
+    }
+
+    vault_upsert_key_health_sql(conn, health)
+}
+
+fn vault_upsert_key_health_sql(
     conn: &Connection,
     health: &VaultKeyHealth,
 ) -> Result<(), MemoryError> {

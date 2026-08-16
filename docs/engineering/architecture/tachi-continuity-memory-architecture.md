@@ -304,9 +304,9 @@ Pattern memory is already stored in the memory DB under `/user/patterns/*`. It u
 Ordinary memory recall excludes `/user/patterns/`, `/user/affect/`, `/timeline/`, `/lorebook/`, and other continuity projection rows by default, while `tachi_search scope="patterns"` reads projected pattern rows explicitly.
 
 Integration direction:
-- `tachi_memory save` can emit a `memory.saved` continuity event when `emit_continuity=true`.
+- Ordinary public save facades do not emit `memory.saved`; admitted internal callers can opt into the internal `save_memory` continuity event path.
 - The distill lane can consume `memory.saved` events to discover or update patterns.
-- Pattern hits/misses can be written through pattern feedback events. `tachi_search scope="patterns"` emits `seen`; `tachi_complete` consumes `evidence_refs=["pattern:<id>"]` and maps successful completions to `hit`, failures to `miss`, and non-terminal outcomes to `seen`; `close_loop` attaches reviewed pattern refs to wiki writes and records them as `hit`. Concrete instance memories under `/memory/instances/<pattern_id>/` are still a target.
+- Internal completion and workflow-closure pattern use is recorded through a crate-private append-only evidence seam. Each admitted event carries a real flow id, a source revision, an evidence digest, the exact pattern id, the `seen` / `hit` / `miss` / `stale` outcome, and a deterministic idempotency key. The fixed `tachi.pattern_evidence.v1` adapter writes `CollectOnly` + `EffectScope::None` events with no projection hints, so these receipts never project, promote, or update pattern counters. `tachi_complete` and `close_loop` are admitted only with a non-empty flow id from their owning operational path. A missing identity is a typed skip, never a query/domain/comment fallback. The model-facing `tachi_search scope="patterns"` and `tachi_event action=context` surfaces remain read-only even when a caller supplies session text. There is no model-facing pattern-feedback workflow. Concrete instance memories under `/memory/instances/<pattern_id>/` are still a target.
 
 ### 3.2 Wiki — pattern promotion path
 
@@ -423,12 +423,12 @@ Implemented integration slice:
 
 ```
 save_memory emit_continuity=true → memory.saved event
-tachi_search scope=patterns      → explicit /user/patterns recall
+tachi_search scope=patterns      → explicit read-only /user/patterns recall
 tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
 tachi_skill action=from_pattern  → pending/disabled Hub skill candidate
 tachi_event action=promote       → wiki draft + pending skill + agent-profile proposal review artifacts
 tachi_domain_adapter lorebook_import → repo lorebook shape → world_book events
-tachi_event action=context       → read-only local A2A bundle with pattern refs, bonding refs, open threads, and compact event refs
+tachi_event action=context       → read-only local context bundle; caller session text is not evidence admission
 tachi_event action=a2a           → read-only A2A evidence bundle without context feedback writes
 ```
 
@@ -461,7 +461,7 @@ The target runtime path is:
 Runtime event
     → search recalls top-k projected patterns
     → extract/flash LLM or deterministic matcher confirms match
-    → emit pattern.hit / pattern.miss event
+    → append collect-only pattern.evidence.hit / pattern.evidence.miss receipt
     ↓
 Pattern matures (hit_rate / confidence threshold + external validation + cold-seat check)
     → projection report includes review_artifacts
@@ -483,8 +483,8 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `capture_session` emits `session.captured`; optional continuity pipeline emits candidates and `session.outcome`.
 - `tachi_complete` bridges subagent eval into `task.outcome` / `subagent.evaluated` events.
 - `tachi_event action=project` idempotently materializes events into stable projections.
-- `tachi_event action=context` returns projected memories plus `patterns`, `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, local `a2a`, and `host_lifecycle` read-model sections. It also records pattern/bonding `seen` feedback for returned pattern refs.
-- Pattern/bonding projections maintain `seen / hit / miss / confidence / last_seen` counters.
+- `tachi_event action=context` returns projected memories plus `patterns`, `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, local `a2a`, and `host_lifecycle` read-model sections. It is read-only and never treats its model-supplied `session_id` as internal evidence admission.
+- Pattern/bonding projections retain their legacy `seen / hit / miss / confidence / last_seen` fields for historical readability. New admitted internal pattern-evidence receipts do not update those counters or grant projection/promotion authority.
 - Timeline projections carry typed metadata and a validated `TimelineEntry` schema marker for discoveries, decisions, open threads, evolution, causal edges, external validations, and validity fields. Explicit causal edges with existing memory-id endpoints are persisted into `memory_edges`; natural-language-only edges are skipped rather than creating orphans.
 - Bonding projections carry SharedLexicon-shaped metadata and a validated `SharedLexicon` schema marker for origin, meaning, shorthand triggers, appropriate/inappropriate contexts, callback hits, and last successful use.
 - Context responses expose a local read-only `a2a` evidence bundle that includes share policy, cold-seat constraints, poll-subscription metadata, pattern refs, bonding refs, timeline open threads, and compact event refs without raw payloads. `tachi_event action=a2a` returns the same evidence bundle without context feedback writes.
@@ -508,7 +508,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 3. **No cross-process A2A transport**: a local read-only `a2a` evidence bundle and `action=a2a` poll surface exist, but there is no daemon pub/sub API, no independent cold-seat host profile, and no transport-level evidence/open-question feed.
 4. **Label-quality calibration incomplete**: harness and smoke fixture exist, but calibration still needs a larger reviewed held-out corpus, thresholds, and an operator-visible calibration status.
 5. **Maturity gates are partially implemented**: projection reports and `tachi_event action="promote"` expose external-validation / cold-seat-review gate status. The gate still does not auto-promote drafts/candidates to final wiki, listed skill, or Agent MD writes.
-6. **Pattern hit/miss feedback is partial but now connected to task closure and context**: `tachi_search scope="patterns"` and `tachi_event action=context` emit `seen`, explicit feedback can emit `hit` / `miss` / `stale`, `tachi_complete` can consume `pattern:<id>` evidence refs, and `close_loop` records reviewed attached patterns as `hit`. Ordinary briefing/context use still does not automatically decide hit/miss without downstream outcome evidence.
+6. **Pattern evidence is append-only but downstream interpretation remains partial**: `tachi_complete` can consume `pattern:<id>` evidence refs when it has a real flow id, and `close_loop` can append `hit` evidence for reviewed attached patterns when it has a real flow id. Missing flow identity produces a typed skip. `tachi_search scope="patterns"` and `tachi_event action=context` are read-only. These internal receipts do not project or change counters. The explicit legacy feedback action can still emit counter-mutating `hit` / `miss` / `stale` signals. Ordinary briefing/context use still does not automatically decide hit/miss without downstream outcome evidence.
 7. **Timeline graph is partially wired**: timeline projections expose a typed `metadata.timeline` / `timeline[]` read-model slice with a `TimelineEntry` schema marker, and explicit causal edges with existing memory-id endpoints persist to `memory_edges`. Natural-language causal edges, typed `JudgmentEvolution`, and automatic endpoint resolution are still missing.
 8. **Bonding privacy migration is unbuilt**: current `/user/patterns/bonding/*` projections are not physically partitioned by `(user trust domain, agent_identity_id)`, and current local A2A bundles expose bonding refs. Migrate to the private relationship partition, bind identity, exclude all bonding refs/content from A2A/workers/cold seats, and add migration/leakage goldens. The current `SharedLexicon` shape also lacks a standalone Rust domain type.
 9. **Rule-based affect detector is first-slice**: affect projections extract language switch, known markers, IO ratio, and length signals, but response-latency-like signals are not yet available without host timing input.

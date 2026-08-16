@@ -1,5 +1,6 @@
 //! R7 — Orphan reference cleanup.
 
+use rusqlite::TransactionBehavior;
 use serde_json::json;
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
@@ -80,7 +81,10 @@ impl RepairRule for OrphanRefs {
 
     fn apply(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut r = RuleReport::new(self.id(), self.name(), ctx.label.clone());
-        let tx = ctx.conn.transaction()?;
+        let tx = ctx
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut deletes = Vec::<(String, String, String, String)>::new();
         for (table, col, label) in REFS {
             // Existence check using the same conn (safe inside tx).
             let exists: bool = tx
@@ -93,28 +97,96 @@ impl RepairRule for OrphanRefs {
             if !exists {
                 continue;
             }
-            let sql = format!("DELETE FROM {table} WHERE {col} NOT IN (SELECT id FROM memories)");
-            let n = match tx.execute(&sql, []) {
-                Ok(v) => v,
+            let locator = if *table == "memories_vec" {
+                "id"
+            } else {
+                "rowid"
+            };
+            let guard_columns = if *table == "memory_edges" {
+                "source_id, target_id".to_string()
+            } else {
+                (*col).to_string()
+            };
+            let sql = format!(
+                "SELECT CAST({locator} AS TEXT), {guard_columns} FROM {table} \
+                 WHERE {col} NOT IN (SELECT id FROM memories)"
+            );
+            let mut stmt = match tx.prepare(&sql) {
+                Ok(stmt) => stmt,
                 Err(_) => continue,
             };
+            let column_count = stmt.column_count();
+            let rows = stmt
+                .query_map([], |row| {
+                    let mut ids = Vec::new();
+                    for index in 1..column_count {
+                        ids.push(row.get::<_, String>(index)?);
+                    }
+                    Ok((row.get::<_, String>(0)?, ids))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            for (value, ids) in rows {
+                let mut ordinary = true;
+                for id in ids {
+                    match memcore::db::refuse_retired_sticky_row_within_tx(
+                        &tx,
+                        &id,
+                        "removed by orphan-reference repair",
+                    ) {
+                        Ok(()) => {}
+                        Err(memcore::MemoryError::InvalidArg(_)) => ordinary = false,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                if ordinary {
+                    deletes.push((
+                        (*table).to_string(),
+                        locator.to_string(),
+                        value,
+                        (*label).to_string(),
+                    ));
+                }
+            }
+        }
+        let dangling_ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM memories
+                 WHERE superseded_by IS NOT NULL AND trim(superseded_by) <> ''
+                   AND NOT EXISTS (SELECT 1 FROM memories target WHERE target.id = memories.superseded_by)",
+            )?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        let mut ordinary_dangling = Vec::new();
+        for id in dangling_ids {
+            match memcore::db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &id,
+                "cleared by orphan-reference repair",
+            ) {
+                Ok(()) => ordinary_dangling.push(id),
+                Err(memcore::MemoryError::InvalidArg(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        for (table, col, value, label) in deletes {
+            let n = tx.execute(&format!("DELETE FROM {table} WHERE {col}=?1"), [value])?;
             if n > 0 {
                 r.findings.push(Finding::new(format!("orphans_{label}"), n));
                 r.applied += n;
             }
         }
-        let superseded_n = tx.execute(
-            "UPDATE memories
-             SET superseded_by = NULL
-             WHERE superseded_by IS NOT NULL
-               AND trim(superseded_by) <> ''
-               AND NOT EXISTS (SELECT 1 FROM memories target WHERE target.id = memories.superseded_by)",
-            [],
-        )?;
-        if superseded_n > 0 {
-            r.findings
-                .push(Finding::new("orphans_memories_superseded_by", superseded_n));
-            r.applied += superseded_n;
+        for id in ordinary_dangling {
+            let n = tx.execute("UPDATE memories SET superseded_by=NULL WHERE id=?1", [id])?;
+            if n > 0 {
+                r.findings
+                    .push(Finding::new("orphans_memories_superseded_by", n));
+                r.applied += n;
+            }
         }
         tx.commit()?;
         Ok(r)

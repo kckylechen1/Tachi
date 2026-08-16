@@ -1,25 +1,64 @@
-use super::make_entry;
-use memcore::MemoryStore;
+use chrono::Utc;
+use memcore::{MemoryEntry, MemoryStore};
+use serde_json::json;
 use std::collections::HashMap;
+use tachi_server::bootstrap_test_api as api;
 
+#[path = "bootstrap_tests/migration_execute.rs"]
 mod migration_execute;
+#[path = "bootstrap_tests/migration_plan.rs"]
 mod migration_plan;
+#[path = "bootstrap_tests/setup_report.rs"]
 mod setup_report;
+#[path = "bootstrap_tests/tidy_apply.rs"]
 mod tidy_apply;
+#[path = "bootstrap_tests/tidy_report.rs"]
 mod tidy_report;
 
-fn authorized_plan_sources(
-    plan: &[crate::bootstrap::TidyMigration],
-) -> std::collections::BTreeMap<String, crate::physical_db_identity::PhysicalMutationAuthority> {
-    plan.iter()
-        .map(|migration| {
-            let authority = crate::physical_db_identity::PhysicalMutationAuthority::capture(
-                std::path::Path::new(&migration.source_path),
-            )
-            .expect("fixture migration source must bind to a physical object");
-            (migration.source_path.clone(), authority)
-        })
-        .collect()
+fn authorized_plan_sources(plan: &[api::TidyMigration]) -> api::AuthorizedMigrationSources {
+    api::capture_migration_sources(plan)
+        .expect("fixture migration sources must bind to physical objects")
+}
+
+fn test_fixture_path(name: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("tachi-bootstrap-tests")
+        .join(format!("run-{}", std::process::id()))
+        .join(name)
+}
+
+fn make_entry(id: &str) -> MemoryEntry {
+    MemoryEntry {
+        id: id.to_string(),
+        path: "/".to_string(),
+        summary: "".to_string(),
+        text: "test memory".to_string(),
+        importance: 0.7,
+        timestamp: Utc::now().to_rfc3339(),
+        valid_from: String::new(),
+        valid_until: None,
+        category: "fact".to_string(),
+        topic: "".to_string(),
+        keywords: Vec::new(),
+        persons: Vec::new(),
+        entities: Vec::new(),
+        location: "".to_string(),
+        source: "test".to_string(),
+        scope: "general".to_string(),
+        archived: false,
+        access_count: 0,
+        scored_count: 0,
+        last_access: None,
+        last_use_at: None,
+        revision: 1,
+        metadata: json!({}),
+        vector: None,
+        retention_policy: None,
+        domain: None,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------

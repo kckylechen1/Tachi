@@ -1124,29 +1124,56 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  gets no proof and every site in it is a declaration.",
     },
     Exemption {
-        path: "crates/tachi-server/src/tests/skill_tests/builtin_ingest/ingest_source.rs",
+        path: "crates/tachi-server/src/tests/skill_tests/builtin_ingest/auto_ingest.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
-            signed_by: "tachi#1443 census lane (agent), body read 2026-07-26",
+            signed_by: "tachi#1756 contract repair (Codex), bodies read 2026-08-14",
         },
         sites: &[
             Site {
-                symbol: "source_success_audit_failure_is_loud_retryable_and_idempotent",
-                trigger: "FAIL_INGEST_SUCCESS_AUDIT",
-                ddl: "3e163fa670c20d51",
+                symbol: "admitted_auto_ingest_chunk_write_failure_is_partial_and_replayable",
+                trigger: "FAIL_ADMITTED_CHUNK_WRITE",
+                ddl: "83faca4f9eb4b9f1",
                 occurrences: 1,
             },
             Site {
-                symbol: "source_success_audit_failure_is_loud_retryable_and_idempotent",
-                trigger: "FAIL_INGEST_SUCCESS_AUDIT",
-                ddl: "45b5266b1101c731",
+                symbol: "admitted_auto_ingest_chunk_write_failure_is_partial_and_replayable",
+                trigger: "FAIL_ADMITTED_CHUNK_WRITE",
+                ddl: "fdb0ef03dadcb089",
+                occurrences: 1,
+            },
+            Site {
+                symbol:
+                    "admitted_auto_ingest_completion_receipt_failure_is_partial_and_replayable",
+                trigger: "FAIL_ADMITTED_AUTO_INGEST_COMPLETION",
+                ddl: "b92e6ecff09fdedc",
+                occurrences: 1,
+            },
+            Site {
+                symbol:
+                    "admitted_auto_ingest_completion_receipt_failure_is_partial_and_replayable",
+                trigger: "FAIL_ADMITTED_AUTO_INGEST_COMPLETION",
+                ddl: "e8d2cf7827ea37f7",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "admitted_auto_ingest_edge_failure_is_partial_without_duplicate_chunks",
+                trigger: "FAIL_ADMITTED_EDGE_WRITE",
+                ddl: "18e035a5d422f961",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "admitted_auto_ingest_edge_failure_is_partial_without_duplicate_chunks",
+                trigger: "FAIL_ADMITTED_EDGE_WRITE",
+                ddl: "73a542736e95f78b",
                 occurrences: 1,
             },
         ],
-        reason: "source_success_audit_failure_is_loud_retryable_and_idempotent \
-                 installs and then drops the audit fault inside \
-                 with_unrestricted_fixture_connection; body read 2026-07-26. \
-                 This is the sanctioned shape, but the file also names a store \
-                 doorway, so it is a declaration.",
+        reason: "the chunk-write, completion-receipt, and edge-write recovery tests each \
+                 install and then drop their named fault trigger through \
+                 with_unrestricted_fixture_connection, assert the typed partial stage, \
+                 and prove replay completes without duplicate chunks. Bodies read \
+                 2026-08-14. The file also names store doorways, so this sanctioned \
+                 fault-injection shape is declared rather than machine-proven.",
     },
     Exemption {
         path: "crates/tachi-server/src/tests/wiki_tests/write/facade_routing/guide_metadata.rs",

@@ -497,7 +497,7 @@ fn archive_one_transactionally(
             return Ok(Err("apply_time_protection_or_policy_changed"));
         }
         if store
-            .archive_memory_if_revision(id, expected_revision)
+            .archive_memory_revision_within_tx(id, expected_revision)
             .map_err(|e| e.to_string())?
         {
             Ok(Ok(expected_revision + 1))
@@ -550,7 +550,7 @@ fn restore_one_transactionally(
             return Ok(Err("restore_target_or_lineage_mismatch"));
         }
         if store
-            .restore_archived_if_revision(&row.memory_id, archived_revision)
+            .restore_archived_revision_within_tx(&row.memory_id, archived_revision)
             .map_err(|e| e.to_string())?
         {
             Ok(Ok(archived_revision + 1))

@@ -4,7 +4,7 @@
 //! `orchestrator_ops::HandoffPacket` (`tachi_orchestrator(action='handoff_write'|
 //! 'handoff_read')`) is the `task_id`-keyed resumable baton; `tachi_gh(action=
 //! 'pr_handoff')` (`task_lifecycle::handle_task_pr_handoff`) is the `flow_id`-keyed
-//! PR-handoff artifact; `sticky_ops` is the short read-once agent memo. This
+//! PR-handoff artifact; `tachi_a2a` is the same-host advisory mailbox. This
 //! module is the third, previously-unimplemented domain: a **campaign/session**
 //! boundary publication, addressed by neither a `task_id` nor a `flow_id` —
 //! a GitHub issue (durable, commentable, closeable) mirrored into `/wiki` for

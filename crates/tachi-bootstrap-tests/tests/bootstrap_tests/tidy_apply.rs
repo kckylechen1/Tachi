@@ -3,7 +3,7 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn tidy_apply_removes_broken_memory_db_symlink() {
-    let root = crate::utils::test_fixture_path(format!(
+    let root = test_fixture_path(format!(
         "tachi-tidy-broken-symlink-{}",
         uuid::Uuid::new_v4()
     ));
@@ -17,7 +17,7 @@ fn tidy_apply_removes_broken_memory_db_symlink() {
     std::fs::create_dir_all(link.parent().unwrap()).expect("create symlink parent");
     std::os::unix::fs::symlink(&missing_target, &link).expect("create broken symlink");
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None)
+    let report = api::build_tidy_report(std::slice::from_ref(&root), None)
         .expect("tidy report should build");
     let finding = report
         .databases
@@ -29,8 +29,7 @@ fn tidy_apply_removes_broken_memory_db_symlink() {
     assert_eq!(finding.target_exists, Some(false));
     assert!(finding.is_symlink);
 
-    let summary = crate::bootstrap::execute_tidy_apply(&app_home, &report)
-        .expect("apply summary should build");
+    let summary = api::execute_tidy_apply(&app_home, &report).expect("apply summary should build");
     assert!(summary
         .applied_steps
         .iter()
@@ -45,8 +44,7 @@ fn tidy_apply_removes_broken_memory_db_symlink() {
 
 #[test]
 fn tidy_apply_writes_report_and_only_confirms_safe_actions() {
-    let root =
-        crate::utils::test_fixture_path(format!("tachi-tidy-apply-{}", uuid::Uuid::new_v4()));
+    let root = test_fixture_path(format!("tachi-tidy-apply-{}", uuid::Uuid::new_v4()));
     let git_root = root.join("repo");
     let app_home = root.join(".tachi-home");
     let global_db = root.join(".tachi").join("global").join("memory.db");
@@ -69,10 +67,9 @@ fn tidy_apply_writes_report_and_only_confirms_safe_actions() {
         store.upsert(&make_entry(&id)).expect("seed db");
     }
 
-    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), Some(&git_root))
+    let report = api::build_tidy_report(std::slice::from_ref(&root), Some(&git_root))
         .expect("tidy report should build");
-    let summary = crate::bootstrap::execute_tidy_apply(&app_home, &report)
-        .expect("apply summary should build");
+    let summary = api::execute_tidy_apply(&app_home, &report).expect("apply summary should build");
 
     assert_eq!(summary.applied_count, 2);
     assert_eq!(summary.skipped_count, 1);

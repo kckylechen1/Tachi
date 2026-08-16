@@ -36,8 +36,8 @@ pub(super) async fn generate_mcp_config(
         // TACHI_PROFILE=standard would otherwise resolve as a named seat
         // (not None/leader) and lose its own broadcasts. `TACHI_AGENT_SEAT`
         // is a dedicated, separate env var carrying the actual per-worker
-        // seat name (the dispatch's `profile`/`agent` identity), read by
-        // `sticky_ops::identity::resolve_caller_agent_id`'s env fallback.
+        // seat name (the dispatch's `profile`/`agent` identity), consumed by
+        // the session-identity and claims surfaces.
         // Every tachi-dispatched worker gets a real seat identity this way,
         // independent of whatever tool profile it was also given.
         if let Some(seat) = agent_seat.filter(|s| !s.trim().is_empty()) {

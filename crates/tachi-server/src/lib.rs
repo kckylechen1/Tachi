@@ -79,11 +79,15 @@
     clippy::useless_format
 )]
 
+mod a2a_ops;
 mod action_effect;
 mod agent_eval;
 mod agent_markdown;
 mod agent_registry;
 mod bootstrap;
+#[cfg(feature = "bootstrap-test-api")]
+#[doc(hidden)]
+pub mod bootstrap_test_api;
 mod build_broker;
 pub mod build_info;
 mod build_info_core;
@@ -104,7 +108,6 @@ mod dispatch_profile;
 mod dlq_ops;
 pub(crate) mod docs_ops;
 mod doctor;
-mod doctor_ops;
 mod domain_adapter_ops;
 mod enrichment;
 mod event_ops;
@@ -169,7 +172,6 @@ mod skill_policy;
 mod skill_source_resolver;
 mod staffing_ops;
 mod status_ops;
-mod sticky_ops;
 mod task_lifecycle;
 #[cfg(test)]
 mod test_support;

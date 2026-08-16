@@ -50,6 +50,7 @@ pub mod llm_usage;
 pub mod maintenance;
 pub mod memory_lifecycle;
 pub mod open;
+mod operator_maintenance;
 pub mod outbox;
 pub mod outbox_destination_apply;
 pub mod outbox_protocol;
@@ -62,6 +63,8 @@ pub mod rem;
 pub mod sandbox;
 pub mod snapshot_import;
 pub mod state;
+#[cfg(feature = "admin")]
+pub mod sticky_cutover;
 pub mod tasks;
 #[cfg(feature = "admin")]
 pub mod vault;

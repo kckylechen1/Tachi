@@ -204,13 +204,6 @@ pub(crate) async fn collect_tachi_search_sections(
         match search_memory_rows_with_access(server, pattern_params, false, true).await {
             Ok(rows) => {
                 let rows = parse_pattern_rows(rows, top_k);
-                let _feedback = crate::continuity_ops::emit_pattern_seen_events(
-                    server,
-                    params.project.as_deref(),
-                    Some(&params.query),
-                    &rows,
-                    Some("tachi_search"),
-                );
                 sections.push(("Patterns".to_string(), Value::Array(strip_metadata(rows))));
             }
             Err(e) => sections.push(("Patterns".to_string(), Value::String(format!("Error: {e}")))),

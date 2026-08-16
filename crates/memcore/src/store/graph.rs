@@ -1,5 +1,7 @@
 //! Memory graph methods on [`MemoryStore`].
 
+use rusqlite::{Transaction, TransactionBehavior};
+
 use crate::{
     db,
     db::AnchorKind,
@@ -10,11 +12,41 @@ use crate::{
 };
 
 impl MemoryStore {
+    fn retired_sticky_edge_preflight(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        operation: &str,
+    ) -> Result<(), MemoryError> {
+        db::refuse_retired_sticky_row_within_tx(&self.conn, source_id, operation)?;
+        db::refuse_retired_sticky_row_within_tx(&self.conn, target_id, operation)
+    }
+
+    fn with_retired_sticky_edge_preflight<T>(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        operation: &str,
+        write: impl FnOnce(&rusqlite::Connection) -> Result<T, MemoryError>,
+    ) -> Result<T, MemoryError> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        db::refuse_retired_sticky_row_within_tx(&tx, source_id, operation)?;
+        db::refuse_retired_sticky_row_within_tx(&tx, target_id, operation)?;
+        let result = write(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     /// Add or update an edge in the memory graph. Generic path: the relation
     /// must be admissible on ontology-v1 (the #772 grandfathered relations are
     /// rejected here — use [`MemoryStore::add_component_governance_edge`]).
     pub fn add_edge(&self, edge: &MemoryEdge) -> Result<(), MemoryError> {
-        db::add_edge(&self.conn, edge)
+        self.with_retired_sticky_edge_preflight(
+            &edge.source_id,
+            &edge.target_id,
+            "given a graph edge",
+            |conn| db::add_edge(conn, edge),
+        )
     }
 
     /// [`MemoryStore::add_edge`] plus explicit provenance for the appended
@@ -24,6 +56,25 @@ impl MemoryStore {
         edge: &MemoryEdge,
         provenance: &db::EdgeProvenance,
     ) -> Result<(), MemoryError> {
+        self.with_retired_sticky_edge_preflight(
+            &edge.source_id,
+            &edge.target_id,
+            "given a provenance graph edge",
+            |conn| db::add_edge_with_provenance(conn, edge, provenance),
+        )
+    }
+
+    /// Add an edge under a transaction/savepoint already owned by the caller.
+    pub fn add_edge_with_provenance_within_tx(
+        &self,
+        edge: &MemoryEdge,
+        provenance: &db::EdgeProvenance,
+    ) -> Result<(), MemoryError> {
+        self.retired_sticky_edge_preflight(
+            &edge.source_id,
+            &edge.target_id,
+            "given a provenance graph edge",
+        )?;
         db::add_edge_with_provenance(&self.conn, edge, provenance)
     }
 
@@ -36,7 +87,12 @@ impl MemoryStore {
         edge: &MemoryEdge,
         relation: ComponentGovernanceRelation,
     ) -> Result<(), MemoryError> {
-        db::add_component_governance_edge(&self.conn, edge, relation)
+        self.with_retired_sticky_edge_preflight(
+            &edge.source_id,
+            &edge.target_id,
+            "given a component-governance edge",
+            |conn| db::add_component_governance_edge(conn, edge, relation),
+        )
     }
 
     /// [`MemoryStore::add_component_governance_edge`] plus explicit provenance
@@ -47,7 +103,14 @@ impl MemoryStore {
         relation: ComponentGovernanceRelation,
         provenance: &db::EdgeProvenance,
     ) -> Result<(), MemoryError> {
-        db::add_component_governance_edge_with_provenance(&self.conn, edge, relation, provenance)
+        self.with_retired_sticky_edge_preflight(
+            &edge.source_id,
+            &edge.target_id,
+            "given a provenance component-governance edge",
+            |conn| {
+                db::add_component_governance_edge_with_provenance(conn, edge, relation, provenance)
+            },
+        )
     }
 
     /// Remove a specific edge.
@@ -57,7 +120,12 @@ impl MemoryStore {
         target_id: &str,
         relation: &str,
     ) -> Result<bool, MemoryError> {
-        db::remove_edge(&self.conn, source_id, target_id, relation)
+        self.with_retired_sticky_edge_preflight(
+            source_id,
+            target_id,
+            "had a graph edge removed",
+            |conn| db::remove_edge(conn, source_id, target_id, relation),
+        )
     }
 
     /// Get edges connected to a memory entry.
@@ -141,7 +209,23 @@ impl MemoryStore {
     /// item 3: legacy fog retirement). Idempotent — safe to call repeatedly
     /// from a maintenance sweep. Returns the number of rows closed.
     pub fn close_related_to_fog(&self) -> Result<usize, MemoryError> {
-        db::close_related_to_fog(&self.conn)
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "SELECT source_id FROM memory_edges WHERE relation='related_to' AND valid_to IS NULL
+                 UNION SELECT target_id FROM memory_edges WHERE relation='related_to' AND valid_to IS NULL",
+            )?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        for id in &ids {
+            db::refuse_retired_sticky_row_within_tx(&tx, id, "had legacy graph fog closed")?;
+        }
+        let closed = db::close_related_to_fog(&tx)?;
+        tx.commit()?;
+        Ok(closed)
     }
 
     /// Ensure a deterministic anchor row exists for `(kind, key)` (tachi#773

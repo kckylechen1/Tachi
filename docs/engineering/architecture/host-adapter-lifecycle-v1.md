@@ -398,7 +398,7 @@ The generic adapter exposes only a small memory surface to the host:
 | `retain` / `save` | `tachi_memory(action="save")`, `save_memory`, or kernel save API | yes | current save path; `retain` is adapter vocabulary | Stores durable user/session facts with provenance and policy labels. |
 | `recall` / `search` | `tachi_memory(action="search")`, `search_memory`, or kernel search API | yes | current search path | Returns ranked memory rows plus source, scope, and confidence metadata. |
 | `reflect` / `synthesize` | `tachi_memory(action="ask")`, distill/read-model API, or no-op | optional | partially current through ask/distill; adapter reflection API is target | Produces synthesis only when the kernel and adapter policy support it. |
-| `status` / `readiness` | `tachi_memory(action="readiness")`, `tachi_status`, or runtime info | yes | current | Reports degraded recall, locked vault, vector gaps, or unavailable kernel. |
+| `status` / `readiness` | `tachi_status` plus `runtime_info` | yes | current semantic owners | Reports compact health/warnings and runtime/profile identity without creating or repairing stores. |
 | `read_by_id` | `tachi_memory(action="get")` or kernel get API | optional | current get path | Allowed only when the host policy permits direct memory reads. |
 | `edit` | kernel update/edit API | optional | proposed/target | Allowed only where the kernel has reviewed edit semantics. |
 

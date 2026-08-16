@@ -318,13 +318,17 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
 ];
 
 pub(super) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, false, None, None)
+    collect_api_key_status_inner(global_db_path, false, None, None, false)
 }
 
 pub(super) fn collect_api_key_status_with_value_compare(
     global_db_path: &Path,
 ) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, true, None, None)
+    collect_api_key_status_inner(global_db_path, true, None, None, false)
+}
+
+pub(super) fn collect_api_key_status_immutable(global_db_path: &Path) -> Vec<ApiKeyStatus> {
+    collect_api_key_status_inner(global_db_path, false, None, None, true)
 }
 
 /// `resolved_home`: the caller's server-bound home (`MemoryServer::tachi_home_dir()`),
@@ -344,6 +348,7 @@ pub(crate) fn collect_api_key_status_with_probe_cache(
         compare_vault_values,
         probe_cache,
         resolved_home,
+        false,
     )
 }
 
@@ -352,11 +357,35 @@ fn collect_api_key_status_inner(
     compare_vault_values: bool,
     probe_cache: Option<&ProviderProbeCache>,
     resolved_home: Option<&Path>,
+    immutable: bool,
 ) -> Vec<ApiKeyStatus> {
     let mut vault_names = HashSet::new();
     let mut rotation_rows = Vec::new();
     let mut key_health_rows = Vec::new();
-    if let Some(path) = global_db_path.to_str() {
+    if immutable {
+        let encoded = global_db_path
+            .to_string_lossy()
+            .replace('?', "%3f")
+            .replace('#', "%23")
+            .replace(' ', "%20");
+        let uri = format!("file:{encoded}?mode=ro&immutable=1");
+        if let Ok(conn) = memcore::db::open_immutable_readonly(&uri) {
+            if let Ok(entries) = memcore::db::vault_list_entries(&conn) {
+                vault_names.extend(
+                    entries
+                        .into_iter()
+                        .filter(|entry| entry.secret_type == "api_key")
+                        .map(|entry| entry.name),
+                );
+            }
+            if let Ok(rows) = memcore::db::vault_list_rotations(&conn) {
+                rotation_rows = rows;
+            }
+            if let Ok(rows) = memcore::db::vault_list_key_health(&conn, None) {
+                key_health_rows = rows;
+            }
+        }
+    } else if let Some(path) = global_db_path.to_str() {
         if let Ok(store) = memcore::MemoryStore::open_read_only(path) {
             if let Ok(entries) = store.vault_list_entries() {
                 vault_names.extend(

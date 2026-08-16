@@ -1,3 +1,5 @@
+#[cfg(feature = "admin")]
+pub mod a2a;
 mod agent_state;
 pub mod anchor;
 mod audit;
@@ -40,6 +42,7 @@ pub mod open_context;
 // tachi#1643: NOT admin-gated. #1630's premise is a host-owned sync loop with
 // no Tachi daemon, so the outbox is portable surface — the same reason the v29
 // migration takes no `StoreProfile`.
+mod operator_maintenance;
 pub mod outbox;
 mod recall_cache;
 #[cfg(feature = "admin")]
@@ -128,6 +131,7 @@ pub(crate) use memory_crud::query_hash;
 #[cfg(test)]
 pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
+pub use memory_crud::refuse_retired_sticky_row_within_tx;
 pub(crate) use memory_crud::search_fts_raw_match;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
 pub(crate) use memory_crud::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals;
@@ -136,14 +140,15 @@ pub(crate) use memory_crud::wiki_corpus_store_sql_splice;
 pub(crate) use memory_crud::AccessUpdate;
 pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;
 pub use memory_crud::{
-    access_event_density, archive_memory, archive_memory_if_revision, delete,
-    delete_memories_symbolic_fts, fetch_by_ids, fetch_by_ids_excluding_store_internal,
-    find_active_wiki_entry_by_path, find_exact_path_text_id, get_access_times, get_all,
-    get_use_access_times, is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
-    list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
-    list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
-    normalize_for_write, record_enrichment_failure, record_memory_use, release_event_claim,
-    restore_archived_if_revision, search_fts, search_symbolic_candidates, search_vec,
+    access_event_density, archive_memory, archive_memory_if_revision,
+    archive_memory_revision_within_tx, delete, delete_memories_symbolic_fts, fetch_by_ids,
+    fetch_by_ids_excluding_store_internal, find_active_wiki_entry_by_path, find_exact_path_text_id,
+    get_access_times, get_all, get_use_access_times, is_reserved_wiki_internal_path,
+    is_user_facing_wiki_entry, list_active_wiki_ingest_predecessors, list_by_path,
+    list_by_path_active_unsuperseded, list_by_path_recent, list_user_facing_wiki_entries,
+    list_wiki_duplicate_candidates, normalize_for_write, record_enrichment_failure,
+    record_memory_use, release_event_claim, restore_archived_if_revision,
+    restore_archived_revision_within_tx, search_fts, search_symbolic_candidates, search_vec,
     set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
     supersede_memory_if_revision, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
     try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
@@ -153,7 +158,8 @@ pub use memory_crud::{
     MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 pub(crate) use memory_crud::{
-    archive_with_metadata_if_expected_state, restore_with_metadata_if_expected_state,
+    archive_memory_within_tx, archive_with_metadata_if_expected_state,
+    restore_with_metadata_if_expected_state, supersede_memory_within_tx,
     supersede_with_metadata_if_expected_state, update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
@@ -193,6 +199,15 @@ pub(crate) use open::{
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
+};
+pub(crate) use operator_maintenance::{
+    apply_operator_delete_candidate_facts, apply_operator_gc_candidate_facts,
+    delete_candidate_facts, gc_candidate_facts, operator_maintenance_authority,
+};
+pub use operator_maintenance::{
+    is_kanban_gc_candidate, DeleteMaintenanceOutcome, GcMaintenanceOutcome, MaintenanceClassFact,
+    OperatorMaintenanceCommittedReceiptBinding, OperatorMaintenanceOperation,
+    OperatorMaintenancePlanBinding, OPERATOR_DELETE_CLASSES, OPERATOR_GC_CLASSES,
 };
 /// tachi#1643 durable outbox write/read seams. Crate-internal on purpose: they
 /// take a `Transaction`/`Connection`, and the invariant this leaf exists to
@@ -237,7 +252,7 @@ pub use schema::{init_schema, init_schema_with_label_mut, SchemaInitOutcome};
 pub use search_generation::{bump_search_generation, search_generation};
 pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
-pub(crate) use state::refuse_store_identity_namespace;
+pub(crate) use state::refuse_general_mutation_namespace;
 pub use state::{
     backfill_missing_expires_at, delete_state, get_state, insert_state_if_absent,
     list_derived_by_source, list_state, reap_expired_state, save_derived, save_derived_with_id,
@@ -263,6 +278,9 @@ pub use vault_accounts::{
     vault_pool_members_digest, AccountRetirement, AliasObservation, FingerprintUpdate,
     POOL_MEMBERS_DIGEST_SCHEME,
 };
+#[cfg(all(feature = "admin", feature = "test-support"))]
+#[doc(hidden)]
+pub use vault_db::{install_vault_key_health_write_hook_for_tests, VaultKeyHealthWriteHookGuard};
 #[cfg(feature = "admin")]
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_entry_exists, vault_get_config, vault_get_entry,
