@@ -49,6 +49,8 @@ pub mod linking;
 pub mod llm_usage;
 pub mod maintenance;
 pub mod memory_lifecycle;
+#[cfg(feature = "admin")]
+pub mod model_alias_plan;
 pub mod open;
 mod operator_maintenance;
 pub mod outbox;

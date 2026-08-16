@@ -1465,3 +1465,49 @@ fn cli_command_tree_builds_within_a_bounded_stack() {
          cli::tests case aborts the test binary."
     );
 }
+
+// #1681 D2: alias governance is plan/apply, and the CLI has to make that the
+// only shape available. A `broker bind` convenience verb would land a routing
+// change with no artifact anyone reviewed, so its absence is part of the
+// surface and is asserted here rather than left to reviewer memory.
+#[test]
+fn broker_is_a_plan_apply_surface_with_no_one_shot_mutation() {
+    let plan = Cli::try_parse_from(["tachi", "broker", "plan", "--out", "/tmp/alias-plan.json"])
+        .expect("broker plan should parse");
+    assert!(matches!(
+        plan.command,
+        Some(Commands::Broker {
+            action: BrokerAction::Plan {
+                json: false,
+                out: Some(path)
+            }
+        }) if path == *std::path::Path::new("/tmp/alias-plan.json")
+    ));
+
+    let apply = Cli::try_parse_from([
+        "tachi",
+        "broker",
+        "apply",
+        "--plan",
+        "/tmp/alias-plan.json",
+        "--json",
+    ])
+    .expect("broker apply should parse");
+    assert!(matches!(
+        apply.command,
+        Some(Commands::Broker {
+            action: BrokerAction::Apply { json: true, .. }
+        })
+    ));
+
+    // Apply has no default plan path: applying "whatever was last planned" is
+    // exactly the unreviewed write this surface exists to prevent.
+    assert!(Cli::try_parse_from(["tachi", "broker", "apply"]).is_err());
+    // And there is no verb that writes without a plan at all.
+    for verb in ["bind", "unbind", "set", "retire"] {
+        assert!(
+            Cli::try_parse_from(["tachi", "broker", verb, "lane.reasoning"]).is_err(),
+            "`broker {verb}` must not exist: an alias write goes through plan/apply"
+        );
+    }
+}

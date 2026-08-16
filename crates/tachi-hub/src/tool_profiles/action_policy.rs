@@ -826,7 +826,7 @@ mod tests {
             }
         }
     }
-#[test]
+    #[test]
     fn f1733_attachment_actions_are_coordinate_or_admin_only() {
         for action in ["attach_session", "get_attachment"] {
             assert!(facade_action_allowed(
@@ -849,7 +849,7 @@ mod tests {
         }
     }
 
-#[test]
+    #[test]
     fn f1733_non_attachment_eval_actions_keep_existing_policy_behavior() {
         for action in ["aggregate_live", "telemetry", "route_projection"] {
             assert!(facade_action_allowed(

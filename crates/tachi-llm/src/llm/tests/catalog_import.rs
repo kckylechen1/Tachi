@@ -5,6 +5,7 @@
 //! model, forgets the key chain, or re-reads env instead of projecting the
 //! config in hand is caught by name.
 
+use memcore::catalog::endpoint::EndpointCredentialLeak;
 use memcore::catalog::{CatalogSource, ProtocolKind};
 use memcore::db::model_catalog::{list_model_deployments_by_source, DeploymentWrite};
 use rusqlite::Connection;
@@ -284,7 +285,10 @@ fn a_base_url_carrying_userinfo_is_refused_and_lands_nothing_in_the_catalog() {
     assert!(
         matches!(
             refusal,
-            CatalogImportError::EndpointCarriesUserinfo { lane: "extract" }
+            CatalogImportError::EndpointCarriesCredential {
+                lane: "extract",
+                leak: EndpointCredentialLeak::Userinfo
+            }
         ),
         "the refusal must be typed and name the offending lane: {refusal:?}"
     );
@@ -305,6 +309,57 @@ fn a_base_url_carrying_userinfo_is_refused_and_lands_nothing_in_the_catalog() {
         "nor may it append events: {} event(s)",
         events.len()
     );
+}
+
+#[test]
+fn a_base_url_carrying_a_credential_shaped_query_key_is_refused_the_same_way() {
+    // Userinfo is not the only place a URL smuggles a credential, and this is
+    // the hole the shared rule closed: `?api_key=` reaches the same durable
+    // `endpoint_ref` column, the same status output and the same logs, and
+    // this side of the boundary used to check only the authority. The deny
+    // list is now memcore's, shared with the request path's own check, so
+    // extending it tightens both surfaces at once.
+    let conn = catalog_conn();
+    let mut config = distinct_config();
+    config.summary.base_url = "https://proxy.internal/v1/chat?api_key=sk-live-SECRET".to_string();
+
+    let refusal = import_env_chat_lanes(&conn, &config, OBSERVED_AT)
+        .expect_err("a query-string credential must not import either");
+    assert!(
+        matches!(
+            &refusal,
+            CatalogImportError::EndpointCarriesCredential {
+                lane: "summary",
+                leak: EndpointCredentialLeak::QueryKey { key }
+            } if key == "api_key"
+        ),
+        "the refusal must name the lane and the offending key: {refusal:?}"
+    );
+    for rendering in [refusal.to_string(), format!("{refusal:?}")] {
+        assert!(
+            !rendering.contains("sk-live-SECRET"),
+            "the refusal repeated the credential: {rendering}"
+        );
+    }
+    assert!(
+        list_model_deployments_by_source(&conn, CatalogSource::Env)
+            .expect("rows read")
+            .is_empty(),
+        "a refused import must leave the catalog untouched"
+    );
+}
+
+#[test]
+fn an_ordinary_query_string_still_imports() {
+    // The rule is about credential keys, not about query strings. An endpoint
+    // that pins an API version is an ordinary endpoint.
+    let conn = catalog_conn();
+    let mut config = distinct_config();
+    config.summary.base_url = "https://proxy.internal/v1/chat?api-version=2026-01-01".to_string();
+
+    import_env_chat_lanes(&conn, &config, OBSERVED_AT).expect("an ordinary query string imports");
+    let stored = list_model_deployments_by_source(&conn, CatalogSource::Env).expect("rows read");
+    assert_eq!(stored.len(), 4);
 }
 
 #[test]
@@ -359,7 +414,10 @@ fn every_chat_lane_is_gated_not_just_the_first() {
         assert!(
             matches!(
                 refusal,
-                CatalogImportError::EndpointCarriesUserinfo { lane: refused } if refused == lane
+                CatalogImportError::EndpointCarriesCredential {
+                    lane: refused,
+                    leak: EndpointCredentialLeak::Userinfo
+                } if refused == lane
             ),
             "lane {lane}: expected a userinfo refusal naming it, got {refusal:?}"
         );

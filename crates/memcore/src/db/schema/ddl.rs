@@ -910,6 +910,30 @@ pub(super) const BASE_SCHEMA_CHUNKS: &[(SchemaScope, &str)] = &[
         CREATE INDEX IF NOT EXISTS idx_model_alias_bindings_deployment ON model_alias_bindings(deployment_id);
 "#,
     ),
+    // model_alias_events
+    (
+        SchemaScope::Product,
+        r#"
+        -- Append-only audit of everything that ever moved an alias or one of its
+        -- bindings, shaped like `model_deployment_events` verbatim (#1681 D2 review,
+        -- CP4): `revision` is the alias revision the event produced, and
+        -- `plan_digest` binds the event to the approved plan that caused it. The
+        -- alias write path is a single reviewed door, so an alias row whose revision
+        -- is not the revision of its newest event was written by something that did
+        -- not come through it. Rows are never updated or deleted -- no UPDATE/DELETE
+        -- accessor exists for this table anywhere in the codebase.
+        CREATE TABLE IF NOT EXISTS model_alias_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            alias_name  TEXT NOT NULL,
+            revision    INTEGER NOT NULL,
+            event_kind  TEXT NOT NULL,
+            plan_digest TEXT,
+            evidence    TEXT NOT NULL DEFAULT '{}',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_alias_events_alias ON model_alias_events(alias_name, id);
+"#,
+    ),
     // pricing_snapshots
     (
         SchemaScope::Product,
@@ -2111,10 +2135,13 @@ pub(super) const MIGRATED_INDEXES_CHUNKS: &[(SchemaScope, &str)] = &[
 /// adds the chunk, changing not one byte of any existing statement. The one
 /// amendments so far: tachi#1680 D1's four provider-account tables, appended
 /// to the vault section (`provider_accounts`, `provider_account_aliases`,
-/// `provider_account_events`, `account_custody`); and tachi#1681 D1's six
+/// `provider_account_events`, `account_custody`); tachi#1681 D1's six
 /// model-broker catalog tables, appended right after that group
 /// (`model_deployments`, `model_deployment_events`, `model_aliases`,
-/// `model_alias_bindings`, `pricing_snapshots`, `model_deployment_health`).
+/// `model_alias_bindings`, `pricing_snapshots`, `model_deployment_health`);
+/// and tachi#1681 D2's `model_alias_events`, inserted between
+/// `model_alias_bindings` and `pricing_snapshots` so the alias group reads in
+/// the same rows-then-log order the deployment group does.
 /// Rewriting an existing statement here to make a failing assertion pass is
 /// exactly the drift this golden exists to catch.
 #[cfg(test)]
@@ -2732,6 +2759,25 @@ pub(super) const BASE_SCHEMA_SQL_V28_GOLDEN: &str = r#"
             PRIMARY KEY (alias_name, deployment_id)
         );
         CREATE INDEX IF NOT EXISTS idx_model_alias_bindings_deployment ON model_alias_bindings(deployment_id);
+
+        -- Append-only audit of everything that ever moved an alias or one of its
+        -- bindings, shaped like `model_deployment_events` verbatim (#1681 D2 review,
+        -- CP4): `revision` is the alias revision the event produced, and
+        -- `plan_digest` binds the event to the approved plan that caused it. The
+        -- alias write path is a single reviewed door, so an alias row whose revision
+        -- is not the revision of its newest event was written by something that did
+        -- not come through it. Rows are never updated or deleted -- no UPDATE/DELETE
+        -- accessor exists for this table anywhere in the codebase.
+        CREATE TABLE IF NOT EXISTS model_alias_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            alias_name  TEXT NOT NULL,
+            revision    INTEGER NOT NULL,
+            event_kind  TEXT NOT NULL,
+            plan_digest TEXT,
+            evidence    TEXT NOT NULL DEFAULT '{}',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_alias_events_alias ON model_alias_events(alias_name, id);
 
         -- Content-addressed price sheet (tachi#1681 D1, cross-vendor review finding
         -- 3): `snapshot_id` is the canonical-JSON digest of `pricing_data`, computed
@@ -3462,6 +3508,8 @@ mod golden_tests {
             ("model_deployment_events", SchemaScope::Product),
             ("model_aliases", SchemaScope::Product),
             ("model_alias_bindings", SchemaScope::Product),
+            // tachi#1681 D2 review (CP4) — the alias group's append-only log.
+            ("model_alias_events", SchemaScope::Product),
             ("pricing_snapshots", SchemaScope::Product),
             ("model_deployment_health", SchemaScope::Product),
             ("foundry_jobs", SchemaScope::Product),

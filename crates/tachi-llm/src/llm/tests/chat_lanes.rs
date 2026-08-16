@@ -407,6 +407,235 @@ async fn chat_lane_records_success_usage_to_vault_db() {
     server_task.abort();
 }
 
+/// #1681 PR-D review (CP5, round 2): `model` in `call_provider_tier` is
+/// `model_override` unwrapped — caller-controlled — and this success path
+/// used to persist it into `llm_usage.model` verbatim. This is the same
+/// hostile shape the ingress gate already bounds at the counting/log seam
+/// (newline, control character, length past the 64-char cap); the write
+/// sink must apply the identical bound rather than a second, unaudited copy
+/// of it.
+#[tokio::test]
+async fn chat_lane_success_usage_bounds_the_caller_supplied_model_override() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "usage recorded"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let db = tempfile::NamedTempFile::new().expect("usage db");
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "configured-extract-model".to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client =
+        LlmClient::new_with_config(config, Some(db.path())).expect("client should initialize");
+    client.set_provider_secret_pool(
+        "EXTRACT_API_KEY",
+        vec![ProviderSecret {
+            key_id: "EXTRACT_API_KEY".to_string(),
+            value: "test-key".to_string(),
+        }],
+    );
+
+    // Caller-controlled model_override: a newline (the same log-line-forging
+    // shape the gate closes) plus a control character plus well past the
+    // 64-char bound.
+    let malicious_model = format!("evil\nmodel\u{0007}{}", "x".repeat(100));
+    assert!(malicious_model.chars().count() > 64);
+
+    let out = client
+        .call_extract_llm("system", "user payload", Some(&malicious_model), 0.0, 16)
+        .await
+        .expect("mock provider should succeed even with a hostile model_override");
+    assert_eq!(out, "usage recorded");
+
+    let mut stored_model = None;
+    for _ in 0..40 {
+        let conn = rusqlite::Connection::open(db.path()).expect("open usage db");
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_usage'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query sqlite_master");
+        if table_exists > 0 {
+            let result: Result<String, _> = conn.query_row(
+                "SELECT model FROM llm_usage ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            );
+            if let Ok(value) = result {
+                stored_model = Some(value);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let stored_model = stored_model.expect("usage row should be persisted");
+    assert_ne!(
+        stored_model, malicious_model,
+        "the raw caller-supplied model_override must not be persisted verbatim"
+    );
+    assert!(
+        !stored_model.contains('\n') && !stored_model.contains('\u{0007}'),
+        "control characters must be scrubbed before the write: {stored_model:?}"
+    );
+    assert!(
+        stored_model.chars().count() <= 65,
+        "the stored model must respect the same 64-char + truncation-marker bound as the \
+         ingress gate: {stored_model:?}"
+    );
+    assert!(
+        stored_model.ends_with('…'),
+        "truncation must be marked, not silent: {stored_model:?}"
+    );
+
+    server_task.abort();
+}
+
+/// Same sink family as the test above, for the other write path the review
+/// found: an empty-content response builds `last_err` (which includes
+/// `model={model}`) and that string reaches `eprintln!` on every retry, then
+/// the final "LANE OUTAGE" error the caller sees. `model` there is also
+/// `model_override` unwrapped, so it must be bounded before it is
+/// interpolated into that string, not just before the successful-call sink.
+#[tokio::test]
+async fn empty_content_retry_error_bounds_the_caller_supplied_model_override() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            // Every attempt answers 200 with empty content, so every attempt
+            // (including the final one whose error is returned) takes the
+            // empty-completion branch that builds `last_err` with
+            // `model={...}` in it.
+            Json(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1}
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "configured-extract-model".to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    // `new_with_config` configures no cross-provider fallback, so this is a
+    // single tier — the failure below is the primary tier's own retry
+    // exhaustion, not a fallback path.
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    client.set_provider_secret_pool(
+        "EXTRACT_API_KEY",
+        vec![ProviderSecret {
+            key_id: "EXTRACT_API_KEY".to_string(),
+            value: "test-key".to_string(),
+        }],
+    );
+
+    let malicious_model = format!("evil\nmodel\u{0007}{}", "x".repeat(100));
+
+    let err = client
+        .call_extract_llm("system", "user", Some(&malicious_model), 0.0, 16)
+        .await
+        .expect_err("every attempt returns empty content, so the lane must fail loudly");
+
+    assert!(
+        !err.contains('\n') && !err.contains('\u{0007}'),
+        "the retry/outage error must not carry the caller's raw control characters \
+         (newline-forging a second log line): {err:?}"
+    );
+    assert!(
+        !err.contains(&"x".repeat(65)),
+        "the raw >64-char model_override tail must not reach the error/log surface: {err:?}"
+    );
+
+    server_task.abort();
+}
+
 /// #1071 fix-round checkpoints 5/6: a lane response whose `finish_reason`
 /// is `"length"` (provider cut it off) must be surfaced as `truncated`, and
 /// a request that used the lane (not the claude-cli path) must honestly

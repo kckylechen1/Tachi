@@ -31,8 +31,12 @@
 //!   separate by table boundary, the way `account_custody` split custody off
 //!   the account row (ddl.rs:776-782).
 
+pub mod alias_plan;
+pub mod alias_policy;
+pub mod endpoint;
 pub mod fold;
 pub mod health;
+pub mod resolver;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -512,6 +516,109 @@ pub struct ModelAliasBinding {
     pub retired: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+// ─── model_alias_events ──────────────────────────────────────────────────────
+
+/// What an alias event says happened, shaped after [`DeploymentEventKind`].
+///
+/// A closed vocabulary for the same reason: the log is what an auditor reads
+/// to answer "who moved this alias, and under which approved plan", and a
+/// free-form kind string makes that question unanswerable by grep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AliasEventKind {
+    /// The alias row was created — the first event every alias has.
+    AliasDeclared,
+    /// A declaration changed the alias's shape and advanced its revision.
+    AliasUpdated,
+    /// The alias left `active`.
+    AliasRetired,
+    /// A deployment was bound (or re-prioritized, or revived) as a candidate.
+    AliasBindingBound,
+    /// A candidacy was retired. The binding row stays.
+    AliasBindingRetired,
+}
+
+impl AliasEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AliasDeclared => "alias_declared",
+            Self::AliasUpdated => "alias_updated",
+            Self::AliasRetired => "alias_retired",
+            Self::AliasBindingBound => "alias_binding_bound",
+            Self::AliasBindingRetired => "alias_binding_retired",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "alias_declared" => Some(Self::AliasDeclared),
+            "alias_updated" => Some(Self::AliasUpdated),
+            "alias_retired" => Some(Self::AliasRetired),
+            "alias_binding_bound" => Some(Self::AliasBindingBound),
+            "alias_binding_retired" => Some(Self::AliasBindingRetired),
+            _ => None,
+        }
+    }
+}
+
+/// One append-only alias audit row, shaped like [`ModelDeploymentEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelAliasEvent {
+    pub id: i64,
+    pub alias_name: String,
+    /// The alias revision this event produced. Every event this store writes
+    /// is written by the plan/apply door immediately after the write that
+    /// moved the revision, so an alias whose current revision is not the
+    /// revision of its newest event is the signature of a write that came from
+    /// somewhere else.
+    pub revision: i64,
+    /// Free-form at the row level so an event written by a newer build is
+    /// still readable; [`AliasEventKind::parse`] is where it becomes typed.
+    pub event_kind: String,
+    /// The `bp1:` digest of the approved plan that caused this event. Never
+    /// `None` for an event this crate writes: an alias only moves through an
+    /// approved plan, and the digest is what binds the row to the artifact an
+    /// operator read.
+    pub plan_digest: Option<String>,
+    /// JSON. Public-safe by the same rule as the alias row: names, ids and
+    /// numbers, never credentials or provider error text.
+    pub evidence: String,
+    pub created_at: String,
+}
+
+/// The caller-supplied half of an alias event row (`id` and `created_at` are
+/// the store's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewModelAliasEvent {
+    pub alias_name: String,
+    pub revision: i64,
+    pub event_kind: String,
+    pub plan_digest: Option<String>,
+    pub evidence: String,
+}
+
+impl NewModelAliasEvent {
+    pub fn new(alias_name: impl Into<String>, revision: i64, event_kind: AliasEventKind) -> Self {
+        Self {
+            alias_name: alias_name.into(),
+            revision,
+            event_kind: event_kind.as_str().to_string(),
+            plan_digest: None,
+            evidence: "{}".to_string(),
+        }
+    }
+
+    pub fn with_plan_digest(mut self, plan_digest: impl Into<String>) -> Self {
+        self.plan_digest = Some(plan_digest.into());
+        self
+    }
+
+    pub fn with_evidence(mut self, evidence: impl Into<String>) -> Self {
+        self.evidence = evidence.into();
+        self
+    }
 }
 
 // ─── pricing_snapshots ───────────────────────────────────────────────────────

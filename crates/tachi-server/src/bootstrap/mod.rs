@@ -7,6 +7,7 @@ use std::process::ExitStatus;
 use tachi_bootstrap::cli::Cli;
 
 mod backfill;
+mod broker_cli;
 mod build_cli;
 mod clanker_cli;
 mod clean_cli;

@@ -50,6 +50,27 @@ pub mod agent_profile;
 pub mod canonical_digest;
 /// Model-broker catalog row types (tachi#1681). `admin`-gated because all
 /// six catalog tables are `SchemaScope::Product`.
+///
+/// # A merge-time reconciliation lives here: the credential deny list
+///
+/// [`catalog::endpoint`] is this stack's single source for "this endpoint URL
+/// is smuggling a credential" — the credential-shaped query keys and the
+/// userinfo scan over the authority. Both refusal sites here call it: the
+/// catalog import in `tachi-llm`, which must not write such a URL into a
+/// durable operator-visible row, and the broker CLI's rendering, which must
+/// not print one.
+///
+/// A **second copy of the same list** lives on another branch: #1682 slice-1's
+/// `tachi-llm` `llm/broker/canonical.rs` carries an identical eight-entry list
+/// for its `EndpointUrl::new` request-path check (`e4072ddd`). It was written
+/// before this module existed, and the two lists are identical today — which is
+/// exactly the state in which a duplicated rule looks harmless. Whichever of
+/// the two branches lands second owes the merge one deletion: the request-path
+/// check calls `memcore::catalog::endpoint::endpoint_credential_leak` and keeps
+/// no list of its own. This is not stylistic. The catalog side of this same
+/// rule had already drifted once — it checked userinfo only, so
+/// `?api_key=sk-live-…` walked into the `endpoint_ref` column — and a rule two
+/// callers each own a copy of is a rule that gets extended on one side only.
 #[cfg(feature = "admin")]
 pub mod catalog;
 pub mod db;

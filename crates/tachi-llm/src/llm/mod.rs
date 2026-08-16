@@ -21,6 +21,7 @@ mod embedding;
 /// disagrees with the stored index is refused at resolution.
 pub mod embedding_config;
 mod helpers;
+pub mod ingress_gate;
 mod provider_health;
 mod rerank;
 
@@ -104,12 +105,35 @@ pub struct LlmClient {
     /// Full-chain (all tiers) outage streak per lane (#1197) — feeds
     /// `provider_health_status().lane_outages`.
     pub(crate) lane_outage: LaneOutageTracker,
+    /// Counts model references that reached the provider call without having
+    /// been resolved (#1681 PR-D debt (a)). Report-only: it changes no
+    /// routing, and it is the evidence #1685's cutover will be measured
+    /// against. Deliberately **not** folded into `ProviderHealthStatus` yet —
+    /// that serialized contract would ship a field #1685 immediately reshapes.
+    pub(crate) ingress_gate: ingress_gate::IngressReferenceGate,
     /// Test-only: last provider arm entered by `rerank()` (dispatch seam probe).
     #[cfg(test)]
     last_rerank_dispatch: Arc<std::sync::Mutex<Option<RerankProviderKind>>>,
 }
 
 impl LlmClient {
+    /// Model references that reached a provider call without having been
+    /// resolved, per lane (#1681 PR-D debt (a)).
+    ///
+    /// A report, not a control: nothing branches on this. It is the evidence
+    /// for what #1685's cutover has to cover, and its going to zero is the
+    /// evidence the cutover is complete.
+    pub fn unresolved_model_references(&self) -> Vec<ingress_gate::UnresolvedReferenceReport> {
+        self.ingress_gate.snapshot()
+    }
+
+    /// Sightings that arrived after the gate's distinct-reference cap. Nonzero
+    /// means [`Self::unresolved_model_references`] is a sample rather than the
+    /// whole list.
+    pub fn unresolved_model_reference_overflow(&self) -> u64 {
+        self.ingress_gate.overflow()
+    }
+
     /// Record which rerank arm `rerank()` actually entered (test discrimination).
     #[inline]
     fn note_rerank_dispatch(&self, kind: RerankProviderKind) {
