@@ -210,7 +210,7 @@ impl BrokerHttpExecutor {
             }
             _ = wait_until(deadlines.response_head) => {
                 let phase = if send_was_polled.load(Ordering::Acquire) {
-                    SendPhase::AwaitingResponse
+                    SendPhase::Sending
                 } else {
                     SendPhase::Connecting
                 };
@@ -445,15 +445,22 @@ impl BrokerHttpExecutor {
     {
         let mut first_byte_seen = false;
         let mut saw_usage = false;
+        let mut terminal_seen = false;
         loop {
             let chunk = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
+                    if terminal_seen {
+                        return terminal_outcome(decoder, None);
+                    }
                     let events = decoder.on_cancel();
                     emit_events(events, &mut saw_usage, emit);
                     return terminal_outcome(decoder, None);
                 }
                 _ = wait_until(deadlines.body(first_byte_seen)) => {
+                    if terminal_seen {
+                        return terminal_outcome(decoder, None);
+                    }
                     let events = decoder.on_transport_error(TransportErrorKind::ReadTimeout);
                     emit_events(events, &mut saw_usage, emit);
                     return terminal_outcome(decoder, None);
@@ -461,6 +468,16 @@ impl BrokerHttpExecutor {
                 chunk = response.chunk() => chunk,
             };
             match chunk {
+                Ok(Some(chunk)) if terminal_seen => {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    let trailing_error = decoder
+                        .push_bytes(&chunk)
+                        .err()
+                        .map_or(StreamDecodeErrorKind::IllegalSequence, |error| error.kind);
+                    return terminal_outcome(decoder, Some(trailing_error));
+                }
                 Ok(Some(chunk)) => match decoder.push_bytes(&chunk) {
                     Ok(events) => {
                         first_byte_seen |= !chunk.is_empty();
@@ -471,7 +488,10 @@ impl BrokerHttpExecutor {
                             }
                             let trailing_error =
                                 decoder.push_bytes(&[]).err().map(|error| error.kind);
-                            return terminal_outcome(decoder, trailing_error);
+                            if trailing_error.is_some() {
+                                return terminal_outcome(decoder, trailing_error);
+                            }
+                            terminal_seen = true;
                         }
                     }
                     Err(error) => {
@@ -480,6 +500,9 @@ impl BrokerHttpExecutor {
                     }
                 },
                 Ok(None) => {
+                    if terminal_seen {
+                        return terminal_outcome(decoder, None);
+                    }
                     let (events, decode_error) = match decoder.finish(StreamEof::Clean) {
                         Ok(events) => (events, None),
                         Err(error) => (Vec::new(), Some(error.kind)),
@@ -491,6 +514,9 @@ impl BrokerHttpExecutor {
                     return terminal_outcome(decoder, decode_error);
                 }
                 Err(error) => {
+                    if terminal_seen {
+                        return terminal_outcome(decoder, None);
+                    }
                     let events = decoder.on_transport_error(transport_error_kind(&error));
                     emit_events(events, &mut saw_usage, emit);
                     return terminal_outcome(decoder, None);

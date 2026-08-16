@@ -232,6 +232,40 @@ async fn a_connect_deadline_shorter_than_the_shared_pool_ceiling_refuses_before_
 }
 
 #[tokio::test]
+async fn a_response_head_deadline_never_claims_the_provider_accepted_the_request() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            StatusCode::NO_CONTENT
+        }),
+    );
+    let (endpoint, task) = serve(app).await;
+    let mut parts = request_parts_for(&endpoint, StreamSelection::Disabled);
+    parts.deadline.first_byte_ms = Some(10);
+    let request = CanonicalInvocationRequest::new(parts).expect("response-head deadline request");
+
+    let outcome = executor()
+        .execute(
+            &OpenAiCompatWire::new(),
+            &request,
+            api_key_lease(),
+            Some(&lease("RESPONSE-HEAD-CANARY")),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+    assert_eq!(
+        outcome.terminal_disposition(),
+        &InvocationDispositionV1::OutcomeUnknown {
+            phase: SendPhase::Sending,
+        }
+    );
+    task.abort();
+}
+
+#[tokio::test]
 async fn first_byte_deadline_stops_an_accepted_response_body_as_outcome_unknown() {
     let app = Router::new().route(
         "/v1/chat/completions",
@@ -343,6 +377,60 @@ async fn trailing_data_in_the_terminal_chunk_is_reported_without_rewriting_compl
             &request_for(&endpoint, StreamSelection::Enabled),
             api_key_lease(),
             Some(&lease("TRAILING-DATA-CANARY")),
+            &CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+    assert!(matches!(
+        outcome.terminal_disposition(),
+        InvocationDispositionV1::Completed { .. }
+    ));
+    assert_eq!(
+        outcome.stream_decode_error(),
+        Some(StreamDecodeErrorKind::IllegalSequence)
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn trailing_data_in_a_later_transport_chunk_is_reported_too() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let (mut writer, reader) = tokio::io::duplex(4_096);
+            tokio::spawn(async move {
+                writer
+                    .write_all(
+                        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n\
+                          data: [DONE]\n\n",
+                    )
+                    .await
+                    .expect("write terminal stream chunk");
+                writer.flush().await.expect("flush terminal stream chunk");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                writer
+                    .write_all(
+                        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}\n\n",
+                    )
+                    .await
+                    .expect("write trailing stream chunk");
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from_stream(ReaderStream::new(reader)))
+                .expect("split trailing stream")
+        }),
+    );
+    let (endpoint, task) = serve(app).await;
+
+    let outcome = executor()
+        .execute(
+            &OpenAiCompatWire::new(),
+            &request_for(&endpoint, StreamSelection::Enabled),
+            api_key_lease(),
+            Some(&lease("SPLIT-TRAILING-DATA-CANARY")),
             &CancellationToken::new(),
             |_| {},
         )

@@ -172,6 +172,30 @@ fn anthropic_refuses_to_move_a_mid_conversation_system_turn_to_the_prefix() {
 }
 
 #[test]
+fn anthropic_refuses_a_final_assistant_prefill_without_a_model_capability() {
+    let mut parts = minimal_parts();
+    parts.messages.push(CanonicalMessage {
+        role: MessageRole::Assistant,
+        content: MessageContent::Text {
+            text: "The answer is".to_string(),
+        },
+        tool_call_id: None,
+        name: None,
+    });
+    parts.sampling.max_output_tokens = Some(32);
+    let request = CanonicalInvocationRequest::new(parts).expect("canonical assistant prefill");
+
+    assert_eq!(
+        AnthropicWire::new()
+            .build_request(&request, api_key_lease())
+            .expect_err("Anthropic prefill must fail closed"),
+        BeforeSendRefusal::UnrepresentableRequest {
+            detail: "Anthropic assistant prefill is not supported by every resolved model",
+        }
+    );
+}
+
+#[test]
 fn anthropic_requires_a_max_output_cap_and_an_api_key() {
     let mut parts = minimal_parts();
     parts.sampling = SamplingParams::none();

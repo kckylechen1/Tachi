@@ -367,10 +367,20 @@ impl ProviderWire for AnthropicWire {
         } else {
             Some(request.sampling().stop.as_slice())
         };
+        let messages = request_messages(request.messages())?;
+        if request
+            .messages()
+            .last()
+            .is_some_and(|message| message.role == MessageRole::Assistant)
+        {
+            return Err(BeforeSendRefusal::UnrepresentableRequest {
+                detail: "Anthropic assistant prefill is not supported by every resolved model",
+            });
+        }
         let body = MessagesBody {
             model: target.provider_model_id(),
             max_tokens,
-            messages: request_messages(request.messages())?,
+            messages,
             system: system_blocks(request.messages())?,
             tools: tools_value(request.tools()),
             tool_choice: tool_choice_value(request.tool_choice(), !request.tools().is_empty()),

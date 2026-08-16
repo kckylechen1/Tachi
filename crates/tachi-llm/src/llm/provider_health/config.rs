@@ -346,6 +346,10 @@ impl super::super::LlmClient {
             // logical attempt into multiple HTTP sends behind the Broker's
             // back, invalidating its cancellation and spend disposition.
             .redirect(reqwest::redirect::Policy::none())
+            // Reqwest retries protocol NACKs by default. Provider invocations
+            // are not generically replay-safe, so the shared pool must never
+            // create a second physical send behind lane/Broker accounting.
+            .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(Self::SHARED_CONNECT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(60))
             .build()
