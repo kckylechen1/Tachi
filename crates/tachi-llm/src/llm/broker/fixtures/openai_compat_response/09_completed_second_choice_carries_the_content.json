@@ -1,0 +1,13 @@
+{
+  "why": "Mirrors the shipped lane's choice selection: scan for the first choice with non-blank content rather than blindly taking index 0. A provider that returns an empty first choice would otherwise look like an empty-content fault.",
+  "status": 200,
+  "headers": [],
+  "body": "{\"model\":\"test-model-1\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"   \"},\"finish_reason\":\"stop\"},{\"index\":1,\"message\":{\"content\":\"the real answer\"},\"finish_reason\":\"length\"}]}",
+  "expected": {
+    "outcome": "completed",
+    "message": {"text": "the real answer"},
+    "completion": "truncated",
+    "usage": {"provenance": "unknown"},
+    "metadata": {"effective_model": "test-model-1"}
+  }
+}

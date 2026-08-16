@@ -1,0 +1,10 @@
+{
+  "why": "`choices: []` parses and has the right type, and there is still no answer in it. Distinguished from a missing `choices` by its pointer so the two failures are not one bucket.",
+  "status": 200,
+  "headers": [],
+  "body": "{\"model\":\"test-model-1\",\"choices\":[]}",
+  "expected": {
+    "outcome": "protocol_violation",
+    "violation": {"kind": "schema_violation", "pointer": "/choices/0"}
+  }
+}

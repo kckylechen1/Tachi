@@ -1,0 +1,13 @@
+{
+  "why": "Providers emit invalid JSON in `arguments` often enough that parsing at the wire boundary would turn a recoverable answer into a protocol failure. The fragment below does not parse; it must survive verbatim so a caller can repair or re-prompt.",
+  "status": 200,
+  "headers": [],
+  "body": "{\"id\":\"chatcmpl-bad\",\"model\":\"test-model-1\",\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"call_9\",\"function\":{\"name\":\"search\",\"arguments\":\"{\\\"q\\\": \\\"unterminated\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+  "expected": {
+    "outcome": "completed",
+    "message": {"tool_calls": [{"id": "call_9", "name": "search", "arguments": "{\"q\": \"unterminated"}]},
+    "completion": "tool_calls",
+    "usage": {"provenance": "unknown"},
+    "metadata": {"effective_model": "test-model-1", "provider_request_id": "chatcmpl-bad"}
+  }
+}

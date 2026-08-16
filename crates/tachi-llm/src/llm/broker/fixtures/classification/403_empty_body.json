@@ -1,0 +1,13 @@
+{
+  "why": "A 403 with nothing to read is an auth failure, not a billing failure. The default must not be the money-shaped one.",
+  "status": 403,
+  "headers": [],
+  "body": "",
+  "expected": {
+    "class": "auth_invalid",
+    "advice": "retry_other_credential",
+    "legacy_failure_class": "auth_failed",
+    "legacy_retry_intent": "retry_within_tier_if_another_key",
+    "retry_after": null
+  }
+}

@@ -249,12 +249,17 @@ pub use model_broker_seam::StaticFixtureResolver;
 /// unreachable.
 pub use model_broker_seam::{
     AbstainReason, AccountAvailability, AccountSnapshot, BudgetContext, BudgetEstimate,
-    CandidateEvaluation, CatalogSnapshot, DeploymentBounds, DeploymentCapabilities,
-    DeploymentCooldown, ExclusionReason, HealthObservation, HealthSnapshot, InvocationErrorClass,
-    ModelRef, ObservationEvidence, OperationalResolver, PinContext, ResolutionOutcome,
-    ResolutionRevisions, ResolvedDeployment, ResolvedDeploymentParts, ResolverInput, RetryAfter,
-    RetryContext, SeamError, Selection, WireDialect, FALLBACK_ORDER_CAP,
+    CandidateEvaluation, CatalogSnapshot, DeploymentBounds, DeploymentCooldown, ExclusionReason,
+    HealthObservation, HealthSnapshot, InvocationErrorClass, ModelRef, ObservationEvidence,
+    OperationalResolver, PinContext, ResolutionOutcome, ResolutionRevisions, ResolvedDeployment,
+    ResolvedDeploymentParts, ResolverInput, RetryAfter, RetryContext, SeamError, Selection,
+    WireDialect, FALLBACK_ORDER_CAP,
 };
+// `DeploymentCapabilities` (the seam's flat bool projection) is deliberately
+// NOT re-exported at the crate root: PR-B's catalog row type of the same name
+// (model_catalog) owns the root path. The seam type stays reachable as
+// `memcore::model_broker_seam::DeploymentCapabilities` — the ruling the #1757
+// vendoring note deferred to the merge (applied 2026-08-16).
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
     is_handoff_entry, is_internal_only_row, is_kanban_entry, is_namespace_search_noise,

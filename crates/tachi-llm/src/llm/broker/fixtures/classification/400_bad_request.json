@@ -1,0 +1,13 @@
+{
+  "why": "Our request was wrong. The shipped tier returns immediately without retrying, which is exactly `do_not_retry`.",
+  "status": 400,
+  "headers": [],
+  "body": "{\"error\":{\"message\":\"Invalid value for 'temperature': must be <= 2\",\"type\":\"invalid_request_error\"}}",
+  "expected": {
+    "class": "bad_request",
+    "advice": "do_not_retry",
+    "legacy_failure_class": "lane_outage",
+    "legacy_retry_intent": "no_retry",
+    "retry_after": null
+  }
+}
