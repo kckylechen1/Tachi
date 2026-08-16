@@ -55,6 +55,7 @@ pub mod foundry;
 #[cfg(feature = "admin")]
 pub mod hub;
 pub mod kernel_policy;
+pub mod model_broker_seam;
 pub mod namespace;
 pub mod near_dup;
 pub mod noise;
@@ -200,6 +201,42 @@ pub use foundry::{
 #[cfg(feature = "admin")]
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use kernel_policy::{EmbedPolicy, KernelPolicy};
+/// The #1681/#1682 model-broker seam's fixture resolver: test scaffolding,
+/// never production routing, so its re-export carries the same
+/// `broker-fixtures` gate as the type itself (codex PR #1739 CONCERN-5).
+/// Downstream leaves opt in explicitly from `[dev-dependencies]`.
+#[cfg(any(test, feature = "broker-fixtures"))]
+pub use model_broker_seam::StaticFixtureResolver;
+/// Model-broker seam (#1681/#1682). This list is the *reachable closure* of the
+/// five frozen seam types, enumerated rather than assumed (codex PR #1739
+/// BUG-6): a type is here only if a consumer must be able to name it to build an
+/// input for, or read a field out of, one of the five.
+///
+/// - `ModelRef` → `SeamError` (its constructor's error).
+/// - `ResolvedDeployment` → `ResolvedDeploymentParts` (its constructor's input
+///   and wire shape), `WireDialect`, `DeploymentCapabilities`,
+///   `DeploymentBounds`.
+/// - `ResolutionOutcome` → `CandidateEvaluation` → `ExclusionReason`;
+///   `Selection` → `AbstainReason`; `ResolutionRevisions`; `BudgetEstimate`;
+///   `FALLBACK_ORDER_CAP` (the bound its constructor enforces, which callers
+///   must respect before calling).
+/// - `OperationalResolver` → `ResolverInput` → `CatalogSnapshot`,
+///   `HealthSnapshot` → `DeploymentCooldown`, `AccountSnapshot` →
+///   `AccountAvailability`, `BudgetContext`, `PinContext`, `RetryContext`.
+/// - `HealthObservation` → `InvocationErrorClass`, `RetryAfter`,
+///   `ObservationEvidence`.
+///
+/// Nothing else in the module is public, so the list is closed by construction;
+/// the module's internal deserialization shadows are private and deliberately
+/// unreachable.
+pub use model_broker_seam::{
+    AbstainReason, AccountAvailability, AccountSnapshot, BudgetContext, BudgetEstimate,
+    CandidateEvaluation, CatalogSnapshot, DeploymentBounds, DeploymentCapabilities,
+    DeploymentCooldown, ExclusionReason, HealthObservation, HealthSnapshot, InvocationErrorClass,
+    ModelRef, ObservationEvidence, OperationalResolver, PinContext, ResolutionOutcome,
+    ResolutionRevisions, ResolvedDeployment, ResolvedDeploymentParts, ResolverInput, RetryAfter,
+    RetryContext, SeamError, Selection, WireDialect, FALLBACK_ORDER_CAP,
+};
 pub use namespace::{
     is_anchor_entry, is_continuity_projection_entry, is_continuity_projection_path, is_eval_entry,
     is_handoff_entry, is_internal_only_row, is_kanban_entry, is_namespace_search_noise,
