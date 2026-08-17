@@ -2,11 +2,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 use crate::hub_ops::{
-    handle_distill_trajectory, handle_export_skills, handle_hub_call, handle_hub_disconnect,
-    handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_quick_add,
-    handle_hub_register, handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled,
-    handle_hub_stats, handle_tachi_audit_log, handle_vc_bind, handle_vc_list, handle_vc_register,
-    handle_vc_resolve,
+    handle_export_skills, handle_hub_call, handle_hub_disconnect, handle_hub_discover,
+    handle_hub_feedback, handle_hub_get, handle_hub_quick_add, handle_hub_register,
+    handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats,
+    handle_tachi_audit_log, handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -134,16 +133,6 @@ impl MemoryServer {
     #[tool(description = "Get Hub capability statistics and metrics.")]
     pub(crate) async fn hub_stats(&self) -> Result<String, String> {
         handle_hub_stats(self).await
-    }
-
-    #[tool(
-        description = "Distill a completed task trajectory into a reusable Skill, persist a permanent skill snapshot, and register/update the distilled Hub Skill."
-    )]
-    pub(crate) async fn distill_trajectory(
-        &self,
-        Parameters(params): Parameters<DistillTrajectoryParams>,
-    ) -> Result<String, String> {
-        handle_distill_trajectory(self, params).await
     }
 
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]

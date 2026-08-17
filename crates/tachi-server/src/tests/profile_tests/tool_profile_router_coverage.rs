@@ -78,7 +78,6 @@ fn bundle_count(tool_name: &str) -> usize {
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "chain_skills",
     "check_inbox",
-    "distill_trajectory",
     "dlq_list",
     "dlq_retry",
     "get_memory",
@@ -185,9 +184,11 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
-    // #1690 C3: skill_evolve (LLM telemetry-driven skill versioning) is retired
+    // #1690 C3: skill_evolve (LLM telemetry-driven skill versioning) and
+    // distill_trajectory (trajectory → skill snapshot/registration) are retired
     // end-to-end — no canonical replacement survives the contraction.
     "skill_evolve",
+    "distill_trajectory",
 ];
 
 // Batch C (#757) removed `tachi_board` and `tachi_dispatch` — their canonical

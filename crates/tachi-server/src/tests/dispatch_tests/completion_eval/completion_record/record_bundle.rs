@@ -345,23 +345,13 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
 
 #[tokio::test]
 async fn tachi_complete_accepts_stringified_trajectory_array() {
+    // #1690 C3 re-anchor: the auto-distill-on-completion fan-out (which this
+    // test used to seed a mock distiller for) is retired end-to-end. What
+    // survives and is guarded here: (a) a stringified trajectory wire is
+    // stored as an array in the eval entry, and (b) the completion pipeline
+    // still indexes the trajectory through the surviving continuity path
+    // (`emit_task_completion_events`) instead of the deleted distill spawn.
     let server = make_server();
-    const DISTILLED_MARKDOWN: &str =
-        "# 适用场景\n- string trajectory\n\n# 核心步骤\n- parse\n\n# 踩坑记录\n- none\n\n# 验证标准\n- enqueued\n\n# 适用域标签\n- test";
-
-    server
-        .with_global_store(|store| {
-            let mut cap = store
-                .hub_get("skill:trajectory-distiller")
-                .map_err(|e| e.to_string())?
-                .expect("trajectory distiller should exist");
-            let mut def: Value =
-                serde_json::from_str(&cap.definition).map_err(|e| e.to_string())?;
-            def["mock_response"] = json!(DISTILLED_MARKDOWN);
-            cap.definition = serde_json::to_string(&def).map_err(|e| e.to_string())?;
-            store.hub_register(&cap).map_err(|e| e.to_string())
-        })
-        .expect("inject mock trajectory distiller");
 
     let resp = server
         .tachi_complete(Parameters(TachiCompleteParams {
@@ -404,7 +394,17 @@ async fn tachi_complete_accepts_stringified_trajectory_array() {
         .await
         .expect("tachi_complete should accept stringified trajectory");
     let bundle: Value = serde_json::from_str(&resp).expect("complete response JSON");
-    assert_eq!(bundle["pipeline"]["distill_trajectory"], json!("enqueued"));
+    assert_eq!(
+        bundle["pipeline"]["continuity_events"],
+        json!("saved"),
+        "completion must persist trajectory-derived continuity events (the surviving memory-indexing path): {}",
+        bundle["pipeline"]
+    );
+    assert!(
+        bundle["pipeline"].get("distill_trajectory").is_none(),
+        "retired auto-distill marker must be absent from the completion pipeline: {}",
+        bundle["pipeline"]
+    );
 
     let eval_id = bundle["eval_entry"]["id"]
         .as_str()

@@ -34,10 +34,10 @@
         "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
       },
       "admin": {
-        "max_visible_tools": 97,
-        "max_total_input_schema_bytes": 179251,
-        "max_total_tool_definition_bytes": 214707,
-        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
+        "max_visible_tools": 96,
+        "max_total_input_schema_bytes": 177633,
+        "max_total_tool_definition_bytes": 212783,
+        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, distill_trajectory, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
       }
     },
     "surfaces": {
@@ -198,9 +198,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 179251,
-        "total_tool_definition_bytes": 214707,
-        "visible_tool_count": 97,
+        "total_input_schema_bytes": 177633,
+        "total_tool_definition_bytes": 212783,
+        "visible_tool_count": 96,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -209,7 +209,6 @@
           "compact_context",
           "compact_rollup",
           "compact_session_memory",
-          "distill_trajectory",
           "dlq_list",
           "dlq_retry",
           "extract_facts",
@@ -442,7 +441,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 97,
+      "tool_count": 96,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -451,7 +450,6 @@
         "compact_context",
         "compact_rollup",
         "compact_session_memory",
-        "distill_trajectory",
         "dlq_list",
         "dlq_retry",
         "extract_facts",

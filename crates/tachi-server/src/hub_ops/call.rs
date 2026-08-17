@@ -1,18 +1,14 @@
-mod distill;
 mod hub;
 
 use crate::tool_params::RunSkillParams;
 use crate::utils::render_skill_prompt_template;
 use crate::MemoryServer;
+pub(crate) use hub::{handle_hub_call, handle_hub_disconnect, handle_tachi_audit_log};
 use memcore::HubCapability;
 use serde_json::Value;
 use tachi_hub::{
     build_skill_execution_envelope, capability_callable, SkillExecution, SkillExecutionMode,
 };
-use tachi_llm::PersistedModelInvocationReceiptV1;
-
-pub(crate) use distill::handle_distill_trajectory;
-pub(crate) use hub::{handle_hub_call, handle_hub_disconnect, handle_tachi_audit_log};
 
 pub(crate) async fn handle_run_skill(
     server: &MemoryServer,
@@ -39,7 +35,6 @@ pub(crate) async fn execute_registered_skill_prompt(
 
 pub(crate) struct SkillExecutionWithReceipt {
     pub(crate) execution: SkillExecution,
-    pub(crate) model_invocation: Option<PersistedModelInvocationReceiptV1>,
 }
 
 pub(crate) async fn execute_registered_skill_prompt_with_receipt(
@@ -122,7 +117,6 @@ async fn execute_skill_prompt_with_receipt(
                 output: output.to_string(),
                 execution: SkillExecutionMode::Document,
             },
-            model_invocation: None,
         });
     }
 
@@ -148,7 +142,6 @@ async fn execute_skill_prompt_with_receipt(
                 output: mock_response.to_string(),
                 execution: SkillExecutionMode::MockResponse,
             },
-            model_invocation: None,
         })
     } else {
         let default_system = "You are an AI assistant executing a specialized skill.";
@@ -187,7 +180,6 @@ async fn execute_skill_prompt_with_receipt(
                         output: output.value,
                         execution: SkillExecutionMode::LlmGenerated,
                     },
-                    model_invocation: Some(output.invocation),
                 })
             })
     }

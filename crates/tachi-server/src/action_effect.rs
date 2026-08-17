@@ -147,7 +147,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // one surviving action (promote_issue).
     "post_card",
     "update_card",
-    "distill_trajectory",
     "tachi_unstick",
     "wiki_lint",
     "tachi_wiki_write",
