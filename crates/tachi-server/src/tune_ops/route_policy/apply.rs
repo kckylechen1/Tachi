@@ -83,10 +83,9 @@ pub(crate) fn handle_route_policy_apply(
                 // (the rule write, the commit, the CAS itself) rolls back both
                 // rows: the apply either fully lands or leaves no trace.
                 let tx = store
-                    .connection_mut()
-                    .transaction()
+                    .begin_state_transaction(rusqlite::TransactionBehavior::Deferred)
                     .map_err(|e| format!("open route policy apply tx: {e}"))?;
-                let source_rows = memcore::db::list_state(&tx, ROUTE_POLICY_RULE_NS)
+                let source_rows = tx.list_state(ROUTE_POLICY_RULE_NS)
                     .map_err(|e| format!("list active route policy rules in apply tx: {e}"))?;
                 let live_source_revision = super::handlers::route_policy_source_revision(&source_rows);
                 let identity_payload = super::handlers::validate_route_policy_proposal(
@@ -104,8 +103,7 @@ pub(crate) fn handle_route_policy_apply(
                 value["applied_at"] = json!(applied_at);
                 let next = serde_json::to_string(&value)
                     .map_err(|e| format!("serialize applied route policy proposal: {e}"))?;
-                let cas_ok = memcore::db::set_state_if_version(
-                    &tx,
+                let cas_ok = tx.set_state_if_version(
                     DISPATCH_POLICY_PROPOSAL_NS,
                     proposal_id,
                     &next,
@@ -117,7 +115,7 @@ pub(crate) fn handle_route_policy_apply(
                         "stale_state_version: route policy proposal {proposal_id} changed before apply; reload and retry"
                     ));
                 }
-                memcore::db::set_state(&tx, ROUTE_POLICY_RULE_NS, proposal_id, &next)
+                tx.set_state(ROUTE_POLICY_RULE_NS, proposal_id, &next)
                     .map_err(|e| format!("persist route policy rule: {e}"))?;
                 tx.commit()
                     .map_err(|e| format!("commit route policy apply tx: {e}"))?;
@@ -169,11 +167,10 @@ pub(crate) fn handle_route_policy_apply(
                 // both revalidated against the proposal identity and retained
                 // for the explicit overlay CAS below.
                 let tx = store
-                    .connection_mut()
-                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .begin_state_transaction(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|e| format!("open loadout evolution apply tx: {e}"))?;
-                let overlay_snapshot =
-                    memcore::db::get_state(&tx, PROFILE_CARD_OVERLAY_NS, profile.name)
+                let overlay_snapshot = tx
+                    .get_state(PROFILE_CARD_OVERLAY_NS, profile.name)
                         .map_err(|e| format!("load profile/card overlay in apply tx: {e}"))?;
                 let live_source_revision = super::handlers::loadout_evolution_source_revision(
                     profile,
@@ -453,8 +450,7 @@ pub(crate) fn handle_route_policy_apply(
                 // Proposal lifecycle and overlay projection are independent
                 // per-row CAS operations in one transaction. Either stale row
                 // or either write failure rolls back both rows.
-                let cas_ok = memcore::db::set_state_if_version(
-                    &tx,
+                let cas_ok = tx.set_state_if_version(
                     DISPATCH_POLICY_PROPOSAL_NS,
                     proposal_id,
                     &next,
@@ -467,15 +463,13 @@ pub(crate) fn handle_route_policy_apply(
                     ));
                 }
                 let overlay_cas_ok = match overlay_snapshot.as_ref() {
-                    Some((_raw, expected_version)) => memcore::db::set_state_if_version(
-                        &tx,
+                    Some((_raw, expected_version)) => tx.set_state_if_version(
                         PROFILE_CARD_OVERLAY_NS,
                         profile.name,
                         &overlay_raw,
                         *expected_version,
                     ),
-                    None => memcore::db::insert_state_if_absent(
-                        &tx,
+                    None => tx.insert_state_if_absent(
                         PROFILE_CARD_OVERLAY_NS,
                         profile.name,
                         &overlay_raw,

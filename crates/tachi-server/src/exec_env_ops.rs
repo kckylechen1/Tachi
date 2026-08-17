@@ -483,7 +483,7 @@ pub(crate) fn validate_provision_request(opts: &ProvisionEnvOptions) -> Result<(
 /// is left to the age-based `clean sweep` (there is no lease for the stale-lease
 /// backstop to reclaim in this case).
 pub(crate) fn provision_managed_env(
-    conn: &mut rusqlite::Connection,
+    store: &mut memcore::MemoryStore,
     opts: &ProvisionEnvOptions,
 ) -> Result<ProvisionedEnv, String> {
     // Fail-closed BEFORE any filesystem work: a refused class must not leave a
@@ -553,12 +553,12 @@ pub(crate) fn provision_managed_env(
         created_at: String::new(),
     };
 
-    match memcore::insert_exec_env(conn, &lease).map_err(|e| e.to_string()) {
+    match memcore::insert_exec_env(store.connection_mut(), &lease).map_err(|e| e.to_string()) {
         Ok(()) => {
             let build_target = opts.build_target_dir(&report.path)?;
             let build_target = build_target.as_ref().map(|p| p.display().to_string());
             if let Err(err) = register_env_resources(
-                conn,
+                store,
                 &env_id,
                 opts.env_class,
                 &report.path,
@@ -606,7 +606,7 @@ pub(crate) fn provision_managed_env(
 /// with the reservation and a provenance row records who approved it. A
 /// reservation nobody records is not a reservation.
 pub(crate) fn register_env_resources(
-    conn: &mut rusqlite::Connection,
+    store: &mut memcore::MemoryStore,
     env_id: &str,
     class: EnvClass,
     worktree_path: &str,
@@ -636,18 +636,24 @@ pub(crate) fn register_env_resources(
         ));
     }
 
-    let worktree_resource_id = ensure_resource(conn, ResourceKind::Worktree, worktree_path)?;
-    memcore::bind_resource(conn, env_id, &worktree_resource_id).map_err(|e| e.to_string())?;
+    let worktree_resource_id = ensure_resource(
+        store.connection_mut(),
+        ResourceKind::Worktree,
+        worktree_path,
+    )?;
+    memcore::bind_resource(store.connection_mut(), env_id, &worktree_resource_id)
+        .map_err(|e| e.to_string())?;
 
     let build_target_resource_id = match build_target {
         None => None,
         Some(path) => {
-            let id = ensure_resource(conn, ResourceKind::BuildTarget, path)?;
+            let id = ensure_resource(store.connection_mut(), ResourceKind::BuildTarget, path)?;
             // Many-to-many by design: the binding table is a refcount, so a
             // resource cannot be reclaimed while any live lease holds it.
-            memcore::bind_resource(conn, env_id, &id).map_err(|e| e.to_string())?;
+            memcore::bind_resource(store.connection_mut(), env_id, &id)
+                .map_err(|e| e.to_string())?;
             if let Some(approval) = approval {
-                book_private_reservation(conn, env_id, &id, path, approval)?;
+                book_private_reservation(store, env_id, &id, path, approval)?;
             }
             Some(id)
         }
@@ -665,14 +671,19 @@ pub(crate) fn register_env_resources(
 /// (so `bytes` being overwritten by the next real measurement does not erase who
 /// approved what).
 fn book_private_reservation(
-    conn: &mut rusqlite::Connection,
+    store: &mut memcore::MemoryStore,
     env_id: &str,
     resource_id: &str,
     target_path: &str,
     approval: &PrivateTargetApproval,
 ) -> Result<(), String> {
-    memcore::record_resource_measurement(conn, resource_id, approval.reserved_bytes, "")
-        .map_err(|e| format!("book reserved bytes for {target_path}: {e}"))?;
+    memcore::record_resource_measurement(
+        store.connection_mut(),
+        resource_id,
+        approval.reserved_bytes,
+        "",
+    )
+    .map_err(|e| format!("book reserved bytes for {target_path}: {e}"))?;
 
     let reservation = PrivateTargetReservation {
         env_id: env_id.to_string(),
@@ -684,7 +695,8 @@ fn book_private_reservation(
     };
     let value =
         serde_json::to_string(&reservation).map_err(|e| format!("serialize reservation: {e}"))?;
-    memcore::db::set_state(conn, PRIVATE_RESERVATION_NS, env_id, &value)
+    store
+        .set_state(PRIVATE_RESERVATION_NS, env_id, &value)
         .map_err(|e| format!("record private target reservation for {env_id}: {e}"))?;
     Ok(())
 }
@@ -989,7 +1001,6 @@ mod tests {
     #[test]
     fn edit_only_env_binds_no_build_target_resource() {
         let mut store = store_with_lease("env-edit", EnvClass::EditOnly, "/wt/edit");
-        let conn = store.connection_mut();
 
         let opts = provision_opts(EnvClass::EditOnly, None);
         assert_eq!(
@@ -998,9 +1009,16 @@ mod tests {
             "edit-only must resolve no build target dir"
         );
 
-        let bound =
-            register_env_resources(conn, "env-edit", EnvClass::EditOnly, "/wt/edit", None, None)
-                .expect("register");
+        let bound = register_env_resources(
+            &mut store,
+            "env-edit",
+            EnvClass::EditOnly,
+            "/wt/edit",
+            None,
+            None,
+        )
+        .expect("register");
+        let conn = store.connection_mut();
 
         assert!(
             bound.build_target_resource_id.is_none(),
@@ -1026,7 +1044,7 @@ mod tests {
     fn register_env_resources_refuses_a_build_target_for_edit_only() {
         let mut store = store_with_lease("env-edit", EnvClass::EditOnly, "/wt/edit");
         let err = register_env_resources(
-            store.connection_mut(),
+            &mut store,
             "env-edit",
             EnvClass::EditOnly,
             "/wt/edit",
@@ -1055,7 +1073,6 @@ mod tests {
     #[test]
     fn build_ticketed_env_holds_no_build_target_of_its_own() {
         let mut store = store_with_lease("env-t", EnvClass::BuildTicketed, "/wt/t");
-        let conn = store.connection_mut();
 
         // Provisioning resolves NO target dir for the class...
         let opts = provision_opts(EnvClass::BuildTicketed, None);
@@ -1068,15 +1085,21 @@ mod tests {
         assert!(!EnvClass::BuildTicketed.allocates_build_target());
 
         // ...and the lease binds none.
-        let bound =
-            register_env_resources(conn, "env-t", EnvClass::BuildTicketed, "/wt/t", None, None)
-                .expect("register");
+        let bound = register_env_resources(
+            &mut store,
+            "env-t",
+            EnvClass::BuildTicketed,
+            "/wt/t",
+            None,
+            None,
+        )
+        .expect("register");
         assert!(
             bound.build_target_resource_id.is_none(),
             "a build-ticketed lease must not hold a build_target resource"
         );
         assert!(
-            memcore::list_resources(conn, None, Some(ResourceKind::BuildTarget))
+            memcore::list_resources(store.connection(), None, Some(ResourceKind::BuildTarget))
                 .unwrap()
                 .is_empty(),
             "provisioning a ticketed env must not create a build_target row at all — the broker \
@@ -1085,7 +1108,7 @@ mod tests {
 
         // And the seam refuses one even if a caller hands it the seat's target.
         let err = register_env_resources(
-            conn,
+            &mut store,
             "env-t",
             EnvClass::BuildTicketed,
             "/wt/t",
@@ -1171,10 +1194,9 @@ mod tests {
     fn an_approved_private_target_reservation_is_booked_in_the_ledger() {
         const RESERVED: i64 = 40_000_000_000;
         let mut store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
-        let conn = store.connection_mut();
 
         let bound = register_env_resources(
-            conn,
+            &mut store,
             "env-p",
             EnvClass::BuildPrivate,
             "/wt/p",
@@ -1186,6 +1208,7 @@ mod tests {
         let target_id = bound
             .build_target_resource_id
             .expect("build-private binds its private target");
+        let conn = store.connection_mut();
 
         // 1. The bytes are on the resource row, so disk accounting counts the
         //    reservation from the moment it is approved.
@@ -1217,7 +1240,7 @@ mod tests {
     fn register_env_resources_refuses_build_private_without_an_approval_to_book() {
         let mut store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
         let err = register_env_resources(
-            store.connection_mut(),
+            &mut store,
             "env-p",
             EnvClass::BuildPrivate,
             "/wt/p",
@@ -1280,7 +1303,7 @@ mod tests {
         memcore::quarantine_resource(store.connection_mut(), &target_id, "interrupted").unwrap();
 
         let err = register_env_resources(
-            store.connection_mut(),
+            &mut store,
             "env-p",
             EnvClass::BuildPrivate,
             "/wt/p",

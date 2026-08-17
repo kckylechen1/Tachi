@@ -273,3 +273,98 @@ fn r12_skips_retired_sticky_promotion_and_archive_projections() {
         "R12 must create no projection involving a retired sticky row"
     );
 }
+
+#[test]
+fn r12_receipt_collision_rolls_back_every_repair_write() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "memory-hygiene-rollback.db");
+    insert_memory(
+        &conn,
+        "raw-rollback",
+        "/notes/raw-rollback",
+        "raw source",
+        "{}",
+        Some("durable"),
+        Some("external:capture"),
+    );
+    insert_memory(
+        &conn,
+        "distill-rollback",
+        "/foundry/distilled/rollback",
+        "distill output",
+        r#"{"source_memory_ids":["raw-rollback"]}"#,
+        Some("permanent"),
+        Some("foundry_distill"),
+    );
+    let receipt_id = memcore::SupersessionReceipt::id_for(
+        "r12_memory_hygiene_v1",
+        "r12-memory-hygiene-v1",
+        "raw-rollback",
+        "distill-rollback",
+    );
+    conn.execute(
+        "INSERT INTO tachi_events (
+            id, source_repo, adapter, project, domain, session_id, actor,
+            event_type, authority, effects, projection_hints,
+            payload_json, provenance_json, created_at
+         ) VALUES (?1,'','fixture','','memory','','fixture','ordinary.fixture','raw_fact',
+                   '[]','[]','{}','{}','2026-01-01T00:00:00Z')",
+        [&receipt_id],
+    )
+    .expect("seed receipt-id collision");
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let error = MemoryHygiene
+        .apply(&mut ctx)
+        .expect_err("receipt collision must abort the whole R12 transaction");
+    assert!(
+        error.to_string().contains("identity conflict"),
+        "unexpected R12 failure: {error}"
+    );
+    let source_state: (bool, Option<String>) = ctx
+        .conn
+        .query_row(
+            "SELECT archived, superseded_by FROM memories WHERE id='raw-rollback'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(source_state, (false, None));
+    let distill_tier: String = ctx
+        .conn
+        .query_row(
+            "SELECT tier FROM memories WHERE id='distill-rollback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(distill_tier, "raw");
+    for count in [
+        ctx.conn
+            .query_row(
+                "SELECT COUNT(*) FROM derived_items WHERE id='derived:distill-rollback'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        ctx.conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_edges
+                 WHERE source_id='distill-rollback' AND target_id='raw-rollback'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        ctx.conn
+            .query_row(
+                "SELECT COUNT(*) FROM hard_state
+                 WHERE namespace=?1 AND key=?2",
+                [memcore::SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+    ] {
+        assert_eq!(count, 0, "R12 failure leaked a transactional write");
+    }
+}

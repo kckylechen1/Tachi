@@ -172,26 +172,36 @@ fn code_before_line_comment(line: &str) -> &str {
     line
 }
 
-fn brace_delta(line: &str) -> i64 {
+#[derive(Default)]
+struct BraceScanState {
+    quoted: bool,
+    escaped: bool,
+}
+
+fn brace_delta(line: &str, state: &mut BraceScanState) -> (i64, bool) {
     let mut delta = 0_i64;
-    let mut quoted = false;
-    let mut escaped = false;
-    for character in code_before_line_comment(line).chars() {
-        if escaped {
-            escaped = false;
+    let mut saw_open_brace = false;
+    let mut characters = line.chars().peekable();
+    while let Some(character) = characters.next() {
+        if state.escaped {
+            state.escaped = false;
             continue;
         }
-        if character == '\\' && quoted {
-            escaped = true;
+        if character == '\\' && state.quoted {
+            state.escaped = true;
         } else if character == '"' {
-            quoted = !quoted;
-        } else if !quoted && character == '{' {
+            state.quoted = !state.quoted;
+        } else if !state.quoted && character == '/' && characters.peek() == Some(&'/') {
+            break;
+        } else if !state.quoted && character == '{' {
             delta += 1;
-        } else if !quoted && character == '}' {
+            saw_open_brace = true;
+        } else if !state.quoted && character == '}' {
             delta -= 1;
         }
     }
-    delta
+    state.escaped = false;
+    (delta, saw_open_brace)
 }
 
 fn function_name(line: &str) -> Option<String> {
@@ -231,9 +241,10 @@ fn skip_cfg_test_module(lines: &[&str], mut index: usize) -> Option<usize> {
     index = module_line;
     let mut depth = 0_i64;
     let mut opened = false;
+    let mut brace_state = BraceScanState::default();
     while index < lines.len() {
-        let change = brace_delta(lines[index]);
-        opened |= code_before_line_comment(lines[index]).contains('{');
+        let (change, saw_open_brace) = brace_delta(lines[index], &mut brace_state);
+        opened |= saw_open_brace;
         depth += change;
         index += 1;
         if opened && depth == 0 {
@@ -284,9 +295,10 @@ fn functions_in_source(source: &str) -> Vec<FunctionSpan> {
         let start = index;
         let mut depth = 0_i64;
         let mut opened = false;
+        let mut brace_state = BraceScanState::default();
         while index < lines.len() {
-            let change = brace_delta(lines[index]);
-            opened |= code_before_line_comment(lines[index]).contains('{');
+            let (change, saw_open_brace) = brace_delta(lines[index], &mut brace_state);
+            opened |= saw_open_brace;
             depth += change;
             index += 1;
             if opened && depth == 0 {
@@ -520,6 +532,35 @@ fn observe_writers(root: &Path) -> Vec<WriterSite> {
 
     sites.sort();
     sites
+}
+
+#[test]
+fn function_scanner_does_not_cross_multiline_string_braces_or_cfg_test_modules() {
+    let source = r#"
+fn one_line_helper() {}
+
+fn production_writer() {
+    let _sql = "SELECT instr(text, '{')
+                FROM memories";
+}
+
+#[cfg(test)]
+mod tests {
+    fn fixture_writer() {
+        let _sql = "UPDATE memories SET text='fixture'";
+    }
+}
+"#;
+
+    let functions = functions_in_source(source);
+    assert_eq!(
+        functions
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["one_line_helper", "production_writer"]
+    );
+    assert!(!functions[1].source.contains("fixture_writer"));
 }
 
 #[test]

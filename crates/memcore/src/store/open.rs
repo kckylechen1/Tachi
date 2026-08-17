@@ -1,6 +1,6 @@
 //! Opening, construction, and write-path entry points for [`MemoryStore`].
 
-use rusqlite::Connection;
+use rusqlite::{Connection, MAIN_DB};
 use std::path::Path;
 use std::time::Duration;
 
@@ -11,6 +11,35 @@ use crate::{
     path_router::{self, UNKNOWN_DB_LABEL},
     MemoryEntry, MemoryStore,
 };
+
+/// Restricted read view available to batch pre-commit guards.
+///
+/// The underlying transaction is intentionally private: a guard may observe
+/// the exact post-batch memory count while the batch is still rollbackable,
+/// but it cannot execute arbitrary SQL under the store's reserved-reference
+/// write authorization.
+///
+/// ```compile_fail
+/// # use memcore::store::open::BatchPrecommitView;
+/// fn bypass(view: BatchPrecommitView<'_>) {
+///     view.execute("UPDATE memories SET metadata = '{}'", []).unwrap();
+/// }
+/// ```
+pub struct BatchPrecommitView<'a> {
+    connection: &'a Connection,
+}
+
+impl BatchPrecommitView<'_> {
+    /// Count memory rows in the transaction's uncommitted post-batch state.
+    pub fn memory_row_count(&self) -> Result<usize, MemoryError> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+            .map_err(MemoryError::from)
+    }
+}
 
 #[cfg(feature = "test-support")]
 struct StartupOwnershipHook {
@@ -534,6 +563,60 @@ impl MemoryStore {
         Self::open_with_label_inner(db_path, db_label, true, ctx, None)
     }
 
+    pub(crate) fn open_private_image(
+        sqlite_image: Option<&[u8]>,
+        identity: crate::private_partition::AdmittedPartition,
+    ) -> Result<Self, MemoryError> {
+        Self::register_open_extensions()?;
+        let mut conn = Connection::open_in_memory()?;
+        if let Some(image) = sqlite_image {
+            conn.deserialize_read_exact(MAIN_DB, image, image.len(), false)?;
+        }
+        db::configure_connection(&conn)?;
+        let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        let ctx = if sqlite_image.is_some() {
+            DbOpenContext::open_existing_deny()
+        } else {
+            DbOpenContext::create_fresh()
+        }
+        .with_profile(db::StoreProfile::PortableKernel);
+        let migration_path = Path::new("private-partition-memory-image");
+        let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
+        let schema_result = db::init_private_schema_with_label_mut(
+            &mut conn,
+            "private_partition",
+            migration_path,
+            &ctx,
+        );
+        let vec_available = schema_result
+            .as_ref()
+            .map(|_| db::try_load_sqlite_vec(&conn))
+            .unwrap_or(false);
+        drop(migration_authorization);
+        let resolved = schema_result?.identity;
+        db::validate_persistent_trigger_inventory(&conn, true)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
+        let mut store = Self {
+            conn,
+            reserved_reference_write,
+            vec_available,
+            db_label: resolved.db_label,
+            profile: resolved.profile,
+            path_validation: false,
+            opened_physical_db_identity: None,
+            policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
+        };
+        {
+            let _authorization =
+                db::authorize_reserved_reference_write(&store.reserved_reference_write)?;
+            crate::private_partition::stamp_private_identity(&store.conn, &identity)?;
+        }
+        store.admitted_partition = Some(identity);
+        Ok(store)
+    }
+
     fn open_with_label_inner(
         db_path: &str,
         db_label: &str,
@@ -583,6 +666,9 @@ impl MemoryStore {
         ctx: &DbOpenContext,
         busy_timeout: Option<Duration>,
     ) -> Result<Self, MemoryError> {
+        let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
+        let resolved_db_path_string = resolved_db_path.to_string_lossy();
+        let db_path = resolved_db_path_string.as_ref();
         // Acquire the in-process startup lock BEFORE the #1132 rename-on-open
         // migration, not after (RESIDUAL-1). The migration's stat+rename+symlink
         // sequence and the `open_read_write` below (which CREATES the canonical
@@ -650,7 +736,9 @@ impl MemoryStore {
         // only the caller's claim and may legitimately be `unknown`. A conflict
         // between the two already failed the open above.
         let identity = schema_result?.identity;
+        crate::private_partition::refuse_stamped_private_store(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
             db_path,
             opened_physical_db_identity.clone(),
@@ -690,6 +778,7 @@ impl MemoryStore {
             // tachi#1585 D5: pure default, no env. `with_kernel_policy`
             // attaches a host-injected policy after open.
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 
@@ -726,6 +815,7 @@ impl MemoryStore {
         }
         db::migrations::validate_current_schema_integrity(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         let opened_physical_db_identity =
             validate_physical_db_identity_across_open(db_path, Some(before_reopen))?;
@@ -742,6 +832,7 @@ impl MemoryStore {
             path_validation,
             opened_physical_db_identity,
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 
@@ -823,6 +914,9 @@ impl MemoryStore {
         db_label: &str,
         immutable: bool,
     ) -> Result<Self, MemoryError> {
+        let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
+        let resolved_db_path_string = resolved_db_path.to_string_lossy();
+        let db_path = resolved_db_path_string.as_ref();
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
@@ -884,6 +978,7 @@ impl MemoryStore {
             // only for an older stamp, never a way to accept a damaged v23 DB.
             db::validate_persistent_trigger_inventory(&conn, true)?;
         }
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         if compat_operation.is_none() || !is_stamped_older_schema {
             db::migrations::check_db_open_context_gate(
                 &conn,
@@ -906,6 +1001,7 @@ impl MemoryStore {
         }
         let resolved_label =
             db::store_identity::resolve_role(stored_role.as_deref(), db_label, path)?;
+        crate::private_partition::refuse_stamped_private_store(&conn)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -918,6 +1014,7 @@ impl MemoryStore {
             path_validation: false,
             opened_physical_db_identity,
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 
@@ -926,6 +1023,9 @@ impl MemoryStore {
     /// refuses an incomplete trigger inventory before exposing a write-capable
     /// connection.
     pub fn open_existing_read_write(db_path: &str) -> Result<Self, MemoryError> {
+        let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
+        let resolved_db_path_string = resolved_db_path.to_string_lossy();
+        let db_path = resolved_db_path_string.as_ref();
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
@@ -947,6 +1047,7 @@ impl MemoryStore {
         }
         db::migrations::validate_current_schema_integrity(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         // A version stamp is not proof of shape. Prepare the complete memories
         // projection exact-dedupe reads and writes before returning a writable
         // handle; this validates only and deliberately performs no
@@ -969,6 +1070,7 @@ impl MemoryStore {
         // whatever the file is stamped with, or `unknown` when it is unstamped.
         let path = std::path::Path::new(db_path);
         let (stored_role, stored_profile) = db::store_identity::read_identity(&conn, path)?;
+        crate::private_partition::refuse_stamped_private_store(&conn)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -978,6 +1080,7 @@ impl MemoryStore {
             path_validation: false,
             opened_physical_db_identity,
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 
@@ -1000,6 +1103,7 @@ impl MemoryStore {
         drop(migration_authorization);
         schema_result?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -1009,6 +1113,7 @@ impl MemoryStore {
             path_validation: false,
             opened_physical_db_identity: None,
             policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
         })
     }
 
@@ -1141,11 +1246,9 @@ impl MemoryStore {
     /// entry never opens a transaction at all; then run the whole batch's
     /// main-row + FTS + vector projections through [`db::upsert_within_tx`]
     /// inside one `BEGIN IMMEDIATE` transaction, run `postcommit` while the
-    /// writes are still rollbackable, and commit only if it succeeds. This
-    /// is a private helper — the closure it takes is never part of a public
-    /// method's signature, which is the entire reason `upsert_batch` can be
-    /// ungated while `upsert_batch_with_precommit`'s closure-carrying public
-    /// signature stays admin/test-gated (see that method's doc comment).
+    /// writes are still rollbackable, and commit only if it succeeds. The raw
+    /// transaction stays private; public pre-commit methods expose only a
+    /// restricted [`BatchPrecommitView`].
     ///
     /// `allow_reserved_anchor_ids` selects which `db` seam the per-row loop
     /// uses: `false` (every ordinary caller) refuses reserved `anchor:` ids
@@ -1159,7 +1262,7 @@ impl MemoryStore {
         postcommit: F,
     ) -> Result<T, MemoryError>
     where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
+        F: FnOnce(BatchPrecommitView<'_>) -> Result<T, MemoryError>,
     {
         for entry in entries {
             self.validate_write_path(entry)?;
@@ -1181,7 +1284,7 @@ impl MemoryStore {
                 db::upsert_within_tx(&tx, entry, self.vec_available, None)?;
             }
         }
-        let output = postcommit(&tx)?;
+        let output = postcommit(BatchPrecommitView { connection: &tx })?;
         tx.commit()?;
         Ok(output)
     }
@@ -1191,14 +1294,10 @@ impl MemoryStore {
     ///
     /// This is for cross-resource maintenance that must validate or complete
     /// an external boundary before the database half becomes durable. The
-    /// closure receives read access to the transaction for exact post-state
-    /// accounting; any closure error drops the transaction without commit.
-    ///
-    /// Gated with the raw-`Connection` accessors (#1585 review round 4): the
-    /// closure's `&Transaction` derefs to `&Connection`, which would hand the
-    /// portable surface the same raw-SQL bypass of the `store_identity`
-    /// write-once guards. Its only production caller is tachi-server's tidy
-    /// migration (admin build), through the
+    /// closure receives a restricted [`BatchPrecommitView`] for exact
+    /// post-state accounting; any closure error drops the transaction without
+    /// commit. Its only production caller is tachi-server's tidy migration
+    /// (admin build), through the
     /// [`Self::upsert_batch_with_precommit_preserving_anchor_rows`] variant.
     ///
     /// Reserved-id refusals are not weakened by batching: since tachi#1602 a
@@ -1213,7 +1312,7 @@ impl MemoryStore {
         precommit: F,
     ) -> Result<T, MemoryError>
     where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
+        F: FnOnce(BatchPrecommitView<'_>) -> Result<T, MemoryError>,
     {
         self.upsert_batch_in_tx(entries, false, precommit)
     }
@@ -1239,15 +1338,14 @@ impl MemoryStore {
         precommit: F,
     ) -> Result<T, MemoryError>
     where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
+        F: FnOnce(BatchPrecommitView<'_>) -> Result<T, MemoryError>,
     {
         self.upsert_batch_in_tx(entries, true, precommit)
     }
 
-    /// Upsert a bounded batch atomically, with **no handle exposure**: unlike
-    /// [`Self::upsert_batch_with_precommit`], this takes no closure and its
-    /// signature never mentions a raw `Connection`/`Transaction`, so it is
-    /// safe to leave ungated for the portable build (tachi#1599).
+    /// Upsert a bounded batch atomically with no callback. The pre-commit
+    /// variants likewise expose no raw handle; they provide only a restricted
+    /// [`BatchPrecommitView`].
     ///
     /// Every entry's `KernelPolicy`-driven write-path check
     /// ([`Self::validate_write_path`] — the same per-row check ordinary
@@ -1274,12 +1372,8 @@ impl MemoryStore {
     /// projection failure rolls back the entire batch. An empty slice is a
     /// successful no-op: no transaction is opened.
     ///
-    /// This exists ungated for the same reason
-    /// [`Self::upsert_batch_with_precommit`] does not (tachi#1585's class
-    /// rule): the raw `&Transaction`/`&Connection` handle is what must stay
-    /// admin/test-gated, not batching or atomicity themselves. This method
-    /// never hands out that handle, so the portable surface gets atomic
-    /// batch writes without the raw-SQL bypass those accessors would open.
+    /// This method stays ungated for the portable build (tachi#1599); it never
+    /// hands out a callback or handle.
     pub fn upsert_batch(&mut self, entries: &[MemoryEntry]) -> Result<(), MemoryError> {
         if entries.is_empty() {
             return Ok(());
@@ -2480,13 +2574,7 @@ mod exact_dedupe_open_tests {
                     test_memory_entry("migration-carried-ordinary"),
                     anchor_entry,
                 ],
-                |tx| {
-                    tx.query_row("SELECT COUNT(*) FROM memories", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .map(|count| count as usize)
-                    .map_err(MemoryError::from)
-                },
+                |view| view.memory_row_count(),
             )
             .expect("the trusted whole-store-copy variant must carry the anchor row");
         assert_eq!(rows_after, 2, "both copied rows must be visible in-tx");

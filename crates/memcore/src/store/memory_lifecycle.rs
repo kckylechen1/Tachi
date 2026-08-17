@@ -47,6 +47,10 @@ use sha2::{Digest, Sha256};
 
 use crate::db;
 use crate::error::MemoryError;
+use crate::store::immutable_supersession::{
+    claim_supersession_edge_within_tx, finalize_supersession_receipt_within_tx,
+    SupersessionClaimOptions, SupersessionExpectedState,
+};
 use crate::types::MemoryEntry;
 use crate::MemoryStore;
 
@@ -59,6 +63,7 @@ pub const LIFECYCLE_SCHEMA_VERSION: u32 = 2;
 /// Policy stamp included in every v2 identity so a policy change invalidates
 /// all prior proposals.
 pub const LIFECYCLE_POLICY_VERSION: &str = "memory-lifecycle-v2";
+pub const LIFECYCLE_SUPERSESSION_ROUTE: &str = "memory_lifecycle_v2";
 
 /// Terminal-state TTL (days) stamped on `rejected` and `applied` proposals.
 const LIFECYCLE_TERMINAL_TTL_DAYS: i64 = 30;
@@ -297,10 +302,10 @@ fn protection_reason_from_fields(
     if is_wiki {
         return Some("wiki_category");
     }
-    if path.starts_with("/wiki") {
+    if crate::namespace::path_in_namespace(path, "/wiki") {
         return Some("wiki_path");
     }
-    let normalized = retention_policy.map(|r| r.to_ascii_lowercase());
+    let normalized = retention_policy.map(|r| r.trim().to_ascii_lowercase());
     if matches!(
         normalized.as_deref(),
         Some("permanent" | "pinned" | "durable")
@@ -316,14 +321,14 @@ pub fn lifecycle_protection_reason(entry: &MemoryEntry) -> Option<&'static str> 
         &entry.path,
         entry.archived,
         &entry.tier,
-        entry.is_wiki(),
+        entry_is_wiki(&entry.category, entry.domain.as_deref(), &entry.metadata),
         entry.retention_policy.as_deref(),
     )
 }
 
 fn entry_is_wiki(category: &str, domain: Option<&str>, metadata: &serde_json::Value) -> bool {
     category.eq_ignore_ascii_case("wiki")
-        || domain == Some("wiki")
+        || domain.is_some_and(|domain| domain.eq_ignore_ascii_case("wiki"))
         || metadata
             .get("wiki")
             .and_then(|v| v.as_bool())
@@ -1035,22 +1040,41 @@ fn apply_lifecycle_proposal_once(
                     "supersede proposal {proposal_id} requires target_id"
                 ))
             })?;
-            let now = db::now_utc_iso();
-            // An existing supersession edge is immutable: install A -> B only
-            // from NULL, never replace a concurrent or pre-existing A -> C.
-            // The edge guard is part of the same revision/archive CAS.
-            let changed = tx.execute(
-                "UPDATE memories SET archived = 1, superseded_by = ?1,
-                 valid_until = COALESCE(valid_until, ?2), updated_at = ?2, revision = revision + 1
-                 WHERE id = ?3 AND revision = ?4 AND archived = 0
-                 AND superseded_by IS NULL",
-                params![target, now, source_id, source_revision],
-            )?;
-            if changed == 0 {
-                return Err(drift_err(
-                    proposal_id,
-                    format!("supersede CAS failed for {source_id} (revision {source_revision})"),
-                ));
+            let source = read_memory_in_tx(&tx, &source_id)?
+                .ok_or_else(|| drift_err(proposal_id, format!("source missing: {source_id}")))?;
+            let target_entry = read_memory_in_tx(&tx, target)?
+                .ok_or_else(|| drift_err(proposal_id, format!("target missing: {target}")))?;
+            let expected =
+                SupersessionExpectedState::active_unsuperseded(&source, Some(&target_entry));
+            let receipt = claim_supersession_edge_within_tx(
+                &tx,
+                &source_id,
+                target,
+                SupersessionClaimOptions {
+                    route: LIFECYCLE_SUPERSESSION_ROUTE,
+                    policy_version: LIFECYCLE_POLICY_VERSION,
+                    expected: Some(&expected),
+                    require_materialized_target: true,
+                    archive_source: true,
+                    enforce_lifecycle_source_protection: true,
+                    mutation_timestamp: None,
+                    partition_id: store
+                        .admitted_partition
+                        .as_ref()
+                        .map(|part| part.partition_id.clone()),
+                },
+            )
+            .map_err(MemoryError::from)?;
+            let attempt_result = receipt.result;
+            let mut receipt = receipt.receipt;
+            if attempt_result
+                == crate::store::immutable_supersession::SupersessionCommitResult::Applied
+            {
+                finalize_supersession_receipt_within_tx(
+                    &tx,
+                    &mut receipt,
+                    "lifecycle_apply_no_extra_target_write",
+                )?;
             }
             serde_json::json!({
                 "lifecycle_action": ACTION_SUPERSEDE,
@@ -1058,6 +1082,8 @@ fn apply_lifecycle_proposal_once(
                 "target_id": target,
                 "superseded": true,
                 "archived": true,
+                "supersession_attempt_result": attempt_result.as_str(),
+                "supersession_receipt": receipt,
             })
         }
         ACTION_MERGE_INTO | ACTION_NEAR_DUP_MERGE => {
@@ -1070,6 +1096,7 @@ fn apply_lifecycle_proposal_once(
                 .ok_or_else(|| drift_err(proposal_id, format!("source missing: {source_id}")))?;
             let mut survivor = read_memory_in_tx(&tx, target)?
                 .ok_or_else(|| drift_err(proposal_id, format!("target missing: {target}")))?;
+            let expected = SupersessionExpectedState::active_unsuperseded(&source, Some(&survivor));
             // BOTH sides of the no-op comparison below must be canonical. The
             // fold produces sorted+deduplicated lists, while the stored column
             // is in whatever order the last writer serialized
@@ -1092,47 +1119,64 @@ fn apply_lifecycle_proposal_once(
             if survivor.importance < source.importance {
                 survivor.importance = source.importance;
             }
-            let merged_keywords = survivor.keywords.len();
-            let merged_entities = survivor.entities.len();
+            let receipt = claim_supersession_edge_within_tx(
+                &tx,
+                &source_id,
+                target,
+                SupersessionClaimOptions {
+                    route: LIFECYCLE_SUPERSESSION_ROUTE,
+                    policy_version: LIFECYCLE_POLICY_VERSION,
+                    expected: Some(&expected),
+                    require_materialized_target: true,
+                    archive_source: true,
+                    enforce_lifecycle_source_protection: true,
+                    mutation_timestamp: None,
+                    partition_id: store
+                        .admitted_partition
+                        .as_ref()
+                        .map(|part| part.partition_id.clone()),
+                },
+            )
+            .map_err(MemoryError::from)?;
+            let attempt_result = receipt.result;
+            let mut receipt = receipt.receipt;
             // Do not rewrite an unchanged survivor: an unconditional upsert
             // bumps its revision, invalidating already-approved sibling star
             // proposals that share this target snapshot. When merged data did
             // change, preserve the full transaction-aware upsert path.
-            if survivor.keywords != target_keywords
-                || survivor.entities != target_entities
-                || survivor.importance != target_importance
+            if attempt_result
+                == crate::store::immutable_supersession::SupersessionCommitResult::Applied
+                && (survivor.keywords != target_keywords
+                    || survivor.entities != target_entities
+                    || survivor.importance != target_importance)
             {
                 db::upsert_within_tx(&tx, &survivor, store.vec_available, None)?;
             }
-            // An existing supersession edge is immutable: this source UPDATE
-            // may install A -> B only from NULL, never replace a concurrent or
-            // pre-existing A -> C. Keep that edge guard inside the same
-            // revision/archive CAS and transaction as the merge fold, so a
-            // failed source mutation rolls the target fold back too.
-            let now = db::now_utc_iso();
-            let changed = tx.execute(
-                "UPDATE memories SET archived = 1, superseded_by = ?1,
-                 valid_until = COALESCE(valid_until, ?2), updated_at = ?2, revision = revision + 1
-                 WHERE id = ?3 AND revision = ?4 AND archived = 0
-                 AND superseded_by IS NULL",
-                params![target, now, source_id, source_revision],
-            )?;
-            if changed == 0 {
-                return Err(drift_err(
-                    proposal_id,
-                    format!(
-                        "{action} supersede/archive CAS failed for {source_id} (revision {source_revision})"
-                    ),
-                ));
+            if attempt_result
+                == crate::store::immutable_supersession::SupersessionCommitResult::Applied
+            {
+                finalize_supersession_receipt_within_tx(
+                    &tx,
+                    &mut receipt,
+                    "lifecycle_apply_target_fold_committed",
+                )?;
             }
+            let committed_survivor = read_memory_in_tx(&tx, target)?.ok_or_else(|| {
+                drift_err(
+                    proposal_id,
+                    format!("target disappeared after merge: {target}"),
+                )
+            })?;
             serde_json::json!({
                 "lifecycle_action": action,
                 "source_id": source_id,
                 "target_id": target,
-                "merged_keywords": merged_keywords,
-                "merged_entities": merged_entities,
+                "merged_keywords": committed_survivor.keywords.len(),
+                "merged_entities": committed_survivor.entities.len(),
                 "superseded": true,
                 "archived": true,
+                "supersession_attempt_result": attempt_result.as_str(),
+                "supersession_receipt": receipt,
             })
         }
         ACTION_PROMOTE_DISTILLED => {
@@ -2293,6 +2337,51 @@ mod tests {
             source_row.archived,
             "the source side of the merge still executes"
         );
+    }
+
+    #[test]
+    fn merge_with_new_target_content_uses_the_pre_fold_snapshot_and_persists_receipt() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let target = seed(
+            &mut store,
+            "fold-target",
+            "maritime logistics rota covering harbour pilots",
+            &["zulu"],
+        );
+        let source = seed(
+            &mut store,
+            "fold-source",
+            "quantum widget calibration notes for the alpha bench",
+            &["alpha"],
+        );
+        let payload = build_apply_payload(ACTION_MERGE_INTO, &source, Some(&target));
+        let proposal_id = persist_and_approve(&store, &payload);
+
+        apply_lifecycle_proposal(&mut store, &proposal_id)
+            .expect("content-changing merge succeeds");
+
+        let survivor = store.get(&target.id).unwrap().expect("target survives");
+        assert_eq!(
+            survivor.keywords,
+            vec!["alpha".to_string(), "zulu".to_string()]
+        );
+        assert_eq!(survivor.revision, target.revision + 1);
+        let receipt_id = crate::SupersessionReceipt::id_for(
+            LIFECYCLE_SUPERSESSION_ROUTE,
+            LIFECYCLE_POLICY_VERSION,
+            &source.id,
+            &target.id,
+        );
+        let (receipt_json, version) = store
+            .get_state_kv(crate::SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+            .expect("read receipt")
+            .expect("receipt is durable");
+        let receipt: crate::SupersessionReceipt =
+            serde_json::from_str(&receipt_json).expect("deserialize receipt");
+        assert!(receipt.durable);
+        assert_eq!(receipt.target_revision_before, Some(target.revision));
+        assert_eq!(receipt.target_revision_after, Some(survivor.revision));
+        assert_eq!(version, 1);
     }
 
     fn test_entry() -> MemoryEntry {

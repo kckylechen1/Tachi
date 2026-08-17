@@ -178,6 +178,10 @@ impl MemoryStore {
     /// (tachi-server and friends) and in-crate tests keep it.
     #[cfg(any(feature = "admin", test))]
     pub fn connection(&self) -> &Connection {
+        assert!(
+            self.admitted_partition.is_none(),
+            "private partition handles do not expose a raw SQLite connection"
+        );
         &self.conn
     }
 
@@ -193,6 +197,10 @@ impl MemoryStore {
     /// with strictly more power.
     #[cfg(any(feature = "admin", test))]
     pub fn connection_mut(&mut self) -> &mut Connection {
+        assert!(
+            self.admitted_partition.is_none(),
+            "private partition handles do not expose a raw SQLite connection"
+        );
         &mut self.conn
     }
 

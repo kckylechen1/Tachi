@@ -107,6 +107,7 @@ pub use doctor_probe::{
 };
 #[cfg(any(feature = "admin", test))]
 pub use doctor_probe::{open_for_wal_checkpoint, open_immutable_readonly, open_raw};
+pub(crate) use event_ledger::refuse_reserved_supersession_event_type;
 pub use event_ledger::{
     continuity_metrics, insert_tachi_event, insert_tachi_event_if_absent, list_tachi_events,
 };
@@ -118,15 +119,18 @@ pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
     CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
 };
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
 pub(crate) use graph::persist_confirmed_contradiction_within_tx;
 pub use graph::{
-    add_component_governance_edge, add_component_governance_edge_with_provenance, add_edge,
-    add_edge_with_provenance, avg_importance, close_related_to_fog, count_active_observations,
-    count_same_topic, edge_authority, get_contradiction_count, get_edges, get_edges_limited,
-    get_superseded_ids, graph_expand, graph_expand_limited, invalidate_observation,
-    list_observations_for_edge, remove_edge, ConfirmedContradictionOutcome, EdgeAuthority,
-    EdgeObservation, EdgeProvenance,
+    add_component_governance_edge, add_component_governance_edge_with_provenance, avg_importance,
+    close_related_to_fog, count_active_observations, count_same_topic, edge_authority,
+    get_contradiction_count, get_edges, get_edges_limited, get_superseded_ids, graph_expand,
+    graph_expand_limited, invalidate_observation, list_observations_for_edge, remove_edge,
+    ConfirmedContradictionOutcome, EdgeAuthority, EdgeObservation, EdgeProvenance,
 };
+pub(crate) use graph::{add_edge, add_edge_with_provenance};
+pub(crate) use graph::{row_matches_expected_state, validate_confirmed_contradiction};
 #[cfg(feature = "admin")]
 pub use harness_session_attachments::{
     attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
@@ -151,6 +155,8 @@ pub(crate) use memory_crud::record_access_with_updates;
 pub use memory_crud::refuse_retired_sticky_row_within_tx;
 pub(crate) use memory_crud::search_fts_raw_match;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use memory_crud::supersede_with_metadata_if_expected_state;
 pub(crate) use memory_crud::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals;
 pub(crate) use memory_crud::wiki_corpus_store_sql_splice;
 #[cfg(test)]
@@ -166,18 +172,18 @@ pub use memory_crud::{
     list_wiki_duplicate_candidates, normalize_for_write, record_enrichment_failure,
     record_memory_use, release_event_claim, restore_archived_if_revision,
     restore_archived_revision_within_tx, search_fts, search_symbolic_candidates, search_vec,
-    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
-    supersede_memory_if_revision, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
-    try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
-    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy,
-    ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
-    MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES,
-    MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status,
+    symbolic_trigram_select_sql, sync_memories_symbolic_fts, try_claim_event,
+    update_enrichment_fields, update_with_revision, AccessEventDensity, AccessEventKind,
+    IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy, ValidatedReferenceMutation,
+    MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES,
+    MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
+    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 pub(crate) use memory_crud::{
     archive_memory_within_tx, archive_with_metadata_if_expected_state,
-    restore_with_metadata_if_expected_state, supersede_memory_within_tx,
-    supersede_with_metadata_if_expected_state, update_with_revision_if_expected_state,
+    find_jaccard_candidate_within_tx, merge_jaccard_candidate_within_tx,
+    restore_with_metadata_if_expected_state, update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
 /// function's own doc for when a hand-built fixture is legitimate.
@@ -198,6 +204,8 @@ pub(crate) use memory_crud::{
     insert_if_absent, insert_if_absent_within_tx, insert_rem_operation_if_absent_within_tx, upsert,
     upsert_idless, upsert_within_tx, upsert_within_tx_allowing_reserved_anchor_ids,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use memory_crud::{supersede_memory, supersede_memory_if_revision};
 #[cfg(feature = "admin")]
 pub use model_catalog::{
     advance_catalog_projection, append_model_deployment_event, get_model_deployment,
@@ -216,12 +224,13 @@ pub use open::lock_retry_backoff_count;
 /// Public: see `open::sqlite_error_is_locked`'s doc comment.
 pub use open::sqlite_error_is_locked;
 pub(crate) use open::{
-    acquire_startup_lock, authorize_planner_maintenance, authorize_reserved_reference_write,
-    authorize_schema_migration, configure_connection, install_reserved_reference_authorizer,
+    acquire_startup_lock, authorize_canonical_supersession_edge_write,
+    authorize_planner_maintenance, authorize_reserved_reference_write, authorize_schema_migration,
+    configure_connection, install_authority_row_guards, install_reserved_reference_authorizer,
     open_read_only, open_read_write, open_read_write_with_busy_timeout,
     register_reserved_reference_write_guard, retry_memory_locked, scoped_sqlite_busy_deadline,
     sqlite_busy_deadline_remaining, validate_persistent_trigger_inventory,
-    ReservedReferenceWriteFlag,
+    ReservedReferenceWriteAuthorization, ReservedReferenceWriteFlag,
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
@@ -272,6 +281,7 @@ pub use sandbox::{
     list_sandbox_exec_audit, list_sandbox_policies, list_sandbox_rules_for_role,
     path_matches_pattern, set_sandbox_policy, set_sandbox_rule,
 };
+pub(crate) use schema::init_private_schema_with_label_mut;
 #[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
 pub use schema::{init_schema, init_schema_with_label_mut, SchemaInitOutcome};
