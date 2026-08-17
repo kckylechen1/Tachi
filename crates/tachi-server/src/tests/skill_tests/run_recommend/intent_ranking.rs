@@ -227,8 +227,7 @@ async fn recommend_capabilities_inner_uses_active_patterns_as_ranking_context() 
     .expect("recommend capabilities should succeed");
     let top = &results[0];
     assert_eq!(
-        top.id,
-        "skill:marmalade-closure",
+        top.id, "skill:marmalade-closure",
         "expected pattern-bridged marmalade skill to rank first, got {results:?}"
     );
     assert_eq!(
@@ -294,8 +293,7 @@ async fn recommend_capabilities_inner_host_bonus_ignores_definition_paths() {
 
     assert_eq!(fixtures.len(), 2, "both path-variant skills must rank");
     assert_eq!(
-        fixtures[0].id,
-        "skill:alpha",
+        fixtures[0].id, "skill:alpha",
         "definition paths must not give skill:zeta a codex host bonus"
     );
     assert_eq!(
@@ -461,7 +459,10 @@ async fn recommend_capabilities_inner_host_bonus_matches_declared_metadata() {
         untagged.score
     );
     assert!(
-        tagged.reasons.iter().any(|reason| reason == "mentions host 'codex'"),
+        tagged
+            .reasons
+            .iter()
+            .any(|reason| reason == "mentions host 'codex'"),
         "the bonus reason must still fire when host affinity is declared metadata"
     );
     assert!(

@@ -273,4 +273,3 @@ fn feature_board_filter_matches_stable_fields_only() {
         &needles
     ));
 }
-

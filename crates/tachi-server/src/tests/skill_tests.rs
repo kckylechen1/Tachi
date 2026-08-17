@@ -1,5 +1,7 @@
 use super::{make_entry, make_server, make_skill_capability};
-use crate::tool_params::{DistillTrajectoryParams, HubRegisterParams, TachiCompleteParams, TachiSkillParams};
+use crate::tool_params::{
+    DistillTrajectoryParams, HubRegisterParams, TachiCompleteParams, TachiSkillParams,
+};
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 

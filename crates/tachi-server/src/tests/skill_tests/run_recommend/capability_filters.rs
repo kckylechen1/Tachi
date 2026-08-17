@@ -41,7 +41,10 @@ async fn recommend_capabilities_inner_skips_hidden_capabilities_by_default() {
         false,
     )
     .expect("recommend capabilities should succeed");
-    let ids = results.iter().map(|rec| rec.id.as_str()).collect::<Vec<_>>();
+    let ids = results
+        .iter()
+        .map(|rec| rec.id.as_str())
+        .collect::<Vec<_>>();
     assert!(ids.contains(&"skill:incident-playbook"));
     assert!(!ids.contains(&"skill:hidden-playbook"));
 
@@ -55,7 +58,10 @@ async fn recommend_capabilities_inner_skips_hidden_capabilities_by_default() {
         false,
     )
     .expect("recommend capabilities include_hidden should succeed");
-    let ids = results.iter().map(|rec| rec.id.as_str()).collect::<Vec<_>>();
+    let ids = results
+        .iter()
+        .map(|rec| rec.id.as_str())
+        .collect::<Vec<_>>();
     assert!(ids.contains(&"skill:hidden-playbook"));
 }
 
