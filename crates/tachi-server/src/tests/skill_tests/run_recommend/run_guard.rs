@@ -195,11 +195,15 @@ async fn run_skill_rejects_uncallable_skill() {
         .await
         .expect("hub_register skill should return response");
 
+    // #1690 C3 slice A: the standalone `run_skill` backcompat route is retired
+    // (it was a pure forwarder to `handle_run_skill`). The uncallable-skill
+    // guard lives in `handle_run_skill`, still reachable through the canonical
+    // `tachi_skill(action='run')` facade — the re-anchor target for this guard.
     let err = server
-        .run_skill(Parameters(RunSkillParams {
-            skill_id: "skill:dangerous".to_string(),
-            args: json!({}),
-        }))
+        .tachi_skill(Parameters(tachi_skill_run_params(
+            "skill:dangerous",
+            json!({}),
+        )))
         .await
         .expect_err("disabled skill should not run");
 

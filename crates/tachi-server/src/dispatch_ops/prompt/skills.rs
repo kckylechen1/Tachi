@@ -15,7 +15,7 @@ pub(in crate::dispatch_ops) fn resolve_effective_skills(
     let mut skills = crate::skill_policy::dispatch_stage_skills(&stage_key);
 
     if stage_key != "brainstorm" {
-        let route = crate::copilot_ops::build_task_brief_routing(&params.task, &[]);
+        let route = crate::copilot_ops::build_task_brief_routing(&params.task);
         crate::skill_policy::append_builtin_sops(&mut skills, route.selected_sops.into_iter());
     }
 

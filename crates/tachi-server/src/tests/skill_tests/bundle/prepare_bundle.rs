@@ -1,7 +1,12 @@
 use super::*;
 
+// #1690 C3 slice A: the standalone `prepare_capability_bundle` backcompat route
+// is retired; the handler it forwarded to SURVIVES (tachi_skill bundle/loadout
+// still call it, their deletion is a later slice). This test re-anchors onto the
+// canonical `tachi_skill(action='bundle')` facade surface.
+
 #[tokio::test]
-async fn prepare_capability_bundle_returns_primary_skill_and_section() {
+async fn tachi_skill_bundle_returns_primary_skill_and_section() {
     let server = make_server();
     let excel = make_skill_capability(
         "skill:excel-automation",
@@ -18,15 +23,22 @@ async fn prepare_capability_bundle_returns_primary_skill_and_section() {
         .expect("seed bundle registry");
 
     let result = server
-        .prepare_capability_bundle(Parameters(PrepareCapabilityBundleParams {
-            query: "build an excel spreadsheet from csv exports".to_string(),
+        .tachi_skill(Parameters(TachiSkillParams {
+            action: "bundle".to_string(),
+            query: Some("build an excel spreadsheet from csv exports".to_string()),
+            cap_type: None,
+            enabled_only: None,
+            limit: None,
+            skill_id: None,
+            args: None,
+            profile: None,
             host: Some("codex".to_string()),
-            skill_limit: 3,
-            capability_limit: 3,
-            include_section: true,
+            skill_limit: Some(3),
+            capability_limit: Some(3),
+            include_section: Some(true),
         }))
         .await
-        .expect("prepare_capability_bundle should succeed");
+        .expect("tachi_skill bundle should succeed");
     let json: Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         json["bundle"]["primary_skill"]["id"],

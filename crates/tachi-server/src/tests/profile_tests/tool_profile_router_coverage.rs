@@ -174,6 +174,18 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "tachi_plan",
     "tachi_progress_check",
     "wiki_browse",
+    // #1690 C3 slice A: the "second model brain" recommend family and its
+    // standalone backcompat skill routes are retired — `run_skill` was a pure
+    // forwarder to `handle_run_skill` (canonical: tachi_skill(action='run'))
+    // and `prepare_capability_bundle` forwarded to the surviving bundle
+    // handler (canonical: tachi_skill(action='bundle')). The recommend_* tools
+    // have no canonical replacement; their scoring core survives only behind
+    // the bundle handler until slice C removes it.
+    "run_skill",
+    "prepare_capability_bundle",
+    "recommend_capability",
+    "recommend_skill",
+    "recommend_toolchain",
 ];
 
 // Batch C (#757) removed `tachi_board` and `tachi_dispatch` — their canonical
@@ -375,7 +387,13 @@ fn profile_retired_direct_tools_stay_admin_only() {
 }
 
 #[test]
-fn standalone_skill_entrypoints_stay_routable_but_point_to_tachi_skill() {
+fn tachi_skill_facade_advertises_canonical_run_and_bundle_actions() {
+    // #1690 C3 slice A re-anchor: this test used to pin that the retired
+    // `run_skill` / `prepare_capability_bundle` backcompat routes stayed
+    // registered and pointed at tachi_skill. Those routes are now RETIRED
+    // (their "stays retired" fate is guarded by `retired_native_aliases_stay_retired`
+    // via `RETIRED_NATIVE_ALIASES`); what survives is the canonical facade's
+    // advertisement of the actions the deleted routes used to forward to.
     let descriptions = native_route_descriptions();
 
     let tachi_skill = descriptions
@@ -388,30 +406,6 @@ fn standalone_skill_entrypoints_stay_routable_but_point_to_tachi_skill() {
     assert!(
         tachi_skill.contains("action='bundle'"),
         "tachi_skill description should advertise canonical bundle action: {tachi_skill}"
-    );
-
-    let run_skill = descriptions
-        .get("run_skill")
-        .expect("run_skill compatibility route should stay registered");
-    assert!(
-        run_skill.contains("compatibility route"),
-        "run_skill description should mark it as a compatibility route: {run_skill}"
-    );
-    assert!(
-        run_skill.contains("tachi_skill(action='run')"),
-        "run_skill description should name the canonical tachi_skill action: {run_skill}"
-    );
-
-    let prepare_bundle = descriptions
-        .get("prepare_capability_bundle")
-        .expect("prepare_capability_bundle compatibility route should stay registered");
-    assert!(
-        prepare_bundle.contains("compatibility route"),
-        "prepare_capability_bundle description should mark it as a compatibility route: {prepare_bundle}"
-    );
-    assert!(
-        prepare_bundle.contains("tachi_skill(action='bundle')"),
-        "prepare_capability_bundle description should name the canonical tachi_skill action: {prepare_bundle}"
     );
 }
 

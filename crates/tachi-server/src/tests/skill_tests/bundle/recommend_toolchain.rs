@@ -1,7 +1,31 @@
 use super::*;
 
+// #1690 C3 slice A: the standalone `recommend_toolchain` route is retired with
+// the "second model brain". The behaviors it guarded — host-tool inference for
+// a query and ranked skill matching — survive in the kept
+// `handle_prepare_capability_bundle` (reachable through the canonical
+// `tachi_skill(action='bundle')` facade), so this test re-anchors onto that
+// live surface: `bundle.host_tools` and `bundle.primary_skill`.
+
+fn bundle_params(query: &str, host: &str) -> TachiSkillParams {
+    TachiSkillParams {
+        action: "bundle".to_string(),
+        query: Some(query.to_string()),
+        cap_type: None,
+        enabled_only: None,
+        limit: None,
+        skill_id: None,
+        args: None,
+        profile: None,
+        host: Some(host.to_string()),
+        skill_limit: Some(3),
+        capability_limit: Some(3),
+        include_section: Some(true),
+    }
+}
+
 #[tokio::test]
-async fn recommend_toolchain_infers_host_tools_and_skills() {
+async fn tachi_skill_bundle_infers_host_tools_and_primary_skill() {
     let server = make_server();
     let excel = make_skill_capability(
         "skill:excel-automation",
@@ -18,16 +42,14 @@ async fn recommend_toolchain_infers_host_tools_and_skills() {
         .expect("seed capability registry");
 
     let result = server
-        .recommend_toolchain(Parameters(RecommendToolchainParams {
-            query: "build an excel spreadsheet from csv exports".to_string(),
-            host: Some("codex".to_string()),
-            skill_limit: 3,
-            capability_limit: 3,
-        }))
+        .tachi_skill(Parameters(bundle_params(
+            "build an excel spreadsheet from csv exports",
+            "codex",
+        )))
         .await
-        .expect("recommend_toolchain should succeed");
+        .expect("tachi_skill bundle should succeed");
     let json: Value = serde_json::from_str(&result).expect("json");
-    let host_tools = json["host_tools"]
+    let host_tools = json["bundle"]["host_tools"]
         .as_array()
         .expect("host_tools array")
         .iter()
@@ -35,5 +57,8 @@ async fn recommend_toolchain_infers_host_tools_and_skills() {
         .collect::<Vec<_>>();
     assert!(host_tools.contains(&"python"));
     assert!(host_tools.contains(&"filesystem"));
-    assert_eq!(json["skills"][0]["id"], "skill:excel-automation");
+    assert_eq!(
+        json["bundle"]["primary_skill"]["id"],
+        json!("skill:excel-automation")
+    );
 }

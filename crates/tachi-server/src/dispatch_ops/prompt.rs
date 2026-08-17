@@ -59,7 +59,7 @@ pub(crate) async fn assemble_prompt_with_trace(
         parts.push(overlay);
     }
 
-    let route = crate::copilot_ops::build_task_brief_routing(&params.task, &[]);
+    let route = crate::copilot_ops::build_task_brief_routing(&params.task);
     parts.push(render_task_route_overlay(&route));
 
     if params.profile.is_some()

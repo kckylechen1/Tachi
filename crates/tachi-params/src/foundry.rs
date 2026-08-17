@@ -419,69 +419,7 @@ pub struct SectionBuildParams {
     pub target_tokens: Option<usize>,
 }
 
-// ─── Recommend / Bundle ─────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct RecommendCapabilityParams {
-    /// Natural language task or intent query
-    pub query: String,
-
-    /// Optional host/runtime name (e.g. openclaw, codex, trae)
-    #[serde(default)]
-    pub host: Option<String>,
-
-    /// Optional capability type filter: skill | plugin | mcp
-    #[serde(default)]
-    pub cap_type: Option<String>,
-
-    /// Max recommendations to return
-    #[serde(default = "default_recommend_limit")]
-    pub limit: usize,
-
-    /// Include hidden capabilities in ranking
-    #[serde(default)]
-    pub include_hidden: bool,
-
-    /// Include currently uncallable capabilities in ranking
-    #[serde(default)]
-    pub include_uncallable: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct RecommendSkillParams {
-    /// Natural language task or intent query
-    pub query: String,
-
-    /// Optional host/runtime name (e.g. openclaw, codex, trae)
-    #[serde(default)]
-    pub host: Option<String>,
-
-    /// Max skill recommendations to return
-    #[serde(default = "default_recommend_limit")]
-    pub limit: usize,
-
-    /// Include currently uncallable skills in ranking
-    #[serde(default)]
-    pub include_uncallable: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct RecommendToolchainParams {
-    /// Natural language task or intent query
-    pub query: String,
-
-    /// Optional host/runtime name (e.g. openclaw, codex, trae)
-    #[serde(default)]
-    pub host: Option<String>,
-
-    /// Max skill recommendations to include
-    #[serde(default = "default_recommend_limit")]
-    pub skill_limit: usize,
-
-    /// Max supporting capability recommendations to include
-    #[serde(default = "default_recommend_limit")]
-    pub capability_limit: usize,
-}
+// ─── Bundle ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PrepareCapabilityBundleParams {

@@ -1,7 +1,14 @@
 use super::*;
 
+// #1690 C3 slice A: `recommend_skill`'s ranking semantics are re-anchored onto
+// the surviving scoring core `recommend_capabilities_inner` (kept because
+// `handle_prepare_capability_bundle` — tachi_skill bundle/loadout — still calls
+// it). Every assertion below maps 1:1 from the retired route's JSON shape onto
+// the live `CapabilityRecommendation` rows; nothing here tests the deleted MCP
+// surface.
+
 #[tokio::test]
-async fn recommend_skill_prefers_matching_skill() {
+async fn recommend_capabilities_inner_prefers_matching_skill() {
     let server = make_server();
     let excel = make_skill_capability(
         "skill:excel-automation",
@@ -24,30 +31,29 @@ async fn recommend_skill_prefers_matching_skill() {
         })
         .expect("register skills");
 
-    let result = server
-        .recommend_skill(Parameters(RecommendSkillParams {
-            query: "make an excel spreadsheet report from csv exports".to_string(),
-            host: Some("codex".to_string()),
-            limit: 3,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_skill should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    let skills = json["skills"].as_array().expect("skills array");
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "make an excel spreadsheet report from csv exports",
+        Some("codex"),
+        Some("skill"),
+        3,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
     assert!(
-        !skills.is_empty(),
+        !results.is_empty(),
         "expected at least one skill recommendation"
     );
-    assert_eq!(skills[0]["id"], "skill:excel-automation");
+    assert_eq!(results[0].id, "skill:excel-automation");
     assert_eq!(
-        skills[0]["suggested_tool_name"],
-        json!("tachi_skill_excel_automation")
+        results[0].suggested_tool_name.as_deref(),
+        Some("tachi_skill_excel_automation")
     );
 }
 
 #[tokio::test]
-async fn recommend_skill_prefers_review_for_code_review_queries() {
+async fn recommend_capabilities_inner_prefers_review_for_code_review_queries() {
     let server = make_server();
     let review = make_skill_capability(
         "skill:review",
@@ -72,29 +78,29 @@ async fn recommend_skill_prefers_review_for_code_review_queries() {
         })
         .expect("register skills");
 
-    let result = server
-        .recommend_skill(Parameters(RecommendSkillParams {
-            query: "code review".to_string(),
-            host: Some("codex".to_string()),
-            limit: 3,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_skill should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    let top_id = json["skills"][0]["id"].as_str().expect("top skill id");
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "code review",
+        Some("codex"),
+        Some("skill"),
+        3,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
+    let top_id = results[0].id.as_str();
     assert!(
         matches!(
             top_id,
             "skill:review" | "skill:waza-check" | "skill:superpowers-requesting-code-review"
         ),
-        "expected a review workflow skill to win, got {json}"
+        "expected a review workflow skill to win, got {results:?}"
     );
     assert_ne!(top_id, "skill:baoyu-markdown-to-html");
 }
 
 #[tokio::test]
-async fn recommend_skill_prefers_investigate_for_debug_500_error_queries() {
+async fn recommend_capabilities_inner_prefers_investigate_for_debug_500_error_queries() {
     let server = make_server();
     let investigate = make_skill_capability(
         "skill:investigate",
@@ -121,21 +127,21 @@ async fn recommend_skill_prefers_investigate_for_debug_500_error_queries() {
         })
         .expect("register skills");
 
-    let result = server
-        .recommend_skill(Parameters(RecommendSkillParams {
-            query: "debug 500 error".to_string(),
-            host: Some("codex".to_string()),
-            limit: 3,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_skill should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    assert_eq!(json["skills"][0]["id"], "skill:investigate");
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "debug 500 error",
+        Some("codex"),
+        Some("skill"),
+        3,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
+    assert_eq!(results[0].id, "skill:investigate");
 }
 
 #[tokio::test]
-async fn recommend_skill_prefers_ship_for_create_pr_queries() {
+async fn recommend_capabilities_inner_prefers_ship_for_create_pr_queries() {
     let server = make_server();
     let ship = make_skill_capability(
         "skill:ship",
@@ -158,21 +164,21 @@ async fn recommend_skill_prefers_ship_for_create_pr_queries() {
         })
         .expect("register skills");
 
-    let result = server
-        .recommend_skill(Parameters(RecommendSkillParams {
-            query: "ship this code, create a PR".to_string(),
-            host: Some("codex".to_string()),
-            limit: 3,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_skill should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    assert_eq!(json["skills"][0]["id"], "skill:ship");
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "ship this code, create a PR",
+        Some("codex"),
+        Some("skill"),
+        3,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
+    assert_eq!(results[0].id, "skill:ship");
 }
 
 #[tokio::test]
-async fn recommend_skill_uses_active_patterns_as_ranking_context() {
+async fn recommend_capabilities_inner_uses_active_patterns_as_ranking_context() {
     let server = make_server();
     let closure = make_skill_capability(
         "skill:marmalade-closure",
@@ -209,41 +215,36 @@ async fn recommend_skill_uses_active_patterns_as_ranking_context() {
         })
         .expect("seed skills and pattern");
 
-    let result = server
-        .recommend_skill(Parameters(RecommendSkillParams {
-            query: "zephyr".to_string(),
-            host: Some("codex".to_string()),
-            limit: 3,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_skill should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    let top = &json["skills"][0];
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "zephyr",
+        Some("codex"),
+        Some("skill"),
+        3,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
+    let top = &results[0];
     assert_eq!(
-        top["id"],
-        json!("skill:marmalade-closure"),
-        "expected pattern-bridged marmalade skill to rank first, got {json}"
+        top.id,
+        "skill:marmalade-closure",
+        "expected pattern-bridged marmalade skill to rank first, got {results:?}"
     );
     assert_eq!(
-        top["pattern_refs"][0]["projection_key"],
+        top.pattern_refs[0]["projection_key"],
         json!("alignment-bridge-closure")
     );
     assert!(
-        top["reasons"]
-            .as_array()
-            .expect("reasons")
+        top.reasons
             .iter()
-            .any(|reason| reason
-                .as_str()
-                .unwrap_or_default()
-                .contains("active pattern 'alignment-bridge-closure'")),
-        "expected active pattern reason in {json}"
+            .any(|reason| reason.contains("active pattern 'alignment-bridge-closure'")),
+        "expected active pattern reason in {results:?}"
     );
 }
 
 #[tokio::test]
-async fn recommend_skill_host_bonus_ignores_definition_paths() {
+async fn recommend_capabilities_inner_host_bonus_ignores_definition_paths() {
     let server = make_server();
     let mut alpha = make_skill_capability(
         "skill:alpha",
@@ -276,38 +277,36 @@ async fn recommend_skill_host_bonus_ignores_definition_paths() {
         })
         .expect("register path-variant skills");
 
-    let result = server
-        .recommend_skill(Parameters(RecommendSkillParams {
-            query: "host affinity fixture".to_string(),
-            host: Some("codex".to_string()),
-            limit: 10,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_skill should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    let fixtures = json["skills"]
-        .as_array()
-        .expect("skills array")
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "host affinity fixture",
+        Some("codex"),
+        Some("skill"),
+        10,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
+    let fixtures = results
         .iter()
-        .filter(|skill| matches!(skill["id"].as_str(), Some("skill:alpha" | "skill:zeta")))
+        .filter(|rec| matches!(rec.id.as_str(), "skill:alpha" | "skill:zeta"))
         .collect::<Vec<_>>();
 
     assert_eq!(fixtures.len(), 2, "both path-variant skills must rank");
     assert_eq!(
-        fixtures[0]["id"],
-        json!("skill:alpha"),
+        fixtures[0].id,
+        "skill:alpha",
         "definition paths must not give skill:zeta a codex host bonus"
     );
     assert_eq!(
-        fixtures[0]["score"], fixtures[1]["score"],
+        fixtures[0].score, fixtures[1].score,
         "the absolute checkout path is not host affinity"
     );
     assert!(
         fixtures
             .iter()
-            .flat_map(|skill| skill["reasons"].as_array().into_iter().flatten())
-            .all(|reason| reason.as_str() != Some("mentions host 'codex'")),
+            .flat_map(|rec| &rec.reasons)
+            .all(|reason| reason != "mentions host 'codex'"),
         "a host bonus must come from stable capability metadata, never an implementation path"
     );
 }
@@ -330,7 +329,7 @@ async fn recommend_skill_host_bonus_ignores_definition_paths() {
 /// diverge for reasons unrelated to host affinity and made the assertion
 /// flaky/wrong independent of the fix under test.
 #[tokio::test]
-async fn recommend_skill_host_bonus_ignores_free_text_mentions() {
+async fn recommend_capabilities_inner_host_bonus_ignores_free_text_mentions() {
     let server = make_server();
     let mut alpha = make_skill_capability(
         "skill:alpha",
@@ -361,33 +360,31 @@ async fn recommend_skill_host_bonus_ignores_free_text_mentions() {
         })
         .expect("register content-variant skills");
 
-    let result = server
-        .recommend_skill(Parameters(RecommendSkillParams {
-            query: "host affinity fixture".to_string(),
-            host: Some("codex".to_string()),
-            limit: 10,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_skill should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    let fixtures = json["skills"]
-        .as_array()
-        .expect("skills array")
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "host affinity fixture",
+        Some("codex"),
+        Some("skill"),
+        10,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
+    let fixtures = results
         .iter()
-        .filter(|skill| matches!(skill["id"].as_str(), Some("skill:alpha" | "skill:zeta")))
+        .filter(|rec| matches!(rec.id.as_str(), "skill:alpha" | "skill:zeta"))
         .collect::<Vec<_>>();
 
     assert_eq!(fixtures.len(), 2, "both content-variant skills must rank");
     assert_eq!(
-        fixtures[0]["score"], fixtures[1]["score"],
+        fixtures[0].score, fixtures[1].score,
         "a host token embedded in free-text content is not declared host affinity"
     );
     assert!(
         fixtures
             .iter()
-            .flat_map(|skill| skill["reasons"].as_array().into_iter().flatten())
-            .all(|reason| reason.as_str() != Some("mentions host 'codex'")),
+            .flat_map(|rec| &rec.reasons)
+            .all(|reason| reason != "mentions host 'codex'"),
         "free-text prose must not earn the host bonus, only declared metadata"
     );
 }
@@ -399,7 +396,7 @@ async fn recommend_skill_host_bonus_ignores_free_text_mentions() {
 /// submitted, which deleted `definition.contains(host)` outright with no
 /// scoped replacement.
 #[tokio::test]
-async fn recommend_skill_host_bonus_matches_declared_metadata() {
+async fn recommend_capabilities_inner_host_bonus_matches_declared_metadata() {
     let server = make_server();
     let mut tagged = make_skill_capability(
         "skill:tagged",
@@ -432,58 +429,46 @@ async fn recommend_skill_host_bonus_matches_declared_metadata() {
         })
         .expect("register tag-variant skills");
 
-    let result = server
-        .recommend_skill(Parameters(RecommendSkillParams {
-            query: "host affinity fixture".to_string(),
-            host: Some("codex".to_string()),
-            limit: 10,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_skill should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    let fixtures = json["skills"]
-        .as_array()
-        .expect("skills array")
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "host affinity fixture",
+        Some("codex"),
+        Some("skill"),
+        10,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
+    let fixtures = results
         .iter()
-        .filter(|skill| {
-            matches!(
-                skill["id"].as_str(),
-                Some("skill:tagged" | "skill:untagged")
-            )
-        })
+        .filter(|rec| matches!(rec.id.as_str(), "skill:tagged" | "skill:untagged"))
         .collect::<Vec<_>>();
 
     assert_eq!(fixtures.len(), 2, "both tag-variant skills must rank");
     let tagged = fixtures
         .iter()
-        .find(|skill| skill["id"] == json!("skill:tagged"))
+        .find(|rec| rec.id == "skill:tagged")
         .expect("skill:tagged in results");
     let untagged = fixtures
         .iter()
-        .find(|skill| skill["id"] == json!("skill:untagged"))
+        .find(|rec| rec.id == "skill:untagged")
         .expect("skill:untagged in results");
-    let tagged_score = tagged["score"].as_f64().expect("tagged score");
-    let untagged_score = untagged["score"].as_f64().expect("untagged score");
     assert!(
-        tagged_score > untagged_score,
+        tagged.score > untagged.score,
         "a host declared in `tags` must score strictly higher than a fixture without it \
-         (tagged={tagged_score}, untagged={untagged_score})"
+         (tagged={}, untagged={})",
+        tagged.score,
+        untagged.score
     );
     assert!(
-        tagged["reasons"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|reason| reason.as_str() == Some("mentions host 'codex'")),
+        tagged.reasons.iter().any(|reason| reason == "mentions host 'codex'"),
         "the bonus reason must still fire when host affinity is declared metadata"
     );
     assert!(
-        untagged["reasons"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .all(|reason| reason.as_str() != Some("mentions host 'codex'")),
+        untagged
+            .reasons
+            .iter()
+            .all(|reason| reason != "mentions host 'codex'"),
         "the fixture without declared host metadata must not earn the bonus"
     );
 }

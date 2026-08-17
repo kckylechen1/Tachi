@@ -95,10 +95,6 @@ impl ActionEffectMetadata {
 /// verbatim from the pre-#1098 `server_state::cache::CACHEABLE_TOOLS`.
 pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "section_build",
-    "recommend_capability",
-    "recommend_skill",
-    "recommend_toolchain",
-    "prepare_capability_bundle",
     "tachi_task_brief",
     "tachi_wiki_search",
     "search_memory",
@@ -209,10 +205,6 @@ const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
 /// telemetry (`search_memory`), and therefore may not be replay-safe.
 const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "section_build",
-    "recommend_capability",
-    "recommend_skill",
-    "recommend_toolchain",
-    "prepare_capability_bundle",
     "tachi_task_brief",
     "tachi_wiki_search",
     "find_similar_memory",

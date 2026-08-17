@@ -1,7 +1,14 @@
 use super::*;
 
+// #1690 C3 slice A: the `recommend_capability`/`recommend_skill` MCP routes are
+// retired with the "second model brain". The scoring core they exposed
+// (`recommend_capabilities_inner`) SURVIVES because the kept
+// `handle_prepare_capability_bundle` (tachi_skill bundle/loadout) still calls
+// it — so the frozen filter semantics these tests guarded (hidden-capability
+// exclusion, limit normalization) are re-anchored onto that live entry point.
+
 #[tokio::test]
-async fn recommend_capability_skips_hidden_capabilities_by_default() {
+async fn recommend_capabilities_inner_skips_hidden_capabilities_by_default() {
     let server = make_server();
     let hidden = make_skill_capability(
         "skill:hidden-playbook",
@@ -24,50 +31,36 @@ async fn recommend_capability_skips_hidden_capabilities_by_default() {
         })
         .expect("register capabilities");
 
-    let result = server
-        .recommend_capability(Parameters(RecommendCapabilityParams {
-            query: "incident playbook".to_string(),
-            host: None,
-            cap_type: Some("skill".to_string()),
-            limit: 5,
-            include_hidden: false,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_capability should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    let ids = json["recommendations"]
-        .as_array()
-        .expect("recommendations array")
-        .iter()
-        .filter_map(|row| row["id"].as_str())
-        .collect::<Vec<_>>();
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "incident playbook",
+        None,
+        Some("skill"),
+        5,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
+    let ids = results.iter().map(|rec| rec.id.as_str()).collect::<Vec<_>>();
     assert!(ids.contains(&"skill:incident-playbook"));
     assert!(!ids.contains(&"skill:hidden-playbook"));
 
-    let result = server
-        .recommend_capability(Parameters(RecommendCapabilityParams {
-            query: "incident playbook".to_string(),
-            host: None,
-            cap_type: Some("skill".to_string()),
-            limit: 5,
-            include_hidden: true,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_capability include_hidden should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    let ids = json["recommendations"]
-        .as_array()
-        .expect("recommendations array")
-        .iter()
-        .filter_map(|row| row["id"].as_str())
-        .collect::<Vec<_>>();
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "incident playbook",
+        None,
+        Some("skill"),
+        5,
+        true,
+        false,
+    )
+    .expect("recommend capabilities include_hidden should succeed");
+    let ids = results.iter().map(|rec| rec.id.as_str()).collect::<Vec<_>>();
     assert!(ids.contains(&"skill:hidden-playbook"));
 }
 
 #[tokio::test]
-async fn recommend_capability_limit_zero_normalizes_to_one() {
+async fn recommend_capabilities_inner_limit_zero_normalizes_to_one() {
     let server = make_server();
     let first = make_skill_capability(
         "skill:incident-first",
@@ -90,18 +83,15 @@ async fn recommend_capability_limit_zero_normalizes_to_one() {
         })
         .expect("register capabilities");
 
-    let result = server
-        .recommend_capability(Parameters(RecommendCapabilityParams {
-            query: "incident response".to_string(),
-            host: None,
-            cap_type: Some("skill".to_string()),
-            limit: 0,
-            include_hidden: false,
-            include_uncallable: false,
-        }))
-        .await
-        .expect("recommend_capability should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    assert_eq!(json["count"], json!(1));
-    assert_eq!(json["recommendations"].as_array().expect("array").len(), 1);
+    let results = crate::capability_ops::recommend_capabilities_inner(
+        &server,
+        "incident response",
+        None,
+        Some("skill"),
+        0,
+        false,
+        false,
+    )
+    .expect("recommend capabilities should succeed");
+    assert_eq!(results.len(), 1);
 }

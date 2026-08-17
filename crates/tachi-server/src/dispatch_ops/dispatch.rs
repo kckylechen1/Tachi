@@ -95,7 +95,7 @@ fn opencode_sop_label(agent_norm: &str, params: &TachiDispatchParams) -> Option<
     if agent_norm != "opencode" {
         return None;
     }
-    let route = crate::copilot_ops::build_task_brief_routing(&params.task, &[]);
+    let route = crate::copilot_ops::build_task_brief_routing(&params.task);
     let selected = route
         .selected_sops
         .iter()

@@ -2,12 +2,9 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_a2a",
     "tachi_tools",
     "tachi_wiki_search",
-    "recommend_capability",
-    "recommend_skill",
-    "recommend_toolchain",
-    // #517 soft-deprecate: standalone prepare_capability_bundle removed from
-    // default observe tray — use tachi_skill(action='bundle'). Tool remains
-    // registered for explicit allow-lists / backcompat callers.
+    // #1690 C3 slice A: recommend_capability / recommend_skill /
+    // recommend_toolchain retired with the "second model brain" — the routes
+    // are gone, so the tray entries died with them.
     // General Hub discovery remains visible for broad observe profiles; skill
     // workflow discovery should prefer tachi_skill(action='discover').
     "hub_discover",
@@ -98,11 +95,10 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "hub_call",
     "hub_disconnect",
     "wiki_lint",
-    // #517 soft-deprecate: dual skill entrypoints stay registered under the
-    // operate surface (not standard/delegate/remember trays). Prefer
-    // tachi_skill(action='run'|'bundle').
-    "run_skill",
-    "prepare_capability_bundle",
+    // #1690 C3 slice A: the standalone `run_skill` / `prepare_capability_bundle`
+    // backcompat routes are retired — they were pure forwarders to
+    // `handle_run_skill` / `handle_prepare_capability_bundle`. Canonical
+    // surface: tachi_skill(action='run' | 'bundle').
     // Vault session management (password-protected)
     "vault_unlock",
     "vault_lock",
@@ -156,9 +152,8 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
 /// status/board/wait/briefing/doc_index only). `tachi_skill` is limited to
 /// discover/run/bundle by the same gate.
 ///
-/// #517 soft-deprecate: standalone `run_skill` is no longer on the default
-/// delegate tray — workers use `tachi_skill(action='run')`. The tool stays
-/// registered for explicit allow-lists / older injection paths.
+/// #1690 C3 slice A: standalone `run_skill` is retired — workers use
+/// `tachi_skill(action='run')`.
 pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_a2a",
     "tachi_tools",
