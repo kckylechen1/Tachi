@@ -5,8 +5,7 @@
 //! 1. **Physical boundary.** One sealed file per `(trust_domain, subject)`.
 //!    Durable path is *derived* (`sha256` of those ids) under a caller-supplied
 //!    estate root. Path labels and first-open order are not authority. The
-//!    working SQLite file is a process-private tempfile; only the sealed
-//!    envelope is durable.
+//!    SQLite remains in memory while open; only the sealed envelope is durable.
 //! 2. **Key provider.** [`PartitionKeyProvider`] injects a 32-byte AES-256-GCM
 //!    key via `vault-kit`. The kernel never reads environment variables.
 //!    [`PrivatePartitionOpenContext::key_version`] is an identity token, never
@@ -21,7 +20,7 @@
 //!    [`MemoryError::PrivatePartitionRefused`] — no path, id, count, hash, or
 //!    existence signal.
 //! 6. **Schema / profile.** Fresh partitions are
-//!    [`StoreProfile::PortableKernel`] and stamp a write-once private-partition
+//!    [`crate::db::StoreProfile::PortableKernel`] and stamp a write-once private-partition
 //!    identity beside the #1585 profile/role stamps.
 //! 7. **#1585.** Generic [`MemoryStore`] open/read-only/maintenance paths
 //!    refuse a sealed envelope *and* a working SQLite file that carries the
@@ -41,7 +40,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-use crate::db::{self, DbOpenContext, StoreProfile};
+use crate::db;
+#[cfg(test)]
+use crate::db::StoreProfile;
 use crate::error::MemoryError;
 use crate::store::immutable_supersession::ImmutableSupersessionTransaction;
 use crate::types::MemoryEntry;
@@ -349,8 +350,6 @@ impl LivePartitionGuard {
 /// Handle that does not expose a raw SQLite connection on the portable API.
 pub struct PrivatePartition {
     store: MemoryStore,
-    /// Keeps the working SQLite file alive for the handle's lifetime.
-    _working: NamedTempFile,
     _live_guard: Option<LivePartitionGuard>,
     identity: AdmittedPartition,
     key: [u8; 32],
@@ -380,26 +379,15 @@ impl PrivatePartition {
         if !exists && !effective_capabilities.contains(&PartitionCapability::Write) {
             return Err(MemoryError::PrivatePartitionRefused);
         }
-        let working = NamedTempFile::new().map_err(|_| MemoryError::PrivatePartitionRefused)?;
         let store = if exists {
             let bytes = unseal_file(&sealed_path, &key, &identity)?;
-            fs::write(working.path(), bytes).map_err(|_| MemoryError::PrivatePartitionRefused)?;
-            MemoryStore::open_private_working_file(
-                &working.path().to_string_lossy(),
-                &DbOpenContext::open_existing_deny().with_profile(StoreProfile::PortableKernel),
-                identity.clone(),
-            )?
+            MemoryStore::open_private_image(Some(&bytes), identity.clone())?
         } else {
-            MemoryStore::open_private_working_file(
-                &working.path().to_string_lossy(),
-                &DbOpenContext::create_fresh().with_profile(StoreProfile::PortableKernel),
-                identity.clone(),
-            )?
+            MemoryStore::open_private_image(None, identity.clone())?
         };
         verify_stamped_identity(&store, &identity)?;
         Ok(Self {
             store,
-            _working: working,
             _live_guard: Some(live_guard),
             identity,
             key,
@@ -422,15 +410,9 @@ impl PrivatePartition {
             return Err(MemoryError::PrivatePartitionRefused);
         }
         let identity = identity_from_admission(&admission);
-        let working = NamedTempFile::new().map_err(|_| MemoryError::PrivatePartitionRefused)?;
-        let store = MemoryStore::open_private_working_file(
-            &working.path().to_string_lossy(),
-            &DbOpenContext::create_fresh().with_profile(StoreProfile::PortableKernel),
-            identity.clone(),
-        )?;
+        let store = MemoryStore::open_private_image(None, identity.clone())?;
         Ok(Self {
             store,
-            _working: working,
             _live_guard: None,
             identity,
             key,
@@ -697,7 +679,7 @@ fn persist_sealed(
     persisted
         .sync_all()
         .map_err(|_| MemoryError::PrivatePartitionRefused)?;
-    sync_parent_dir(parent);
+    sync_parent_dir(parent)?;
     Ok(())
 }
 
@@ -729,17 +711,18 @@ fn ensure_replace_target_safe(path: &Path) -> Result<(), MemoryError> {
     }
 }
 
-fn sync_parent_dir(parent: &Path) {
+fn sync_parent_dir(parent: &Path) -> Result<(), MemoryError> {
     #[cfg(unix)]
     {
-        if let Ok(dir) = fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        let dir = fs::File::open(parent).map_err(|_| MemoryError::PrivatePartitionRefused)?;
+        dir.sync_all()
+            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
     }
     #[cfg(not(unix))]
     {
         let _ = parent;
     }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -753,7 +736,7 @@ fn encode_envelope(
     identity: &AdmittedPartition,
     store: &MemoryStore,
 ) -> Result<Vec<u8>, MemoryError> {
-    let sqlite = snapshot_sqlite_image(&store.conn)?;
+    let sqlite = snapshot_sqlite_image(&store.conn, &identity.partition_id)?;
     let payload = serde_json::to_vec(&(identity, sqlite))
         .map_err(|_| MemoryError::PrivatePartitionRefused)?;
     let (ciphertext_b64, nonce_b64) =
@@ -769,18 +752,61 @@ fn encode_envelope(
     Ok(out)
 }
 
-fn snapshot_sqlite_image(conn: &rusqlite::Connection) -> Result<Vec<u8>, MemoryError> {
-    let snapshot = NamedTempFile::new().map_err(|_| MemoryError::PrivatePartitionRefused)?;
+fn snapshot_sqlite_image(
+    conn: &rusqlite::Connection,
+    partition_id: &str,
+) -> Result<Vec<u8>, MemoryError> {
+    let mut snapshot =
+        rusqlite::Connection::open_in_memory().map_err(|_| MemoryError::PrivatePartitionRefused)?;
     {
-        let mut dst = rusqlite::Connection::open(snapshot.path())
-            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
-        let backup = rusqlite::backup::Backup::new(conn, &mut dst)
+        let backup = rusqlite::backup::Backup::new(conn, &mut snapshot)
             .map_err(|_| MemoryError::PrivatePartitionRefused)?;
         backup
             .run_to_completion(128, Duration::from_millis(100), None)
             .map_err(|_| MemoryError::PrivatePartitionRefused)?;
     }
-    fs::read(snapshot.path()).map_err(|_| MemoryError::PrivatePartitionRefused)
+    mark_partition_receipts_sealed(&snapshot, partition_id)?;
+    let data = snapshot
+        .serialize(rusqlite::MAIN_DB)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    Ok(data.to_vec())
+}
+
+fn mark_partition_receipts_sealed(
+    conn: &rusqlite::Connection,
+    partition_id: &str,
+) -> Result<(), MemoryError> {
+    let mut statement =
+        conn.prepare("SELECT key, value_json FROM hard_state WHERE namespace = ?1 ORDER BY key")?;
+    let rows = statement.query_map([crate::SUPERSESSION_RECEIPT_NAMESPACE], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut updates = Vec::new();
+    for row in rows {
+        let (key, value_json) = row?;
+        let mut receipt: crate::SupersessionReceipt = serde_json::from_str(&value_json)?;
+        if receipt.partition_id.as_deref() == Some(partition_id) && !receipt.durable {
+            receipt.durable = true;
+            updates.push((key, serde_json::to_string(&receipt)?));
+        }
+    }
+    drop(statement);
+    for (key, value_json) in updates {
+        if conn.execute(
+            "UPDATE hard_state SET value_json = ?1, updated_at = ?2
+             WHERE namespace = ?3 AND key = ?4 AND version = 1",
+            rusqlite::params![
+                value_json,
+                db::now_utc_iso(),
+                crate::SUPERSESSION_RECEIPT_NAMESPACE,
+                key,
+            ],
+        )? != 1
+        {
+            return Err(MemoryError::PrivatePartitionRefused);
+        }
+    }
+    Ok(())
 }
 
 fn unseal_file(
@@ -788,7 +814,7 @@ fn unseal_file(
     key: &[u8; 32],
     expected: &AdmittedPartition,
 ) -> Result<Vec<u8>, MemoryError> {
-    let bytes = fs::read(path).map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    let bytes = read_regular_file_no_follow(path)?;
     if !bytes.starts_with(SEALED_MAGIC) {
         return Err(MemoryError::PrivatePartitionRefused);
     }
@@ -802,6 +828,35 @@ fn unseal_file(
         return Err(MemoryError::PrivatePartitionRefused);
     }
     Ok(sqlite)
+}
+
+fn read_regular_file_no_follow(path: &Path) -> Result<Vec<u8>, MemoryError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(MemoryError::PrivatePartitionRefused);
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -1045,6 +1100,56 @@ mod tests {
             .is_symlink());
         let reopened = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
         assert_eq!(reopened.get("row-two").unwrap().unwrap().text, "two");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_reader_refuses_symlink_to_a_valid_prior_envelope() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let keys = keys();
+        PrivatePartition::open(root.path(), &ctx, &keys)
+            .unwrap()
+            .persist()
+            .unwrap();
+        let sealed = root
+            .path()
+            .join(ctx.partition_id())
+            .join("partition.sealed");
+        let prior = sealed.with_extension("sealed.prior");
+        fs::rename(&sealed, &prior).unwrap();
+        std::os::unix::fs::symlink(&prior, &sealed).unwrap();
+
+        let err = match PrivatePartition::open(root.path(), &ctx, &keys) {
+            Err(err) => err,
+            Ok(_) => panic!("sealed envelope symlinks must not be followed"),
+        };
+        assert!(matches!(err, MemoryError::PrivatePartitionRefused));
+    }
+
+    #[test]
+    fn raw_admin_openers_refuse_a_stamped_private_image() {
+        let ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let part = PrivatePartition::open_in_memory(&ctx, &keys()).unwrap();
+        let image = snapshot_sqlite_image(&part.store.conn, &part.identity.partition_id).unwrap();
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&image).unwrap();
+        file.as_file().sync_all().unwrap();
+
+        assert!(crate::db::open_raw(file.path()).is_err());
+        assert!(crate::db::open_for_wal_checkpoint(&file.path().to_string_lossy()).is_err());
+        let uri = format!("file:{}?mode=ro&immutable=1", file.path().display());
+        assert!(crate::db::open_immutable_readonly(&uri).is_err());
     }
 
     #[test]

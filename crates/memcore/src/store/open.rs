@@ -1,6 +1,6 @@
 //! Opening, construction, and write-path entry points for [`MemoryStore`].
 
-use rusqlite::Connection;
+use rusqlite::{Connection, MAIN_DB};
 use std::path::Path;
 use std::time::Duration;
 
@@ -550,13 +550,47 @@ impl MemoryStore {
         Self::open_with_label_inner(db_path, db_label, true, ctx, None, false)
     }
 
-    pub(crate) fn open_private_working_file(
-        db_path: &str,
-        ctx: &DbOpenContext,
+    pub(crate) fn open_private_image(
+        sqlite_image: Option<&[u8]>,
         identity: crate::private_partition::AdmittedPartition,
     ) -> Result<Self, MemoryError> {
-        let mut store =
-            Self::open_with_label_inner(db_path, "private_partition", false, ctx, None, true)?;
+        Self::register_open_extensions()?;
+        let mut conn = Connection::open_in_memory()?;
+        if let Some(image) = sqlite_image {
+            conn.deserialize_read_exact(MAIN_DB, image, image.len(), false)?;
+        }
+        db::configure_connection(&conn)?;
+        let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
+        db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        let ctx = if sqlite_image.is_some() {
+            DbOpenContext::open_existing_deny()
+        } else {
+            DbOpenContext::create_fresh()
+        }
+        .with_profile(db::StoreProfile::PortableKernel);
+        let migration_scratch = tempfile::tempdir()?;
+        let migration_path = migration_scratch.path().join("private.sqlite");
+        let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
+        let schema_result =
+            db::init_schema_with_label_mut(&mut conn, "private_partition", &migration_path, &ctx);
+        let vec_available = schema_result
+            .as_ref()
+            .map(|_| db::try_load_sqlite_vec(&conn))
+            .unwrap_or(false);
+        drop(migration_authorization);
+        let resolved = schema_result?.identity;
+        db::validate_persistent_trigger_inventory(&conn, true)?;
+        let mut store = Self {
+            conn,
+            reserved_reference_write,
+            vec_available,
+            db_label: resolved.db_label,
+            profile: resolved.profile,
+            path_validation: false,
+            opened_physical_db_identity: None,
+            policy: crate::KernelPolicy::default(),
+            admitted_partition: None,
+        };
         crate::private_partition::stamp_private_identity(&store.conn, &identity)?;
         store.admitted_partition = Some(identity);
         Ok(store)
