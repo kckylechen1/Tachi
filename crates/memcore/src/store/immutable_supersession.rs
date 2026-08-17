@@ -1466,6 +1466,14 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         let source = self
             .get_memory(&entry.id)?
             .ok_or_else(|| MemoryError::NotFound(entry.id.clone()))?;
+        // Near-duplicate matching is heuristic, so it cannot create authority
+        // to retire a lifecycle-protected row. The id-less save itself has
+        // already landed atomically above; keep both rows active when the new
+        // row is protected instead of turning an optional dedup decision into
+        // a failed save (for example, append-only precedent candidates).
+        if crate::store::memory_lifecycle::lifecycle_protection_reason(&source).is_some() {
+            return Ok((result, metadata));
+        }
         let target = self
             .get_memory(&candidate_id)?
             .ok_or_else(|| MemoryError::NotFound(candidate_id.clone()))?;
@@ -3011,6 +3019,78 @@ mod tests {
             .contains("injected idless dependent failure"));
         assert!(store.get(&loser.id).expect("read loser").is_none());
         assert_eq!(store.supersession_target(&winner.id).unwrap(), Some(None));
+        for table_count in [
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_edges WHERE relation='supersedes'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM hard_state WHERE namespace=?1",
+                    [SUPERSESSION_RECEIPT_NAMESPACE],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM tachi_events WHERE event_type=?1",
+                    [SUPERSESSION_RECEIPT_EVENT_TYPE],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+        ] {
+            assert_eq!(table_count, 0);
+        }
+    }
+
+    #[test]
+    fn idless_near_duplicate_keeps_lifecycle_protected_source_active() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        let shared = "alpha bravo charlie delta echo foxtrot golf hotel india juliet \
+                      kilo lima mike november oscar papa quebec romeo sierra";
+        let mut existing = fixture_entry("protected-near-duplicate-existing");
+        existing.path = "/precedent_candidates/global/existing".to_string();
+        existing.text = format!("{shared} tango");
+        existing.retention_policy = Some("permanent".to_string());
+        store
+            .upsert_idless(&existing, "protected-existing-identity")
+            .expect("seed existing protected row");
+
+        let mut incoming = fixture_entry("protected-near-duplicate-incoming");
+        incoming.path = "/precedent_candidates/global/incoming".to_string();
+        incoming.text = format!("{shared} uniform");
+        incoming.retention_policy = Some("permanent".to_string());
+        let (result, _) = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.upsert_idless_with_near_duplicate_merge(
+                    &incoming,
+                    "protected-incoming-identity",
+                    &Map::new(),
+                    &[],
+                    &[],
+                )
+            })
+            .expect("protected id-less save must land without semantic retirement");
+
+        assert_eq!(result, db::IdlessUpsertResult::Saved);
+        assert_eq!(store.supersession_target(&existing.id).unwrap(), Some(None));
+        assert_eq!(store.supersession_target(&incoming.id).unwrap(), Some(None));
+        let active_rows: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM memories
+                 WHERE id IN (?1, ?2) AND archived = 0 AND superseded_by IS NULL",
+                params![&existing.id, &incoming.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_rows, 2);
         for table_count in [
             store
                 .connection()
