@@ -31,9 +31,12 @@
 //! filters. Those remain defenses in depth only.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -54,7 +57,7 @@ pub const SEALED_MAGIC: &[u8] = b"TACHI-PRIVPART-1\n";
 const DERIVATION_DOMAIN: &[u8] = b"tachi.private_partition.v1";
 
 /// Opaque admitted trust-domain identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TrustDomainId(String);
 
 impl TrustDomainId {
@@ -67,8 +70,14 @@ impl TrustDomainId {
     }
 }
 
+impl fmt::Debug for TrustDomainId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TrustDomainId(<redacted>)")
+    }
+}
+
 /// Opaque admitted subject identifier. Not a display name or carrier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SubjectId(String);
 
 impl SubjectId {
@@ -81,8 +90,14 @@ impl SubjectId {
     }
 }
 
+impl fmt::Debug for SubjectId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SubjectId(<redacted>)")
+    }
+}
+
 /// Capability receipt: an opaque token the [`PartitionKeyProvider`] admits.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CapabilityReceipt(String);
 
 impl CapabilityReceipt {
@@ -95,6 +110,12 @@ impl CapabilityReceipt {
     }
 }
 
+impl fmt::Debug for CapabilityReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CapabilityReceipt(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PartitionCapability {
     Read,
@@ -103,7 +124,7 @@ pub enum PartitionCapability {
 }
 
 /// Admitted open request. Caller-supplied path labels are not fields.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PrivatePartitionOpenContext {
     pub trust_domain_id: TrustDomainId,
     pub subject_id: SubjectId,
@@ -114,54 +135,243 @@ pub struct PrivatePartitionOpenContext {
 }
 
 impl PrivatePartitionOpenContext {
-    pub fn partition_id(&self) -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    fn partition_id(&self) -> String {
         derive_partition_id(&self.trust_domain_id, &self.subject_id)
+    }
+}
+
+impl fmt::Debug for PrivatePartitionOpenContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivatePartitionOpenContext")
+            .field("trust_domain_id", &"<redacted>")
+            .field("subject_id", &"<redacted>")
+            .field("receipt", &"<redacted>")
+            .field("capabilities", &self.capabilities)
+            .field("key_version", &"<redacted>")
+            .field("revoked", &self.revoked)
+            .finish()
+    }
+}
+
+/// Provider-granted admission. The caller's [`PrivatePartitionOpenContext`]
+/// requests capabilities; this object is the trusted provider's grant.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PartitionAdmission {
+    trust_domain_id: TrustDomainId,
+    subject_id: SubjectId,
+    capabilities: BTreeSet<PartitionCapability>,
+    key_version: String,
+}
+
+impl PartitionAdmission {
+    pub fn new(
+        trust_domain_id: TrustDomainId,
+        subject_id: SubjectId,
+        capabilities: impl IntoIterator<Item = PartitionCapability>,
+        key_version: impl Into<String>,
+    ) -> Result<Self, MemoryError> {
+        let key_version = parse_opaque_id(key_version.into())?;
+        let capabilities = capabilities.into_iter().collect();
+        Ok(Self {
+            trust_domain_id,
+            subject_id,
+            capabilities,
+            key_version,
+        })
+    }
+
+    fn effective_capabilities(
+        &self,
+        ctx: &PrivatePartitionOpenContext,
+    ) -> Result<BTreeSet<PartitionCapability>, MemoryError> {
+        if ctx.revoked
+            || self.trust_domain_id != ctx.trust_domain_id
+            || self.subject_id != ctx.subject_id
+            || self.key_version != ctx.key_version
+            || !ctx.capabilities.is_subset(&self.capabilities)
+        {
+            return Err(MemoryError::PrivatePartitionRefused);
+        }
+        Ok(ctx.capabilities.clone())
+    }
+}
+
+impl fmt::Debug for PartitionAdmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PartitionAdmission")
+            .field("trust_domain_id", &"<redacted>")
+            .field("subject_id", &"<redacted>")
+            .field("capabilities", &self.capabilities)
+            .field("key_version", &"<redacted>")
+            .finish()
     }
 }
 
 /// Injected key material. Portable kernel never reads the environment.
 pub trait PartitionKeyProvider {
-    fn admit(&self, ctx: &PrivatePartitionOpenContext) -> Result<(), MemoryError>;
-    fn materialize_key(&self, ctx: &PrivatePartitionOpenContext) -> Result<[u8; 32], MemoryError>;
+    fn admit(&self, ctx: &PrivatePartitionOpenContext) -> Result<PartitionAdmission, MemoryError>;
+    fn materialize_key(&self, admission: &PartitionAdmission) -> Result<[u8; 32], MemoryError>;
 }
 
-/// One key; admits a single receipt unless the context is revoked.
-#[derive(Debug, Clone)]
+/// Test-support key provider. Production callers should inject a provider backed
+/// by their real admission authority; this fixture has no production
+/// constructor.
+#[derive(Clone)]
 pub struct StaticKeyProvider {
     key: [u8; 32],
-    admitted_receipt: String,
+    admissions: Vec<StaticKeyAdmission>,
 }
 
+#[derive(Clone)]
+struct StaticKeyAdmission {
+    trust_domain_id: String,
+    subject_id: String,
+    receipt: String,
+    capabilities: BTreeSet<PartitionCapability>,
+    key_version: String,
+}
+
+#[cfg(any(test, feature = "test-support"))]
 impl StaticKeyProvider {
-    pub fn new(key: [u8; 32], admitted_receipt: impl Into<String>) -> Self {
+    pub fn new(key: [u8; 32]) -> Self {
         Self {
             key,
-            admitted_receipt: admitted_receipt.into(),
+            admissions: Vec::new(),
         }
+    }
+
+    pub fn with_admission(
+        mut self,
+        trust_domain_id: impl Into<String>,
+        subject_id: impl Into<String>,
+        receipt: impl Into<String>,
+        capabilities: impl IntoIterator<Item = PartitionCapability>,
+        key_version: impl Into<String>,
+    ) -> Result<Self, MemoryError> {
+        let trust_domain_id = parse_opaque_id(trust_domain_id.into())?;
+        let subject_id = parse_opaque_id(subject_id.into())?;
+        let receipt = parse_opaque_id(receipt.into())?;
+        let key_version = parse_opaque_id(key_version.into())?;
+        self.admissions.push(StaticKeyAdmission {
+            trust_domain_id,
+            subject_id,
+            receipt,
+            capabilities: capabilities.into_iter().collect(),
+            key_version,
+        });
+        Ok(self)
+    }
+}
+
+impl fmt::Debug for StaticKeyProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StaticKeyProvider")
+            .field("key", &"<redacted>")
+            .field("admissions", &self.admissions.len())
+            .finish()
     }
 }
 
 impl PartitionKeyProvider for StaticKeyProvider {
-    fn admit(&self, ctx: &PrivatePartitionOpenContext) -> Result<(), MemoryError> {
-        if ctx.revoked || ctx.receipt.as_str() != self.admitted_receipt {
+    fn admit(&self, ctx: &PrivatePartitionOpenContext) -> Result<PartitionAdmission, MemoryError> {
+        if ctx.revoked {
             return Err(MemoryError::PrivatePartitionRefused);
         }
-        Ok(())
+        let Some(admission) = self.admissions.iter().find(|admission| {
+            admission.trust_domain_id == ctx.trust_domain_id.as_str()
+                && admission.subject_id == ctx.subject_id.as_str()
+                && admission.receipt == ctx.receipt.as_str()
+                && admission.key_version == ctx.key_version
+        }) else {
+            return Err(MemoryError::PrivatePartitionRefused);
+        };
+        PartitionAdmission::new(
+            ctx.trust_domain_id.clone(),
+            ctx.subject_id.clone(),
+            admission.capabilities.iter().copied(),
+            admission.key_version.clone(),
+        )
+        .map_err(|_| MemoryError::PrivatePartitionRefused)
     }
 
-    fn materialize_key(&self, ctx: &PrivatePartitionOpenContext) -> Result<[u8; 32], MemoryError> {
-        self.admit(ctx)?;
+    fn materialize_key(&self, admission: &PartitionAdmission) -> Result<[u8; 32], MemoryError> {
+        if !self.admissions.iter().any(|configured| {
+            configured.trust_domain_id == admission.trust_domain_id.as_str()
+                && configured.subject_id == admission.subject_id.as_str()
+                && configured.key_version == admission.key_version
+                && admission.capabilities.is_subset(&configured.capabilities)
+        }) {
+            return Err(MemoryError::PrivatePartitionRefused);
+        }
         Ok(self.key)
     }
 }
 
-/// Identity stamped inside the working store and sealed envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Opaque partition identity stamped inside the working store and encrypted
+/// inside the sealed envelope. Trust-domain, subject, and key-version values
+/// stay provider-side and are not serialized into memory metadata.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmittedPartition {
     pub partition_id: String,
-    pub trust_domain_id: String,
-    pub subject_id: String,
-    pub key_version: String,
+}
+
+impl fmt::Debug for AdmittedPartition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmittedPartition")
+            .field("partition_id", &"<redacted>")
+            .finish()
+    }
+}
+
+struct LivePartitionGuard {
+    key: PathBuf,
+    lock_path: PathBuf,
+    _lock_file: fs::File,
+}
+
+impl LivePartitionGuard {
+    fn acquire(path: &Path) -> Result<Self, MemoryError> {
+        let key = live_partition_key(path)?;
+        let lock_path = lock_path_for(path);
+        let parent = ensure_sealed_parent(path)?;
+        if lock_path.parent() != Some(parent) {
+            return Err(MemoryError::PrivatePartitionRefused);
+        }
+        let lock_file = create_live_lock_file(&lock_path)?;
+        let mut live = live_partitions()
+            .lock()
+            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+        if !live.insert(key.clone()) {
+            drop(lock_file);
+            let _ = fs::remove_file(&lock_path);
+            return Err(MemoryError::PrivatePartitionRefused);
+        }
+        Ok(Self {
+            key,
+            lock_path,
+            _lock_file: lock_file,
+        })
+    }
+}
+
+impl Drop for LivePartitionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut live) = live_partitions().lock() {
+            live.remove(&self.key);
+        }
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
+static LIVE_PARTITIONS: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+
+fn live_partitions() -> &'static Mutex<BTreeSet<PathBuf>> {
+    LIVE_PARTITIONS.get_or_init(|| Mutex::new(BTreeSet::new()))
 }
 
 /// Handle that does not expose a raw SQLite connection on the portable API.
@@ -169,6 +379,7 @@ pub struct PrivatePartition {
     store: MemoryStore,
     /// Keeps the working SQLite file alive for the handle's lifetime.
     _working: NamedTempFile,
+    _live_guard: Option<LivePartitionGuard>,
     identity: AdmittedPartition,
     key: [u8; 32],
     sealed_path: Option<PathBuf>,
@@ -184,20 +395,22 @@ impl PrivatePartition {
         ctx: &PrivatePartitionOpenContext,
         keys: &dyn PartitionKeyProvider,
     ) -> Result<Self, MemoryError> {
-        admit_open(ctx, keys)?;
-        let key = keys
-            .materialize_key(ctx)
-            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
-        let identity = identity_from_ctx(ctx);
+        let admission = admit_open(ctx, keys)?;
+        let effective_capabilities = admission.effective_capabilities(ctx)?;
+        let identity = identity_from_admission(&admission);
         let sealed_path = sealed_path_for(estate_root, &identity.partition_id);
-        let exists = match fs::metadata(&sealed_path) {
-            Ok(_) => true,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-            Err(_) => return Err(MemoryError::PrivatePartitionRefused),
-        };
-        if !exists && !ctx.capabilities.contains(&PartitionCapability::Write) {
+        let exists = sealed_file_exists(&sealed_path)?;
+        if !exists && !effective_capabilities.contains(&PartitionCapability::Write) {
             return Err(MemoryError::PrivatePartitionRefused);
         }
+        let live_guard = LivePartitionGuard::acquire(&sealed_path)?;
+        let exists = sealed_file_exists(&sealed_path)?;
+        if !exists && !effective_capabilities.contains(&PartitionCapability::Write) {
+            return Err(MemoryError::PrivatePartitionRefused);
+        }
+        let key = keys
+            .materialize_key(&admission)
+            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
         let working = NamedTempFile::new().map_err(|_| MemoryError::PrivatePartitionRefused)?;
         let store = if exists {
             let bytes = unseal_file(&sealed_path, &key, &identity)?;
@@ -218,28 +431,31 @@ impl PrivatePartition {
         Ok(Self {
             store,
             _working: working,
+            _live_guard: Some(live_guard),
             identity,
             key,
             sealed_path: Some(sealed_path),
-            can_write: ctx.capabilities.contains(&PartitionCapability::Write),
-            can_export: ctx.capabilities.contains(&PartitionCapability::Export),
+            can_write: effective_capabilities.contains(&PartitionCapability::Write),
+            can_export: effective_capabilities.contains(&PartitionCapability::Export),
             dirty: !exists,
         })
     }
 
     /// In-memory / tempfile partition (tests). Still requires a live provider.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_in_memory(
         ctx: &PrivatePartitionOpenContext,
         keys: &dyn PartitionKeyProvider,
     ) -> Result<Self, MemoryError> {
-        admit_open(ctx, keys)?;
-        if !ctx.capabilities.contains(&PartitionCapability::Write) {
+        let admission = admit_open(ctx, keys)?;
+        let effective_capabilities = admission.effective_capabilities(ctx)?;
+        if !effective_capabilities.contains(&PartitionCapability::Write) {
             return Err(MemoryError::PrivatePartitionRefused);
         }
         let key = keys
-            .materialize_key(ctx)
+            .materialize_key(&admission)
             .map_err(|_| MemoryError::PrivatePartitionRefused)?;
-        let identity = identity_from_ctx(ctx);
+        let identity = identity_from_admission(&admission);
         let working = NamedTempFile::new().map_err(|_| MemoryError::PrivatePartitionRefused)?;
         let store = MemoryStore::open_private_working_file(
             &working.path().to_string_lossy(),
@@ -249,11 +465,12 @@ impl PrivatePartition {
         Ok(Self {
             store,
             _working: working,
+            _live_guard: None,
             identity,
             key,
             sealed_path: None,
             can_write: true,
-            can_export: ctx.capabilities.contains(&PartitionCapability::Export),
+            can_export: effective_capabilities.contains(&PartitionCapability::Export),
             dirty: true,
         })
     }
@@ -293,7 +510,7 @@ impl PrivatePartition {
         if !self.can_export {
             return Err(MemoryError::PrivatePartitionRefused);
         }
-        encode_envelope(&self.key, &self.identity, self._working.path())
+        encode_envelope(&self.key, &self.identity, &self.store)
     }
 
     pub fn persist(&mut self) -> Result<(), MemoryError> {
@@ -301,9 +518,13 @@ impl PrivatePartition {
         let Some(path) = self.sealed_path.clone() else {
             return Ok(());
         };
-        persist_sealed(self._working.path(), &self.key, &self.identity, &path)?;
+        persist_sealed(&self.store, &self.key, &self.identity, &path)?;
         self.dirty = false;
         Ok(())
+    }
+
+    pub fn close(mut self) -> Result<(), MemoryError> {
+        self.persist()
     }
 
     fn require_write(&self) -> Result<(), MemoryError> {
@@ -317,11 +538,6 @@ impl PrivatePartition {
 
 impl Drop for PrivatePartition {
     fn drop(&mut self) {
-        if self.can_write && self.dirty {
-            if let Some(path) = self.sealed_path.clone() {
-                let _ = persist_sealed(self._working.path(), &self.key, &self.identity, &path);
-            }
-        }
         vault_kit::zero_key(&mut self.key);
     }
 }
@@ -353,19 +569,16 @@ pub(crate) fn refuse_stamped_private_store(conn: &rusqlite::Connection) -> Resul
     }
 }
 
-fn identity_from_ctx(ctx: &PrivatePartitionOpenContext) -> AdmittedPartition {
+fn identity_from_admission(admission: &PartitionAdmission) -> AdmittedPartition {
     AdmittedPartition {
-        partition_id: ctx.partition_id(),
-        trust_domain_id: ctx.trust_domain_id.as_str().to_string(),
-        subject_id: ctx.subject_id.as_str().to_string(),
-        key_version: ctx.key_version.clone(),
+        partition_id: derive_partition_id(&admission.trust_domain_id, &admission.subject_id),
     }
 }
 
 fn admit_open(
     ctx: &PrivatePartitionOpenContext,
     keys: &dyn PartitionKeyProvider,
-) -> Result<(), MemoryError> {
+) -> Result<PartitionAdmission, MemoryError> {
     if ctx.revoked || ctx.key_version.trim().is_empty() {
         return Err(MemoryError::PrivatePartitionRefused);
     }
@@ -408,6 +621,47 @@ fn sealed_path_for(estate_root: &Path, partition_id: &str) -> PathBuf {
     estate_root.join(partition_id).join("partition.sealed")
 }
 
+fn lock_path_for(path: &Path) -> PathBuf {
+    path.with_extension("sealed.lock")
+}
+
+fn live_partition_key(path: &Path) -> Result<PathBuf, MemoryError> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|_| MemoryError::PrivatePartitionRefused)
+    }
+}
+
+fn sealed_file_exists(path: &Path) -> Result<bool, MemoryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                Err(MemoryError::PrivatePartitionRefused)
+            } else {
+                Ok(true)
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(MemoryError::PrivatePartitionRefused),
+    }
+}
+
+fn create_live_lock_file(path: &Path) -> Result<fs::File, MemoryError> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)
+}
+
 pub(crate) fn stamp_private_identity(
     conn: &rusqlite::Connection,
     identity: &AdmittedPartition,
@@ -440,38 +694,80 @@ fn verify_stamped_identity(
 }
 
 fn persist_sealed(
-    working: &Path,
+    store: &MemoryStore,
     key: &[u8; 32],
     identity: &AdmittedPartition,
     path: &Path,
 ) -> Result<(), MemoryError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|_| MemoryError::PrivatePartitionRefused)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
-        }
-    }
-    let blob = encode_envelope(key, identity, working)?;
-    let tmp = path.with_extension("sealed.tmp");
+    let parent = ensure_sealed_parent(path)?;
+    let blob = encode_envelope(key, identity, store)?;
+    ensure_replace_target_safe(path)?;
+    let mut tmp =
+        NamedTempFile::new_in(parent).map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    #[cfg(unix)]
     {
-        let mut file = fs::File::create(&tmp).map_err(|_| MemoryError::PrivatePartitionRefused)?;
-        file.write_all(&blob)
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o600))
             .map_err(|_| MemoryError::PrivatePartitionRefused)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
+    tmp.write_all(&blob)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    let persisted = tmp
+        .persist(path)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    persisted
+        .sync_all()
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    sync_parent_dir(parent);
+    Ok(())
+}
+
+fn ensure_sealed_parent(path: &Path) -> Result<&Path, MemoryError> {
+    let parent = path.parent().ok_or(MemoryError::PrivatePartitionRefused)?;
+    fs::create_dir_all(parent).map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    let metadata =
+        fs::symlink_metadata(parent).map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(MemoryError::PrivatePartitionRefused);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    }
+    Ok(parent)
+}
+
+fn ensure_replace_target_safe(path: &Path) -> Result<(), MemoryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(MemoryError::PrivatePartitionRefused)
+        }
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(MemoryError::PrivatePartitionRefused),
+    }
+}
+
+fn sync_parent_dir(parent: &Path) {
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
         }
     }
-    fs::rename(&tmp, path).map_err(|_| MemoryError::PrivatePartitionRefused)
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+    }
 }
 
 #[derive(Serialize, Deserialize)]
 struct SealedEnvelope {
-    key_version: String,
-    partition_id: String,
     nonce_b64: String,
     ciphertext_b64: String,
 }
@@ -479,16 +775,14 @@ struct SealedEnvelope {
 fn encode_envelope(
     key: &[u8; 32],
     identity: &AdmittedPartition,
-    working: &Path,
+    store: &MemoryStore,
 ) -> Result<Vec<u8>, MemoryError> {
-    let sqlite = fs::read(working).map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    let sqlite = snapshot_sqlite_image(&store.conn)?;
     let payload = serde_json::to_vec(&(identity, sqlite))
         .map_err(|_| MemoryError::PrivatePartitionRefused)?;
     let (ciphertext_b64, nonce_b64) =
         vault_kit::encrypt(key, &payload).map_err(|_| MemoryError::PrivatePartitionRefused)?;
     let envelope = SealedEnvelope {
-        key_version: identity.key_version.clone(),
-        partition_id: identity.partition_id.clone(),
         nonce_b64,
         ciphertext_b64,
     };
@@ -497,6 +791,20 @@ fn encode_envelope(
     out.extend_from_slice(SEALED_MAGIC);
     out.extend_from_slice(&json);
     Ok(out)
+}
+
+fn snapshot_sqlite_image(conn: &rusqlite::Connection) -> Result<Vec<u8>, MemoryError> {
+    let snapshot = NamedTempFile::new().map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    {
+        let mut dst = rusqlite::Connection::open(snapshot.path())
+            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+        let backup = rusqlite::backup::Backup::new(conn, &mut dst)
+            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+        backup
+            .run_to_completion(128, Duration::from_millis(100), None)
+            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    }
+    fs::read(snapshot.path()).map_err(|_| MemoryError::PrivatePartitionRefused)
 }
 
 fn unseal_file(
@@ -510,11 +818,6 @@ fn unseal_file(
     }
     let envelope: SealedEnvelope = serde_json::from_slice(&bytes[SEALED_MAGIC.len()..])
         .map_err(|_| MemoryError::PrivatePartitionRefused)?;
-    if envelope.key_version != expected.key_version
-        || envelope.partition_id != expected.partition_id
-    {
-        return Err(MemoryError::PrivatePartitionRefused);
-    }
     let payload = vault_kit::decrypt(key, &envelope.ciphertext_b64, &envelope.nonce_b64)
         .map_err(|_| MemoryError::PrivatePartitionRefused)?;
     let (identity, sqlite): (AdmittedPartition, Vec<u8>) =
@@ -530,6 +833,11 @@ mod tests {
     use super::*;
     use crate::db::InsertMemoryResult;
 
+    const TRUST_DOMAIN: &str = "td-alpha";
+    const RECEIPT_OK: &str = "rcpt-ok";
+    const KEY_VERSION: &str = "kv1";
+    const TEST_KEY: [u8; 32] = [7u8; 32];
+
     fn ctx(
         subject: &str,
         receipt: &str,
@@ -537,17 +845,50 @@ mod tests {
         revoked: bool,
     ) -> PrivatePartitionOpenContext {
         PrivatePartitionOpenContext {
-            trust_domain_id: TrustDomainId::new("td-alpha").unwrap(),
+            trust_domain_id: TrustDomainId::new(TRUST_DOMAIN).unwrap(),
             subject_id: SubjectId::new(subject).unwrap(),
             receipt: CapabilityReceipt::new(receipt).unwrap(),
             capabilities: caps.iter().copied().collect(),
-            key_version: "kv1".to_string(),
+            key_version: KEY_VERSION.to_string(),
             revoked,
         }
     }
 
     fn keys() -> StaticKeyProvider {
-        StaticKeyProvider::new([7u8; 32], "rcpt-ok")
+        keys_for_subjects(&[
+            (
+                "subject-alice",
+                &[
+                    PartitionCapability::Read,
+                    PartitionCapability::Write,
+                    PartitionCapability::Export,
+                ][..],
+            ),
+            (
+                "subject-bob",
+                &[
+                    PartitionCapability::Read,
+                    PartitionCapability::Write,
+                    PartitionCapability::Export,
+                ][..],
+            ),
+        ])
+    }
+
+    fn keys_for_subjects(subjects: &[(&str, &[PartitionCapability])]) -> StaticKeyProvider {
+        let mut provider = StaticKeyProvider::new(TEST_KEY);
+        for (subject, capabilities) in subjects {
+            provider = provider
+                .with_admission(
+                    TRUST_DOMAIN,
+                    *subject,
+                    RECEIPT_OK,
+                    capabilities.iter().copied(),
+                    KEY_VERSION,
+                )
+                .unwrap();
+        }
+        provider
     }
 
     fn entry(id: &str, text: &str) -> MemoryEntry {
@@ -585,17 +926,290 @@ mod tests {
     }
 
     #[test]
+    fn single_write_persist_drop_reopen_retains_committed_row() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let keys = keys();
+        {
+            let mut part = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+            assert!(matches!(
+                part.insert_if_absent(&entry("first-row", "committed-before-seal"))
+                    .unwrap(),
+                InsertMemoryResult::Inserted
+            ));
+            part.persist().unwrap();
+        }
+        let reopened = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+        assert_eq!(
+            reopened.get("first-row").unwrap().unwrap().text,
+            "committed-before-seal"
+        );
+    }
+
+    #[test]
+    fn drop_without_explicit_persist_does_not_create_successful_seal() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let keys = keys();
+        {
+            let mut part = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+            part.insert_if_absent(&entry("unpersisted-row", "must-not-claim-success"))
+                .unwrap();
+        }
+        let sealed = root
+            .path()
+            .join(ctx.partition_id())
+            .join("partition.sealed");
+        assert!(
+            !sealed.exists(),
+            "Drop must not silently claim persistence success"
+        );
+
+        let reopened = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+        assert!(reopened.get("unpersisted-row").unwrap().is_none());
+    }
+
+    #[test]
+    fn second_live_opener_refuses_until_first_handle_drops() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let keys = keys();
+        let first = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+        let err = match PrivatePartition::open(root.path(), &ctx, &keys) {
+            Err(err) => err,
+            Ok(_) => panic!("second live opener must refuse"),
+        };
+        assert!(matches!(err, MemoryError::PrivatePartitionRefused));
+        drop(first);
+        PrivatePartition::open(root.path(), &ctx, &keys)
+            .expect("dropping the first handle releases exclusive ownership");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn predictable_tmp_symlink_is_not_followed_or_clobbered() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let keys = keys();
+        {
+            let mut part = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+            part.insert_if_absent(&entry("row-one", "one")).unwrap();
+            part.persist().unwrap();
+        }
+
+        let sealed = root
+            .path()
+            .join(ctx.partition_id())
+            .join("partition.sealed");
+        let predictable_tmp = sealed.with_extension("sealed.tmp");
+        let victim = root.path().join("victim.txt");
+        fs::write(&victim, b"do-not-clobber").unwrap();
+        std::os::unix::fs::symlink(&victim, &predictable_tmp).unwrap();
+
+        {
+            let mut part = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+            part.insert_if_absent(&entry("row-two", "two")).unwrap();
+            part.persist().unwrap();
+        }
+
+        assert_eq!(fs::read(&victim).unwrap(), b"do-not-clobber");
+        assert!(fs::symlink_metadata(&predictable_tmp)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let reopened = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+        assert_eq!(reopened.get("row-two").unwrap().unwrap().text, "two");
+    }
+
+    #[test]
+    fn caller_cannot_self_escalate_provider_capabilities() {
+        let root = tempfile::tempdir().unwrap();
+        let write_ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let write_keys = keys();
+        {
+            let mut part = PrivatePartition::open(root.path(), &write_ctx, &write_keys).unwrap();
+            part.insert_if_absent(&entry("existing", "present"))
+                .unwrap();
+            part.persist().unwrap();
+        }
+
+        let read_only_keys =
+            keys_for_subjects(&[("subject-alice", &[PartitionCapability::Read][..])]);
+        let escalated_ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[
+                PartitionCapability::Read,
+                PartitionCapability::Write,
+                PartitionCapability::Export,
+            ],
+            false,
+        );
+        let err = match PrivatePartition::open(root.path(), &escalated_ctx, &read_only_keys) {
+            Err(err) => err,
+            Ok(_) => panic!("caller-requested Write/Export must not exceed provider grant"),
+        };
+        assert!(matches!(err, MemoryError::PrivatePartitionRefused));
+
+        let read_ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read],
+            false,
+        );
+        let part = PrivatePartition::open(root.path(), &read_ctx, &read_only_keys)
+            .expect("provider-granted read remains admitted");
+        assert_eq!(part.get("existing").unwrap().unwrap().text, "present");
+    }
+
+    #[test]
+    fn private_partition_debug_and_envelope_redact_secret_identity_material() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = PrivatePartitionOpenContext {
+            trust_domain_id: TrustDomainId::new("td-secret-debug-domain").unwrap(),
+            subject_id: SubjectId::new("subject-secret-debug-id").unwrap(),
+            receipt: CapabilityReceipt::new("receipt-secret-debug-token").unwrap(),
+            capabilities: [PartitionCapability::Read, PartitionCapability::Write]
+                .into_iter()
+                .collect(),
+            key_version: "kv-secret-debug-version".to_string(),
+            revoked: false,
+        };
+        let keys = StaticKeyProvider::new(TEST_KEY)
+            .with_admission(
+                "td-secret-debug-domain",
+                "subject-secret-debug-id",
+                "receipt-secret-debug-token",
+                [PartitionCapability::Read, PartitionCapability::Write],
+                "kv-secret-debug-version",
+            )
+            .unwrap();
+        let debug_surfaces = [
+            format!("{ctx:?}"),
+            format!("{:?}", ctx.trust_domain_id),
+            format!("{:?}", ctx.subject_id),
+            format!("{:?}", ctx.receipt),
+            format!("{keys:?}"),
+        ];
+        for rendered in debug_surfaces {
+            for secret in [
+                "td-secret-debug-domain",
+                "subject-secret-debug-id",
+                "receipt-secret-debug-token",
+                "kv-secret-debug-version",
+                "7, 7, 7",
+            ] {
+                assert!(
+                    !rendered.contains(secret),
+                    "debug surface leaked {secret}: {rendered}"
+                );
+            }
+        }
+
+        let mut part = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+        part.insert_if_absent(&entry("debug-redaction-row", "stored"))
+            .unwrap();
+        part.persist().unwrap();
+        let sealed = root
+            .path()
+            .join(ctx.partition_id())
+            .join("partition.sealed");
+        let sealed_text = String::from_utf8_lossy(&fs::read(sealed).unwrap()).into_owned();
+        for secret in [
+            "td-secret-debug-domain",
+            "subject-secret-debug-id",
+            "receipt-secret-debug-token",
+            "kv-secret-debug-version",
+            &ctx.partition_id(),
+        ] {
+            assert!(
+                !sealed_text.contains(secret),
+                "sealed envelope plaintext leaked {secret}: {sealed_text}"
+            );
+        }
+    }
+
+    #[test]
+    fn denied_contexts_refuse_before_creating_or_opening_store() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = keys();
+        let missing_read = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Write],
+            false,
+        );
+        let err = match PrivatePartition::open(root.path(), &missing_read, &keys) {
+            Err(err) => err,
+            Ok(_) => panic!("missing Read must refuse"),
+        };
+        assert!(matches!(err, MemoryError::PrivatePartitionRefused));
+        assert!(!root.path().join(missing_read.partition_id()).exists());
+
+        let wrong_receipt = ctx(
+            "subject-alice",
+            "receipt-wrong",
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let err = match PrivatePartition::open(root.path(), &wrong_receipt, &keys) {
+            Err(err) => err,
+            Ok(_) => panic!("wrong receipt must refuse"),
+        };
+        assert!(matches!(err, MemoryError::PrivatePartitionRefused));
+        assert!(!root.path().join(wrong_receipt.partition_id()).exists());
+
+        let revoked = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            true,
+        );
+        let err = match PrivatePartition::open(root.path(), &revoked, &keys) {
+            Err(err) => err,
+            Ok(_) => panic!("revoked context must refuse"),
+        };
+        assert!(matches!(err, MemoryError::PrivatePartitionRefused));
+        assert!(!root.path().join(revoked.partition_id()).exists());
+    }
+
+    #[test]
     fn two_subjects_cannot_read_each_others_content_or_existence() {
         let root = tempfile::tempdir().unwrap();
         let alice = ctx(
             "subject-alice",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             false,
         );
         let bob = ctx(
             "subject-bob",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             false,
         );
@@ -630,7 +1244,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let ok = ctx(
             "subject-alice",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             false,
         );
@@ -658,13 +1272,13 @@ mod tests {
         let keys = keys();
         let alice = ctx(
             "subject-alice",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             false,
         );
         let bob = ctx(
             "subject-bob",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             false,
         );
@@ -694,7 +1308,7 @@ mod tests {
         let keys = keys();
         let live = ctx(
             "subject-alice",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             false,
         );
@@ -704,7 +1318,7 @@ mod tests {
             .unwrap();
         let revoked = ctx(
             "subject-alice",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             true,
         );
@@ -719,7 +1333,7 @@ mod tests {
     fn export_without_capability_refuses_and_mentions_nothing() {
         let ctx = ctx(
             "subject-alice",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             false,
         );
@@ -738,13 +1352,13 @@ mod tests {
         let keys = keys();
         let alice_ctx = ctx(
             "subject-alice",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             false,
         );
         let bob_ctx = ctx(
             "subject-bob",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[PartitionCapability::Read, PartitionCapability::Write],
             false,
         );
@@ -785,7 +1399,7 @@ mod tests {
     fn portable_profile_is_stamped_not_tachi_full() {
         let ctx = ctx(
             "subject-alice",
-            "rcpt-ok",
+            RECEIPT_OK,
             &[
                 PartitionCapability::Read,
                 PartitionCapability::Write,
@@ -796,6 +1410,6 @@ mod tests {
         let keys = keys();
         let part = PrivatePartition::open_in_memory(&ctx, &keys).unwrap();
         assert_eq!(part.store.profile, StoreProfile::PortableKernel);
-        assert_eq!(part.identity().key_version, "kv1");
+        assert_eq!(part.identity().partition_id, ctx.partition_id());
     }
 }
