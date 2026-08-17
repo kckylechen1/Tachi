@@ -513,7 +513,7 @@ impl PrivatePartition {
 }
 
 fn generic_non_sqlite_image() -> MemoryError {
-    MemoryError::InvalidArg("database path is not a valid SQLite image".to_string())
+    MemoryError::InvalidArg("database path is not a database".to_string())
 }
 
 /// Resolve an existing path to its canonical target, then require a regular
