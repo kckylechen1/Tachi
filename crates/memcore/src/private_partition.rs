@@ -35,7 +35,6 @@ use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -135,7 +134,7 @@ pub struct PrivatePartitionOpenContext {
 }
 
 impl PrivatePartitionOpenContext {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     fn partition_id(&self) -> String {
         derive_partition_id(&self.trust_domain_id, &self.subject_id)
     }
@@ -329,49 +328,24 @@ impl fmt::Debug for AdmittedPartition {
 }
 
 struct LivePartitionGuard {
-    key: PathBuf,
-    lock_path: PathBuf,
     _lock_file: fs::File,
 }
 
 impl LivePartitionGuard {
     fn acquire(path: &Path) -> Result<Self, MemoryError> {
-        let key = live_partition_key(path)?;
         let lock_path = lock_path_for(path);
         let parent = ensure_sealed_parent(path)?;
         if lock_path.parent() != Some(parent) {
             return Err(MemoryError::PrivatePartitionRefused);
         }
-        let lock_file = create_live_lock_file(&lock_path)?;
-        let mut live = live_partitions()
-            .lock()
+        let lock_file = open_live_lock_file(&lock_path)?;
+        lock_file
+            .try_lock()
             .map_err(|_| MemoryError::PrivatePartitionRefused)?;
-        if !live.insert(key.clone()) {
-            drop(lock_file);
-            let _ = fs::remove_file(&lock_path);
-            return Err(MemoryError::PrivatePartitionRefused);
-        }
         Ok(Self {
-            key,
-            lock_path,
             _lock_file: lock_file,
         })
     }
-}
-
-impl Drop for LivePartitionGuard {
-    fn drop(&mut self) {
-        if let Ok(mut live) = live_partitions().lock() {
-            live.remove(&self.key);
-        }
-        let _ = fs::remove_file(&self.lock_path);
-    }
-}
-
-static LIVE_PARTITIONS: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
-
-fn live_partitions() -> &'static Mutex<BTreeSet<PathBuf>> {
-    LIVE_PARTITIONS.get_or_init(|| Mutex::new(BTreeSet::new()))
 }
 
 /// Handle that does not expose a raw SQLite connection on the portable API.
@@ -628,16 +602,6 @@ fn lock_path_for(path: &Path) -> PathBuf {
     path.with_extension("sealed.lock")
 }
 
-fn live_partition_key(path: &Path) -> Result<PathBuf, MemoryError> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|_| MemoryError::PrivatePartitionRefused)
-    }
-}
-
 fn sealed_file_exists(path: &Path) -> Result<bool, MemoryError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -652,17 +616,34 @@ fn sealed_file_exists(path: &Path) -> Result<bool, MemoryError> {
     }
 }
 
-fn create_live_lock_file(path: &Path) -> Result<fs::File, MemoryError> {
+fn open_live_lock_file(path: &Path) -> Result<fs::File, MemoryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(MemoryError::PrivatePartitionRefused);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(MemoryError::PrivatePartitionRefused),
+    }
     let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true).write(true).create(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
     }
-    options
+    let file = options
         .open(path)
-        .map_err(|_| MemoryError::PrivatePartitionRefused)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    }
+    Ok(file)
 }
 
 pub(crate) fn stamp_private_identity(
@@ -1001,6 +982,36 @@ mod tests {
         drop(first);
         PrivatePartition::open(root.path(), &ctx, &keys)
             .expect("dropping the first handle releases exclusive ownership");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_lock_symlink_is_refused_without_touching_its_target() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let partition_dir = root.path().join(ctx.partition_id());
+        fs::create_dir_all(&partition_dir).unwrap();
+        let lock_path = lock_path_for(&partition_dir.join("partition.sealed"));
+        let victim = root.path().join("lock-victim.txt");
+        fs::write(&victim, b"do-not-touch").unwrap();
+        std::os::unix::fs::symlink(&victim, &lock_path).unwrap();
+
+        let err = match PrivatePartition::open(root.path(), &ctx, &keys()) {
+            Err(err) => err,
+            Ok(_) => panic!("a symlink must never serve as the partition lock"),
+        };
+
+        assert!(matches!(err, MemoryError::PrivatePartitionRefused));
+        assert_eq!(fs::read(&victim).unwrap(), b"do-not-touch");
+        assert!(fs::symlink_metadata(lock_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(unix)]
@@ -1434,6 +1445,24 @@ mod tests {
             crate::SupersessionCommitResult::Applied,
             "same-partition claim must install the edge"
         );
+        let receipt_id = crate::SupersessionReceipt::id_for(
+            crate::SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
+            crate::SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
+            "alice-row",
+            "alice-successor",
+        );
+        let (receipt_json, _) = alice
+            .store
+            .get_state_kv(crate::SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+            .expect("read private-partition receipt")
+            .expect("private-partition claim persists a receipt");
+        let receipt: crate::SupersessionReceipt =
+            serde_json::from_str(&receipt_json).expect("deserialize private receipt");
+        assert_eq!(
+            receipt.partition_id.as_deref(),
+            Some(alice.identity().partition_id.as_str())
+        );
+        assert!(receipt.durable);
         assert_eq!(alice.identity().partition_id, alice_ctx.partition_id());
         assert_ne!(alice.identity().partition_id, bob.identity().partition_id);
     }
