@@ -520,6 +520,7 @@ impl MigrationPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MigrationBoundary {
     TargetCopied,
+    #[cfg(any(test, feature = "bootstrap-test-api"))]
     SourceSuperseded,
 }
 
@@ -2978,6 +2979,7 @@ fn maybe_complete_item_as_sibling_worker(
     final_result
 }
 
+#[cfg(any(test, feature = "bootstrap-test-api"))]
 fn maybe_inject_copy_after_receipt_prepared(
     source_scan: &StoreScan,
     target_scan: &StoreScan,
@@ -3275,6 +3277,7 @@ fn target_mismatch_diagnosis(row: &RawRow, item: &PlanItem, plan_id: &str) -> St
 /// completion decision taken after that read therefore re-reads the source row,
 /// its receipt and the target row here, and applies exactly the predicate
 /// [`plan_item_completed`] uses for `copy_to_shared_and_supersede` items.
+#[cfg(any(test, feature = "bootstrap-test-api"))]
 fn copy_item_completed_from_fresh_state(
     source_store: &MemoryStore,
     target_store: &MemoryStore,
@@ -3312,6 +3315,7 @@ fn copy_item_completed_from_fresh_state(
     Ok(canonical_target_matches_plan(&target_row, item, plan_id))
 }
 
+#[cfg(any(test, feature = "bootstrap-test-api"))]
 fn copy_completed_no_op_outcome(
     item: &PlanItem,
     target_id: &str,
@@ -3328,6 +3332,64 @@ fn copy_completed_no_op_outcome(
     }
 }
 
+fn copy_only_outcome_from_fresh_state(
+    source_store: &MemoryStore,
+    target_store: &MemoryStore,
+    item: &PlanItem,
+    plan_id: &str,
+    target_id: &str,
+) -> Result<MigrationOutcome, String> {
+    let source_entry = source_store
+        .get_with_options(&item.source_id, true)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "source row {} disappeared after target copy",
+                item.source_id
+            )
+        })?;
+    let mut source_row = raw_from_entry(&source_entry);
+    source_row.superseded_by = source_store
+        .supersession_target(&item.source_id)
+        .map_err(|error| error.to_string())?
+        .flatten();
+    if source_row.archived
+        || source_row.superseded_by.is_some()
+        || parse_migration_receipt(&source_row)?.is_some()
+    {
+        return Err(format!(
+            "copy-only completion requires an active, unsuperseded, unreceipted source for {}:{}",
+            item.source_store_ref, item.source_id
+        ));
+    }
+
+    let target_entry = target_store
+        .get_with_options(target_id, true)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("deterministic target {target_id} disappeared after copy"))?;
+    let mut target_row = raw_from_entry(&target_entry);
+    target_row.superseded_by = target_store
+        .supersession_target(target_id)
+        .map_err(|error| error.to_string())?
+        .flatten();
+    if !canonical_target_matches_plan(&target_row, item, plan_id) {
+        return Err(format!(
+            "copy-only completion found a noncanonical target {target_id}"
+        ));
+    }
+
+    Ok(MigrationOutcome {
+        source_store_ref: item.source_store_ref.clone(),
+        source_id: item.source_id.clone(),
+        target_store_ref: item.target_store_ref.clone(),
+        target_id: Some(target_id.to_string()),
+        action: item.action.clone(),
+        outcome: "copied_without_supersession".to_string(),
+        phases: vec![MigrationPhase::TargetCopied.as_str().to_string()],
+    })
+}
+
+#[cfg(any(test, feature = "bootstrap-test-api"))]
 fn reconcile_target_noncanonical(
     target_store: &mut MemoryStore,
     target_id: &str,
@@ -4098,92 +4160,20 @@ fn apply_copy_and_supersede(
     verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     maybe_interrupt(interruption, item, MigrationBoundary::TargetCopied)?;
 
-    // Sibling-completion defence: `source_receipted` and
-    // `source_superseded_receipted` above were derived from the source snapshot
-    // taken before the target was inspected, so they report "not started" for
-    // work a sibling worker on the same deterministic plan has already
-    // finished. Decide completion from a fresh read of the source row, its
-    // receipt and the target row instead.
-    if copy_item_completed_from_fresh_state(&source_store, &target_store, item, plan_id, target_id)?
-    {
-        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
-        verify_retained_backups(retained_backups)?;
-        phases.push("source_superseded".to_string());
-        return Ok(copy_completed_no_op_outcome(item, target_id, phases));
-    }
-    maybe_inject_copy_after_receipt_prepared(source_scan, target_scan, item, target_id, race_hook)?;
-    maybe_complete_item_as_sibling_worker(
-        source_scan,
-        target_scan,
-        item,
-        plan_id,
-        target_id,
-        SiblingCompletionSeam::AfterReceiptPrepared,
-        race_hook,
-    )?;
-    verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
-    verify_backups_before_source_mutation(retained_backups, race_hook)?;
-
     #[cfg(not(any(test, feature = "bootstrap-test-api")))]
-    let transitioned = Err::<bool, String>(format!(
-        "cross-store wiki supersession is disabled: target {target_id} was copied and the source {} remains active",
-        item.source_id
-    ))?;
+    {
+        verify_retained_backups(retained_backups)?;
+        copy_only_outcome_from_fresh_state(&source_store, &target_store, item, plan_id, target_id)
+    }
 
     #[cfg(any(test, feature = "bootstrap-test-api"))]
-    let transitioned = {
-        let final_metadata = metadata_with_receipt(
-            &source_row,
-            receipt_value(item, plan_id, "source_superseded"),
-        )?;
-        let expected_transition =
-            ExpectedMemoryState::from_entry(&source_entry, initial_supersession.as_deref());
-
-        let observed_before_transition = source_store
-            .supersession_target(&item.source_id)
-            .map_err(|error| error.to_string())?
-            .flatten();
-        if observed_before_transition.as_deref() == Some(target_id) {
-            if !source_receipted {
-                false
-            } else {
-                source_store
-                    .update_with_revision_if_expected_state(
-                        &source_entry.id,
-                        &source_entry.text,
-                        &source_entry.summary,
-                        &source_entry.source,
-                        &final_metadata,
-                        source_entry.vector.as_deref(),
-                        &expected_transition,
-                    )
-                    .map_err(|error| error.to_string())?
-            }
-        } else if observed_before_transition.is_none() {
-            source_store
-                .supersede_with_metadata_if_expected_state(
-                    &source_entry.id,
-                    target_id,
-                    &final_metadata,
-                    &expected_transition,
-                )
-                .map_err(|error| error.to_string())?
-        } else {
-            false
-        }
-    };
-
-    if !transitioned {
-        // Invariant, sibling-completion defence: the deterministic target may
-        // only be reconciled to noncanonical once a *fresh* read of the source
-        // proves it does not already carry a completed, receipted supersede
-        // onto this exact target. The transition above loses that CAS both when
-        // this worker's own snapshot went stale and when a sibling worker
-        // applying the same deterministic plan finished the item first;
-        // archiving the winner's canonical target here would remove the page
-        // from every user-facing read surface (`archived = 0 AND superseded_by
-        // IS NULL`) and dead-end every later apply on the occupant collision
-        // check above.
+    {
+        // Sibling-completion defence: `source_receipted` and
+        // `source_superseded_receipted` above were derived from the source snapshot
+        // taken before the target was inspected, so they report "not started" for
+        // work a sibling worker on the same deterministic plan has already
+        // finished. Decide completion from a fresh read of the source row, its
+        // receipt and the target row instead.
         if copy_item_completed_from_fresh_state(
             &source_store,
             &target_store,
@@ -4191,67 +4181,158 @@ fn apply_copy_and_supersede(
             plan_id,
             target_id,
         )? {
-            verify_retained_backups(retained_backups)?;
             verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+            verify_retained_backups(retained_backups)?;
             phases.push("source_superseded".to_string());
             return Ok(copy_completed_no_op_outcome(item, target_id, phases));
         }
-        reconcile_target_noncanonical(&mut target_store, target_id, item, plan_id)?;
-        verify_retained_backups(retained_backups)?;
+        maybe_inject_copy_after_receipt_prepared(
+            source_scan,
+            target_scan,
+            item,
+            target_id,
+            race_hook,
+        )?;
+        maybe_complete_item_as_sibling_worker(
+            source_scan,
+            target_scan,
+            item,
+            plan_id,
+            target_id,
+            SiblingCompletionSeam::AfterReceiptPrepared,
+            race_hook,
+        )?;
         verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
-        let observed = source_store
-            .supersession_target(&item.source_id)
-            .map_err(|error| error.to_string())?
-            .flatten();
-        if observed.as_deref().is_some_and(|id| id != target_id) {
-            return Err(format!(
+        verify_backups_before_source_mutation(retained_backups, race_hook)?;
+
+        let transitioned = {
+            let final_metadata = metadata_with_receipt(
+                &source_row,
+                receipt_value(item, plan_id, "source_superseded"),
+            )?;
+            let expected_transition =
+                ExpectedMemoryState::from_entry(&source_entry, initial_supersession.as_deref());
+
+            let observed_before_transition = source_store
+                .supersession_target(&item.source_id)
+                .map_err(|error| error.to_string())?
+                .flatten();
+            if observed_before_transition.as_deref() == Some(target_id) {
+                if !source_receipted {
+                    false
+                } else {
+                    source_store
+                        .update_with_revision_if_expected_state(
+                            &source_entry.id,
+                            &source_entry.text,
+                            &source_entry.summary,
+                            &source_entry.source,
+                            &final_metadata,
+                            source_entry.vector.as_deref(),
+                            &expected_transition,
+                        )
+                        .map_err(|error| error.to_string())?
+                }
+            } else if observed_before_transition.is_none() {
+                source_store
+                    .supersede_with_metadata_if_expected_state(
+                        &source_entry.id,
+                        target_id,
+                        &final_metadata,
+                        &expected_transition,
+                    )
+                    .map_err(|error| error.to_string())?
+            } else {
+                false
+            }
+        };
+
+        if !transitioned {
+            // Invariant, sibling-completion defence: the deterministic target may
+            // only be reconciled to noncanonical once a *fresh* read of the source
+            // proves it does not already carry a completed, receipted supersede
+            // onto this exact target. The transition above loses that CAS both when
+            // this worker's own snapshot went stale and when a sibling worker
+            // applying the same deterministic plan finished the item first;
+            // archiving the winner's canonical target here would remove the page
+            // from every user-facing read surface (`archived = 0 AND superseded_by
+            // IS NULL`) and dead-end every later apply on the occupant collision
+            // check above.
+            if copy_item_completed_from_fresh_state(
+                &source_store,
+                &target_store,
+                item,
+                plan_id,
+                target_id,
+            )? {
+                verify_retained_backups(retained_backups)?;
+                verify_copy_store_identities(
+                    &source_store,
+                    source_path,
+                    &target_store,
+                    target_path,
+                )?;
+                phases.push("source_superseded".to_string());
+                return Ok(copy_completed_no_op_outcome(item, target_id, phases));
+            }
+            reconcile_target_noncanonical(&mut target_store, target_id, item, plan_id)?;
+            verify_retained_backups(retained_backups)?;
+            verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+            let observed = source_store
+                .supersession_target(&item.source_id)
+                .map_err(|error| error.to_string())?
+                .flatten();
+            if observed.as_deref().is_some_and(|id| id != target_id) {
+                return Err(format!(
                 "source {}:{} was superseded by foreign target {} before the atomic migration transition",
                 item.source_store_ref,
                 item.source_id,
                 observed.as_deref().unwrap_or("<none>")
             ));
-        }
-        return Err(format!(
+            }
+            return Err(format!(
             "source fingerprint changed before the atomic receipt and supersession transition for {}:{}",
             item.source_store_ref, item.source_id
         ));
-    }
+        }
 
-    verify_retained_backups(retained_backups)?;
-    verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
-    maybe_interrupt(interruption, item, MigrationBoundary::SourceSuperseded)?;
+        verify_retained_backups(retained_backups)?;
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+        maybe_interrupt(interruption, item, MigrationBoundary::SourceSuperseded)?;
 
-    let final_source = source_store
-        .get_with_options(&item.source_id, true)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "source disappeared after final receipt".to_string())?;
-    let final_row = raw_from_entry(&final_source);
-    if !receipt_matches(&final_row, item, plan_id, &["source_superseded"])
-        || !(item.source_revision + 1..=item.source_revision + 3).contains(&final_source.revision)
-        || source_store
-            .supersession_target(&item.source_id)
+        let final_source = source_store
+            .get_with_options(&item.source_id, true)
             .map_err(|error| error.to_string())?
-            .flatten()
-            .as_deref()
-            != Some(target_id)
-    {
-        return Err(format!(
-            "source superseded state was not durably reconciled for {}:{}",
-            item.source_store_ref, item.source_id
-        ));
+            .ok_or_else(|| "source disappeared after final receipt".to_string())?;
+        let final_row = raw_from_entry(&final_source);
+        if !receipt_matches(&final_row, item, plan_id, &["source_superseded"])
+            || !(item.source_revision + 1..=item.source_revision + 3)
+                .contains(&final_source.revision)
+            || source_store
+                .supersession_target(&item.source_id)
+                .map_err(|error| error.to_string())?
+                .flatten()
+                .as_deref()
+                != Some(target_id)
+        {
+            return Err(format!(
+                "source superseded state was not durably reconciled for {}:{}",
+                item.source_store_ref, item.source_id
+            ));
+        }
+        verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
+        verify_retained_backups(retained_backups)?;
+        phases.push("source_superseded".to_string());
+        Ok(MigrationOutcome {
+            source_store_ref: item.source_store_ref.clone(),
+            source_id: item.source_id.clone(),
+            target_store_ref: item.target_store_ref.clone(),
+            target_id: Some(target_id.to_string()),
+            action: item.action.clone(),
+            outcome: "copied_and_superseded".to_string(),
+            phases,
+        })
     }
-    verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
-    verify_retained_backups(retained_backups)?;
-    phases.push("source_superseded".to_string());
-    Ok(MigrationOutcome {
-        source_store_ref: item.source_store_ref.clone(),
-        source_id: item.source_id.clone(),
-        target_store_ref: item.target_store_ref.clone(),
-        target_id: Some(target_id.to_string()),
-        action: item.action.clone(),
-        outcome: "copied_and_superseded".to_string(),
-        phases,
-    })
 }
 
 fn raw_from_entry(entry: &MemoryEntry) -> RawRow {
@@ -7061,6 +7142,70 @@ mod tests {
             classify_row(LogicalStore::LegacyGlobal, &candidate).0,
             CorpusClassification::SharedCandidate
         );
+    }
+
+    #[test]
+    fn production_copy_only_completion_is_honest_and_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("legacy.db");
+        let target_path = directory.path().join("shared.db");
+        create_current_fixture(
+            &source_path,
+            &[fixture_entry(
+                "source",
+                "/wiki/copy-only",
+                shared_metadata(),
+            )],
+        );
+        create_current_fixture(&target_path, &[]);
+        let mut scans = vec![
+            fixture_scan(LogicalStore::LegacyGlobal, &source_path),
+            fixture_scan(LogicalStore::SharedWiki, &target_path),
+        ];
+        classify_scans(&mut scans);
+        let plan = build_plan(&scans).unwrap();
+        let item = &plan.items[0];
+        let target_id = item.target_id.as_deref().unwrap();
+        let source_store = open_apply_store(&scans[0]).unwrap();
+        let mut target_store = open_apply_store(&scans[1]).unwrap();
+        let source_entry = source_store
+            .get_with_options(&item.source_id, true)
+            .unwrap()
+            .unwrap();
+        let source_row = raw_from_entry(&source_entry);
+        let mut target_entry = source_entry;
+        target_entry.id = target_id.to_string();
+        target_entry.metadata = metadata_with_receipt(
+            &source_row,
+            receipt_value(item, &plan.plan_id, "target_copied"),
+        )
+        .unwrap();
+        target_store.insert_if_absent(&target_entry).unwrap();
+
+        for _ in 0..2 {
+            let outcome = copy_only_outcome_from_fresh_state(
+                &source_store,
+                &target_store,
+                item,
+                &plan.plan_id,
+                target_id,
+            )
+            .expect("copy-only completion must be replay-safe");
+            assert_eq!(outcome.outcome, "copied_without_supersession");
+            assert_eq!(outcome.phases, vec!["target_copied"]);
+        }
+        let source_after = source_store
+            .get_with_options(&item.source_id, true)
+            .unwrap()
+            .unwrap();
+        assert!(!source_after.archived);
+        assert_eq!(
+            source_store.supersession_target(&item.source_id).unwrap(),
+            Some(None)
+        );
+        assert!(parse_migration_receipt(&raw_from_entry(&source_after))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

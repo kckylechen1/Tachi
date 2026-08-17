@@ -38,6 +38,17 @@ pub const SUPERSESSION_RECEIPT_EVENT_TYPE: &str = "memory.supersession.receipt.v
 /// Write-once hard-state namespace that exists in every memcore profile.
 pub const SUPERSESSION_RECEIPT_NAMESPACE: &str = "memory_supersession_receipts";
 
+/// Non-semantic R12 writes and candidate pairs prepared inside the same
+/// immutable transaction that must claim their supersessions.
+#[derive(Debug)]
+pub struct R12MemoryHygienePreparation {
+    pub promoted: usize,
+    pub derived_inserted: usize,
+    pub edges_inserted: usize,
+    pub covered_pairs: Vec<(String, String)>,
+    pub duplicate_pairs: Vec<(String, String)>,
+}
+
 /// The typed reason a checked supersession claim refused before writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1459,15 +1470,42 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
             .get_memory(&candidate_id)?
             .ok_or_else(|| MemoryError::NotFound(candidate_id.clone()))?;
         let expected = SupersessionExpectedState::active_unsuperseded(&source, Some(&target));
-        let claim = self.claim_checked_immutable_supersession(
+        let mutation_timestamp = db::now_utc_iso();
+        let claim = self.claim_checked_immutable_supersession_at(
             &source.id,
             &target.id,
             &expected,
             SUPERSESSION_ROUTE_IDLESS_NEAR_DUPLICATE,
             SUPERSESSION_POLICY_IDLESS_NEAR_DUPLICATE,
             true,
+            &mutation_timestamp,
         )?;
-        if claim == SupersessionCommitResult::Applied {
+        if claim.result == SupersessionCommitResult::Applied {
+            self.add_canonical_supersession_edge(
+                &MemoryEdge {
+                    source_id: target.id.clone(),
+                    target_id: source.id.clone(),
+                    relation: "supersedes".to_string(),
+                    weight: 1.0,
+                    metadata: serde_json::json!({
+                        "source": "idless_near_duplicate",
+                        "route": SUPERSESSION_ROUTE_IDLESS_NEAR_DUPLICATE,
+                        "policy_version": SUPERSESSION_POLICY_IDLESS_NEAR_DUPLICATE,
+                    }),
+                    created_at: mutation_timestamp.clone(),
+                    valid_from: mutation_timestamp.clone(),
+                    valid_to: None,
+                },
+                &db::EdgeProvenance {
+                    capture_event_kind: SUPERSESSION_ROUTE_IDLESS_NEAR_DUPLICATE.to_string(),
+                    actor: "memcore".to_string(),
+                    reason_code: "near_duplicate_supersession".to_string(),
+                    authority: Some(db::EdgeAuthority::StructuralBookkeeping),
+                    ..Default::default()
+                },
+            )?;
+            let _authorization =
+                db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
             db::merge_jaccard_candidate_within_tx(
                 &self.tx,
                 entry,
@@ -1488,6 +1526,303 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
             }
         }
         Ok((result, metadata))
+    }
+
+    /// Prepare R12's promotion and projection writes and select every
+    /// supersession pair from this transaction's snapshot. The caller must
+    /// claim the returned pairs before allowing the enclosing immutable
+    /// transaction to commit.
+    pub fn prepare_r12_memory_hygiene(
+        &mut self,
+    ) -> Result<R12MemoryHygienePreparation, MemoryError> {
+        let all_ids = {
+            let mut statement = self.tx.prepare("SELECT id FROM memories ORDER BY id")?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut retired_sticky = HashSet::new();
+        for id in all_ids {
+            match db::refuse_retired_sticky_row_within_tx(
+                &self.tx,
+                &id,
+                "mutated or projected by memory hygiene",
+            ) {
+                Ok(()) => {}
+                Err(MemoryError::InvalidArg(_)) => {
+                    retired_sticky.insert(id);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let promotion_ids = {
+            let mut statement = self.tx.prepare(
+                "SELECT id FROM memories
+                 WHERE COALESCE(archived,0)=0
+                   AND source='foundry_distill'
+                   AND tier='raw'
+                 ORDER BY id",
+            )?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut promoted = 0usize;
+        for id in promotion_ids {
+            if retired_sticky.contains(&id) {
+                continue;
+            }
+            promoted += self.tx.execute(
+                "UPDATE memories
+                 SET tier='consolidated',
+                     updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                     revision=revision+1,
+                     metadata=json_set(
+                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                       '$.tier_repair','r12_memory_hygiene'
+                     )
+                 WHERE id=?1
+                   AND COALESCE(archived,0)=0
+                   AND source='foundry_distill'
+                   AND tier='raw'",
+                [&id],
+            )?;
+        }
+
+        let derived_ids = {
+            let mut statement = self.tx.prepare(
+                "SELECT m.id
+                 FROM memories m
+                 LEFT JOIN derived_items d ON d.id='derived:' || m.id
+                 WHERE COALESCE(m.archived,0)=0
+                   AND m.source='foundry_distill'
+                   AND m.tier='consolidated'
+                   AND d.id IS NULL
+                 ORDER BY m.id",
+            )?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut derived_inserted = 0usize;
+        for id in derived_ids {
+            if retired_sticky.contains(&id) {
+                continue;
+            }
+            derived_inserted += self.tx.execute(
+                "INSERT OR IGNORE INTO derived_items
+                   (id, text, path, summary, importance, source, scope, metadata, created_at)
+                 SELECT 'derived:' || m.id,
+                        m.text,
+                        m.path,
+                        m.summary,
+                        m.importance,
+                        m.source,
+                        m.scope,
+                        json_set(
+                          CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END,
+                          '$.legacy_repair','r12_memory_hygiene'
+                        ),
+                        strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 FROM memories m
+                 WHERE m.id=?1
+                   AND COALESCE(m.archived,0)=0
+                   AND m.source='foundry_distill'
+                   AND m.tier='consolidated'",
+                [&id],
+            )?;
+        }
+
+        let missing_edges = {
+            let mut statement = self.tx.prepare(
+                "WITH source_ids AS (
+                   SELECT d.id AS distill_id, json_each.value AS source_id
+                   FROM memories d,
+                        json_each(
+                          CASE
+                            WHEN json_valid(d.metadata)
+                             AND json_type(d.metadata, '$.source_memory_ids')='array'
+                            THEN json_extract(d.metadata, '$.source_memory_ids')
+                            ELSE '[]'
+                          END
+                        )
+                   WHERE COALESCE(d.archived,0)=0
+                     AND d.source='foundry_distill'
+                 )
+                 SELECT source_ids.distill_id, source_ids.source_id
+                 FROM source_ids
+                 JOIN memories s ON s.id=source_ids.source_id
+                 LEFT JOIN memory_edges e ON e.source_id=source_ids.distill_id
+                                         AND e.target_id=source_ids.source_id
+                                         AND e.relation='distilled_from'
+                 WHERE e.source_id IS NULL
+                 ORDER BY source_ids.distill_id, source_ids.source_id",
+            )?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<(String, String)>, _>>()?;
+            rows
+        };
+        let mut edges_inserted = 0usize;
+        for (distill_id, source_id) in missing_edges {
+            if retired_sticky.contains(&distill_id) || retired_sticky.contains(&source_id) {
+                continue;
+            }
+            let now = db::now_utc_iso();
+            edges_inserted += self.tx.execute(
+                "INSERT OR IGNORE INTO memory_edges
+                   (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
+                 VALUES (?1,?2,'distilled_from',1.0,
+                         json_object('source','r12_memory_hygiene'),?3,?3,NULL)",
+                params![distill_id, source_id, now],
+            )?;
+        }
+
+        let covered_pairs = {
+            let mut statement = self.tx.prepare(
+                "WITH coverage AS (
+                   SELECT d.id AS distill_id, e.target_id AS source_id, d.timestamp AS distill_ts
+                   FROM memory_edges e
+                   JOIN memories d ON d.id=e.source_id
+                   WHERE e.relation='distilled_from'
+                     AND COALESCE(d.archived,0)=0
+                     AND d.source='foundry_distill'
+                   UNION
+                   SELECT d.id AS distill_id, json_each.value AS source_id, d.timestamp AS distill_ts
+                   FROM memories d,
+                        json_each(
+                          CASE
+                            WHEN json_valid(d.metadata)
+                             AND json_type(d.metadata, '$.source_memory_ids')='array'
+                            THEN json_extract(d.metadata, '$.source_memory_ids')
+                            ELSE '[]'
+                          END
+                        )
+                   WHERE COALESCE(d.archived,0)=0
+                     AND d.source='foundry_distill'
+                 ),
+                 ranked AS (
+                   SELECT s.id AS source_id,
+                          c.distill_id,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY s.id
+                            ORDER BY c.distill_ts DESC, c.distill_id DESC
+                          ) AS rn
+                   FROM coverage c
+                   JOIN memories s ON s.id=c.source_id
+                   WHERE COALESCE(s.archived,0)=0
+                     AND s.source!='foundry_distill'
+                     AND s.tier='raw'
+                     AND COALESCE(s.access_count,0)=0
+                     AND COALESCE(s.recall_count,0)=0
+                     AND COALESCE(s.retention_policy,'') NOT IN ('pinned','permanent')
+                     AND COALESCE(s.importance,0)<0.85
+                 )
+                 SELECT source_id, distill_id FROM ranked
+                 WHERE rn=1
+                 ORDER BY source_id",
+            )?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<(String, String)>, _>>()?;
+            rows
+        }
+        .into_iter()
+        .filter(|(source_id, distill_id)| {
+            !retired_sticky.contains(source_id) && !retired_sticky.contains(distill_id)
+        })
+        .collect::<Vec<_>>();
+        let covered_ids = covered_pairs
+            .iter()
+            .map(|(source_id, _)| source_id.as_str())
+            .collect::<HashSet<_>>();
+
+        let duplicate_pairs = {
+            let mut statement = self.tx.prepare(
+                "WITH normalized AS (
+                   SELECT id, path, summary, source, category, retention_policy, access_count,
+                          recall_count, importance, timestamp, tier,
+                          CASE
+                            WHEN path LIKE '/trading/equity/daily_review/%'
+                              AND instr(text,'{') > 0
+                              AND json_valid(substr(text, instr(text,'{')))
+                            THEN json_remove(
+                              substr(text, instr(text,'{')),
+                              '$.summary.created_at',
+                              '$.created_at',
+                              '$.timestamp',
+                              '$.updated_at'
+                            )
+                            ELSE text
+                          END AS normalized_text
+                   FROM memories
+                   WHERE COALESCE(archived,0)=0
+                 ),
+                 ranked AS (
+                   SELECT *,
+                          COUNT(*) OVER (
+                            PARTITION BY path, summary, normalized_text, source, category
+                          ) AS group_count,
+                          FIRST_VALUE(id) OVER (
+                            PARTITION BY path, summary, normalized_text, source, category
+                            ORDER BY
+                              CASE WHEN retention_policy IN ('pinned','permanent') THEN 1 ELSE 0 END DESC,
+                              COALESCE(access_count,0) DESC,
+                              COALESCE(recall_count,0) DESC,
+                              COALESCE(importance,0) DESC,
+                              timestamp DESC,
+                              id DESC
+                          ) AS keep_id,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY path, summary, normalized_text, source, category
+                            ORDER BY
+                              CASE WHEN retention_policy IN ('pinned','permanent') THEN 1 ELSE 0 END DESC,
+                              COALESCE(access_count,0) DESC,
+                              COALESCE(recall_count,0) DESC,
+                              COALESCE(importance,0) DESC,
+                              timestamp DESC,
+                              id DESC
+                          ) AS rn
+                   FROM normalized
+                 )
+                 SELECT id, keep_id
+                 FROM ranked
+                 WHERE group_count > 1
+                   AND rn > 1
+                   AND id != keep_id
+                   AND source!='foundry_distill'
+                   AND tier='raw'
+                   AND COALESCE(access_count,0)=0
+                   AND COALESCE(recall_count,0)=0
+                   AND COALESCE(retention_policy,'') NOT IN ('pinned','permanent')
+                 ORDER BY id",
+            )?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<(String, String)>, _>>()?;
+            rows
+        }
+        .into_iter()
+        .filter(|(source_id, keep_id)| {
+            !retired_sticky.contains(source_id)
+                && !retired_sticky.contains(keep_id)
+                && !covered_ids.contains(source_id.as_str())
+        })
+        .collect::<Vec<_>>();
+
+        Ok(R12MemoryHygienePreparation {
+            promoted,
+            derived_inserted,
+            edges_inserted,
+            covered_pairs,
+            duplicate_pairs,
+        })
     }
 
     /// Read active Wiki/Guide candidates from the same writer snapshot used
@@ -1660,6 +1995,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
                 "canonical supersession edge endpoints must be distinct".to_string(),
             ));
         }
+        let _authorization =
+            db::authorize_canonical_supersession_edge_write(&self.reserved_reference_write)?;
         db::add_edge_with_provenance(&self.tx, edge, provenance)
     }
 
@@ -2524,6 +2861,182 @@ mod tests {
                 .is_none(),
             "rolled-back lifecycle mutation must not leave a receipt"
         );
+    }
+
+    #[test]
+    fn raw_connection_cannot_mutate_reserved_supersedes_edges() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        for id in ["raw-edge-source", "raw-edge-target"] {
+            store
+                .insert_if_absent(&fixture_entry(id))
+                .expect("seed edge endpoint");
+        }
+        let guard_count: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM temp.sqlite_master
+                 WHERE type='trigger' AND name IN (
+                   'tachi_authority_hard_state_insert_guard',
+                   'tachi_authority_hard_state_update_guard',
+                   'tachi_authority_hard_state_delete_guard',
+                   'tachi_supersession_event_insert_guard',
+                   'tachi_supersession_event_update_guard',
+                   'tachi_supersession_event_delete_guard',
+                   'tachi_canonical_supersession_edge_insert_guard',
+                   'tachi_canonical_supersession_edge_update_guard',
+                   'tachi_canonical_supersession_edge_delete_guard'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count exact authority guards");
+        assert_eq!(guard_count, 9, "exact connection-local guard inventory");
+
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memory_edges
+                   (source_id,target_id,relation,weight,metadata,created_at,valid_from)
+                 VALUES (?1,?2,'related_to',1.0,'{}',?3,?3)",
+                params!["raw-edge-source", "raw-edge-target", db::now_utc_iso()],
+            )
+            .expect("ordinary raw edge remains allowed");
+        {
+            let authorization = store.reserved_reference_write.clone();
+            let _event_authorization = db::authorize_reserved_reference_write(&authorization)
+                .expect("arm generic typed event authority");
+            assert!(store
+                .connection()
+                .execute(
+                    "UPDATE memory_edges SET relation='supersedes'
+                     WHERE source_id='raw-edge-source' AND target_id='raw-edge-target'",
+                    [],
+                )
+                .is_err());
+        }
+        assert!(store
+            .connection()
+            .execute(
+                "INSERT INTO memory_edges
+                   (source_id,target_id,relation,weight,metadata,created_at,valid_from)
+                 VALUES (?1,?2,'supersedes',1.0,'{}',?3,?3)",
+                params!["raw-edge-target", "raw-edge-source", db::now_utc_iso()],
+            )
+            .is_err());
+
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("raw-edge-source", "raw-edge-target")?;
+                let now = db::now_utc_iso();
+                operation.add_canonical_supersession_edge(
+                    &MemoryEdge {
+                        source_id: "raw-edge-target".to_string(),
+                        target_id: "raw-edge-source".to_string(),
+                        relation: "supersedes".to_string(),
+                        weight: 1.0,
+                        metadata: serde_json::json!({"source":"test"}),
+                        created_at: now.clone(),
+                        valid_from: now,
+                        valid_to: None,
+                    },
+                    &db::EdgeProvenance {
+                        authority: Some(db::EdgeAuthority::StructuralBookkeeping),
+                        ..Default::default()
+                    },
+                )
+            })
+            .expect("canonical edge writer remains authorized");
+        assert!(store
+            .connection()
+            .execute(
+                "DELETE FROM memory_edges
+                 WHERE source_id='raw-edge-target' AND target_id='raw-edge-source'
+                   AND relation='supersedes'",
+                [],
+            )
+            .is_err());
+        assert!(store
+            .connection()
+            .execute(
+                "UPDATE memory_edges SET relation='related_to'
+                 WHERE source_id='raw-edge-target' AND target_id='raw-edge-source'
+                   AND relation='supersedes'",
+                [],
+            )
+            .is_err());
+        store
+            .connection()
+            .execute(
+                "DELETE FROM memory_edges
+                 WHERE source_id='raw-edge-source' AND target_id='raw-edge-target'
+                   AND relation='related_to'",
+                [],
+            )
+            .expect("ordinary raw edge delete remains allowed");
+    }
+
+    #[test]
+    fn idless_near_duplicate_dependent_failure_rolls_back_canonical_bundle() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        let shared = "alpha bravo charlie delta echo foxtrot golf hotel india juliet \
+                      kilo lima mike november oscar papa quebec romeo sierra";
+        let mut winner = fixture_entry("idless-rollback-winner");
+        winner.path = "/notes/idless-rollback".to_string();
+        winner.text = format!("{shared} tango");
+        store
+            .upsert_idless(&winner, "idless-rollback-winner-identity")
+            .expect("seed winner");
+        let mut loser = fixture_entry("idless-rollback-loser");
+        loser.path = winner.path.clone();
+        loser.text = format!("{shared} uniform");
+
+        let error = store
+            .with_immutable_supersession_transaction::<()>(|operation| {
+                operation.upsert_idless_with_near_duplicate_merge(
+                    &loser,
+                    "idless-rollback-loser-identity",
+                    &Map::new(),
+                    &[],
+                    &[],
+                )?;
+                Err(MemoryError::Internal(
+                    "injected idless dependent failure".to_string(),
+                ))
+            })
+            .expect_err("dependent failure must roll back idless canonical bundle");
+        assert!(error
+            .to_string()
+            .contains("injected idless dependent failure"));
+        assert!(store.get(&loser.id).expect("read loser").is_none());
+        assert_eq!(store.supersession_target(&winner.id).unwrap(), Some(None));
+        for table_count in [
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_edges WHERE relation='supersedes'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM hard_state WHERE namespace=?1",
+                    [SUPERSESSION_RECEIPT_NAMESPACE],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM tachi_events WHERE event_type=?1",
+                    [SUPERSESSION_RECEIPT_EVENT_TYPE],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+        ] {
+            assert_eq!(table_count, 0);
+        }
     }
 
     #[test]

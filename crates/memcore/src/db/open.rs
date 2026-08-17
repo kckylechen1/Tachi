@@ -6,7 +6,7 @@
 //! `reserved_reference_authorizer` denies **all** schema mutation — every
 //! CREATE/DROP of table, index, view, trigger and virtual table, TEMP variants
 //! included, plus ALTER TABLE / ANALYZE / REINDEX (see `schema_mutation`).
-//! The only DDL it ever returns `SQLITE_OK` for is two byte-exact internal
+//! The only DDL it ever returns `SQLITE_OK` for is three byte-exact internal
 //! shapes:
 //!
 //! 1. the canonical `memories_reserved_refs_{insert,update}_guard` and
@@ -14,7 +14,10 @@
 //!    token is armed (`authorize_schema_migration`);
 //! 2. the `ingest_stable_owner_fence` temp trigger and its
 //!    `ingest_owner_fence_context` temp table, while the owner-fence token is
-//!    armed (`is_exact_ingest_owner_fence_temp_ddl`).
+//!    armed (`is_exact_ingest_owner_fence_temp_ddl`);
+//! 3. the connection-local hard-state, supersession-event, and canonical-edge
+//!    guard triggers while their private installer is armed
+//!    (`is_exact_authority_row_temp_trigger`).
 //!
 //! Note the ordering consequence: the trigger branch runs *before* the blanket
 //! `schema_migration` allow, so even an armed migration token cannot create an
@@ -106,6 +109,7 @@ pub(crate) fn sqlite_busy_deadline_remaining() -> Option<Duration> {
 
 pub(crate) struct ConnectionAuthorizationState {
     typed_dml: AtomicBool,
+    canonical_supersession_edge: AtomicBool,
     schema_migration: AtomicBool,
     planner_maintenance: AtomicBool,
     ingest_owner_fence: AtomicBool,
@@ -116,6 +120,7 @@ pub(crate) type ReservedReferenceWriteFlag = Arc<ConnectionAuthorizationState>;
 
 enum AuthorizationKind {
     TypedDml,
+    CanonicalSupersessionEdge,
     SchemaMigration,
     PlannerMaintenance,
     IngestOwnerFence,
@@ -131,6 +136,10 @@ impl Drop for ReservedReferenceWriteAuthorization {
     fn drop(&mut self) {
         match self.kind {
             AuthorizationKind::TypedDml => self.flag.typed_dml.store(false, Ordering::SeqCst),
+            AuthorizationKind::CanonicalSupersessionEdge => self
+                .flag
+                .canonical_supersession_edge
+                .store(false, Ordering::SeqCst),
             AuthorizationKind::SchemaMigration => {
                 self.flag.schema_migration.store(false, Ordering::SeqCst)
             }
@@ -153,6 +162,7 @@ pub(crate) fn register_reserved_reference_write_guard(
 ) -> rusqlite::Result<ReservedReferenceWriteFlag> {
     let flag = Arc::new(ConnectionAuthorizationState {
         typed_dml: AtomicBool::new(false),
+        canonical_supersession_edge: AtomicBool::new(false),
         schema_migration: AtomicBool::new(false),
         planner_maintenance: AtomicBool::new(false),
         ingest_owner_fence: AtomicBool::new(false),
@@ -167,6 +177,19 @@ pub(crate) fn register_reserved_reference_write_guard(
             Ok(i64::from(
                 function_flag.typed_dml.load(Ordering::SeqCst)
                     || function_flag.schema_migration.load(Ordering::SeqCst),
+            ))
+        },
+    )?;
+    let canonical_edge_flag = Arc::clone(&flag);
+    conn.create_scalar_function(
+        "tachi_canonical_supersession_edge_write_enabled",
+        0,
+        FunctionFlags::SQLITE_UTF8,
+        move |_| {
+            Ok(i64::from(
+                canonical_edge_flag
+                    .canonical_supersession_edge
+                    .load(Ordering::SeqCst),
             ))
         },
     )?;
@@ -230,7 +253,15 @@ fn is_exact_authority_row_temp_trigger(
         ]
         .iter()
         .any(|name| sqlite_identifier_eq(arg1, name));
-    hard_state_guard || event_guard
+    let canonical_edge_guard = sqlite_identifier_eq(arg2, b"memory_edges")
+        && [
+            b"tachi_canonical_supersession_edge_insert_guard".as_slice(),
+            b"tachi_canonical_supersession_edge_update_guard".as_slice(),
+            b"tachi_canonical_supersession_edge_delete_guard".as_slice(),
+        ]
+        .iter()
+        .any(|name| sqlite_identifier_eq(arg1, name));
+    hard_state_guard || event_guard || canonical_edge_guard
 }
 
 fn is_exact_ingest_owner_fence_temp_ddl(
@@ -565,9 +596,26 @@ pub(crate) fn authorize_reserved_reference_write(
     })
 }
 
+pub(crate) fn authorize_canonical_supersession_edge_write(
+    flag: &ReservedReferenceWriteFlag,
+) -> Result<ReservedReferenceWriteAuthorization, MemoryError> {
+    flag.canonical_supersession_edge
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| {
+            MemoryError::InvalidArg(
+                "canonical supersession edge write authorization is already active".to_string(),
+            )
+        })?;
+    Ok(ReservedReferenceWriteAuthorization {
+        flag: Arc::clone(flag),
+        kind: AuthorizationKind::CanonicalSupersessionEdge,
+    })
+}
+
 /// Install connection-local row guards for write-once hard-state authority and
-/// immutable supersession events. Ordinary hard-state namespaces and ordinary
-/// events remain available to existing typed and compatibility paths.
+/// immutable supersession events, and canonical supersession edges. Ordinary
+/// hard-state namespaces, events, and graph relations remain available to
+/// existing typed and compatibility paths.
 pub(crate) fn install_authority_row_guards(
     conn: &Connection,
     flag: &ReservedReferenceWriteFlag,
@@ -579,6 +627,11 @@ pub(crate) fn install_authority_row_guards(
     )?;
     let has_events = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'tachi_events')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let has_edges = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'memory_edges')",
         [],
         |row| row.get::<_, bool>(0),
     )?;
@@ -624,6 +677,25 @@ pub(crate) fn install_authority_row_guards(
              BEFORE DELETE ON main.tachi_events
              WHEN OLD.event_type = 'memory.supersession.receipt.v1'
               AND tachi_reserved_reference_write_enabled() = 0
+             BEGIN SELECT RAISE(ABORT, 'not authorized'); END;",
+        )?;
+    }
+    if has_edges {
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER IF NOT EXISTS tachi_canonical_supersession_edge_insert_guard
+             BEFORE INSERT ON main.memory_edges
+             WHEN NEW.relation = 'supersedes'
+              AND tachi_canonical_supersession_edge_write_enabled() = 0
+             BEGIN SELECT RAISE(ABORT, 'not authorized'); END;
+             CREATE TEMP TRIGGER IF NOT EXISTS tachi_canonical_supersession_edge_update_guard
+             BEFORE UPDATE ON main.memory_edges
+             WHEN (OLD.relation = 'supersedes' OR NEW.relation = 'supersedes')
+              AND tachi_canonical_supersession_edge_write_enabled() = 0
+             BEGIN SELECT RAISE(ABORT, 'not authorized'); END;
+             CREATE TEMP TRIGGER IF NOT EXISTS tachi_canonical_supersession_edge_delete_guard
+             BEFORE DELETE ON main.memory_edges
+             WHEN OLD.relation = 'supersedes'
+              AND tachi_canonical_supersession_edge_write_enabled() = 0
              BEGIN SELECT RAISE(ABORT, 'not authorized'); END;",
         )?;
     }

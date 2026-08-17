@@ -4,8 +4,6 @@
 //! distill runs wrote durable summaries but left the raw source rows active.
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
-use rusqlite::TransactionBehavior;
-use std::collections::HashSet;
 
 pub struct MemoryHygiene;
 
@@ -36,58 +34,54 @@ fn push_count(report: &mut RuleReport, kind: &str, count: usize) {
 }
 
 fn apply_r12_supersession(
-    store: &mut memcore::MemoryStore,
+    replacement: &mut memcore::store::immutable_supersession::ImmutableSupersessionTransaction<'_>,
     source_id: &str,
     target_id: &str,
     archive_reason: &str,
-) -> Result<bool, RepairError> {
-    let applied = store.with_immutable_supersession_transaction(|replacement| {
-        let source = replacement
-            .get_memory(source_id)?
-            .ok_or_else(|| memcore::MemoryError::NotFound(source_id.to_string()))?;
-        let target = replacement
-            .get_memory(target_id)?
-            .ok_or_else(|| memcore::MemoryError::NotFound(target_id.to_string()))?;
-        let expected =
-            memcore::SupersessionExpectedState::active_unsuperseded(&source, Some(&target));
-        let outcome = replacement.claim_and_archive_immutable_supersession_for_r12(
-            source_id,
-            target_id,
-            Some(&expected),
-        )?;
-        if !outcome.is_applied() {
-            return Ok(false);
-        }
-        let now = memcore::now_utc_iso();
-        replacement.add_canonical_supersession_edge(
-            &memcore::MemoryEdge {
-                source_id: target_id.to_string(),
-                target_id: source_id.to_string(),
-                relation: "supersedes".to_string(),
-                weight: 1.0,
-                metadata: serde_json::json!({
-                    "source": "r12_memory_hygiene",
-                    "reason": archive_reason,
-                }),
-                created_at: now.clone(),
-                valid_from: now,
-                valid_to: None,
-            },
-            &memcore::db::EdgeProvenance {
-                authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
-                ..Default::default()
-            },
-        )?;
-        replacement.update_claimed_source_metadata(
-            source_id,
-            &serde_json::json!({
-                "repair_rule": "R12",
-                "archive_reason": archive_reason,
+) -> Result<bool, memcore::MemoryError> {
+    let source = replacement
+        .get_memory(source_id)?
+        .ok_or_else(|| memcore::MemoryError::NotFound(source_id.to_string()))?;
+    let target = replacement
+        .get_memory(target_id)?
+        .ok_or_else(|| memcore::MemoryError::NotFound(target_id.to_string()))?;
+    let expected = memcore::SupersessionExpectedState::active_unsuperseded(&source, Some(&target));
+    let outcome = replacement.claim_and_archive_immutable_supersession_for_r12(
+        source_id,
+        target_id,
+        Some(&expected),
+    )?;
+    if !outcome.is_applied() {
+        return Ok(false);
+    }
+    let now = memcore::now_utc_iso();
+    replacement.add_canonical_supersession_edge(
+        &memcore::MemoryEdge {
+            source_id: target_id.to_string(),
+            target_id: source_id.to_string(),
+            relation: "supersedes".to_string(),
+            weight: 1.0,
+            metadata: serde_json::json!({
+                "source": "r12_memory_hygiene",
+                "reason": archive_reason,
             }),
-        )?;
-        Ok(true)
-    })?;
-    Ok(applied)
+            created_at: now.clone(),
+            valid_from: now,
+            valid_to: None,
+        },
+        &memcore::db::EdgeProvenance {
+            authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+            ..Default::default()
+        },
+    )?;
+    replacement.update_claimed_source_metadata(
+        source_id,
+        &serde_json::json!({
+            "repair_rule": "R12",
+            "archive_reason": archive_reason,
+        }),
+    )?;
+    Ok(true)
 }
 
 const LEGACY_DISTILL_RAW_SQL: &str = r#"
@@ -295,291 +289,41 @@ impl RepairRule for MemoryHygiene {
             return Ok(report);
         }
 
-        let tx = ctx
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let all_ids = {
-            let mut stmt = tx.prepare("SELECT id FROM memories ORDER BY id")?;
-            let ids = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            ids
-        };
-        let mut retired_sticky = Vec::new();
-        for id in all_ids {
-            match memcore::db::refuse_retired_sticky_row_within_tx(
-                &tx,
-                &id,
-                "mutated or projected by memory hygiene",
-            ) {
-                Ok(()) => {}
-                Err(memcore::MemoryError::InvalidArg(_)) => retired_sticky.push(id),
-                Err(error) => return Err(error.into()),
-            }
-        }
-        tx.execute_batch("CREATE TEMP TABLE r12_retired_sticky(id TEXT PRIMARY KEY);")?;
-        for id in retired_sticky {
-            tx.execute("INSERT INTO r12_retired_sticky(id) VALUES (?1)", [id])?;
-        }
-        // The batch below re-states COVERED_SAFE_RAW_SQL and
-        // SAFE_DUPLICATE_RAW_SQL inline; both copies of the
-        // `access_count`/`recall_count` guard carry the tachi#1459 caveat
-        // documented on those constants — the counters observe the search path
-        // only; reads through path-listing routes do not increment them.
-        tx.execute_batch(
-            r#"
-            CREATE TEMP TABLE r12_missing_edges(
-                distill_id TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                PRIMARY KEY(distill_id, source_id)
-            );
-            INSERT OR IGNORE INTO r12_missing_edges(distill_id, source_id)
-            WITH source_ids AS (
-              SELECT d.id AS distill_id, json_each.value AS source_id
-              FROM memories d,
-                   json_each(
-                     CASE
-                       WHEN json_valid(d.metadata)
-                        AND json_type(d.metadata, '$.source_memory_ids')='array'
-                       THEN json_extract(d.metadata, '$.source_memory_ids')
-                       ELSE '[]'
-                     END
-                   )
-              WHERE COALESCE(d.archived,0)=0
-                AND d.source='foundry_distill'
-            )
-            SELECT source_ids.distill_id, source_ids.source_id
-            FROM source_ids
-            JOIN memories s ON s.id=source_ids.source_id
-            LEFT JOIN memory_edges e ON e.source_id=source_ids.distill_id
-                                    AND e.target_id=source_ids.source_id
-                                    AND e.relation='distilled_from'
-            WHERE e.source_id IS NULL
-              AND source_ids.distill_id NOT IN (SELECT id FROM r12_retired_sticky)
-              AND source_ids.source_id NOT IN (SELECT id FROM r12_retired_sticky);
-
-            CREATE TEMP TABLE r12_covered_raw(
-                source_id TEXT PRIMARY KEY,
-                distill_id TEXT NOT NULL
-            );
-            INSERT OR IGNORE INTO r12_covered_raw(source_id, distill_id)
-            WITH coverage AS (
-              SELECT d.id AS distill_id, e.target_id AS source_id, d.timestamp AS distill_ts
-              FROM memory_edges e
-              JOIN memories d ON d.id=e.source_id
-              WHERE e.relation='distilled_from'
-                AND COALESCE(d.archived,0)=0
-                AND d.source='foundry_distill'
-              UNION
-              SELECT d.id AS distill_id, json_each.value AS source_id, d.timestamp AS distill_ts
-              FROM memories d,
-                   json_each(
-                     CASE
-                       WHEN json_valid(d.metadata)
-                        AND json_type(d.metadata, '$.source_memory_ids')='array'
-                       THEN json_extract(d.metadata, '$.source_memory_ids')
-                       ELSE '[]'
-                     END
-                   )
-              WHERE COALESCE(d.archived,0)=0
-                AND d.source='foundry_distill'
-            ),
-            ranked AS (
-              SELECT s.id AS source_id,
-                     c.distill_id,
-                     ROW_NUMBER() OVER (
-                       PARTITION BY s.id
-                       ORDER BY c.distill_ts DESC, c.distill_id DESC
-                     ) AS rn
-              FROM coverage c
-              JOIN memories s ON s.id=c.source_id
-              WHERE COALESCE(s.archived,0)=0
-                AND s.source!='foundry_distill'
-                AND s.tier='raw'
-                AND COALESCE(s.access_count,0)=0
-                AND COALESCE(s.recall_count,0)=0
-                AND COALESCE(s.retention_policy,'') NOT IN ('pinned','permanent')
-                AND COALESCE(s.importance,0)<0.85
-            )
-            SELECT source_id, distill_id FROM ranked
-            WHERE rn=1
-              AND source_id NOT IN (SELECT id FROM r12_retired_sticky)
-              AND distill_id NOT IN (SELECT id FROM r12_retired_sticky);
-
-            CREATE TEMP TABLE r12_duplicate_raw(
-                source_id TEXT PRIMARY KEY,
-                keep_id TEXT NOT NULL
-            );
-            INSERT OR IGNORE INTO r12_duplicate_raw(source_id, keep_id)
-            WITH normalized AS (
-              SELECT id, path, summary, source, category, retention_policy, access_count,
-                     recall_count, importance, timestamp, tier,
-                     CASE
-                       WHEN path LIKE '/trading/equity/daily_review/%'
-                         AND instr(text,'{') > 0
-                         AND json_valid(substr(text, instr(text,'{')))
-                       THEN json_remove(
-                         substr(text, instr(text,'{')),
-                         '$.summary.created_at',
-                         '$.created_at',
-                         '$.timestamp',
-                         '$.updated_at'
-                       )
-                       ELSE text
-                     END AS normalized_text
-              FROM memories
-              WHERE COALESCE(archived,0)=0
-                AND id NOT IN (SELECT id FROM r12_retired_sticky)
-            ),
-            ranked AS (
-              SELECT *,
-                     COUNT(*) OVER (
-                       PARTITION BY path, summary, normalized_text, source, category
-                     ) AS group_count,
-                     FIRST_VALUE(id) OVER (
-                       PARTITION BY path, summary, normalized_text, source, category
-                       ORDER BY
-                         CASE WHEN retention_policy IN ('pinned','permanent') THEN 1 ELSE 0 END DESC,
-                         COALESCE(access_count,0) DESC,
-                         COALESCE(recall_count,0) DESC,
-                         COALESCE(importance,0) DESC,
-                         timestamp DESC,
-                         id DESC
-                     ) AS keep_id,
-                     ROW_NUMBER() OVER (
-                       PARTITION BY path, summary, normalized_text, source, category
-                       ORDER BY
-                         CASE WHEN retention_policy IN ('pinned','permanent') THEN 1 ELSE 0 END DESC,
-                         COALESCE(access_count,0) DESC,
-                         COALESCE(recall_count,0) DESC,
-                         COALESCE(importance,0) DESC,
-                         timestamp DESC,
-                         id DESC
-                     ) AS rn
-              FROM normalized
-            )
-            SELECT id, keep_id
-            FROM ranked
-            WHERE group_count > 1
-              AND rn > 1
-              AND id != keep_id
-              AND source!='foundry_distill'
-              AND tier='raw'
-              AND COALESCE(access_count,0)=0
-              AND COALESCE(recall_count,0)=0
-              AND COALESCE(retention_policy,'') NOT IN ('pinned','permanent');
-            "#,
-        )?;
-
-        let promoted = tx.execute(
-            "UPDATE memories
-             SET tier='consolidated',
-                 updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                 revision=revision+1,
-                 metadata=json_set(
-                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                   '$.tier_repair','r12_memory_hygiene'
-                 )
-             WHERE COALESCE(archived,0)=0
-               AND source='foundry_distill'
-               AND tier='raw'
-               AND id NOT IN (SELECT id FROM r12_retired_sticky)",
-            [],
-        )?;
-
-        let derived_inserted = tx.execute(
-            "INSERT OR IGNORE INTO derived_items
-               (id, text, path, summary, importance, source, scope, metadata, created_at)
-             SELECT 'derived:' || m.id,
-                    m.text,
-                    m.path,
-                    m.summary,
-                    m.importance,
-                    m.source,
-                    m.scope,
-                    json_set(
-                      CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END,
-                      '$.legacy_repair','r12_memory_hygiene'
-                    ),
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             FROM memories m
-             WHERE COALESCE(m.archived,0)=0
-               AND m.source='foundry_distill'
-               AND m.tier='consolidated'
-               AND m.id NOT IN (SELECT id FROM r12_retired_sticky)",
-            [],
-        )?;
-
-        let edges_inserted = tx.execute(
-            "INSERT OR IGNORE INTO memory_edges
-               (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
-             SELECT distill_id,
-                    source_id,
-                    'distilled_from',
-                    1.0,
-                    json_object('source','r12_memory_hygiene'),
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                    NULL
-             FROM r12_missing_edges",
-            [],
-        )?;
-
-        let covered_pairs = {
-            let mut statement =
-                tx.prepare("SELECT source_id, distill_id FROM r12_covered_raw ORDER BY source_id")?;
-            let rows = statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<(String, String)>, _>>()?;
-            rows
-        };
-        let covered_ids = covered_pairs
-            .iter()
-            .map(|(source_id, _)| source_id.as_str())
-            .collect::<HashSet<_>>();
-        let duplicate_pairs = {
-            let mut statement =
-                tx.prepare("SELECT source_id, keep_id FROM r12_duplicate_raw ORDER BY source_id")?;
-            let rows = statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<(String, String)>, _>>()?;
-            rows.into_iter()
-                .filter(|(source_id, _)| !covered_ids.contains(source_id.as_str()))
-                .collect::<Vec<_>>()
-        };
-
-        tx.execute_batch(
-            "DROP TABLE r12_missing_edges;
-             DROP TABLE r12_covered_raw;
-             DROP TABLE r12_duplicate_raw;
-             DROP TABLE r12_retired_sticky;",
-        )?;
-        tx.commit()?;
-
         let db_path = ctx.path.to_string_lossy().into_owned();
         let mut semantic_store = memcore::MemoryStore::open_existing_read_write(&db_path)?;
-        let mut covered_archived = 0usize;
-        for (source_id, target_id) in covered_pairs {
-            if apply_r12_supersession(
-                &mut semantic_store,
-                &source_id,
-                &target_id,
-                "distill_source_superseded",
-            )? {
-                covered_archived += 1;
-            }
-        }
-        let mut duplicates_archived = 0usize;
-        for (source_id, target_id) in duplicate_pairs {
-            if apply_r12_supersession(
-                &mut semantic_store,
-                &source_id,
-                &target_id,
-                "duplicate_raw_fold",
-            )? {
-                duplicates_archived += 1;
-            }
-        }
+        let (promoted, derived_inserted, edges_inserted, covered_archived, duplicates_archived) =
+            semantic_store.with_immutable_supersession_transaction(|replacement| {
+                let preparation = replacement.prepare_r12_memory_hygiene()?;
+                let mut covered_archived = 0usize;
+                for (source_id, target_id) in &preparation.covered_pairs {
+                    if apply_r12_supersession(
+                        replacement,
+                        source_id,
+                        target_id,
+                        "distill_source_superseded",
+                    )? {
+                        covered_archived += 1;
+                    }
+                }
+                let mut duplicates_archived = 0usize;
+                for (source_id, target_id) in &preparation.duplicate_pairs {
+                    if apply_r12_supersession(
+                        replacement,
+                        source_id,
+                        target_id,
+                        "duplicate_raw_fold",
+                    )? {
+                        duplicates_archived += 1;
+                    }
+                }
+                Ok((
+                    preparation.promoted,
+                    preparation.derived_inserted,
+                    preparation.edges_inserted,
+                    covered_archived,
+                    duplicates_archived,
+                ))
+            })?;
 
         push_count(&mut report, "legacy_foundry_distill_raw", promoted);
         push_count(

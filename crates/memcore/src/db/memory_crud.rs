@@ -3128,41 +3128,24 @@ mod idless_upsert_tests {
     /// merge on the id-less path must opt in explicitly, the same way
     /// `upsert_idless_save_entry` (the production id-less `save_memory`
     /// opt-in) does — by going around `MemoryStore::upsert_idless` and
-    /// driving the transactional seam directly with
+    /// driving the production transaction seam with
     /// [`NearDuplicatePolicy::AllowNearDuplicateMerge`].
-    ///
-    /// Every production caller of this seam acquires
-    /// `authorize_reserved_reference_write` before opening its writer
-    /// transaction (see `MemoryStore::upsert_idless`,
-    /// `upsert_with_validated_reference_mutations_and_metadata_removals`);
-    /// the shared connection authorizer denies the main-row INSERT/UPDATE
-    /// otherwise (`reserved_reference_authorizer`'s `protected_memory_write`
-    /// branch, `crates/memcore/src/db/open.rs`). This helper must do the
-    /// same, or the write-time Jaccard merge fails with
-    /// `AuthorizationForStatementDenied` before it ever reaches the
-    /// candidate scan.
     fn upsert_idless_allowing_merge(
         store: &mut crate::MemoryStore,
         entry: &MemoryEntry,
         identity: &str,
     ) -> IdlessUpsertResult {
-        let _authorization =
-            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
-        let tx = store
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .unwrap();
-        let result = upsert_within_tx_inner(
-            &tx,
-            entry,
-            store.vec_available,
-            Some(identity),
-            false,
-            NearDuplicatePolicy::AllowNearDuplicateMerge,
-        )
-        .unwrap();
-        tx.commit().unwrap();
-        result
+        store
+            .upsert_with_validated_reference_mutations_and_metadata_removals(
+                entry,
+                Some(identity),
+                &Map::new(),
+                &[],
+                &[],
+                NearDuplicatePolicy::AllowNearDuplicateMerge,
+            )
+            .unwrap()
+            .0
     }
 
     /// A `(base, near_dup)` text pair with 0.9 < Jaccard < 1.0 similarity —
@@ -3533,6 +3516,47 @@ mod idless_upsert_tests {
             )
             .unwrap();
         assert_eq!(winner_identity.as_deref(), Some("identity-original"));
+
+        let canonical_edge: (String, String) = conn
+            .query_row(
+                "SELECT json_extract(metadata, '$.source'),
+                        json_extract(metadata, '$.authority')
+                 FROM memory_edges
+                 WHERE source_id='near-dup-original'
+                   AND target_id='near-dup-second'
+                   AND relation='supersedes'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("canonical winner-to-loser supersedes edge");
+        assert_eq!(
+            canonical_edge,
+            (
+                "idless_near_duplicate".to_string(),
+                "structural_bookkeeping".to_string()
+            )
+        );
+        let receipt_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM hard_state
+                 WHERE namespace = ?1
+                   AND json_extract(value_json, '$.source_id') = 'near-dup-second'
+                   AND json_extract(value_json, '$.target_id') = 'near-dup-original'",
+                [crate::SUPERSESSION_RECEIPT_NAMESPACE],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tachi_events
+                 WHERE event_type = ?1
+                   AND json_extract(payload_json, '$.source_id') = 'near-dup-second'
+                   AND json_extract(payload_json, '$.target_id') = 'near-dup-original'",
+                [crate::SUPERSESSION_RECEIPT_EVENT_TYPE],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((receipt_count, event_count), (1, 1));
     }
 
     /// #1331 BUG 2: id-less Jaccard early-return must sync the superseded
