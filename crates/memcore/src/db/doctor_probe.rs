@@ -295,6 +295,7 @@ pub fn open_raw(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+#[cfg(any(feature = "admin", test))]
 fn memory_error_to_rusqlite(error: crate::error::MemoryError) -> rusqlite::Error {
     match error {
         crate::error::MemoryError::Sqlite(error) => error,
