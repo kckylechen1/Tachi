@@ -545,6 +545,42 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
             Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_AUTHORITY_HARD_STATE_DELETE_GUARD",
+                ddl: "e9f7d57e6ed05487",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_AUTHORITY_HARD_STATE_INSERT_GUARD",
+                ddl: "b197c7596cafdb3a",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_AUTHORITY_HARD_STATE_UPDATE_GUARD",
+                ddl: "088c65c0ac15a272",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_SUPERSESSION_EVENT_DELETE_GUARD",
+                ddl: "9808dc1dc3f318ec",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_SUPERSESSION_EVENT_INSERT_GUARD",
+                ddl: "0ddbc17b53178011",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_SUPERSESSION_EVENT_UPDATE_GUARD",
+                ddl: "100f286dd78f4ed9",
+                occurrences: 1,
+            },
+            Site {
                 symbol: "install_ingest_stable_owner_fence",
                 trigger: "INGEST_STABLE_OWNER_FENCE",
                 ddl: "85cc694adcebac24",
@@ -575,7 +611,10 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "the wall's own module. INGEST_STABLE_OWNER_FENCE is the \
+        reason: "the wall's own module. The six install_authority_row_guards \
+                 sites are the byte-exact TEMP triggers admitted only while \
+                 the internal typed-DML token is armed; bodies read 2026-08-17. \
+                 INGEST_STABLE_OWNER_FENCE is the \
                  byte-exact temp-trigger shape the authorizer admits under the \
                  owner-fence token (install_ingest_stable_owner_fence, \
                  remove_ingest_stable_owner_fence, and the two scoped_owner_fence \
