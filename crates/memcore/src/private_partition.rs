@@ -516,11 +516,19 @@ fn generic_non_sqlite_image() -> MemoryError {
     MemoryError::InvalidArg("database path is not a valid SQLite image".to_string())
 }
 
-/// Generic MemoryStore open: an existing non-empty file must be a regular,
-/// directly opened SQLite image. Private envelopes, arbitrary malformed
-/// files, and symlinks all receive the same content-free refusal.
-pub(crate) fn refuse_generic_open_path(db_path: &str) -> Result<(), MemoryError> {
+/// Resolve an existing path to its canonical target, then require a regular
+/// SQLite image opened without following another final-component link. This
+/// preserves the repository's supported global-store symlink while ensuring
+/// SQLite receives the already-resolved target rather than racing a second
+/// traversal of the caller path. Private envelopes and arbitrary malformed
+/// files receive the same content-free refusal.
+pub(crate) fn resolve_generic_open_path(db_path: &str) -> Result<PathBuf, MemoryError> {
     let path = Path::new(db_path);
+    let resolved = match fs::canonicalize(path) {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path.to_path_buf()),
+        Err(_) => return Err(generic_non_sqlite_image()),
+    };
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -534,9 +542,8 @@ pub(crate) fn refuse_generic_open_path(db_path: &str) -> Result<(), MemoryError>
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let mut file = match options.open(path) {
+    let mut file = match options.open(&resolved) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(generic_non_sqlite_image()),
     };
     let metadata = file.metadata().map_err(|_| generic_non_sqlite_image())?;
@@ -544,13 +551,13 @@ pub(crate) fn refuse_generic_open_path(db_path: &str) -> Result<(), MemoryError>
         return Err(generic_non_sqlite_image());
     }
     if metadata.len() == 0 {
-        return Ok(());
+        return Ok(resolved);
     }
     let mut header = [0u8; SQLITE_HEADER.len()];
     if file.read_exact(&mut header).is_err() || &header != SQLITE_HEADER {
         return Err(generic_non_sqlite_image());
     }
-    Ok(())
+    Ok(resolved)
 }
 
 /// Generic MemoryStore open: a working file that still carries the stamp

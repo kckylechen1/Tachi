@@ -636,7 +636,9 @@ impl MemoryStore {
         ctx: &DbOpenContext,
         busy_timeout: Option<Duration>,
     ) -> Result<Self, MemoryError> {
-        crate::private_partition::refuse_generic_open_path(db_path)?;
+        let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
+        let resolved_db_path_string = resolved_db_path.to_string_lossy();
+        let db_path = resolved_db_path_string.as_ref();
         // Acquire the in-process startup lock BEFORE the #1132 rename-on-open
         // migration, not after (RESIDUAL-1). The migration's stat+rename+symlink
         // sequence and the `open_read_write` below (which CREATES the canonical
@@ -880,7 +882,9 @@ impl MemoryStore {
         db_label: &str,
         immutable: bool,
     ) -> Result<Self, MemoryError> {
-        crate::private_partition::refuse_generic_open_path(db_path)?;
+        let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
+        let resolved_db_path_string = resolved_db_path.to_string_lossy();
+        let db_path = resolved_db_path_string.as_ref();
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
@@ -986,7 +990,9 @@ impl MemoryStore {
     /// refuses an incomplete trigger inventory before exposing a write-capable
     /// connection.
     pub fn open_existing_read_write(db_path: &str) -> Result<Self, MemoryError> {
-        crate::private_partition::refuse_generic_open_path(db_path)?;
+        let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
+        let resolved_db_path_string = resolved_db_path.to_string_lossy();
+        let db_path = resolved_db_path_string.as_ref();
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
