@@ -201,7 +201,7 @@ fn expected_search_generation_trigger(raw_name: *const c_char, raw_table: *const
 const INGEST_OWNER_FENCE_CONTEXT_TABLE: &[u8] = b"ingest_owner_fence_context";
 const INGEST_STABLE_OWNER_FENCE_TRIGGER: &[u8] = b"ingest_stable_owner_fence";
 
-fn is_exact_supersession_evidence_temp_trigger(
+fn is_exact_authority_row_temp_trigger(
     action: c_int,
     arg1: *const c_char,
     arg2: *const c_char,
@@ -216,9 +216,9 @@ fn is_exact_supersession_evidence_temp_trigger(
     }
     let hard_state_guard = sqlite_identifier_eq(arg2, b"hard_state")
         && [
-            b"tachi_supersession_hard_state_insert_guard".as_slice(),
-            b"tachi_supersession_hard_state_update_guard".as_slice(),
-            b"tachi_supersession_hard_state_delete_guard".as_slice(),
+            b"tachi_authority_hard_state_insert_guard".as_slice(),
+            b"tachi_authority_hard_state_update_guard".as_slice(),
+            b"tachi_authority_hard_state_delete_guard".as_slice(),
         ]
         .iter()
         .any(|name| sqlite_identifier_eq(arg1, name));
@@ -335,8 +335,10 @@ unsafe extern "C" fn reserved_reference_authorizer(
     let (typed_dml, schema_migration, planner_maintenance, ingest_owner_fence) = if raw_connection {
         (false, false, false, false)
     } else {
-        // MemoryStore owns this state for longer than its Connection. Raw
-        // fixture handles pass null and therefore remain permanently denied.
+        // The connection-local scalar function owns an Arc clone for the
+        // connection lifetime; MemoryStore additionally retains one so typed
+        // seams can activate it. Raw fixture handles drop their returned clone
+        // after setup and therefore remain permanently deny-by-default.
         let state = unsafe { &*state.cast::<ConnectionAuthorizationState>() };
         (
             state.typed_dml.load(Ordering::SeqCst),
@@ -348,8 +350,8 @@ unsafe extern "C" fn reserved_reference_authorizer(
 
     let exact_ingest_owner_fence_temp_ddl =
         ingest_owner_fence && is_exact_ingest_owner_fence_temp_ddl(action, arg1, arg2, database);
-    let exact_supersession_evidence_temp_ddl =
-        typed_dml && is_exact_supersession_evidence_temp_trigger(action, arg1, arg2, database);
+    let exact_authority_row_temp_ddl =
+        typed_dml && is_exact_authority_row_temp_trigger(action, arg1, arg2, database);
 
     let trigger_ddl = matches!(
         action,
@@ -369,7 +371,7 @@ unsafe extern "C" fn reserved_reference_authorizer(
             && sqlite_identifier_eq(database, b"main");
         return if canonical_migration_trigger
             || exact_ingest_owner_fence_temp_ddl
-            || exact_supersession_evidence_temp_ddl
+            || exact_authority_row_temp_ddl
         {
             rusqlite::ffi::SQLITE_OK
         } else {
@@ -563,11 +565,10 @@ pub(crate) fn authorize_reserved_reference_write(
     })
 }
 
-/// Install connection-local row guards for immutable supersession evidence.
-/// Ordinary hard-state namespaces and ordinary events remain available to
-/// their existing typed and compatibility paths; only receipt rows require an
-/// active typed-DML authorization.
-pub(crate) fn install_supersession_evidence_guards(
+/// Install connection-local row guards for write-once hard-state authority and
+/// immutable supersession events. Ordinary hard-state namespaces and ordinary
+/// events remain available to existing typed and compatibility paths.
+pub(crate) fn install_authority_row_guards(
     conn: &Connection,
     flag: &ReservedReferenceWriteFlag,
 ) -> Result<(), MemoryError> {
@@ -584,20 +585,24 @@ pub(crate) fn install_supersession_evidence_guards(
     let _authorization = authorize_reserved_reference_write(flag)?;
     if has_hard_state {
         conn.execute_batch(
-            "CREATE TEMP TRIGGER IF NOT EXISTS tachi_supersession_hard_state_insert_guard
+            "CREATE TEMP TRIGGER IF NOT EXISTS tachi_authority_hard_state_insert_guard
              BEFORE INSERT ON main.hard_state
-             WHEN NEW.namespace = 'memory_supersession_receipts'
+             WHEN NEW.namespace IN ('store_identity', 'operator_maintenance_receipt',
+                                    'memory_supersession_receipts')
               AND tachi_reserved_reference_write_enabled() = 0
              BEGIN SELECT RAISE(ABORT, 'not authorized'); END;
-             CREATE TEMP TRIGGER IF NOT EXISTS tachi_supersession_hard_state_update_guard
+             CREATE TEMP TRIGGER IF NOT EXISTS tachi_authority_hard_state_update_guard
              BEFORE UPDATE ON main.hard_state
-             WHEN (OLD.namespace = 'memory_supersession_receipts'
-                OR NEW.namespace = 'memory_supersession_receipts')
+             WHEN (OLD.namespace IN ('store_identity', 'operator_maintenance_receipt',
+                                    'memory_supersession_receipts')
+                OR NEW.namespace IN ('store_identity', 'operator_maintenance_receipt',
+                                    'memory_supersession_receipts'))
               AND tachi_reserved_reference_write_enabled() = 0
              BEGIN SELECT RAISE(ABORT, 'not authorized'); END;
-             CREATE TEMP TRIGGER IF NOT EXISTS tachi_supersession_hard_state_delete_guard
+             CREATE TEMP TRIGGER IF NOT EXISTS tachi_authority_hard_state_delete_guard
              BEFORE DELETE ON main.hard_state
-             WHEN OLD.namespace = 'memory_supersession_receipts'
+             WHEN OLD.namespace IN ('store_identity', 'operator_maintenance_receipt',
+                                    'memory_supersession_receipts')
               AND tachi_reserved_reference_write_enabled() = 0
              BEGIN SELECT RAISE(ABORT, 'not authorized'); END;",
         )?;

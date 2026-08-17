@@ -262,8 +262,10 @@ pub fn open_for_wal_checkpoint(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     refuse_private_partition_connection(&conn)?;
     let _ = conn.busy_timeout(Duration::from_millis(5_000));
-    let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
-    super::install_reserved_reference_authorizer(&conn, None)?;
+    let deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
+    super::install_reserved_reference_authorizer(&conn, Some(&deny_by_default))?;
+    super::install_authority_row_guards(&conn, &deny_by_default)
+        .map_err(memory_error_to_rusqlite)?;
     Ok(conn)
 }
 
@@ -285,14 +287,20 @@ pub fn checkpoint_wal_truncate(conn: &Connection) -> rusqlite::Result<()> {
 pub fn open_raw(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     refuse_private_partition_connection(&conn)?;
-    let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
-    super::install_reserved_reference_authorizer(&conn, None)?;
-    super::validate_persistent_trigger_inventory(&conn, false).map_err(|error| match error {
+    let deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
+    super::install_reserved_reference_authorizer(&conn, Some(&deny_by_default))?;
+    super::validate_persistent_trigger_inventory(&conn, false).map_err(memory_error_to_rusqlite)?;
+    super::install_authority_row_guards(&conn, &deny_by_default)
+        .map_err(memory_error_to_rusqlite)?;
+    Ok(conn)
+}
+
+fn memory_error_to_rusqlite(error: crate::error::MemoryError) -> rusqlite::Error {
+    match error {
         crate::error::MemoryError::Sqlite(error) => error,
         other => rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
             Some(other.to_string()),
         ),
-    })?;
-    Ok(conn)
+    }
 }

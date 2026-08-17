@@ -567,7 +567,7 @@ impl MemoryStore {
         drop(migration_authorization);
         let resolved = schema_result?.identity;
         db::validate_persistent_trigger_inventory(&conn, true)?;
-        db::install_supersession_evidence_guards(&conn, &reserved_reference_write)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let mut store = Self {
             conn,
             reserved_reference_write,
@@ -709,7 +709,7 @@ impl MemoryStore {
         let identity = schema_result?.identity;
         crate::private_partition::refuse_stamped_private_store(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
-        db::install_supersession_evidence_guards(&conn, &reserved_reference_write)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
             db_path,
             opened_physical_db_identity.clone(),
@@ -786,7 +786,7 @@ impl MemoryStore {
         }
         db::migrations::validate_current_schema_integrity(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
-        db::install_supersession_evidence_guards(&conn, &reserved_reference_write)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         let opened_physical_db_identity =
             validate_physical_db_identity_across_open(db_path, Some(before_reopen))?;
@@ -949,7 +949,7 @@ impl MemoryStore {
             // only for an older stamp, never a way to accept a damaged v23 DB.
             db::validate_persistent_trigger_inventory(&conn, true)?;
         }
-        db::install_supersession_evidence_guards(&conn, &reserved_reference_write)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         if compat_operation.is_none() || !is_stamped_older_schema {
             db::migrations::check_db_open_context_gate(
                 &conn,
@@ -1018,7 +1018,7 @@ impl MemoryStore {
         }
         db::migrations::validate_current_schema_integrity(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
-        db::install_supersession_evidence_guards(&conn, &reserved_reference_write)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         // A version stamp is not proof of shape. Prepare the complete memories
         // projection exact-dedupe reads and writes before returning a writable
         // handle; this validates only and deliberately performs no
@@ -1074,7 +1074,7 @@ impl MemoryStore {
         drop(migration_authorization);
         schema_result?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
-        db::install_supersession_evidence_guards(&conn, &reserved_reference_write)?;
+        db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
