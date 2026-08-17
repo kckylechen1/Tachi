@@ -28,18 +28,15 @@ fn portable_build_disables_admin_surface() {
     );
 }
 
-/// #1119 remediation text, portable branch (2026-08-16 Hyperion mis-chase):
-/// memcore built without `admin` must NOT send the operator after
-/// `tachi-server --allow-schema-migration` — a portable product shell (e.g.
-/// Hyperion's `hypermem`) has no such flag. The text must also stay
-/// host-neutral: memcore's feature bit cannot know which shell embeds it,
-/// and tachi's own `portable-server` DOES accept `--allow-schema-migration`,
-/// so both routes (shell flag first, shell migrate ritual second) are named.
+/// #1119 remediation text, portable branch: memcore built without `admin`
+/// must not prescribe a product-specific command. The feature bit cannot
+/// know which shell embeds it or which migration operations that shell
+/// supports, so the hint must remain product-neutral.
 /// The admin branch is pinned by memcore's own Display test; workspace
 /// feature unification prevents asserting both branches in one build, which
 /// is why this lives in the isolated contract test.
 #[test]
-fn schema_migration_refusal_hints_portable_builds_at_shell_migrate_ritual() {
+fn schema_migration_refusal_keeps_portable_remediation_product_neutral() {
     // Tripwire on the compile-time constant, deliberately (same shape as the
     // post-#1062 tripwire in exec_env_reaper): every assertion below is only
     // meaningful while this facade resolves memcore without `admin`.
@@ -62,18 +59,16 @@ fn schema_migration_refusal_hints_portable_builds_at_shell_migrate_ritual() {
         !text.contains("--allow-schema-migration to tachi-server"),
         "portable builds must not chase a flag their shell does not have: {text}"
     );
-    // Host-neutral, both real routes present: a shell-provided opt-in flag
-    // (tachi's portable-server has one — naming it must not mislead THAT
-    // operator into a migrate ritual they do not need) and the shell's
-    // migrate ritual (the `hypermem` shell has no flag — 2026-08-16
-    // mis-chase).
     assert!(
         text.contains("portable build")
-            && text.contains("schema-migration opt-in")
-            && text.contains("portable-server")
-            && text.contains("migrate ritual")
-            && text.contains("hypermem migrate"),
-        "portable builds name both shell routes, flag first then ritual: {text}"
+            && text.contains("embedding product")
+            && text.contains("documented schema-migration opt-in")
+            && text.contains("documented migration procedure"),
+        "portable builds must delegate remediation to the embedding product's docs: {text}"
+    );
+    assert!(
+        !text.contains("portable-server") && !text.contains("hypermem migrate"),
+        "portable memcore must not guess which product command can remediate the refusal: {text}"
     );
     assert!(
         text.contains("/data/legacy.db.migration-marker"),

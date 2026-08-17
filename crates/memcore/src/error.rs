@@ -483,16 +483,9 @@ pub enum MemoryError {
 ///
 /// The admin branch keeps the historical tachi-server deploy-ritual guidance:
 /// that flag is where the opt-in lives for the full product. The portable
-/// branch (memcore built without `admin` — the `portable-kernel` facade that
-/// embedded product shells such as Hyperion's `hypermem` consume) must NOT
-/// send the operator hunting for `tachi-server --allow-schema-migration`: a
-/// portable shell typically has no such flag and no tachi-server binary at
-/// all (2026-08-16: a Hyperion operator chased the canned hint for a flag
-/// that does not exist in that build). But memcore's feature bit cannot know
-/// which shell is embedding it — tachi's own `portable-server` DOES carry
-/// `--allow-schema-migration` — so the portable text stays host-neutral:
-/// name the shell's own opt-in flag first (when it has one), else the
-/// shell's migrate ritual (`hypermem migrate` for the shell that lacks one).
+/// branch cannot know which product embeds memcore or which migration
+/// operations that product supports, so it points only at the embedding
+/// product's documented authority entry point or migration procedure.
 ///
 /// Private on purpose: the public contract is the typed variant, not this
 /// prose. Build-form assertions live next to the Display tests in
@@ -503,10 +496,8 @@ fn schema_migration_authority_hint() -> &'static str {
         "pass --allow-schema-migration to tachi-server, which becomes a typed \
          MigrationAuthority::Allow threaded to every DB open (never a process env var)"
     } else {
-        "this is a portable build without the tachi-server admin surface — authorize \
-         through the embedding product shell instead: its own schema-migration opt-in \
-         flag if it provides one (tachi's portable-server does have \
-         --allow-schema-migration), otherwise its migrate ritual (e.g. `hypermem migrate` \
-         for Hyperion HyperMemory)"
+        "this portable build cannot grant migration authority itself — reopen it through \
+         the embedding product's documented schema-migration opt-in entry point, or follow \
+         that product's documented migration procedure"
     }
 }
