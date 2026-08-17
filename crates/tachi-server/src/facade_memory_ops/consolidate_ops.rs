@@ -370,6 +370,12 @@ pub(crate) fn merge_into_for_project(
     target_id: &str,
 ) -> Result<Value, String> {
     merge_into_for_project_with_expected(server, project, source_id, target_id, None)
+        .map(|result| result.response)
+}
+
+pub(crate) struct Route1MergeResult {
+    pub(crate) response: Value,
+    pub(crate) committed_survivor: MemoryEntry,
 }
 
 pub(crate) fn merge_into_for_project_with_expected(
@@ -378,15 +384,22 @@ pub(crate) fn merge_into_for_project_with_expected(
     source_id: &str,
     target_id: &str,
     expected: Option<memcore::store::immutable_supersession::SupersessionExpectedState>,
-) -> Result<Value, String> {
-    apply_lifecycle_action(
+) -> Result<Route1MergeResult, String> {
+    let result = apply_lifecycle_action(
         server,
         &minimal_params_for_project(project),
         "merge_into",
         source_id,
         Some(target_id),
         expected,
-    )
+    )?;
+    let committed_survivor = result.committed_target.ok_or_else(|| {
+        "route-1 merge_into completed without a committed target snapshot".to_string()
+    })?;
+    Ok(Route1MergeResult {
+        response: result.response,
+        committed_survivor,
+    })
 }
 
 /// Bare `TachiMemoryParams` carrying only `action`/`project`, for callers
@@ -450,6 +463,11 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
 /// stale drift is a zero-write refusal instead of a best-effort CAS.
 pub(crate) const ROUTE1_MERGE_POLICY_VERSION: &str = "memory-lifecycle-route1-merge-v2";
 
+struct LifecycleActionResult {
+    response: Value,
+    committed_target: Option<MemoryEntry>,
+}
+
 fn apply_lifecycle_action(
     server: &MemoryServer,
     params: &TachiMemoryParams,
@@ -457,7 +475,7 @@ fn apply_lifecycle_action(
     source_id: &str,
     target_id: Option<&str>,
     expected: Option<memcore::store::immutable_supersession::SupersessionExpectedState>,
-) -> Result<Value, String> {
+) -> Result<LifecycleActionResult, String> {
     let result = match action {
         "supersede" => {
             let target = target_id.ok_or_else(|| {
@@ -491,13 +509,16 @@ fn apply_lifecycle_action(
                         Ok(receipt)
                     })
                     .map_err(|e| format!("supersede refused: {e}"))?;
-                Ok(json!({
+                Ok(LifecycleActionResult {
+                    response: json!({
                     "lifecycle_action": "supersede",
                     "source_id": source_id,
                     "target_id": target,
                     "superseded": true,
                     "archived": true,
-                }))
+                    }),
+                    committed_target: None,
+                })
             })
         }
         "merge_into" | "near_dup_merge" => {
@@ -509,7 +530,14 @@ fn apply_lifecycle_action(
                 // transaction. A stale A -> B request after A -> C therefore
                 // cannot mutate B, and any later write failure rolls A's claim
                 // back instead of leaving a partial lifecycle result.
-                let (receipt, source_revision, target_revision, merged_keywords, merged_entities) = store
+                let (
+                    receipt,
+                    source_revision,
+                    target_revision,
+                    merged_keywords,
+                    merged_entities,
+                    committed_target,
+                ) = store
                     .with_immutable_supersession_transaction(|replacement| {
                         let source = replacement
                             .get_memory(source_id)?
@@ -556,16 +584,21 @@ fn apply_lifecycle_action(
                                 "consolidate_route1_target_fold_committed",
                             )?;
                         }
+                        let committed_target = replacement
+                            .get_memory(target)?
+                            .ok_or_else(|| memcore::MemoryError::NotFound(target.to_string()))?;
                         Ok((
                             receipt,
                             source_revision,
                             target_revision,
                             survivor.keywords.len(),
                             survivor.entities.len(),
+                            committed_target,
                         ))
                     })
                     .map_err(|e| format!("{action} refused: {e}"))?;
-                Ok(json!({
+                Ok(LifecycleActionResult {
+                    response: json!({
                     "lifecycle_action": action,
                     "source_id": source_id,
                     "target_id": target,
@@ -577,7 +610,10 @@ fn apply_lifecycle_action(
                     "archived": true,
                     "policy_version": ROUTE1_MERGE_POLICY_VERSION,
                     "supersession_receipt": receipt,
-                }))
+                    "committed_target_entry": committed_target,
+                    }),
+                    committed_target: Some(committed_target),
+                })
             })
         }
         "archive" => with_memory_store(server, params, |store| {
@@ -585,11 +621,14 @@ fn apply_lifecycle_action(
             let archived = store
                 .archive_memory(source_id)
                 .map_err(|e| format!("archive_memory: {e}"))?;
-            Ok(json!({
+            Ok(LifecycleActionResult {
+                response: json!({
                 "lifecycle_action": "archive",
                 "source_id": source_id,
                 "archived": archived,
-            }))
+                }),
+                committed_target: None,
+            })
         }),
         "promote_distilled" => with_memory_store(server, params, |store| {
             refuse_if_protected(store, source_id, "promote_distilled")?;
@@ -603,26 +642,32 @@ fn apply_lifecycle_action(
                 if entry.tier.eq_ignore_ascii_case("consolidated")
                     || entry.tier.eq_ignore_ascii_case("pattern")
                 {
-                    return Ok(json!({
+                    return Ok(LifecycleActionResult {
+                        response: json!({
                         "lifecycle_action": "promote_distilled",
                         "source_id": source_id,
                         "tier_before": prev_tier,
                         "tier_after": entry.tier,
                         "changed": false,
-                    }));
+                        }),
+                        committed_target: None,
+                    });
                 }
             }
             entry.tier = "consolidated".to_string();
             store
                 .upsert(&entry)
                 .map_err(|e| format!("upsert promoted: {e}"))?;
-            Ok(json!({
+            Ok(LifecycleActionResult {
+                response: json!({
                 "lifecycle_action": "promote_distilled",
                 "source_id": source_id,
                 "tier_before": prev_tier,
                 "tier_after": "consolidated",
                 "changed": true,
-            }))
+                }),
+                committed_target: None,
+            })
         }),
         other => Err(format!(
             "unsupported lifecycle_action '{other}'; expected supersede|merge_into|near_dup_merge|archive|promote_distilled"

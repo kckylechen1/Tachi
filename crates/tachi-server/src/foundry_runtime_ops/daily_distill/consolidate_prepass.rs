@@ -31,7 +31,7 @@
 
 use std::collections::HashMap;
 
-use memcore::MemoryEntry;
+use serde_json::Value;
 use tachi_foundry::CandidateGroup;
 
 use crate::server_state::MemoryServer;
@@ -99,8 +99,20 @@ fn consolidate_one_group(
                 &survivor_id,
                 Some(expected),
             ) {
-                Ok(_) => {
-                    advance_selected_survivor_snapshot(&mut survivor_entry, &source_entry);
+                Ok(result) => {
+                    if result
+                        .response
+                        .get("lifecycle_action")
+                        .and_then(Value::as_str)
+                        != Some("merge_into")
+                    {
+                        tracing::warn!(
+                            "distill consolidate pre-pass: route-1 returned unexpected action for \
+                             {source_id} -> {survivor_id}, continuing with committed survivor snapshot"
+                        );
+                    }
+                    survivor_entry = result.committed_survivor;
+                    group.entries[indices[0]] = survivor_entry.clone();
                     drop_indices.push(dup_idx);
                 }
                 Err(err) => {
@@ -125,27 +137,6 @@ fn consolidate_one_group(
         group.entries.remove(idx);
     }
     drop_indices.len()
-}
-
-fn advance_selected_survivor_snapshot(survivor: &mut MemoryEntry, source: &MemoryEntry) {
-    let target_keywords = memcore::store::memory_lifecycle::canonical_tags(&survivor.keywords);
-    let target_entities = memcore::store::memory_lifecycle::canonical_tags(&survivor.entities);
-    let target_importance = survivor.importance;
-
-    let mut keywords = survivor.keywords.clone();
-    keywords.extend(source.keywords.iter().cloned());
-    survivor.keywords = memcore::store::memory_lifecycle::canonical_tags(&keywords);
-    let mut entities = survivor.entities.clone();
-    entities.extend(source.entities.iter().cloned());
-    survivor.entities = memcore::store::memory_lifecycle::canonical_tags(&entities);
-    survivor.importance = survivor.importance.max(source.importance);
-
-    if survivor.keywords != target_keywords
-        || survivor.entities != target_entities
-        || survivor.importance != target_importance
-    {
-        survivor.revision += 1;
-    }
 }
 
 #[cfg(test)]
@@ -300,6 +291,153 @@ mod tests {
                 Ok(())
             })
             .expect("all duplicate metadata folds reach the final survivor");
+    }
+
+    /// tachi#1768 blocker 3: after a successful route-1 merge, the pre-pass must
+    /// chain from the committed DB survivor, not from a local reimplementation
+    /// of tag canonicalization/revision behavior. The first duplicate below adds
+    /// no logical tags to a survivor whose stored tag order is noncanonical, so
+    /// route-1 correctly does not upsert the target. A local canonicalized
+    /// survivor snapshot would then be stale against the DB row and would refuse
+    /// the later metadata-adding duplicate.
+    #[test]
+    fn committed_survivor_snapshot_chains_across_noop_then_metadata_fold() {
+        let temp = tempfile::tempdir().expect("temp consolidate pre-pass db");
+        let server = crate::MemoryServer::new(
+            temp.path().join("global.db"),
+            Some(temp.path().join("project.db")),
+        )
+        .expect("server");
+
+        let mut later_metadata = dup_entry("chain-later-metadata", "2026-01-01T00:00:00Z");
+        later_metadata.keywords = vec!["later-keyword".to_string()];
+        later_metadata.entities = vec!["later-entity".to_string()];
+        later_metadata.importance = 0.95;
+
+        let mut no_logical_tags = dup_entry("chain-noop-tags", "2026-01-01T00:00:01Z");
+        no_logical_tags.keywords = vec!["alpha".to_string(), "zeta".to_string()];
+        no_logical_tags.entities = vec!["entity-a".to_string(), "entity-b".to_string()];
+        no_logical_tags.importance = 0.6;
+
+        let mut survivor = dup_entry("chain-survivor", "2026-01-01T00:00:02Z");
+        survivor.keywords = vec!["zeta".to_string(), "alpha".to_string()];
+        survivor.entities = vec!["entity-b".to_string(), "entity-a".to_string()];
+        survivor.importance = 0.6;
+
+        let entries = vec![later_metadata, no_logical_tags, survivor];
+        server
+            .with_project_store(|store| {
+                for entry in &entries {
+                    store.insert_if_absent(entry).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .expect("seed duplicate chain rows");
+
+        let selected_entries = server
+            .with_project_store_read(|store| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        store
+                            .get(&entry.id)
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| format!("seeded duplicate missing: {}", entry.id))
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .expect("read exact selected snapshots");
+        let selected_survivor = selected_entries
+            .iter()
+            .find(|entry| entry.id == "chain-survivor")
+            .expect("selected survivor snapshot");
+        assert_eq!(
+            selected_survivor.keywords,
+            vec!["zeta".to_string(), "alpha".to_string()],
+            "fixture must start with noncanonical survivor keyword order"
+        );
+        assert_eq!(
+            selected_survivor.entities,
+            vec!["entity-b".to_string(), "entity-a".to_string()],
+            "fixture must start with noncanonical survivor entity order"
+        );
+        let selected_survivor_revision = selected_survivor.revision;
+        let selected_later_importance = selected_entries
+            .iter()
+            .find(|entry| entry.id == "chain-later-metadata")
+            .expect("selected later metadata snapshot")
+            .importance;
+
+        let mut groups = vec![CandidateGroup {
+            group_id: "bounded|chain".to_string(),
+            path_prefix: "/project/bounded".to_string(),
+            coherence_key: "chain".to_string(),
+            entries: selected_entries,
+        }];
+
+        let consolidated = consolidate_duplicate_candidates(&server, None, &mut groups);
+        assert_eq!(
+            consolidated, 2,
+            "the no-op first fold must not stale the later metadata-adding fold"
+        );
+        assert_eq!(
+            groups[0].entries.len(),
+            1,
+            "all three duplicates must converge to one survivor"
+        );
+        assert_eq!(groups[0].entries[0].id, "chain-survivor");
+
+        server
+            .with_project_store_read(|store| {
+                let survivor_after = store
+                    .get("chain-survivor")
+                    .map_err(|error| error.to_string())?
+                    .expect("survivor remains materialized");
+                assert_eq!(
+                    survivor_after.keywords,
+                    vec![
+                        "alpha".to_string(),
+                        "later-keyword".to_string(),
+                        "zeta".to_string()
+                    ]
+                );
+                assert_eq!(
+                    survivor_after.entities,
+                    vec![
+                        "entity-a".to_string(),
+                        "entity-b".to_string(),
+                        "later-entity".to_string()
+                    ]
+                );
+                assert_eq!(survivor_after.importance, selected_later_importance);
+                assert_eq!(
+                    survivor_after.revision,
+                    selected_survivor_revision + 1,
+                    "only the later metadata-adding fold should rewrite the survivor"
+                );
+                assert_eq!(
+                    serde_json::to_value(&groups[0].entries[0]).expect("group entry JSON"),
+                    serde_json::to_value(&survivor_after).expect("survivor JSON"),
+                    "CandidateGroup must carry the exact committed DB survivor row"
+                );
+
+                for duplicate_id in ["chain-noop-tags", "chain-later-metadata"] {
+                    let duplicate = store
+                        .get_with_options(duplicate_id, true)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("duplicate missing: {duplicate_id}"))?;
+                    assert!(duplicate.archived, "{duplicate_id} must be archived");
+                    assert_eq!(
+                        store
+                            .supersession_target(duplicate_id)
+                            .map_err(|error| error.to_string())?,
+                        Some(Some("chain-survivor".to_string())),
+                        "{duplicate_id} must converge on the survivor"
+                    );
+                }
+                Ok(())
+            })
+            .expect("verify committed survivor chain");
     }
 
     /// A group with no duplicates is left untouched — the pre-pass never
