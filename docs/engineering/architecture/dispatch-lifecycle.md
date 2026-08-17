@@ -106,10 +106,10 @@ The repository pays expensive acceptance ceremony once per stable candidate, not
 
 Every non-trivial packet and PR also carries a maintainability budget. The following are review triggers, not automatic rejections:
 
-- **More than 20 changed files:** classify the count as production, tests/goldens, generated/migrations, and deletions, then explain why one bounded contract cannot be split into independently reviewable leaves.
+- **More than 20 changed files:** classify the count separately as production, tests, goldens, generated files, migrations, and deletions, then explain why one bounded contract cannot be split into independently reviewable leaves.
 - **More than 2,000 changed production lines:** split by default. Keeping one delivery requires evidence that splitting would break an atomic migration, wire/security boundary, or frozen behavior proof.
-- **More than 5 new public types:** perform a vocabulary review. Name the production consumers and reject parallel representations of an existing concept.
-- **A new trait, wrapper, facade, or registry:** require at least two real production consumers, or one named external/security boundary whose isolation is itself the contract. Tests, fixtures, and hypothetical future callers do not count as production consumers.
+- **More than 5 new public types:** perform a vocabulary review, name the production consumers, reject parallel representations of an existing concept, and explain why the contract cannot be split into smaller leaves.
+- **A new abstraction:** require at least two real production consumers, or one named external/security boundary whose isolation is itself the contract. This includes, but is not limited to, traits, wrappers, facades, registries, policies, and services. Tests, fixtures, and hypothetical future callers do not count as production consumers.
 - **A new proof artifact:** bind it to a production decision branch, public or external wire contract, or concrete mutant that the old suite admits. Extend the canonical census/golden where one exists instead of creating a parallel list that can drift.
 
 When the owner withdraws a product direction, the next change starts with a production-caller census. A zero-consumer experimental surface is deleted by default; Git and the PR retain its history. Compatibility or migration exceptions name the still-live boundary and its removal condition.
