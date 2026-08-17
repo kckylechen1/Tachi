@@ -23,10 +23,37 @@ use rusqlite::OpenFlags;
 /// string — percent-encoding the path is the caller's concern.
 #[cfg(any(feature = "admin", test))]
 pub fn open_immutable_readonly(uri: &str) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
+    let conn = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )
+    )?;
+    refuse_private_partition_connection(&conn)?;
+    Ok(conn)
+}
+
+#[cfg(any(feature = "admin", test))]
+fn refuse_private_partition_connection(conn: &Connection) -> rusqlite::Result<()> {
+    let has_hard_state = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'hard_state')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_hard_state {
+        return Ok(());
+    }
+    let is_private = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hard_state WHERE namespace = ?1 AND key = ?2)",
+        [
+            super::store_profile::STORE_IDENTITY_NAMESPACE,
+            crate::private_partition::STORE_PRIVATE_PARTITION_KEY,
+        ],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if is_private {
+        Err(rusqlite::Error::InvalidQuery)
+    } else {
+        Ok(())
+    }
 }
 
 /// `pragma schema_version` — the cheapest possible "is this actually a
@@ -233,9 +260,12 @@ pub fn foundry_job_status_counts(conn: &Connection) -> FoundryJobStatusCounts {
 #[cfg(any(feature = "admin", test))]
 pub fn open_for_wal_checkpoint(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    refuse_private_partition_connection(&conn)?;
     let _ = conn.busy_timeout(Duration::from_millis(5_000));
-    let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
-    super::install_reserved_reference_authorizer(&conn, None)?;
+    let deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
+    super::install_reserved_reference_authorizer(&conn, Some(&deny_by_default))?;
+    super::install_authority_row_guards(&conn, &deny_by_default)
+        .map_err(memory_error_to_rusqlite)?;
     Ok(conn)
 }
 
@@ -256,14 +286,22 @@ pub fn checkpoint_wal_truncate(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(any(feature = "admin", test))]
 pub fn open_raw(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
-    let _deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
-    super::install_reserved_reference_authorizer(&conn, None)?;
-    super::validate_persistent_trigger_inventory(&conn, false).map_err(|error| match error {
+    refuse_private_partition_connection(&conn)?;
+    let deny_by_default = super::register_reserved_reference_write_guard(&conn)?;
+    super::install_reserved_reference_authorizer(&conn, Some(&deny_by_default))?;
+    super::validate_persistent_trigger_inventory(&conn, false).map_err(memory_error_to_rusqlite)?;
+    super::install_authority_row_guards(&conn, &deny_by_default)
+        .map_err(memory_error_to_rusqlite)?;
+    Ok(conn)
+}
+
+#[cfg(any(feature = "admin", test))]
+fn memory_error_to_rusqlite(error: crate::error::MemoryError) -> rusqlite::Error {
+    match error {
         crate::error::MemoryError::Sqlite(error) => error,
         other => rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
             Some(other.to_string()),
         ),
-    })?;
-    Ok(conn)
+    }
 }

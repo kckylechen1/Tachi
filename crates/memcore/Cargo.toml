@@ -56,6 +56,8 @@ chrono = { workspace = true }
 regex = { workspace = true }
 libsimple = "~0.7"
 sqlite-vec = { workspace = true }
+vault-kit = { path = "../vault-kit" }
+tempfile = "3"
 
 # Atomic no-clobber rename FFI (renamex_np / renameat2) for the #1226
 # cross-process migration TOCTOU close in `db::filename`. Only referenced under

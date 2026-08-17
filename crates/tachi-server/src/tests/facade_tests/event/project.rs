@@ -1,6 +1,86 @@
 use super::*;
 
 #[tokio::test]
+async fn tachi_event_emit_rejects_reserved_receipt_type_but_keeps_ordinary_events() {
+    let server = make_server();
+
+    let mut reserved = tachi_event_params("emit");
+    reserved.id = Some("reserved-receipt-facade-event".to_string());
+    reserved.event_type = Some(memcore::SUPERSESSION_RECEIPT_EVENT_TYPE.to_string());
+    let error = crate::event_ops::handle_tachi_event(&server, reserved)
+        .await
+        .expect_err("the facade must not mint canonical supersession receipt events");
+    assert!(
+        error.contains("reserved"),
+        "unexpected facade error: {error}"
+    );
+
+    let mut ordinary = tachi_event_params("emit");
+    ordinary.id = Some("ordinary-facade-event".to_string());
+    ordinary.event_type = Some("ordinary.continuity.event".to_string());
+    crate::event_ops::handle_tachi_event(&server, ordinary)
+        .await
+        .expect("ordinary event emission remains available");
+    let events = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    event_type: Some("ordinary.continuity.event".to_string()),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("read ordinary facade event");
+    assert_eq!(events.len(), 1);
+}
+
+#[tokio::test]
+async fn tachi_event_project_rejects_reserved_supersedes_relation() {
+    let server = make_server();
+
+    let mut timeline = tachi_event_params("emit");
+    timeline.id = Some("reserved-supersedes-event".to_string());
+    timeline.event_type = Some("timeline.candidate".to_string());
+    timeline.authority = Some("collect_only".to_string());
+    timeline.projection_hints = vec!["timeline".to_string()];
+    timeline.payload = Some(json!({
+        "projection_key": "reserved-supersedes",
+        "summary": "Reserved supersession relation",
+        "discoveries": [],
+        "causal_edges": [{
+            "source_id": "$projection",
+            "target_id": "$projection",
+            "relation": "supersedes",
+        }],
+    }));
+    crate::event_ops::handle_tachi_event(&server, timeline)
+        .await
+        .expect("emit timeline event");
+
+    let mut project = tachi_event_params("project");
+    project.projection_hints = vec!["timeline".to_string()];
+    let projected = crate::event_ops::handle_tachi_event(&server, project)
+        .await
+        .expect("project timeline event");
+    let projected_json: Value = serde_json::from_str(&projected).expect("project JSON");
+    let timeline_projection = projected_json["projections"]
+        .as_array()
+        .expect("projections")
+        .iter()
+        .find(|projection| projection["event_id"] == json!("reserved-supersedes-event"))
+        .expect("reserved relation timeline projection");
+    assert_eq!(timeline_projection["graph_edges"]["saved_count"], json!(0));
+    assert_eq!(
+        timeline_projection["graph_edges"]["skipped_count"],
+        json!(1)
+    );
+    assert!(timeline_projection["graph_edges"]["skipped"][0]["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("reserved")));
+}
+
+#[tokio::test]
 async fn tachi_event_project_materializes_pattern_idempotently() {
     let server = make_server();
 

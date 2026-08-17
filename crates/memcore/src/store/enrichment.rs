@@ -135,6 +135,7 @@ impl MemoryStore {
 
     /// Atomically write final migration metadata and supersede an exact source
     /// state. A mismatch performs zero writes.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn supersede_with_metadata_if_expected_state(
         &mut self,
         id: &str,

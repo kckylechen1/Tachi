@@ -465,4 +465,10 @@ pub enum MemoryError {
          database created by a portable-kernel build."
     )]
     StoreProfileUnstamped { db_path: String },
+
+    /// tachi#1668: private-partition admission, crypto, capability, or stamp
+    /// refusal. **No fields** — Display/Debug must not carry path, id, count,
+    /// hash, or existence. Every denied caller sees this same variant.
+    #[error("private partition refused")]
+    PrivatePartitionRefused,
 }

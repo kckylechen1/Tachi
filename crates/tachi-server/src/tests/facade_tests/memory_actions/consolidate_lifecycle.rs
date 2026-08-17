@@ -2820,6 +2820,21 @@ async fn consolidate_apply_receipt_binds_source_target_revisions_policy_and_comm
         json!("life-receipt-new")
     );
     assert_eq!(apply_json["apply_result"]["archived"], json!(true));
+    let supersession_receipt = &apply_json["apply_result"]["supersession_receipt"];
+    assert_eq!(supersession_receipt["durable"], json!(true));
+    assert_eq!(supersession_receipt["commit_result"], json!("applied"));
+    assert_eq!(
+        supersession_receipt["policy_version"],
+        json!("memory-lifecycle-v2")
+    );
+    assert_eq!(
+        supersession_receipt["source_revision_before"],
+        json!(source_revision_before)
+    );
+    assert_eq!(
+        supersession_receipt["target_revision_before"],
+        json!(target_revision_before)
+    );
 }
 
 /// tachi#1645 (#1635 finding 3, item 8 — flipped from finding-pin to a
@@ -2829,10 +2844,10 @@ async fn consolidate_apply_receipt_binds_source_target_revisions_policy_and_comm
 /// `proposal` wrapper) now carries `source_revision`/`target_revision` (the
 /// revisions the CAS actually consumed, mirroring the human-reviewed v2
 /// loop's `apply_payload.source.revision`/`apply_payload.target.revision`
-/// binding pinned above) and a `policy_version` — but a route-1-specific
-/// one (`ROUTE1_MERGE_POLICY_VERSION`), not `lifecycle::LIFECYCLE_POLICY_VERSION`,
-/// since this bypass's CAS does not carry route 2's revision-checked drift
-/// guarantee.
+/// binding pinned above) and a route-1-specific `policy_version`. Its shared
+/// primitive now carries the same source/target expected-state and durable
+/// receipt guarantees as reviewed-v2 while retaining a distinct admission
+/// policy identity.
 #[tokio::test]
 async fn merge_into_for_project_receipt_binds_source_target_revisions_and_policy() {
     let server = make_server();
@@ -2870,6 +2885,21 @@ async fn merge_into_for_project_receipt_binds_source_target_revisions_and_policy
         receipt["policy_version"],
         json!(crate::facade_memory_ops::consolidate_ops::ROUTE1_MERGE_POLICY_VERSION),
         "receipt must bind route 1's own policy identity: {receipt}"
+    );
+    let supersession_receipt = &receipt["supersession_receipt"];
+    assert_eq!(supersession_receipt["durable"], json!(true));
+    assert_eq!(supersession_receipt["commit_result"], json!("applied"));
+    assert_eq!(
+        supersession_receipt["policy_version"],
+        json!(crate::facade_memory_ops::consolidate_ops::ROUTE1_MERGE_POLICY_VERSION)
+    );
+    assert_eq!(
+        supersession_receipt["source_revision_before"],
+        receipt["source_revision"]
+    );
+    assert_eq!(
+        supersession_receipt["target_revision_before"],
+        receipt["target_revision"]
     );
 }
 

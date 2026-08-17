@@ -349,6 +349,11 @@ pub(super) fn add_memory_edge(
     target: &ContinuityEventTarget,
     edge: &MemoryEdge,
 ) -> Result<(), String> {
+    if edge.relation == "supersedes" {
+        return Err(
+            "supersedes is reserved for canonical immutable-supersession claims".to_string(),
+        );
+    }
     let provenance = continuity_edge_provenance();
     if let Some(project_name) = target.named_project.as_deref() {
         server.with_named_project_store(project_name, |store| {

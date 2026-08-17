@@ -619,7 +619,9 @@ fn store_identity_namespace_is_write_once_at_the_api() {
     );
 
     // Ordinary namespaces are unaffected.
-    crate::db::set_state(store.connection(), "scratch", "k", "\"v\"").expect("ordinary set_state");
+    store
+        .set_state("scratch", "k", "\"v\"")
+        .expect("ordinary set_state");
 }
 
 /// The write-once guard on `set_state`/`delete_state`/`set_state_if_version`

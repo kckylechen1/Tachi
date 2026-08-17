@@ -466,14 +466,24 @@ fn persist_timeline_graph_edges(
             skipped.push(json!({"edge": raw, "reason": "missing target_id"}));
             continue;
         };
-        let relation = raw
+        let requested_relation = raw
             .get("relation")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or("causes")
             .to_string();
-        let relation = restrict_relation_for_authority(relation, event.authority);
+        if requested_relation == "supersedes" {
+            skipped.push(json!({
+                "edge": raw,
+                "source_id": source_id,
+                "target_id": target_id,
+                "relation": requested_relation,
+                "reason": "supersedes is reserved for canonical immutable-supersession claims",
+            }));
+            continue;
+        }
+        let relation = restrict_relation_for_authority(requested_relation, event.authority);
         let source_exists = get_projection_memory(server, target, &source_id)
             .ok()
             .flatten()

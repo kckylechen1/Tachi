@@ -45,9 +45,11 @@ pub(crate) use snapshot_import::{
     read_snapshot_lifecycle_row_within_tx, read_snapshot_vector_blob_within_tx,
     SnapshotLifecycleRow, SnapshotVectorRow,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use update::supersede_with_metadata_if_expected_state;
 pub(crate) use update::{
     archive_with_metadata_if_expected_state, restore_with_metadata_if_expected_state,
-    supersede_with_metadata_if_expected_state, update_with_revision_if_expected_state,
+    update_with_revision_if_expected_state,
 };
 pub use update::{
     record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,
@@ -296,6 +298,17 @@ fn merge_into_jaccard_candidate(
     importance: f64,
     write_time_utc: &str,
 ) -> Result<Option<String>, MemoryError> {
+    let Some(cand_id) = find_jaccard_candidate_within_tx(tx, entry)? else {
+        return Ok(None);
+    };
+    merge_jaccard_candidate_within_tx(tx, entry, importance, write_time_utc, &cand_id)?;
+    Ok(Some(cand_id))
+}
+
+pub(crate) fn find_jaccard_candidate_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+) -> Result<Option<String>, MemoryError> {
     let safe_query = simple_query_input(
         &entry
             .text
@@ -331,77 +344,85 @@ fn merge_into_jaccard_candidate(
     };
     for (cand_id, cand_text) in fts_candidates {
         if jaccard_similarity(&entry.text, &cand_text) > 0.9 {
-            // Merge: update candidate with max importance and merged tags
-            let merge_kws = {
-                let cand_kws_json: String = tx
-                    .query_row(
-                        "SELECT keywords FROM memories WHERE id = ?1",
-                        params![cand_id],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or_else(|_| "[]".to_string());
-                let mut kws: Vec<String> = serde_json::from_str(&cand_kws_json).unwrap_or_default();
-                for k in &entry.keywords {
-                    if !kws.contains(k) {
-                        kws.push(k.clone());
-                    }
-                }
-                serde_json::to_string(&kws).unwrap_or_else(|_| "[]".to_string())
-            };
-            let merge_ents = {
-                let cand_ents_json: String = tx
-                    .query_row(
-                        "SELECT entities FROM memories WHERE id = ?1",
-                        params![cand_id],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or_else(|_| "[]".to_string());
-                let mut ents: Vec<String> =
-                    serde_json::from_str(&cand_ents_json).unwrap_or_default();
-                for e in &entry.entities {
-                    if !ents.contains(e) {
-                        ents.push(e.clone());
-                    }
-                }
-                crate::types::fold_person_names_into_entities(&mut ents, entry.persons.clone());
-                serde_json::to_string(&ents).unwrap_or_else(|_| "[]".to_string())
-            };
-            tx.execute(
-                "UPDATE memories SET keywords = ?1, entities = ?2,
-                 importance = MAX(importance, ?3), updated_at = ?4
-                 WHERE id = ?5",
-                params![merge_kws, merge_ents, importance, write_time_utc, cand_id],
-            )?;
-            let (cand_path, cand_summary, cand_text) = tx.query_row(
-                "SELECT path, summary, text FROM memories WHERE id = ?1",
-                params![cand_id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                },
-            )?;
-            let kws_joined: String = serde_json::from_str::<Vec<String>>(&merge_kws)
-                .unwrap_or_default()
-                .join(" ");
-            let ents_joined: String = serde_json::from_str::<Vec<String>>(&merge_ents)
-                .unwrap_or_default()
-                .join(" ");
-            sync_memories_fts(
-                tx,
-                &cand_id,
-                &cand_path,
-                &cand_summary,
-                &cand_text,
-                &kws_joined,
-                &ents_joined,
-            )?;
             return Ok(Some(cand_id));
         }
     }
     Ok(None)
+}
+
+pub(crate) fn merge_jaccard_candidate_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    importance: f64,
+    write_time_utc: &str,
+    cand_id: &str,
+) -> Result<(), MemoryError> {
+    let merge_kws = {
+        let cand_kws_json: String = tx
+            .query_row(
+                "SELECT keywords FROM memories WHERE id = ?1",
+                params![cand_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let mut kws: Vec<String> = serde_json::from_str(&cand_kws_json).unwrap_or_default();
+        for k in &entry.keywords {
+            if !kws.contains(k) {
+                kws.push(k.clone());
+            }
+        }
+        serde_json::to_string(&kws).unwrap_or_else(|_| "[]".to_string())
+    };
+    let merge_ents = {
+        let cand_ents_json: String = tx
+            .query_row(
+                "SELECT entities FROM memories WHERE id = ?1",
+                params![cand_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let mut ents: Vec<String> = serde_json::from_str(&cand_ents_json).unwrap_or_default();
+        for e in &entry.entities {
+            if !ents.contains(e) {
+                ents.push(e.clone());
+            }
+        }
+        crate::types::fold_person_names_into_entities(&mut ents, entry.persons.clone());
+        serde_json::to_string(&ents).unwrap_or_else(|_| "[]".to_string())
+    };
+    tx.execute(
+        "UPDATE memories SET keywords = ?1, entities = ?2,
+         importance = MAX(importance, ?3), updated_at = ?4
+         WHERE id = ?5",
+        params![merge_kws, merge_ents, importance, write_time_utc, cand_id],
+    )?;
+    let (cand_path, cand_summary, cand_text) = tx.query_row(
+        "SELECT path, summary, text FROM memories WHERE id = ?1",
+        params![cand_id],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    let kws_joined: String = serde_json::from_str::<Vec<String>>(&merge_kws)
+        .unwrap_or_default()
+        .join(" ");
+    let ents_joined: String = serde_json::from_str::<Vec<String>>(&merge_ents)
+        .unwrap_or_default()
+        .join(" ");
+    sync_memories_fts(
+        tx,
+        cand_id,
+        &cand_path,
+        &cand_summary,
+        &cand_text,
+        &kws_joined,
+        &ents_joined,
+    )?;
+    Ok(())
 }
 
 // ─── Normalization ────────────────────────────────────────────────────────────
@@ -921,6 +942,24 @@ impl crate::MemoryStore {
         policy: NearDuplicatePolicy,
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
         self.validate_write_path(entry)?;
+
+        if matches!(policy, NearDuplicatePolicy::AllowNearDuplicateMerge) {
+            let identity = idless_identity.ok_or_else(|| {
+                MemoryError::InvalidArg(
+                    "near-duplicate merge requires an id-less identity".to_string(),
+                )
+            })?;
+            let identity = identity.to_string();
+            return self.with_immutable_supersession_transaction(|replacement| {
+                replacement.upsert_idless_with_near_duplicate_merge(
+                    entry,
+                    &identity,
+                    metadata_patch,
+                    metadata_removals,
+                    mutations,
+                )
+            });
+        }
 
         let db_label = self.db_label.clone();
         let vec_available = self.vec_available;
@@ -3089,41 +3128,24 @@ mod idless_upsert_tests {
     /// merge on the id-less path must opt in explicitly, the same way
     /// `upsert_idless_save_entry` (the production id-less `save_memory`
     /// opt-in) does — by going around `MemoryStore::upsert_idless` and
-    /// driving the transactional seam directly with
+    /// driving the production transaction seam with
     /// [`NearDuplicatePolicy::AllowNearDuplicateMerge`].
-    ///
-    /// Every production caller of this seam acquires
-    /// `authorize_reserved_reference_write` before opening its writer
-    /// transaction (see `MemoryStore::upsert_idless`,
-    /// `upsert_with_validated_reference_mutations_and_metadata_removals`);
-    /// the shared connection authorizer denies the main-row INSERT/UPDATE
-    /// otherwise (`reserved_reference_authorizer`'s `protected_memory_write`
-    /// branch, `crates/memcore/src/db/open.rs`). This helper must do the
-    /// same, or the write-time Jaccard merge fails with
-    /// `AuthorizationForStatementDenied` before it ever reaches the
-    /// candidate scan.
     fn upsert_idless_allowing_merge(
         store: &mut crate::MemoryStore,
         entry: &MemoryEntry,
         identity: &str,
     ) -> IdlessUpsertResult {
-        let _authorization =
-            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
-        let tx = store
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .unwrap();
-        let result = upsert_within_tx_inner(
-            &tx,
-            entry,
-            store.vec_available,
-            Some(identity),
-            false,
-            NearDuplicatePolicy::AllowNearDuplicateMerge,
-        )
-        .unwrap();
-        tx.commit().unwrap();
-        result
+        store
+            .upsert_with_validated_reference_mutations_and_metadata_removals(
+                entry,
+                Some(identity),
+                &Map::new(),
+                &[],
+                &[],
+                NearDuplicatePolicy::AllowNearDuplicateMerge,
+            )
+            .unwrap()
+            .0
     }
 
     /// A `(base, near_dup)` text pair with 0.9 < Jaccard < 1.0 similarity —
@@ -3494,6 +3516,47 @@ mod idless_upsert_tests {
             )
             .unwrap();
         assert_eq!(winner_identity.as_deref(), Some("identity-original"));
+
+        let canonical_edge: (String, String) = conn
+            .query_row(
+                "SELECT json_extract(metadata, '$.source'),
+                        json_extract(metadata, '$.authority')
+                 FROM memory_edges
+                 WHERE source_id='near-dup-original'
+                   AND target_id='near-dup-second'
+                   AND relation='supersedes'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("canonical winner-to-loser supersedes edge");
+        assert_eq!(
+            canonical_edge,
+            (
+                "idless_near_duplicate".to_string(),
+                "structural_bookkeeping".to_string()
+            )
+        );
+        let receipt_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM hard_state
+                 WHERE namespace = ?1
+                   AND json_extract(value_json, '$.source_id') = 'near-dup-second'
+                   AND json_extract(value_json, '$.target_id') = 'near-dup-original'",
+                [crate::SUPERSESSION_RECEIPT_NAMESPACE],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tachi_events
+                 WHERE event_type = ?1
+                   AND json_extract(payload_json, '$.source_id') = 'near-dup-second'
+                   AND json_extract(payload_json, '$.target_id') = 'near-dup-original'",
+                [crate::SUPERSESSION_RECEIPT_EVENT_TYPE],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((receipt_count, event_count), (1, 1));
     }
 
     /// #1331 BUG 2: id-less Jaccard early-return must sync the superseded
@@ -3910,6 +3973,7 @@ pub fn restore_archived_revision_within_tx(
 
 /// Mark a memory as superseded by a newer/canonical memory. Superseded rows are
 /// hidden from default search but remain available for audit/history.
+#[cfg(any(test, feature = "test-support"))]
 pub fn supersede_memory(
     conn: &Connection,
     id: &str,
@@ -3921,7 +3985,8 @@ pub fn supersede_memory(
     Ok(changed)
 }
 
-pub(crate) fn supersede_memory_within_tx(
+#[cfg(any(test, feature = "test-support"))]
+fn supersede_memory_within_tx(
     tx: &Connection,
     id: &str,
     superseded_by: &str,
@@ -3952,6 +4017,7 @@ pub(crate) fn supersede_memory_within_tx(
 /// Mark a memory as superseded only when its revision is the one the caller
 /// inspected. This is the lifecycle counterpart to `update_with_revision` for
 /// migration paths that must not race a concurrent content/review write.
+#[cfg(any(test, feature = "test-support"))]
 pub fn supersede_memory_if_revision(
     conn: &Connection,
     id: &str,

@@ -136,7 +136,7 @@ fn receipt_test_group(group_id: &str, offset: usize) -> CandidateGroup {
     }
 }
 
-fn seed_receipt_test_groups(server: &crate::MemoryServer, groups: &[CandidateGroup]) {
+fn seed_receipt_test_groups(server: &crate::MemoryServer, groups: &mut [CandidateGroup]) {
     server
         .with_project_store(|store| {
             for entry in groups.iter().flat_map(|group| &group.entries) {
@@ -145,6 +145,19 @@ fn seed_receipt_test_groups(server: &crate::MemoryServer, groups: &[CandidateGro
             Ok(())
         })
         .expect("seed daily receipt source entries");
+    server
+        .with_project_store_read(|store| {
+            for group in groups {
+                for entry in &mut group.entries {
+                    *entry = store
+                        .get(&entry.id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("seeded receipt source missing: {}", entry.id))?;
+                }
+            }
+            Ok(())
+        })
+        .expect("bind receipt groups to committed source snapshots");
 }
 
 fn persisted_daily_metadata(server: &crate::MemoryServer) -> Vec<serde_json::Value> {
@@ -179,11 +192,11 @@ async fn daily_batch_copies_one_invocation_receipt_to_every_group_first_write() 
     .await;
     let temp = tempfile::tempdir().expect("temp daily batch receipt database");
     let server = daily_server_with_llm(temp.path().to_path_buf(), &provider.llm);
-    let groups = vec![
+    let mut groups = vec![
         receipt_test_group("receipt-a", 0),
         receipt_test_group("receipt-b", 10),
     ];
-    seed_receipt_test_groups(&server, &groups);
+    seed_receipt_test_groups(&server, &mut groups);
 
     let mut report = DistillBatchReport::default();
     let mut manifest = Vec::new();
@@ -235,11 +248,11 @@ async fn daily_parse_failure_uses_a_fresh_receipt_for_each_group_fallback() {
     .await;
     let temp = tempfile::tempdir().expect("temp daily fallback receipt database");
     let server = daily_server_with_llm(temp.path().to_path_buf(), &provider.llm);
-    let groups = vec![
+    let mut groups = vec![
         receipt_test_group("fallback-a", 30),
         receipt_test_group("fallback-b", 40),
     ];
-    seed_receipt_test_groups(&server, &groups);
+    seed_receipt_test_groups(&server, &mut groups);
 
     let mut report = DistillBatchReport::default();
     let mut manifest = Vec::new();
@@ -570,7 +583,7 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
         Some(temp.path().join("project.db")),
     )
     .expect("server");
-    let entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
 
     server
         .with_project_store(|store| {
@@ -580,6 +593,19 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
             Ok(())
         })
         .expect("seed source memories");
+    entries = server
+        .with_project_store_read(|store| {
+            entries
+                .iter()
+                .map(|entry| {
+                    store
+                        .get(&entry.id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("seeded source missing: {}", entry.id))
+                })
+                .collect()
+        })
+        .expect("bind group to committed source snapshots");
 
     let group = CandidateGroup {
         group_id: "bounded_scan".to_string(),
@@ -765,6 +791,19 @@ fn persist_distill_memory_preserves_used_or_protected_raw_sources() {
             Ok(())
         })
         .expect("seed source memories");
+    entries = server
+        .with_project_store_read(|store| {
+            entries
+                .iter()
+                .map(|entry| {
+                    store
+                        .get(&entry.id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("seeded source missing: {}", entry.id))
+                })
+                .collect()
+        })
+        .expect("bind guarded group to committed source snapshots");
 
     let group = CandidateGroup {
         group_id: "guarded_sources".to_string(),
@@ -1468,6 +1507,196 @@ fn persist_distill_memory_does_not_project_a_conflicted_supersession_source() {
             Ok(())
         })
         .expect("verify conflicted distill source has no side effects");
+}
+
+#[test]
+fn persist_distill_memory_refuses_source_drift_after_selection_without_writes() {
+    let temp = tempfile::tempdir().expect("temp daily distill source-drift db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let source_fixture = candidate_entry(50);
+    server
+        .with_project_store(|store| {
+            store
+                .insert_if_absent(&source_fixture)
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed selected source");
+    let selected_source = server
+        .with_project_store_read(|store| {
+            store
+                .get(&source_fixture.id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "selected source missing after insert".to_string())
+        })
+        .expect("read exact selected source snapshot");
+
+    let group = CandidateGroup {
+        group_id: "source-drift-after-model-selection".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries: vec![selected_source.clone()],
+    };
+    let payload = GroupPayload {
+        summary: "stale distilled summary".to_string(),
+        text: "stale model output must not become durable".to_string(),
+        keywords: vec!["stale".to_string()],
+        skip_reason: None,
+    };
+
+    server
+        .with_project_store(|store| {
+            let mut drifted = selected_source.clone();
+            drifted.text = "source changed after the model selected its evidence".to_string();
+            drifted.metadata = json!({"changed_after_selection": true});
+            store.upsert(&drifted).map_err(|e| e.to_string())
+        })
+        .expect("drift selected source before persist");
+
+    let error = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-source-drift",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect_err("a stale model-selected source snapshot must refuse the transaction");
+    assert!(error.contains("source_drift"), "unexpected error: {error}");
+
+    server
+        .with_project_store_read(|store| {
+            let source_state: (bool, Option<String>, String) = store
+                .connection()
+                .query_row(
+                    "SELECT archived, superseded_by, text FROM memories WHERE id = ?1",
+                    [&selected_source.id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let distill_memories: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE source = 'foundry_distill'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let derived_items: i64 = store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM derived_items", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            let graph_edges: i64 = store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            assert!(!source_state.0);
+            assert_eq!(source_state.1, None);
+            assert_eq!(
+                source_state.2,
+                "source changed after the model selected its evidence"
+            );
+            assert_eq!(distill_memories, 0);
+            assert_eq!(derived_items, 0);
+            assert_eq!(graph_edges, 0);
+            Ok(())
+        })
+        .expect("verify stale selection rollback");
+}
+
+#[test]
+fn persist_distill_memory_preserves_wiki_and_durable_sources_while_writing_output() {
+    let mut wiki = candidate_entry(51);
+    wiki.id = "daily-protected-wiki".to_string();
+    wiki.category = "WiKi".to_string();
+    let mut durable = candidate_entry(52);
+    durable.id = "daily-protected-durable".to_string();
+    durable.retention_policy = Some("durable".to_string());
+
+    for source in [wiki, durable] {
+        let temp = tempfile::tempdir().expect("temp daily protected-source db");
+        let server = crate::MemoryServer::new(
+            temp.path().join("global.db"),
+            Some(temp.path().join("project.db")),
+        )
+        .expect("server");
+        server
+            .with_project_store(|store| {
+                store.insert_if_absent(&source).map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .expect("seed protected source");
+        let selected_source = server
+            .with_project_store_read(|store| {
+                store
+                    .get(&source.id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "protected source missing after insert".to_string())
+            })
+            .expect("read exact protected source snapshot");
+        let group = CandidateGroup {
+            group_id: format!("protected-source-{}", source.id),
+            path_prefix: "/project/bounded".to_string(),
+            coherence_key: "bounded-scan".to_string(),
+            entries: vec![selected_source],
+        };
+        let payload = GroupPayload {
+            summary: "protected source summary".to_string(),
+            text: "protected source output remains independently durable".to_string(),
+            keywords: vec!["protected".to_string()],
+            skip_reason: None,
+        };
+
+        let memory_id = persist_distill_memory(
+            &server,
+            &group,
+            &payload,
+            "batch-protected-source",
+            "raw_api",
+            false,
+            None,
+        )
+        .expect("lifecycle-protected evidence must be preserved without blocking the output");
+
+        server
+            .with_project_store_read(|store| {
+                let source_state: (bool, Option<String>) = store
+                    .connection()
+                    .query_row(
+                        "SELECT archived, superseded_by FROM memories WHERE id = ?1",
+                        [&source.id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let distill_memories: i64 = store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memories WHERE id = ?1 AND source = 'foundry_distill'",
+                        [&memory_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let derived_items: i64 = store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM derived_items", [], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                let graph_edges: i64 = store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                assert_eq!(source_state, (false, None));
+                assert_eq!(distill_memories, 1);
+                assert_eq!(derived_items, 1);
+                assert!(graph_edges >= 1);
+                Ok(())
+            })
+            .expect("verify protected evidence and committed output");
+    }
 }
 
 // ── #1261 step 2/3: CLI fallback removed from call_claude_batch ──────

@@ -992,7 +992,6 @@ pub(crate) fn apply_operator_gc_candidate_facts<F>(
 ) -> Result<GcMaintenanceOutcome, MemoryError>
 where
     F: FnOnce(
-        &Connection,
         &[MaintenanceClassFact],
         &[MaintenanceClassFact],
     ) -> Result<OperatorMaintenanceCommittedReceiptBinding, MemoryError>,
@@ -1024,7 +1023,7 @@ where
         kanban_max_age_days,
         include_kanban,
     )?;
-    let authority = before_commit(&tx, &source, &post)?;
+    let authority = before_commit(&source, &post)?;
     insert_operator_maintenance_authority(
         &tx,
         OperatorMaintenanceOperation::Gc,
@@ -1162,7 +1161,6 @@ pub(crate) fn apply_operator_delete_candidate_facts<F>(
 ) -> Result<DeleteMaintenanceOutcome, MemoryError>
 where
     F: FnOnce(
-        &Connection,
         &[MaintenanceClassFact],
         &[MaintenanceClassFact],
     ) -> Result<OperatorMaintenanceCommittedReceiptBinding, MemoryError>,
@@ -1176,7 +1174,7 @@ where
     }
     let deleted = delete_memory_within_tx(&tx, id, vec_available, profile)?;
     let post = delete_candidate_facts(&tx, id, vec_available, profile)?;
-    let authority = before_commit(&tx, &source, &post)?;
+    let authority = before_commit(&source, &post)?;
     insert_operator_maintenance_authority(
         &tx,
         OperatorMaintenanceOperation::Delete,

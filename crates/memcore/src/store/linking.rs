@@ -3,13 +3,111 @@
 
 use std::collections::HashSet;
 
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
+#[cfg(any(test, feature = "test-support"))]
+use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, TransactionBehavior};
 
 use crate::db::ConfirmedContradictionOutcome;
 use crate::types::ExpectedMemoryState;
-use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
+use crate::{db, error::MemoryError, MemoryEntry, MemoryStore, SupersessionExpectedState};
 
 impl MemoryStore {
+    /// Atomically persist one heuristic reinforcement, but only while both
+    /// endpoint rows still match the snapshots used to compute it.
+    ///
+    /// Search and similarity scoring happen before this call. A concurrent
+    /// rewrite of either endpoint therefore makes the judgment stale. The
+    /// `BEGIN IMMEDIATE` snapshot check, edge write, and confidence update
+    /// share one transaction so a stale judgment or later failure leaves no
+    /// partial edge or confidence mutation. Both endpoints must still be
+    /// active and unsuperseded, and this fixed heuristic door always stamps
+    /// [`db::EdgeAuthority::DerivedHeuristic`] rather than trusting caller
+    /// provenance.
+    pub fn commit_confidence_reinforcement(
+        &mut self,
+        edge: &crate::MemoryEdge,
+        increment: f64,
+        reinforced_at: &str,
+        expected_source: &ExpectedMemoryState,
+        expected_target: &ExpectedMemoryState,
+    ) -> Result<bool, MemoryError> {
+        if edge.relation != "reinforces" || edge.source_id == edge.target_id {
+            return Err(MemoryError::InvalidArg(
+                "confidence reinforcement requires distinct endpoints and a reinforces edge"
+                    .to_string(),
+            ));
+        }
+        if !increment.is_finite() || !(0.0..=1.0).contains(&increment) {
+            return Err(MemoryError::InvalidArg(
+                "confidence reinforcement increment must be finite and within [0, 1]".to_string(),
+            ));
+        }
+
+        let db_label = self.db_label.clone();
+        let reserved_reference_write = self.reserved_reference_write.clone();
+        db::retry_memory_locked("confidence_reinforcement", &db_label, || {
+            let _authorization = db::authorize_reserved_reference_write(&reserved_reference_write)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if !db::row_matches_expected_state(&tx, &edge.source_id, expected_source)?
+                || !db::row_matches_expected_state(&tx, &edge.target_id, expected_target)?
+            {
+                return Ok(false);
+            }
+            for id in [&edge.source_id, &edge.target_id] {
+                let active_unsuperseded = tx
+                    .query_row(
+                        "SELECT archived = 0 AND superseded_by IS NULL FROM memories WHERE id = ?1",
+                        [id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+                if !active_unsuperseded {
+                    return Ok(false);
+                }
+            }
+            db::refuse_retired_sticky_row_within_tx(
+                &tx,
+                &edge.source_id,
+                "used as a confidence reinforcement source",
+            )?;
+            db::refuse_retired_sticky_row_within_tx(&tx, &edge.target_id, "confidence-reinforced")?;
+            db::add_edge_with_provenance(
+                &tx,
+                edge,
+                &db::EdgeProvenance {
+                    authority: Some(db::EdgeAuthority::DerivedHeuristic),
+                    ..Default::default()
+                },
+            )?;
+            let affected = tx.execute(
+                r#"UPDATE memories
+                   SET metadata = json_set(
+                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                       '$.confidence',
+                       min(
+                           1.0,
+                           coalesce(
+                               CAST(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.confidence') AS REAL),
+                               importance
+                           ) + ?1
+                       ),
+                       '$.confidence_reinforced_at', ?2
+                   ),
+                   updated_at = ?2
+                   WHERE id = ?3 AND archived = 0 AND superseded_by IS NULL"#,
+                rusqlite::params![increment, reinforced_at, &edge.target_id],
+            )?;
+            if affected != 1 {
+                return Err(MemoryError::NotFound(edge.target_id.clone()));
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
     /// Atomically persist the two graph projections and lifecycle transition
     /// produced by one successful contradiction-verification invocation.
     ///
@@ -36,35 +134,63 @@ impl MemoryStore {
         expected_entry: &ExpectedMemoryState,
         expected_candidate: &ExpectedMemoryState,
     ) -> Result<ConfirmedContradictionOutcome, MemoryError> {
-        let db_label = self.db_label.clone();
-        let reserved_reference_write = self.reserved_reference_write.clone();
-        db::retry_memory_locked("confirmed_contradiction", &db_label, || {
-            let _authorization = db::authorize_reserved_reference_write(&reserved_reference_write)?;
-            let tx = self
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            for id in [
-                contradicts_edge.source_id.as_str(),
-                contradicts_edge.target_id.as_str(),
-                supersedes_edge.source_id.as_str(),
-                supersedes_edge.target_id.as_str(),
-            ] {
-                db::refuse_retired_sticky_row_within_tx(
-                    &tx,
-                    id,
-                    "used by confirmed contradiction persistence",
-                )?;
-            }
-            let outcome = db::persist_confirmed_contradiction_within_tx(
-                &tx,
-                contradicts_edge,
-                supersedes_edge,
-                superseded_at,
+        db::validate_confirmed_contradiction(contradicts_edge, supersedes_edge, superseded_at)?;
+        let superseded_at = db::normalize_utc_iso(superseded_at)?;
+        self.with_immutable_supersession_transaction(|replacement| {
+            if !db::row_matches_expected_state(
+                replacement.transaction(),
+                &contradicts_edge.source_id,
                 expected_entry,
+            )? {
+                eprintln!(
+                    "[confirmed-contradiction] entry-side snapshot mismatch for {} (candidate {}): the triggering memory changed (or was archived/deleted) between the read that fed the model and the write",
+                    contradicts_edge.source_id, contradicts_edge.target_id
+                );
+                return Ok(ConfirmedContradictionOutcome::StaleSkipped);
+            }
+            if !db::row_matches_expected_state(
+                replacement.transaction(),
+                &contradicts_edge.target_id,
                 expected_candidate,
-            )?;
-            tx.commit()?;
-            Ok(outcome)
+            )? {
+                return Ok(ConfirmedContradictionOutcome::StaleSkipped);
+            }
+
+            let expected = SupersessionExpectedState {
+                source: expected_candidate.clone(),
+                target: Some(expected_entry.clone()),
+            };
+            let outcome = match replacement.claim_checked_immutable_supersession_at(
+                &contradicts_edge.target_id,
+                &contradicts_edge.source_id,
+                &expected,
+                "confirmed_contradiction_v1",
+                "confirmed-contradiction-v1",
+                false,
+                &superseded_at,
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) if error.to_string().contains("(competing_target)") => {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "confirmed contradiction lifecycle CAS refused for {} -> {}",
+                        contradicts_edge.target_id, contradicts_edge.source_id
+                    )));
+                }
+                Err(error) => return Err(error),
+            };
+            if outcome.result != crate::SupersessionCommitResult::Applied {
+                return Err(MemoryError::InvalidArg(
+                    "confirmed contradiction supersession was not applied".to_string(),
+                ));
+            }
+
+            let receipt_provenance = db::EdgeProvenance {
+                authority: Some(db::EdgeAuthority::ModelReceiptBacked),
+                ..db::EdgeProvenance::default()
+            };
+            replacement.add_edge_with_provenance(contradicts_edge, &receipt_provenance)?;
+            replacement.add_canonical_supersession_edge(supersedes_edge, &receipt_provenance)?;
+            Ok(ConfirmedContradictionOutcome::Committed)
         })
     }
 
@@ -101,6 +227,7 @@ impl MemoryStore {
     /// slice 5 / #2059 codex round 3: the auto-link write path only busts the
     /// recall cache when this returns `> 0`, since search-visible content
     /// only changed on the former.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn mark_superseded_closing_validity(
         &self,
         id: &str,
@@ -122,40 +249,6 @@ impl MemoryStore {
         )?;
         tx.commit()?;
         Ok(affected)
-    }
-
-    /// Bump `$.confidence` in metadata by `increment` (capped at 1.0), falling
-    /// back to `importance` when no confidence has been recorded yet.
-    pub fn reinforce_confidence(
-        &self,
-        id: &str,
-        increment: f64,
-        reinforced_at: &str,
-    ) -> Result<(), MemoryError> {
-        let _authorization =
-            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        db::refuse_retired_sticky_row_within_tx(&tx, id, "confidence-reinforced")?;
-        tx.execute(
-            r#"UPDATE memories
-               SET metadata = json_set(
-                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                   '$.confidence',
-                   min(
-                       1.0,
-                       coalesce(
-                           CAST(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.confidence') AS REAL),
-                           importance
-                       ) + ?1
-                   ),
-                   '$.confidence_reinforced_at', ?2
-               ),
-               updated_at = ?2
-               WHERE id = ?3"#,
-            rusqlite::params![increment, reinforced_at, id],
-        )?;
-        tx.commit()?;
-        Ok(())
     }
 
     /// Load active memories that share at least one entity with `entities`,
@@ -219,7 +312,7 @@ impl MemoryStore {
 mod tests {
     use serde_json::json;
 
-    use crate::types::MemoryEntry;
+    use crate::types::{ExpectedMemoryState, MemoryEntry};
     use crate::MemoryStore;
 
     fn test_entry(id: &str, entities: Vec<String>) -> MemoryEntry {
@@ -268,6 +361,111 @@ mod tests {
     }
 
     #[test]
+    fn confidence_reinforcement_refuses_a_rewritten_source_without_partial_writes() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let source = test_entry("new", vec!["Acme".to_string()]);
+        let mut target = test_entry("old", vec!["Acme".to_string()]);
+        target.metadata = json!({ "confidence": 0.50 });
+        store.upsert(&source).expect("seed source");
+        store.upsert(&target).expect("seed target");
+
+        let expected_source = ExpectedMemoryState::from_entry(&source, None);
+        let expected_target = ExpectedMemoryState::from_entry(&target, None);
+        let edge = crate::MemoryEdge {
+            source_id: source.id.clone(),
+            target_id: target.id.clone(),
+            relation: "reinforces".to_string(),
+            weight: 0.8,
+            metadata: json!({ "auto_link": true }),
+            created_at: "2026-07-05T01:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+
+        let mut rewritten_source = source.clone();
+        rewritten_source.text = "concurrently rewritten source".to_string();
+        store
+            .upsert(&rewritten_source)
+            .expect("rewrite source after scoring snapshot");
+
+        let committed = store
+            .commit_confidence_reinforcement(
+                &edge,
+                0.08,
+                "2026-07-05T01:00:00Z",
+                &expected_source,
+                &expected_target,
+            )
+            .expect("stale reinforcement is an ordinary skipped outcome");
+
+        assert!(!committed);
+        assert!(store
+            .get_edges("new", "outgoing", Some("reinforces"))
+            .expect("read edges")
+            .is_empty());
+        let unchanged_target = store.get("old").expect("read target").expect("target");
+        assert_eq!(unchanged_target.metadata["confidence"], 0.50);
+        assert!(unchanged_target
+            .metadata
+            .get("confidence_reinforced_at")
+            .is_none());
+    }
+
+    #[test]
+    fn confidence_reinforcement_refuses_archived_target_without_partial_writes() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let source = test_entry("new-archived-case", vec!["Acme".to_string()]);
+        let mut target = test_entry("old-archived-case", vec!["Acme".to_string()]);
+        target.archived = true;
+        target.metadata = json!({ "confidence": 0.50 });
+        store.upsert(&source).expect("seed source");
+        store.upsert(&target).expect("seed archived target");
+        let source = store
+            .get(&source.id)
+            .expect("read source")
+            .expect("source exists");
+        let target = store
+            .get_with_options(&target.id, true)
+            .expect("read archived target")
+            .expect("archived target exists");
+        let edge = crate::MemoryEdge {
+            source_id: source.id.clone(),
+            target_id: target.id.clone(),
+            relation: "reinforces".to_string(),
+            weight: 0.8,
+            metadata: json!({ "auto_link": true }),
+            created_at: "2026-07-05T01:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+
+        let committed = store
+            .commit_confidence_reinforcement(
+                &edge,
+                0.08,
+                "2026-07-05T01:00:00Z",
+                &ExpectedMemoryState::from_entry(&source, None),
+                &ExpectedMemoryState::from_entry(&target, None),
+            )
+            .expect("archived reinforcement is an ordinary skipped outcome");
+
+        assert!(!committed);
+        assert!(store
+            .get_edges(&source.id, "outgoing", Some("reinforces"))
+            .expect("read edges")
+            .is_empty());
+        let unchanged_target = store
+            .get_with_options(&target.id, true)
+            .expect("read archived target")
+            .expect("archived target exists");
+        assert_eq!(unchanged_target.metadata["confidence"], 0.50);
+        assert!(unchanged_target
+            .metadata
+            .get("confidence_reinforced_at")
+            .is_none());
+    }
+
+    #[test]
     fn mark_superseded_closing_validity_updates_only_unsuperseded_rows() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         store.upsert(&test_entry("old", vec![])).expect("seed old");
@@ -300,19 +498,53 @@ mod tests {
     #[test]
     fn reinforce_confidence_increments_and_falls_back_to_importance() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let source_with_confidence = test_entry("source-with-confidence", vec![]);
+        let source_without_confidence = test_entry("source-without-confidence", vec![]);
         let mut with_confidence = test_entry("with-confidence", vec![]);
         with_confidence.metadata = json!({ "confidence": 0.70 });
+        store
+            .upsert(&source_with_confidence)
+            .expect("seed first source");
         store.upsert(&with_confidence).expect("seed confidence");
         let mut without_confidence = test_entry("without-confidence", vec![]);
         without_confidence.importance = 0.60;
+        store
+            .upsert(&source_without_confidence)
+            .expect("seed second source");
         store.upsert(&without_confidence).expect("seed importance");
 
-        store
-            .reinforce_confidence("with-confidence", 0.08, "2026-07-05T01:00:00Z")
-            .expect("reinforce existing confidence");
-        store
-            .reinforce_confidence("without-confidence", 0.10, "2026-07-05T01:00:00Z")
-            .expect("reinforce importance fallback");
+        for (source_id, target_id, increment) in [
+            ("source-with-confidence", "with-confidence", 0.08),
+            ("source-without-confidence", "without-confidence", 0.10),
+        ] {
+            let source = store
+                .get(source_id)
+                .expect("read source")
+                .expect("source exists");
+            let target = store
+                .get(target_id)
+                .expect("read target")
+                .expect("target exists");
+            let edge = crate::MemoryEdge {
+                source_id: source.id.clone(),
+                target_id: target.id.clone(),
+                relation: "reinforces".to_string(),
+                weight: 0.8,
+                metadata: json!({ "auto_link": true }),
+                created_at: "2026-07-05T01:00:00Z".to_string(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            assert!(store
+                .commit_confidence_reinforcement(
+                    &edge,
+                    increment,
+                    "2026-07-05T01:00:00Z",
+                    &ExpectedMemoryState::from_entry(&source, None),
+                    &ExpectedMemoryState::from_entry(&target, None),
+                )
+                .expect("commit typed confidence reinforcement"));
+        }
 
         let reinforced = store
             .get("with-confidence")

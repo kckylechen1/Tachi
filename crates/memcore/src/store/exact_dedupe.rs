@@ -733,155 +733,170 @@ impl MemoryStore {
         plan: &ExactDedupePlan,
         precommit_receipt: impl FnOnce(&ExactDedupeApplyResult) -> Result<(), MemoryError>,
     ) -> Result<ExactDedupeApplyResult, MemoryError> {
-        let _authorization =
-            crate::db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         plan.validate()?;
         self.validate_exact_dedupe_target_at_mutation_boundary(
             "plan",
             &plan.target_db_identity,
             Some(&plan.target_db_physical_identity),
         )?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let vec_expr = if self.vec_available {
             "EXISTS(SELECT 1 FROM memories_vec v WHERE v.id=m.id)"
         } else {
             "0"
         };
-        let candidate_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE id=?1 AND id NOT LIKE 'wiki-rem:%'");
-        let live_group_sql = format!("SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE text=?1 AND archived=0 AND superseded_by IS NULL AND id NOT LIKE 'wiki-rem:%'");
-        for g in &plan.groups {
-            let winner = tx
-                .query_row(&candidate_sql, [&g.winner.id], candidate_from_row)
-                .optional()?;
-            let Some((_, exact_text, _)) = winner else {
-                return Err(MemoryError::InvalidArg(format!(
-                    "planned row missing: {}",
-                    g.winner.id
-                )));
+        let mut precommit_receipt = Some(precommit_receipt);
+        let mut result = self.with_immutable_supersession_transaction(|replacement| {
+            let candidate_sql = format!(
+                "SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE id=?1 AND id NOT LIKE 'wiki-rem:%'"
+            );
+            let live_group_sql = format!(
+                "SELECT id,path,text,revision,retention_policy,tier,query_diversity,recall_count,access_count,metadata,{vec_expr},archived,superseded_by FROM memories m WHERE text=?1 AND archived=0 AND superseded_by IS NULL AND id NOT LIKE 'wiki-rem:%'"
+            );
+            {
+                let tx = replacement.transaction();
+                for g in &plan.groups {
+                    let winner = tx
+                        .query_row(&candidate_sql, [&g.winner.id], candidate_from_row)
+                        .optional()?;
+                    let Some((_, exact_text, _)) = winner else {
+                        return Err(MemoryError::InvalidArg(format!(
+                            "planned row missing: {}",
+                            g.winner.id
+                        )));
+                    };
+
+                    let mut statement = tx.prepare(&live_group_sql)?;
+                    let mut actual = statement
+                        .query_map([&exact_text], candidate_from_row)?
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .filter(|(normalized_path, _, _)| normalized_path == &g.normalized_path)
+                        .map(|(_, _, candidate)| candidate)
+                        .collect::<Vec<_>>();
+                    actual.sort_by(order);
+
+                    let planned_ids = g
+                        .ranked_candidates
+                        .iter()
+                        .map(|candidate| candidate.row.id.as_str())
+                        .collect::<HashSet<_>>();
+                    let actual_ids = actual
+                        .iter()
+                        .map(|candidate| candidate.row.id.as_str())
+                        .collect::<HashSet<_>>();
+                    if actual.len() != g.ranked_candidates.len() || actual_ids != planned_ids {
+                        return Err(MemoryError::InvalidArg(format!(
+                            "exact-dedupe group membership drifted: {}/{}",
+                            g.normalized_path, g.text_digest
+                        )));
+                    }
+
+                    for (index, candidate) in actual.iter().enumerate() {
+                        let planned = &g.ranked_candidates[index];
+                        if candidate_evidence(candidate, index + 1) != *planned {
+                            return Err(MemoryError::InvalidArg(format!(
+                                "planned candidate evidence drifted: {}",
+                                planned.row.id
+                            )));
+                        }
+                    }
+                }
+                for group in &plan.groups {
+                    db::refuse_retired_sticky_row_within_tx(
+                        tx,
+                        &group.winner.id,
+                        "used as an exact-dedupe winner",
+                    )?;
+                    for loser in &group.losers {
+                        db::refuse_retired_sticky_row_within_tx(
+                            tx,
+                            &loser.id,
+                            "archived by exact dedupe",
+                        )?;
+                    }
+                }
+            }
+
+            let now = db::now_utc_iso();
+            let apply_id = uuid::Uuid::new_v4().to_string();
+            let mut receipt_rows = Vec::with_capacity(plan.planned_losers);
+            for group in &plan.groups {
+                for frozen_loser in &group.losers {
+                    let source = replacement
+                        .get_memory(&frozen_loser.id)?
+                        .ok_or_else(|| MemoryError::NotFound(frozen_loser.id.clone()))?;
+                    let winner = replacement
+                        .get_memory(&group.winner.id)?
+                        .ok_or_else(|| MemoryError::NotFound(group.winner.id.clone()))?;
+                    let valid_until_before = source.valid_until.clone();
+                    let expected =
+                        super::immutable_supersession::SupersessionExpectedState::active_unsuperseded(
+                            &source,
+                            Some(&winner),
+                        );
+                    let outcome = replacement
+                        .claim_and_archive_immutable_supersession_for_exact_dedupe(
+                        &source.id,
+                        &winner.id,
+                        Some(&expected),
+                        "exact_dedupe_v1",
+                        "exact-dedupe-v1",
+                        &now,
+                    )?;
+                    if outcome.result != super::immutable_supersession::SupersessionCommitResult::Applied
+                    {
+                        return Err(MemoryError::InvalidArg(format!(
+                            "exact-dedupe supersession was not applied: {} -> {}",
+                            source.id, winner.id
+                        )));
+                    }
+                    replacement.record_exact_dedupe_lineage(
+                        &source.id,
+                        &apply_id,
+                        &plan.plan_digest,
+                        &winner.id,
+                        source.revision,
+                        outcome.receipt.source_revision_after,
+                        valid_until_before.as_deref(),
+                        &now,
+                    )?;
+                    replacement.transfer_exact_dedupe_edges(&source.id, &winner.id)?;
+                    receipt_rows.push(ExactDedupeReceiptRow {
+                        winner_id: winner.id,
+                        loser_id: source.id,
+                        loser_path: source.path,
+                        loser_valid_until_before: valid_until_before,
+                        before_revision: frozen_loser.revision,
+                        archived_revision: outcome.receipt.source_revision_after,
+                    });
+                }
+            }
+            let mut receipt = ExactDedupeReceipt {
+                schema_version: EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION,
+                policy_version: EXACT_DEDUPE_POLICY.into(),
+                target_db_identity: plan.target_db_identity.clone(),
+                target_db_physical_identity: plan.target_db_physical_identity.clone(),
+                plan_digest: plan.plan_digest.clone(),
+                apply_id,
+                applied_at: now,
+                phase: ExactDedupeReceiptPhase::Prepared,
+                applied_groups: plan.groups.len(),
+                applied_losers: plan.planned_losers,
+                rows: receipt_rows,
+                receipt_digest: String::new(),
             };
-
-            let mut statement = tx.prepare(&live_group_sql)?;
-            let mut actual = statement
-                .query_map([&exact_text], candidate_from_row)?
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .filter(|(normalized_path, _, _)| normalized_path == &g.normalized_path)
-                .map(|(_, _, candidate)| candidate)
-                .collect::<Vec<_>>();
-            actual.sort_by(order);
-
-            let planned_ids = g
-                .ranked_candidates
-                .iter()
-                .map(|candidate| candidate.row.id.as_str())
-                .collect::<HashSet<_>>();
-            let actual_ids = actual
-                .iter()
-                .map(|candidate| candidate.row.id.as_str())
-                .collect::<HashSet<_>>();
-            if actual.len() != g.ranked_candidates.len() || actual_ids != planned_ids {
-                return Err(MemoryError::InvalidArg(format!(
-                    "exact-dedupe group membership drifted: {}/{}",
-                    g.normalized_path, g.text_digest
-                )));
-            }
-
-            for (index, candidate) in actual.iter().enumerate() {
-                let planned = &g.ranked_candidates[index];
-                if candidate_evidence(candidate, index + 1) != *planned {
-                    return Err(MemoryError::InvalidArg(format!(
-                        "planned candidate evidence drifted: {}",
-                        planned.row.id
-                    )));
-                }
-            }
-        }
-        for group in &plan.groups {
-            db::refuse_retired_sticky_row_within_tx(
-                &tx,
-                &group.winner.id,
-                "used as an exact-dedupe winner",
-            )?;
-            for loser in &group.losers {
-                db::refuse_retired_sticky_row_within_tx(
-                    &tx,
-                    &loser.id,
-                    "archived by exact dedupe",
-                )?;
-            }
-        }
-        let now = db::now_utc_iso();
-        let apply_id = uuid::Uuid::new_v4().to_string();
-        // The complete text-digest revalidation above runs after BEGIN IMMEDIATE,
-        // which excludes intervening writers until commit. The UPDATE therefore
-        // needs only the revision/state/original-path CAS predicates.
-        let mut receipt_rows = Vec::with_capacity(plan.planned_losers);
-        for g in &plan.groups {
-            for f in &g.losers {
-                let valid_until_before: Option<String> = tx.query_row(
-                    "SELECT valid_until FROM memories WHERE id=?1",
-                    [&f.id],
-                    |r| r.get(0),
-                )?;
-                let changed=tx.execute("UPDATE memories SET archived=1,superseded_by=?1,valid_until=COALESCE(valid_until,?2),updated_at=?2,revision=revision+1 WHERE id=?3 AND revision=?4 AND archived=0 AND superseded_by IS NULL AND path=?5 AND id NOT LIKE 'wiki-rem:%'",params![g.winner.id,now,f.id,f.revision,f.path])?;
-                if changed != 1 {
-                    return Err(MemoryError::InvalidArg(format!(
-                        "exact-dedupe CAS failed: {}",
-                        f.id
-                    )));
-                }
-                tx.execute(
-                    "INSERT INTO exact_dedupe_apply_lineage (
-                         loser_id,apply_id,plan_digest,winner_id,
-                         before_revision,archived_revision,
-                         loser_valid_until_before,applied_at
-                     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                    params![
-                        f.id,
-                        apply_id,
-                        plan.plan_digest,
-                        g.winner.id,
-                        f.revision,
-                        f.revision + 1,
-                        valid_until_before,
-                        now
-                    ],
-                )?;
-                transfer_edges_to_winner(&tx, &f.id, &g.winner.id)?;
-                receipt_rows.push(ExactDedupeReceiptRow {
-                    winner_id: g.winner.id.clone(),
-                    loser_id: f.id.clone(),
-                    loser_path: f.path.clone(),
-                    loser_valid_until_before: valid_until_before,
-                    before_revision: f.revision,
-                    archived_revision: f.revision + 1,
-                });
-            }
-        }
-        let mut receipt = ExactDedupeReceipt {
-            schema_version: EXACT_DEDUPE_RECEIPT_SCHEMA_VERSION,
-            policy_version: EXACT_DEDUPE_POLICY.into(),
-            target_db_identity: plan.target_db_identity.clone(),
-            target_db_physical_identity: plan.target_db_physical_identity.clone(),
-            plan_digest: plan.plan_digest.clone(),
-            apply_id,
-            applied_at: now,
-            phase: ExactDedupeReceiptPhase::Prepared,
-            applied_groups: plan.groups.len(),
-            applied_losers: plan.planned_losers,
-            rows: receipt_rows,
-            receipt_digest: String::new(),
-        };
-        receipt.receipt_digest = receipt.compute_digest()?;
-        let mut result = ExactDedupeApplyResult {
-            applied_groups: plan.groups.len(),
-            applied_losers: plan.planned_losers,
-            receipt,
-        };
-        precommit_receipt(&result)?;
-        tx.commit()?;
+            receipt.receipt_digest = receipt.compute_digest()?;
+            let result = ExactDedupeApplyResult {
+                applied_groups: plan.groups.len(),
+                applied_losers: plan.planned_losers,
+                receipt,
+            };
+            let precommit_receipt = precommit_receipt.take().ok_or_else(|| {
+                MemoryError::Internal("exact-dedupe precommit callback was already consumed".to_string())
+            })?;
+            precommit_receipt(&result)?;
+            Ok(result)
+        })?;
         result.receipt = result.receipt.into_committed()?;
         Ok(result)
     }
@@ -1110,52 +1125,6 @@ impl MemoryStore {
             restored_losers: view.rows.len(),
         })
     }
-}
-
-/// Move every `memory_edges` row touching `loser` onto `winner` in the same
-/// transaction as the archive CAS. `loser` is byte-identical to `winner`
-/// (that's the entire exact-dedupe eligibility bar), so its edges are
-/// semantically the winner's edges post-merge:
-///
-/// - an edge already present for `winner` with the same `(target, relation)`
-///   (or `(source, relation)` on the incoming side) is a duplicate — the
-///   loser's copy is dropped, not doubled (`INSERT OR IGNORE` on the
-///   `(source_id, target_id, relation)` primary key);
-/// - an edge between `loser` and `winner` becomes a winner→winner self-loop
-///   after the rename, which is meaningless post-merge, so it is dropped
-///   rather than inserted (the `target_id != winner`/`source_id != winner`
-///   guards on the `INSERT ... SELECT`).
-///
-/// `edge_observations` (the append-only Layer-2 evidence ledger, #774) is
-/// deliberately left untouched: it is historical record of what was
-/// observed about which ids, not a live projection, and is out of scope
-/// for #1348's frozen contract.
-fn transfer_edges_to_winner(
-    tx: &rusqlite::Transaction<'_>,
-    loser: &str,
-    winner: &str,
-) -> Result<(), MemoryError> {
-    tx.execute(
-        "INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
-         SELECT ?1, target_id, relation, weight, metadata, created_at, valid_from, valid_to
-         FROM memory_edges WHERE source_id = ?2 AND target_id != ?1",
-        params![winner, loser],
-    )?;
-    tx.execute(
-        "DELETE FROM memory_edges WHERE source_id = ?1",
-        params![loser],
-    )?;
-    tx.execute(
-        "INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
-         SELECT source_id, ?1, relation, weight, metadata, created_at, valid_from, valid_to
-         FROM memory_edges WHERE target_id = ?2 AND source_id != ?1",
-        params![winner, loser],
-    )?;
-    tx.execute(
-        "DELETE FROM memory_edges WHERE target_id = ?1",
-        params![loser],
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]

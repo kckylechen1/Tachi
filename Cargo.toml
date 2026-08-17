@@ -131,7 +131,7 @@ opt-level = 1
 #     crates/memcore/src/db/tests.rs — checks the library actually loaded.
 # Both restate `3.50.3` on purpose; do not collapse them onto one shared
 # constant, and do not relax either one to make a below-floor pin resolve.
-rusqlite = { version = ">=0.37, <0.39", features = ["backup", "bundled", "vtab", "functions"] }
+rusqlite = { version = ">=0.37, <0.39", features = ["backup", "bundled", "vtab", "functions", "serialize"] }
 sqlite-vec = "0.1.7-alpha.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
