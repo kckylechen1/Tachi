@@ -22,6 +22,7 @@ use health::collect_database_stats_for_targets;
 pub(crate) use health::run_health_check as run_health_check_for_tests;
 #[cfg(test)]
 use maintenance::resolve_truth_maintenance_route_for_paths_in_home;
+pub(crate) use report::parse_llm_json;
 pub(crate) use report::validated_latest_daily_report;
 #[cfg(test)]
 pub(crate) use report::{
@@ -36,7 +37,6 @@ pub(crate) use report::{
     serialize_daily_json_section as serialize_daily_json_section_for_tests,
     DailyPublishFailurePoint,
 };
-pub(crate) use report::parse_llm_json;
 pub(crate) use schedule::{next_daily_run_time, next_weekly_rem_run_time};
 pub(crate) use types::{
     CategorySourceCount, DailyHealthPayload, DailyPipelineReport, DailyStageReport, DatabaseStats,
@@ -72,12 +72,8 @@ pub(crate) async fn run_daily_pipeline(
     let health_section = serialize_daily_json_section(&health_json)?;
     let truth_section = serialize_daily_json_section(&report.truth_maintenance.details)?;
     let routing_section = serialize_daily_json_section(&report.routing_analysis.details)?;
-    let markdown = render_daily_report_markdown(
-        &report,
-        &health_section,
-        &truth_section,
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown(&report, &health_section, &truth_section, &routing_section);
 
     let (revision, sidecar) = publish_daily_report_with_retry(
         &report_path,

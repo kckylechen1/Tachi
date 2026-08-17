@@ -49,8 +49,13 @@ async fn dispatch_response_and_flow_card_link_run_artifacts() {
     assert_eq!(response["feedback_rules"]["status"], json!("none"));
     let prompt_file = response["prompt_file"].as_str().expect("prompt file");
     let context_file = response["context_file"].as_str().expect("context file");
-    let trajectory_file = response["trajectory_file"].as_str().expect("trajectory file");
-    assert!(std::path::Path::new(prompt_file).exists(), "prompt file exists");
+    let trajectory_file = response["trajectory_file"]
+        .as_str()
+        .expect("trajectory file");
+    assert!(
+        std::path::Path::new(prompt_file).exists(),
+        "prompt file exists"
+    );
     assert!(
         std::path::Path::new(context_file).exists(),
         "context file exists"

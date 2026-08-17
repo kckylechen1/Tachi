@@ -93,7 +93,10 @@ fn review_stage_profiles_resolve_with_review_evidence_contract() {
     review_params.profile = Some("codex_55_review".to_string());
     review_params.stage = None;
     let resolved_review = resolve_and_apply_dispatch_profile(&mut review_params).unwrap();
-    assert_eq!(resolved_review.selected_profile.as_deref(), Some("codex_55_review"));
+    assert_eq!(
+        resolved_review.selected_profile.as_deref(),
+        Some("codex_55_review")
+    );
     assert_eq!(
         resolved_review.evidence_required,
         vec![
@@ -117,7 +120,11 @@ fn review_stage_profiles_resolve_with_review_evidence_contract() {
     );
     assert_eq!(
         resolved_execute.evidence_required,
-        vec!["diff".to_string(), "tests_run".to_string(), "files_changed".to_string()]
+        vec![
+            "diff".to_string(),
+            "tests_run".to_string(),
+            "files_changed".to_string()
+        ]
     );
 }
 

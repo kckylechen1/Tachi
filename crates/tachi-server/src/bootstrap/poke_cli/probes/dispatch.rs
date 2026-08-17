@@ -65,13 +65,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
         .ok_or_else(|| format!("dispatch response lacks dispatch_id: {response}"))?;
     let run_dir = sandbox_home.join("runs").join(dispatch_id);
     wait_for_file(&run_dir.join("result.md"), Duration::from_secs(10)).await?;
-    let required = [
-        "prompt.md",
-        "context.md",
-        "capability_bundle.json",
-        "trajectory.jsonl",
-        "status.json",
-    ];
+    let required = ["prompt.md", "context.md", "trajectory.jsonl", "status.json"];
     let missing = required
         .iter()
         .filter(|name| !run_dir.join(name).exists())
@@ -104,7 +98,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
         "repro_steps": [
             "tachi_staff(action='start', task=..., profile=...) or invoke the dispatch kernel directly with a mock worker",
             "wait for result.md",
-            "verify prompt/context/capability_bundle/trajectory/status artifacts"
+            "verify prompt/context/trajectory/status artifacts"
         ],
     }))
 }

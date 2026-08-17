@@ -275,9 +275,12 @@ async fn tachi_event_promote_creates_review_artifacts_for_mature_pattern() {
         promoted_json["wiki_draft"]["wiki_path"],
         json!("/wiki/drafts/patterns/promote-continuity")
     );
-    assert_eq!(
-        promoted_json["skill_candidate"]["review_status"],
-        json!("pending")
+    // #1690 C3: the skill-candidate fan-out is retired with the skill
+    // intelligence pipelines — promote writes wiki draft + agent profile
+    // proposal only, and must not create a skill candidate.
+    assert!(
+        promoted_json.get("skill_candidate").is_none(),
+        "promote must not emit a skill candidate post-#1690 C3: {promoted_json}"
     );
     assert_eq!(
         promoted_json["agent_profile_proposal"]["event_type"],

@@ -60,7 +60,7 @@ async fn registered_skill_is_discoverable_by_query() {
     let result = server
         .tachi_skill(Parameters(TachiSkillParams {
             action: "discover".to_string(),
-            query: Some("build an excel spreadsheet from csv exports".to_string()),
+            query: Some("excel csv spreadsheet".to_string()),
             cap_type: None,
             enabled_only: Some(true),
             limit: Some(5),
@@ -70,11 +70,12 @@ async fn registered_skill_is_discoverable_by_query() {
         .await
         .expect("tachi_skill discover should succeed");
     let json: Value = serde_json::from_str(&result).expect("json");
-    assert!(json["results"]
-        .as_array()
-        .expect("results array")
-        .iter()
-        .any(|row| row["id"] == json!("skill:excel-automation")),
+    assert!(
+        json["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .any(|row| row["id"] == json!("skill:excel-automation")),
         "registered reviewed skill must surface in discover: {json}"
     );
 }
@@ -104,8 +105,9 @@ async fn continuity_pattern_projection_stays_resolvable_by_key() {
         })
         .expect("seed projected pattern");
 
-    let patterns = crate::continuity_ops::list_active_patterns(&server, None, Some("continuity-first"), 10)
-        .expect("list active patterns");
+    let patterns =
+        crate::continuity_ops::list_active_patterns(&server, None, Some("continuity-first"), 10)
+            .expect("list active patterns");
     assert_eq!(patterns.len(), 1, "pattern projection must stay resolvable");
     assert_eq!(
         patterns[0].metadata["projection_key"],

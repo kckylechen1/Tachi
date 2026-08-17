@@ -316,12 +316,8 @@ fn sample_report_artifacts(
         .expect("health section");
     let routing_section = serialize_daily_json_section_for_tests(&report.routing_analysis.details)
         .expect("routing section");
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     (report, health_section, routing_section, markdown)
 }
 
@@ -379,12 +375,8 @@ async fn provider_fallback_persists_actual_serving_identity_not_configured_prima
     let report = sample_pipeline_report("2026-08-06");
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 1);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
@@ -430,12 +422,8 @@ async fn health_and_routing_receipts_are_independently_named_in_sidecar() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 1);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
@@ -490,12 +478,8 @@ async fn injected_failure_between_payload_and_sidecar_leaves_neither_success_pai
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -695,12 +679,8 @@ async fn serialized_artifact_provenance_is_secret_negative() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -771,12 +751,8 @@ async fn sidecar_declares_immutable_revision_payload() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -820,12 +796,8 @@ async fn mismatched_sidecar_is_rejected_without_legacy_fallback() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -1065,12 +1037,8 @@ async fn generation_collision_does_not_overwrite_existing_sidecar() {
     let health_section = "{\"marker\":\"health\"}";
     let routing_section = "{\"routing_proposals\":[]}";
     let report = sample_pipeline_report("2026-08-06");
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        health_section,
-        "{}",
-        routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, health_section, "{}", routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -1107,12 +1075,8 @@ async fn precommit_failure_preserves_prior_valid_generation() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let first_markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        &routing_section,
-    );
+    let first_markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let first_sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,

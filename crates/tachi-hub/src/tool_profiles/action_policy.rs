@@ -191,7 +191,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "alerts"
                 | "ask"
         ),
-        "tachi_skill" => matches!(action, "discover" | "run" | "bundle"),
+        "tachi_skill" => matches!(action, "discover" | "run"),
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
         "tachi_a2a" => matches!(action, "respond" | "status"),
         // Non-facade tools on the delegate list (no action concept): tool
@@ -232,8 +232,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
         },
         "tachi_skill" => match action.as_str() {
             "discover" => Some(ToolBundle::Observe),
-            "run" | "bundle" => Some(ToolBundle::Remember),
-            "loadout" | "from_pattern" => Some(ToolBundle::Operate),
+            "run" => Some(ToolBundle::Remember),
             _ => None,
         },
         "tachi_wiki" => match action.as_str() {
@@ -345,21 +344,14 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_skill", Some("run"), profile));
-        assert!(facade_action_allowed(
-            "tachi_skill",
-            Some("bundle"),
-            profile
-        ));
-        assert!(!facade_action_allowed(
-            "tachi_skill",
-            Some("loadout"),
-            profile
-        ));
-        assert!(!facade_action_allowed(
-            "tachi_skill",
-            Some("from_pattern"),
-            profile
-        ));
+        // #1690 C3: bundle/loadout/from_pattern are retired — the delegate
+        // gate must not admit any retired tachi_skill action.
+        for retired in ["bundle", "loadout", "from_pattern"] {
+            assert!(
+                !facade_action_allowed("tachi_skill", Some(retired), profile),
+                "delegate gate must reject retired tachi_skill action '{retired}'"
+            );
+        }
 
         assert!(facade_action_allowed(
             "tachi_memory",

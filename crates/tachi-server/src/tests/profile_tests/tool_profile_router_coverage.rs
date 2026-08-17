@@ -396,6 +396,8 @@ fn tachi_skill_facade_advertises_canonical_run_and_bundle_actions() {
     // (their "stays retired" fate is guarded by `retired_native_aliases_stay_retired`
     // via `RETIRED_NATIVE_ALIASES`); what survives is the canonical facade's
     // advertisement of the actions the deleted routes used to forward to.
+    // #1690 C3 slice C: the surviving static action set is {discover, run} —
+    // the description must advertise exactly those and teach no retired action.
     let descriptions = native_route_descriptions();
 
     let tachi_skill = descriptions
@@ -406,9 +408,15 @@ fn tachi_skill_facade_advertises_canonical_run_and_bundle_actions() {
         "tachi_skill description should advertise canonical run action: {tachi_skill}"
     );
     assert!(
-        tachi_skill.contains("action='bundle'"),
-        "tachi_skill description should advertise canonical bundle action: {tachi_skill}"
+        tachi_skill.contains("action='discover'"),
+        "tachi_skill description should advertise canonical discover action: {tachi_skill}"
     );
+    for retired in ["bundle", "loadout", "from_pattern"] {
+        assert!(
+            !tachi_skill.contains(&format!("action='{retired}'")),
+            "tachi_skill description must not teach retired action '{retired}': {tachi_skill}"
+        );
+    }
 }
 
 /// #1098: every name in the single typed action-effect authority's cache

@@ -11,39 +11,39 @@
     "profiles": {
       "standard": {
         "max_visible_tools": 17,
-        "max_total_input_schema_bytes": 60246,
-        "max_total_tool_definition_bytes": 70184,
-        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (standard: 17 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 59270,
+        "max_total_tool_definition_bytes": 68922,
+        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
       },
       "delegate": {
         "max_visible_tools": 12,
-        "max_total_input_schema_bytes": 61857,
-        "max_total_tool_definition_bytes": 67623,
-        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (delegate: 12 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 60881,
+        "max_total_tool_definition_bytes": 66361,
+        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
       },
       "coordinate": {
         "max_visible_tools": 36,
-        "max_total_input_schema_bytes": 124247,
-        "max_total_tool_definition_bytes": 141632,
-        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (coordinate: 36 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 123271,
+        "max_total_tool_definition_bytes": 140370,
+        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
       },
       "operate": {
         "max_visible_tools": 46,
-        "max_total_input_schema_bytes": 118783,
-        "max_total_tool_definition_bytes": 136599,
-        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (operate: 46 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 117807,
+        "max_total_tool_definition_bytes": 135337,
+        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
       },
       "admin": {
-        "max_visible_tools": 98,
-        "max_total_input_schema_bytes": 180867,
-        "max_total_tool_definition_bytes": 216892,
-        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (admin: 98 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "max_visible_tools": 97,
+        "max_total_input_schema_bytes": 179251,
+        "max_total_tool_definition_bytes": 214707,
+        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
       }
     },
     "surfaces": {
       "standard.tachi_task": {
-        "max_top_level_properties": 66,
-        "max_input_schema_bytes": 24662,
+        "max_top_level_properties": 65,
+        "max_input_schema_bytes": 24481,
         "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
       },
       "standard.tachi_memory": {
@@ -57,8 +57,8 @@
         "rationale": "Exact live observed #1713 tachi_gh schema after close_loop relocation; zero headroom."
       },
       "admin.tachi_task": {
-        "max_top_level_properties": 66,
-        "max_input_schema_bytes": 25916,
+        "max_top_level_properties": 65,
+        "max_input_schema_bytes": 25735,
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
       }
     }
@@ -136,12 +136,9 @@
         ]
       },
       "tachi_skill": {
-        "action_count": 5,
+        "action_count": 2,
         "actions": [
-          "bundle",
           "discover",
-          "from_pattern",
-          "loadout",
           "run"
         ]
       },
@@ -201,9 +198,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 180867,
-        "total_tool_definition_bytes": 216892,
-        "visible_tool_count": 98,
+        "total_input_schema_bytes": 179251,
+        "total_tool_definition_bytes": 214707,
+        "visible_tool_count": 97,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -248,7 +245,6 @@
           "save_memory",
           "search_memory",
           "section_build",
-          "skill_evolve",
           "sync_memories",
           "tachi_a2a",
           "tachi_agent_eval",
@@ -306,8 +302,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 124247,
-        "total_tool_definition_bytes": 141632,
+        "total_input_schema_bytes": 123271,
+        "total_tool_definition_bytes": 140370,
         "visible_tool_count": 36,
         "visible_tools": [
           "extract_facts",
@@ -349,8 +345,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 61857,
-        "total_tool_definition_bytes": 67623,
+        "total_input_schema_bytes": 60881,
+        "total_tool_definition_bytes": 66361,
         "visible_tool_count": 12,
         "visible_tools": [
           "peer_query",
@@ -368,8 +364,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 118783,
-        "total_tool_definition_bytes": 136599,
+        "total_input_schema_bytes": 117807,
+        "total_tool_definition_bytes": 135337,
         "visible_tool_count": 46,
         "visible_tools": [
           "archive_memory",
@@ -421,8 +417,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 60246,
-        "total_tool_definition_bytes": 70184,
+        "total_input_schema_bytes": 59270,
+        "total_tool_definition_bytes": 68922,
         "visible_tool_count": 17,
         "visible_tools": [
           "peer_query",
@@ -446,7 +442,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 98,
+      "tool_count": 97,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -491,7 +487,6 @@
         "save_memory",
         "search_memory",
         "section_build",
-        "skill_evolve",
         "sync_memories",
         "tachi_a2a",
         "tachi_agent_eval",
@@ -626,8 +621,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 25916,
-            "property_count": 66,
+            "input_schema_bytes": 25735,
+            "property_count": 65,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -636,7 +631,6 @@
               "agent_id",
               "agent_identity_id",
               "allow_umbrella_close",
-              "auto_capability_bundle",
               "branch",
               "claim_id",
               "claim_mode",
@@ -774,8 +768,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 24662,
-            "property_count": 66,
+            "input_schema_bytes": 24481,
+            "property_count": 65,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -784,7 +778,6 @@
               "agent_id",
               "agent_identity_id",
               "allow_umbrella_close",
-              "auto_capability_bundle",
               "branch",
               "claim_id",
               "claim_mode",
@@ -1008,22 +1001,17 @@
           ]
         },
         "tachi_skill": {
-          "input_schema_bytes": 1324,
-          "property_count": 12,
+          "property_count": 7,
           "property_names": [
             "action",
             "args",
             "cap_type",
-            "capability_limit",
             "enabled_only",
-            "host",
-            "include_section",
             "limit",
-            "profile",
             "query",
-            "skill_id",
-            "skill_limit"
-          ]
+            "skill_id"
+          ],
+          "input_schema_bytes": 529
         },
         "tachi_status": {
           "input_schema_bytes": 621,
@@ -1033,8 +1021,8 @@
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 24662,
-          "property_count": 66,
+          "input_schema_bytes": 24481,
+          "property_count": 65,
           "property_names": [
             "__tachi_project_explicit",
             "action",
@@ -1043,7 +1031,6 @@
             "agent_id",
             "agent_identity_id",
             "allow_umbrella_close",
-            "auto_capability_bundle",
             "branch",
             "claim_id",
             "claim_mode",
