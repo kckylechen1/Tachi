@@ -321,11 +321,7 @@ pub fn lifecycle_protection_reason(entry: &MemoryEntry) -> Option<&'static str> 
         &entry.path,
         entry.archived,
         &entry.tier,
-        entry_is_wiki(
-            &entry.category,
-            entry.domain.as_deref(),
-            &entry.metadata,
-        ),
+        entry_is_wiki(&entry.category, entry.domain.as_deref(), &entry.metadata),
         entry.retention_policy.as_deref(),
     )
 }
@@ -1050,7 +1046,7 @@ fn apply_lifecycle_proposal_once(
                 .ok_or_else(|| drift_err(proposal_id, format!("target missing: {target}")))?;
             let expected =
                 SupersessionExpectedState::active_unsuperseded(&source, Some(&target_entry));
-            let mut receipt = claim_supersession_edge_within_tx(
+            let receipt = claim_supersession_edge_within_tx(
                 &tx,
                 &source_id,
                 target,
@@ -1070,7 +1066,8 @@ fn apply_lifecycle_proposal_once(
             .map_err(MemoryError::from)?;
             let attempt_result = receipt.result;
             let mut receipt = receipt.receipt;
-            if attempt_result == crate::store::immutable_supersession::SupersessionCommitResult::Applied
+            if attempt_result
+                == crate::store::immutable_supersession::SupersessionCommitResult::Applied
             {
                 finalize_supersession_receipt_within_tx(
                     &tx,
@@ -1121,9 +1118,7 @@ fn apply_lifecycle_proposal_once(
             if survivor.importance < source.importance {
                 survivor.importance = source.importance;
             }
-            let merged_keywords = survivor.keywords.len();
-            let merged_entities = survivor.entities.len();
-            let mut receipt = claim_supersession_edge_within_tx(
+            let receipt = claim_supersession_edge_within_tx(
                 &tx,
                 &source_id,
                 target,
@@ -1147,13 +1142,16 @@ fn apply_lifecycle_proposal_once(
             // bumps its revision, invalidating already-approved sibling star
             // proposals that share this target snapshot. When merged data did
             // change, preserve the full transaction-aware upsert path.
-            if survivor.keywords != target_keywords
-                || survivor.entities != target_entities
-                || survivor.importance != target_importance
+            if attempt_result
+                == crate::store::immutable_supersession::SupersessionCommitResult::Applied
+                && (survivor.keywords != target_keywords
+                    || survivor.entities != target_entities
+                    || survivor.importance != target_importance)
             {
                 db::upsert_within_tx(&tx, &survivor, store.vec_available, None)?;
             }
-            if attempt_result == crate::store::immutable_supersession::SupersessionCommitResult::Applied
+            if attempt_result
+                == crate::store::immutable_supersession::SupersessionCommitResult::Applied
             {
                 finalize_supersession_receipt_within_tx(
                     &tx,
@@ -1161,12 +1159,18 @@ fn apply_lifecycle_proposal_once(
                     "lifecycle_apply_target_fold_committed",
                 )?;
             }
+            let committed_survivor = read_memory_in_tx(&tx, target)?.ok_or_else(|| {
+                drift_err(
+                    proposal_id,
+                    format!("target disappeared after merge: {target}"),
+                )
+            })?;
             serde_json::json!({
                 "lifecycle_action": action,
                 "source_id": source_id,
                 "target_id": target,
-                "merged_keywords": merged_keywords,
-                "merged_entities": merged_entities,
+                "merged_keywords": committed_survivor.keywords.len(),
+                "merged_entities": committed_survivor.entities.len(),
                 "superseded": true,
                 "archived": true,
                 "supersession_attempt_result": attempt_result.as_str(),

@@ -5,7 +5,8 @@ use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
 use crate::server_state::{DbScope, MemoryServer};
 use memcore::{
     store::immutable_supersession::ImmutableSupersessionTransaction, InsertMemoryResult,
-    MemoryEdge, MemoryEntry, MemoryError, MemoryStore,
+    MemoryEdge, MemoryEntry, MemoryError, MemoryStore, SupersessionCommitResult,
+    SupersessionExpectedState,
 };
 use tachi_foundry::{
     distill_edge_relation_is_structural, plan_daily_distill_memory, plan_distill_edges,
@@ -16,6 +17,8 @@ use tachi_llm::PersistedModelInvocationReceiptV1;
 use super::types::{CandidateGroup, GroupPayload};
 
 const DAILY_DISTILL_SOURCE_SET_CONTRACT: &str = "daily-distill-source-set-v1";
+const DAILY_DISTILL_SUPERSESSION_ROUTE: &str = "daily_distill_supersession_v1";
+const DAILY_DISTILL_SUPERSESSION_POLICY_VERSION: &str = "daily-distill-snapshot-bound-v1";
 
 #[derive(serde::Serialize)]
 struct DailyDistillSourceSetIdentityV1<'a> {
@@ -162,6 +165,9 @@ fn claim_distilled_sources<'a>(
     distill_entry: &MemoryEntry,
     source_entries: &'a [MemoryEntry],
 ) -> Result<Vec<&'a MemoryEntry>, MemoryError> {
+    let target_snapshot = replacement
+        .get_memory(&distill_entry.id)?
+        .ok_or_else(|| MemoryError::NotFound(distill_entry.id.clone()))?;
     let mut claimed = Vec::new();
     for source in source_entries
         .iter()
@@ -171,7 +177,22 @@ fn claim_distilled_sources<'a>(
         // candidate must not persist its own row, derived projection, or any
         // graph/archive side effect when an input already has an immutable
         // successor.
-        replacement.claim_immutable_supersession(&source.id, &distill_entry.id)?;
+        let expected =
+            SupersessionExpectedState::active_unsuperseded(source, Some(&target_snapshot));
+        let result = replacement.claim_checked_immutable_supersession(
+            &source.id,
+            &distill_entry.id,
+            &expected,
+            DAILY_DISTILL_SUPERSESSION_ROUTE,
+            DAILY_DISTILL_SUPERSESSION_POLICY_VERSION,
+            true,
+        )?;
+        if result != SupersessionCommitResult::Applied {
+            return Err(MemoryError::InvalidArg(format!(
+                "daily_distill_prior_supersession: source {} already points at {}",
+                source.id, distill_entry.id
+            )));
+        }
         claimed.push(source);
     }
     Ok(claimed)

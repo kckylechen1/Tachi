@@ -499,8 +499,9 @@ fn apply_lifecycle_action(
                             "consolidate_route1_supersede",
                             ROUTE1_MERGE_POLICY_VERSION,
                         )?;
+                        let applied = outcome.is_applied();
                         let mut receipt = outcome.receipt;
-                        if outcome.is_applied() {
+                        if applied {
                             replacement.finalize_supersession_receipt(
                                 &mut receipt,
                                 "consolidate_route1_no_extra_target_write",
@@ -532,6 +533,7 @@ fn apply_lifecycle_action(
                 // back instead of leaving a partial lifecycle result.
                 let (
                     receipt,
+                    attempt_result,
                     source_revision,
                     target_revision,
                     merged_keywords,
@@ -574,11 +576,13 @@ fn apply_lifecycle_action(
                             "consolidate_route1_merge",
                             ROUTE1_MERGE_POLICY_VERSION,
                         )?;
+                        let attempt_result = outcome.result;
+                        let applied = outcome.is_applied();
                         let mut receipt = outcome.receipt;
-                        if survivor_changed {
+                        if applied && survivor_changed {
                             replacement.upsert(&survivor)?;
                         }
-                        if outcome.is_applied() {
+                        if applied {
                             replacement.finalize_supersession_receipt(
                                 &mut receipt,
                                 "consolidate_route1_target_fold_committed",
@@ -587,12 +591,15 @@ fn apply_lifecycle_action(
                         let committed_target = replacement
                             .get_memory(target)?
                             .ok_or_else(|| memcore::MemoryError::NotFound(target.to_string()))?;
+                        let merged_keywords = committed_target.keywords.len();
+                        let merged_entities = committed_target.entities.len();
                         Ok((
                             receipt,
+                            attempt_result,
                             source_revision,
                             target_revision,
-                            survivor.keywords.len(),
-                            survivor.entities.len(),
+                            merged_keywords,
+                            merged_entities,
                             committed_target,
                         ))
                     })
@@ -609,6 +616,7 @@ fn apply_lifecycle_action(
                     "superseded": true,
                     "archived": true,
                     "policy_version": ROUTE1_MERGE_POLICY_VERSION,
+                    "supersession_attempt_result": attempt_result.as_str(),
                     "supersession_receipt": receipt,
                     "committed_target_entry": committed_target,
                     }),

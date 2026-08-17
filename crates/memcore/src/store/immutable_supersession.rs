@@ -185,10 +185,6 @@ impl SupersessionReceipt {
     pub fn id_for(route: &str, policy_version: &str, source_id: &str, target_id: &str) -> String {
         receipt_id(route, policy_version, source_id, target_id)
     }
-
-    pub fn is_prior_idempotent(&self) -> bool {
-        self.commit_result == SupersessionCommitResult::PriorIdempotent
-    }
 }
 
 /// Transaction-local result of one semantic supersession claim attempt.
@@ -699,29 +695,29 @@ pub(crate) fn claim_supersession_edge_within_tx(
     Ok(SupersessionClaimOutcome {
         result: SupersessionCommitResult::Applied,
         receipt: SupersessionReceipt {
-        receipt_id: receipt_id(options.route, options.policy_version, source_id, target_id),
-        source_id: source_id.to_string(),
-        target_id: target_id.to_string(),
-        source_revision_before: source_before.revision,
-        source_revision_after: source_after.revision,
-        target_revision_before,
-        target_revision_after,
-        source_archived_before: source_before.archived,
-        source_archived_after: source_after.archived,
-        source_superseded_by_before,
-        source_superseded_by_after,
-        source_valid_until_before: source_before.valid_until,
-        source_valid_until_after: source_after.valid_until,
-        source_path_before: source_before.path,
-        source_text_digest_before: text_digest(&source_before.text),
-        target_path_before,
-        target_text_digest_before,
-        partition_id: options.partition_id,
-        route: options.route.to_string(),
-        policy_version: options.policy_version.to_string(),
-        dependent_write_disposition: "pending_transaction".to_string(),
-        commit_result: SupersessionCommitResult::Applied,
-        durable: false,
+            receipt_id: receipt_id(options.route, options.policy_version, source_id, target_id),
+            source_id: source_id.to_string(),
+            target_id: target_id.to_string(),
+            source_revision_before: source_before.revision,
+            source_revision_after: source_after.revision,
+            target_revision_before,
+            target_revision_after,
+            source_archived_before: source_before.archived,
+            source_archived_after: source_after.archived,
+            source_superseded_by_before,
+            source_superseded_by_after,
+            source_valid_until_before: source_before.valid_until,
+            source_valid_until_after: source_after.valid_until,
+            source_path_before: source_before.path,
+            source_text_digest_before: text_digest(&source_before.text),
+            target_path_before,
+            target_text_digest_before,
+            partition_id: options.partition_id,
+            route: options.route.to_string(),
+            policy_version: options.policy_version.to_string(),
+            dependent_write_disposition: "pending_transaction".to_string(),
+            commit_result: SupersessionCommitResult::Applied,
+            durable: false,
         },
     })
 }
@@ -919,48 +915,17 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         Ok(receipt)
     }
 
-    /// Bind a caller-supplied source snapshot to this transaction's current row.
-    ///
-    /// Daily distill and other multi-source transactions use this before
-    /// treating an out-of-transaction source set as the basis for derived
-    /// projections. The source must still be materialized, active, and
-    /// unsuperseded, and every field in [`ExpectedMemoryState`] must still
-    /// match the originally selected row.
-    pub fn validate_active_unsuperseded_snapshot(
-        &self,
-        expected_entry: &MemoryEntry,
-        context: &str,
-    ) -> Result<(), MemoryError> {
-        let expected = ExpectedMemoryState::from_entry(expected_entry, None);
-        let Some((current, superseded_by)) =
-            read_entry_and_supersession(&self.tx, &expected_entry.id)?
-        else {
-            return Err(MemoryError::InvalidArg(format!(
-                "{context}: source snapshot missing for {}",
-                expected_entry.id
-            )));
-        };
-        if !expected.matches(&current, superseded_by.as_deref()) {
-            return Err(MemoryError::InvalidArg(format!(
-                "{context}: source snapshot drift for {}",
-                expected_entry.id
-            )));
-        }
-        Ok(())
-    }
-
     /// Finalize and durably persist the exact receipt returned by a semantic
     /// route after all promised dependent writes have succeeded in this same
-    /// transaction. A prior-idempotent replay already refers to the original
-    /// durable receipt and performs no new write.
+    /// transaction. Callers invoke this only for an `Applied` attempt; a
+    /// prior-idempotent attempt already refers to the original durable receipt
+    /// and must perform no dependent write.
     pub fn finalize_supersession_receipt(
         &mut self,
         receipt: &mut SupersessionReceipt,
         dependent_write_disposition: &str,
     ) -> Result<(), MemoryError> {
-        if receipt.is_prior_idempotent() {
-            return Ok(());
-        }
+        debug_assert_eq!(receipt.commit_result, SupersessionCommitResult::Applied);
         finalize_supersession_receipt_within_tx(&self.tx, receipt, dependent_write_disposition)?;
         self.pending_receipts
             .retain(|pending| pending.receipt_id != receipt.receipt_id);
@@ -1661,6 +1626,106 @@ mod tests {
             })
             .expect("identical replay must return an explicit prior result");
         assert_eq!(result, SupersessionCommitResult::PriorIdempotent);
+    }
+
+    #[test]
+    fn semantic_replay_returns_the_exact_stored_receipt_without_rewriting_it() {
+        const ROUTE: &str = "test_semantic_replay";
+        const POLICY: &str = "test_policy_v1";
+
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        let source = fixture_entry("semantic-replay-source");
+        let target = fixture_entry("semantic-replay-target");
+        store.insert_if_absent(&source).expect("seed source");
+        store.insert_if_absent(&target).expect("seed target");
+
+        let first = store
+            .with_immutable_supersession_transaction(|operation| {
+                let outcome = operation.claim_and_archive_immutable_supersession(
+                    &source.id, &target.id, None, ROUTE, POLICY,
+                )?;
+                assert_eq!(outcome.result, SupersessionCommitResult::Applied);
+                let mut receipt = outcome.receipt;
+                operation.finalize_supersession_receipt(
+                    &mut receipt,
+                    "test_semantic_replay_committed",
+                )?;
+                Ok(receipt)
+            })
+            .expect("first semantic claim");
+        let receipt_id = SupersessionReceipt::id_for(ROUTE, POLICY, &source.id, &target.id);
+        let (stored_json, stored_version) = store
+            .get_state_kv(SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+            .expect("read first receipt")
+            .expect("first receipt exists");
+        let stored: SupersessionReceipt =
+            serde_json::from_str(&stored_json).expect("decode first receipt");
+        assert_eq!(stored_version, 1);
+        assert_eq!(stored, first);
+
+        let replay = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_and_archive_immutable_supersession(
+                    &source.id, &target.id, None, ROUTE, POLICY,
+                )
+            })
+            .expect("same-edge semantic replay");
+        assert_eq!(replay.result, SupersessionCommitResult::PriorIdempotent);
+        assert_eq!(
+            replay.receipt, stored,
+            "attempt-local replay status must not mutate the write-once receipt clone"
+        );
+        let (stored_after_json, stored_after_version) = store
+            .get_state_kv(SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+            .expect("read receipt after replay")
+            .expect("receipt remains present");
+        assert_eq!(stored_after_version, stored_version);
+        assert_eq!(stored_after_json, stored_json);
+    }
+
+    #[test]
+    fn semantic_lifecycle_claim_refuses_wiki_and_durable_sources_without_writes() {
+        let mut wiki = fixture_entry("protected-wiki-source");
+        wiki.category = "WiKi".to_string();
+        let mut durable = fixture_entry("protected-durable-source");
+        durable.retention_policy = Some("durable".to_string());
+
+        for source in [wiki, durable] {
+            let mut store = MemoryStore::open_in_memory().expect("open memory store");
+            let target = fixture_entry(&format!("{}-target", source.id));
+            store
+                .insert_if_absent(&source)
+                .expect("seed protected source");
+            store.insert_if_absent(&target).expect("seed target");
+            let before = database_snapshot(&store);
+            let receipt_id = SupersessionReceipt::id_for(
+                "test_protected_semantic_route",
+                "test_policy_v1",
+                &source.id,
+                &target.id,
+            );
+
+            let error = store
+                .with_immutable_supersession_transaction(|operation| {
+                    operation.claim_and_archive_immutable_supersession(
+                        &source.id,
+                        &target.id,
+                        None,
+                        "test_protected_semantic_route",
+                        "test_policy_v1",
+                    )
+                })
+                .expect_err("protected semantic source must refuse");
+            assert!(error.to_string().contains("source_protected"), "{error}");
+            assert_eq!(database_snapshot(&store), before);
+            assert!(
+                store
+                    .get_state_kv(SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+                    .expect("read receipt namespace")
+                    .is_none(),
+                "a protected-source refusal must not leave durable evidence"
+            );
+        }
     }
 
     #[test]

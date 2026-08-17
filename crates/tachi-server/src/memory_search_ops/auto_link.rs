@@ -548,6 +548,38 @@ pub(crate) fn spawn_auto_linking_for_test(
     });
 }
 
+fn commit_auto_link_supersession(
+    store: &mut MemoryStore,
+    edge: &memcore::MemoryEdge,
+    source_snapshot: &MemoryEntry,
+    target_snapshot: &MemoryEntry,
+) -> Result<SupersessionCommitResult, String> {
+    let expected =
+        SupersessionExpectedState::active_unsuperseded(source_snapshot, Some(target_snapshot));
+    store
+        .with_immutable_supersession_transaction(|replacement| {
+            let claim_result = replacement.claim_checked_immutable_supersession(
+                &source_snapshot.id,
+                &target_snapshot.id,
+                &expected,
+                AUTO_LINK_SUPERSESSION_ROUTE,
+                AUTO_LINK_SUPERSESSION_POLICY_VERSION,
+                true,
+            )?;
+            if claim_result == SupersessionCommitResult::Applied {
+                replacement.add_edge_with_provenance(
+                    edge,
+                    &memcore::db::EdgeProvenance {
+                        authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            Ok(claim_result)
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// Run one auto-link pass to completion, optionally returning a finalized
 /// [`AutoLinkReceipt`].
 ///
@@ -791,39 +823,12 @@ pub(crate) fn run_auto_linking(
                 let mut superseded_rows: usize = 0;
                 let save_edge_action = |store: &mut MemoryStore| -> Result<(), String> {
                     if supersedes {
-                        let expected = SupersessionExpectedState::active_unsuperseded(
-                            &result.entry,
-                            Some(entry),
-                        );
-                        let claim_result = store
-                            .with_immutable_supersession_transaction(|replacement| {
-                                let claim_result = replacement
-                                    .claim_checked_immutable_supersession(
-                                        &result.entry.id,
-                                        &entry.id,
-                                        &expected,
-                                        AUTO_LINK_SUPERSESSION_ROUTE,
-                                        AUTO_LINK_SUPERSESSION_POLICY_VERSION,
-                                        true,
-                                    )?;
-                                if claim_result == SupersessionCommitResult::Applied {
-                                    // tachi#1646: auto-link `supersedes` edges
-                                    // are a vector-similarity heuristic Tachi
-                                    // computed itself; they now commit only
-                                    // with the checked semantic claim.
-                                    replacement.add_edge_with_provenance(
-                                        &edge,
-                                        &memcore::db::EdgeProvenance {
-                                            authority: Some(
-                                                memcore::db::EdgeAuthority::DerivedHeuristic,
-                                            ),
-                                            ..Default::default()
-                                        },
-                                    )?;
-                                }
-                                Ok(claim_result)
-                            })
-                            .map_err(|e| e.to_string())?;
+                        // tachi#1646: auto-link `supersedes` edges are a
+                        // vector-similarity heuristic Tachi computed itself;
+                        // the edge now commits only with the checked semantic
+                        // claim in one transaction.
+                        let claim_result =
+                            commit_auto_link_supersession(store, &edge, &result.entry, entry)?;
                         if claim_result == SupersessionCommitResult::Applied {
                             superseded_rows = 1;
                             edge_outcome = EdgeWriteOutcome::InsertAndPostWriteOk;
@@ -1352,31 +1357,31 @@ mod tests {
     }
 
     #[test]
-    fn apply_edge_outcome_insert_failed_counts_attempt_only() {
+    fn apply_edge_outcome_no_write_counts_attempt_only() {
         let mut r = zeroed_receipt();
-        r.apply_edge_outcome(EdgeWriteOutcome::InsertFailed);
+        r.apply_edge_outcome(EdgeWriteOutcome::NoWrite);
         assert_eq!(r.edges_attempted, 1);
         assert_eq!(
             r.edges_written, 0,
-            "insert itself failed → nothing persisted → not written"
+            "no edge landed → nothing persisted → not written"
         );
         assert_eq!(
             r.post_write_failures, 0,
-            "no partial write — insert never landed, so no post-write failure either"
+            "no partial write — the atomic operation landed nothing"
         );
     }
 
     #[test]
     fn apply_edge_outcome_mix_sums_consistently() {
         // A small fold covering every outcome once: one full success, one
-        // partial write, one insert failure. `edges_attempted` must equal
+        // partial write, one no-write refusal. `edges_attempted` must equal
         // the number of outcomes; `edges_written` must equal full-success
         // PLUS partial-write (both persisted the edge); `post_write_failures`
         // must equal only the partial-write outcome.
         let mut r = zeroed_receipt();
         r.apply_edge_outcome(EdgeWriteOutcome::InsertAndPostWriteOk);
         r.apply_edge_outcome(EdgeWriteOutcome::InsertOkPostWriteFailed);
-        r.apply_edge_outcome(EdgeWriteOutcome::InsertFailed);
+        r.apply_edge_outcome(EdgeWriteOutcome::NoWrite);
         assert_eq!(r.edges_attempted, 3);
         assert_eq!(r.edges_written, 2);
         assert_eq!(r.post_write_failures, 1);
@@ -1576,6 +1581,162 @@ mod tests {
         // caller-controllable, so it is still never emitted.
         assert_eq!(receipt.entry_id, REDACTED_ENTRY_ID);
         assert_eq!(receipt.entity_count, 2);
+    }
+
+    #[test]
+    fn auto_link_protected_supersession_refusal_leaves_no_edge_or_lifecycle_write() {
+        let server = crate::tests::make_server();
+        let path = format!("/auto-link-protected-{}", uuid::Uuid::new_v4());
+        let old_id = format!("auto-link-protected-old-{}", uuid::Uuid::new_v4());
+        let mut old = test_entry(&old_id, "older protected shared-entity observation");
+        old.entities = vec!["protected-a".to_string(), "protected-b".to_string()];
+        old.path = path.clone();
+        old.timestamp = "2026-01-01T00:00:00Z".to_string();
+        old.retention_policy = Some("durable".to_string());
+        server
+            .with_global_store(|store| store.upsert(&old).map_err(|e| e.to_string()))
+            .expect("seed protected candidate");
+
+        let fresh_id = format!("auto-link-protected-new-{}", uuid::Uuid::new_v4());
+        let mut fresh = test_entry(&fresh_id, "newer shared-entity observation");
+        fresh.entities = old.entities.clone();
+        fresh.path = path;
+        fresh.timestamp = "2026-01-02T00:00:00Z".to_string();
+        server
+            .with_global_store(|store| store.upsert(&fresh).map_err(|e| e.to_string()))
+            .expect("seed fresh candidate");
+
+        let receipt = run_auto_linking(
+            &server,
+            &fresh,
+            &fresh.entities,
+            DbScope::Global,
+            None,
+            true,
+        )
+        .expect("sampled auto-link receipt");
+        assert!(
+            receipt.edges_attempted >= 1,
+            "fixture must reach the semantic supersession write: {receipt:?}"
+        );
+        assert_eq!(receipt.edges_written, 0);
+
+        server
+            .with_global_store_read(|store| {
+                let source_state: (bool, Option<String>) = store
+                    .connection()
+                    .query_row(
+                        "SELECT archived, superseded_by FROM memories WHERE id = ?1",
+                        [&old_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let edge_count: i64 = store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memory_edges WHERE source_id = ?1 AND target_id = ?2",
+                        [&fresh_id, &old_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                assert_eq!(source_state, (false, None));
+                assert_eq!(
+                    edge_count, 0,
+                    "edge and lifecycle close must roll back as one transaction"
+                );
+                Ok(())
+            })
+            .expect("verify protected auto-link refusal");
+    }
+
+    #[test]
+    fn auto_link_edge_failure_rolls_back_supersession_and_receipt() {
+        let server = crate::tests::make_server();
+        let path = format!("/auto-link-edge-failure-{}", uuid::Uuid::new_v4());
+        let old_id = format!("auto-link-edge-failure-old-{}", uuid::Uuid::new_v4());
+        let mut old = test_entry(&old_id, "older shared-entity observation");
+        old.entities = vec!["rollback-a".to_string(), "rollback-b".to_string()];
+        old.path = path.clone();
+        old.timestamp = "2026-01-01T00:00:00Z".to_string();
+
+        let fresh_id = format!("auto-link-edge-failure-new-{}", uuid::Uuid::new_v4());
+        let mut fresh = test_entry(&fresh_id, "newer shared-entity observation");
+        fresh.entities = old.entities.clone();
+        fresh.path = path;
+        fresh.timestamp = "2026-01-02T00:00:00Z".to_string();
+
+        let error = server
+            .with_global_store(|store| {
+                store.upsert(&old).map_err(|e| e.to_string())?;
+                store.upsert(&fresh).map_err(|e| e.to_string())?;
+                let source_snapshot = store
+                    .get(&old_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "source snapshot missing".to_string())?;
+                let target_snapshot = store
+                    .get(&fresh_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "target snapshot missing".to_string())?;
+                let invalid_edge = memcore::MemoryEdge {
+                    source_id: fresh_id.clone(),
+                    target_id: old_id.clone(),
+                    relation: "invalid_test_relation".to_string(),
+                    weight: 0.9,
+                    metadata: json!({"auto_link": true}),
+                    created_at: memcore::now_utc_iso(),
+                    valid_from: String::new(),
+                    valid_to: None,
+                };
+                commit_auto_link_supersession(
+                    store,
+                    &invalid_edge,
+                    &source_snapshot,
+                    &target_snapshot,
+                )
+                .map(|_| ())
+            })
+            .expect_err("dependent edge rejection must abort the semantic claim");
+        assert!(
+            error.contains("invalid_test_relation") || error.contains("relation"),
+            "the failure must come from the dependent edge write: {error}"
+        );
+
+        server
+            .with_global_store_read(|store| {
+                let source_state: (bool, Option<String>) = store
+                    .connection()
+                    .query_row(
+                        "SELECT archived, superseded_by FROM memories WHERE id = ?1",
+                        [&old_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let edge_count: i64 = store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memory_edges WHERE source_id = ?1 AND target_id = ?2",
+                        [&fresh_id, &old_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let receipt_id = memcore::SupersessionReceipt::id_for(
+                    AUTO_LINK_SUPERSESSION_ROUTE,
+                    AUTO_LINK_SUPERSESSION_POLICY_VERSION,
+                    &old_id,
+                    &fresh_id,
+                );
+                let durable_receipt = store
+                    .get_state_kv(memcore::SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+                    .map_err(|e| e.to_string())?;
+                assert_eq!(source_state, (false, None));
+                assert_eq!(edge_count, 0);
+                assert!(
+                    durable_receipt.is_none(),
+                    "the rolled-back semantic claim must not leave a receipt"
+                );
+                Ok(())
+            })
+            .expect("verify edge-failure rollback");
     }
 
     fn search_params_for(query: &str) -> SearchMemoryParams {
