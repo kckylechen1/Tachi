@@ -87,9 +87,7 @@ pub struct EdgeProvenance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeAuthority {
     /// Backed by an actual model-invocation receipt bound to specific
-    /// content — the #1524 contradiction pipeline
-    /// ([`persist_confirmed_contradiction_within_tx`]) is the only current
-    /// producer.
+    /// content — the #1524 contradiction pipeline is the current producer.
     ModelReceiptBacked,
     /// A heuristic/statistical signal Tachi computed itself (vector/token
     /// similarity, symbolic overlap, keyword-substring match against free
@@ -176,12 +174,12 @@ pub struct EdgeObservation {
 ///
 /// Records an anonymous ([`EdgeProvenance::default`]) observation; callers with
 /// provenance context should use [`add_edge_with_provenance`].
-pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError> {
+pub(crate) fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError> {
     add_edge_with_provenance(conn, edge, &EdgeProvenance::default())
 }
 
 /// [`add_edge`] plus explicit provenance for the appended observation.
-pub fn add_edge_with_provenance(
+pub(crate) fn add_edge_with_provenance(
     conn: &Connection,
     edge: &MemoryEdge,
     provenance: &EdgeProvenance,
@@ -264,6 +262,8 @@ pub(crate) fn row_matches_expected_state(
 /// flight, and nothing upstream of this function re-reads it (tachi#1563).
 /// Both snapshots are verified after `BEGIN IMMEDIATE` and before any edge
 /// write, so a stale verdict about either side leaves the database untouched.
+#[allow(dead_code)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn persist_confirmed_contradiction_within_tx(
     tx: &Transaction<'_>,
     contradicts_edge: &MemoryEdge,
@@ -328,7 +328,7 @@ pub(crate) fn persist_confirmed_contradiction_within_tx(
     Ok(ConfirmedContradictionOutcome::Committed)
 }
 
-fn validate_confirmed_contradiction(
+pub(crate) fn validate_confirmed_contradiction(
     contradicts_edge: &MemoryEdge,
     supersedes_edge: &MemoryEdge,
     superseded_at: &str,

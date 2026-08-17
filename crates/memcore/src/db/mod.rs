@@ -107,6 +107,7 @@ pub use doctor_probe::{
 };
 #[cfg(any(feature = "admin", test))]
 pub use doctor_probe::{open_for_wal_checkpoint, open_immutable_readonly, open_raw};
+pub(crate) use event_ledger::refuse_reserved_supersession_event_type;
 pub use event_ledger::{
     continuity_metrics, insert_tachi_event, insert_tachi_event_if_absent, list_tachi_events,
 };
@@ -118,15 +119,18 @@ pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
     CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
 };
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub(crate) use graph::persist_confirmed_contradiction_within_tx;
 pub use graph::{
-    add_component_governance_edge, add_component_governance_edge_with_provenance, add_edge,
-    add_edge_with_provenance, avg_importance, close_related_to_fog, count_active_observations,
-    count_same_topic, edge_authority, get_contradiction_count, get_edges, get_edges_limited,
-    get_superseded_ids, graph_expand, graph_expand_limited, invalidate_observation,
-    list_observations_for_edge, remove_edge, ConfirmedContradictionOutcome, EdgeAuthority,
-    EdgeObservation, EdgeProvenance,
+    add_component_governance_edge, add_component_governance_edge_with_provenance, avg_importance,
+    close_related_to_fog, count_active_observations, count_same_topic, edge_authority,
+    get_contradiction_count, get_edges, get_edges_limited, get_superseded_ids, graph_expand,
+    graph_expand_limited, invalidate_observation, list_observations_for_edge, remove_edge,
+    ConfirmedContradictionOutcome, EdgeAuthority, EdgeObservation, EdgeProvenance,
 };
-pub(crate) use graph::{persist_confirmed_contradiction_within_tx, row_matches_expected_state};
+pub(crate) use graph::{add_edge, add_edge_with_provenance};
+pub(crate) use graph::{row_matches_expected_state, validate_confirmed_contradiction};
 #[cfg(feature = "admin")]
 pub use harness_session_attachments::{
     attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
@@ -151,6 +155,8 @@ pub(crate) use memory_crud::record_access_with_updates;
 pub use memory_crud::refuse_retired_sticky_row_within_tx;
 pub(crate) use memory_crud::search_fts_raw_match;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use memory_crud::supersede_with_metadata_if_expected_state;
 pub(crate) use memory_crud::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals;
 pub(crate) use memory_crud::wiki_corpus_store_sql_splice;
 #[cfg(test)]
@@ -176,8 +182,8 @@ pub use memory_crud::{
 };
 pub(crate) use memory_crud::{
     archive_memory_within_tx, archive_with_metadata_if_expected_state,
-    restore_with_metadata_if_expected_state, supersede_with_metadata_if_expected_state,
-    update_with_revision_if_expected_state,
+    find_jaccard_candidate_within_tx, merge_jaccard_candidate_within_tx,
+    restore_with_metadata_if_expected_state, update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
 /// function's own doc for when a hand-built fixture is legitimate.

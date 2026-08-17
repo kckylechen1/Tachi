@@ -844,15 +844,46 @@ async fn wiki_lint_migration_audit_never_applies_edges_across_store_identity() {
                 .upsert(&global_source)
                 .map_err(|error| error.to_string())?;
             store
-                .add_edge(&memcore::MemoryEdge {
-                    source_id: global_source.id.clone(),
-                    target_id: global_target.id.clone(),
-                    relation: "supersedes".to_string(),
-                    weight: 0.9,
-                    metadata: json!({"source": "test"}),
-                    created_at: Utc::now().to_rfc3339(),
-                    valid_from: String::new(),
-                    valid_to: None,
+                .with_immutable_supersession_transaction(|replacement| {
+                    let source = replacement
+                        .get_memory(&global_target.id)?
+                        .ok_or_else(|| memcore::MemoryError::NotFound(global_target.id.clone()))?;
+                    let target = replacement
+                        .get_memory(&global_source.id)?
+                        .ok_or_else(|| memcore::MemoryError::NotFound(global_source.id.clone()))?;
+                    let expected = memcore::SupersessionExpectedState::active_unsuperseded(
+                        &source,
+                        Some(&target),
+                    );
+                    let result = replacement.claim_checked_immutable_supersession(
+                        &source.id,
+                        &target.id,
+                        &expected,
+                        "wiki_lint_fixture_v1",
+                        "wiki-lint-fixture-v1",
+                        false,
+                    )?;
+                    if result != memcore::SupersessionCommitResult::Applied {
+                        return Err(memcore::MemoryError::InvalidArg(
+                            "wiki lint fixture supersession was not applied".to_string(),
+                        ));
+                    }
+                    replacement.add_canonical_supersession_edge(
+                        &memcore::MemoryEdge {
+                            source_id: global_source.id.clone(),
+                            target_id: global_target.id.clone(),
+                            relation: "supersedes".to_string(),
+                            weight: 0.9,
+                            metadata: json!({"source": "test"}),
+                            created_at: Utc::now().to_rfc3339(),
+                            valid_from: String::new(),
+                            valid_to: None,
+                        },
+                        &memcore::db::EdgeProvenance {
+                            authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                            ..Default::default()
+                        },
+                    )
                 })
                 .map_err(|error| error.to_string())
         })

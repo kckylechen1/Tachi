@@ -16,6 +16,16 @@ fn event_limit(limit: usize) -> i64 {
     limit.clamp(1, 500) as i64
 }
 
+pub(crate) fn refuse_reserved_supersession_event_type(event_type: &str) -> Result<(), MemoryError> {
+    if event_type == crate::store::immutable_supersession::SUPERSESSION_RECEIPT_EVENT_TYPE {
+        return Err(MemoryError::InvalidArg(
+            "the supersession receipt event type is reserved for canonical immutable-supersession persistence"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn table_exists(conn: &Connection, name: &str) -> bool {
     conn.query_row(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
@@ -63,6 +73,7 @@ fn event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TachiEventRecord> {
 }
 
 pub fn insert_tachi_event(conn: &Connection, event: &TachiEventRecord) -> Result<(), MemoryError> {
+    refuse_reserved_supersession_event_type(&event.event_type)?;
     let effects = event
         .effects
         .iter()
@@ -109,6 +120,7 @@ pub fn insert_tachi_event_if_absent(
     conn: &Connection,
     event: &TachiEventRecord,
 ) -> Result<bool, MemoryError> {
+    refuse_reserved_supersession_event_type(&event.event_type)?;
     let effects = event.effects.iter().map(|v| v.as_str()).collect::<Vec<_>>();
     let hints = event
         .projection_hints

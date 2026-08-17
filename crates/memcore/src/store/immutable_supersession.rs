@@ -31,6 +31,8 @@ const MAX_SUPERSESSION_CHAIN_WALK: u32 = 32;
 /// Route token stamped on every [`SupersessionReceipt`] from
 /// [`ImmutableSupersessionTransaction::claim_immutable_supersession`].
 pub const SUPERSESSION_ROUTE_IMMUTABLE_CLAIM: &str = "immutable_claim_v1";
+const SUPERSESSION_ROUTE_IDLESS_NEAR_DUPLICATE: &str = "idless_near_duplicate_v1";
+const SUPERSESSION_POLICY_IDLESS_NEAR_DUPLICATE: &str = "idless-near-duplicate-v1";
 /// Durable receipt event kind for checked supersession claims (tachi#1671).
 pub const SUPERSESSION_RECEIPT_EVENT_TYPE: &str = "memory.supersession.receipt.v1";
 /// Write-once hard-state namespace that exists in every memcore profile.
@@ -218,6 +220,7 @@ pub struct SupersessionClaimOptions<'a> {
     pub require_materialized_target: bool,
     pub archive_source: bool,
     pub enforce_lifecycle_source_protection: bool,
+    pub mutation_timestamp: Option<&'a str>,
     pub partition_id: Option<String>,
 }
 
@@ -723,7 +726,10 @@ pub(crate) fn claim_supersession_edge_within_tx(
             )
         })?;
 
-    let now = db::now_utc_iso();
+    let now = options
+        .mutation_timestamp
+        .map(str::to_owned)
+        .unwrap_or_else(db::now_utc_iso);
     let changed = tx
         .execute(
             "UPDATE memories
@@ -936,6 +942,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
                 require_materialized_target: false,
                 archive_source: false,
                 enforce_lifecycle_source_protection: false,
+                mutation_timestamp: None,
                 partition_id: self.partition_id.clone(),
             },
         )?;
@@ -957,6 +964,52 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         policy_version: &str,
         enforce_lifecycle_source_protection: bool,
     ) -> Result<SupersessionCommitResult, MemoryError> {
+        Ok(self
+            .claim_checked_immutable_supersession_with_timestamp(
+                source_id,
+                target_id,
+                expected,
+                route,
+                policy_version,
+                enforce_lifecycle_source_protection,
+                None,
+            )?
+            .result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn claim_checked_immutable_supersession_at(
+        &mut self,
+        source_id: &str,
+        target_id: &str,
+        expected: &SupersessionExpectedState,
+        route: &str,
+        policy_version: &str,
+        enforce_lifecycle_source_protection: bool,
+        mutation_timestamp: &str,
+    ) -> Result<SupersessionClaimOutcome, MemoryError> {
+        self.claim_checked_immutable_supersession_with_timestamp(
+            source_id,
+            target_id,
+            expected,
+            route,
+            policy_version,
+            enforce_lifecycle_source_protection,
+            Some(mutation_timestamp),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_checked_immutable_supersession_with_timestamp(
+        &mut self,
+        source_id: &str,
+        target_id: &str,
+        expected: &SupersessionExpectedState,
+        route: &str,
+        policy_version: &str,
+        enforce_lifecycle_source_protection: bool,
+        mutation_timestamp: Option<&str>,
+    ) -> Result<SupersessionClaimOutcome, MemoryError> {
         let _authorization = db::authorize_reserved_reference_write(&self.reserved_reference_write)
             .map_err(|error| {
                 SupersessionError::new(
@@ -977,17 +1030,17 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
                 require_materialized_target: true,
                 archive_source: false,
                 enforce_lifecycle_source_protection,
+                mutation_timestamp,
                 partition_id: self.partition_id.clone(),
             },
         )
         .map_err(MemoryError::from)?;
-        let result = outcome.result;
         if outcome.is_applied() {
             self.claimed_source_ids
                 .insert(outcome.receipt.source_id.clone());
-            self.pending_receipts.push(outcome.receipt);
+            self.pending_receipts.push(outcome.receipt.clone());
         }
-        Ok(result)
+        Ok(outcome)
     }
 
     pub fn claim_and_archive_immutable_supersession(
@@ -997,6 +1050,95 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         expected: Option<&SupersessionExpectedState>,
         route: &str,
         policy_version: &str,
+    ) -> Result<SupersessionClaimOutcome, MemoryError> {
+        self.claim_and_archive_immutable_supersession_with_protection(
+            source_id,
+            target_id,
+            expected,
+            route,
+            policy_version,
+            true,
+            None,
+        )
+    }
+
+    /// Exact dedupe is itself the lifecycle authority for ordinary duplicate
+    /// rows, including legacy Wiki-path rows that are not reserved `wiki-rem:`
+    /// operations. It keeps the canonical source/target/CAS/receipt path while
+    /// deliberately opting out of the generic lifecycle-protection gate.
+    pub(crate) fn claim_and_archive_immutable_supersession_for_exact_dedupe(
+        &mut self,
+        source_id: &str,
+        target_id: &str,
+        expected: Option<&SupersessionExpectedState>,
+        route: &str,
+        policy_version: &str,
+        mutation_timestamp: &str,
+    ) -> Result<SupersessionClaimOutcome, MemoryError> {
+        self.claim_and_archive_immutable_supersession_with_protection(
+            source_id,
+            target_id,
+            expected,
+            route,
+            policy_version,
+            false,
+            Some(mutation_timestamp),
+        )
+    }
+
+    /// R12 has its own query-bound safe-raw eligibility policy: durable raw
+    /// rows are eligible, while pinned/permanent, used, important, and
+    /// lifecycle-reserved rows are excluded before this seam is called. Keep
+    /// that repair policy distinct from the ordinary lifecycle-source guard,
+    /// while retaining the canonical target check, expected-state drift check,
+    /// source CAS, and durable receipt finalization below.
+    pub fn claim_and_archive_immutable_supersession_for_r12(
+        &mut self,
+        source_id: &str,
+        target_id: &str,
+        expected: Option<&SupersessionExpectedState>,
+    ) -> Result<SupersessionClaimOutcome, MemoryError> {
+        let source = self
+            .get_memory(source_id)?
+            .ok_or_else(|| MemoryError::NotFound(source_id.to_string()))?;
+        let retention = source
+            .retention_policy
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
+        if source.archived
+            || source.tier != "raw"
+            || source.source == "foundry_distill"
+            || source.access_count != 0
+            || source.recall_count != 0
+            || source.importance >= 0.85
+            || matches!(retention, "pinned" | "permanent")
+        {
+            return Err(MemoryError::InvalidArg(format!(
+                "R12 source eligibility refused: {source_id}"
+            )));
+        }
+        self.claim_and_archive_immutable_supersession_with_protection(
+            source_id,
+            target_id,
+            expected,
+            "r12_memory_hygiene_v1",
+            "r12-memory-hygiene-v1",
+            false,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_and_archive_immutable_supersession_with_protection(
+        &mut self,
+        source_id: &str,
+        target_id: &str,
+        expected: Option<&SupersessionExpectedState>,
+        route: &str,
+        policy_version: &str,
+        enforce_lifecycle_source_protection: bool,
+        mutation_timestamp: Option<&str>,
     ) -> Result<SupersessionClaimOutcome, MemoryError> {
         let _authorization = db::authorize_reserved_reference_write(&self.reserved_reference_write)
             .map_err(|error| {
@@ -1017,7 +1159,8 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
                 expected,
                 require_materialized_target: true,
                 archive_source: true,
-                enforce_lifecycle_source_protection: true,
+                enforce_lifecycle_source_protection,
+                mutation_timestamp,
                 partition_id: self.partition_id.clone(),
             },
         )
@@ -1037,15 +1180,34 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     /// and must perform no dependent write.
     pub fn finalize_supersession_receipt(
         &mut self,
-        receipt: &mut SupersessionReceipt,
+        receipt: &SupersessionReceipt,
         dependent_write_disposition: &str,
     ) -> Result<(), MemoryError> {
         debug_assert_eq!(receipt.commit_result, SupersessionCommitResult::Applied);
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        finalize_supersession_receipt_within_tx(&self.tx, receipt, dependent_write_disposition)?;
-        self.pending_receipts
-            .retain(|pending| pending.receipt_id != receipt.receipt_id);
+        let pending_index = self
+            .pending_receipts
+            .iter()
+            .position(|pending| pending.receipt_id == receipt.receipt_id)
+            .ok_or_else(|| {
+                MemoryError::InvalidArg(format!(
+                    "supersession receipt is not pending in this transaction: {}",
+                    receipt.receipt_id
+                ))
+            })?;
+        if self.pending_receipts[pending_index] != *receipt {
+            return Err(MemoryError::InvalidArg(format!(
+                "supersession receipt diverged from the canonical pending receipt: {}",
+                receipt.receipt_id
+            )));
+        }
+        finalize_supersession_receipt_within_tx(
+            &self.tx,
+            &mut self.pending_receipts[pending_index],
+            dependent_write_disposition,
+        )?;
+        self.pending_receipts.remove(pending_index);
         Ok(())
     }
 
@@ -1239,6 +1401,12 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         mutations: &[db::ValidatedReferenceMutation],
         policy: db::NearDuplicatePolicy,
     ) -> Result<(db::IdlessUpsertResult, Value), MemoryError> {
+        if matches!(policy, db::NearDuplicatePolicy::AllowNearDuplicateMerge) {
+            return Err(MemoryError::InvalidArg(
+                "near-duplicate semantic writes must use the canonical id-less supersession seam"
+                    .to_string(),
+            ));
+        }
         Self::validate_memory_write(entry)?;
         self.refuse_claimed_source_rewrite(&entry.id)?;
         let _authorization =
@@ -1253,6 +1421,73 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
             mutations,
             policy,
         )
+    }
+
+    /// Persist an id-less save and, only for its explicit near-duplicate policy,
+    /// route the semantic loser through the canonical supersession claim. The
+    /// ordinary upsert remains non-semantic; this method is the only transaction
+    /// seam that opts into the merge policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_idless_with_near_duplicate_merge(
+        &mut self,
+        entry: &MemoryEntry,
+        idless_identity: &str,
+        metadata_patch: &Map<String, Value>,
+        metadata_removals: &[&str],
+        mutations: &[db::ValidatedReferenceMutation],
+    ) -> Result<(db::IdlessUpsertResult, Value), MemoryError> {
+        let (result, metadata) = self
+            .upsert_with_validated_reference_mutations_and_metadata_removals(
+                entry,
+                Some(idless_identity),
+                metadata_patch,
+                metadata_removals,
+                mutations,
+                db::NearDuplicatePolicy::NonSemantic,
+            )?;
+        if !matches!(result, db::IdlessUpsertResult::Saved) {
+            return Ok((result, metadata));
+        }
+
+        let Some(candidate_id) = db::find_jaccard_candidate_within_tx(&self.tx, entry)? else {
+            return Ok((result, metadata));
+        };
+        let source = self
+            .get_memory(&entry.id)?
+            .ok_or_else(|| MemoryError::NotFound(entry.id.clone()))?;
+        let target = self
+            .get_memory(&candidate_id)?
+            .ok_or_else(|| MemoryError::NotFound(candidate_id.clone()))?;
+        let expected = SupersessionExpectedState::active_unsuperseded(&source, Some(&target));
+        let claim = self.claim_checked_immutable_supersession(
+            &source.id,
+            &target.id,
+            &expected,
+            SUPERSESSION_ROUTE_IDLESS_NEAR_DUPLICATE,
+            SUPERSESSION_POLICY_IDLESS_NEAR_DUPLICATE,
+            true,
+        )?;
+        if claim == SupersessionCommitResult::Applied {
+            db::merge_jaccard_candidate_within_tx(
+                &self.tx,
+                entry,
+                entry.importance,
+                &db::now_utc_iso(),
+                &candidate_id,
+            )?;
+            let changed = self.tx.execute(
+                "UPDATE memories SET idless_identity = NULL
+                 WHERE id = ?1 AND superseded_by = ?2",
+                params![&source.id, &candidate_id],
+            )?;
+            if changed != 1 {
+                return Err(MemoryError::InvalidArg(format!(
+                    "id-less supersession did not release loser identity: {}",
+                    source.id
+                )));
+            }
+        }
+        Ok((result, metadata))
     }
 
     /// Read active Wiki/Guide candidates from the same writer snapshot used
@@ -1314,8 +1549,68 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         Ok(())
     }
 
+    /// Merge fixed dependent metadata into a source already claimed by this
+    /// transaction. Lifecycle columns remain exclusively owned by the claim;
+    /// this method only records the caller's bounded repair annotation.
+    pub fn update_claimed_source_metadata(
+        &mut self,
+        source_id: &str,
+        metadata_patch: &Value,
+    ) -> Result<(), MemoryError> {
+        let Some(receipt) = self
+            .pending_receipts
+            .iter()
+            .find(|receipt| receipt.source_id == source_id)
+        else {
+            return Err(MemoryError::InvalidArg(format!(
+                "claimed source metadata update refused: no pending claim for {source_id}"
+            )));
+        };
+        let Some(patch) = metadata_patch.as_object() else {
+            return Err(MemoryError::InvalidArg(
+                "claimed source metadata patch must be a JSON object".to_string(),
+            ));
+        };
+        let current: String = self.tx.query_row(
+            "SELECT metadata FROM memories WHERE id=?1 AND archived=1 AND superseded_by=?2",
+            params![source_id, receipt.target_id],
+            |row| row.get(0),
+        )?;
+        let mut merged = serde_json::from_str::<Value>(&current)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        let object = merged.as_object_mut().ok_or_else(|| {
+            MemoryError::Internal("claimed source metadata lost its object shape".to_string())
+        })?;
+        for (key, value) in patch {
+            object.insert(key.clone(), value.clone());
+        }
+        let encoded = serde_json::to_string(&merged).map_err(|error| {
+            MemoryError::Internal(format!("serialize claimed metadata: {error}"))
+        })?;
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let changed = self.tx.execute(
+            "UPDATE memories SET metadata=?1 WHERE id=?2 AND archived=1 AND superseded_by=?3",
+            params![encoded, source_id, receipt.target_id],
+        )?;
+        if changed != 1 {
+            return Err(MemoryError::InvalidArg(format!(
+                "claimed source metadata update CAS failed: {source_id}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Write a provenance edge inside the replacement transaction.
     pub fn add_edge(&mut self, edge: &MemoryEdge) -> Result<(), MemoryError> {
+        if edge.relation == "supersedes" {
+            return Err(MemoryError::InvalidArg(
+                "supersedes edges must be created by the canonical immutable-supersession claim"
+                    .to_string(),
+            ));
+        }
         db::add_edge(&self.tx, edge)
     }
 
@@ -1326,7 +1621,117 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         edge: &MemoryEdge,
         provenance: &db::EdgeProvenance,
     ) -> Result<(), MemoryError> {
+        if edge.relation == "supersedes" {
+            return Err(MemoryError::InvalidArg(
+                "supersedes edges must be created by the canonical immutable-supersession claim"
+                    .to_string(),
+            ));
+        }
         db::add_edge_with_provenance(&self.tx, edge, provenance)
+    }
+
+    /// Persist the lifecycle edge that belongs to an applied canonical claim.
+    ///
+    /// This is deliberately separate from the generic graph writer: the edge
+    /// must be the reverse projection of a pending source -> target claim in
+    /// this same immutable transaction. The pending receipt is the authority
+    /// check, so a caller cannot mint a `supersedes` edge for an unrelated pair
+    /// or after finalization.
+    pub fn add_canonical_supersession_edge(
+        &mut self,
+        edge: &MemoryEdge,
+        provenance: &db::EdgeProvenance,
+    ) -> Result<(), MemoryError> {
+        if edge.relation != "supersedes" {
+            return Err(MemoryError::InvalidArg(
+                "canonical supersession edge must use the supersedes relation".to_string(),
+            ));
+        }
+        let Some(_receipt) = self.pending_receipts.iter().find(|receipt| {
+            receipt.source_id == edge.target_id && receipt.target_id == edge.source_id
+        }) else {
+            return Err(MemoryError::InvalidArg(format!(
+                "canonical supersession edge has no matching pending claim: {} -> {}",
+                edge.source_id, edge.target_id
+            )));
+        };
+        if edge.source_id == edge.target_id {
+            return Err(MemoryError::InvalidArg(
+                "canonical supersession edge endpoints must be distinct".to_string(),
+            ));
+        }
+        db::add_edge_with_provenance(&self.tx, edge, provenance)
+    }
+
+    pub(crate) fn transaction(&self) -> &Transaction<'tx> {
+        &self.tx
+    }
+
+    /// Record exact-dedupe lineage only after the canonical loser claim has
+    /// succeeded in this same transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_exact_dedupe_lineage(
+        &mut self,
+        loser_id: &str,
+        apply_id: &str,
+        plan_digest: &str,
+        winner_id: &str,
+        before_revision: i64,
+        archived_revision: i64,
+        loser_valid_until_before: Option<&str>,
+        applied_at: &str,
+    ) -> Result<(), MemoryError> {
+        self.tx.execute(
+            "INSERT INTO exact_dedupe_apply_lineage (
+                 loser_id,apply_id,plan_digest,winner_id,
+                 before_revision,archived_revision,
+                 loser_valid_until_before,applied_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                loser_id,
+                apply_id,
+                plan_digest,
+                winner_id,
+                before_revision,
+                archived_revision,
+                loser_valid_until_before,
+                applied_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Transfer non-lifecycle graph projections after the canonical loser
+    /// claim. The reserved `supersedes` edge itself is created only by the
+    /// claim primitive, never by this dependent-write helper.
+    pub(crate) fn transfer_exact_dedupe_edges(
+        &mut self,
+        loser: &str,
+        winner: &str,
+    ) -> Result<(), MemoryError> {
+        self.tx.execute(
+            "INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
+             SELECT ?1, target_id, relation, weight, metadata, created_at, valid_from, valid_to
+             FROM memory_edges WHERE source_id = ?2 AND target_id != ?1
+               AND relation != 'supersedes'",
+            params![winner, loser],
+        )?;
+        self.tx.execute(
+            "DELETE FROM memory_edges WHERE source_id = ?1 AND relation != 'supersedes'",
+            params![loser],
+        )?;
+        self.tx.execute(
+            "INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
+             SELECT source_id, ?1, relation, weight, metadata, created_at, valid_from, valid_to
+             FROM memory_edges WHERE target_id = ?2 AND source_id != ?1
+               AND relation != 'supersedes'",
+            params![winner, loser],
+        )?;
+        self.tx.execute(
+            "DELETE FROM memory_edges WHERE target_id = ?1 AND relation != 'supersedes'",
+            params![loser],
+        )?;
+        Ok(())
     }
 
     /// Record a durable outbox event for an object this transaction has
@@ -1867,11 +2272,9 @@ mod tests {
                     &source.id, &target.id, None, ROUTE, POLICY,
                 )?;
                 assert_eq!(outcome.result, SupersessionCommitResult::Applied);
-                let mut receipt = outcome.receipt;
-                operation.finalize_supersession_receipt(
-                    &mut receipt,
-                    "test_semantic_replay_committed",
-                )?;
+                let receipt = outcome.receipt;
+                operation
+                    .finalize_supersession_receipt(&receipt, "test_semantic_replay_committed")?;
                 Ok(receipt)
             })
             .expect("first semantic claim");
@@ -1903,6 +2306,71 @@ mod tests {
             .expect("receipt remains present");
         assert_eq!(stored_after_version, stored_version);
         assert_eq!(stored_after_json, stored_json);
+    }
+
+    #[test]
+    fn caller_receipt_tampering_is_rejected_and_pending_receipt_can_finalize() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        let source = fixture_entry("tamper-source");
+        let target = fixture_entry("tamper-target");
+        store.insert_if_absent(&source).expect("seed source");
+        store.insert_if_absent(&target).expect("seed target");
+
+        let error = store
+            .with_immutable_supersession_transaction(|operation| {
+                let outcome = operation.claim_and_archive_immutable_supersession(
+                    &source.id,
+                    &target.id,
+                    None,
+                    "tamper-test-route",
+                    "tamper-test-policy-v1",
+                )?;
+                let mut forged = outcome.receipt;
+                forged.route = "caller-forged-route".to_string();
+                operation.finalize_supersession_receipt(&forged, "caller-forged-disposition")
+            })
+            .expect_err("caller-mutated receipt must not finalize");
+        assert!(
+            error
+                .to_string()
+                .contains("diverged from the canonical pending receipt"),
+            "unexpected tampering error: {error}"
+        );
+        assert_eq!(
+            store
+                .supersession_target(&source.id)
+                .expect("read rolled-back source"),
+            Some(None),
+            "a rejected receipt tamper must roll back the semantic edge"
+        );
+
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_and_archive_immutable_supersession(
+                    &source.id,
+                    &target.id,
+                    None,
+                    "tamper-test-route",
+                    "tamper-test-policy-v1",
+                )
+            })
+            .expect("the transaction-held canonical receipt auto-finalizes");
+        let (receipt_json, _) = store
+            .get_state_kv(
+                SUPERSESSION_RECEIPT_NAMESPACE,
+                &SupersessionReceipt::id_for(
+                    "tamper-test-route",
+                    "tamper-test-policy-v1",
+                    &source.id,
+                    &target.id,
+                ),
+            )
+            .expect("read canonical receipt")
+            .expect("canonical receipt exists");
+        let receipt: SupersessionReceipt =
+            serde_json::from_str(&receipt_json).expect("decode canonical receipt");
+        assert_eq!(receipt.route, "tamper-test-route");
+        assert_eq!(receipt.dependent_write_disposition, "transaction_committed");
     }
 
     #[test]
@@ -2210,27 +2678,73 @@ mod tests {
             serde_json::from_str(&receipt_json).expect("decode receipt");
 
         let mut store = MemoryStore::open_in_memory().expect("open collision store");
-        store
-            .insert_tachi_event(&crate::types::TachiEventRecord {
-                id: receipt_id.clone(),
-                source_repo: String::new(),
-                adapter: "hostile-adapter".to_string(),
-                project: String::new(),
-                domain: "memory".to_string(),
-                session_id: String::new(),
-                actor: "hostile-actor".to_string(),
-                event_type: SUPERSESSION_RECEIPT_EVENT_TYPE.to_string(),
-                authority: crate::types::AuthorityLevel::RawFact,
-                effects: Vec::new(),
-                projection_hints: Vec::new(),
-                payload: serde_json::to_value(&receipt).expect("encode payload"),
-                provenance: serde_json::json!({"producer": "hostile"}),
-                created_at: db::now_utc_iso(),
-            })
-            .expect("seed same-payload hostile event");
+        let hostile_event = crate::types::TachiEventRecord {
+            id: receipt_id.clone(),
+            source_repo: String::new(),
+            adapter: "hostile-adapter".to_string(),
+            project: String::new(),
+            domain: "memory".to_string(),
+            session_id: String::new(),
+            actor: "hostile-actor".to_string(),
+            event_type: SUPERSESSION_RECEIPT_EVENT_TYPE.to_string(),
+            authority: crate::types::AuthorityLevel::RawFact,
+            effects: Vec::new(),
+            projection_hints: Vec::new(),
+            payload: serde_json::to_value(&receipt).expect("encode payload"),
+            provenance: serde_json::json!({"producer": "hostile"}),
+            created_at: db::now_utc_iso(),
+        };
+        let generic_error = store
+            .insert_tachi_event(&hostile_event)
+            .expect_err("generic event writer must reject reserved receipt events");
+        assert!(generic_error.to_string().contains("reserved"));
+        let idempotent_error = store
+            .insert_tachi_event_if_absent(&hostile_event)
+            .expect_err("idempotent generic event writer must reject reserved receipt events");
+        assert!(idempotent_error.to_string().contains("reserved"));
         let authorization = store.reserved_reference_write.clone();
         let _authorization =
             db::authorize_reserved_reference_write(&authorization).expect("authorize typed write");
+        store
+            .conn
+            .execute(
+                "INSERT INTO tachi_events (
+                    id, source_repo, adapter, project, domain, session_id, actor,
+                    event_type, authority, effects, projection_hints,
+                    payload_json, provenance_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    &hostile_event.id,
+                    &hostile_event.source_repo,
+                    &hostile_event.adapter,
+                    &hostile_event.project,
+                    &hostile_event.domain,
+                    &hostile_event.session_id,
+                    &hostile_event.actor,
+                    &hostile_event.event_type,
+                    hostile_event.authority.as_str(),
+                    serde_json::to_string(
+                        &hostile_event
+                            .effects
+                            .iter()
+                            .map(|effect| effect.as_str())
+                            .collect::<Vec<_>>(),
+                    )
+                    .expect("encode effects"),
+                    serde_json::to_string(
+                        &hostile_event
+                            .projection_hints
+                            .iter()
+                            .map(|hint| hint.as_str())
+                            .collect::<Vec<_>>(),
+                    )
+                    .expect("encode projection hints"),
+                    serde_json::to_string(&hostile_event.payload).expect("encode payload"),
+                    serde_json::to_string(&hostile_event.provenance).expect("encode provenance"),
+                    &hostile_event.created_at,
+                ],
+            )
+            .expect("seed same-payload hostile event fixture");
         let tx = store
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)

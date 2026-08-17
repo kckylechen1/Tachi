@@ -45,9 +45,11 @@ pub(crate) use snapshot_import::{
     read_snapshot_lifecycle_row_within_tx, read_snapshot_vector_blob_within_tx,
     SnapshotLifecycleRow, SnapshotVectorRow,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use update::supersede_with_metadata_if_expected_state;
 pub(crate) use update::{
     archive_with_metadata_if_expected_state, restore_with_metadata_if_expected_state,
-    supersede_with_metadata_if_expected_state, update_with_revision_if_expected_state,
+    update_with_revision_if_expected_state,
 };
 pub use update::{
     record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,
@@ -296,6 +298,17 @@ fn merge_into_jaccard_candidate(
     importance: f64,
     write_time_utc: &str,
 ) -> Result<Option<String>, MemoryError> {
+    let Some(cand_id) = find_jaccard_candidate_within_tx(tx, entry)? else {
+        return Ok(None);
+    };
+    merge_jaccard_candidate_within_tx(tx, entry, importance, write_time_utc, &cand_id)?;
+    Ok(Some(cand_id))
+}
+
+pub(crate) fn find_jaccard_candidate_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+) -> Result<Option<String>, MemoryError> {
     let safe_query = simple_query_input(
         &entry
             .text
@@ -331,77 +344,85 @@ fn merge_into_jaccard_candidate(
     };
     for (cand_id, cand_text) in fts_candidates {
         if jaccard_similarity(&entry.text, &cand_text) > 0.9 {
-            // Merge: update candidate with max importance and merged tags
-            let merge_kws = {
-                let cand_kws_json: String = tx
-                    .query_row(
-                        "SELECT keywords FROM memories WHERE id = ?1",
-                        params![cand_id],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or_else(|_| "[]".to_string());
-                let mut kws: Vec<String> = serde_json::from_str(&cand_kws_json).unwrap_or_default();
-                for k in &entry.keywords {
-                    if !kws.contains(k) {
-                        kws.push(k.clone());
-                    }
-                }
-                serde_json::to_string(&kws).unwrap_or_else(|_| "[]".to_string())
-            };
-            let merge_ents = {
-                let cand_ents_json: String = tx
-                    .query_row(
-                        "SELECT entities FROM memories WHERE id = ?1",
-                        params![cand_id],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or_else(|_| "[]".to_string());
-                let mut ents: Vec<String> =
-                    serde_json::from_str(&cand_ents_json).unwrap_or_default();
-                for e in &entry.entities {
-                    if !ents.contains(e) {
-                        ents.push(e.clone());
-                    }
-                }
-                crate::types::fold_person_names_into_entities(&mut ents, entry.persons.clone());
-                serde_json::to_string(&ents).unwrap_or_else(|_| "[]".to_string())
-            };
-            tx.execute(
-                "UPDATE memories SET keywords = ?1, entities = ?2,
-                 importance = MAX(importance, ?3), updated_at = ?4
-                 WHERE id = ?5",
-                params![merge_kws, merge_ents, importance, write_time_utc, cand_id],
-            )?;
-            let (cand_path, cand_summary, cand_text) = tx.query_row(
-                "SELECT path, summary, text FROM memories WHERE id = ?1",
-                params![cand_id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                },
-            )?;
-            let kws_joined: String = serde_json::from_str::<Vec<String>>(&merge_kws)
-                .unwrap_or_default()
-                .join(" ");
-            let ents_joined: String = serde_json::from_str::<Vec<String>>(&merge_ents)
-                .unwrap_or_default()
-                .join(" ");
-            sync_memories_fts(
-                tx,
-                &cand_id,
-                &cand_path,
-                &cand_summary,
-                &cand_text,
-                &kws_joined,
-                &ents_joined,
-            )?;
             return Ok(Some(cand_id));
         }
     }
     Ok(None)
+}
+
+pub(crate) fn merge_jaccard_candidate_within_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &MemoryEntry,
+    importance: f64,
+    write_time_utc: &str,
+    cand_id: &str,
+) -> Result<(), MemoryError> {
+    let merge_kws = {
+        let cand_kws_json: String = tx
+            .query_row(
+                "SELECT keywords FROM memories WHERE id = ?1",
+                params![cand_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let mut kws: Vec<String> = serde_json::from_str(&cand_kws_json).unwrap_or_default();
+        for k in &entry.keywords {
+            if !kws.contains(k) {
+                kws.push(k.clone());
+            }
+        }
+        serde_json::to_string(&kws).unwrap_or_else(|_| "[]".to_string())
+    };
+    let merge_ents = {
+        let cand_ents_json: String = tx
+            .query_row(
+                "SELECT entities FROM memories WHERE id = ?1",
+                params![cand_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let mut ents: Vec<String> = serde_json::from_str(&cand_ents_json).unwrap_or_default();
+        for e in &entry.entities {
+            if !ents.contains(e) {
+                ents.push(e.clone());
+            }
+        }
+        crate::types::fold_person_names_into_entities(&mut ents, entry.persons.clone());
+        serde_json::to_string(&ents).unwrap_or_else(|_| "[]".to_string())
+    };
+    tx.execute(
+        "UPDATE memories SET keywords = ?1, entities = ?2,
+         importance = MAX(importance, ?3), updated_at = ?4
+         WHERE id = ?5",
+        params![merge_kws, merge_ents, importance, write_time_utc, cand_id],
+    )?;
+    let (cand_path, cand_summary, cand_text) = tx.query_row(
+        "SELECT path, summary, text FROM memories WHERE id = ?1",
+        params![cand_id],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    let kws_joined: String = serde_json::from_str::<Vec<String>>(&merge_kws)
+        .unwrap_or_default()
+        .join(" ");
+    let ents_joined: String = serde_json::from_str::<Vec<String>>(&merge_ents)
+        .unwrap_or_default()
+        .join(" ");
+    sync_memories_fts(
+        tx,
+        cand_id,
+        &cand_path,
+        &cand_summary,
+        &cand_text,
+        &kws_joined,
+        &ents_joined,
+    )?;
+    Ok(())
 }
 
 // ─── Normalization ────────────────────────────────────────────────────────────
@@ -921,6 +942,24 @@ impl crate::MemoryStore {
         policy: NearDuplicatePolicy,
     ) -> Result<(IdlessUpsertResult, Value), MemoryError> {
         self.validate_write_path(entry)?;
+
+        if matches!(policy, NearDuplicatePolicy::AllowNearDuplicateMerge) {
+            let identity = idless_identity.ok_or_else(|| {
+                MemoryError::InvalidArg(
+                    "near-duplicate merge requires an id-less identity".to_string(),
+                )
+            })?;
+            let identity = identity.to_string();
+            return self.with_immutable_supersession_transaction(|replacement| {
+                replacement.upsert_idless_with_near_duplicate_merge(
+                    entry,
+                    &identity,
+                    metadata_patch,
+                    metadata_removals,
+                    mutations,
+                )
+            });
+        }
 
         let db_label = self.db_label.clone();
         let vec_available = self.vec_available;

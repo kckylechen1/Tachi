@@ -5,6 +5,7 @@
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
 use rusqlite::TransactionBehavior;
+use std::collections::HashSet;
 
 pub struct MemoryHygiene;
 
@@ -32,6 +33,61 @@ fn push_count(report: &mut RuleReport, kind: &str, count: usize) {
     if count > 0 {
         report.findings.push(Finding::new(kind, count));
     }
+}
+
+fn apply_r12_supersession(
+    store: &mut memcore::MemoryStore,
+    source_id: &str,
+    target_id: &str,
+    archive_reason: &str,
+) -> Result<bool, RepairError> {
+    let applied = store.with_immutable_supersession_transaction(|replacement| {
+        let source = replacement
+            .get_memory(source_id)?
+            .ok_or_else(|| memcore::MemoryError::NotFound(source_id.to_string()))?;
+        let target = replacement
+            .get_memory(target_id)?
+            .ok_or_else(|| memcore::MemoryError::NotFound(target_id.to_string()))?;
+        let expected =
+            memcore::SupersessionExpectedState::active_unsuperseded(&source, Some(&target));
+        let outcome = replacement.claim_and_archive_immutable_supersession_for_r12(
+            source_id,
+            target_id,
+            Some(&expected),
+        )?;
+        if !outcome.is_applied() {
+            return Ok(false);
+        }
+        let now = memcore::now_utc_iso();
+        replacement.add_canonical_supersession_edge(
+            &memcore::MemoryEdge {
+                source_id: target_id.to_string(),
+                target_id: source_id.to_string(),
+                relation: "supersedes".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({
+                    "source": "r12_memory_hygiene",
+                    "reason": archive_reason,
+                }),
+                created_at: now.clone(),
+                valid_from: now,
+                valid_to: None,
+            },
+            &memcore::db::EdgeProvenance {
+                authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                ..Default::default()
+            },
+        )?;
+        replacement.update_claimed_source_metadata(
+            source_id,
+            &serde_json::json!({
+                "repair_rule": "R12",
+                "archive_reason": archive_reason,
+            }),
+        )?;
+        Ok(true)
+    })?;
+    Ok(applied)
 }
 
 const LEGACY_DISTILL_RAW_SQL: &str = r#"
@@ -469,75 +525,28 @@ impl RepairRule for MemoryHygiene {
             [],
         )?;
 
-        tx.execute(
-            "INSERT OR REPLACE INTO memory_edges
-               (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
-             SELECT distill_id,
-                    source_id,
-                    'supersedes',
-                    1.0,
-                    json_object(
-                      'source','r12_memory_hygiene',
-                      'reason','distill_source_archived'
-                    ),
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                    NULL
-             FROM r12_covered_raw",
-            [],
-        )?;
-
-        let covered_archived = tx.execute(
-            "UPDATE memories
-             SET archived=1,
-                 superseded_by=(SELECT distill_id FROM r12_covered_raw t WHERE t.source_id=memories.id),
-                 updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                 revision=revision+1,
-                 valid_until=COALESCE(valid_until, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                 metadata=json_set(
-                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                   '$.repair_rule','R12',
-                   '$.archive_reason','distill_source_superseded'
-                 )
-             WHERE id IN (SELECT source_id FROM r12_covered_raw)
-               AND COALESCE(archived,0)=0",
-            [],
-        )?;
-
-        tx.execute(
-            "INSERT OR REPLACE INTO memory_edges
-               (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
-             SELECT keep_id,
-                    source_id,
-                    'supersedes',
-                    1.0,
-                    json_object(
-                      'source','r12_memory_hygiene',
-                      'reason','duplicate_raw_archived'
-                    ),
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                    strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                    NULL
-             FROM r12_duplicate_raw",
-            [],
-        )?;
-
-        let duplicates_archived = tx.execute(
-            "UPDATE memories
-             SET archived=1,
-                 superseded_by=(SELECT keep_id FROM r12_duplicate_raw t WHERE t.source_id=memories.id),
-                 updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                 revision=revision+1,
-                 valid_until=COALESCE(valid_until, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                 metadata=json_set(
-                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                   '$.repair_rule','R12',
-                   '$.archive_reason','duplicate_raw_fold'
-                 )
-             WHERE id IN (SELECT source_id FROM r12_duplicate_raw)
-               AND COALESCE(archived,0)=0",
-            [],
-        )?;
+        let covered_pairs = {
+            let mut statement =
+                tx.prepare("SELECT source_id, distill_id FROM r12_covered_raw ORDER BY source_id")?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<(String, String)>, _>>()?;
+            rows
+        };
+        let covered_ids = covered_pairs
+            .iter()
+            .map(|(source_id, _)| source_id.as_str())
+            .collect::<HashSet<_>>();
+        let duplicate_pairs = {
+            let mut statement =
+                tx.prepare("SELECT source_id, keep_id FROM r12_duplicate_raw ORDER BY source_id")?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<(String, String)>, _>>()?;
+            rows.into_iter()
+                .filter(|(source_id, _)| !covered_ids.contains(source_id.as_str()))
+                .collect::<Vec<_>>()
+        };
 
         tx.execute_batch(
             "DROP TABLE r12_missing_edges;
@@ -546,6 +555,31 @@ impl RepairRule for MemoryHygiene {
              DROP TABLE r12_retired_sticky;",
         )?;
         tx.commit()?;
+
+        let db_path = ctx.path.to_string_lossy().into_owned();
+        let mut semantic_store = memcore::MemoryStore::open_existing_read_write(&db_path)?;
+        let mut covered_archived = 0usize;
+        for (source_id, target_id) in covered_pairs {
+            if apply_r12_supersession(
+                &mut semantic_store,
+                &source_id,
+                &target_id,
+                "distill_source_superseded",
+            )? {
+                covered_archived += 1;
+            }
+        }
+        let mut duplicates_archived = 0usize;
+        for (source_id, target_id) in duplicate_pairs {
+            if apply_r12_supersession(
+                &mut semantic_store,
+                &source_id,
+                &target_id,
+                "duplicate_raw_fold",
+            )? {
+                duplicates_archived += 1;
+            }
+        }
 
         push_count(&mut report, "legacy_foundry_distill_raw", promoted);
         push_count(

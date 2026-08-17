@@ -569,7 +569,7 @@ fn commit_auto_link_supersession(
                 true,
             )?;
             if claim_result == SupersessionCommitResult::Applied {
-                replacement.add_edge_with_provenance(
+                replacement.add_canonical_supersession_edge(
                     edge,
                     &memcore::db::EdgeProvenance {
                         authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),

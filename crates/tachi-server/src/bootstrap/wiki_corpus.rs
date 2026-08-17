@@ -2919,9 +2919,13 @@ fn maybe_complete_item_as_sibling_worker(
         .addressed_path
         .as_deref()
         .ok_or_else(|| "race hook target has no addressed path".to_string())?;
+    #[cfg(any(test, feature = "bootstrap-test-api"))]
     let mut source_store =
         MemoryStore::open_existing_read_write(&source_path.display().to_string())
             .map_err(|error| error.to_string())?;
+    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+    let source_store = MemoryStore::open_existing_read_write(&source_path.display().to_string())
+        .map_err(|error| error.to_string())?;
     let mut target_store =
         MemoryStore::open_existing_read_write(&target_path.display().to_string())
             .map_err(|error| error.to_string())?;
@@ -2940,23 +2944,38 @@ fn maybe_complete_item_as_sibling_worker(
     {
         InsertMemoryResult::Inserted | InsertMemoryResult::Existing => {}
     }
-    let final_metadata = metadata_with_receipt(
-        &source_row,
-        receipt_value(item, plan_id, "source_superseded"),
-    )?;
-    let expected = ExpectedMemoryState::from_entry(&source_entry, None);
-    if !source_store
-        .supersede_with_metadata_if_expected_state(
-            &item.source_id,
-            target_id,
-            &final_metadata,
-            &expected,
-        )
-        .map_err(|error| error.to_string())?
+    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
     {
-        return Err("race hook sibling worker could not supersede the source".to_string());
+        let production_result = Err::<(), String>(
+            "cross-store wiki race hook cannot perform semantic supersession in a production build"
+                .to_string(),
+        );
+        production_result?;
     }
-    Ok(())
+    #[cfg(any(test, feature = "bootstrap-test-api"))]
+    {
+        let final_metadata = metadata_with_receipt(
+            &source_row,
+            receipt_value(item, plan_id, "source_superseded"),
+        )?;
+        let expected = ExpectedMemoryState::from_entry(&source_entry, None);
+        if !source_store
+            .supersede_with_metadata_if_expected_state(
+                &item.source_id,
+                target_id,
+                &final_metadata,
+                &expected,
+            )
+            .map_err(|error| error.to_string())?
+        {
+            return Err("race hook sibling worker could not supersede the source".to_string());
+        }
+    }
+    #[cfg(any(test, feature = "bootstrap-test-api"))]
+    let final_result: Result<(), String> = Ok(());
+    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+    let final_result: Result<(), String> = Ok(());
+    final_result
 }
 
 fn maybe_inject_copy_after_receipt_prepared(
@@ -3929,7 +3948,10 @@ fn apply_copy_and_supersede(
             item.target_store_ref, item.source_store_ref, item.source_id
         ));
     }
+    #[cfg(any(test, feature = "bootstrap-test-api"))]
     let mut source_store = open_apply_store(source_scan)?;
+    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+    let source_store = open_apply_store(source_scan)?;
     let mut target_store = open_apply_store(target_scan)?;
     maybe_swap_opened_store_path(race_hook, source_scan.spec.logical_store, source_path)?;
     maybe_swap_opened_store_path(race_hook, target_scan.spec.logical_store, target_path)?;
@@ -4089,12 +4111,6 @@ fn apply_copy_and_supersede(
         phases.push("source_superseded".to_string());
         return Ok(copy_completed_no_op_outcome(item, target_id, phases));
     }
-    let final_metadata = metadata_with_receipt(
-        &source_row,
-        receipt_value(item, plan_id, "source_superseded"),
-    )?;
-    let expected_transition =
-        ExpectedMemoryState::from_entry(&source_entry, initial_supersession.as_deref());
     maybe_inject_copy_after_receipt_prepared(source_scan, target_scan, item, target_id, race_hook)?;
     maybe_complete_item_as_sibling_worker(
         source_scan,
@@ -4108,37 +4124,53 @@ fn apply_copy_and_supersede(
     verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     verify_backups_before_source_mutation(retained_backups, race_hook)?;
 
-    let observed_before_transition = source_store
-        .supersession_target(&item.source_id)
-        .map_err(|error| error.to_string())?
-        .flatten();
-    let transitioned = if observed_before_transition.as_deref() == Some(target_id) {
-        if !source_receipted {
-            false
-        } else {
+    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+    let transitioned = Err::<bool, String>(format!(
+        "cross-store wiki supersession is disabled: target {target_id} was copied and the source {} remains active",
+        item.source_id
+    ))?;
+
+    #[cfg(any(test, feature = "bootstrap-test-api"))]
+    let transitioned = {
+        let final_metadata = metadata_with_receipt(
+            &source_row,
+            receipt_value(item, plan_id, "source_superseded"),
+        )?;
+        let expected_transition =
+            ExpectedMemoryState::from_entry(&source_entry, initial_supersession.as_deref());
+
+        let observed_before_transition = source_store
+            .supersession_target(&item.source_id)
+            .map_err(|error| error.to_string())?
+            .flatten();
+        if observed_before_transition.as_deref() == Some(target_id) {
+            if !source_receipted {
+                false
+            } else {
+                source_store
+                    .update_with_revision_if_expected_state(
+                        &source_entry.id,
+                        &source_entry.text,
+                        &source_entry.summary,
+                        &source_entry.source,
+                        &final_metadata,
+                        source_entry.vector.as_deref(),
+                        &expected_transition,
+                    )
+                    .map_err(|error| error.to_string())?
+            }
+        } else if observed_before_transition.is_none() {
             source_store
-                .update_with_revision_if_expected_state(
+                .supersede_with_metadata_if_expected_state(
                     &source_entry.id,
-                    &source_entry.text,
-                    &source_entry.summary,
-                    &source_entry.source,
+                    target_id,
                     &final_metadata,
-                    source_entry.vector.as_deref(),
                     &expected_transition,
                 )
                 .map_err(|error| error.to_string())?
+        } else {
+            false
         }
-    } else if observed_before_transition.is_none() {
-        source_store
-            .supersede_with_metadata_if_expected_state(
-                &source_entry.id,
-                target_id,
-                &final_metadata,
-                &expected_transition,
-            )
-            .map_err(|error| error.to_string())?
-    } else {
-        false
     };
 
     if !transitioned {

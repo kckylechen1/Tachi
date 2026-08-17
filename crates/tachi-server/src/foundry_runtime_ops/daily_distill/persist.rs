@@ -222,7 +222,7 @@ fn archive_claimed_distilled_sources(
         // tachi#1646: this archival `supersedes` edge documents a
         // supersession claim this transaction just won — deterministic
         // bookkeeping, not an inference.
-        replacement.add_edge_with_provenance(
+        replacement.add_canonical_supersession_edge(
             &edge,
             &memcore::db::EdgeProvenance {
                 authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),

@@ -500,10 +500,10 @@ fn apply_lifecycle_action(
                             ROUTE1_MERGE_POLICY_VERSION,
                         )?;
                         let applied = outcome.is_applied();
-                        let mut receipt = outcome.receipt;
+                        let receipt = outcome.receipt;
                         if applied {
                             replacement.finalize_supersession_receipt(
-                                &mut receipt,
+                                &receipt,
                                 "consolidate_route1_no_extra_target_write",
                             )?;
                         }
@@ -583,13 +583,13 @@ fn apply_lifecycle_action(
                         )?;
                         let attempt_result = outcome.result;
                         let applied = outcome.is_applied();
-                        let mut receipt = outcome.receipt;
+                        let receipt = outcome.receipt;
                         if applied && survivor_changed {
                             replacement.upsert(&survivor)?;
                         }
                         if applied {
                             replacement.finalize_supersession_receipt(
-                                &mut receipt,
+                                &receipt,
                                 "consolidate_route1_target_fold_committed",
                             )?;
                         }

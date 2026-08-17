@@ -12,6 +12,16 @@ use crate::{
 };
 
 impl MemoryStore {
+    fn refuse_generic_supersession_edge(edge: &MemoryEdge) -> Result<(), MemoryError> {
+        if edge.relation == "supersedes" {
+            return Err(MemoryError::InvalidArg(
+                "supersedes edges are reserved for canonical immutable-supersession claims"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn retired_sticky_edge_preflight(
         &self,
         source_id: &str,
@@ -41,6 +51,7 @@ impl MemoryStore {
     /// must be admissible on ontology-v1 (the #772 grandfathered relations are
     /// rejected here — use [`MemoryStore::add_component_governance_edge`]).
     pub fn add_edge(&self, edge: &MemoryEdge) -> Result<(), MemoryError> {
+        Self::refuse_generic_supersession_edge(edge)?;
         self.with_retired_sticky_edge_preflight(
             &edge.source_id,
             &edge.target_id,
@@ -56,6 +67,7 @@ impl MemoryStore {
         edge: &MemoryEdge,
         provenance: &db::EdgeProvenance,
     ) -> Result<(), MemoryError> {
+        Self::refuse_generic_supersession_edge(edge)?;
         self.with_retired_sticky_edge_preflight(
             &edge.source_id,
             &edge.target_id,
@@ -70,6 +82,7 @@ impl MemoryStore {
         edge: &MemoryEdge,
         provenance: &db::EdgeProvenance,
     ) -> Result<(), MemoryError> {
+        Self::refuse_generic_supersession_edge(edge)?;
         self.retired_sticky_edge_preflight(
             &edge.source_id,
             &edge.target_id,

@@ -352,7 +352,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                     // tachi#1646: this `supersedes` edge documents a
                     // near-duplicate identity claim this transaction just
                     // won — deterministic bookkeeping, not an inference.
-                    projection.add_edge_with_provenance(
+                    projection.add_canonical_supersession_edge(
                         &crate::copilot_ops::wiki_projection_supersedes_edge(
                             winner_id,
                             &candidate.id,

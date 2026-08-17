@@ -1057,6 +1057,7 @@ fn apply_lifecycle_proposal_once(
                     require_materialized_target: true,
                     archive_source: true,
                     enforce_lifecycle_source_protection: true,
+                    mutation_timestamp: None,
                     partition_id: store
                         .admitted_partition
                         .as_ref()
@@ -1129,6 +1130,7 @@ fn apply_lifecycle_proposal_once(
                     require_materialized_target: true,
                     archive_source: true,
                     enforce_lifecycle_source_protection: true,
+                    mutation_timestamp: None,
                     partition_id: store
                         .admitted_partition
                         .as_ref()

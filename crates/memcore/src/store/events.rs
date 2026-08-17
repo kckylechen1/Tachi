@@ -26,6 +26,7 @@ impl MemoryStore {
 
     /// Append a domain-neutral continuity event for typed projectors.
     pub fn insert_tachi_event(&self, event: &TachiEventRecord) -> Result<(), MemoryError> {
+        db::refuse_reserved_supersession_event_type(&event.event_type)?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::insert_tachi_event(&self.conn, event)
@@ -37,6 +38,7 @@ impl MemoryStore {
         &self,
         event: &TachiEventRecord,
     ) -> Result<bool, MemoryError> {
+        db::refuse_reserved_supersession_event_type(&event.event_type)?;
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::insert_tachi_event_if_absent(&self.conn, event)

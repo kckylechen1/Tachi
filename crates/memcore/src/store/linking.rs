@@ -3,11 +3,13 @@
 
 use std::collections::HashSet;
 
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
+#[cfg(any(test, feature = "test-support"))]
+use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, TransactionBehavior};
 
 use crate::db::ConfirmedContradictionOutcome;
 use crate::types::ExpectedMemoryState;
-use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
+use crate::{db, error::MemoryError, MemoryEntry, MemoryStore, SupersessionExpectedState};
 
 impl MemoryStore {
     /// Atomically persist one heuristic reinforcement, but only while both
@@ -132,35 +134,63 @@ impl MemoryStore {
         expected_entry: &ExpectedMemoryState,
         expected_candidate: &ExpectedMemoryState,
     ) -> Result<ConfirmedContradictionOutcome, MemoryError> {
-        let db_label = self.db_label.clone();
-        let reserved_reference_write = self.reserved_reference_write.clone();
-        db::retry_memory_locked("confirmed_contradiction", &db_label, || {
-            let _authorization = db::authorize_reserved_reference_write(&reserved_reference_write)?;
-            let tx = self
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            for id in [
-                contradicts_edge.source_id.as_str(),
-                contradicts_edge.target_id.as_str(),
-                supersedes_edge.source_id.as_str(),
-                supersedes_edge.target_id.as_str(),
-            ] {
-                db::refuse_retired_sticky_row_within_tx(
-                    &tx,
-                    id,
-                    "used by confirmed contradiction persistence",
-                )?;
-            }
-            let outcome = db::persist_confirmed_contradiction_within_tx(
-                &tx,
-                contradicts_edge,
-                supersedes_edge,
-                superseded_at,
+        db::validate_confirmed_contradiction(contradicts_edge, supersedes_edge, superseded_at)?;
+        let superseded_at = db::normalize_utc_iso(superseded_at)?;
+        self.with_immutable_supersession_transaction(|replacement| {
+            if !db::row_matches_expected_state(
+                replacement.transaction(),
+                &contradicts_edge.source_id,
                 expected_entry,
+            )? {
+                eprintln!(
+                    "[confirmed-contradiction] entry-side snapshot mismatch for {} (candidate {}): the triggering memory changed (or was archived/deleted) between the read that fed the model and the write",
+                    contradicts_edge.source_id, contradicts_edge.target_id
+                );
+                return Ok(ConfirmedContradictionOutcome::StaleSkipped);
+            }
+            if !db::row_matches_expected_state(
+                replacement.transaction(),
+                &contradicts_edge.target_id,
                 expected_candidate,
-            )?;
-            tx.commit()?;
-            Ok(outcome)
+            )? {
+                return Ok(ConfirmedContradictionOutcome::StaleSkipped);
+            }
+
+            let expected = SupersessionExpectedState {
+                source: expected_candidate.clone(),
+                target: Some(expected_entry.clone()),
+            };
+            let outcome = match replacement.claim_checked_immutable_supersession_at(
+                &contradicts_edge.target_id,
+                &contradicts_edge.source_id,
+                &expected,
+                "confirmed_contradiction_v1",
+                "confirmed-contradiction-v1",
+                false,
+                &superseded_at,
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) if error.to_string().contains("(competing_target)") => {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "confirmed contradiction lifecycle CAS refused for {} -> {}",
+                        contradicts_edge.target_id, contradicts_edge.source_id
+                    )));
+                }
+                Err(error) => return Err(error),
+            };
+            if outcome.result != crate::SupersessionCommitResult::Applied {
+                return Err(MemoryError::InvalidArg(
+                    "confirmed contradiction supersession was not applied".to_string(),
+                ));
+            }
+
+            let receipt_provenance = db::EdgeProvenance {
+                authority: Some(db::EdgeAuthority::ModelReceiptBacked),
+                ..db::EdgeProvenance::default()
+            };
+            replacement.add_edge_with_provenance(contradicts_edge, &receipt_provenance)?;
+            replacement.add_canonical_supersession_edge(supersedes_edge, &receipt_provenance)?;
+            Ok(ConfirmedContradictionOutcome::Committed)
         })
     }
 
@@ -197,6 +227,7 @@ impl MemoryStore {
     /// slice 5 / #2059 codex round 3: the auto-link write path only busts the
     /// recall cache when this returns `> 0`, since search-visible content
     /// only changed on the former.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn mark_superseded_closing_validity(
         &self,
         id: &str,
