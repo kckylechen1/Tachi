@@ -204,7 +204,7 @@ pub(crate) async fn handle_hub_register(
             let _ = server.unregister_skill_tool(&cap.id);
             append_warning(
                 &mut resp,
-                "Skill registered but not listed in tools (policy.visibility != 'listed'). Use run_skill or change policy.visibility.",
+                "Skill registered but not listed in tools (policy.visibility != 'listed'). Use tachi_skill(action='run') or change policy.visibility.",
             );
         }
 

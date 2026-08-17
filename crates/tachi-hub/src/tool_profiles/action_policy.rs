@@ -200,7 +200,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
         // internally by an exhaustive whitelist) and read-only, so it belongs
         // here rather than in an action-bundle map.
         "tachi_tools" | "runtime_info" | "tachi_web_search" | "tachi_browse" | "tachi_unstick"
-        | "tachi_complete" | "run_skill" | "peer_query" => true,
+        | "tachi_complete" | "peer_query" => true,
         // Anything else — a tool not on the delegate allow-list at all, or a
         // gated facade we forgot to enumerate above — is denied by default.
         _ => false,
@@ -697,7 +697,8 @@ mod tests {
     /// Unrestricted tools on the delegate allow-list keep working regardless
     /// of what's in the (irrelevant) action arg — this is the "no action
     /// concept" carve-out, distinct from a real gated facade with an
-    /// unrecognized action.
+    /// unrecognized action. `run_skill` is gone: its route was retired
+    /// (#1690 C3 slice A), so the allow-arm died with it.
     #[test]
     fn f919_delegate_no_action_concept_tools_stay_allowed() {
         let profile = Some(ToolProfile::delegate());
@@ -708,11 +709,24 @@ mod tests {
             "tachi_browse",
             "tachi_unstick",
             "tachi_complete",
-            "run_skill",
         ] {
             assert!(facade_action_allowed(tool, None, profile));
             assert!(facade_action_allowed(tool, Some("whatever"), profile));
         }
+    }
+
+    /// #1690 C3 slice A discrimination: the retired `run_skill` route must not
+    /// be re-admitted through the delegate no-action-concept carve-out. RED
+    /// pre-fix (the arm matched), GREEN post-fix (the arm is gone).
+    #[test]
+    fn f1690_retired_run_skill_is_not_delegate_allowed() {
+        let profile = Some(ToolProfile::delegate());
+        assert!(!facade_action_allowed("run_skill", None, profile));
+        assert!(!facade_action_allowed(
+            "run_skill",
+            Some("whatever"),
+            profile
+        ));
     }
 
     #[test]
