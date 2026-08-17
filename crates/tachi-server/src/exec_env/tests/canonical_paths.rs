@@ -182,7 +182,7 @@ fn provision_writer_persists_canonical_path_for_post_delete_reclaim() {
 
     let mut store = memcore::MemoryStore::open_in_memory().expect("in-memory store");
     let provisioned = provision_managed_env(
-        store.connection_mut(),
+        &mut store,
         &ProvisionEnvOptions {
             repo_root: repo.clone(),
             path: Some(alias_tree.clone()),

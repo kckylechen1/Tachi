@@ -374,7 +374,8 @@ pub(crate) fn handle_recall_config_review(
         let tx = store
             .begin_state_transaction(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("open bracketed recall review tx: {e}"))?;
-        let (raw, version) = memcore::db::get_state(&tx, RECALL_CONFIG_PROPOSAL_NS, proposal_id)
+        let (raw, version) = tx
+            .get_state(RECALL_CONFIG_PROPOSAL_NS, proposal_id)
             .map_err(|e| format!("load recall config proposal: {e}"))?
             .ok_or_else(|| format!("recall config proposal not found: {proposal_id}"))?;
         let mut value: Value =
@@ -463,8 +464,7 @@ pub(crate) fn handle_recall_config_review(
         // hard_state version CAS: a concurrent review or a regeneration that
         // landed on the same content-addressed id must not be silently
         // overwritten. Refuse on version drift; the caller reloads and retries.
-        let cas_ok = memcore::db::set_state_if_version(
-            &tx,
+        let cas_ok = tx.set_state_if_version(
             RECALL_CONFIG_PROPOSAL_NS,
             proposal_id,
             &next,

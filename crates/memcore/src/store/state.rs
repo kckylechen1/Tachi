@@ -1,7 +1,5 @@
 //! Deterministic key-value state methods on [`MemoryStore`].
 
-use std::ops::Deref;
-
 use crate::{db, error::MemoryError, MemoryStore};
 
 /// A hard-state transaction carrying the same typed-DML authorization as the
@@ -13,17 +11,60 @@ pub struct StateTransaction<'conn> {
     _authorization: db::ReservedReferenceWriteAuthorization,
 }
 
-impl<'conn> Deref for StateTransaction<'conn> {
-    type Target = rusqlite::Transaction<'conn>;
-
-    fn deref(&self) -> &Self::Target {
+impl StateTransaction<'_> {
+    fn transaction(&self) -> &rusqlite::Transaction<'_> {
         self.transaction
             .as_ref()
             .expect("state transaction is present until commit")
     }
-}
 
-impl StateTransaction<'_> {
+    pub fn get_state(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<(String, u32)>, MemoryError> {
+        db::get_state(self.transaction(), namespace, key)
+    }
+
+    pub fn list_state(&self, namespace: &str) -> Result<Vec<db::StateRow>, MemoryError> {
+        db::list_state(self.transaction(), namespace)
+    }
+
+    pub fn set_state(
+        &self,
+        namespace: &str,
+        key: &str,
+        value_json: &str,
+    ) -> Result<u32, MemoryError> {
+        db::set_state(self.transaction(), namespace, key, value_json)
+    }
+
+    pub fn insert_state_if_absent(
+        &self,
+        namespace: &str,
+        key: &str,
+        value_json: &str,
+    ) -> Result<bool, MemoryError> {
+        db::refuse_general_mutation_namespace(namespace, "inserted")?;
+        db::insert_state_if_absent(self.transaction(), namespace, key, value_json)
+    }
+
+    pub fn set_state_if_version(
+        &self,
+        namespace: &str,
+        key: &str,
+        value_json: &str,
+        expected_version: u32,
+    ) -> Result<bool, MemoryError> {
+        db::set_state_if_version(
+            self.transaction(),
+            namespace,
+            key,
+            value_json,
+            expected_version,
+        )
+    }
+
     pub fn commit(mut self) -> Result<(), MemoryError> {
         self.transaction
             .take()

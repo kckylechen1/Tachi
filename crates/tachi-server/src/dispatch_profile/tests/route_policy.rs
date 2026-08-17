@@ -405,25 +405,20 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
         // First write: a fresh UPSERT to the rule namespace. This write
         // SUCCEEDS inside the tx body; the test's discriminating question is
         // whether it persists when a later step in the same tx errors.
-        memcore::db::set_state(
-            &tx,
-            ROUTE_POLICY_RULE_NS,
-            proposal_id,
-            &proposal.to_string(),
-        )
-        .map_err(|e| format!("rule write: {e}"))?;
+        tx.set_state(ROUTE_POLICY_RULE_NS, proposal_id, &proposal.to_string())
+            .map_err(|e| format!("rule write: {e}"))?;
         // Second write: a CAS with a deliberately bogus expected_version. The
         // CAS affects 0 rows, we surface that as an Err, and the tx (still
         // uncommitted) drops at the end of the closure → SQLite rolls back
         // both the CAS row and the rule write above.
-        let cas_ok = memcore::db::set_state_if_version(
-            &tx,
-            DISPATCH_POLICY_PROPOSAL_NS,
-            proposal_id,
-            &proposal.to_string(),
-            bogus_version,
-        )
-        .map_err(|e| format!("proposal CAS: {e}"))?;
+        let cas_ok = tx
+            .set_state_if_version(
+                DISPATCH_POLICY_PROPOSAL_NS,
+                proposal_id,
+                &proposal.to_string(),
+                bogus_version,
+            )
+            .map_err(|e| format!("proposal CAS: {e}"))?;
         if !cas_ok {
             return Err("simulated_mid_tx_cas_failure".to_string());
         }
