@@ -12,6 +12,35 @@ use crate::{
     MemoryEntry, MemoryStore,
 };
 
+/// Restricted read view available to batch pre-commit guards.
+///
+/// The underlying transaction is intentionally private: a guard may observe
+/// the exact post-batch memory count while the batch is still rollbackable,
+/// but it cannot execute arbitrary SQL under the store's reserved-reference
+/// write authorization.
+///
+/// ```compile_fail
+/// # use memcore::store::open::BatchPrecommitView;
+/// fn bypass(view: BatchPrecommitView<'_>) {
+///     view.execute("UPDATE memories SET metadata = '{}'", []).unwrap();
+/// }
+/// ```
+pub struct BatchPrecommitView<'a> {
+    connection: &'a Connection,
+}
+
+impl BatchPrecommitView<'_> {
+    /// Count memory rows in the transaction's uncommitted post-batch state.
+    pub fn memory_row_count(&self) -> Result<usize, MemoryError> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+            .map_err(MemoryError::from)
+    }
+}
+
 #[cfg(feature = "test-support")]
 struct StartupOwnershipHook {
     db_path: String,
@@ -1217,11 +1246,9 @@ impl MemoryStore {
     /// entry never opens a transaction at all; then run the whole batch's
     /// main-row + FTS + vector projections through [`db::upsert_within_tx`]
     /// inside one `BEGIN IMMEDIATE` transaction, run `postcommit` while the
-    /// writes are still rollbackable, and commit only if it succeeds. This
-    /// is a private helper — the closure it takes is never part of a public
-    /// method's signature, which is the entire reason `upsert_batch` can be
-    /// ungated while `upsert_batch_with_precommit`'s closure-carrying public
-    /// signature stays admin/test-gated (see that method's doc comment).
+    /// writes are still rollbackable, and commit only if it succeeds. The raw
+    /// transaction stays private; public pre-commit methods expose only a
+    /// restricted [`BatchPrecommitView`].
     ///
     /// `allow_reserved_anchor_ids` selects which `db` seam the per-row loop
     /// uses: `false` (every ordinary caller) refuses reserved `anchor:` ids
@@ -1235,7 +1262,7 @@ impl MemoryStore {
         postcommit: F,
     ) -> Result<T, MemoryError>
     where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
+        F: FnOnce(BatchPrecommitView<'_>) -> Result<T, MemoryError>,
     {
         for entry in entries {
             self.validate_write_path(entry)?;
@@ -1257,7 +1284,7 @@ impl MemoryStore {
                 db::upsert_within_tx(&tx, entry, self.vec_available, None)?;
             }
         }
-        let output = postcommit(&tx)?;
+        let output = postcommit(BatchPrecommitView { connection: &tx })?;
         tx.commit()?;
         Ok(output)
     }
@@ -1267,14 +1294,10 @@ impl MemoryStore {
     ///
     /// This is for cross-resource maintenance that must validate or complete
     /// an external boundary before the database half becomes durable. The
-    /// closure receives read access to the transaction for exact post-state
-    /// accounting; any closure error drops the transaction without commit.
-    ///
-    /// Gated with the raw-`Connection` accessors (#1585 review round 4): the
-    /// closure's `&Transaction` derefs to `&Connection`, which would hand the
-    /// portable surface the same raw-SQL bypass of the `store_identity`
-    /// write-once guards. Its only production caller is tachi-server's tidy
-    /// migration (admin build), through the
+    /// closure receives a restricted [`BatchPrecommitView`] for exact
+    /// post-state accounting; any closure error drops the transaction without
+    /// commit. Its only production caller is tachi-server's tidy migration
+    /// (admin build), through the
     /// [`Self::upsert_batch_with_precommit_preserving_anchor_rows`] variant.
     ///
     /// Reserved-id refusals are not weakened by batching: since tachi#1602 a
@@ -1289,7 +1312,7 @@ impl MemoryStore {
         precommit: F,
     ) -> Result<T, MemoryError>
     where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
+        F: FnOnce(BatchPrecommitView<'_>) -> Result<T, MemoryError>,
     {
         self.upsert_batch_in_tx(entries, false, precommit)
     }
@@ -1315,15 +1338,14 @@ impl MemoryStore {
         precommit: F,
     ) -> Result<T, MemoryError>
     where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, MemoryError>,
+        F: FnOnce(BatchPrecommitView<'_>) -> Result<T, MemoryError>,
     {
         self.upsert_batch_in_tx(entries, true, precommit)
     }
 
-    /// Upsert a bounded batch atomically, with **no handle exposure**: unlike
-    /// [`Self::upsert_batch_with_precommit`], this takes no closure and its
-    /// signature never mentions a raw `Connection`/`Transaction`, so it is
-    /// safe to leave ungated for the portable build (tachi#1599).
+    /// Upsert a bounded batch atomically with no callback. The pre-commit
+    /// variants likewise expose no raw handle; they provide only a restricted
+    /// [`BatchPrecommitView`].
     ///
     /// Every entry's `KernelPolicy`-driven write-path check
     /// ([`Self::validate_write_path`] — the same per-row check ordinary
@@ -1350,12 +1372,8 @@ impl MemoryStore {
     /// projection failure rolls back the entire batch. An empty slice is a
     /// successful no-op: no transaction is opened.
     ///
-    /// This exists ungated for the same reason
-    /// [`Self::upsert_batch_with_precommit`] does not (tachi#1585's class
-    /// rule): the raw `&Transaction`/`&Connection` handle is what must stay
-    /// admin/test-gated, not batching or atomicity themselves. This method
-    /// never hands out that handle, so the portable surface gets atomic
-    /// batch writes without the raw-SQL bypass those accessors would open.
+    /// This method stays ungated for the portable build (tachi#1599); it never
+    /// hands out a callback or handle.
     pub fn upsert_batch(&mut self, entries: &[MemoryEntry]) -> Result<(), MemoryError> {
         if entries.is_empty() {
             return Ok(());
@@ -2556,13 +2574,7 @@ mod exact_dedupe_open_tests {
                     test_memory_entry("migration-carried-ordinary"),
                     anchor_entry,
                 ],
-                |tx| {
-                    tx.query_row("SELECT COUNT(*) FROM memories", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .map(|count| count as usize)
-                    .map_err(MemoryError::from)
-                },
+                |view| view.memory_row_count(),
             )
             .expect("the trusted whole-store-copy variant must carry the anchor row");
         assert_eq!(rows_after, 2, "both copied rows must be visible in-tx");
