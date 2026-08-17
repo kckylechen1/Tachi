@@ -313,7 +313,11 @@ fn persist_supersession_receipt(
     tx: &Connection,
     receipt: &mut SupersessionReceipt,
 ) -> Result<(), MemoryError> {
-    receipt.durable = true;
+    // A generic database commit is itself the durable authority. A private
+    // partition is still only an in-memory working image here; its snapshot
+    // copy flips this bit only when constructing the successfully sealed
+    // envelope.
+    receipt.durable = receipt.partition_id.is_none();
     let value_json = serde_json::to_string(receipt)?;
     let created_at = db::now_utc_iso();
     let changed = tx.execute(

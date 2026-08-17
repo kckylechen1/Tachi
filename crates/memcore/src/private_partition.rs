@@ -25,6 +25,11 @@
 //! 7. **#1585.** Generic [`MemoryStore`] open/read-only/maintenance paths
 //!    refuse a sealed envelope *and* a working SQLite file that carries the
 //!    private-partition stamp. A private partition never satisfies `TachiFull`.
+//! 8. **Filesystem trust.** The estate root is operator-owned storage. Final
+//!    envelope and lock components are opened without following symlinks, but
+//!    this format does not claim rollback protection against an attacker with
+//!    arbitrary same-principal write access to the entire estate directory;
+//!    that requires an external monotonic authority.
 //!
 //! Trust is not encoded in `MemoryEntry::scope`, path prefixes, or SQL
 //! filters. Those remain defenses in depth only.
@@ -1559,7 +1564,10 @@ mod tests {
             receipt.partition_id.as_deref(),
             Some(alice.identity().partition_id.as_str())
         );
-        assert!(receipt.durable);
+        assert!(
+            !receipt.durable,
+            "an in-memory private receipt is not sealed-durable"
+        );
         assert_eq!(alice.identity().partition_id, alice_ctx.partition_id());
         assert_ne!(alice.identity().partition_id, bob.identity().partition_id);
     }
@@ -1580,5 +1588,55 @@ mod tests {
         let part = PrivatePartition::open_in_memory(&ctx, &keys).unwrap();
         assert_eq!(part.store.profile, StoreProfile::PortableKernel);
         assert_eq!(part.identity().partition_id, ctx.partition_id());
+    }
+
+    #[test]
+    fn private_receipt_becomes_durable_only_in_the_sealed_image() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let keys = keys();
+        let receipt_id = crate::SupersessionReceipt::id_for(
+            crate::SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
+            crate::SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
+            "sealed-source",
+            "sealed-target",
+        );
+        {
+            let mut part = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+            part.insert_if_absent(&entry("sealed-source", "source"))
+                .unwrap();
+            part.insert_if_absent(&entry("sealed-target", "target"))
+                .unwrap();
+            part.with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("sealed-source", "sealed-target")
+            })
+            .unwrap();
+            let (json, _) = part
+                .store
+                .get_state_kv(crate::SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+                .unwrap()
+                .unwrap();
+            let receipt: crate::SupersessionReceipt = serde_json::from_str(&json).unwrap();
+            assert!(!receipt.durable);
+            part.persist().unwrap();
+        }
+
+        let reopened = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();
+        let (json, _) = reopened
+            .store
+            .get_state_kv(crate::SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+            .unwrap()
+            .unwrap();
+        let receipt: crate::SupersessionReceipt = serde_json::from_str(&json).unwrap();
+        assert!(receipt.durable);
+        assert_eq!(
+            receipt.partition_id.as_deref(),
+            Some(reopened.identity.partition_id.as_str())
+        );
     }
 }
