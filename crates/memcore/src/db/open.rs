@@ -374,14 +374,11 @@ unsafe extern "C" fn reserved_reference_authorizer(
         || (action == rusqlite::ffi::SQLITE_UPDATE
             && sqlite_identifier_eq(arg1, b"memories")
             && protected_memory_authority_column(arg2));
-    let raw_hard_state_write = raw_connection
-        && matches!(
-            action,
-            rusqlite::ffi::SQLITE_INSERT
-                | rusqlite::ffi::SQLITE_UPDATE
-                | rusqlite::ffi::SQLITE_DELETE
-        )
-        && sqlite_identifier_eq(arg1, b"hard_state")
+    let protected_evidence_write = matches!(
+        action,
+        rusqlite::ffi::SQLITE_INSERT | rusqlite::ffi::SQLITE_UPDATE | rusqlite::ffi::SQLITE_DELETE
+    ) && (sqlite_identifier_eq(arg1, b"hard_state")
+        || sqlite_identifier_eq(arg1, b"tachi_events"))
         && sqlite_identifier_eq(database, b"main");
     let unsafe_pragma =
         action == rusqlite::ffi::SQLITE_PRAGMA && sqlite_identifier_eq(arg1, b"writable_schema");
@@ -390,8 +387,12 @@ unsafe extern "C" fn reserved_reference_authorizer(
         rusqlite::ffi::SQLITE_ATTACH | rusqlite::ffi::SQLITE_DETACH
     );
 
-    if raw_hard_state_write {
-        rusqlite::ffi::SQLITE_DENY
+    if protected_evidence_write {
+        if typed_dml && accessor.is_null() {
+            rusqlite::ffi::SQLITE_OK
+        } else {
+            rusqlite::ffi::SQLITE_DENY
+        }
     } else if protected_memory_write {
         // A direct typed statement may mutate protected fields. SQL executed
         // indirectly by a trigger never inherits that authority.
@@ -1157,7 +1158,8 @@ mod store_connection_ddl_wall_tests {
             );
         drop(offline);
 
-        let error = crate::db::set_state(store.connection(), "wf1443/fault", "key", "{}")
+        let error = store
+            .set_state("wf1443/fault", "key", "{}")
             .expect_err("the injected trigger must abort the store write");
         assert!(
             error
@@ -1166,7 +1168,8 @@ mod store_connection_ddl_wall_tests {
             "store write failed with an unrelated error: {error}"
         );
 
-        crate::db::set_state(store.connection(), "wf1443/unfenced", "key", "{}")
+        store
+            .set_state("wf1443/unfenced", "key", "{}")
             .expect("the injected trigger must only fire on its own namespace");
     }
 }

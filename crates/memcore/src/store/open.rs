@@ -578,7 +578,11 @@ impl MemoryStore {
             policy: crate::KernelPolicy::default(),
             admitted_partition: None,
         };
-        crate::private_partition::stamp_private_identity(&store.conn, &identity)?;
+        {
+            let _authorization =
+                db::authorize_reserved_reference_write(&store.reserved_reference_write)?;
+            crate::private_partition::stamp_private_identity(&store.conn, &identity)?;
+        }
         store.admitted_partition = Some(identity);
         Ok(store)
     }

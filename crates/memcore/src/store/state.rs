@@ -10,6 +10,8 @@ impl MemoryStore {
         key: &str,
         value_json: &str,
     ) -> Result<u32, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::set_state(&self.conn, namespace, key, value_json)
     }
 
@@ -30,6 +32,8 @@ impl MemoryStore {
         value_json: &str,
     ) -> Result<bool, MemoryError> {
         db::refuse_general_mutation_namespace(namespace, "inserted")?;
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::insert_state_if_absent(&self.conn, namespace, key, value_json)
     }
 
@@ -41,6 +45,8 @@ impl MemoryStore {
         value_json: &str,
         expected_version: u32,
     ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::set_state_if_version(&self.conn, namespace, key, value_json, expected_version)
     }
 
@@ -61,6 +67,8 @@ impl MemoryStore {
     /// Delete a single deterministic key-value state row. Returns whether a
     /// row was actually removed.
     pub fn delete_state(&self, namespace: &str, key: &str) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::delete_state(&self.conn, namespace, key)
     }
 
@@ -69,6 +77,8 @@ impl MemoryStore {
     /// deleted. See `db::reap_expired_state` for what "expired" means and
     /// which rows are deliberately exempt.
     pub fn reap_expired_state(&self, now_rfc3339: &str) -> Result<usize, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::reap_expired_state(&self.conn, now_rfc3339)
     }
 
@@ -82,6 +92,8 @@ impl MemoryStore {
         ttl_rfc3339: &str,
         terminal_status: Option<(&str, &[&str])>,
     ) -> Result<usize, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::backfill_missing_expires_at(&self.conn, namespace, ttl_rfc3339, terminal_status)
     }
 }

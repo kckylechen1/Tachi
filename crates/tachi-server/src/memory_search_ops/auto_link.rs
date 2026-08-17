@@ -785,32 +785,6 @@ pub(crate) fn run_auto_linking(
                     }
                     continue;
                 }
-                let relation = if supersedes {
-                    "supersedes"
-                } else {
-                    "reinforces"
-                };
-                let weight = if supersedes {
-                    0.9
-                } else {
-                    vector_similarity.unwrap_or(0.0)
-                };
-                let edge = memcore::MemoryEdge {
-                    source_id: entry.id.clone(),
-                    target_id: result.entry.id.clone(),
-                    relation: relation.to_string(),
-                    weight,
-                    metadata: json!({
-                        "auto_link": true,
-                        "shared_entities": shared,
-                        "similarity": vector_similarity,
-                        "confidence_increment": reinforces.then(|| confidence_increment(weight)),
-                    }),
-                    created_at: now.clone(),
-                    valid_from: String::new(),
-                    // Edges are only closed/expired when supersession is explicitly reversed.
-                    valid_to: None,
-                };
                 // #1097 r1 codex review ③-B: classify the write outcome inside
                 // the closure so the receipt can distinguish "edge landed" from
                 // "full success". Supersede writes no longer use an edge
@@ -822,42 +796,65 @@ pub(crate) fn run_auto_linking(
                 let mut edge_outcome = EdgeWriteOutcome::NoWrite;
                 let mut superseded_rows: usize = 0;
                 let save_edge_action = |store: &mut MemoryStore| -> Result<(), String> {
-                    if supersedes {
-                        // `entry` is the save handler's pre-persistence value.
-                        // `MemoryStore::upsert` canonicalizes committed fields
-                        // such as revision/timestamps, so it is not an honest
-                        // exact-state CAS snapshot. Re-read the admitted target
-                        // on this same store and re-run the discriminator before
-                        // opening the immutable transaction; the checked claim
-                        // then catches any later drift between this read and its
-                        // BEGIN IMMEDIATE writer snapshot.
-                        let committed_target = store
-                            .get(&entry.id)
-                            .map_err(|error| error.to_string())?
-                            .ok_or_else(|| format!("auto-link target disappeared: {}", entry.id))?;
-                        let committed_shared = unique_shared_entities(
-                            &committed_target.entities,
-                            &result.entry.entities,
-                        );
-                        let committed_similarity =
-                            vector_similarity_between(&committed_target, &result.entry);
-                        if !should_supersede(
+                    // `entry` is the save handler's pre-persistence value.
+                    // Re-read the admitted target on the write store, then
+                    // recompute every decision and edge field from that exact
+                    // committed row. The outer calculation is only a cheap
+                    // candidate prefilter; it grants no write authority.
+                    let committed_target = store
+                        .get(&entry.id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("auto-link target disappeared: {}", entry.id))?;
+                    let committed_shared =
+                        unique_shared_entities(&committed_target.entities, &result.entry.entities);
+                    let committed_similarity =
+                        vector_similarity_between(&committed_target, &result.entry);
+                    let committed_supersedes = should_supersede(
+                        &committed_target,
+                        &result.entry,
+                        committed_shared.len(),
+                        result.score.symbolic,
+                    );
+                    let committed_reinforces = committed_similarity.is_some_and(|similarity| {
+                        should_reinforce(
                             &committed_target,
                             &result.entry,
                             committed_shared.len(),
-                            result.score.symbolic,
-                        ) {
-                            return Ok(());
-                        }
-                        let committed_edge = memcore::MemoryEdge {
-                            metadata: json!({
-                                "auto_link": true,
-                                "shared_entities": committed_shared,
-                                "similarity": committed_similarity,
-                                "confidence_increment": serde_json::Value::Null,
-                            }),
-                            ..edge.clone()
-                        };
+                            similarity,
+                            committed_supersedes,
+                        )
+                    });
+                    if !committed_supersedes && !committed_reinforces {
+                        return Ok(());
+                    }
+                    let relation = if committed_supersedes {
+                        "supersedes"
+                    } else {
+                        "reinforces"
+                    };
+                    let weight = if committed_supersedes {
+                        0.9
+                    } else {
+                        committed_similarity.unwrap_or(0.0)
+                    };
+                    let committed_edge = memcore::MemoryEdge {
+                        source_id: committed_target.id.clone(),
+                        target_id: result.entry.id.clone(),
+                        relation: relation.to_string(),
+                        weight,
+                        metadata: json!({
+                            "auto_link": true,
+                            "shared_entities": committed_shared,
+                            "similarity": committed_similarity,
+                            "confidence_increment": committed_reinforces
+                                .then(|| confidence_increment(weight)),
+                        }),
+                        created_at: now.clone(),
+                        valid_from: String::new(),
+                        // Edges are only closed/expired when supersession is explicitly reversed.
+                        valid_to: None,
+                    };
+                    if committed_supersedes {
                         // tachi#1646: auto-link `supersedes` edges are a
                         // vector-similarity heuristic Tachi computed itself;
                         // the edge now commits only with the checked semantic
@@ -872,12 +869,12 @@ pub(crate) fn run_auto_linking(
                             superseded_rows = 1;
                             edge_outcome = EdgeWriteOutcome::InsertAndPostWriteOk;
                         }
-                    } else if reinforces {
+                    } else {
                         // tachi#1646: auto-link `reinforces` edges are a
                         // vector-similarity heuristic Tachi computed itself.
                         store
                             .add_edge_with_provenance(
-                                &edge,
+                                &committed_edge,
                                 &memcore::db::EdgeProvenance {
                                     authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
                                     ..Default::default()
@@ -1698,6 +1695,82 @@ mod tests {
                 Ok(())
             })
             .expect("verify stale overlap left no lifecycle or edge write");
+    }
+
+    #[test]
+    fn auto_link_recomputes_reinforcement_after_same_id_target_update() {
+        let server = crate::tests::make_server();
+        let old_id = format!("auto-link-reinforce-old-{}", uuid::Uuid::new_v4());
+        let mut old = test_entry(&old_id, "older reinforcement candidate");
+        old.entities = vec!["stale-shared".to_string()];
+        old.path = "/reinforce/old".to_string();
+        old.timestamp = "2026-01-01T00:00:00Z".to_string();
+        let mut old_vector = vec![0.0_f32; crate::status_ops::EXPECTED_EMBEDDING_DIM];
+        old_vector[0] = 1.0;
+        old.vector = Some(old_vector);
+        server
+            .with_global_store(|store| store.upsert(&old).map_err(|error| error.to_string()))
+            .expect("seed reinforcement candidate");
+
+        let fresh_id = format!("auto-link-reinforce-new-{}", uuid::Uuid::new_v4());
+        let mut stale_fresh = test_entry(&fresh_id, "captured reinforcement target");
+        stale_fresh.entities = old.entities.clone();
+        stale_fresh.path = "/reinforce/new".to_string();
+        stale_fresh.timestamp = "2026-01-02T00:00:00Z".to_string();
+        let mut fresh_vector = vec![0.0_f32; crate::status_ops::EXPECTED_EMBEDDING_DIM];
+        fresh_vector[0] = 0.8;
+        fresh_vector[1] = 0.6;
+        stale_fresh.vector = Some(fresh_vector);
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&stale_fresh)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed captured reinforcement target");
+
+        // The captured value qualifies for reinforcement. The committed
+        // same-ID row no longer overlaps, so persisting the stale decision
+        // would create both an edge and an unjustified confidence increment.
+        let mut committed_fresh = stale_fresh.clone();
+        committed_fresh.entities = vec!["current-disjoint".to_string()];
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&committed_fresh)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("commit intervening same-id reinforcement update");
+
+        let receipt = run_auto_linking(
+            &server,
+            &stale_fresh,
+            &stale_fresh.entities,
+            DbScope::Global,
+            None,
+            true,
+        )
+        .expect("sampled auto-link receipt");
+        assert!(
+            receipt.edges_attempted >= 1,
+            "captured reinforcement must reach the write discriminator"
+        );
+        assert_eq!(receipt.edges_written, 0);
+        server
+            .with_global_store_read(|store| {
+                let stale_edges: i64 = store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memory_edges
+                         WHERE source_id = ?1 AND target_id = ?2 AND relation = 'reinforces'",
+                        rusqlite::params![&fresh_id, &old_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(stale_edges, 0);
+                Ok(())
+            })
+            .expect("verify stale reinforcement left no edge write");
     }
 
     #[test]

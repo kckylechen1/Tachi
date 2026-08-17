@@ -290,7 +290,7 @@ pub use model_broker_seam::{
 pub use private_partition::{
     AdmittedPartition, CapabilityReceipt, PartitionCapability, PartitionKeyProvider,
     PrivatePartition, PrivatePartitionOpenContext, StaticKeyProvider, SubjectId, TrustDomainId,
-    SEALED_MAGIC, STORE_PRIVATE_PARTITION_KEY,
+    STORE_PRIVATE_PARTITION_KEY,
 };
 pub use store::immutable_supersession::{
     SupersessionClaimOutcome, SupersessionCommitResult, SupersessionError, SupersessionErrorKind,

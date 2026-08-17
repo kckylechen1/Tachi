@@ -56,8 +56,10 @@ use crate::MemoryStore;
 /// Write-once identity key: this file is a private partition (#1668 / #1585).
 pub const STORE_PRIVATE_PARTITION_KEY: &str = "private_partition";
 
-/// On-disk magic. Generic open inspects this before handing the file to SQLite.
-pub const SEALED_MAGIC: &[u8] = b"TACHI-PRIVPART-1\n";
+/// Private on-disk envelope marker. This is deliberately not part of the
+/// public API: generic openers classify every non-SQLite image identically.
+const SEALED_MAGIC: &[u8] = b"TACHI-PRIVPART-1\n";
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 const DERIVATION_DOMAIN: &[u8] = b"tachi.private_partition.v1";
 
@@ -490,6 +492,8 @@ impl PrivatePartition {
             return Ok(());
         };
         persist_sealed(&self.store, self.key.as_array(), &self.identity, &path)?;
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.store.reserved_reference_write)?;
         mark_partition_receipts_sealed(&self.store.conn, &self.identity.partition_id)?;
         self.dirty = false;
         Ok(())
@@ -508,19 +512,43 @@ impl PrivatePartition {
     }
 }
 
-/// True when `path` is a sealed private-partition envelope.
-fn path_is_sealed_partition(path: &Path) -> bool {
-    let Ok(mut file) = fs::File::open(path) else {
-        return false;
-    };
-    let mut magic = [0u8; SEALED_MAGIC.len()];
-    file.read_exact(&mut magic).is_ok() && magic == SEALED_MAGIC
+fn generic_non_sqlite_image() -> MemoryError {
+    MemoryError::InvalidArg("database path is not a valid SQLite image".to_string())
 }
 
-/// Generic MemoryStore open: sealed envelope never becomes a connection.
+/// Generic MemoryStore open: an existing non-empty file must be a regular,
+/// directly opened SQLite image. Private envelopes, arbitrary malformed
+/// files, and symlinks all receive the same content-free refusal.
 pub(crate) fn refuse_generic_open_path(db_path: &str) -> Result<(), MemoryError> {
-    if path_is_sealed_partition(Path::new(db_path)) {
-        return Err(MemoryError::PrivatePartitionRefused);
+    let path = Path::new(db_path);
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(generic_non_sqlite_image()),
+    };
+    let metadata = file.metadata().map_err(|_| generic_non_sqlite_image())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(generic_non_sqlite_image());
+    }
+    if metadata.len() == 0 {
+        return Ok(());
+    }
+    let mut header = [0u8; SQLITE_HEADER.len()];
+    if file.read_exact(&mut header).is_err() || &header != SQLITE_HEADER {
+        return Err(generic_non_sqlite_image());
     }
     Ok(())
 }
@@ -815,17 +843,21 @@ fn mark_partition_receipts_sealed(
         let (key, value_json) = row?;
         let mut receipt: crate::SupersessionReceipt = serde_json::from_str(&value_json)?;
         if receipt.partition_id.as_deref() == Some(partition_id) && !receipt.durable {
+            let before = receipt.clone();
             receipt.durable = true;
-            updates.push((key, serde_json::to_string(&receipt)?));
+            updates.push((key, before, receipt));
         }
     }
     drop(statement);
-    for (key, value_json) in updates {
+    for (key, before, after) in updates {
+        crate::store::immutable_supersession::replace_supersession_event_receipt_after_seal(
+            conn, &before, &after,
+        )?;
         if conn.execute(
             "UPDATE hard_state SET value_json = ?1, updated_at = ?2
              WHERE namespace = ?3 AND key = ?4 AND version = 1",
             rusqlite::params![
-                value_json,
+                serde_json::to_string(&after)?,
                 db::now_utc_iso(),
                 crate::SUPERSESSION_RECEIPT_NAMESPACE,
                 key,
@@ -1465,13 +1497,35 @@ mod tests {
         // is derived. Pointing MemoryStore at alice's sealed file refuses.
         let alice_id = alice.partition_id();
         let sealed = root.path().join(alice_id).join("partition.sealed");
-        let err = match MemoryStore::open(&sealed.to_string_lossy()) {
+        let sealed_error = match MemoryStore::open(&sealed.to_string_lossy()) {
             Err(err) => err,
             Ok(_) => panic!("generic open must not yield a private-partition handle"),
         };
-        assert!(matches!(err, MemoryError::PrivatePartitionRefused));
-        assert_eq!(err.to_string(), "private partition refused");
-        assert!(!err.to_string().contains("alice"));
+        let malformed = root.path().join("ordinary-malformed.db");
+        fs::write(&malformed, b"ordinary malformed database bytes").unwrap();
+        let malformed_error = match MemoryStore::open(&malformed.to_string_lossy()) {
+            Err(error) => error,
+            Ok(_) => panic!("ordinary malformed input must refuse"),
+        };
+        assert!(matches!(sealed_error, MemoryError::InvalidArg(_)));
+        assert_eq!(
+            sealed_error.to_string(),
+            malformed_error.to_string(),
+            "generic open must not disclose that malformed bytes are a sealed partition"
+        );
+        assert!(!sealed_error.to_string().contains("private"));
+        assert!(!sealed_error.to_string().contains("alice"));
+
+        #[cfg(unix)]
+        {
+            let sealed_link = root.path().join("sealed-link.db");
+            std::os::unix::fs::symlink(&sealed, &sealed_link).unwrap();
+            let link_error = match MemoryStore::open(&sealed_link.to_string_lossy()) {
+                Err(error) => error,
+                Ok(_) => panic!("generic open must not follow a sealed-file symlink"),
+            };
+            assert_eq!(link_error.to_string(), malformed_error.to_string());
+        }
         let _ = bob_part;
     }
 
@@ -1748,5 +1802,21 @@ mod tests {
             receipt.partition_id.as_deref(),
             Some(reopened.identity.partition_id.as_str())
         );
+        let event_payload: String = reopened
+            .store
+            .conn
+            .query_row(
+                "SELECT payload_json FROM tachi_events WHERE id = ?1",
+                [&receipt_id],
+                |row| row.get(0),
+            )
+            .expect("sealed receipt event exists");
+        let event_receipt: crate::SupersessionReceipt =
+            serde_json::from_str(&event_payload).expect("decode sealed receipt event");
+        assert_eq!(
+            event_receipt, receipt,
+            "hard-state authority and its event projection must cross the seal boundary together"
+        );
+        assert!(event_receipt.durable);
     }
 }
