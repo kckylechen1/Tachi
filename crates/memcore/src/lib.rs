@@ -294,7 +294,8 @@ pub use private_partition::{
 };
 pub use store::immutable_supersession::{
     SupersessionCommitResult, SupersessionError, SupersessionErrorKind, SupersessionExpectedState,
-    SupersessionReceipt, SUPERSESSION_RECEIPT_EVENT_TYPE, SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
+    SupersessionReceipt, SUPERSESSION_RECEIPT_EVENT_TYPE, SUPERSESSION_RECEIPT_NAMESPACE,
+    SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
 };
 // `DeploymentCapabilities` (the seam's flat bool projection) is deliberately
 // NOT re-exported at the crate root: PR-B's catalog row type of the same name

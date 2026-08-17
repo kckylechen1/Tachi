@@ -474,12 +474,16 @@ fn apply_lifecycle_action(
                                 "refusing to supersede protected memory {source_id} (retention/wiki/pattern)"
                             )));
                         }
-                        let receipt = replacement.claim_and_archive_immutable_supersession(
+                        let mut receipt = replacement.claim_and_archive_immutable_supersession(
                             source_id,
                             target,
                             expected.as_ref(),
                             "consolidate_route1_supersede",
                             ROUTE1_MERGE_POLICY_VERSION,
+                        )?;
+                        replacement.finalize_supersession_receipt(
+                            &mut receipt,
+                            "consolidate_route1_no_extra_target_write",
                         )?;
                         Ok(receipt)
                     })
@@ -532,7 +536,7 @@ fn apply_lifecycle_action(
                         let survivor_changed = survivor.keywords != target_keywords
                             || survivor.entities != target_entities
                             || survivor.importance != target_importance;
-                        let receipt = replacement.claim_and_archive_immutable_supersession(
+                        let mut receipt = replacement.claim_and_archive_immutable_supersession(
                             source_id,
                             target,
                             expected.as_ref(),
@@ -542,6 +546,10 @@ fn apply_lifecycle_action(
                         if survivor_changed {
                             replacement.upsert(&survivor)?;
                         }
+                        replacement.finalize_supersession_receipt(
+                            &mut receipt,
+                            "consolidate_route1_target_fold_committed",
+                        )?;
                         Ok((
                             receipt,
                             source_revision,

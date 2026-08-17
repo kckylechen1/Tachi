@@ -1087,6 +1087,7 @@ fn apply_lifecycle_proposal_once(
                 .ok_or_else(|| drift_err(proposal_id, format!("source missing: {source_id}")))?;
             let mut survivor = read_memory_in_tx(&tx, target)?
                 .ok_or_else(|| drift_err(proposal_id, format!("target missing: {target}")))?;
+            let expected = SupersessionExpectedState::active_unsuperseded(&source, Some(&survivor));
             // BOTH sides of the no-op comparison below must be canonical. The
             // fold produces sorted+deduplicated lists, while the stored column
             // is in whatever order the last writer serialized
@@ -1111,7 +1112,6 @@ fn apply_lifecycle_proposal_once(
             }
             let merged_keywords = survivor.keywords.len();
             let merged_entities = survivor.entities.len();
-            let expected = SupersessionExpectedState::active_unsuperseded(&source, Some(&survivor));
             let mut receipt = claim_supersession_edge_within_tx(
                 &tx,
                 &source_id,
@@ -2313,6 +2313,51 @@ mod tests {
             source_row.archived,
             "the source side of the merge still executes"
         );
+    }
+
+    #[test]
+    fn merge_with_new_target_content_uses_the_pre_fold_snapshot_and_persists_receipt() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let target = seed(
+            &mut store,
+            "fold-target",
+            "maritime logistics rota covering harbour pilots",
+            &["zulu"],
+        );
+        let source = seed(
+            &mut store,
+            "fold-source",
+            "quantum widget calibration notes for the alpha bench",
+            &["alpha"],
+        );
+        let payload = build_apply_payload(ACTION_MERGE_INTO, &source, Some(&target));
+        let proposal_id = persist_and_approve(&store, &payload);
+
+        apply_lifecycle_proposal(&mut store, &proposal_id)
+            .expect("content-changing merge succeeds");
+
+        let survivor = store.get(&target.id).unwrap().expect("target survives");
+        assert_eq!(
+            survivor.keywords,
+            vec!["alpha".to_string(), "zulu".to_string()]
+        );
+        assert_eq!(survivor.revision, target.revision + 1);
+        let receipt_id = crate::SupersessionReceipt::id_for(
+            LIFECYCLE_SUPERSESSION_ROUTE,
+            LIFECYCLE_POLICY_VERSION,
+            &source.id,
+            &target.id,
+        );
+        let (receipt_json, version) = store
+            .get_state_kv(crate::SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+            .expect("read receipt")
+            .expect("receipt is durable");
+        let receipt: crate::SupersessionReceipt =
+            serde_json::from_str(&receipt_json).expect("deserialize receipt");
+        assert!(receipt.durable);
+        assert_eq!(receipt.target_revision_before, Some(target.revision));
+        assert_eq!(receipt.target_revision_after, Some(survivor.revision));
+        assert_eq!(version, 1);
     }
 
     fn test_entry() -> MemoryEntry {

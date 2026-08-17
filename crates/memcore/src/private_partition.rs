@@ -767,14 +767,15 @@ mod tests {
         );
         let bob_row = bob.get("bob-row").unwrap().expect("bob row stays");
         assert_eq!(bob_row.text, "SECRET-B");
-        let receipt = alice
+        let result = alice
             .with_immutable_supersession_transaction(|operation| {
                 operation.claim_immutable_supersession("alice-row", "alice-successor")
             })
             .expect("same-partition claim with in-flight target remains legal");
         assert_eq!(
-            receipt.partition_id.as_deref(),
-            Some(alice.identity().partition_id.as_str())
+            result,
+            crate::SupersessionCommitResult::Applied,
+            "same-partition claim must install the edge"
         );
         assert_eq!(alice.identity().partition_id, alice_ctx.partition_id());
         assert_ne!(alice.identity().partition_id, bob.identity().partition_id);

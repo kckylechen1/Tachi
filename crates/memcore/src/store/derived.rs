@@ -108,6 +108,7 @@ impl MemoryStore {
     }
 
     /// Mark a memory as superseded by a newer/canonical memory.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn supersede_memory(&self, id: &str, superseded_by: &str) -> Result<bool, MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
@@ -116,6 +117,7 @@ impl MemoryStore {
 
     /// Mark a memory as superseded only when its inspected revision is still
     /// current. This keeps migration lifecycle edges revision-CAS protected.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn supersede_memory_if_revision(
         &self,
         id: &str,

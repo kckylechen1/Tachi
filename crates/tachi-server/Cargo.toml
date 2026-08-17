@@ -47,7 +47,7 @@ portable = []
 # Non-default friend surface for the external bootstrap test crate (#1714).
 # It is intentionally absent from `full`: ordinary product builds must not
 # expose test fault injection, lock fixtures, or migration authority wrappers.
-bootstrap-test-api = []
+bootstrap-test-api = ["memcore/test-support"]
 
 [dependencies]
 memcore = { path = "../memcore" }
@@ -126,6 +126,7 @@ vault-kit = { path = "../vault-kit" }
 
 [dev-dependencies]
 tempfile = "3"
+memcore = { path = "../memcore", features = ["test-support"] }
 memory-server-runtime = { path = "../memory-server-runtime", features = ["test-support"] }
 tachi-llm = { path = "../tachi-llm", features = ["test-support"] }
 # Dev-dep only, so `cargo build --release` never sees this feature. It

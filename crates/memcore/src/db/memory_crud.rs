@@ -3910,6 +3910,7 @@ pub fn restore_archived_revision_within_tx(
 
 /// Mark a memory as superseded by a newer/canonical memory. Superseded rows are
 /// hidden from default search but remain available for audit/history.
+#[cfg(any(test, feature = "test-support"))]
 pub fn supersede_memory(
     conn: &Connection,
     id: &str,
@@ -3921,7 +3922,8 @@ pub fn supersede_memory(
     Ok(changed)
 }
 
-pub(crate) fn supersede_memory_within_tx(
+#[cfg(any(test, feature = "test-support"))]
+fn supersede_memory_within_tx(
     tx: &Connection,
     id: &str,
     superseded_by: &str,
@@ -3952,6 +3954,7 @@ pub(crate) fn supersede_memory_within_tx(
 /// Mark a memory as superseded only when its revision is the one the caller
 /// inspected. This is the lifecycle counterpart to `update_with_revision` for
 /// migration paths that must not race a concurrent content/review write.
+#[cfg(any(test, feature = "test-support"))]
 pub fn supersede_memory_if_revision(
     conn: &Connection,
     id: &str,

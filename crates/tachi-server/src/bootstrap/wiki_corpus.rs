@@ -3072,22 +3072,32 @@ fn maybe_inject_copy_after_receipt_prepared(
             }
         }
         CorpusRaceHook::ForeignSupersedeSourceBeforeAtomicTransition { .. } => {
-            let source_path = source_scan
-                .spec
-                .addressed_path
-                .as_deref()
-                .ok_or_else(|| "race hook source has no addressed path".to_string())?;
-            let store = MemoryStore::open_existing_read_write(&source_path.display().to_string())
-                .map_err(|error| error.to_string())?;
-            if !store
-                .supersede_memory_if_revision(
-                    &source_id,
-                    "foreign-wiki-target",
-                    item.source_revision,
-                )
-                .map_err(|error| error.to_string())?
+            #[cfg(any(test, feature = "bootstrap-test-api"))]
             {
-                return Err("race hook could not supersede source".to_string());
+                let source_path = source_scan
+                    .spec
+                    .addressed_path
+                    .as_deref()
+                    .ok_or_else(|| "race hook source has no addressed path".to_string())?;
+                let store =
+                    MemoryStore::open_existing_read_write(&source_path.display().to_string())
+                        .map_err(|error| error.to_string())?;
+                if !store
+                    .supersede_memory_if_revision(
+                        &source_id,
+                        "foreign-wiki-target",
+                        item.source_revision,
+                    )
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err("race hook could not supersede source".to_string());
+                }
+            }
+            #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+            {
+                return Err(
+                    "wiki corpus race hooks are unavailable in production builds".to_string(),
+                );
             }
         }
         _ => unreachable!("matched one of the receipt-prepared hooks"),

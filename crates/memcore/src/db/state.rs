@@ -43,6 +43,11 @@ pub(crate) fn refuse_general_mutation_namespace(
              insert_state_if_absent"
         )));
     }
+    if namespace == crate::store::immutable_supersession::SUPERSESSION_RECEIPT_NAMESPACE {
+        return Err(MemoryError::InvalidArg(format!(
+            "hard_state namespace '{namespace}' is write-once supersession evidence and cannot be {operation} through a general state API"
+        )));
+    }
     refuse_operator_maintenance_authority_namespace(namespace, operation)?;
     Ok(())
 }

@@ -166,13 +166,13 @@ pub use memory_crud::{
     list_wiki_duplicate_candidates, normalize_for_write, record_enrichment_failure,
     record_memory_use, release_event_claim, restore_archived_if_revision,
     restore_archived_revision_within_tx, search_fts, search_symbolic_candidates, search_vec,
-    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
-    supersede_memory_if_revision, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
-    try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
-    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy,
-    ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
-    MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES,
-    MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status,
+    symbolic_trigram_select_sql, sync_memories_symbolic_fts, try_claim_event,
+    update_enrichment_fields, update_with_revision, AccessEventDensity, AccessEventKind,
+    IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy, ValidatedReferenceMutation,
+    MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES,
+    MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
+    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 pub(crate) use memory_crud::{
     archive_memory_within_tx, archive_with_metadata_if_expected_state,
@@ -198,6 +198,8 @@ pub(crate) use memory_crud::{
     insert_if_absent, insert_if_absent_within_tx, insert_rem_operation_if_absent_within_tx, upsert,
     upsert_idless, upsert_within_tx, upsert_within_tx_allowing_reserved_anchor_ids,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use memory_crud::{supersede_memory, supersede_memory_if_revision};
 #[cfg(feature = "admin")]
 pub use model_catalog::{
     advance_catalog_projection, append_model_deployment_event, get_model_deployment,

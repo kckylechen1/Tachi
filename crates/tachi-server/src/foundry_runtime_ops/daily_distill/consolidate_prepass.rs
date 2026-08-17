@@ -31,6 +31,7 @@
 
 use std::collections::HashMap;
 
+use memcore::MemoryEntry;
 use tachi_foundry::CandidateGroup;
 
 use crate::server_state::MemoryServer;
@@ -83,7 +84,7 @@ fn consolidate_one_group(
                 .then_with(|| ea.id.cmp(&eb.id))
         });
         let survivor_id = group.entries[indices[0]].id.clone();
-        let survivor_entry = group.entries[indices[0]].clone();
+        let mut survivor_entry = group.entries[indices[0]].clone();
         for &dup_idx in &indices[1..] {
             let source_entry = group.entries[dup_idx].clone();
             let source_id = source_entry.id.clone();
@@ -98,7 +99,10 @@ fn consolidate_one_group(
                 &survivor_id,
                 Some(expected),
             ) {
-                Ok(_) => drop_indices.push(dup_idx),
+                Ok(_) => {
+                    advance_selected_survivor_snapshot(&mut survivor_entry, &source_entry);
+                    drop_indices.push(dup_idx);
+                }
                 Err(err) => {
                     // Best-effort: leave the row in the pool rather than
                     // silently dropping evidence the merge couldn't apply.
@@ -120,6 +124,27 @@ fn consolidate_one_group(
         group.entries.remove(idx);
     }
     drop_indices.len()
+}
+
+fn advance_selected_survivor_snapshot(survivor: &mut MemoryEntry, source: &MemoryEntry) {
+    let target_keywords = memcore::store::memory_lifecycle::canonical_tags(&survivor.keywords);
+    let target_entities = memcore::store::memory_lifecycle::canonical_tags(&survivor.entities);
+    let target_importance = survivor.importance;
+
+    let mut keywords = survivor.keywords.clone();
+    keywords.extend(source.keywords.iter().cloned());
+    survivor.keywords = memcore::store::memory_lifecycle::canonical_tags(&keywords);
+    let mut entities = survivor.entities.clone();
+    entities.extend(source.entities.iter().cloned());
+    survivor.entities = memcore::store::memory_lifecycle::canonical_tags(&entities);
+    survivor.importance = survivor.importance.max(source.importance);
+
+    if survivor.keywords != target_keywords
+        || survivor.entities != target_entities
+        || survivor.importance != target_importance
+    {
+        survivor.revision += 1;
+    }
 }
 
 #[cfg(test)]
@@ -173,11 +198,15 @@ mod tests {
         )
         .expect("server");
 
-        let entries = vec![
-            dup_entry("dup-0", "2026-01-01T00:00:00Z"),
-            dup_entry("dup-1", "2026-01-01T00:00:01Z"),
-            dup_entry("dup-2", "2026-01-01T00:00:02Z"),
-        ];
+        let mut oldest = dup_entry("dup-0", "2026-01-01T00:00:00Z");
+        oldest.keywords.push("oldest-keyword".to_string());
+        oldest.entities.push("oldest-entity".to_string());
+        oldest.importance = 0.9;
+        let mut middle = dup_entry("dup-1", "2026-01-01T00:00:01Z");
+        middle.keywords.push("middle-keyword".to_string());
+        middle.entities.push("middle-entity".to_string());
+        let newest = dup_entry("dup-2", "2026-01-01T00:00:02Z");
+        let entries = vec![oldest, middle, newest];
         server
             .with_project_store(|store| {
                 for entry in &entries {
@@ -203,12 +232,30 @@ mod tests {
                 Ok(())
             })
             .expect("seed duplicate rows");
+        let selected_entries = server
+            .with_project_store_read(|store| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        store
+                            .get(&entry.id)
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| format!("seeded duplicate missing: {}", entry.id))
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .expect("read exact selected snapshots");
+        let expected_importance = selected_entries
+            .iter()
+            .map(|entry| entry.importance)
+            .max_by(f64::total_cmp)
+            .expect("selected duplicates");
 
         let mut groups = vec![CandidateGroup {
             group_id: "bounded|dup".to_string(),
             path_prefix: "/project/bounded".to_string(),
             coherence_key: "dup".to_string(),
-            entries,
+            entries: selected_entries,
         }];
 
         let consolidated = consolidate_duplicate_candidates(&server, None, &mut groups);
@@ -225,6 +272,20 @@ mod tests {
             groups[0].entries[0].id, "dup-2",
             "the newest row (by timestamp) should survive"
         );
+        server
+            .with_project_store_read(|store| {
+                let survivor = store
+                    .get("dup-2")
+                    .map_err(|error| error.to_string())?
+                    .expect("survivor remains materialized");
+                assert!(survivor.keywords.contains(&"oldest-keyword".to_string()));
+                assert!(survivor.keywords.contains(&"middle-keyword".to_string()));
+                assert!(survivor.entities.contains(&"oldest-entity".to_string()));
+                assert!(survivor.entities.contains(&"middle-entity".to_string()));
+                assert_eq!(survivor.importance, expected_importance);
+                Ok(())
+            })
+            .expect("all duplicate metadata folds reach the final survivor");
     }
 
     /// A group with no duplicates is left untouched — the pre-pass never
@@ -321,18 +382,36 @@ mod tests {
 
         let source = dup_entry("stale-source", "2026-01-01T00:00:00Z");
         let survivor = dup_entry("stale-survivor", "2026-01-01T00:00:01Z");
-        let entries = vec![source.clone(), survivor.clone()];
         server
             .with_project_store(|store| {
                 store.upsert(&source).map_err(|e| e.to_string())?;
                 store.upsert(&survivor).map_err(|e| e.to_string())?;
-                let mut drifted = source.clone();
+                Ok(())
+            })
+            .expect("seed selected duplicates");
+        let entries = server
+            .with_project_store_read(|store| {
+                Ok(vec![
+                    store
+                        .get(&source.id)
+                        .map_err(|error| error.to_string())?
+                        .expect("selected source"),
+                    store
+                        .get(&survivor.id)
+                        .map_err(|error| error.to_string())?
+                        .expect("selected survivor"),
+                ])
+            })
+            .expect("capture exact selected snapshots");
+        server
+            .with_project_store(|store| {
+                let mut drifted = entries[0].clone();
                 drifted.text = "The live row changed after pre-pass selection.".to_string();
                 drifted.summary = "drifted duplicate source".to_string();
                 store.upsert(&drifted).map_err(|e| e.to_string())?;
                 Ok(())
             })
-            .expect("seed and drift selected duplicate");
+            .expect("drift selected duplicate after snapshot");
 
         let mut groups = vec![CandidateGroup {
             group_id: "bounded|stale".to_string(),
