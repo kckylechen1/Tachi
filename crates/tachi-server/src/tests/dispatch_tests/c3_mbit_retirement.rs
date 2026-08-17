@@ -26,10 +26,8 @@ async fn c3_dispatch_receipts_carry_no_mbit_card_or_dispatch_profile() {
     let server = make_server();
 
     for verbose in [false, true] {
-        let mut params = dispatch_params(
-            Some("custom"),
-            "c3 mbit retirement dispatch discriminator",
-        );
+        let mut params =
+            dispatch_params(Some("custom"), "c3 mbit retirement dispatch discriminator");
         params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
         params.cwd = Some(tmp.path().to_string_lossy().to_string());
         params.unmanaged_cwd = Some(true);

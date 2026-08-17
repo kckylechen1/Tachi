@@ -6,7 +6,8 @@ use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
 use tachi_dispatch::{
-    profile_projected_evidence_required_from_overlay, profile_projected_signature_skills_from_overlay,
+    profile_projected_evidence_required_from_overlay,
+    profile_projected_signature_skills_from_overlay,
 };
 
 pub(crate) fn handle_route_policy_apply(

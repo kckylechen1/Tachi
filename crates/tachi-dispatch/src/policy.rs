@@ -1023,13 +1023,9 @@ mod tests {
             ..AgentPerformanceMatrixRow::default()
         }];
 
-        let proposals = build_loadout_evolution_proposals(
-            &rows,
-            &[],
-            50,
-            "now",
-            |_profile| Err("positive inputs should stay lazy".to_string()),
-        )
+        let proposals = build_loadout_evolution_proposals(&rows, &[], 50, "now", |_profile| {
+            Err("positive inputs should stay lazy".to_string())
+        })
         .expect("low-sample profiles never read positive inputs");
 
         assert!(proposals.is_empty());
