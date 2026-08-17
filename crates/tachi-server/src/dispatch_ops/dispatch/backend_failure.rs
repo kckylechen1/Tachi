@@ -13,7 +13,6 @@ pub(super) struct ExecutionBackendPrepareFailure<'a> {
     pub(super) plan_duration_ms: Option<u64>,
     pub(super) harness_transport: &'a str,
     pub(super) harness_server_url: &'a Option<String>,
-    pub(super) capability_bundle_card: &'a Value,
     pub(super) timeout_secs_for_status: u64,
 }
 
@@ -50,7 +49,6 @@ pub(super) fn record_execution_backend_prepare_failure(ctx: ExecutionBackendPrep
             "harness_transport": ctx.harness_transport,
             "harness_server_url": ctx.harness_server_url,
             "execution_backend": ctx.backend,
-            "capability_bundle": ctx.capability_bundle_card,
             "timeout_secs": ctx.timeout_secs_for_status,
             "error": ctx.error,
         })),

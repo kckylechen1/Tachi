@@ -258,19 +258,47 @@ fn tachi_event_action_schema_declares_enum_values() {
     assert!(values.contains(&json!("label_eval")));
 }
 
+/// #1690 C3 discriminator (5a/5b, schema layer): `tachi_skill` survives only
+/// as the thin static discover/run surface — the action enum must contain
+/// exactly {discover, run}, the retired bundle/loadout/from_pattern actions
+/// must be typed-rejected by the schema, and the retired param fields those
+/// actions consumed (profile/host/skill_limit/capability_limit/include_section)
+/// must not appear in the schema.
 #[test]
-fn tachi_skill_action_schema_declares_bundle_and_loadout() {
+fn tachi_skill_action_schema_declares_only_discover_and_run() {
     let schema = rmcp::schemars::schema_for!(TachiSkillParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
     let action = &value["properties"]["action"];
 
     assert_eq!(action["type"], json!("string"));
     let values = action["enum"].as_array().expect("action enum");
-    assert!(values.contains(&json!("discover")));
-    assert!(values.contains(&json!("run")));
-    assert!(values.contains(&json!("bundle")));
-    assert!(values.contains(&json!("from_pattern")));
-    assert!(values.contains(&json!("loadout")));
+    assert_eq!(values, &vec![json!("discover"), json!("run")]);
+    for retired in ["bundle", "loadout", "from_pattern"] {
+        assert!(
+            !values.iter().any(|value| value == retired),
+            "retired action '{retired}' must be absent from the tachi_skill schema"
+        );
+    }
+    let properties = value["properties"].as_object().expect("skill properties");
+    for field in [
+        "profile",
+        "host",
+        "skill_limit",
+        "capability_limit",
+        "include_section",
+    ] {
+        assert!(
+            !properties.contains_key(field),
+            "retired bundle/loadout field '{field}' must be absent from the tachi_skill schema"
+        );
+    }
+    // The discover/run fields stay (thin static surface, C4).
+    for field in ["query", "skill_id", "args", "limit"] {
+        assert!(
+            properties.contains_key(field),
+            "surviving discover/run field '{field}' must stay in the tachi_skill schema"
+        );
+    }
 }
 
 #[test]
@@ -871,8 +899,6 @@ fn tachi_gh_schema_exposes_relocated_closure_fields() {
 ///   dispatch-defaults fallback);
 /// - `cwd` is shared by brief and lifecycle/closure readers for relative doc
 ///   path resolution (feature_briefing/docs.rs and task_lifecycle);
-/// - `auto_capability_bundle` is read by brief for context injection
-///   (feature_briefing/dispatch.rs);
 /// - `project_explicit` is read by the Complete arm for the #1041 B7 wire
 ///   explicitness signal (task_router.rs complete arm); its schema property
 ///   name is the serde rename `__tachi_project_explicit`, which IS the wire
@@ -886,7 +912,6 @@ fn tachi_task_schema_keeps_fields_read_by_surviving_actions() {
     let properties = value["properties"].as_object().expect("task properties");
     for (field, reader_hint) in [
         ("agent", "action=complete"),
-        ("auto_capability_bundle", "action=brief"),
         ("__tachi_project_explicit", "action=complete"),
         ("timeout_secs", "action=status"),
     ] {
@@ -897,6 +922,15 @@ fn tachi_task_schema_keeps_fields_read_by_surviving_actions() {
         assert!(
             description.contains(reader_hint),
             "{field} description must name its surviving reader action ({reader_hint})"
+        );
+    }
+    // #1690 C3: `auto_capability_bundle` (+ alias `include_capability_bundle`)
+    // is retired end-to-end — the schema must no longer expose the field, and
+    // the serde wire name must be ignored (asserted here at the schema layer).
+    for retired in ["auto_capability_bundle", "include_capability_bundle"] {
+        assert!(
+            !properties.contains_key(retired),
+            "retired field '{retired}' must be absent from the tachi_task schema"
         );
     }
     let cwd_description = properties["cwd"]["description"]

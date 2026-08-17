@@ -92,7 +92,6 @@ mod build_broker;
 pub mod build_info;
 mod build_info_core;
 mod builtins;
-mod capability_ops;
 mod claims_ops;
 mod cli_client;
 mod complete_ops;

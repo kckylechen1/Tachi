@@ -43,7 +43,6 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) plan_duration_ms: Option<u64>,
     pub(super) timeout_secs: u64,
     pub(super) timeout: Duration,
-    pub(super) capability_bundle_card: Value,
     pub(super) feedback_rules_trace: Value,
     pub(super) harness_transport: String,
     pub(super) harness_server_url: Option<String>,
@@ -69,7 +68,6 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let plan_duration_ms_for_spawn = ctx.plan_duration_ms;
     let timeout_secs_for_spawn = ctx.timeout_secs;
     let timeout = ctx.timeout;
-    let capability_bundle_card_for_spawn = ctx.capability_bundle_card;
     let feedback_rules_trace_for_spawn = ctx.feedback_rules_trace;
     let harness_transport_for_spawn = ctx.harness_transport;
     let harness_server_url_for_spawn = ctx.harness_server_url;
@@ -618,7 +616,6 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     None
                 },
                 "acpx_events": acpx_event_summary_json,
-                "capability_bundle": capability_bundle_card_for_spawn,
                 "feedback_rules": feedback_rules_trace_for_spawn,
                 "timeout_secs": timeout_secs_for_spawn,
             })),

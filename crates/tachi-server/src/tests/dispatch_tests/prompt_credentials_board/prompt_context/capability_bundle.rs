@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
+async fn dispatch_prompt_includes_profile_overlay() {
     let server = make_server();
     server
         .with_global_store(|store| {
@@ -28,7 +28,6 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
     params.tool_profile = Some("delegate".to_string());
     params.issue_ref = Some("kckylechen1/tachi#194".to_string());
     params.flow_id = Some("flow-194".to_string());
-    params.auto_capability_bundle = Some(true);
     params.mcp_access = Some(DispatchMcpAccessParams {
         inject_tachi_mcp: Some(true),
         inject_hub_mcps: Some(false),
@@ -85,7 +84,10 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
         prompt.contains("evidence_projection_status: applied_overlay"),
         "{prompt}"
     );
-    assert!(prompt.contains("## Capability Bundle"), "{prompt}");
+    // #1690 C3: the capability-bundle auto-injection is retired end-to-end —
+    // the prompt never carries a "## Capability Bundle" section, regardless of
+    // what the caller passes.
+    assert!(!prompt.contains("## Capability Bundle"), "{prompt}");
     // #1690 slice B: the MBIT/card-personality evolution surface is retired —
     // the overlay prompt must not render it, even with a legacy overlay that
     // once carried the keys.
@@ -94,57 +96,39 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
     assert!(!prompt.contains("demotion_targets"), "{prompt}");
 }
 
+/// #1690 C3 discriminator (5b): `auto_capability_bundle` is no longer a
+/// `TachiDispatchParams` field, so a caller that still passes the key through
+/// JSON (serde ignores unknown fields on this struct) must get a prompt with
+/// NO capability-bundle section and a trace that no longer carries the bundle
+/// payload. RED pre-fix: the params field exists and the prompt gains a
+/// "## Capability Bundle" section; GREEN post-fix: no section, no bundle trace.
 #[tokio::test]
-async fn dispatch_prompt_trace_records_capability_bundle_injection() {
+async fn dispatch_prompt_ignores_retired_bundle_key_and_injects_no_bundle_section() {
     let server = make_server();
-    let mut params = dispatch_params(Some("claude"), "Plan profile-based MCP access");
-    params.profile = Some("claude_plan".to_string());
-    params.stage = Some("plan".to_string());
-    params.auto_capability_bundle = Some(true);
-
-    let assembly = crate::dispatch_ops::assemble_prompt_with_trace(&server, &params).await;
-
-    assert!(
-        assembly.prompt.contains("## Capability Bundle"),
-        "{}",
-        assembly.prompt
-    );
-    assert_eq!(assembly.capability_bundle["requested"], json!(true));
-    assert_eq!(assembly.capability_bundle["status"], json!("injected"));
-    assert_eq!(assembly.capability_bundle["source"], json!("params"));
-    assert_eq!(assembly.capability_bundle["disabled"], json!(false));
-    assert_eq!(assembly.capability_bundle["injected"], json!(true));
-    assert!(
-        assembly.capability_bundle["section"]["block"]
-            .as_str()
-            .is_some_and(|block| block.contains("## Capability Bundle")),
-        "trace should retain the injected section: {}",
-        assembly.capability_bundle
-    );
-}
-
-#[tokio::test]
-async fn dispatch_prompt_trace_records_capability_bundle_disabled() {
-    let server = make_server();
-    let mut params = dispatch_params(Some("claude"), "Plan profile-based MCP access");
-    params.profile = Some("claude_plan".to_string());
-    params.stage = Some("plan".to_string());
-    params.auto_capability_bundle = Some(false);
+    // Deserialize through JSON so the retired key is present on the wire even
+    // though it no longer exists on the struct (asserted at the prompt-assembly
+    // layer: the assembled prompt is the live entry the dispatch spawns from).
+    let params: TachiDispatchParams = serde_json::from_value(json!({
+        "agent": "claude",
+        "profile": "claude_plan",
+        "stage": "plan",
+        "task": "Plan profile-based MCP access",
+        "staffing_reason": "explicit_user_request",
+        "auto_capability_bundle": true,
+        "include_capability_bundle": true,
+    }))
+    .expect("retired bundle keys must be ignored, not rejected");
 
     let assembly = crate::dispatch_ops::assemble_prompt_with_trace(&server, &params).await;
 
     assert!(
         !assembly.prompt.contains("## Capability Bundle"),
-        "disabled bundle should not be injected: {}",
+        "retired bundle key must not inject a bundle section: {}",
         assembly.prompt
     );
-    assert_eq!(assembly.capability_bundle["requested"], json!(false));
-    assert_eq!(assembly.capability_bundle["status"], json!("disabled"));
-    assert_eq!(assembly.capability_bundle["source"], json!("params"));
-    assert_eq!(assembly.capability_bundle["disabled"], json!(true));
-    assert_eq!(assembly.capability_bundle["injected"], json!(false));
-    assert_eq!(
-        assembly.capability_bundle["reason"],
-        json!("auto_capability_bundle=false")
+    assert!(
+        !assembly.prompt.contains("capability_bundle"),
+        "retired bundle key must not leak bundle trace into the prompt: {}",
+        assembly.prompt
     );
 }

@@ -500,7 +500,6 @@ pub(crate) async fn handle_tachi_complete(
                 "continuity_events": "skipped (canonical outcome pending)",
                 "pattern_feedback": "skipped (canonical outcome pending)",
                 "distill_trajectory": "skipped (canonical outcome pending)",
-                "skill_evolve": "skipped (canonical outcome pending)",
                 "post_complete_hooks": "skipped (canonical outcome pending)",
             });
             let response = shape_complete_response(
@@ -549,7 +548,6 @@ pub(crate) async fn handle_tachi_complete(
         "adjudication": adjudication_status,
         "kanban_update": "skipped (no dispatch_id)",
         "distill_trajectory": "skipped (no trajectory data)",
-        "skill_evolve": "skipped",
         "continuity_events": "pending",
         "post_complete_hooks": "pending",
     });
@@ -710,7 +708,6 @@ pub(crate) async fn handle_tachi_complete(
                     skills_used[0].clone()
                 };
                 pipeline_status["distill_trajectory"] = json!("enqueued");
-                pipeline_status["skill_evolve"] = json!("will follow distill if successful");
                 tokio::spawn(async move {
                     // #1041 F5: `domain: None` here is an intentional S2
                     // consequence, not a regression. Before S2,

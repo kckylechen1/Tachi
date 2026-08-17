@@ -290,7 +290,6 @@ fn sample_pipeline_report(date: &str) -> DailyPipelineReport {
         report_path: None,
         health_check: stage_report("health", json!({"overall_health":"good","marker":"health"})),
         truth_maintenance: stage_report("truth", json!({"ok":true})),
-        skill_evolution: stage_report("skill", json!({"ok":true})),
         routing_analysis: stage_report(
             "routing",
             json!({
@@ -320,7 +319,6 @@ fn sample_report_artifacts(
     let markdown = render_daily_report_markdown_for_tests(
         &report,
         &health_section,
-        "{}",
         "{}",
         &routing_section,
     );
@@ -385,7 +383,6 @@ async fn provider_fallback_persists_actual_serving_identity_not_configured_prima
         &report,
         &health_section,
         "{}",
-        "{}",
         &routing_section,
     );
     let sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 1);
@@ -436,7 +433,6 @@ async fn health_and_routing_receipts_are_independently_named_in_sidecar() {
     let markdown = render_daily_report_markdown_for_tests(
         &report,
         &health_section,
-        "{}",
         "{}",
         &routing_section,
     );
@@ -497,7 +493,6 @@ async fn injected_failure_between_payload_and_sidecar_leaves_neither_success_pai
     let markdown = render_daily_report_markdown_for_tests(
         &report,
         &health_section,
-        "{}",
         "{}",
         &routing_section,
     );
@@ -597,7 +592,6 @@ async fn replacement_cannot_pair_new_payload_with_old_receipt() {
         report_path: None,
         health_check: stage_report("old", old_health.clone()),
         truth_maintenance: stage_report("truth", json!({})),
-        skill_evolution: stage_report("skill", json!({})),
         routing_analysis: stage_report("routing", old_routing.clone()),
     };
     let old_health_section = serialize_daily_json_section_for_tests(&old_health).unwrap();
@@ -605,7 +599,6 @@ async fn replacement_cannot_pair_new_payload_with_old_receipt() {
     let old_markdown = render_daily_report_markdown_for_tests(
         &old_report,
         &old_health_section,
-        "{}",
         "{}",
         &old_routing_section,
     );
@@ -638,7 +631,6 @@ async fn replacement_cannot_pair_new_payload_with_old_receipt() {
         report_path: None,
         health_check: stage_report("new", new_health.clone()),
         truth_maintenance: stage_report("truth", json!({})),
-        skill_evolution: stage_report("skill", json!({})),
         routing_analysis: stage_report("routing", new_routing.clone()),
     };
     let new_health_section = serialize_daily_json_section_for_tests(&new_health).unwrap();
@@ -646,7 +638,6 @@ async fn replacement_cannot_pair_new_payload_with_old_receipt() {
     let new_markdown = render_daily_report_markdown_for_tests(
         &new_report,
         &new_health_section,
-        "{}",
         "{}",
         &new_routing_section,
     );
@@ -707,7 +698,6 @@ async fn serialized_artifact_provenance_is_secret_negative() {
     let markdown = render_daily_report_markdown_for_tests(
         &report,
         &health_section,
-        "{}",
         "{}",
         &routing_section,
     );
@@ -785,7 +775,6 @@ async fn sidecar_declares_immutable_revision_payload() {
         &report,
         &health_section,
         "{}",
-        "{}",
         &routing_section,
     );
     let sidecar = build_daily_sidecar_for_tests(
@@ -834,7 +823,6 @@ async fn mismatched_sidecar_is_rejected_without_legacy_fallback() {
     let markdown = render_daily_report_markdown_for_tests(
         &report,
         &health_section,
-        "{}",
         "{}",
         &routing_section,
     );
@@ -1030,7 +1018,6 @@ async fn late_generation_cannot_hide_newer_committed_generation() {
             &report,
             &health_section,
             "{}",
-            "{}",
             &routing_section,
         );
         let sidecar = build_daily_sidecar_for_tests(
@@ -1082,7 +1069,6 @@ async fn generation_collision_does_not_overwrite_existing_sidecar() {
         &report,
         health_section,
         "{}",
-        "{}",
         routing_section,
     );
     let sidecar = build_daily_sidecar_for_tests(
@@ -1124,7 +1110,6 @@ async fn precommit_failure_preserves_prior_valid_generation() {
     let first_markdown = render_daily_report_markdown_for_tests(
         &report,
         &health_section,
-        "{}",
         "{}",
         &routing_section,
     );

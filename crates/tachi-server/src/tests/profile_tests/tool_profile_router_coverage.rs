@@ -101,7 +101,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "sandbox_set_rule",
     "save_memory",
     "search_memory",
-    "skill_evolve",
     "tachi_audit_log",
     "tachi_init_project_db",
     // tachi_research is now observe-bundled (#963/#530), no longer admin-only.
@@ -186,6 +185,9 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
+    // #1690 C3: skill_evolve (LLM telemetry-driven skill versioning) is retired
+    // end-to-end — no canonical replacement survives the contraction.
+    "skill_evolve",
 ];
 
 // Batch C (#757) removed `tachi_board` and `tachi_dispatch` — their canonical

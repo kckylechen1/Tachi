@@ -500,11 +500,11 @@ pub struct TachiComponentParams {
     pub repo: Option<String>,
 }
 
-// ─── Facade: skill (discover / run / bundle / loadout) ───────────────────────
+// ─── Facade: skill (discover / run) ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiSkillParams {
-    /// Action: "discover", "run", "bundle", "loadout", or "from_pattern"
+    /// Action: "discover" or "run"
     #[schemars(schema_with = "tachi_skill_action_schema")]
     pub action: String,
     #[serde(default)]
@@ -519,21 +519,6 @@ pub struct TachiSkillParams {
     pub skill_id: Option<String>,
     #[serde(default)]
     pub args: Option<serde_json::Value>,
-    /// DispatchProfile name for action="loadout", e.g. "claude_plan".
-    #[serde(default)]
-    pub profile: Option<String>,
-    /// Optional host/runtime name for bundle preparation, e.g. "codex".
-    #[serde(default)]
-    pub host: Option<String>,
-    /// Max skill recommendations in a capability bundle.
-    #[serde(default)]
-    pub skill_limit: Option<usize>,
-    /// Max supporting capabilities in a capability bundle.
-    #[serde(default)]
-    pub capability_limit: Option<usize>,
-    /// Include a ready-to-inject markdown section in bundle responses.
-    #[serde(default)]
-    pub include_section: Option<bool>,
 }
 
 mod task;

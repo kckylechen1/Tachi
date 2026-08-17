@@ -101,22 +101,6 @@ pub(crate) fn profile_json_for_server(
     Ok(card)
 }
 
-pub(crate) fn profile_eval_feedback_json(
-    server: &MemoryServer,
-    profile: &DispatchProfileDef,
-    limit: usize,
-) -> Result<Value, String> {
-    let limit = limit.max(1);
-    let rows = load_live_eval_rows(server, limit)?;
-    let performance_matrix = aggregate_performance_matrix(&rows);
-    Ok(tachi_dispatch::policy::profile_eval_feedback_json(
-        profile,
-        rows.len(),
-        &performance_matrix,
-        limit,
-    ))
-}
-
 fn load_profile_overlay(server: &MemoryServer, profile: &str) -> Result<Option<Value>, String> {
     server
         .with_global_store_read(|store| {

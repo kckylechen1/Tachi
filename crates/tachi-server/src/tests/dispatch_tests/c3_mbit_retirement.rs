@@ -51,9 +51,12 @@ async fn c3_dispatch_receipts_carry_no_mbit_card_or_dispatch_profile() {
 }
 
 #[tokio::test]
-async fn c3_loadout_response_carries_no_mbit_card() {
+async fn c3_loadout_is_typed_rejected() {
+    // #1690 C3: `tachi_skill(action='loadout')` is retired end-to-end. Slice B
+    // guarded that the loadout response carried no mbit_card; slice C removes
+    // the surface itself, so the guard becomes typed rejection of the action.
     let server = make_server();
-    let raw = server
+    let result = server
         .tachi_skill(Parameters(TachiSkillParams {
             action: "loadout".to_string(),
             query: Some("plan a dispatch policy change".to_string()),
@@ -62,24 +65,13 @@ async fn c3_loadout_response_carries_no_mbit_card() {
             limit: Some(50),
             skill_id: None,
             args: None,
-            profile: Some("claude_plan".to_string()),
-            host: Some("codex".to_string()),
-            skill_limit: Some(3),
-            capability_limit: Some(2),
-            include_section: Some(true),
         }))
         .await
-        .expect("loadout should succeed");
-    let json: Value = serde_json::from_str(&raw).expect("loadout JSON");
+        .expect_err("loadout must be typed-rejected post-#1690 C3");
     assert!(
-        json.get("mbit_card").is_none(),
-        "loadout response must not carry mbit_card: {json}"
+        result.contains("Invalid action") && result.contains("'discover' or 'run'"),
+        "loadout rejection must name the surviving set, got: {result}"
     );
-    assert!(
-        json["skill_loadout"].is_object(),
-        "loadout itself stays: {json}"
-    );
-    assert!(json["evidence_contract"].is_object(), "{json}");
 }
 
 #[tokio::test]

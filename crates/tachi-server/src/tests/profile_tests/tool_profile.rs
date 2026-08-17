@@ -59,6 +59,9 @@ async fn f1690_retired_recommend_family_is_rejected_by_router() {
         "recommend_skill",
         "recommend_toolchain",
         "prepare_capability_bundle",
+        // #1690 C3: skill_evolve joins the retired set — LLM telemetry-driven
+        // skill versioning is gone end-to-end.
+        "skill_evolve",
     ] {
         let server = make_server();
         // Admin profile sees every registered tool, so a routed (pre-fix) call

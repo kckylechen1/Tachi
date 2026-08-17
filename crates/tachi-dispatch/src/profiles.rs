@@ -38,7 +38,6 @@ pub struct DispatchProfileDef {
     pub inject_hub_mcps: bool,
     pub github_read: bool,
     pub write_actions: bool,
-    pub auto_capability_bundle: bool,
     pub allowed_facades: &'static [&'static str],
     pub allowed_mcp_servers: &'static [&'static str],
     pub credential_profiles: &'static [&'static str],
@@ -66,7 +65,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: true,
         allowed_facades: &[
             "tachi_briefing",
             "tachi_memory",
@@ -101,7 +99,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: false,
         write_actions: true,
-        auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_task"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -143,7 +140,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: false,
         write_actions: true,
-        auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_task"],
         allowed_mcp_servers: &[],
         credential_profiles: &["opencode_shared"],
@@ -181,7 +177,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: false,
         allowed_facades: &[
             "tachi_briefing",
             "tachi_memory",
@@ -221,7 +216,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: false,
         write_actions: false,
-        auto_capability_bundle: false,
         allowed_facades: &["tachi_memory", "tachi_event"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -247,7 +241,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_wiki"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -273,7 +266,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: false,
         write_actions: false,
-        auto_capability_bundle: false,
         allowed_facades: &["tachi_memory", "tachi_event"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -299,7 +291,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: false,
         allowed_facades: &[
             "tachi_briefing",
             "tachi_memory",
@@ -354,7 +345,6 @@ pub struct ResolvedDispatchProfile {
     pub agent: String,
     pub role: Option<String>,
     pub tool_profile: Option<String>,
-    pub auto_capability_bundle: bool,
     pub mcp_access: DispatchMcpAccessParams,
     pub evidence_required: Vec<String>,
     pub fallback_chain: Vec<String>,
@@ -579,18 +569,6 @@ where
         if params.inject_hub_mcps.is_none() {
             params.inject_hub_mcps = Some(profile.inject_hub_mcps);
         }
-        if params.auto_capability_bundle.is_none() {
-            let effective_stage = params.stage.as_deref().or(profile.stage);
-            if matches!(effective_stage, Some("review" | "review_light")) {
-                params.auto_capability_bundle = Some(false);
-                route_explanation.push(
-                    "auto_capability_bundle disabled by default for review-stage dispatch (#457); pass auto_capability_bundle=true to override"
-                        .to_string(),
-                );
-            } else {
-                params.auto_capability_bundle = Some(profile.auto_capability_bundle);
-            }
-        }
         if params.skills.is_empty() {
             params.skills = profile_required_skills(profile)?;
         }
@@ -730,7 +708,6 @@ where
         agent: agent_norm,
         role: profile.map(|p| p.role.to_string()),
         tool_profile: params.tool_profile.clone(),
-        auto_capability_bundle: params.auto_capability_bundle.unwrap_or(false),
         mcp_access,
         evidence_required,
         fallback_chain,
@@ -1304,7 +1281,6 @@ mod tests {
             pr_ref: None,
             flow_id: None,
             tool_profile: None,
-            auto_capability_bundle: None,
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,

@@ -90,73 +90,8 @@ pub(super) async fn handle_tachi_skill_facade(
             };
             handle_run_skill(server, run_params).await
         }
-        "bundle" => {
-            let query = required_skill_query(&params, "bundle")?;
-            let bundle_params = skill_bundle_params(&params, query, params.host.clone());
-            handle_prepare_capability_bundle(server, bundle_params).await
-        }
-        "loadout" => {
-            let profile_name = params
-                .profile
-                .as_deref()
-                .map(str::trim)
-                .filter(|profile| !profile.is_empty())
-                .ok_or_else(|| "profile is required when action='loadout'".to_string())?;
-            let profile = crate::dispatch_profile::resolve_dispatch_profile(profile_name)
-                .ok_or_else(|| {
-                    format!(
-                        "Unknown dispatch profile '{}'. Supported: {}",
-                        profile_name,
-                        crate::dispatch_profile::DISPATCH_PROFILES
-                            .iter()
-                            .map(|profile| profile.name)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                })?;
-            let query = params.query.clone().unwrap_or_else(|| {
-                format!(
-                    "{} {} {}",
-                    profile.role,
-                    profile.common_skills.join(" "),
-                    profile.signature_skills.join(" ")
-                )
-            });
-            let host = params
-                .host
-                .clone()
-                .or_else(|| Some(profile.backend.to_string()));
-            let bundle_raw = handle_prepare_capability_bundle(
-                server,
-                skill_bundle_params(&params, query.clone(), host.clone()),
-            )
-            .await?;
-            let bundle_value: Value = serde_json::from_str(&bundle_raw)
-                .map_err(|e| format!("parse capability bundle: {e}"))?;
-            serde_json::to_string(&json!({
-                "status": "completed",
-                "action": "loadout",
-                "profile": profile.name,
-                "display_name": profile.display_name,
-                "role": profile.role,
-                "stage": profile.stage,
-                "backend": profile.backend,
-                "host": host,
-                "resolved_skills": crate::dispatch_profile::profile_required_skill_ids_for_server(server, profile)?,
-                "skill_loadout": crate::dispatch_profile::profile_skill_loadout_json_for_server(server, profile)?,
-                "evidence_required": crate::dispatch_profile::profile_evidence_required_for_server(server, profile)?,
-                "evidence_contract": crate::dispatch_profile::profile_evidence_contract_json_for_server(server, profile)?,
-                "strong_against": profile.strong_against,
-                "weak_against": crate::dispatch_profile::profile_weak_against_for_server(server, profile)?,
-                "auto_capability_bundle": profile.auto_capability_bundle,
-                "capability_bundle": bundle_value.get("bundle").cloned().unwrap_or(Value::Null),
-                "eval_feedback": crate::dispatch_profile::profile_eval_feedback_json(server, profile, params.limit.unwrap_or(500))?,
-            }))
-            .map_err(|e| format!("serialize skill loadout: {e}"))
-        }
-        "from_pattern" => handle_skill_from_pattern(server, &params).await,
         _ => Err(format!(
-            "Invalid action '{}'. Use 'discover', 'bundle', 'from_pattern', 'loadout', or 'run'.",
+            "Invalid action '{}'. Use 'discover' or 'run'.",
             params.action
         )),
     }?;
@@ -169,7 +104,7 @@ fn reject_delegate_skill_action(server: &MemoryServer, action: &str) -> Result<(
     if !tachi_hub::facade_action_allowed("tachi_skill", Some(action), server.active_tool_profile())
     {
         return Err(format!(
-            "tachi_skill(action='{action}') is not available to the active tool profile; delegate workers may use 'discover', 'run', or 'bundle'."
+            "tachi_skill(action='{action}') is not available to the active tool profile; delegate workers may use 'discover' or 'run'."
         ));
     }
     Ok(())
@@ -195,11 +130,11 @@ mod tests {
 
     #[test]
     fn normalize_skill_response_adds_missing_envelope_fields() {
-        let raw = r#"{"bundle":{"skills":[]}}"#;
-        let normalized = normalize_skill_response("bundle", raw).unwrap();
+        let raw = r#"{"results":[]}"#;
+        let normalized = normalize_skill_response("discover", raw).unwrap();
         let value: Value = serde_json::from_str(&normalized).unwrap();
-        assert_eq!(value["action"], "bundle");
+        assert_eq!(value["action"], "discover");
         assert_eq!(value["status"], "completed");
-        assert!(value.get("bundle").is_some());
+        assert!(value.get("results").is_some());
     }
 }

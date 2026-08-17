@@ -31,7 +31,6 @@ pub(super) async fn init_kanban_task(
         "issue_ref": params.issue_ref,
         "pr_ref": params.pr_ref,
         "flow_id": params.flow_id,
-        "auto_capability_bundle": params.auto_capability_bundle,
         "plan_file": plan_path,
         "eval_ledger_id": null,
     });

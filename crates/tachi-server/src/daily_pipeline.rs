@@ -1,4 +1,3 @@
-mod evolution;
 mod health;
 mod maintenance;
 mod report;
@@ -8,7 +7,6 @@ mod types;
 
 use crate::server_state::MemoryServer;
 
-use evolution::run_skill_evolution_stage;
 use health::{load_manifest_targets, run_health_check};
 use maintenance::run_truth_maintenance_stage;
 use report::{
@@ -38,7 +36,7 @@ pub(crate) use report::{
     serialize_daily_json_section as serialize_daily_json_section_for_tests,
     DailyPublishFailurePoint,
 };
-pub(crate) use report::{parse_json_or_raw, parse_llm_json};
+pub(crate) use report::parse_llm_json;
 pub(crate) use schedule::{next_daily_run_time, next_weekly_rem_run_time};
 pub(crate) use types::{
     CategorySourceCount, DailyHealthPayload, DailyPipelineReport, DailyStageReport, DatabaseStats,
@@ -61,7 +59,6 @@ pub(crate) async fn run_daily_pipeline(
         run_health_check(server, &app_home, &date).await?;
     let truth_maintenance = run_truth_maintenance_stage(server, &app_home).await;
 
-    let skill_stage = run_skill_evolution_stage(server).await;
     let routing_outcome = run_routing_analysis_stage(server, &date).await?;
 
     let report = DailyPipelineReport {
@@ -69,18 +66,15 @@ pub(crate) async fn run_daily_pipeline(
         report_path: Some(report_path.display().to_string()),
         health_check: health_stage,
         truth_maintenance,
-        skill_evolution: skill_stage,
         routing_analysis: routing_outcome.report,
     };
 
     let health_section = serialize_daily_json_section(&health_json)?;
-    let skill_section = serialize_daily_json_section(&report.skill_evolution.details)?;
     let truth_section = serialize_daily_json_section(&report.truth_maintenance.details)?;
     let routing_section = serialize_daily_json_section(&report.routing_analysis.details)?;
     let markdown = render_daily_report_markdown(
         &report,
         &health_section,
-        &skill_section,
         &truth_section,
         &routing_section,
     );

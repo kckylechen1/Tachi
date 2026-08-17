@@ -252,10 +252,6 @@ pub struct TachiDispatchParams {
     #[serde(default)]
     pub tool_profile: Option<String>,
 
-    /// Include a capability bundle in the dispatch prompt when supported.
-    #[serde(default, alias = "include_capability_bundle")]
-    pub auto_capability_bundle: Option<bool>,
-
     /// Explicit MCP/tool access contract for the child agent. Profiles populate this by default.
     #[serde(default)]
     pub mcp_access: Option<DispatchMcpAccessParams>,

@@ -491,8 +491,6 @@ pub(crate) async fn handle_tachi_dispatch(
         prompt_md_path,
         context_md_path,
         trajectory_path,
-        capability_bundle_file,
-        capability_bundle_card,
         feedback_rules_trace,
     } = write_dispatch_artifacts(DispatchArtifactInputs {
         workspace_dir: &workspace_dir,
@@ -532,7 +530,6 @@ pub(crate) async fn handle_tachi_dispatch(
             "host_adapter": host_adapter.clone(),
             "host_profile": host_profile.name(),
             "execution_level": execution_level.as_str(),
-            "capability_bundle": capability_bundle_card.clone(),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,
             // #894 S2d: same authority receipt as the receipt-first seed above
@@ -582,8 +579,6 @@ pub(crate) async fn handle_tachi_dispatch(
         prompt_md_path: &prompt_md_path,
         context_md_path: &context_md_path,
         trajectory_path: &trajectory_path,
-        capability_bundle_card: &capability_bundle_card,
-        capability_bundle_file: &capability_bundle_file,
         evidence_required: &resolved_profile.evidence_required,
         route_explanation: &resolved_profile.route_explanation,
         identity_receipt: &resolved_profile.identity_receipt,
@@ -622,8 +617,6 @@ pub(crate) async fn handle_tachi_dispatch(
             context_md_path: &context_md_path,
             trajectory_path: &trajectory_path,
             workspace_dir: &workspace_dir,
-            capability_bundle_card: &capability_bundle_card,
-            capability_bundle_file: &capability_bundle_file,
             feedback_rules_trace: &feedback_rules_trace,
             v2_decision,
         })
@@ -657,7 +650,6 @@ pub(crate) async fn handle_tachi_dispatch(
             plan_duration_ms,
             harness_transport: &harness_transport,
             harness_server_url: &harness_server_url,
-            capability_bundle_card: &capability_bundle_card,
             timeout_secs_for_status,
         })?;
 
@@ -690,7 +682,6 @@ pub(crate) async fn handle_tachi_dispatch(
                 execution_backend_metadata: &execution_backend_metadata,
                 acpx_enabled,
                 native_acp_enabled,
-                capability_bundle_card: &capability_bundle_card,
                 timeout_secs_for_status,
             },
             &mut execution,
@@ -715,7 +706,6 @@ pub(crate) async fn handle_tachi_dispatch(
             execution_backend_metadata: &execution_backend_metadata,
             acpx_enabled,
             native_acp_enabled,
-            capability_bundle_card: &capability_bundle_card,
             timeout_secs_for_status,
             project: params.project.as_deref(),
         })?;
@@ -779,7 +769,6 @@ pub(crate) async fn handle_tachi_dispatch(
         plan_duration_ms,
         timeout_secs: timeout_secs_for_status,
         timeout,
-        capability_bundle_card: capability_bundle_card.clone(),
         feedback_rules_trace: feedback_rules_trace.clone(),
         harness_transport: harness_transport.clone(),
         harness_server_url: harness_server_url.clone(),
@@ -799,8 +788,6 @@ pub(crate) async fn handle_tachi_dispatch(
         resolved_profile: &resolved_profile,
         authority: &authority_receipt,
         credential_reports_json: &credentials.reports_json,
-        capability_bundle_card: &capability_bundle_card,
-        capability_bundle_file: &capability_bundle_file,
         feedback_rules_trace: &feedback_rules_trace,
         harness_transport: &harness_transport,
         harness_server_url: &harness_server_url,

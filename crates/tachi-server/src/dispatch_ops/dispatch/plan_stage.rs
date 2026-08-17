@@ -16,8 +16,6 @@ pub(super) struct PlanStageInputs<'a> {
     pub(super) context_md_path: &'a Path,
     pub(super) trajectory_path: &'a Path,
     pub(super) workspace_dir: &'a Path,
-    pub(super) capability_bundle_card: &'a Value,
-    pub(super) capability_bundle_file: &'a str,
     pub(super) feedback_rules_trace: &'a Value,
     pub(super) v2_decision: V2Decision,
 }
@@ -71,7 +69,6 @@ pub(super) async fn run_v2_plan_stage(
                     None,
                     Some(json!({
                         "error": e,
-                        "capability_bundle": inputs.capability_bundle_card.clone(),
                     })),
                 );
                 // #971: the kanban row now exists before this stage runs
@@ -122,7 +119,6 @@ pub(super) async fn run_v2_plan_stage(
                     None,
                     Some(json!({
                         "error": e,
-                        "capability_bundle": inputs.capability_bundle_card.clone(),
                     })),
                 );
                 // #971: same as above — plan-stage TIMEOUT must also close
@@ -182,9 +178,7 @@ pub(super) async fn run_v2_plan_stage(
                 plan_duration_ms,
                 None,
                 plan_duration_ms,
-                Some(json!({
-                    "capability_bundle": inputs.capability_bundle_card.clone(),
-                })),
+                Some(json!({})),
             );
             append_trajectory_event(
                 inputs.trajectory_path,
@@ -248,9 +242,6 @@ pub(super) async fn run_v2_plan_stage(
                 "issue_ref": inputs.params.issue_ref,
                 "pr_ref": inputs.params.pr_ref,
                 "flow_id": inputs.params.flow_id,
-                "auto_capability_bundle": inputs.resolved_profile.auto_capability_bundle,
-                "capability_bundle": inputs.capability_bundle_card,
-                "capability_bundle_file": inputs.capability_bundle_file,
                 "feedback_rules": inputs.feedback_rules_trace.clone(),
                 "v2": true,
                 "plan_review_status": "pending_review",

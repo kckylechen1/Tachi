@@ -2,10 +2,10 @@ use super::*;
 
 #[tool_router(router = workflow_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
-    // ─── Facade: skill (discover / run / bundle / loadout / from_pattern) ───
+    // ─── Facade: skill (discover / run) ─────────────────────────────────────
 
     #[tool(
-        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='bundle': prepare a host-aware capability bundle for a task query; action='loadout': resolve a DispatchProfile's sparse skill loadout plus capability bundle; action='from_pattern': create a disabled/pending skill candidate from a projected continuity pattern; action='run': execute a named skill by ID. Delegate tool profiles may use only discover/run/bundle. Always discover/bundle before writing custom multi-step logic."
+        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='run': execute a named skill by ID. Delegate tool profiles may use discover/run. Always discover before writing custom multi-step logic."
     )]
     pub(crate) async fn tachi_skill(
         &self,

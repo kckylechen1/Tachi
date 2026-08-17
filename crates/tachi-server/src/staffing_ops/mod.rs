@@ -163,7 +163,6 @@ impl StaffStartRequest {
             completion_predicate: None,
             max_turns: None,
             timeout_secs: DEFAULT_STAFF_DISPATCH_TIMEOUT_SECS,
-            auto_capability_bundle: None,
             verbose: None,
             inject_card: None,
         }

@@ -50,7 +50,6 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
             pr_ref: None,
             flow_id: None,
             tool_profile: Some("observe".to_string()),
-            auto_capability_bundle: Some(true),
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,

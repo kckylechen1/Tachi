@@ -391,45 +391,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         json!("acceptance_criteria")
     );
 
-    let loadout_raw = server
-        .tachi_skill(Parameters(TachiSkillParams {
-            action: "loadout".to_string(),
-            query: Some("plan a dispatch loadout evolution slice".to_string()),
-            cap_type: None,
-            enabled_only: None,
-            limit: Some(50),
-            skill_id: None,
-            args: None,
-            profile: Some("claude_plan".to_string()),
-            host: Some("codex".to_string()),
-            skill_limit: Some(3),
-            capability_limit: Some(2),
-            include_section: Some(false),
-        }))
-        .await
-        .expect("loadout should include projected skill");
-    let loadout: serde_json::Value = serde_json::from_str(&loadout_raw).expect("loadout JSON");
-    assert!(loadout["resolved_skills"]
-        .as_array()
-        .expect("resolved skills")
-        .contains(&json!("skill:planning-ux-review")));
-    assert!(loadout["skill_loadout"]["projected_signature_skills"]
-        .as_array()
-        .expect("projected signature skills")
-        .contains(&json!("skill:planning-ux-review")));
-    assert_eq!(
-        loadout["skill_loadout"]["projection"]["status"],
-        json!("applied_overlay")
-    );
-    assert!(loadout["evidence_required"]
-        .as_array()
-        .expect("loadout evidence required")
-        .contains(&json!("acceptance_criteria")));
-    assert!(loadout["evidence_contract"]["projected_required"]
-        .as_array()
-        .expect("loadout projected evidence")
-        .contains(&json!("acceptance_criteria")));
-
     let agents_raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
             action: "profiles".to_string(),
