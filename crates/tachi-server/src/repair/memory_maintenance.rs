@@ -754,7 +754,7 @@ fn apply_common(
         DB_APPLY_CALLS.with(|count| count.set(count.get() + 1));
         let apply_result = match operation {
             MaintenanceOperation::Gc => store
-                .apply_operator_gc_with_precommit_receipt(&operator_plan, |_, source, post| {
+                .apply_operator_gc_with_precommit_receipt(&operator_plan, |source, post| {
                     prepare_or_validate_receipt(
                         &plan,
                         &operator_plan,
@@ -768,7 +768,7 @@ fn apply_common(
                 })
                 .map(|_| ()),
             MaintenanceOperation::Delete => store
-                .apply_operator_delete_with_precommit_receipt(&operator_plan, |_, source, post| {
+                .apply_operator_delete_with_precommit_receipt(&operator_plan, |source, post| {
                     prepare_or_validate_receipt(
                         &plan,
                         &operator_plan,
@@ -1942,7 +1942,7 @@ mod tests {
         let mut store =
             MemoryStore::open_existing_read_write(&fixture.db_path.to_string_lossy()).unwrap();
         let error = store
-            .apply_operator_delete_with_precommit_receipt(&operator_plan, |_tx, source, post| {
+            .apply_operator_delete_with_precommit_receipt(&operator_plan, |source, post| {
                 let receipt = MaintenanceReceipt {
                     version: RECEIPT_VERSION,
                     plan_digest: plan.digest.clone(),
@@ -2009,7 +2009,7 @@ mod tests {
                 |operator_plan| {
                     store.apply_operator_delete_with_precommit_receipt(
                         &operator_plan,
-                        |_tx, source, post| {
+                        |source, post| {
                             let mut receipt = MaintenanceReceipt {
                                 version: RECEIPT_VERSION,
                                 plan_digest: plan.digest.clone(),
