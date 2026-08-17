@@ -823,12 +823,36 @@ pub(crate) fn run_auto_linking(
                 let mut superseded_rows: usize = 0;
                 let save_edge_action = |store: &mut MemoryStore| -> Result<(), String> {
                     if supersedes {
+                        // `entry` is the save handler's pre-persistence value.
+                        // `MemoryStore::upsert` canonicalizes committed fields
+                        // such as revision/timestamps, so it is not an honest
+                        // exact-state CAS snapshot. Re-read the admitted target
+                        // on this same store and re-run the discriminator before
+                        // opening the immutable transaction; the checked claim
+                        // then catches any later drift between this read and its
+                        // BEGIN IMMEDIATE writer snapshot.
+                        let committed_target = store
+                            .get(&entry.id)
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| format!("auto-link target disappeared: {}", entry.id))?;
+                        if !should_supersede(
+                            &committed_target,
+                            &result.entry,
+                            shared.len(),
+                            result.score.symbolic,
+                        ) {
+                            return Ok(());
+                        }
                         // tachi#1646: auto-link `supersedes` edges are a
                         // vector-similarity heuristic Tachi computed itself;
                         // the edge now commits only with the checked semantic
                         // claim in one transaction.
-                        let claim_result =
-                            commit_auto_link_supersession(store, &edge, &result.entry, entry)?;
+                        let claim_result = commit_auto_link_supersession(
+                            store,
+                            &edge,
+                            &result.entry,
+                            &committed_target,
+                        )?;
                         if claim_result == SupersessionCommitResult::Applied {
                             superseded_rows = 1;
                             edge_outcome = EdgeWriteOutcome::InsertAndPostWriteOk;
