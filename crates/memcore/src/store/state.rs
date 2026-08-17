@@ -1,8 +1,53 @@
 //! Deterministic key-value state methods on [`MemoryStore`].
 
+use std::ops::Deref;
+
 use crate::{db, error::MemoryError, MemoryStore};
 
+/// A hard-state transaction carrying the same typed-DML authorization as the
+/// single-row [`MemoryStore`] state methods. Dropping it without `commit`
+/// rolls the SQLite transaction back before the authorization guard is
+/// released.
+pub struct StateTransaction<'conn> {
+    transaction: Option<rusqlite::Transaction<'conn>>,
+    _authorization: db::ReservedReferenceWriteAuthorization,
+}
+
+impl<'conn> Deref for StateTransaction<'conn> {
+    type Target = rusqlite::Transaction<'conn>;
+
+    fn deref(&self) -> &Self::Target {
+        self.transaction
+            .as_ref()
+            .expect("state transaction is present until commit")
+    }
+}
+
+impl StateTransaction<'_> {
+    pub fn commit(mut self) -> Result<(), MemoryError> {
+        self.transaction
+            .take()
+            .expect("state transaction is present until commit")
+            .commit()?;
+        Ok(())
+    }
+}
+
 impl MemoryStore {
+    /// Begin a transaction admitted to use the typed hard-state/event DML
+    /// seams. A caller holding only [`MemoryStore::connection`] remains denied.
+    pub fn begin_state_transaction(
+        &mut self,
+        behavior: rusqlite::TransactionBehavior,
+    ) -> Result<StateTransaction<'_>, MemoryError> {
+        let authorization = db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let transaction = self.conn.transaction_with_behavior(behavior)?;
+        Ok(StateTransaction {
+            transaction: Some(transaction),
+            _authorization: authorization,
+        })
+    }
+
     /// Set a deterministic key-value state.
     pub fn set_state(
         &self,

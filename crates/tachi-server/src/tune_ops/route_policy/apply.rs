@@ -83,8 +83,7 @@ pub(crate) fn handle_route_policy_apply(
                 // (the rule write, the commit, the CAS itself) rolls back both
                 // rows: the apply either fully lands or leaves no trace.
                 let tx = store
-                    .connection_mut()
-                    .transaction()
+                    .begin_state_transaction(rusqlite::TransactionBehavior::Deferred)
                     .map_err(|e| format!("open route policy apply tx: {e}"))?;
                 let source_rows = memcore::db::list_state(&tx, ROUTE_POLICY_RULE_NS)
                     .map_err(|e| format!("list active route policy rules in apply tx: {e}"))?;
@@ -169,8 +168,7 @@ pub(crate) fn handle_route_policy_apply(
                 // both revalidated against the proposal identity and retained
                 // for the explicit overlay CAS below.
                 let tx = store
-                    .connection_mut()
-                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .begin_state_transaction(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|e| format!("open loadout evolution apply tx: {e}"))?;
                 let overlay_snapshot =
                     memcore::db::get_state(&tx, PROFILE_CARD_OVERLAY_NS, profile.name)

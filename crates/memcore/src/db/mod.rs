@@ -223,7 +223,7 @@ pub(crate) use open::{
     open_read_only, open_read_write, open_read_write_with_busy_timeout,
     register_reserved_reference_write_guard, retry_memory_locked, scoped_sqlite_busy_deadline,
     sqlite_busy_deadline_remaining, validate_persistent_trigger_inventory,
-    ReservedReferenceWriteFlag,
+    ReservedReferenceWriteAuthorization, ReservedReferenceWriteFlag,
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,

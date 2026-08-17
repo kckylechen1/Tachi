@@ -320,8 +320,9 @@ fn legacy_approved_route_policy_proposal_cannot_be_applied() {
 /// the proposal write, deliberately fails the rule write, and verifies the
 /// proposal row's status is unchanged (rollback held).
 ///
-/// Production path: `handle_route_policy_apply` -> `store.connection_mut()
-/// .transaction()` wrapping both the proposal CAS and the rule write.
+/// Production path: `handle_route_policy_apply` ->
+/// `store.begin_state_transaction(...)` wrapping both the proposal CAS and the
+/// rule write.
 /// Pre-fix red: the two writes were independent `set_state` calls, so a late
 /// failure could leave the proposal `applied` with no rule row.
 /// Post-fix green: the transaction rolls back both writes on any branch that
@@ -399,8 +400,7 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
     let bogus_version = version + 1_000_000;
     let tx_result: Result<(), String> = server.with_global_store(|store| {
         let tx = store
-            .connection_mut()
-            .transaction()
+            .begin_state_transaction(rusqlite::TransactionBehavior::Deferred)
             .map_err(|e| format!("open tx: {e}"))?;
         // First write: a fresh UPSERT to the rule namespace. This write
         // SUCCEEDS inside the tx body; the test's discriminating question is

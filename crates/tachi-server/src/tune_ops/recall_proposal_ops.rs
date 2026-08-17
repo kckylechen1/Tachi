@@ -372,8 +372,7 @@ pub(crate) fn handle_recall_config_review(
     let pre_review_source_revision = compute_recall_digest(&config_env_path)?;
     let updated = server.with_global_store(|store| {
         let tx = store
-            .connection_mut()
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .begin_state_transaction(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("open bracketed recall review tx: {e}"))?;
         let (raw, version) = memcore::db::get_state(&tx, RECALL_CONFIG_PROPOSAL_NS, proposal_id)
             .map_err(|e| format!("load recall config proposal: {e}"))?

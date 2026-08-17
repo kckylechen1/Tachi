@@ -709,8 +709,7 @@ pub(crate) fn handle_route_policy_review(
         // same connection and transaction, so no external route writer can
         // land after validation but before the lifecycle transition.
         let tx = store
-            .connection_mut()
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .begin_state_transaction(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("open route policy review tx: {e}"))?;
         let (raw, version) = memcore::db::get_state(
             &tx,
