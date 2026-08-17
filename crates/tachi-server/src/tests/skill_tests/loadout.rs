@@ -135,7 +135,7 @@ async fn tachi_skill_loadout_resolves_dispatch_profile_skills_and_bundle() {
         .any(|note| note
             .as_str()
             .is_some_and(|note| note.contains("low_sample"))));
-    assert_eq!(json["mbit_card"]["auto_capability_bundle"], json!(true));
+    assert_eq!(json["auto_capability_bundle"], json!(true));
 }
 
 #[tokio::test]

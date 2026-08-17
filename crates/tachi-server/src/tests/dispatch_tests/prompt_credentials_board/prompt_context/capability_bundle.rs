@@ -13,10 +13,7 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
                         "kind": "profile_card_loadout_overlay",
                         "profile": "claude_plan",
                         "add_signature_skills": ["skill:planning-ux-review"],
-                        "add_passive_traits": ["evidence_backed_planning"],
                         "add_evidence_required": ["acceptance_criteria"],
-                        "add_weak_against": ["plan_request"],
-                        "demotion_targets": ["skill:superpowers-writing-plans"],
                         "source_proposal_ids": ["proposal-fixture"],
                     })
                     .to_string(),
@@ -72,10 +69,6 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("projected_passive_traits: evidence_backed_planning"),
-        "{prompt}"
-    );
-    assert!(
         prompt.contains("passive_traits: plan_before_execute"),
         "{prompt}"
     );
@@ -92,16 +85,13 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
         prompt.contains("evidence_projection_status: applied_overlay"),
         "{prompt}"
     );
-    assert!(prompt.contains("- mbit_card_evolution:"), "{prompt}");
-    assert!(
-        prompt.contains("projected_weak_against: plan_request"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("demotion_targets: skill:superpowers-writing-plans"),
-        "{prompt}"
-    );
     assert!(prompt.contains("## Capability Bundle"), "{prompt}");
+    // #1690 slice B: the MBIT/card-personality evolution surface is retired —
+    // the overlay prompt must not render it, even with a legacy overlay that
+    // once carried the keys.
+    assert!(!prompt.contains("mbit_card_evolution"), "{prompt}");
+    assert!(!prompt.contains("projected_weak_against"), "{prompt}");
+    assert!(!prompt.contains("demotion_targets"), "{prompt}");
 }
 
 #[tokio::test]

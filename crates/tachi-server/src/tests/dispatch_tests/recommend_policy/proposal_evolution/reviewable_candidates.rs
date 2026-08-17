@@ -250,38 +250,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         proposal_id.starts_with("loadout_evolution:v3:"),
         "loadout proposal id must be content-addressed: {proposal_id}"
     );
-    let passive_proposal = proposals["proposals"]
-        .as_array()
-        .and_then(|items| {
-            items.iter().find(|proposal| {
-                proposal["kind"] == json!("loadout_evolution")
-                    && proposal["profile"] == json!("claude_plan")
-                    && proposal["operation"] == json!("add_evidence_backed_passive_trait")
-                    && proposal["trait_id"] == json!("evidence_backed_planning")
-            })
-        })
-        .expect("passive trait evolution proposal");
-    assert_eq!(
-        proposal_items
-            .iter()
-            .filter(|proposal| {
-                proposal["kind"] == json!("loadout_evolution")
-                    && proposal["profile"] == json!("claude_plan")
-                    && proposal["operation"] == json!("add_evidence_backed_passive_trait")
-                    && proposal["trait_id"] == json!("evidence_backed_planning")
-            })
-            .count(),
-        1,
-        "duplicate agent/model matrix rows should not emit duplicate passive trait proposals: {proposal_items:?}"
-    );
-    assert_eq!(
-        passive_proposal["proposed_patch"]["add_passive_traits"][0],
-        json!("evidence_backed_planning")
-    );
-    let stale_passive_proposal_id = passive_proposal["proposal_id"]
-        .as_str()
-        .expect("passive proposal id")
-        .to_string();
     let evidence_proposal = proposals["proposals"]
         .as_array()
         .and_then(|items| {
@@ -371,60 +339,12 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         "a refused second apply must not mutate the already projected overlay"
     );
 
-    // The skill-promotion apply above moved the overlay, so the passive-trait
-    // proposal minted from the same `proposals` call is now bound to a stale
-    // source revision and is refused by design (#1431). Pin that refusal
-    // before re-minting — it is the property the source-revision binding
-    // exists for, and without this assertion the re-mint below would hide it.
-    let mut stale_passive_review = tune_params("route_review");
-    stale_passive_review.proposal_id = Some(stale_passive_proposal_id.clone());
-    stale_passive_review.review_status = Some("approved".to_string());
-    stale_passive_review.notes = Some("Stale baseline must be refused.".to_string());
-    let stale_err = run_tune(&server, stale_passive_review)
-        .await
-        .expect_err("a proposal bound to the pre-apply overlay revision must be refused");
-    assert!(
-        stale_err.contains("source_state_drift"),
-        "expected source_state_drift for the stale passive proposal, got: {stale_err}"
-    );
-
-    // Re-mint, which is what an operator must do too.
-    let passive_proposal_id = remint_loadout_proposal_id(
-        &server,
-        "add_evidence_backed_passive_trait",
-        "trait_id",
-        "evidence_backed_planning",
-    )
-    .await;
-    let mut passive_review = tune_params("route_review");
-    passive_review.proposal_id = Some(passive_proposal_id.clone());
-    passive_review.review_status = Some("approved".to_string());
-    passive_review.notes = Some("Human approved passive trait projection.".to_string());
-    let passive_reviewed_raw = run_tune(&server, passive_review)
-        .await
-        .expect("passive review should succeed");
-    let passive_reviewed: serde_json::Value =
-        serde_json::from_str(&passive_reviewed_raw).expect("passive review JSON");
-    assert_eq!(
-        passive_reviewed["proposal"]["operation"],
-        json!("add_evidence_backed_passive_trait")
-    );
-
-    let mut passive_apply = tune_params("route_apply");
-    passive_apply.proposal_id = Some(passive_proposal_id);
-    passive_apply.confirm = true;
-    let passive_applied_raw = run_tune(&server, passive_apply)
-        .await
-        .expect("approved passive trait should project");
-    let passive_applied: serde_json::Value =
-        serde_json::from_str(&passive_applied_raw).expect("passive apply JSON");
-    assert_eq!(
-        passive_applied["proposal"]["projection"]["added_passive_traits"][0],
-        json!("evidence_backed_planning")
-    );
-
-    // Same for the evidence-contract proposal: the passive-trait apply moved the
-    // overlay again, so its pre-apply binding is stale.
+    // The skill-promotion apply above moved the overlay, so the
+    // evidence-contract proposal minted from the same `proposals` call is now
+    // bound to a stale source revision and is refused by design (#1431). Pin
+    // that refusal before re-minting — it is the property the source-revision
+    // binding exists for, and without this assertion the re-mint below would
+    // hide it.
     let mut stale_evidence_review = tune_params("route_review");
     stale_evidence_review.proposal_id = Some(stale_evidence_proposal_id.clone());
     stale_evidence_review.review_status = Some("approved".to_string());
@@ -501,20 +421,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         loadout["skill_loadout"]["projection"]["status"],
         json!("applied_overlay")
     );
-    assert!(loadout["skill_loadout"]["passive_traits"]
-        .as_array()
-        .expect("passive traits")
-        .contains(&json!("evidence_backed_planning")));
-    assert!(loadout["skill_loadout"]["projected_passive_traits"]
-        .as_array()
-        .expect("projected passive traits")
-        .contains(&json!("evidence_backed_planning")));
-    assert!(
-        loadout["mbit_card"]["skill_loadout"]["projected_passive_traits"]
-            .as_array()
-            .expect("mbit projected passive traits")
-            .contains(&json!("evidence_backed_planning"))
-    );
     assert!(loadout["evidence_required"]
         .as_array()
         .expect("loadout evidence required")
@@ -523,12 +429,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .as_array()
         .expect("loadout projected evidence")
         .contains(&json!("acceptance_criteria")));
-    assert!(
-        loadout["mbit_card"]["evidence_contract"]["projected_required"]
-            .as_array()
-            .expect("mbit projected evidence")
-            .contains(&json!("acceptance_criteria"))
-    );
 
     let agents_raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
@@ -549,12 +449,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .as_array()
         .expect("agent signature skills")
         .contains(&json!("skill:planning-ux-review")));
-    assert!(
-        agent_claude_profile["skill_loadout"]["projected_passive_traits"]
-            .as_array()
-            .expect("agent projected passive traits")
-            .contains(&json!("evidence_backed_planning"))
-    );
     assert!(
         agent_claude_profile["evidence_contract"]["projected_required"]
             .as_array()

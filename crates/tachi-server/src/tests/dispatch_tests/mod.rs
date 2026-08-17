@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 mod acp_transport;
 mod board_first;
+mod c3_mbit_retirement;
 mod completion_eval;
 mod prompt_credentials_board;
 mod recommend_policy;
