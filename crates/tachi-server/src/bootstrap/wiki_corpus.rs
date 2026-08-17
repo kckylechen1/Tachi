@@ -3332,6 +3332,7 @@ fn copy_completed_no_op_outcome(
     }
 }
 
+#[cfg(any(test, not(feature = "bootstrap-test-api")))]
 fn copy_only_outcome_from_fresh_state(
     source_store: &MemoryStore,
     target_store: &MemoryStore,
