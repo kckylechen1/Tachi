@@ -169,10 +169,10 @@ fn claim_distilled_sources<'a>(
         .get_memory(&distill_entry.id)?
         .ok_or_else(|| MemoryError::NotFound(distill_entry.id.clone()))?;
     let mut claimed = Vec::new();
-    for source in source_entries
-        .iter()
-        .filter(|entry| should_archive_daily_distill_source(entry))
-    {
+    for source in source_entries.iter().filter(|entry| {
+        should_archive_daily_distill_source(entry)
+            && memcore::store::memory_lifecycle::lifecycle_protection_reason(entry).is_none()
+    }) {
         // A false claim is an operation-wide conflict: this new distilled
         // candidate must not persist its own row, derived projection, or any
         // graph/archive side effect when an input already has an immutable

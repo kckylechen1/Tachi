@@ -552,11 +552,14 @@ impl MemoryStore {
             DbOpenContext::create_fresh()
         }
         .with_profile(db::StoreProfile::PortableKernel);
-        let migration_scratch = tempfile::tempdir()?;
-        let migration_path = migration_scratch.path().join("private.sqlite");
+        let migration_path = Path::new("private-partition-memory-image");
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
-        let schema_result =
-            db::init_schema_with_label_mut(&mut conn, "private_partition", &migration_path, &ctx);
+        let schema_result = db::init_private_schema_with_label_mut(
+            &mut conn,
+            "private_partition",
+            migration_path,
+            &ctx,
+        );
         let vec_available = schema_result
             .as_ref()
             .map(|_| db::try_load_sqlite_vec(&conn))

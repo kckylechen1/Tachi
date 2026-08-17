@@ -136,7 +136,7 @@ fn receipt_test_group(group_id: &str, offset: usize) -> CandidateGroup {
     }
 }
 
-fn seed_receipt_test_groups(server: &crate::MemoryServer, groups: &[CandidateGroup]) {
+fn seed_receipt_test_groups(server: &crate::MemoryServer, groups: &mut [CandidateGroup]) {
     server
         .with_project_store(|store| {
             for entry in groups.iter().flat_map(|group| &group.entries) {
@@ -145,6 +145,19 @@ fn seed_receipt_test_groups(server: &crate::MemoryServer, groups: &[CandidateGro
             Ok(())
         })
         .expect("seed daily receipt source entries");
+    server
+        .with_project_store_read(|store| {
+            for group in groups {
+                for entry in &mut group.entries {
+                    *entry = store
+                        .get(&entry.id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("seeded receipt source missing: {}", entry.id))?;
+                }
+            }
+            Ok(())
+        })
+        .expect("bind receipt groups to committed source snapshots");
 }
 
 fn persisted_daily_metadata(server: &crate::MemoryServer) -> Vec<serde_json::Value> {
@@ -179,11 +192,11 @@ async fn daily_batch_copies_one_invocation_receipt_to_every_group_first_write() 
     .await;
     let temp = tempfile::tempdir().expect("temp daily batch receipt database");
     let server = daily_server_with_llm(temp.path().to_path_buf(), &provider.llm);
-    let groups = vec![
+    let mut groups = vec![
         receipt_test_group("receipt-a", 0),
         receipt_test_group("receipt-b", 10),
     ];
-    seed_receipt_test_groups(&server, &groups);
+    seed_receipt_test_groups(&server, &mut groups);
 
     let mut report = DistillBatchReport::default();
     let mut manifest = Vec::new();
@@ -235,11 +248,11 @@ async fn daily_parse_failure_uses_a_fresh_receipt_for_each_group_fallback() {
     .await;
     let temp = tempfile::tempdir().expect("temp daily fallback receipt database");
     let server = daily_server_with_llm(temp.path().to_path_buf(), &provider.llm);
-    let groups = vec![
+    let mut groups = vec![
         receipt_test_group("fallback-a", 30),
         receipt_test_group("fallback-b", 40),
     ];
-    seed_receipt_test_groups(&server, &groups);
+    seed_receipt_test_groups(&server, &mut groups);
 
     let mut report = DistillBatchReport::default();
     let mut manifest = Vec::new();
@@ -570,7 +583,7 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
         Some(temp.path().join("project.db")),
     )
     .expect("server");
-    let entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+    let mut entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
 
     server
         .with_project_store(|store| {
@@ -580,6 +593,19 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
             Ok(())
         })
         .expect("seed source memories");
+    entries = server
+        .with_project_store_read(|store| {
+            entries
+                .iter()
+                .map(|entry| {
+                    store
+                        .get(&entry.id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("seeded source missing: {}", entry.id))
+                })
+                .collect()
+        })
+        .expect("bind group to committed source snapshots");
 
     let group = CandidateGroup {
         group_id: "bounded_scan".to_string(),
@@ -765,6 +791,19 @@ fn persist_distill_memory_preserves_used_or_protected_raw_sources() {
             Ok(())
         })
         .expect("seed source memories");
+    entries = server
+        .with_project_store_read(|store| {
+            entries
+                .iter()
+                .map(|entry| {
+                    store
+                        .get(&entry.id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("seeded source missing: {}", entry.id))
+                })
+                .collect()
+        })
+        .expect("bind guarded group to committed source snapshots");
 
     let group = CandidateGroup {
         group_id: "guarded_sources".to_string(),
@@ -1571,7 +1610,7 @@ fn persist_distill_memory_refuses_source_drift_after_selection_without_writes() 
 }
 
 #[test]
-fn persist_distill_memory_refuses_wiki_and_durable_sources_without_writes() {
+fn persist_distill_memory_preserves_wiki_and_durable_sources_while_writing_output() {
     let mut wiki = candidate_entry(51);
     wiki.id = "daily-protected-wiki".to_string();
     wiki.category = "WiKi".to_string();
@@ -1608,12 +1647,12 @@ fn persist_distill_memory_refuses_wiki_and_durable_sources_without_writes() {
         };
         let payload = GroupPayload {
             summary: "protected source summary".to_string(),
-            text: "protected source output must roll back".to_string(),
+            text: "protected source output remains independently durable".to_string(),
             keywords: vec!["protected".to_string()],
             skip_reason: None,
         };
 
-        let error = persist_distill_memory(
+        let memory_id = persist_distill_memory(
             &server,
             &group,
             &payload,
@@ -1622,12 +1661,7 @@ fn persist_distill_memory_refuses_wiki_and_durable_sources_without_writes() {
             false,
             None,
         )
-        .expect_err("lifecycle-protected source must refuse daily distill persistence");
-        assert!(
-            error.contains("source_protected"),
-            "unexpected protected-source error for {}: {error}",
-            source.id
-        );
+        .expect("lifecycle-protected evidence must be preserved without blocking the output");
 
         server
             .with_project_store_read(|store| {
@@ -1642,8 +1676,8 @@ fn persist_distill_memory_refuses_wiki_and_durable_sources_without_writes() {
                 let distill_memories: i64 = store
                     .connection()
                     .query_row(
-                        "SELECT COUNT(*) FROM memories WHERE source = 'foundry_distill'",
-                        [],
+                        "SELECT COUNT(*) FROM memories WHERE id = ?1 AND source = 'foundry_distill'",
+                        [&memory_id],
                         |row| row.get(0),
                     )
                     .map_err(|e| e.to_string())?;
@@ -1656,12 +1690,12 @@ fn persist_distill_memory_refuses_wiki_and_durable_sources_without_writes() {
                     .query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))
                     .map_err(|e| e.to_string())?;
                 assert_eq!(source_state, (false, None));
-                assert_eq!(distill_memories, 0);
-                assert_eq!(derived_items, 0);
-                assert_eq!(graph_edges, 0);
+                assert_eq!(distill_memories, 1);
+                assert_eq!(derived_items, 1);
+                assert!(graph_edges >= 1);
                 Ok(())
             })
-            .expect("verify protected-source rollback");
+            .expect("verify protected evidence and committed output");
     }
 }
 

@@ -299,8 +299,8 @@ unsafe extern "C" fn reserved_reference_authorizer(
     database: *const c_char,
     accessor: *const c_char,
 ) -> c_int {
-    let (typed_dml, schema_migration, planner_maintenance, ingest_owner_fence) = if state.is_null()
-    {
+    let raw_connection = state.is_null();
+    let (typed_dml, schema_migration, planner_maintenance, ingest_owner_fence) = if raw_connection {
         (false, false, false, false)
     } else {
         // MemoryStore owns this state for longer than its Connection. Raw
@@ -374,6 +374,15 @@ unsafe extern "C" fn reserved_reference_authorizer(
         || (action == rusqlite::ffi::SQLITE_UPDATE
             && sqlite_identifier_eq(arg1, b"memories")
             && protected_memory_authority_column(arg2));
+    let raw_hard_state_write = raw_connection
+        && matches!(
+            action,
+            rusqlite::ffi::SQLITE_INSERT
+                | rusqlite::ffi::SQLITE_UPDATE
+                | rusqlite::ffi::SQLITE_DELETE
+        )
+        && sqlite_identifier_eq(arg1, b"hard_state")
+        && sqlite_identifier_eq(database, b"main");
     let unsafe_pragma =
         action == rusqlite::ffi::SQLITE_PRAGMA && sqlite_identifier_eq(arg1, b"writable_schema");
     let attached_schema = matches!(
@@ -381,7 +390,9 @@ unsafe extern "C" fn reserved_reference_authorizer(
         rusqlite::ffi::SQLITE_ATTACH | rusqlite::ffi::SQLITE_DETACH
     );
 
-    if protected_memory_write {
+    if raw_hard_state_write {
+        rusqlite::ffi::SQLITE_DENY
+    } else if protected_memory_write {
         // A direct typed statement may mutate protected fields. SQL executed
         // indirectly by a trigger never inherits that authority.
         if typed_dml && accessor.is_null() {

@@ -436,12 +436,25 @@ pub(crate) fn finalize_supersession_receipt_within_tx(
             receipt.source_id
         )));
     };
-    let target_after = read_entry_and_supersession(tx, &receipt.target_id)?;
+    let Some((target_after, target_superseded_by_after)) =
+        read_entry_and_supersession(tx, &receipt.target_id)?
+    else {
+        return Err(MemoryError::InvalidArg(format!(
+            "supersession receipt target was not materialized before commit: {}",
+            receipt.target_id
+        )));
+    };
+    if target_is_retired(&target_after, target_superseded_by_after.as_deref()) {
+        return Err(MemoryError::InvalidArg(format!(
+            "supersession receipt target became ineligible before commit: {}",
+            receipt.target_id
+        )));
+    }
     receipt.source_revision_after = source_after.revision;
     receipt.source_archived_after = source_after.archived;
     receipt.source_superseded_by_after = source_superseded_by_after;
     receipt.source_valid_until_after = source_after.valid_until;
-    receipt.target_revision_after = target_after.as_ref().map(|(entry, _)| entry.revision);
+    receipt.target_revision_after = Some(target_after.revision);
     receipt.dependent_write_disposition = dependent_write_disposition.to_string();
     persist_supersession_receipt(tx, receipt)
 }
@@ -764,12 +777,9 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     ///   just upserted in this same transaction or the pre-existing active
     ///   winner `list_all_wiki_duplicate_candidates` resolved; `candidate`s
     ///   being folded in are filtered `candidate.id != winner_id`.
-    /// - `foundry_runtime_ops/daily_distill/persist.rs:174`
-    ///   (`claim_distilled_sources`) — target is `distill_entry.id`, only
-    ///   reached after `replacement.insert_if_absent(entry)` already
-    ///   returned `InsertMemoryResult::default` (fresh row) earlier in the
-    ///   same transaction; the `Existing` branch returns before ever
-    ///   calling this method.
+    /// - `foundry_runtime_ops/daily_distill/persist.rs`
+    ///   (`claim_distilled_sources`) uses the stricter checked claim; its
+    ///   target is already materialized by the same transaction.
     ///
     /// Two adjacent modules do NOT call this method at all, so findings 1/2
     /// do not reach them: `foundry_runtime_ops/wiki_evolver.rs` (REM draft
@@ -1165,6 +1175,15 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
 
     /// Archive a source after its supersession claim has succeeded.
     pub fn archive_claimed_source(&mut self, source_id: &str) -> Result<(), MemoryError> {
+        if !self
+            .pending_receipts
+            .iter()
+            .any(|receipt| receipt.source_id == source_id)
+        {
+            return Err(MemoryError::InvalidArg(format!(
+                "archive claimed source refused: no applied supersession claim for {source_id} in this transaction"
+            )));
+        }
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let already_archived = self.tx.query_row(
@@ -1626,6 +1645,95 @@ mod tests {
             })
             .expect("identical replay must return an explicit prior result");
         assert_eq!(result, SupersessionCommitResult::PriorIdempotent);
+    }
+
+    #[test]
+    fn receipt_namespace_refuses_ttl_backfill_and_reaping() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .insert_if_absent(&fixture_entry("ttl-source"))
+            .expect("seed source");
+        store
+            .insert_if_absent(&fixture_entry("ttl-target"))
+            .expect("seed target");
+        store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("ttl-source", "ttl-target")
+            })
+            .expect("commit supersession receipt");
+
+        assert_eq!(
+            store
+                .backfill_missing_expires_at(
+                    SUPERSESSION_RECEIPT_NAMESPACE,
+                    "2000-01-01T00:00:00Z",
+                    None,
+                )
+                .expect("protected namespace backfill is a no-op"),
+            0
+        );
+        assert_eq!(
+            store
+                .reap_expired_state("2100-01-01T00:00:00Z")
+                .expect("reap hard state"),
+            0
+        );
+        assert_eq!(
+            store
+                .with_immutable_supersession_transaction(|operation| {
+                    operation.claim_immutable_supersession("ttl-source", "ttl-target")
+                })
+                .expect("receipt survives TTL maintenance"),
+            SupersessionCommitResult::PriorIdempotent
+        );
+    }
+
+    #[test]
+    fn transaction_refuses_to_archive_a_source_it_did_not_claim() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        for id in ["claimed-source", "claimed-target", "unrelated-source"] {
+            store
+                .insert_if_absent(&fixture_entry(id))
+                .expect("seed transaction fixture");
+        }
+        let error = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("claimed-source", "claimed-target")?;
+                operation.archive_claimed_source("unrelated-source")
+            })
+            .expect_err("unrelated archive must roll the claim back");
+        assert!(error.to_string().contains("no applied supersession claim"));
+        for id in ["claimed-source", "unrelated-source"] {
+            let entry = store
+                .get(id)
+                .expect("read fixture")
+                .expect("fixture remains");
+            assert!(!entry.archived);
+            assert_eq!(
+                store.supersession_target(id).expect("read target"),
+                Some(None)
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_refuses_a_claim_whose_target_never_materializes() {
+        let mut store = MemoryStore::open_in_memory().expect("open memory store");
+        store
+            .insert_if_absent(&fixture_entry("dangling-source"))
+            .expect("seed source");
+        let error = store
+            .with_immutable_supersession_transaction(|operation| {
+                operation.claim_immutable_supersession("dangling-source", "missing-target")
+            })
+            .expect_err("commit must refuse a dangling target");
+        assert!(error.to_string().contains("not materialized before commit"));
+        assert_eq!(
+            store
+                .supersession_target("dangling-source")
+                .expect("read source after rollback"),
+            Some(None)
+        );
     }
 
     #[test]

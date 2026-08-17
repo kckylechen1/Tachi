@@ -335,6 +335,20 @@ struct LivePartitionGuard {
     _lock_file: fs::File,
 }
 
+struct PartitionKey([u8; 32]);
+
+impl PartitionKey {
+    fn as_array(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl Drop for PartitionKey {
+    fn drop(&mut self) {
+        vault_kit::zero_key(&mut self.0);
+    }
+}
+
 impl LivePartitionGuard {
     fn acquire(path: &Path) -> Result<Self, MemoryError> {
         let lock_path = lock_path_for(path);
@@ -357,7 +371,7 @@ pub struct PrivatePartition {
     store: MemoryStore,
     _live_guard: Option<LivePartitionGuard>,
     identity: AdmittedPartition,
-    key: [u8; 32],
+    key: PartitionKey,
     sealed_path: Option<PathBuf>,
     can_write: bool,
     can_export: bool,
@@ -385,7 +399,7 @@ impl PrivatePartition {
             return Err(MemoryError::PrivatePartitionRefused);
         }
         let store = if exists {
-            let bytes = unseal_file(&sealed_path, &key, &identity)?;
+            let bytes = unseal_file(&sealed_path, key.as_array(), &identity)?;
             MemoryStore::open_private_image(Some(&bytes), identity.clone())?
         } else {
             MemoryStore::open_private_image(None, identity.clone())?
@@ -451,10 +465,11 @@ impl PrivatePartition {
         operation: impl FnMut(&mut ImmutableSupersessionTransaction<'_>) -> Result<T, MemoryError>,
     ) -> Result<T, MemoryError> {
         self.require_write()?;
+        let changes_before = self.store.conn.total_changes();
         let result = self
             .store
             .with_immutable_supersession_transaction(operation)?;
-        self.dirty = true;
+        self.dirty |= self.store.conn.total_changes() != changes_before;
         Ok(result)
     }
 
@@ -463,7 +478,7 @@ impl PrivatePartition {
         if !self.can_export {
             return Err(MemoryError::PrivatePartitionRefused);
         }
-        encode_envelope(&self.key, &self.identity, &self.store)
+        encode_envelope(self.key.as_array(), &self.identity, &self.store)
     }
 
     pub fn persist(&mut self) -> Result<(), MemoryError> {
@@ -474,7 +489,8 @@ impl PrivatePartition {
         let Some(path) = self.sealed_path.clone() else {
             return Ok(());
         };
-        persist_sealed(&self.store, &self.key, &self.identity, &path)?;
+        persist_sealed(&self.store, self.key.as_array(), &self.identity, &path)?;
+        mark_partition_receipts_sealed(&self.store.conn, &self.identity.partition_id)?;
         self.dirty = false;
         Ok(())
     }
@@ -492,14 +508,8 @@ impl PrivatePartition {
     }
 }
 
-impl Drop for PrivatePartition {
-    fn drop(&mut self) {
-        vault_kit::zero_key(&mut self.key);
-    }
-}
-
 /// True when `path` is a sealed private-partition envelope.
-pub fn path_is_sealed_partition(path: &Path) -> bool {
+fn path_is_sealed_partition(path: &Path) -> bool {
     let Ok(mut file) = fs::File::open(path) else {
         return false;
     };
@@ -534,15 +544,17 @@ fn identity_from_admission(admission: &PartitionAdmission) -> AdmittedPartition 
 fn admit_open(
     ctx: &PrivatePartitionOpenContext,
     keys: &dyn PartitionKeyProvider,
-) -> Result<(PartitionAdmission, [u8; 32]), MemoryError> {
+) -> Result<(PartitionAdmission, PartitionKey), MemoryError> {
     if ctx.revoked || ctx.key_version.trim().is_empty() {
         return Err(MemoryError::PrivatePartitionRefused);
     }
     if !ctx.capabilities.contains(&PartitionCapability::Read) {
         return Err(MemoryError::PrivatePartitionRefused);
     }
-    keys.admit_and_materialize(ctx)
-        .map_err(|_| MemoryError::PrivatePartitionRefused)
+    let (admission, key) = keys
+        .admit_and_materialize(ctx)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    Ok((admission, PartitionKey(key)))
 }
 
 fn parse_opaque_id(raw: String) -> Result<String, MemoryError> {
@@ -613,9 +625,21 @@ fn open_live_lock_file(path: &Path) -> Result<fs::File, MemoryError> {
             .mode(0o600)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options
         .open(path)
         .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(MemoryError::PrivatePartitionRefused);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1244,6 +1268,62 @@ mod tests {
     }
 
     #[test]
+    fn reopening_private_image_leaves_no_plaintext_migration_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let keys = keys();
+        PrivatePartition::open(root.path(), &ctx, &keys)
+            .unwrap()
+            .close()
+            .unwrap();
+        PrivatePartition::open(root.path(), &ctx, &keys)
+            .unwrap()
+            .close()
+            .unwrap();
+
+        let partition_dir = root.path().join(ctx.partition_id());
+        let names = fs::read_dir(partition_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            names.iter().all(|name| {
+                !name.contains("migration-bak")
+                    && !name.contains("migration-marker")
+                    && name != "private.sqlite"
+            }),
+            "private open leaked plaintext migration artifacts: {names:?}"
+        );
+    }
+
+    #[test]
+    fn raw_opener_cannot_mint_a_private_partition_identity_stamp() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_path_buf();
+        drop(file);
+        let store = MemoryStore::open(&path.to_string_lossy()).unwrap();
+        drop(store);
+        let raw = crate::db::open_raw(&path).unwrap();
+        let forged = raw.execute(
+            "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
+             VALUES ('store_identity', 'private_partition', '{}', 1, 'now', 'now')",
+            [],
+        );
+        assert!(
+            forged.is_err(),
+            "raw opener minted private identity authority"
+        );
+        drop(raw);
+        MemoryStore::open(&path.to_string_lossy())
+            .expect("refused forgery must leave the ordinary store openable");
+    }
+
+    #[test]
     fn private_partition_debug_and_envelope_redact_secret_identity_material() {
         let root = tempfile::tempdir().unwrap();
         let ctx = PrivatePartitionOpenContext {
@@ -1539,7 +1619,10 @@ mod tests {
         assert_eq!(bob_row.text, "SECRET-B");
         let result = alice
             .with_immutable_supersession_transaction(|operation| {
-                operation.claim_immutable_supersession("alice-row", "alice-successor")
+                let result =
+                    operation.claim_immutable_supersession("alice-row", "alice-successor")?;
+                operation.insert_if_absent(&entry("alice-successor", "successor"))?;
+                Ok(result)
             })
             .expect("same-partition claim with in-flight target remains legal");
         assert_eq!(
@@ -1624,6 +1707,33 @@ mod tests {
             let receipt: crate::SupersessionReceipt = serde_json::from_str(&json).unwrap();
             assert!(!receipt.durable);
             part.persist().unwrap();
+            let (json, _) = part
+                .store
+                .get_state_kv(crate::SUPERSESSION_RECEIPT_NAMESPACE, &receipt_id)
+                .unwrap()
+                .unwrap();
+            let receipt: crate::SupersessionReceipt = serde_json::from_str(&json).unwrap();
+            assert!(
+                receipt.durable,
+                "the live handle must observe durability after sealing succeeds"
+            );
+            let sealed = root
+                .path()
+                .join(ctx.partition_id())
+                .join("partition.sealed");
+            let sealed_before_replay = fs::read(&sealed).unwrap();
+            let replay = part
+                .with_immutable_supersession_transaction(|operation| {
+                    operation.claim_immutable_supersession("sealed-source", "sealed-target")
+                })
+                .unwrap();
+            assert_eq!(replay, crate::SupersessionCommitResult::PriorIdempotent);
+            part.persist().unwrap();
+            assert_eq!(
+                fs::read(sealed).unwrap(),
+                sealed_before_replay,
+                "a no-op replay must not rewrite the sealed envelope"
+            );
         }
 
         let reopened = PrivatePartition::open(root.path(), &ctx, &keys).unwrap();

@@ -552,6 +552,11 @@ fn apply_lifecycle_action(
                         let mut survivor = replacement
                             .get_memory(target)?
                             .ok_or_else(|| memcore::MemoryError::NotFound(target.to_string()))?;
+                        if is_protected(&survivor) {
+                            return Err(memcore::MemoryError::InvalidArg(format!(
+                                "refusing to {action} into protected memory {target} (retention/wiki/pattern)"
+                            )));
+                        }
                         let source_revision = source.revision;
                         let target_revision = survivor.revision;
                         let target_keywords = lifecycle::canonical_tags(&survivor.keywords);

@@ -179,6 +179,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn protected_newest_survivor_is_not_mutated_or_used_as_a_merge_target() {
+        let temp = tempfile::tempdir().expect("temp protected survivor db");
+        let server = crate::MemoryServer::new(
+            temp.path().join("global.db"),
+            Some(temp.path().join("project.db")),
+        )
+        .expect("server");
+        let source = dup_entry("protected-target-source", "2026-01-01T00:00:00Z");
+        let mut survivor = dup_entry("protected-target-survivor", "2026-01-01T00:00:01Z");
+        survivor.retention_policy = Some("durable".to_string());
+        let entries = vec![source, survivor];
+        server
+            .with_project_store(|store| {
+                for entry in &entries {
+                    store
+                        .insert_if_absent(entry)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })
+            .expect("seed protected survivor cluster");
+        let selected = server
+            .with_project_store_read(|store| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        store
+                            .get(&entry.id)
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| format!("seeded row missing: {}", entry.id))
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .expect("read selected snapshots");
+        let protected_before = selected[1].clone();
+        let mut groups = vec![CandidateGroup {
+            group_id: "protected-survivor".to_string(),
+            path_prefix: "/project/bounded".to_string(),
+            coherence_key: "bounded-scan".to_string(),
+            entries: selected,
+        }];
+
+        assert_eq!(
+            consolidate_duplicate_candidates(&server, None, &mut groups),
+            0
+        );
+        assert_eq!(groups[0].entries.len(), 2);
+        let protected_after = server
+            .with_project_store_read(|store| {
+                store
+                    .get(&protected_before.id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "protected survivor disappeared".to_string())
+            })
+            .expect("read protected survivor after refused fold");
+        assert_eq!(protected_after.revision, protected_before.revision);
+        assert_eq!(protected_after.keywords, protected_before.keywords);
+        assert_eq!(protected_after.entities, protected_before.entities);
+        assert_eq!(protected_after.importance, protected_before.importance);
+    }
+
     /// #1043 D3 judgement test: 3 byte-identical rows in one candidate group
     /// collapse to 1 survivor, and the merge count is reported.
     #[test]
