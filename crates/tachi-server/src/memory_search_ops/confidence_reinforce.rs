@@ -107,10 +107,6 @@ pub(crate) fn apply_confidence_reinforcement_links(
         let committed = store
             .commit_confidence_reinforcement(
                 &edge,
-                &memcore::db::EdgeProvenance {
-                    authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
-                    ..Default::default()
-                },
                 increment,
                 &now,
                 &ExpectedMemoryState::from_entry(&entry, source_superseded_by.as_deref()),
@@ -259,6 +255,10 @@ mod tests {
             .unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].target_id, "old");
+        assert_eq!(
+            memcore::db::edge_authority(&edges[0]),
+            Some(memcore::db::EdgeAuthority::DerivedHeuristic)
+        );
 
         let updated = store.get("old").unwrap().unwrap();
         let confidence = updated

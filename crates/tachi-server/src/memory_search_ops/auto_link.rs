@@ -903,10 +903,6 @@ pub(crate) fn run_auto_linking(
                         let committed = store
                             .commit_confidence_reinforcement(
                                 &committed_edge,
-                                &memcore::db::EdgeProvenance {
-                                    authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
-                                    ..Default::default()
-                                },
                                 confidence_increment(weight),
                                 &now,
                                 &ExpectedMemoryState::from_entry(

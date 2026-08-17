@@ -17,11 +17,13 @@ impl MemoryStore {
     /// rewrite of either endpoint therefore makes the judgment stale. The
     /// `BEGIN IMMEDIATE` snapshot check, edge write, and confidence update
     /// share one transaction so a stale judgment or later failure leaves no
-    /// partial edge or confidence mutation.
+    /// partial edge or confidence mutation. Both endpoints must still be
+    /// active and unsuperseded, and this fixed heuristic door always stamps
+    /// [`db::EdgeAuthority::DerivedHeuristic`] rather than trusting caller
+    /// provenance.
     pub fn commit_confidence_reinforcement(
         &mut self,
         edge: &crate::MemoryEdge,
-        provenance: &db::EdgeProvenance,
         increment: f64,
         reinforced_at: &str,
         expected_source: &ExpectedMemoryState,
@@ -51,13 +53,33 @@ impl MemoryStore {
             {
                 return Ok(false);
             }
+            for id in [&edge.source_id, &edge.target_id] {
+                let active_unsuperseded = tx
+                    .query_row(
+                        "SELECT archived = 0 AND superseded_by IS NULL FROM memories WHERE id = ?1",
+                        [id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+                if !active_unsuperseded {
+                    return Ok(false);
+                }
+            }
             db::refuse_retired_sticky_row_within_tx(
                 &tx,
                 &edge.source_id,
                 "used as a confidence reinforcement source",
             )?;
             db::refuse_retired_sticky_row_within_tx(&tx, &edge.target_id, "confidence-reinforced")?;
-            db::add_edge_with_provenance(&tx, edge, provenance)?;
+            db::add_edge_with_provenance(
+                &tx,
+                edge,
+                &db::EdgeProvenance {
+                    authority: Some(db::EdgeAuthority::DerivedHeuristic),
+                    ..Default::default()
+                },
+            )?;
             let affected = tx.execute(
                 r#"UPDATE memories
                    SET metadata = json_set(
@@ -73,7 +95,7 @@ impl MemoryStore {
                        '$.confidence_reinforced_at', ?2
                    ),
                    updated_at = ?2
-                   WHERE id = ?3"#,
+                   WHERE id = ?3 AND archived = 0 AND superseded_by IS NULL"#,
                 rusqlite::params![increment, reinforced_at, &edge.target_id],
             )?;
             if affected != 1 {
@@ -372,10 +394,6 @@ mod tests {
         let committed = store
             .commit_confidence_reinforcement(
                 &edge,
-                &crate::db::EdgeProvenance {
-                    authority: Some(crate::db::EdgeAuthority::DerivedHeuristic),
-                    ..Default::default()
-                },
                 0.08,
                 "2026-07-05T01:00:00Z",
                 &expected_source,
@@ -389,6 +407,60 @@ mod tests {
             .expect("read edges")
             .is_empty());
         let unchanged_target = store.get("old").expect("read target").expect("target");
+        assert_eq!(unchanged_target.metadata["confidence"], 0.50);
+        assert!(unchanged_target
+            .metadata
+            .get("confidence_reinforced_at")
+            .is_none());
+    }
+
+    #[test]
+    fn confidence_reinforcement_refuses_archived_target_without_partial_writes() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let source = test_entry("new-archived-case", vec!["Acme".to_string()]);
+        let mut target = test_entry("old-archived-case", vec!["Acme".to_string()]);
+        target.archived = true;
+        target.metadata = json!({ "confidence": 0.50 });
+        store.upsert(&source).expect("seed source");
+        store.upsert(&target).expect("seed archived target");
+        let source = store
+            .get(&source.id)
+            .expect("read source")
+            .expect("source exists");
+        let target = store
+            .get_with_options(&target.id, true)
+            .expect("read archived target")
+            .expect("archived target exists");
+        let edge = crate::MemoryEdge {
+            source_id: source.id.clone(),
+            target_id: target.id.clone(),
+            relation: "reinforces".to_string(),
+            weight: 0.8,
+            metadata: json!({ "auto_link": true }),
+            created_at: "2026-07-05T01:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+
+        let committed = store
+            .commit_confidence_reinforcement(
+                &edge,
+                0.08,
+                "2026-07-05T01:00:00Z",
+                &ExpectedMemoryState::from_entry(&source, None),
+                &ExpectedMemoryState::from_entry(&target, None),
+            )
+            .expect("archived reinforcement is an ordinary skipped outcome");
+
+        assert!(!committed);
+        assert!(store
+            .get_edges(&source.id, "outgoing", Some("reinforces"))
+            .expect("read edges")
+            .is_empty());
+        let unchanged_target = store
+            .get_with_options(&target.id, true)
+            .expect("read archived target")
+            .expect("archived target exists");
         assert_eq!(unchanged_target.metadata["confidence"], 0.50);
         assert!(unchanged_target
             .metadata
