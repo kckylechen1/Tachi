@@ -47,6 +47,10 @@ use sha2::{Digest, Sha256};
 
 use crate::db;
 use crate::error::MemoryError;
+use crate::store::immutable_supersession::{
+    claim_supersession_edge_within_tx, finalize_supersession_receipt_within_tx,
+    SupersessionClaimOptions, SupersessionExpectedState,
+};
 use crate::types::MemoryEntry;
 use crate::MemoryStore;
 
@@ -59,6 +63,7 @@ pub const LIFECYCLE_SCHEMA_VERSION: u32 = 2;
 /// Policy stamp included in every v2 identity so a policy change invalidates
 /// all prior proposals.
 pub const LIFECYCLE_POLICY_VERSION: &str = "memory-lifecycle-v2";
+pub const LIFECYCLE_SUPERSESSION_ROUTE: &str = "memory_lifecycle_v2";
 
 /// Terminal-state TTL (days) stamped on `rejected` and `applied` proposals.
 const LIFECYCLE_TERMINAL_TTL_DAYS: i64 = 30;
@@ -1035,29 +1040,41 @@ fn apply_lifecycle_proposal_once(
                     "supersede proposal {proposal_id} requires target_id"
                 ))
             })?;
-            let now = db::now_utc_iso();
-            // An existing supersession edge is immutable: install A -> B only
-            // from NULL, never replace a concurrent or pre-existing A -> C.
-            // The edge guard is part of the same revision/archive CAS.
-            let changed = tx.execute(
-                "UPDATE memories SET archived = 1, superseded_by = ?1,
-                 valid_until = COALESCE(valid_until, ?2), updated_at = ?2, revision = revision + 1
-                 WHERE id = ?3 AND revision = ?4 AND archived = 0
-                 AND superseded_by IS NULL",
-                params![target, now, source_id, source_revision],
+            let source = read_memory_in_tx(&tx, &source_id)?
+                .ok_or_else(|| drift_err(proposal_id, format!("source missing: {source_id}")))?;
+            let target_entry = read_memory_in_tx(&tx, target)?
+                .ok_or_else(|| drift_err(proposal_id, format!("target missing: {target}")))?;
+            let expected =
+                SupersessionExpectedState::active_unsuperseded(&source, Some(&target_entry));
+            let mut receipt = claim_supersession_edge_within_tx(
+                &tx,
+                &source_id,
+                target,
+                SupersessionClaimOptions {
+                    route: LIFECYCLE_SUPERSESSION_ROUTE,
+                    policy_version: LIFECYCLE_POLICY_VERSION,
+                    expected: Some(&expected),
+                    require_materialized_target: true,
+                    archive_source: true,
+                    partition_id: store
+                        .admitted_partition
+                        .as_ref()
+                        .map(|part| part.partition_id.clone()),
+                },
+            )
+            .map_err(MemoryError::from)?;
+            finalize_supersession_receipt_within_tx(
+                &tx,
+                &mut receipt,
+                "lifecycle_apply_no_extra_target_write",
             )?;
-            if changed == 0 {
-                return Err(drift_err(
-                    proposal_id,
-                    format!("supersede CAS failed for {source_id} (revision {source_revision})"),
-                ));
-            }
             serde_json::json!({
                 "lifecycle_action": ACTION_SUPERSEDE,
                 "source_id": source_id,
                 "target_id": target,
                 "superseded": true,
                 "archived": true,
+                "supersession_receipt": receipt,
             })
         }
         ACTION_MERGE_INTO | ACTION_NEAR_DUP_MERGE => {
@@ -1094,6 +1111,24 @@ fn apply_lifecycle_proposal_once(
             }
             let merged_keywords = survivor.keywords.len();
             let merged_entities = survivor.entities.len();
+            let expected = SupersessionExpectedState::active_unsuperseded(&source, Some(&survivor));
+            let mut receipt = claim_supersession_edge_within_tx(
+                &tx,
+                &source_id,
+                target,
+                SupersessionClaimOptions {
+                    route: LIFECYCLE_SUPERSESSION_ROUTE,
+                    policy_version: LIFECYCLE_POLICY_VERSION,
+                    expected: Some(&expected),
+                    require_materialized_target: true,
+                    archive_source: true,
+                    partition_id: store
+                        .admitted_partition
+                        .as_ref()
+                        .map(|part| part.partition_id.clone()),
+                },
+            )
+            .map_err(MemoryError::from)?;
             // Do not rewrite an unchanged survivor: an unconditional upsert
             // bumps its revision, invalidating already-approved sibling star
             // proposals that share this target snapshot. When merged data did
@@ -1104,27 +1139,11 @@ fn apply_lifecycle_proposal_once(
             {
                 db::upsert_within_tx(&tx, &survivor, store.vec_available, None)?;
             }
-            // An existing supersession edge is immutable: this source UPDATE
-            // may install A -> B only from NULL, never replace a concurrent or
-            // pre-existing A -> C. Keep that edge guard inside the same
-            // revision/archive CAS and transaction as the merge fold, so a
-            // failed source mutation rolls the target fold back too.
-            let now = db::now_utc_iso();
-            let changed = tx.execute(
-                "UPDATE memories SET archived = 1, superseded_by = ?1,
-                 valid_until = COALESCE(valid_until, ?2), updated_at = ?2, revision = revision + 1
-                 WHERE id = ?3 AND revision = ?4 AND archived = 0
-                 AND superseded_by IS NULL",
-                params![target, now, source_id, source_revision],
+            finalize_supersession_receipt_within_tx(
+                &tx,
+                &mut receipt,
+                "lifecycle_apply_target_fold_committed",
             )?;
-            if changed == 0 {
-                return Err(drift_err(
-                    proposal_id,
-                    format!(
-                        "{action} supersede/archive CAS failed for {source_id} (revision {source_revision})"
-                    ),
-                ));
-            }
             serde_json::json!({
                 "lifecycle_action": action,
                 "source_id": source_id,
@@ -1133,6 +1152,7 @@ fn apply_lifecycle_proposal_once(
                 "merged_entities": merged_entities,
                 "superseded": true,
                 "archived": true,
+                "supersession_receipt": receipt,
             })
         }
         ACTION_PROMOTE_DISTILLED => {

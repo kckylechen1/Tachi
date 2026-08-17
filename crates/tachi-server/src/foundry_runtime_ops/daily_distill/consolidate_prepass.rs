@@ -22,9 +22,10 @@
 //! loop — this pre-pass does not touch that decision logic, it only reuses
 //! the same `merge_into` *mutation* (fold keywords/entities into the
 //! survivor, supersede + archive the rest) via
-//! [`crate::facade_memory_ops::consolidate_ops::merge_into_for_project`],
+//! [`crate::facade_memory_ops::consolidate_ops::merge_into_for_project_with_expected`],
 //! called directly instead of through the proposal-store round trip. That
-//! entry point hard-codes `action="merge_into"` — it cannot reach any other
+//! entry point hard-codes `action="merge_into"` and binds the selected
+//! source/target snapshots before writing — it cannot reach any other
 //! lifecycle action, so this pre-pass has no way to bypass human review for
 //! `supersede`/`archive`/`promote_distilled`.
 
@@ -82,13 +83,20 @@ fn consolidate_one_group(
                 .then_with(|| ea.id.cmp(&eb.id))
         });
         let survivor_id = group.entries[indices[0]].id.clone();
+        let survivor_entry = group.entries[indices[0]].clone();
         for &dup_idx in &indices[1..] {
-            let source_id = group.entries[dup_idx].id.clone();
-            match crate::facade_memory_ops::consolidate_ops::merge_into_for_project(
+            let source_entry = group.entries[dup_idx].clone();
+            let source_id = source_entry.id.clone();
+            let expected = memcore::store::immutable_supersession::SupersessionExpectedState::active_unsuperseded(
+                &source_entry,
+                Some(&survivor_entry),
+            );
+            match crate::facade_memory_ops::consolidate_ops::merge_into_for_project_with_expected(
                 server,
                 project,
                 &source_id,
                 &survivor_id,
+                Some(expected),
             ) {
                 Ok(_) => drop_indices.push(dup_idx),
                 Err(err) => {
@@ -296,5 +304,72 @@ mod tests {
             "\"x\" and \"x \" must not be treated as byte-identical duplicates"
         );
         assert_eq!(groups[0].entries.len(), 2);
+    }
+
+    /// tachi#1671: the automated route-1 pre-pass binds the exact source and
+    /// target rows it selected before calling the semantic supersession route.
+    /// If a live row drifts after selection, the route refuses and keeps both
+    /// rows in the distill pool instead of applying a stale merge.
+    #[test]
+    fn stale_selected_duplicate_snapshot_is_not_merged_or_dropped() {
+        let temp = tempfile::tempdir().expect("temp consolidate pre-pass db");
+        let server = crate::MemoryServer::new(
+            temp.path().join("global.db"),
+            Some(temp.path().join("project.db")),
+        )
+        .expect("server");
+
+        let source = dup_entry("stale-source", "2026-01-01T00:00:00Z");
+        let survivor = dup_entry("stale-survivor", "2026-01-01T00:00:01Z");
+        let entries = vec![source.clone(), survivor.clone()];
+        server
+            .with_project_store(|store| {
+                store.upsert(&source).map_err(|e| e.to_string())?;
+                store.upsert(&survivor).map_err(|e| e.to_string())?;
+                let mut drifted = source.clone();
+                drifted.text = "The live row changed after pre-pass selection.".to_string();
+                drifted.summary = "drifted duplicate source".to_string();
+                store.upsert(&drifted).map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .expect("seed and drift selected duplicate");
+
+        let mut groups = vec![CandidateGroup {
+            group_id: "bounded|stale".to_string(),
+            path_prefix: "/project/bounded".to_string(),
+            coherence_key: "stale".to_string(),
+            entries,
+        }];
+
+        let consolidated = consolidate_duplicate_candidates(&server, None, &mut groups);
+        assert_eq!(
+            consolidated, 0,
+            "stale expected source/target state must refuse the route-1 merge"
+        );
+        assert_eq!(
+            groups[0].entries.len(),
+            2,
+            "a refused stale merge must not drop the source from the pool"
+        );
+        server
+            .with_project_store_read(|store| {
+                let source_after = store
+                    .get_with_options("stale-source", true)
+                    .map_err(|e| e.to_string())?
+                    .expect("source remains");
+                assert!(
+                    !source_after.archived,
+                    "stale expected-state refusal must leave source active"
+                );
+                assert_eq!(
+                    store
+                        .supersession_target("stale-source")
+                        .map_err(|e| e.to_string())?,
+                    Some(None),
+                    "stale expected-state refusal must write no supersession edge"
+                );
+                Ok(())
+            })
+            .expect("verify stale refusal wrote nothing");
     }
 }

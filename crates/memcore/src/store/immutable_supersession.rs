@@ -7,13 +7,16 @@
 //! or any later mutation error drops the `BEGIN IMMEDIATE` transaction and
 //! rolls every earlier mutation back.
 
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+use std::fmt;
 
 use crate::{
     db,
     error::MemoryError,
-    types::{MemoryEdge, MemoryEntry},
+    types::{ExpectedMemoryState, MemoryEdge, MemoryEntry},
     MemoryStore,
 };
 
@@ -27,16 +30,165 @@ const MAX_SUPERSESSION_CHAIN_WALK: u32 = 32;
 /// Route token stamped on every [`SupersessionReceipt`] from
 /// [`ImmutableSupersessionTransaction::claim_immutable_supersession`].
 pub const SUPERSESSION_ROUTE_IMMUTABLE_CLAIM: &str = "immutable_claim_v1";
+/// Durable receipt event kind for checked supersession claims (tachi#1671).
+pub const SUPERSESSION_RECEIPT_EVENT_TYPE: &str = "memory.supersession.receipt.v1";
 
-/// Durable facts for one successful immutable claim (tachi#1671).
+/// The typed reason a checked supersession claim refused before writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupersessionErrorKind {
+    SelfSupersession,
+    SourceMissing,
+    TargetMissing,
+    SourceArchived,
+    TargetIneligible,
+    SourceDrift,
+    TargetDrift,
+    CycleDetected,
+    TraversalCapExceeded,
+    CompetingTarget,
+    CasLost,
+}
+
+impl fmt::Display for SupersessionErrorKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let token = match self {
+            Self::SelfSupersession => "self_supersession",
+            Self::SourceMissing => "source_missing",
+            Self::TargetMissing => "target_missing",
+            Self::SourceArchived => "source_archived",
+            Self::TargetIneligible => "target_ineligible",
+            Self::SourceDrift => "source_drift",
+            Self::TargetDrift => "target_drift",
+            Self::CycleDetected => "cycle_detected",
+            Self::TraversalCapExceeded => "traversal_cap_exceeded",
+            Self::CompetingTarget => "competing_target",
+            Self::CasLost => "cas_lost",
+        };
+        formatter.write_str(token)
+    }
+}
+
+/// Typed supersession refusal. It converts to [`MemoryError`] only at legacy
+/// boundaries; the primitive itself exposes structured reason tags.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SupersessionReceipt {
+pub struct SupersessionError {
+    pub kind: SupersessionErrorKind,
     pub source_id: String,
     pub target_id: String,
+    pub detail: String,
+}
+
+impl SupersessionError {
+    fn new(
+        kind: SupersessionErrorKind,
+        source_id: &str,
+        target_id: &str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            source_id: source_id.to_string(),
+            target_id: target_id.to_string(),
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for SupersessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "immutable supersession refused ({}): {} -> {}: {}",
+            self.kind, self.source_id, self.target_id, self.detail
+        )
+    }
+}
+
+impl std::error::Error for SupersessionError {}
+
+impl From<SupersessionError> for MemoryError {
+    fn from(error: SupersessionError) -> Self {
+        MemoryError::InvalidArg(error.to_string())
+    }
+}
+
+/// Explicit result of attempting to install a checked supersession edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupersessionCommitResult {
+    Applied,
+    PriorIdempotent,
+}
+
+impl SupersessionCommitResult {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::PriorIdempotent => "prior_idempotent",
+        }
+    }
+}
+
+/// Caller-bound expected state for source/target rows.
+#[derive(Debug, Clone)]
+pub struct SupersessionExpectedState {
+    pub source: ExpectedMemoryState,
+    pub target: Option<ExpectedMemoryState>,
+}
+
+impl SupersessionExpectedState {
+    pub fn active_unsuperseded(source: &MemoryEntry, target: Option<&MemoryEntry>) -> Self {
+        Self {
+            source: ExpectedMemoryState::from_entry(source, None),
+            target: target.map(|entry| ExpectedMemoryState::from_entry(entry, None)),
+        }
+    }
+}
+
+/// Durable facts for one successful immutable claim (tachi#1671).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupersessionReceipt {
+    pub receipt_id: String,
+    pub source_id: String,
+    pub target_id: String,
+    pub source_revision_before: i64,
     pub source_revision_after: i64,
+    pub target_revision_before: Option<i64>,
+    pub target_revision_after: Option<i64>,
+    pub source_archived_before: bool,
+    pub source_archived_after: bool,
+    pub source_superseded_by_before: Option<String>,
+    pub source_superseded_by_after: Option<String>,
+    pub source_valid_until_before: Option<String>,
+    pub source_valid_until_after: Option<String>,
+    pub source_path_before: String,
+    pub source_text_digest_before: String,
+    pub target_path_before: Option<String>,
+    pub target_text_digest_before: Option<String>,
     /// [`None`] on a generic store; private partitions carry their admitted id.
     pub partition_id: Option<String>,
-    pub route: &'static str,
+    pub route: String,
+    pub policy_version: String,
+    pub dependent_write_disposition: String,
+    pub commit_result: SupersessionCommitResult,
+    pub durable: bool,
+}
+
+impl SupersessionReceipt {
+    pub fn is_prior_idempotent(&self) -> bool {
+        self.commit_result == SupersessionCommitResult::PriorIdempotent
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SupersessionClaimOptions<'a> {
+    pub route: &'a str,
+    pub policy_version: &'a str,
+    pub expected: Option<&'a SupersessionExpectedState>,
+    pub require_materialized_target: bool,
+    pub archive_source: bool,
+    pub partition_id: Option<String>,
 }
 
 /// Narrow mutation handle passed only inside
@@ -46,12 +198,455 @@ pub struct ImmutableSupersessionTransaction<'tx> {
     vec_available: bool,
     reserved_reference_write: db::ReservedReferenceWriteFlag,
     partition_id: Option<String>,
+    pending_receipts: Vec<SupersessionReceipt>,
+}
+
+fn text_digest(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+fn receipt_id(route: &str, policy_version: &str, source_id: &str, target_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(route.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(policy_version.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(target_id.as_bytes());
+    format!("supersession:{:x}", hasher.finalize())
+}
+
+fn read_entry_and_supersession(
+    tx: &Connection,
+    id: &str,
+) -> Result<Option<(MemoryEntry, Option<String>)>, MemoryError> {
+    let ids = vec![id.to_string()];
+    let mut entries = db::fetch_by_ids(tx, &ids, true)?;
+    let Some(entry) = entries.remove(id) else {
+        return Ok(None);
+    };
+    let superseded_by = tx
+        .query_row(
+            "SELECT superseded_by FROM memories WHERE id = ?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(Some((entry, superseded_by)))
+}
+
+fn target_is_retired(entry: &MemoryEntry, superseded_by: Option<&str>) -> bool {
+    entry.archived || superseded_by.is_some()
+}
+
+fn refuse_supersession_cycle_within_tx(
+    tx: &Connection,
+    source_id: &str,
+    target_id: &str,
+) -> Result<(), SupersessionError> {
+    let mut current = target_id.to_string();
+    for _ in 0..MAX_SUPERSESSION_CHAIN_WALK {
+        let next: Option<String> = tx
+            .query_row(
+                "SELECT superseded_by FROM memories WHERE id = ?1",
+                [current.as_str()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| {
+                SupersessionError::new(
+                    SupersessionErrorKind::TraversalCapExceeded,
+                    source_id,
+                    target_id,
+                    error.to_string(),
+                )
+            })?
+            .flatten();
+        match next {
+            None => return Ok(()),
+            Some(next_id) if next_id == source_id => {
+                return Err(SupersessionError::new(
+                    SupersessionErrorKind::CycleDetected,
+                    source_id,
+                    target_id,
+                    format!("would close a superseded_by cycle back to {source_id}"),
+                ));
+            }
+            Some(next_id) => current = next_id,
+        }
+    }
+    Err(SupersessionError::new(
+        SupersessionErrorKind::TraversalCapExceeded,
+        source_id,
+        target_id,
+        format!("superseded_by chain did not terminate within {MAX_SUPERSESSION_CHAIN_WALK} hops"),
+    ))
+}
+
+fn insert_supersession_receipt_event(
+    tx: &Connection,
+    receipt: &SupersessionReceipt,
+) -> Result<bool, MemoryError> {
+    let has_events = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'tachi_events')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_events {
+        return Ok(false);
+    }
+    let created_at = db::now_utc_iso();
+    let payload = serde_json::to_value(receipt)?;
+    let provenance = serde_json::json!({
+        "producer": "memcore::immutable_supersession",
+        "route": receipt.route,
+        "policy_version": receipt.policy_version,
+    });
+    tx.execute(
+        "INSERT INTO tachi_events (
+            id, source_repo, adapter, project, domain, session_id, actor,
+            event_type, authority, effects, projection_hints,
+            payload_json, provenance_json, created_at
+         )
+         VALUES (?1, '', 'memcore', '', 'memory', '', 'memcore',
+                 ?2, 'structural', ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            receipt.receipt_id,
+            SUPERSESSION_RECEIPT_EVENT_TYPE,
+            serde_json::to_string(&vec![
+                "memories.superseded_by",
+                "memories.valid_until",
+                "memories.revision",
+                "dependent.transaction"
+            ])?,
+            serde_json::to_string(&vec!["supersession_receipt"])?,
+            serde_json::to_string(&payload)?,
+            serde_json::to_string(&provenance)?,
+            created_at,
+        ],
+    )?;
+    Ok(true)
+}
+
+pub(crate) fn finalize_supersession_receipt_within_tx(
+    tx: &Connection,
+    receipt: &mut SupersessionReceipt,
+    dependent_write_disposition: &str,
+) -> Result<(), MemoryError> {
+    let Some((source_after, source_superseded_by_after)) =
+        read_entry_and_supersession(tx, &receipt.source_id)?
+    else {
+        return Err(MemoryError::Internal(format!(
+            "supersession receipt source disappeared before commit: {}",
+            receipt.source_id
+        )));
+    };
+    let target_after = read_entry_and_supersession(tx, &receipt.target_id)?;
+    receipt.source_revision_after = source_after.revision;
+    receipt.source_archived_after = source_after.archived;
+    receipt.source_superseded_by_after = source_superseded_by_after;
+    receipt.source_valid_until_after = source_after.valid_until;
+    receipt.target_revision_after = target_after.as_ref().map(|(entry, _)| entry.revision);
+    receipt.dependent_write_disposition = dependent_write_disposition.to_string();
+    receipt.durable = insert_supersession_receipt_event(tx, receipt)?;
+    Ok(())
+}
+
+pub(crate) fn claim_supersession_edge_within_tx(
+    tx: &Connection,
+    source_id: &str,
+    target_id: &str,
+    options: SupersessionClaimOptions<'_>,
+) -> Result<SupersessionReceipt, SupersessionError> {
+    if source_id == target_id {
+        return Err(SupersessionError::new(
+            SupersessionErrorKind::SelfSupersession,
+            source_id,
+            target_id,
+            "source and target must be distinct",
+        ));
+    }
+
+    let (source_before, source_superseded_by_before) = read_entry_and_supersession(tx, source_id)
+        .map_err(|error| {
+            SupersessionError::new(
+                SupersessionErrorKind::SourceMissing,
+                source_id,
+                target_id,
+                error.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            SupersessionError::new(
+                SupersessionErrorKind::SourceMissing,
+                source_id,
+                target_id,
+                "source row is not materialized in the admitted partition",
+            )
+        })?;
+
+    if let Some(expected) = options.expected {
+        if !expected
+            .source
+            .matches(&source_before, source_superseded_by_before.as_deref())
+        {
+            return Err(SupersessionError::new(
+                SupersessionErrorKind::SourceDrift,
+                source_id,
+                target_id,
+                "source state no longer matches the caller-bound snapshot",
+            ));
+        }
+    }
+
+    if source_before.archived {
+        return Err(SupersessionError::new(
+            SupersessionErrorKind::SourceArchived,
+            source_id,
+            target_id,
+            "source is archived",
+        ));
+    }
+
+    if source_superseded_by_before.as_deref() == Some(target_id) {
+        let target_state = read_entry_and_supersession(tx, target_id).map_err(|error| {
+            SupersessionError::new(
+                SupersessionErrorKind::TargetMissing,
+                source_id,
+                target_id,
+                error.to_string(),
+            )
+        })?;
+        let (target_revision_before, target_path_before, target_text_digest_before) = target_state
+            .as_ref()
+            .map(|(entry, _)| {
+                (
+                    Some(entry.revision),
+                    Some(entry.path.clone()),
+                    Some(text_digest(&entry.text)),
+                )
+            })
+            .unwrap_or((None, None, None));
+        return Ok(SupersessionReceipt {
+            receipt_id: receipt_id(options.route, options.policy_version, source_id, target_id),
+            source_id: source_id.to_string(),
+            target_id: target_id.to_string(),
+            source_revision_before: source_before.revision,
+            source_revision_after: source_before.revision,
+            target_revision_before,
+            target_revision_after: target_revision_before,
+            source_archived_before: source_before.archived,
+            source_archived_after: source_before.archived,
+            source_superseded_by_before: source_superseded_by_before.clone(),
+            source_superseded_by_after: source_superseded_by_before,
+            source_valid_until_before: source_before.valid_until.clone(),
+            source_valid_until_after: source_before.valid_until,
+            source_path_before: source_before.path,
+            source_text_digest_before: text_digest(&source_before.text),
+            target_path_before,
+            target_text_digest_before,
+            partition_id: options.partition_id,
+            route: options.route.to_string(),
+            policy_version: options.policy_version.to_string(),
+            dependent_write_disposition: "prior_result_no_dependent_writes".to_string(),
+            commit_result: SupersessionCommitResult::PriorIdempotent,
+            durable: false,
+        });
+    }
+    if let Some(existing_target) = source_superseded_by_before.as_deref() {
+        return Err(SupersessionError::new(
+            SupersessionErrorKind::CompetingTarget,
+            source_id,
+            target_id,
+            format!("source already points at {existing_target}"),
+        ));
+    }
+
+    let target_state = read_entry_and_supersession(tx, target_id).map_err(|error| {
+        SupersessionError::new(
+            SupersessionErrorKind::TargetMissing,
+            source_id,
+            target_id,
+            error.to_string(),
+        )
+    })?;
+    if target_state.is_none() && options.require_materialized_target {
+        return Err(SupersessionError::new(
+            SupersessionErrorKind::TargetMissing,
+            source_id,
+            target_id,
+            "target row is not materialized in the admitted partition",
+        ));
+    }
+
+    if let Some((target_before, target_superseded_by_before)) = target_state.as_ref() {
+        if let Some(expected) = options
+            .expected
+            .and_then(|expected| expected.target.as_ref())
+        {
+            if !expected.matches(target_before, target_superseded_by_before.as_deref()) {
+                return Err(SupersessionError::new(
+                    SupersessionErrorKind::TargetDrift,
+                    source_id,
+                    target_id,
+                    "target state no longer matches the caller-bound snapshot",
+                ));
+            }
+        }
+        refuse_supersession_cycle_within_tx(tx, source_id, target_id)?;
+        if target_is_retired(target_before, target_superseded_by_before.as_deref()) {
+            return Err(SupersessionError::new(
+                SupersessionErrorKind::TargetIneligible,
+                source_id,
+                target_id,
+                "target is archived or already superseded",
+            ));
+        }
+    } else if options
+        .expected
+        .and_then(|expected| expected.target.as_ref())
+        .is_some()
+    {
+        return Err(SupersessionError::new(
+            SupersessionErrorKind::TargetDrift,
+            source_id,
+            target_id,
+            "expected target disappeared",
+        ));
+    }
+
+    if target_state.is_none() {
+        refuse_supersession_cycle_within_tx(tx, source_id, target_id)?;
+    }
+    db::refuse_retired_sticky_row_within_tx(tx, source_id, "superseded").map_err(|error| {
+        SupersessionError::new(
+            SupersessionErrorKind::SourceDrift,
+            source_id,
+            target_id,
+            error.to_string(),
+        )
+    })?;
+    db::refuse_retired_sticky_row_within_tx(tx, target_id, "used as a supersession target")
+        .map_err(|error| {
+            SupersessionError::new(
+                SupersessionErrorKind::TargetDrift,
+                source_id,
+                target_id,
+                error.to_string(),
+            )
+        })?;
+
+    let now = db::now_utc_iso();
+    let changed = tx
+        .execute(
+            "UPDATE memories
+             SET superseded_by = ?1, archived = CASE WHEN ?2 THEN 1 ELSE archived END,
+                 updated_at = ?3, revision = revision + 1,
+                 valid_until = COALESCE(valid_until, ?3)
+             WHERE id = ?4 AND revision = ?5 AND archived = ?6 AND superseded_by IS NULL",
+            params![
+                target_id,
+                options.archive_source,
+                now,
+                source_id,
+                source_before.revision,
+                source_before.archived,
+            ],
+        )
+        .map_err(|error| {
+            SupersessionError::new(
+                SupersessionErrorKind::CasLost,
+                source_id,
+                target_id,
+                error.to_string(),
+            )
+        })?;
+    if changed == 0 {
+        return Err(SupersessionError::new(
+            SupersessionErrorKind::CasLost,
+            source_id,
+            target_id,
+            "source CAS lost",
+        ));
+    }
+    let (source_after, source_superseded_by_after) = read_entry_and_supersession(tx, source_id)
+        .map_err(|error| {
+            SupersessionError::new(
+                SupersessionErrorKind::CasLost,
+                source_id,
+                target_id,
+                error.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            SupersessionError::new(
+                SupersessionErrorKind::CasLost,
+                source_id,
+                target_id,
+                "source disappeared after update",
+            )
+        })?;
+    let target_after = read_entry_and_supersession(tx, target_id).map_err(|error| {
+        SupersessionError::new(
+            SupersessionErrorKind::TargetMissing,
+            source_id,
+            target_id,
+            error.to_string(),
+        )
+    })?;
+    let (target_revision_before, target_path_before, target_text_digest_before) = target_state
+        .as_ref()
+        .map(|(entry, _)| {
+            (
+                Some(entry.revision),
+                Some(entry.path.clone()),
+                Some(text_digest(&entry.text)),
+            )
+        })
+        .unwrap_or((None, None, None));
+    let target_revision_after = target_after.as_ref().map(|(entry, _)| entry.revision);
+
+    Ok(SupersessionReceipt {
+        receipt_id: receipt_id(options.route, options.policy_version, source_id, target_id),
+        source_id: source_id.to_string(),
+        target_id: target_id.to_string(),
+        source_revision_before: source_before.revision,
+        source_revision_after: source_after.revision,
+        target_revision_before,
+        target_revision_after,
+        source_archived_before: source_before.archived,
+        source_archived_after: source_after.archived,
+        source_superseded_by_before,
+        source_superseded_by_after,
+        source_valid_until_before: source_before.valid_until,
+        source_valid_until_after: source_after.valid_until,
+        source_path_before: source_before.path,
+        source_text_digest_before: text_digest(&source_before.text),
+        target_path_before,
+        target_text_digest_before,
+        partition_id: options.partition_id,
+        route: options.route.to_string(),
+        policy_version: options.policy_version.to_string(),
+        dependent_write_disposition: "pending_transaction".to_string(),
+        commit_result: SupersessionCommitResult::Applied,
+        durable: false,
+    })
 }
 
 impl<'tx> ImmutableSupersessionTransaction<'tx> {
     fn validate_memory_write(entry: &MemoryEntry) -> Result<(), MemoryError> {
         crate::path_router::validate_retired_sticky_write(&entry.path, &entry.category)
             .map_err(|error| MemoryError::InvalidArg(error.to_string()))
+    }
+
+    fn finalize_pending_receipts(&mut self) -> Result<(), MemoryError> {
+        for receipt in &mut self.pending_receipts {
+            finalize_supersession_receipt_within_tx(&self.tx, receipt, "transaction_committed")?;
+        }
+        Ok(())
     }
 
     /// Claim `source_id -> target_id` exactly once.
@@ -103,8 +698,24 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         source_id: &str,
         target_id: &str,
     ) -> Result<SupersessionReceipt, MemoryError> {
-        let _authorization =
-            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        self.try_claim_immutable_supersession(source_id, target_id)
+            .map_err(Into::into)
+    }
+
+    pub fn try_claim_immutable_supersession(
+        &mut self,
+        source_id: &str,
+        target_id: &str,
+    ) -> Result<SupersessionReceipt, SupersessionError> {
+        let _authorization = db::authorize_reserved_reference_write(&self.reserved_reference_write)
+            .map_err(|error| {
+                SupersessionError::new(
+                    SupersessionErrorKind::SourceDrift,
+                    source_id,
+                    target_id,
+                    error.to_string(),
+                )
+            })?;
         // Cycle guard first: it gives the more specific diagnosis when a
         // target is already-superseded *and* the chain closes back onto
         // `source_id` (see `claim_immutable_supersession_permits_a_two_hop_cycle_finding`'s
@@ -118,100 +729,56 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         // repair seeding — they are not a weaker production bypass of
         // partition identity. Partition identity is the handle's admitted
         // stamp (#1668), never `MemoryEntry::scope` or a path label.
-        self.refuse_supersession_cycle(source_id, target_id)?;
-        self.refuse_ineligible_supersession_target(target_id)?;
-        let changed = db::supersede_memory_within_tx(&self.tx, source_id, target_id)?;
-        if !changed {
-            return Err(MemoryError::InvalidArg(format!(
-                "immutable supersession CAS refused for {source_id} -> {target_id}"
-            )));
-        }
-        let source_revision_after: i64 = self.tx.query_row(
-            "SELECT revision FROM memories WHERE id = ?1",
-            [source_id],
-            |row| row.get(0),
+        let receipt = claim_supersession_edge_within_tx(
+            &self.tx,
+            source_id,
+            target_id,
+            SupersessionClaimOptions {
+                route: SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
+                policy_version: SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
+                expected: None,
+                require_materialized_target: false,
+                archive_source: false,
+                partition_id: self.partition_id.clone(),
+            },
         )?;
-        Ok(SupersessionReceipt {
-            source_id: source_id.to_string(),
-            target_id: target_id.to_string(),
-            source_revision_after,
-            partition_id: self.partition_id.clone(),
-            route: SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
-        })
+        self.pending_receipts.push(receipt.clone());
+        Ok(receipt)
     }
 
-    /// tachi#1645 (#1635 finding 2): walk `target_id`'s `superseded_by`
-    /// chain forward, bounded at [`MAX_SUPERSESSION_CHAIN_WALK`] hops. A row
-    /// that does not exist yet — e.g. a target a caller is about to
-    /// materialize later in this same `BEGIN IMMEDIATE` transaction, such as
-    /// Wiki ingest's replacement row (`persist_wiki_ingest_entry` claims
-    /// each predecessor onto the NEW entry's id before upserting it) — has
-    /// no chain and passes trivially; the surrounding transaction still
-    /// guarantees that id either gets created before commit or this claim
-    /// rolls back with it.
-    ///
-    /// Returns a distinct, differently-worded error for "the chain closes
-    /// back onto `source_id`" (a genuine cycle) vs "the chain did not
-    /// terminate within the depth cap" (refuse rather than risk an
-    /// undetected cycle past the cap) — both refuse the claim.
-    fn refuse_supersession_cycle(
-        &self,
+    pub fn claim_and_archive_immutable_supersession(
+        &mut self,
         source_id: &str,
         target_id: &str,
-    ) -> Result<(), MemoryError> {
-        let mut current = target_id.to_string();
-        for _ in 0..MAX_SUPERSESSION_CHAIN_WALK {
-            let next: Option<String> = self
-                .tx
-                .query_row(
-                    "SELECT superseded_by FROM memories WHERE id = ?1",
-                    [current.as_str()],
-                    |row| row.get::<_, Option<String>>(0),
+        expected: Option<&SupersessionExpectedState>,
+        route: &str,
+        policy_version: &str,
+    ) -> Result<SupersessionReceipt, MemoryError> {
+        let _authorization = db::authorize_reserved_reference_write(&self.reserved_reference_write)
+            .map_err(|error| {
+                SupersessionError::new(
+                    SupersessionErrorKind::SourceDrift,
+                    source_id,
+                    target_id,
+                    error.to_string(),
                 )
-                .optional()?
-                .flatten();
-            match next {
-                None => return Ok(()),
-                Some(next_id) if next_id == source_id => {
-                    return Err(MemoryError::InvalidArg(format!(
-                        "immutable supersession refused: {source_id} -> {target_id} would \
-                         close a superseded_by cycle back to {source_id}"
-                    )));
-                }
-                Some(next_id) => current = next_id,
-            }
-        }
-        Err(MemoryError::InvalidArg(format!(
-            "immutable supersession refused: {source_id} -> {target_id}'s superseded_by chain \
-             did not terminate within {MAX_SUPERSESSION_CHAIN_WALK} hops; refusing rather than \
-             risk an undetected cycle past the depth cap"
-        )))
-    }
-
-    /// tachi#1645 (#1635 finding 1): a target must be active + eligible
-    /// (not archived, not itself already superseded) to receive a new
-    /// predecessor — the mechanism must enforce this itself, not rely on
-    /// caller self-defense (some callers already re-check with
-    /// `memory_is_active_unsuperseded` before claiming; `apply_lifecycle_action`'s
-    /// "supersede"/"merge_into" arms in
-    /// `tachi-server/facade_memory_ops/consolidate_ops.rs` did not).
-    ///
-    /// A target with no row yet is not "retired" and is left eligible for
-    /// the same claim-before-materialize reason documented on
-    /// `refuse_supersession_cycle` above.
-    fn refuse_ineligible_supersession_target(&self, target_id: &str) -> Result<(), MemoryError> {
-        let retired = self.tx.query_row(
-            "SELECT COUNT(*) FROM memories WHERE id = ?1 AND (archived = 1 OR superseded_by IS NOT NULL)",
-            [target_id],
-            |row| row.get::<_, i64>(0),
-        )? > 0;
-        if retired {
-            return Err(MemoryError::InvalidArg(format!(
-                "immutable supersession target ineligible: {target_id} is archived or already \
-                 superseded"
-            )));
-        }
-        Ok(())
+            })?;
+        let receipt = claim_supersession_edge_within_tx(
+            &self.tx,
+            source_id,
+            target_id,
+            SupersessionClaimOptions {
+                route,
+                policy_version,
+                expected,
+                require_materialized_target: true,
+                archive_source: true,
+                partition_id: self.partition_id.clone(),
+            },
+        )
+        .map_err(MemoryError::from)?;
+        self.pending_receipts.push(receipt.clone());
+        Ok(receipt)
     }
 
     /// Persist an entry inside the replacement transaction.
@@ -449,6 +1016,14 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     pub fn archive_claimed_source(&mut self, source_id: &str) -> Result<(), MemoryError> {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let already_archived = self.tx.query_row(
+            "SELECT archived FROM memories WHERE id = ?1",
+            [source_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if already_archived {
+            return Ok(());
+        }
         if !db::archive_memory_within_tx(&self.tx, source_id)? {
             return Err(MemoryError::InvalidArg(format!(
                 "archive claimed source failed for {source_id}"
@@ -549,8 +1124,10 @@ impl MemoryStore {
                     .admitted_partition
                     .as_ref()
                     .map(|part| part.partition_id.clone()),
+                pending_receipts: Vec::new(),
             };
             let result = operation(&mut replacement)?;
+            replacement.finalize_pending_receipts()?;
             replacement.tx.commit()?;
             Ok(result)
         })
@@ -860,7 +1437,7 @@ mod tests {
             })
             .expect_err("source == target must refuse");
         assert!(
-            error.to_string().contains("CAS refused"),
+            error.to_string().contains("self_supersession"),
             "unexpected error: {error}"
         );
 
@@ -885,7 +1462,7 @@ mod tests {
     /// (tachi-server consolidate_lifecycle tests) already covers the
     /// conflicting-edge half at this layer.
     #[test]
-    fn claim_immutable_supersession_same_edge_replay_is_refused_not_silently_reapplied() {
+    fn claim_immutable_supersession_same_edge_replay_returns_prior_result() {
         let mut store = MemoryStore::open_in_memory().expect("open memory store");
         store
             .insert_if_absent(&fixture_entry("replay-source"))
@@ -900,14 +1477,19 @@ mod tests {
             })
             .expect("first claim must install the edge");
 
-        let error = store
+        let receipt = store
             .with_immutable_supersession_transaction(|operation| {
                 operation.claim_immutable_supersession("replay-source", "replay-target")
             })
-            .expect_err("identical replay must refuse loudly, not silently succeed again");
-        assert!(
-            error.to_string().contains("CAS refused"),
-            "unexpected error: {error}"
+            .expect("identical replay must return an explicit prior result");
+        assert_eq!(
+            receipt.commit_result,
+            SupersessionCommitResult::PriorIdempotent
+        );
+        assert!(receipt.is_prior_idempotent());
+        assert_eq!(
+            receipt.source_superseded_by_before.as_deref(),
+            Some("replay-target")
         );
     }
 
@@ -953,7 +1535,7 @@ mod tests {
             })
             .expect_err("superseding onto an archived/already-superseded target must refuse");
         assert!(
-            error.to_string().contains("target ineligible"),
+            error.to_string().contains("target_ineligible"),
             "unexpected error: {error}"
         );
 

@@ -362,11 +362,22 @@ fn handle_apply(server: &MemoryServer, params: &TachiMemoryParams) -> Result<Str
 /// every lifecycle action (`supersede`/`archive`/`promote_distilled`) to
 /// bypassing human review, which the module doc above says is exactly what
 /// this proposal/review/apply loop exists to prevent.
+#[cfg(test)]
 pub(crate) fn merge_into_for_project(
     server: &MemoryServer,
     project: Option<&str>,
     source_id: &str,
     target_id: &str,
+) -> Result<Value, String> {
+    merge_into_for_project_with_expected(server, project, source_id, target_id, None)
+}
+
+pub(crate) fn merge_into_for_project_with_expected(
+    server: &MemoryServer,
+    project: Option<&str>,
+    source_id: &str,
+    target_id: &str,
+    expected: Option<memcore::store::immutable_supersession::SupersessionExpectedState>,
 ) -> Result<Value, String> {
     apply_lifecycle_action(
         server,
@@ -374,6 +385,7 @@ pub(crate) fn merge_into_for_project(
         "merge_into",
         source_id,
         Some(target_id),
+        expected,
     )
 }
 
@@ -430,17 +442,13 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
     }
 }
 
-/// tachi#1645 (#1635 finding 3): route-1's automated bypass CAS
-/// (`ImmutableSupersessionTransaction::claim_immutable_supersession` ->
-/// `db::supersede_memory`) only gates on `superseded_by IS NULL` — it never
-/// takes or checks a caller-supplied `expected_revision`, unlike route 2's
-/// `apply_lifecycle_proposal` (`memcore::store::memory_lifecycle`), which
-/// re-derives and CASes against `LifecycleApplyPayload`'s stored revision.
-/// This is therefore a distinct policy identity from
-/// `lifecycle::LIFECYCLE_POLICY_VERSION` ("memory-lifecycle-v2") — reusing
-/// that string on a receipt this mechanism produces would overstate the
-/// drift guarantee the caller actually got.
-pub(crate) const ROUTE1_MERGE_POLICY_VERSION: &str = "memory-lifecycle-route1-merge-v1";
+/// Route-1 remains a distinct policy identity from
+/// `lifecycle::LIFECYCLE_POLICY_VERSION` because its admission/review step is
+/// automated, but its edge mutation now converges with lifecycle apply: source
+/// and target live state are read inside the transaction, optional
+/// source/target snapshots are bound by the shared supersession primitive, and
+/// stale drift is a zero-write refusal instead of a best-effort CAS.
+pub(crate) const ROUTE1_MERGE_POLICY_VERSION: &str = "memory-lifecycle-route1-merge-v2";
 
 fn apply_lifecycle_action(
     server: &MemoryServer,
@@ -448,6 +456,7 @@ fn apply_lifecycle_action(
     action: &str,
     source_id: &str,
     target_id: Option<&str>,
+    expected: Option<memcore::store::immutable_supersession::SupersessionExpectedState>,
 ) -> Result<Value, String> {
     let result = match action {
         "supersede" => {
@@ -455,11 +464,24 @@ fn apply_lifecycle_action(
                 "supersede proposal requires target_id (canonical survivor)".to_string()
             })?;
             with_memory_store(server, params, |store| {
-                refuse_if_protected(store, source_id, "supersede")?;
                 store
                     .with_immutable_supersession_transaction(|replacement| {
-                        replacement.claim_immutable_supersession(source_id, target)?;
-                        replacement.archive_claimed_source(source_id)
+                        let source = replacement
+                            .get_memory(source_id)?
+                            .ok_or_else(|| memcore::MemoryError::NotFound(source_id.to_string()))?;
+                        if is_protected(&source) {
+                            return Err(memcore::MemoryError::InvalidArg(format!(
+                                "refusing to supersede protected memory {source_id} (retention/wiki/pattern)"
+                            )));
+                        }
+                        let receipt = replacement.claim_and_archive_immutable_supersession(
+                            source_id,
+                            target,
+                            expected.as_ref(),
+                            "consolidate_route1_supersede",
+                            ROUTE1_MERGE_POLICY_VERSION,
+                        )?;
+                        Ok(receipt)
                     })
                     .map_err(|e| format!("supersede refused: {e}"))?;
                 Ok(json!({
@@ -476,55 +498,57 @@ fn apply_lifecycle_action(
                 format!("{action} proposal requires target_id (canonical survivor)")
             })?;
             with_memory_store(server, params, |store| {
-                refuse_if_protected(store, source_id, action)?;
-                let source = store
-                    .get(source_id)
-                    .map_err(|e| format!("load source: {e}"))?
-                    .ok_or_else(|| format!("source not found: {source_id}"))?;
-                let mut survivor = store
-                    .get(target)
-                    .map_err(|e| format!("load target: {e}"))?
-                    .ok_or_else(|| format!("target not found: {target}"))?;
-                // tachi#1645 (#1635 finding 3): the revisions the CAS below
-                // actually consumes, captured before the in-memory keyword/
-                // entity/importance fold — `survivor.revision` is untouched
-                // by that fold (only the DB write, if any, bumps it).
-                let source_revision = source.revision;
-                let target_revision = survivor.revision;
-                // Canonical on both sides of the no-op guard below — the fold
-                // is sorted+deduplicated while the stored column keeps the last
-                // writer's serialization order, so a raw comparison would
-                // report "changed" for any target whose array is not already
-                // sorted and unique. Same helper as the reviewed apply path in
-                // `memcore::store::memory_lifecycle`, so the two agree on what
-                // "unchanged" means.
-                let target_keywords = lifecycle::canonical_tags(&survivor.keywords);
-                let target_entities = lifecycle::canonical_tags(&survivor.entities);
-                let target_importance = survivor.importance;
-                // Fold unique keywords/entities; keep survivor text as canonical.
-                let mut merged_kw = survivor.keywords.clone();
-                merged_kw.extend(source.keywords.iter().cloned());
-                survivor.keywords = lifecycle::canonical_tags(&merged_kw);
-                let mut merged_ents = survivor.entities.clone();
-                merged_ents.extend(source.entities.iter().cloned());
-                survivor.entities = lifecycle::canonical_tags(&merged_ents);
-                if survivor.importance < source.importance {
-                    survivor.importance = source.importance;
-                }
-                let survivor_changed = survivor.keywords != target_keywords
-                    || survivor.entities != target_entities
-                    || survivor.importance != target_importance;
                 // Claim, survivor fold, and source archive share one physical
                 // transaction. A stale A -> B request after A -> C therefore
                 // cannot mutate B, and any later write failure rolls A's claim
                 // back instead of leaving a partial lifecycle result.
-                store
+                let (receipt, source_revision, target_revision, merged_keywords, merged_entities) = store
                     .with_immutable_supersession_transaction(|replacement| {
-                        replacement.claim_immutable_supersession(source_id, target)?;
+                        let source = replacement
+                            .get_memory(source_id)?
+                            .ok_or_else(|| memcore::MemoryError::NotFound(source_id.to_string()))?;
+                        if is_protected(&source) {
+                            return Err(memcore::MemoryError::InvalidArg(format!(
+                                "refusing to {action} protected memory {source_id} (retention/wiki/pattern)"
+                            )));
+                        }
+                        let mut survivor = replacement
+                            .get_memory(target)?
+                            .ok_or_else(|| memcore::MemoryError::NotFound(target.to_string()))?;
+                        let source_revision = source.revision;
+                        let target_revision = survivor.revision;
+                        let target_keywords = lifecycle::canonical_tags(&survivor.keywords);
+                        let target_entities = lifecycle::canonical_tags(&survivor.entities);
+                        let target_importance = survivor.importance;
+                        let mut merged_kw = survivor.keywords.clone();
+                        merged_kw.extend(source.keywords.iter().cloned());
+                        survivor.keywords = lifecycle::canonical_tags(&merged_kw);
+                        let mut merged_ents = survivor.entities.clone();
+                        merged_ents.extend(source.entities.iter().cloned());
+                        survivor.entities = lifecycle::canonical_tags(&merged_ents);
+                        if survivor.importance < source.importance {
+                            survivor.importance = source.importance;
+                        }
+                        let survivor_changed = survivor.keywords != target_keywords
+                            || survivor.entities != target_entities
+                            || survivor.importance != target_importance;
+                        let receipt = replacement.claim_and_archive_immutable_supersession(
+                            source_id,
+                            target,
+                            expected.as_ref(),
+                            "consolidate_route1_merge",
+                            ROUTE1_MERGE_POLICY_VERSION,
+                        )?;
                         if survivor_changed {
                             replacement.upsert(&survivor)?;
                         }
-                        replacement.archive_claimed_source(source_id)
+                        Ok((
+                            receipt,
+                            source_revision,
+                            target_revision,
+                            survivor.keywords.len(),
+                            survivor.entities.len(),
+                        ))
                     })
                     .map_err(|e| format!("{action} refused: {e}"))?;
                 Ok(json!({
@@ -533,11 +557,12 @@ fn apply_lifecycle_action(
                     "target_id": target,
                     "source_revision": source_revision,
                     "target_revision": target_revision,
-                    "merged_keywords": survivor.keywords.len(),
-                    "merged_entities": survivor.entities.len(),
+                    "merged_keywords": merged_keywords,
+                    "merged_entities": merged_entities,
                     "superseded": true,
                     "archived": true,
                     "policy_version": ROUTE1_MERGE_POLICY_VERSION,
+                    "supersession_receipt": receipt,
                 }))
             })
         }

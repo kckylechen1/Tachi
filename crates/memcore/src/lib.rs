@@ -292,7 +292,10 @@ pub use private_partition::{
     PrivatePartition, PrivatePartitionOpenContext, StaticKeyProvider, SubjectId, TrustDomainId,
     SEALED_MAGIC, STORE_PRIVATE_PARTITION_KEY,
 };
-pub use store::immutable_supersession::{SupersessionReceipt, SUPERSESSION_ROUTE_IMMUTABLE_CLAIM};
+pub use store::immutable_supersession::{
+    SupersessionCommitResult, SupersessionError, SupersessionErrorKind, SupersessionExpectedState,
+    SupersessionReceipt, SUPERSESSION_RECEIPT_EVENT_TYPE, SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
+};
 // `DeploymentCapabilities` (the seam's flat bool projection) is deliberately
 // NOT re-exported at the crate root: PR-B's catalog row type of the same name
 // (model_catalog) owns the root path. The seam type stays reachable as
