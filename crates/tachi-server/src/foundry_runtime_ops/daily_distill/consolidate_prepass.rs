@@ -113,6 +113,7 @@ fn consolidate_one_group(
                 }
             }
         }
+        group.entries[indices[0]] = survivor_entry;
     }
 
     if drop_indices.is_empty() {
@@ -272,6 +273,19 @@ mod tests {
             groups[0].entries[0].id, "dup-2",
             "the newest row (by timestamp) should survive"
         );
+        assert!(groups[0].entries[0]
+            .keywords
+            .contains(&"oldest-keyword".to_string()));
+        assert!(groups[0].entries[0]
+            .keywords
+            .contains(&"middle-keyword".to_string()));
+        assert!(groups[0].entries[0]
+            .entities
+            .contains(&"oldest-entity".to_string()));
+        assert!(groups[0].entries[0]
+            .entities
+            .contains(&"middle-entity".to_string()));
+        assert_eq!(groups[0].entries[0].importance, expected_importance);
         server
             .with_project_store_read(|store| {
                 let survivor = store

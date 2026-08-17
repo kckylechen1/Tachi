@@ -211,8 +211,14 @@ impl fmt::Debug for PartitionAdmission {
 
 /// Injected key material. Portable kernel never reads the environment.
 pub trait PartitionKeyProvider {
-    fn admit(&self, ctx: &PrivatePartitionOpenContext) -> Result<PartitionAdmission, MemoryError>;
-    fn materialize_key(&self, admission: &PartitionAdmission) -> Result<[u8; 32], MemoryError>;
+    /// Validate the caller receipt and return the provider-bound grant and key
+    /// as one operation. Keeping key materialization inside admission prevents
+    /// a caller from constructing a look-alike [`PartitionAdmission`] and
+    /// presenting it later as proof that a receipt was checked.
+    fn admit_and_materialize(
+        &self,
+        ctx: &PrivatePartitionOpenContext,
+    ) -> Result<(PartitionAdmission, [u8; 32]), MemoryError>;
 }
 
 /// Test-support key provider. Production callers should inject a provider backed
@@ -276,7 +282,10 @@ impl fmt::Debug for StaticKeyProvider {
 }
 
 impl PartitionKeyProvider for StaticKeyProvider {
-    fn admit(&self, ctx: &PrivatePartitionOpenContext) -> Result<PartitionAdmission, MemoryError> {
+    fn admit_and_materialize(
+        &self,
+        ctx: &PrivatePartitionOpenContext,
+    ) -> Result<(PartitionAdmission, [u8; 32]), MemoryError> {
         if ctx.revoked {
             return Err(MemoryError::PrivatePartitionRefused);
         }
@@ -288,25 +297,14 @@ impl PartitionKeyProvider for StaticKeyProvider {
         }) else {
             return Err(MemoryError::PrivatePartitionRefused);
         };
-        PartitionAdmission::new(
+        let admission = PartitionAdmission::new(
             ctx.trust_domain_id.clone(),
             ctx.subject_id.clone(),
             admission.capabilities.iter().copied(),
             admission.key_version.clone(),
         )
-        .map_err(|_| MemoryError::PrivatePartitionRefused)
-    }
-
-    fn materialize_key(&self, admission: &PartitionAdmission) -> Result<[u8; 32], MemoryError> {
-        if !self.admissions.iter().any(|configured| {
-            configured.trust_domain_id == admission.trust_domain_id.as_str()
-                && configured.subject_id == admission.subject_id.as_str()
-                && configured.key_version == admission.key_version
-                && admission.capabilities.is_subset(&configured.capabilities)
-        }) {
-            return Err(MemoryError::PrivatePartitionRefused);
-        }
-        Ok(self.key)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?;
+        Ok((admission, self.key))
     }
 }
 
@@ -369,7 +367,7 @@ impl PrivatePartition {
         ctx: &PrivatePartitionOpenContext,
         keys: &dyn PartitionKeyProvider,
     ) -> Result<Self, MemoryError> {
-        let admission = admit_open(ctx, keys)?;
+        let (admission, key) = admit_open(ctx, keys)?;
         let effective_capabilities = admission.effective_capabilities(ctx)?;
         let identity = identity_from_admission(&admission);
         let sealed_path = sealed_path_for(estate_root, &identity.partition_id);
@@ -382,9 +380,6 @@ impl PrivatePartition {
         if !exists && !effective_capabilities.contains(&PartitionCapability::Write) {
             return Err(MemoryError::PrivatePartitionRefused);
         }
-        let key = keys
-            .materialize_key(&admission)
-            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
         let working = NamedTempFile::new().map_err(|_| MemoryError::PrivatePartitionRefused)?;
         let store = if exists {
             let bytes = unseal_file(&sealed_path, &key, &identity)?;
@@ -421,14 +416,11 @@ impl PrivatePartition {
         ctx: &PrivatePartitionOpenContext,
         keys: &dyn PartitionKeyProvider,
     ) -> Result<Self, MemoryError> {
-        let admission = admit_open(ctx, keys)?;
+        let (admission, key) = admit_open(ctx, keys)?;
         let effective_capabilities = admission.effective_capabilities(ctx)?;
         if !effective_capabilities.contains(&PartitionCapability::Write) {
             return Err(MemoryError::PrivatePartitionRefused);
         }
-        let key = keys
-            .materialize_key(&admission)
-            .map_err(|_| MemoryError::PrivatePartitionRefused)?;
         let identity = identity_from_admission(&admission);
         let working = NamedTempFile::new().map_err(|_| MemoryError::PrivatePartitionRefused)?;
         let store = MemoryStore::open_private_working_file(
@@ -555,14 +547,14 @@ fn identity_from_admission(admission: &PartitionAdmission) -> AdmittedPartition 
 fn admit_open(
     ctx: &PrivatePartitionOpenContext,
     keys: &dyn PartitionKeyProvider,
-) -> Result<PartitionAdmission, MemoryError> {
+) -> Result<(PartitionAdmission, [u8; 32]), MemoryError> {
     if ctx.revoked || ctx.key_version.trim().is_empty() {
         return Err(MemoryError::PrivatePartitionRefused);
     }
     if !ctx.capabilities.contains(&PartitionCapability::Read) {
         return Err(MemoryError::PrivatePartitionRefused);
     }
-    keys.admit(ctx)
+    keys.admit_and_materialize(ctx)
         .map_err(|_| MemoryError::PrivatePartitionRefused)
 }
 
