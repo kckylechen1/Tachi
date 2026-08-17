@@ -514,6 +514,9 @@ impl PrivatePartition {
     }
 
     pub fn persist(&mut self) -> Result<(), MemoryError> {
+        if !self.dirty {
+            return Ok(());
+        }
         self.require_write()?;
         let Some(path) = self.sealed_path.clone() else {
             return Ok(());
@@ -1085,6 +1088,46 @@ mod tests {
         let part = PrivatePartition::open(root.path(), &read_ctx, &read_only_keys)
             .expect("provider-granted read remains admitted");
         assert_eq!(part.get("existing").unwrap().unwrap().text, "present");
+    }
+
+    #[test]
+    fn read_only_handle_closes_without_rewriting_the_sealed_partition() {
+        let root = tempfile::tempdir().unwrap();
+        let write_ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let write_keys = keys();
+        {
+            let mut part = PrivatePartition::open(root.path(), &write_ctx, &write_keys).unwrap();
+            part.insert_if_absent(&entry("existing", "present"))
+                .unwrap();
+            part.close().unwrap();
+        }
+        let sealed = root
+            .path()
+            .join(write_ctx.partition_id())
+            .join("partition.sealed");
+        let before = fs::read(&sealed).unwrap();
+
+        let read_ctx = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read],
+            false,
+        );
+        let read_keys = keys_for_subjects(&[("subject-alice", &[PartitionCapability::Read][..])]);
+        let part = PrivatePartition::open(root.path(), &read_ctx, &read_keys).unwrap();
+        assert_eq!(part.get("existing").unwrap().unwrap().text, "present");
+        part.close().unwrap();
+
+        assert_eq!(
+            fs::read(sealed).unwrap(),
+            before,
+            "closing a clean read-only handle must not rewrite the encrypted partition"
+        );
     }
 
     #[test]
