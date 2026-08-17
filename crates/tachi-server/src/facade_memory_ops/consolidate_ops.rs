@@ -474,17 +474,20 @@ fn apply_lifecycle_action(
                                 "refusing to supersede protected memory {source_id} (retention/wiki/pattern)"
                             )));
                         }
-                        let mut receipt = replacement.claim_and_archive_immutable_supersession(
+                        let outcome = replacement.claim_and_archive_immutable_supersession(
                             source_id,
                             target,
                             expected.as_ref(),
                             "consolidate_route1_supersede",
                             ROUTE1_MERGE_POLICY_VERSION,
                         )?;
-                        replacement.finalize_supersession_receipt(
-                            &mut receipt,
-                            "consolidate_route1_no_extra_target_write",
-                        )?;
+                        let mut receipt = outcome.receipt;
+                        if outcome.is_applied() {
+                            replacement.finalize_supersession_receipt(
+                                &mut receipt,
+                                "consolidate_route1_no_extra_target_write",
+                            )?;
+                        }
                         Ok(receipt)
                     })
                     .map_err(|e| format!("supersede refused: {e}"))?;
@@ -536,20 +539,23 @@ fn apply_lifecycle_action(
                         let survivor_changed = survivor.keywords != target_keywords
                             || survivor.entities != target_entities
                             || survivor.importance != target_importance;
-                        let mut receipt = replacement.claim_and_archive_immutable_supersession(
+                        let outcome = replacement.claim_and_archive_immutable_supersession(
                             source_id,
                             target,
                             expected.as_ref(),
                             "consolidate_route1_merge",
                             ROUTE1_MERGE_POLICY_VERSION,
                         )?;
+                        let mut receipt = outcome.receipt;
                         if survivor_changed {
                             replacement.upsert(&survivor)?;
                         }
-                        replacement.finalize_supersession_receipt(
-                            &mut receipt,
-                            "consolidate_route1_target_fold_committed",
-                        )?;
+                        if outcome.is_applied() {
+                            replacement.finalize_supersession_receipt(
+                                &mut receipt,
+                                "consolidate_route1_target_fold_committed",
+                            )?;
+                        }
                         Ok((
                             receipt,
                             source_revision,

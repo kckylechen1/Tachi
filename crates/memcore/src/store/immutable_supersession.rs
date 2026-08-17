@@ -43,6 +43,7 @@ pub enum SupersessionErrorKind {
     SourceMissing,
     TargetMissing,
     SourceArchived,
+    SourceProtected,
     TargetIneligible,
     SourceDrift,
     TargetDrift,
@@ -60,6 +61,7 @@ impl fmt::Display for SupersessionErrorKind {
             Self::SourceMissing => "source_missing",
             Self::TargetMissing => "target_missing",
             Self::SourceArchived => "source_archived",
+            Self::SourceProtected => "source_protected",
             Self::TargetIneligible => "target_ineligible",
             Self::SourceDrift => "source_drift",
             Self::TargetDrift => "target_drift",
@@ -189,6 +191,28 @@ impl SupersessionReceipt {
     }
 }
 
+/// Transaction-local result of one semantic supersession claim attempt.
+///
+/// A replayed same-edge claim returns [`SupersessionCommitResult::PriorIdempotent`]
+/// here while carrying the original stored [`SupersessionReceipt`] unchanged.
+/// The durable receipt is write-once state; replay/no-op status belongs to the
+/// attempt envelope, not to a mutated clone of the stored receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupersessionClaimOutcome {
+    pub result: SupersessionCommitResult,
+    pub receipt: SupersessionReceipt,
+}
+
+impl SupersessionClaimOutcome {
+    pub fn is_applied(&self) -> bool {
+        self.result == SupersessionCommitResult::Applied
+    }
+
+    pub fn is_prior_idempotent(&self) -> bool {
+        self.result == SupersessionCommitResult::PriorIdempotent
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SupersessionClaimOptions<'a> {
     pub route: &'a str,
@@ -196,6 +220,7 @@ pub struct SupersessionClaimOptions<'a> {
     pub expected: Option<&'a SupersessionExpectedState>,
     pub require_materialized_target: bool,
     pub archive_source: bool,
+    pub enforce_lifecycle_source_protection: bool,
     pub partition_id: Option<String>,
 }
 
@@ -430,7 +455,7 @@ pub(crate) fn claim_supersession_edge_within_tx(
     source_id: &str,
     target_id: &str,
     options: SupersessionClaimOptions<'_>,
-) -> Result<SupersessionReceipt, SupersessionError> {
+) -> Result<SupersessionClaimOutcome, SupersessionError> {
     if source_id == target_id {
         return Err(SupersessionError::new(
             SupersessionErrorKind::SelfSupersession,
@@ -460,7 +485,7 @@ pub(crate) fn claim_supersession_edge_within_tx(
 
     if source_superseded_by_before.as_deref() == Some(target_id) {
         let id = receipt_id(options.route, options.policy_version, source_id, target_id);
-        let mut prior = load_supersession_receipt(tx, &id)
+        let prior = load_supersession_receipt(tx, &id)
             .map_err(|error| {
                 SupersessionError::new(
                     SupersessionErrorKind::PriorReceiptMissing,
@@ -477,9 +502,10 @@ pub(crate) fn claim_supersession_edge_within_tx(
                     "same edge exists without its durable receipt",
                 )
             })?;
-        prior.commit_result = SupersessionCommitResult::PriorIdempotent;
-        prior.dependent_write_disposition = "prior_result_no_dependent_writes".to_string();
-        return Ok(prior);
+        return Ok(SupersessionClaimOutcome {
+            result: SupersessionCommitResult::PriorIdempotent,
+            receipt: prior,
+        });
     }
 
     if let Some(expected) = options.expected {
@@ -503,6 +529,18 @@ pub(crate) fn claim_supersession_edge_within_tx(
             target_id,
             "source is archived",
         ));
+    }
+    if options.enforce_lifecycle_source_protection {
+        if let Some(reason) =
+            crate::store::memory_lifecycle::lifecycle_protection_reason(&source_before)
+        {
+            return Err(SupersessionError::new(
+                SupersessionErrorKind::SourceProtected,
+                source_id,
+                target_id,
+                format!("source is lifecycle-protected ({reason})"),
+            ));
+        }
     }
 
     if let Some(existing_target) = source_superseded_by_before.as_deref() {
@@ -658,7 +696,9 @@ pub(crate) fn claim_supersession_edge_within_tx(
         .unwrap_or((None, None, None));
     let target_revision_after = target_after.as_ref().map(|(entry, _)| entry.revision);
 
-    Ok(SupersessionReceipt {
+    Ok(SupersessionClaimOutcome {
+        result: SupersessionCommitResult::Applied,
+        receipt: SupersessionReceipt {
         receipt_id: receipt_id(options.route, options.policy_version, source_id, target_id),
         source_id: source_id.to_string(),
         target_id: target_id.to_string(),
@@ -682,6 +722,7 @@ pub(crate) fn claim_supersession_edge_within_tx(
         dependent_write_disposition: "pending_transaction".to_string(),
         commit_result: SupersessionCommitResult::Applied,
         durable: false,
+        },
     })
 }
 
@@ -789,12 +830,53 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
                 expected: None,
                 require_materialized_target: false,
                 archive_source: false,
+                enforce_lifecycle_source_protection: false,
                 partition_id: self.partition_id.clone(),
             },
         )?;
-        let result = receipt.commit_result;
+        let result = receipt.result;
         if result == SupersessionCommitResult::Applied {
-            self.pending_receipts.push(receipt);
+            self.pending_receipts.push(receipt.receipt);
+        }
+        Ok(result)
+    }
+
+    pub fn claim_checked_immutable_supersession(
+        &mut self,
+        source_id: &str,
+        target_id: &str,
+        expected: &SupersessionExpectedState,
+        route: &str,
+        policy_version: &str,
+        enforce_lifecycle_source_protection: bool,
+    ) -> Result<SupersessionCommitResult, MemoryError> {
+        let _authorization = db::authorize_reserved_reference_write(&self.reserved_reference_write)
+            .map_err(|error| {
+                SupersessionError::new(
+                    SupersessionErrorKind::SourceDrift,
+                    source_id,
+                    target_id,
+                    error.to_string(),
+                )
+            })?;
+        let outcome = claim_supersession_edge_within_tx(
+            &self.tx,
+            source_id,
+            target_id,
+            SupersessionClaimOptions {
+                route,
+                policy_version,
+                expected: Some(expected),
+                require_materialized_target: true,
+                archive_source: false,
+                enforce_lifecycle_source_protection,
+                partition_id: self.partition_id.clone(),
+            },
+        )
+        .map_err(MemoryError::from)?;
+        let result = outcome.result;
+        if outcome.is_applied() {
+            self.pending_receipts.push(outcome.receipt);
         }
         Ok(result)
     }
@@ -806,7 +888,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
         expected: Option<&SupersessionExpectedState>,
         route: &str,
         policy_version: &str,
-    ) -> Result<SupersessionReceipt, MemoryError> {
+    ) -> Result<SupersessionClaimOutcome, MemoryError> {
         let _authorization = db::authorize_reserved_reference_write(&self.reserved_reference_write)
             .map_err(|error| {
                 SupersessionError::new(
@@ -826,14 +908,45 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
                 expected,
                 require_materialized_target: true,
                 archive_source: true,
+                enforce_lifecycle_source_protection: true,
                 partition_id: self.partition_id.clone(),
             },
         )
         .map_err(MemoryError::from)?;
-        if receipt.commit_result == SupersessionCommitResult::Applied {
-            self.pending_receipts.push(receipt.clone());
+        if receipt.is_applied() {
+            self.pending_receipts.push(receipt.receipt.clone());
         }
         Ok(receipt)
+    }
+
+    /// Bind a caller-supplied source snapshot to this transaction's current row.
+    ///
+    /// Daily distill and other multi-source transactions use this before
+    /// treating an out-of-transaction source set as the basis for derived
+    /// projections. The source must still be materialized, active, and
+    /// unsuperseded, and every field in [`ExpectedMemoryState`] must still
+    /// match the originally selected row.
+    pub fn validate_active_unsuperseded_snapshot(
+        &self,
+        expected_entry: &MemoryEntry,
+        context: &str,
+    ) -> Result<(), MemoryError> {
+        let expected = ExpectedMemoryState::from_entry(expected_entry, None);
+        let Some((current, superseded_by)) =
+            read_entry_and_supersession(&self.tx, &expected_entry.id)?
+        else {
+            return Err(MemoryError::InvalidArg(format!(
+                "{context}: source snapshot missing for {}",
+                expected_entry.id
+            )));
+        };
+        if !expected.matches(&current, superseded_by.as_deref()) {
+            return Err(MemoryError::InvalidArg(format!(
+                "{context}: source snapshot drift for {}",
+                expected_entry.id
+            )));
+        }
+        Ok(())
     }
 
     /// Finalize and durably persist the exact receipt returned by a semantic

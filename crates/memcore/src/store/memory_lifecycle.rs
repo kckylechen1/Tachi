@@ -302,10 +302,10 @@ fn protection_reason_from_fields(
     if is_wiki {
         return Some("wiki_category");
     }
-    if path.starts_with("/wiki") {
+    if crate::namespace::path_in_namespace(path, "/wiki") {
         return Some("wiki_path");
     }
-    let normalized = retention_policy.map(|r| r.to_ascii_lowercase());
+    let normalized = retention_policy.map(|r| r.trim().to_ascii_lowercase());
     if matches!(
         normalized.as_deref(),
         Some("permanent" | "pinned" | "durable")
@@ -321,14 +321,18 @@ pub fn lifecycle_protection_reason(entry: &MemoryEntry) -> Option<&'static str> 
         &entry.path,
         entry.archived,
         &entry.tier,
-        entry.is_wiki(),
+        entry_is_wiki(
+            &entry.category,
+            entry.domain.as_deref(),
+            &entry.metadata,
+        ),
         entry.retention_policy.as_deref(),
     )
 }
 
 fn entry_is_wiki(category: &str, domain: Option<&str>, metadata: &serde_json::Value) -> bool {
     category.eq_ignore_ascii_case("wiki")
-        || domain == Some("wiki")
+        || domain.is_some_and(|domain| domain.eq_ignore_ascii_case("wiki"))
         || metadata
             .get("wiki")
             .and_then(|v| v.as_bool())
@@ -1056,6 +1060,7 @@ fn apply_lifecycle_proposal_once(
                     expected: Some(&expected),
                     require_materialized_target: true,
                     archive_source: true,
+                    enforce_lifecycle_source_protection: true,
                     partition_id: store
                         .admitted_partition
                         .as_ref()
@@ -1063,17 +1068,23 @@ fn apply_lifecycle_proposal_once(
                 },
             )
             .map_err(MemoryError::from)?;
-            finalize_supersession_receipt_within_tx(
-                &tx,
-                &mut receipt,
-                "lifecycle_apply_no_extra_target_write",
-            )?;
+            let attempt_result = receipt.result;
+            let mut receipt = receipt.receipt;
+            if attempt_result == crate::store::immutable_supersession::SupersessionCommitResult::Applied
+            {
+                finalize_supersession_receipt_within_tx(
+                    &tx,
+                    &mut receipt,
+                    "lifecycle_apply_no_extra_target_write",
+                )?;
+            }
             serde_json::json!({
                 "lifecycle_action": ACTION_SUPERSEDE,
                 "source_id": source_id,
                 "target_id": target,
                 "superseded": true,
                 "archived": true,
+                "supersession_attempt_result": attempt_result.as_str(),
                 "supersession_receipt": receipt,
             })
         }
@@ -1122,6 +1133,7 @@ fn apply_lifecycle_proposal_once(
                     expected: Some(&expected),
                     require_materialized_target: true,
                     archive_source: true,
+                    enforce_lifecycle_source_protection: true,
                     partition_id: store
                         .admitted_partition
                         .as_ref()
@@ -1129,6 +1141,8 @@ fn apply_lifecycle_proposal_once(
                 },
             )
             .map_err(MemoryError::from)?;
+            let attempt_result = receipt.result;
+            let mut receipt = receipt.receipt;
             // Do not rewrite an unchanged survivor: an unconditional upsert
             // bumps its revision, invalidating already-approved sibling star
             // proposals that share this target snapshot. When merged data did
@@ -1139,11 +1153,14 @@ fn apply_lifecycle_proposal_once(
             {
                 db::upsert_within_tx(&tx, &survivor, store.vec_available, None)?;
             }
-            finalize_supersession_receipt_within_tx(
-                &tx,
-                &mut receipt,
-                "lifecycle_apply_target_fold_committed",
-            )?;
+            if attempt_result == crate::store::immutable_supersession::SupersessionCommitResult::Applied
+            {
+                finalize_supersession_receipt_within_tx(
+                    &tx,
+                    &mut receipt,
+                    "lifecycle_apply_target_fold_committed",
+                )?;
+            }
             serde_json::json!({
                 "lifecycle_action": action,
                 "source_id": source_id,
@@ -1152,6 +1169,7 @@ fn apply_lifecycle_proposal_once(
                 "merged_entities": merged_entities,
                 "superseded": true,
                 "archived": true,
+                "supersession_attempt_result": attempt_result.as_str(),
                 "supersession_receipt": receipt,
             })
         }

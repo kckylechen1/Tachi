@@ -2,13 +2,18 @@ use crate::memory_search_ops::confidence_reinforce::{
     apply_confidence_reinforcement, confidence_increment, vector_similarity_between,
 };
 use crate::{DbScope, MemoryServer};
-use memcore::{LayerAvailability, MemoryEntry, MemoryStore};
+use memcore::{
+    LayerAvailability, MemoryEntry, MemoryStore, SupersessionCommitResult,
+    SupersessionExpectedState,
+};
 use serde_json::json;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 const REINFORCEMENT_MIN_SIMILARITY: f64 = 0.75;
 const REINFORCEMENT_DUPLICATE_SIMILARITY: f64 = 0.95;
+const AUTO_LINK_SUPERSESSION_ROUTE: &str = "auto_link_supersession_v1";
+const AUTO_LINK_SUPERSESSION_POLICY_VERSION: &str = "auto-link-semantic-supersession-v1";
 
 // ---------------------------------------------------------------------------
 // tachi#1097 PERF-T3 S1 — Auto-link phase-attribution receipt.
@@ -177,7 +182,7 @@ pub(crate) enum SearchOutcome {
 /// later update's outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EdgeWriteOutcome {
-    /// Edge insert landed AND the post-insert update (supersede/reinforce)
+    /// Edge insert landed AND the dependent update (supersede/reinforce)
     /// landed too.
     InsertAndPostWriteOk,
     /// Edge insert landed, post-insert update FAILED. The edge IS persisted
@@ -185,9 +190,9 @@ pub(crate) enum EdgeWriteOutcome {
     /// but `post_write_failures` also increments so the partial write is
     /// visible instead of erased.
     InsertOkPostWriteFailed,
-    /// Edge insert itself failed (ontology rejection, DB error). Nothing
-    /// persisted. Neither `edges_written` nor `post_write_failures` moves.
-    InsertFailed,
+    /// No edge landed. This covers an insert/store error and a semantic
+    /// supersession replay that correctly performed no new mutation.
+    NoWrite,
 }
 
 impl AutoLinkReceipt {
@@ -218,7 +223,7 @@ impl AutoLinkReceipt {
                 self.edges_written += 1;
                 self.post_write_failures += 1;
             }
-            EdgeWriteOutcome::InsertFailed => {}
+            EdgeWriteOutcome::NoWrite => {}
         }
     }
 }
@@ -775,43 +780,75 @@ pub(crate) fn run_auto_linking(
                     valid_to: None,
                 };
                 // #1097 r1 codex review ③-B: classify the write outcome inside
-                // the closure so the receipt can distinguish "insert landed"
-                // (edge persisted under its own savepoint at db/graph.rs:144,
-                // RELEASEd at :158) from "full success". The closure preserves
-                // the pre-receipt `Result<(), String>` error propagation; the
-                // side channel is sampled bookkeeping only. An outer Err before
-                // the closure runs leaves the default `InsertFailed` outcome.
-                let mut edge_outcome = EdgeWriteOutcome::InsertFailed;
+                // the closure so the receipt can distinguish "edge landed" from
+                // "full success". Supersede writes no longer use an edge
+                // savepoint followed by a separate lifecycle UPDATE: edge,
+                // checked immutable claim, lifecycle close, and durable
+                // supersession receipt share one transaction. A failure at any
+                // point therefore lands no edge, and a same-edge semantic replay
+                // is a typed no-write result.
+                let mut edge_outcome = EdgeWriteOutcome::NoWrite;
                 let mut superseded_rows: usize = 0;
                 let save_edge_action = |store: &mut MemoryStore| -> Result<(), String> {
-                    // tachi#1646: auto-link `reinforces`/`supersedes` edges
-                    // are a vector-similarity heuristic Tachi computed
-                    // itself.
-                    store
-                        .add_edge_with_provenance(
-                            &edge,
-                            &memcore::db::EdgeProvenance {
-                                authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
-                                ..Default::default()
-                            },
-                        )
-                        .map_err(|e| e.to_string())?;
-                    if sample {
-                        edge_outcome = EdgeWriteOutcome::InsertOkPostWriteFailed;
-                    }
                     if supersedes {
-                        superseded_rows = store
-                            .mark_superseded_closing_validity(&result.entry.id, &entry.id, &now)
+                        let expected = SupersessionExpectedState::active_unsuperseded(
+                            &result.entry,
+                            Some(entry),
+                        );
+                        let claim_result = store
+                            .with_immutable_supersession_transaction(|replacement| {
+                                let claim_result = replacement
+                                    .claim_checked_immutable_supersession(
+                                        &result.entry.id,
+                                        &entry.id,
+                                        &expected,
+                                        AUTO_LINK_SUPERSESSION_ROUTE,
+                                        AUTO_LINK_SUPERSESSION_POLICY_VERSION,
+                                        true,
+                                    )?;
+                                if claim_result == SupersessionCommitResult::Applied {
+                                    // tachi#1646: auto-link `supersedes` edges
+                                    // are a vector-similarity heuristic Tachi
+                                    // computed itself; they now commit only
+                                    // with the checked semantic claim.
+                                    replacement.add_edge_with_provenance(
+                                        &edge,
+                                        &memcore::db::EdgeProvenance {
+                                            authority: Some(
+                                                memcore::db::EdgeAuthority::DerivedHeuristic,
+                                            ),
+                                            ..Default::default()
+                                        },
+                                    )?;
+                                }
+                                Ok(claim_result)
+                            })
                             .map_err(|e| e.to_string())?;
+                        if claim_result == SupersessionCommitResult::Applied {
+                            superseded_rows = 1;
+                            edge_outcome = EdgeWriteOutcome::InsertAndPostWriteOk;
+                        }
                     } else if reinforces {
+                        // tachi#1646: auto-link `reinforces` edges are a
+                        // vector-similarity heuristic Tachi computed itself.
+                        store
+                            .add_edge_with_provenance(
+                                &edge,
+                                &memcore::db::EdgeProvenance {
+                                    authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
+                                    ..Default::default()
+                                },
+                            )
+                            .map_err(|e| e.to_string())?;
+                        if sample {
+                            edge_outcome = EdgeWriteOutcome::InsertOkPostWriteFailed;
+                        }
                         apply_confidence_reinforcement(
                             store,
                             &result.entry.id,
                             confidence_increment(weight),
                             &now,
                         )?;
-                    }
-                    if sample {
                         edge_outcome = EdgeWriteOutcome::InsertAndPostWriteOk;
                     }
                     Ok(())
@@ -828,10 +865,9 @@ pub(crate) fn run_auto_linking(
                 if let (Some(receipt), Some(write_timer)) = (receipt.as_mut(), write_timer) {
                     receipt.write_elapsed += write_timer.elapsed();
                 }
-                // Outer Err = store resolution failed (closure never ran,
-                // nothing persisted); fold to `InsertFailed` so the
-                // attempt is counted but neither `edges_written` nor
-                // `post_write_failures` moves.
+                // Outer Err = store resolution failed or the atomic write
+                // refused. Either way no edge landed, so the attempt is counted
+                // but neither `edges_written` nor `post_write_failures` moves.
                 if let Some(receipt) = receipt.as_mut() {
                     receipt.apply_edge_outcome(edge_outcome);
                 }
