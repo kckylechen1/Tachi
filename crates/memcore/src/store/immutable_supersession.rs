@@ -1191,7 +1191,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
     /// and must perform no dependent write.
     pub fn finalize_supersession_receipt(
         &mut self,
-        receipt: &SupersessionReceipt,
+        receipt: &mut SupersessionReceipt,
         dependent_write_disposition: &str,
     ) -> Result<(), MemoryError> {
         debug_assert_eq!(receipt.commit_result, SupersessionCommitResult::Applied);
@@ -1218,7 +1218,7 @@ impl<'tx> ImmutableSupersessionTransaction<'tx> {
             &mut self.pending_receipts[pending_index],
             dependent_write_disposition,
         )?;
-        self.pending_receipts.remove(pending_index);
+        *receipt = self.pending_receipts.remove(pending_index);
         Ok(())
     }
 
@@ -2609,9 +2609,11 @@ mod tests {
                     &source.id, &target.id, None, ROUTE, POLICY,
                 )?;
                 assert_eq!(outcome.result, SupersessionCommitResult::Applied);
-                let receipt = outcome.receipt;
-                operation
-                    .finalize_supersession_receipt(&receipt, "test_semantic_replay_committed")?;
+                let mut receipt = outcome.receipt;
+                operation.finalize_supersession_receipt(
+                    &mut receipt,
+                    "test_semantic_replay_committed",
+                )?;
                 Ok(receipt)
             })
             .expect("first semantic claim");
@@ -2664,7 +2666,7 @@ mod tests {
                 )?;
                 let mut forged = outcome.receipt;
                 forged.route = "caller-forged-route".to_string();
-                operation.finalize_supersession_receipt(&forged, "caller-forged-disposition")
+                operation.finalize_supersession_receipt(&mut forged, "caller-forged-disposition")
             })
             .expect_err("caller-mutated receipt must not finalize");
         assert!(
