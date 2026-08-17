@@ -13,31 +13,31 @@
         "max_visible_tools": 17,
         "max_total_input_schema_bytes": 60246,
         "max_total_tool_definition_bytes": 70184,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (standard: 17 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       },
       "delegate": {
         "max_visible_tools": 12,
         "max_total_input_schema_bytes": 61857,
         "max_total_tool_definition_bytes": 67623,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (delegate: 12 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       },
       "coordinate": {
-        "max_visible_tools": 39,
-        "max_total_input_schema_bytes": 126159,
-        "max_total_tool_definition_bytes": 144473,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "max_visible_tools": 36,
+        "max_total_input_schema_bytes": 124247,
+        "max_total_tool_definition_bytes": 141632,
+        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (coordinate: 36 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       },
       "operate": {
-        "max_visible_tools": 51,
-        "max_total_input_schema_bytes": 121728,
-        "max_total_tool_definition_bytes": 141174,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "max_visible_tools": 46,
+        "max_total_input_schema_bytes": 118783,
+        "max_total_tool_definition_bytes": 136599,
+        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (operate: 46 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       },
       "admin": {
-        "max_visible_tools": 103,
-        "max_total_input_schema_bytes": 183812,
-        "max_total_tool_definition_bytes": 221467,
-        "rationale": "Exact live observed #1751 A2A plus sticky-retirement census for admin; any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
+        "max_visible_tools": 98,
+        "max_total_input_schema_bytes": 180867,
+        "max_total_tool_definition_bytes": 216892,
+        "rationale": "Exact live observed #1690 C3 slice A after retiring the recommend_* family and the run_skill/prepare_capability_bundle backcompat routes (admin: 98 tools); any regrowth requires explicit adjudication.; #1733 trusted-local ACP attachment fields (+2120 schema bytes per profile) pinned after the 2026-08-16 merge batch; any further regrowth requires explicit adjudication."
       }
     },
     "surfaces": {
@@ -201,9 +201,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 183812,
-        "total_tool_definition_bytes": 221467,
-        "visible_tool_count": 103,
+        "total_input_schema_bytes": 180867,
+        "total_tool_definition_bytes": 216892,
+        "visible_tool_count": 98,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -236,13 +236,8 @@
           "memory_stats",
           "peer_query",
           "post_card",
-          "prepare_capability_bundle",
           "recall_context",
-          "recommend_capability",
-          "recommend_skill",
-          "recommend_toolchain",
           "remember",
-          "run_skill",
           "runtime_info",
           "sandbox_check",
           "sandbox_exec_audit",
@@ -311,9 +306,9 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 126159,
-        "total_tool_definition_bytes": 144473,
-        "visible_tool_count": 39,
+        "total_input_schema_bytes": 124247,
+        "total_tool_definition_bytes": 141632,
+        "visible_tool_count": 36,
         "visible_tools": [
           "extract_facts",
           "hub_discover",
@@ -321,9 +316,6 @@
           "list_memories",
           "memory_stats",
           "peer_query",
-          "recommend_capability",
-          "recommend_skill",
-          "recommend_toolchain",
           "runtime_info",
           "tachi_a2a",
           "tachi_agent_eval",
@@ -376,9 +368,9 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 121728,
-        "total_tool_definition_bytes": 141174,
-        "visible_tool_count": 51,
+        "total_input_schema_bytes": 118783,
+        "total_tool_definition_bytes": 136599,
+        "visible_tool_count": 46,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -395,12 +387,7 @@
           "list_memories",
           "memory_stats",
           "peer_query",
-          "prepare_capability_bundle",
           "recall_context",
-          "recommend_capability",
-          "recommend_skill",
-          "recommend_toolchain",
-          "run_skill",
           "runtime_info",
           "section_build",
           "sync_memories",
@@ -459,7 +446,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 103,
+      "tool_count": 98,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -492,13 +479,8 @@
         "memory_stats",
         "peer_query",
         "post_card",
-        "prepare_capability_bundle",
         "recall_context",
-        "recommend_capability",
-        "recommend_skill",
-        "recommend_toolchain",
         "remember",
-        "run_skill",
         "runtime_info",
         "sandbox_check",
         "sandbox_exec_audit",
