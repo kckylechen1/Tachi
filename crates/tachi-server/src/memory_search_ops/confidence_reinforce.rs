@@ -1,5 +1,5 @@
 use crate::memory_search_ops::auto_link::{should_reinforce, should_supersede};
-use memcore::{MemoryEntry, MemoryStore};
+use memcore::{ExpectedMemoryState, MemoryEntry, MemoryStore};
 use serde_json::json;
 use std::collections::HashSet;
 
@@ -7,6 +7,7 @@ pub(crate) fn confidence_increment(similarity: f64) -> f64 {
     (0.1 * similarity).clamp(0.0, 0.1)
 }
 
+#[cfg(test)]
 pub(crate) fn apply_confidence_reinforcement(
     store: &mut MemoryStore,
     reinforced_id: &str,
@@ -31,13 +32,19 @@ pub(crate) fn apply_confidence_reinforcement_links(
     store: &mut MemoryStore,
     entry: &MemoryEntry,
 ) -> Result<usize, String> {
+    let Some(entry) = store
+        .get(&entry.id)
+        .map_err(|error| format!("read committed reinforcement source: {error}"))?
+    else {
+        return Ok(0);
+    };
     if entry.entities.is_empty() || entry.vector.is_none() {
         return Ok(0);
     }
 
     let mut reinforced = 0usize;
     let mut seen_targets = HashSet::<String>::new();
-    for candidate in collect_reinforcement_candidates(store, entry)? {
+    for candidate in collect_reinforcement_candidates(store, &entry)? {
         if !seen_targets.insert(candidate.id.clone()) {
             continue;
         }
@@ -62,11 +69,11 @@ pub(crate) fn apply_confidence_reinforcement_links(
                 )
             })
             .fold(0.0_f64, f64::max);
-        let supersedes = should_supersede(entry, &candidate, shared.len(), symbolic_score);
-        let Some(similarity) = vector_similarity_between(entry, &candidate) else {
+        let supersedes = should_supersede(&entry, &candidate, shared.len(), symbolic_score);
+        let Some(similarity) = vector_similarity_between(&entry, &candidate) else {
             continue;
         };
-        if !should_reinforce(entry, &candidate, shared.len(), similarity, supersedes) {
+        if !should_reinforce(&entry, &candidate, shared.len(), similarity, supersedes) {
             continue;
         }
 
@@ -89,17 +96,28 @@ pub(crate) fn apply_confidence_reinforcement_links(
         };
         // tachi#1646: vector-similarity `reinforces` edges are a heuristic
         // Tachi computed itself.
-        store
-            .add_edge_with_provenance(
+        let source_superseded_by = store
+            .supersession_target(&entry.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("reinforcement source disappeared: {}", entry.id))?;
+        let target_superseded_by = store
+            .supersession_target(&candidate.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("reinforcement target disappeared: {}", candidate.id))?;
+        let committed = store
+            .commit_confidence_reinforcement(
                 &edge,
                 &memcore::db::EdgeProvenance {
                     authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
                     ..Default::default()
                 },
+                increment,
+                &now,
+                &ExpectedMemoryState::from_entry(&entry, source_superseded_by.as_deref()),
+                &ExpectedMemoryState::from_entry(&candidate, target_superseded_by.as_deref()),
             )
-            .map_err(|e| format!("{e}"))?;
-        apply_confidence_reinforcement(store, &candidate.id, increment, &now)?;
-        reinforced += 1;
+            .map_err(|error| error.to_string())?;
+        reinforced += usize::from(committed);
     }
 
     Ok(reinforced)

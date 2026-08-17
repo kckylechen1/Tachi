@@ -704,7 +704,8 @@ fn verify_stamped_identity(
     store: &MemoryStore,
     expected: &AdmittedPartition,
 ) -> Result<(), MemoryError> {
-    let raw = db::store_identity::read_stamp(&store.conn, STORE_PRIVATE_PARTITION_KEY)?
+    let raw = db::store_identity::read_stamp(&store.conn, STORE_PRIVATE_PARTITION_KEY)
+        .map_err(|_| MemoryError::PrivatePartitionRefused)?
         .ok_or(MemoryError::PrivatePartitionRefused)?;
     // `read_stamp` returns the inner `value` string; we stored JSON as value.
     let stamped: AdmittedPartition =
@@ -988,6 +989,37 @@ mod tests {
                 .unwrap();
         }
         provider
+    }
+
+    #[test]
+    fn malformed_private_stamp_is_uniformly_refused() {
+        let store = MemoryStore::open_in_memory().expect("open test store");
+        let _authorization =
+            db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("enter typed identity-write scope");
+        store
+            .connection()
+            .execute(
+                "INSERT INTO hard_state \
+                 (namespace, key, value_json, version, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 1, ?4, ?4)",
+                rusqlite::params![
+                    db::store_profile::STORE_IDENTITY_NAMESPACE,
+                    STORE_PRIVATE_PARTITION_KEY,
+                    "not-json",
+                    db::now_utc_iso(),
+                ],
+            )
+            .expect("seed malformed private stamp");
+
+        let error = verify_stamped_identity(
+            &store,
+            &AdmittedPartition {
+                partition_id: "expected-partition".to_string(),
+            },
+        )
+        .expect_err("malformed private stamp must fail closed");
+        assert!(matches!(error, MemoryError::PrivatePartitionRefused));
     }
 
     fn entry(id: &str, text: &str) -> MemoryEntry {

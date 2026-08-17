@@ -225,7 +225,7 @@ pub enum ConfirmedContradictionOutcome {
 /// verdict about a row that no longer exists must not write edges. An
 /// archived row is likewise a mismatch whenever the snapshot was taken before
 /// archival, because `archived` is one of the compared fields.
-fn row_matches_expected_state(
+pub(crate) fn row_matches_expected_state(
     tx: &Transaction<'_>,
     row_id: &str,
     expected: &ExpectedMemoryState,

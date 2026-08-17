@@ -1,9 +1,9 @@
 use crate::memory_search_ops::confidence_reinforce::{
-    apply_confidence_reinforcement, confidence_increment, vector_similarity_between,
+    confidence_increment, vector_similarity_between,
 };
 use crate::{DbScope, MemoryServer};
 use memcore::{
-    LayerAvailability, MemoryEntry, MemoryStore, SupersessionCommitResult,
+    ExpectedMemoryState, LayerAvailability, MemoryEntry, MemoryStore, SupersessionCommitResult,
     SupersessionExpectedState,
 };
 use serde_json::json;
@@ -189,6 +189,7 @@ pub(crate) enum EdgeWriteOutcome {
     /// (its savepoint released), so `edges_written` must still count it —
     /// but `post_write_failures` also increments so the partial write is
     /// visible instead of erased.
+    #[cfg(test)]
     InsertOkPostWriteFailed,
     /// No edge landed. This covers an insert/store error and a semantic
     /// supersession replay that correctly performed no new mutation.
@@ -219,6 +220,7 @@ impl AutoLinkReceipt {
         self.edges_attempted += 1;
         match outcome {
             EdgeWriteOutcome::InsertAndPostWriteOk => self.edges_written += 1,
+            #[cfg(test)]
             EdgeWriteOutcome::InsertOkPostWriteFailed => {
                 self.edges_written += 1;
                 self.post_write_failures += 1;
@@ -805,20 +807,34 @@ pub(crate) fn run_auto_linking(
                         .get(&entry.id)
                         .map_err(|error| error.to_string())?
                         .ok_or_else(|| format!("auto-link target disappeared: {}", entry.id))?;
-                    let committed_shared =
-                        unique_shared_entities(&committed_target.entities, &result.entry.entities);
+                    let committed_source = store
+                        .get(&result.entry.id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| {
+                            format!("auto-link source disappeared: {}", result.entry.id)
+                        })?;
+                    let committed_shared = unique_shared_entities(
+                        &committed_target.entities,
+                        &committed_source.entities,
+                    );
                     let committed_similarity =
-                        vector_similarity_between(&committed_target, &result.entry);
+                        vector_similarity_between(&committed_target, &committed_source);
+                    let committed_symbolic = memcore::scorer::symbolic_score(
+                        &query,
+                        &committed_source.text,
+                        &committed_source.keywords,
+                        &committed_source.entities,
+                    );
                     let committed_supersedes = should_supersede(
                         &committed_target,
-                        &result.entry,
+                        &committed_source,
                         committed_shared.len(),
-                        result.score.symbolic,
+                        committed_symbolic,
                     );
                     let committed_reinforces = committed_similarity.is_some_and(|similarity| {
                         should_reinforce(
                             &committed_target,
-                            &result.entry,
+                            &committed_source,
                             committed_shared.len(),
                             similarity,
                             committed_supersedes,
@@ -839,7 +855,7 @@ pub(crate) fn run_auto_linking(
                     };
                     let committed_edge = memcore::MemoryEdge {
                         source_id: committed_target.id.clone(),
-                        target_id: result.entry.id.clone(),
+                        target_id: committed_source.id.clone(),
                         relation: relation.to_string(),
                         weight,
                         metadata: json!({
@@ -862,7 +878,7 @@ pub(crate) fn run_auto_linking(
                         let claim_result = commit_auto_link_supersession(
                             store,
                             &committed_edge,
-                            &result.entry,
+                            &committed_source,
                             &committed_target,
                         )?;
                         if claim_result == SupersessionCommitResult::Applied {
@@ -872,25 +888,40 @@ pub(crate) fn run_auto_linking(
                     } else {
                         // tachi#1646: auto-link `reinforces` edges are a
                         // vector-similarity heuristic Tachi computed itself.
-                        store
-                            .add_edge_with_provenance(
+                        let source_superseded_by = store
+                            .supersession_target(&committed_target.id)
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| {
+                                format!("auto-link target disappeared: {}", committed_target.id)
+                            })?;
+                        let target_superseded_by = store
+                            .supersession_target(&committed_source.id)
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| {
+                                format!("auto-link source disappeared: {}", committed_source.id)
+                            })?;
+                        let committed = store
+                            .commit_confidence_reinforcement(
                                 &committed_edge,
                                 &memcore::db::EdgeProvenance {
                                     authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
                                     ..Default::default()
                                 },
+                                confidence_increment(weight),
+                                &now,
+                                &ExpectedMemoryState::from_entry(
+                                    &committed_target,
+                                    source_superseded_by.as_deref(),
+                                ),
+                                &ExpectedMemoryState::from_entry(
+                                    &committed_source,
+                                    target_superseded_by.as_deref(),
+                                ),
                             )
-                            .map_err(|e| e.to_string())?;
-                        if sample {
-                            edge_outcome = EdgeWriteOutcome::InsertOkPostWriteFailed;
+                            .map_err(|error| error.to_string())?;
+                        if committed {
+                            edge_outcome = EdgeWriteOutcome::InsertAndPostWriteOk;
                         }
-                        apply_confidence_reinforcement(
-                            store,
-                            &result.entry.id,
-                            confidence_increment(weight),
-                            &now,
-                        )?;
-                        edge_outcome = EdgeWriteOutcome::InsertAndPostWriteOk;
                     }
                     Ok(())
                 };

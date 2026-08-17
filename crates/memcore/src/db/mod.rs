@@ -118,7 +118,6 @@ pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
     CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
 };
-pub(crate) use graph::persist_confirmed_contradiction_within_tx;
 pub use graph::{
     add_component_governance_edge, add_component_governance_edge_with_provenance, add_edge,
     add_edge_with_provenance, avg_importance, close_related_to_fog, count_active_observations,
@@ -127,6 +126,7 @@ pub use graph::{
     list_observations_for_edge, remove_edge, ConfirmedContradictionOutcome, EdgeAuthority,
     EdgeObservation, EdgeProvenance,
 };
+pub(crate) use graph::{persist_confirmed_contradiction_within_tx, row_matches_expected_state};
 #[cfg(feature = "admin")]
 pub use harness_session_attachments::{
     attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
