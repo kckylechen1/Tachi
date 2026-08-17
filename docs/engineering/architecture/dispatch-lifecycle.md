@@ -95,6 +95,29 @@ This section is the owning section for the review-diversity gate itself; the 202
 
 **Helper-agent routing (owner-ratified 2026-07-20):** a session that needs helper agents spawns them through its own harness's native subagent mechanism. Tachi task dispatch is a leader-level cross-carrier lane mechanism, not a substitute subagent pool — a session that keeps routing helper work through Tachi dispatch instead of its own agents is mis-routing, even when each individual dispatch succeeds. This is a routing rule, not a ban on helpers: different-model independent review still applies to whatever helpers a session spawns.
 
+### 2.5 Candidate freeze and maintainability budget
+
+The repository pays expensive acceptance ceremony once per stable candidate, not once per repair attempt. This is a scheduling rule; it never narrows the command set owed by `AGENTS.md` or the packet.
+
+1. **Implement and discriminate.** While code, conflict resolution, or ancestry is still changing, run the smallest behavioral tests that distinguish the contract plus proportional fmt/check/clippy coverage. A knowingly provisional head does not receive the full workspace gate merely to produce a receipt that the next edit will invalidate.
+2. **Integrate before review.** Resolve the intended base, stacked ancestry, conflict decisions, generated artifacts, and frozen fixtures before declaring a candidate. Integration after review changes the candidate and therefore invalidates the verdict.
+3. **Freeze and review.** Bind a fresh, independent, different-model review to the exact candidate head. Apply accepted findings through a separate writer and repeat review until the candidate is stable. A review is evidence about one object, not about a branch name.
+4. **Run canonical acceptance once.** Run and quote every required `ci.yml` Rust `run:` command on that reviewed exact head. If a failure requires a candidate-changing repair, both the prior review and the gate receipt are stale: repair, re-review, then rerun the canonical gates.
+
+Every non-trivial packet and PR also carries a maintainability budget. The following are review triggers, not automatic rejections:
+
+- **More than 20 changed files:** classify the count as production, tests/goldens, generated/migrations, and deletions, then explain why one bounded contract cannot be split into independently reviewable leaves.
+- **More than 2,000 changed production lines:** split by default. Keeping one delivery requires evidence that splitting would break an atomic migration, wire/security boundary, or frozen behavior proof.
+- **More than 5 new public types:** perform a vocabulary review. Name the production consumers and reject parallel representations of an existing concept.
+- **A new trait, wrapper, facade, or registry:** require at least two real production consumers, or one named external/security boundary whose isolation is itself the contract. Tests, fixtures, and hypothetical future callers do not count as production consumers.
+- **A new proof artifact:** bind it to a production decision branch, public or external wire contract, or concrete mutant that the old suite admits. Extend the canonical census/golden where one exists instead of creating a parallel list that can drift.
+
+When the owner withdraws a product direction, the next change starts with a production-caller census. A zero-consumer experimental surface is deleted by default; Git and the PR retain its history. Compatibility or migration exceptions name the still-live boundary and its removal condition.
+
+Source comments explain the current invariant, threat model, surprising mechanism, or canonical specification. Reviewer identities, review rounds, finding labels, commit anecdotes, and superseded implementation history belong in the PR or an owning design/decision record. Migration-compatibility comments may retain dated history only where the date or former shape is required to operate or remove the compatibility path safely.
+
+A large file is not split by inventing another architecture layer. Once a contract file exceeds 1,500 lines or 20 public types, new invariants go into physical submodules grouped by the existing vocabulary; the move preserves behavior and public paths unless a separate leaf explicitly changes them.
+
 ---
 
 ## 3. 怎么回 (Return)
