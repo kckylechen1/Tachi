@@ -835,21 +835,36 @@ pub(crate) fn run_auto_linking(
                             .get(&entry.id)
                             .map_err(|error| error.to_string())?
                             .ok_or_else(|| format!("auto-link target disappeared: {}", entry.id))?;
+                        let committed_shared = unique_shared_entities(
+                            &committed_target.entities,
+                            &result.entry.entities,
+                        );
+                        let committed_similarity =
+                            vector_similarity_between(&committed_target, &result.entry);
                         if !should_supersede(
                             &committed_target,
                             &result.entry,
-                            shared.len(),
+                            committed_shared.len(),
                             result.score.symbolic,
                         ) {
                             return Ok(());
                         }
+                        let committed_edge = memcore::MemoryEdge {
+                            metadata: json!({
+                                "auto_link": true,
+                                "shared_entities": committed_shared,
+                                "similarity": committed_similarity,
+                                "confidence_increment": serde_json::Value::Null,
+                            }),
+                            ..edge.clone()
+                        };
                         // tachi#1646: auto-link `supersedes` edges are a
                         // vector-similarity heuristic Tachi computed itself;
                         // the edge now commits only with the checked semantic
                         // claim in one transaction.
                         let claim_result = commit_auto_link_supersession(
                             store,
-                            &edge,
+                            &committed_edge,
                             &result.entry,
                             &committed_target,
                         )?;
@@ -1605,6 +1620,84 @@ mod tests {
         // caller-controllable, so it is still never emitted.
         assert_eq!(receipt.entry_id, REDACTED_ENTRY_ID);
         assert_eq!(receipt.entity_count, 2);
+    }
+
+    #[test]
+    fn auto_link_recomputes_overlap_after_same_id_target_update() {
+        let server = crate::tests::make_server();
+        let path = format!("/auto-link-interleave-{}", uuid::Uuid::new_v4());
+        let old_id = format!("auto-link-interleave-old-{}", uuid::Uuid::new_v4());
+        let mut old = test_entry(&old_id, "older shared-entity observation");
+        old.entities = vec!["stale-a".to_string(), "stale-b".to_string()];
+        old.path = path.clone();
+        old.timestamp = "2026-01-01T00:00:00Z".to_string();
+        server
+            .with_global_store(|store| store.upsert(&old).map_err(|error| error.to_string()))
+            .expect("seed old candidate");
+
+        let fresh_id = format!("auto-link-interleave-new-{}", uuid::Uuid::new_v4());
+        let mut stale_fresh = test_entry(&fresh_id, "newer shared-entity observation");
+        stale_fresh.entities = old.entities.clone();
+        stale_fresh.path = path;
+        stale_fresh.timestamp = "2026-01-02T00:00:00Z".to_string();
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&stale_fresh)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("seed initial fresh target");
+
+        // Simulate the async task having captured `stale_fresh` before a
+        // same-ID patch commits a disjoint entity set.
+        let mut committed_fresh = stale_fresh.clone();
+        committed_fresh.entities = vec!["current-x".to_string(), "current-y".to_string()];
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&committed_fresh)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("commit intervening same-id target update");
+
+        let receipt = run_auto_linking(
+            &server,
+            &stale_fresh,
+            &stale_fresh.entities,
+            DbScope::Global,
+            None,
+            true,
+        )
+        .expect("sampled auto-link receipt");
+        assert!(
+            receipt.edges_attempted >= 1,
+            "stale snapshot must reach the write discriminator"
+        );
+        assert_eq!(receipt.edges_written, 0);
+        server
+            .with_global_store(|store| {
+                let superseded_by = store
+                    .connection()
+                    .query_row(
+                        "SELECT superseded_by FROM memories WHERE id = ?1",
+                        [&old_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let stale_edges: i64 = store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memory_edges
+                         WHERE source_id = ?1 AND target_id = ?2 AND relation = 'supersedes'",
+                        rusqlite::params![&fresh_id, &old_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(superseded_by, None);
+                assert_eq!(stale_edges, 0);
+                Ok(())
+            })
+            .expect("verify stale overlap left no lifecycle or edge write");
     }
 
     #[test]
