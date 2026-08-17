@@ -7,18 +7,6 @@ pub(crate) fn confidence_increment(similarity: f64) -> f64 {
     (0.1 * similarity).clamp(0.0, 0.1)
 }
 
-#[cfg(test)]
-pub(crate) fn apply_confidence_reinforcement(
-    store: &mut MemoryStore,
-    reinforced_id: &str,
-    increment: f64,
-    reinforced_at: &str,
-) -> Result<(), String> {
-    store
-        .reinforce_confidence(reinforced_id, increment, reinforced_at)
-        .map_err(|e| format!("update confidence reinforcement: {e}"))
-}
-
 pub(crate) fn collect_reinforcement_candidates(
     store: &MemoryStore,
     entry: &MemoryEntry,
@@ -172,50 +160,6 @@ mod tests {
             query_diversity: 0,
             tier: "raw".to_string(),
         }
-    }
-
-    #[test]
-    fn confidence_reinforcement_updates_metadata_confidence() {
-        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
-        let mut old_entry = test_entry("old", "durable supported fact");
-        old_entry.metadata = json!({ "confidence": 0.70 });
-        store.upsert(&old_entry).unwrap();
-
-        apply_confidence_reinforcement(&mut store, "old", 0.08, "2026-01-01T00:00:00Z").unwrap();
-
-        let updated = store.get("old").unwrap().unwrap();
-        let confidence = updated
-            .metadata
-            .get("confidence")
-            .and_then(|value| value.as_f64())
-            .unwrap();
-        assert!((confidence - 0.78).abs() < 1e-9, "confidence={confidence}");
-        assert_eq!(
-            updated
-                .metadata
-                .get("confidence_reinforced_at")
-                .and_then(|value| value.as_str()),
-            Some("2026-01-01T00:00:00Z")
-        );
-    }
-
-    #[test]
-    fn confidence_reinforcement_falls_back_to_importance() {
-        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
-        let mut old_entry = test_entry("old", "durable supported fact");
-        old_entry.importance = 0.60;
-        old_entry.metadata = json!({});
-        store.upsert(&old_entry).unwrap();
-
-        apply_confidence_reinforcement(&mut store, "old", 0.10, "2026-01-01T00:00:00Z").unwrap();
-
-        let updated = store.get("old").unwrap().unwrap();
-        let confidence = updated
-            .metadata
-            .get("confidence")
-            .and_then(|value| value.as_f64())
-            .unwrap();
-        assert!((confidence - 0.70).abs() < 1e-9, "confidence={confidence}");
     }
 
     #[test]

@@ -220,40 +220,6 @@ impl MemoryStore {
         Ok(affected)
     }
 
-    /// Bump `$.confidence` in metadata by `increment` (capped at 1.0), falling
-    /// back to `importance` when no confidence has been recorded yet.
-    pub fn reinforce_confidence(
-        &self,
-        id: &str,
-        increment: f64,
-        reinforced_at: &str,
-    ) -> Result<(), MemoryError> {
-        let _authorization =
-            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        db::refuse_retired_sticky_row_within_tx(&tx, id, "confidence-reinforced")?;
-        tx.execute(
-            r#"UPDATE memories
-               SET metadata = json_set(
-                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                   '$.confidence',
-                   min(
-                       1.0,
-                       coalesce(
-                           CAST(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.confidence') AS REAL),
-                           importance
-                       ) + ?1
-                   ),
-                   '$.confidence_reinforced_at', ?2
-               ),
-               updated_at = ?2
-               WHERE id = ?3"#,
-            rusqlite::params![increment, reinforced_at, id],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Load active memories that share at least one entity with `entities`,
     /// newest first per entity batch, excluding `exclude_id`.
     pub fn entity_overlap_candidates(
@@ -501,19 +467,53 @@ mod tests {
     #[test]
     fn reinforce_confidence_increments_and_falls_back_to_importance() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let source_with_confidence = test_entry("source-with-confidence", vec![]);
+        let source_without_confidence = test_entry("source-without-confidence", vec![]);
         let mut with_confidence = test_entry("with-confidence", vec![]);
         with_confidence.metadata = json!({ "confidence": 0.70 });
+        store
+            .upsert(&source_with_confidence)
+            .expect("seed first source");
         store.upsert(&with_confidence).expect("seed confidence");
         let mut without_confidence = test_entry("without-confidence", vec![]);
         without_confidence.importance = 0.60;
+        store
+            .upsert(&source_without_confidence)
+            .expect("seed second source");
         store.upsert(&without_confidence).expect("seed importance");
 
-        store
-            .reinforce_confidence("with-confidence", 0.08, "2026-07-05T01:00:00Z")
-            .expect("reinforce existing confidence");
-        store
-            .reinforce_confidence("without-confidence", 0.10, "2026-07-05T01:00:00Z")
-            .expect("reinforce importance fallback");
+        for (source_id, target_id, increment) in [
+            ("source-with-confidence", "with-confidence", 0.08),
+            ("source-without-confidence", "without-confidence", 0.10),
+        ] {
+            let source = store
+                .get(source_id)
+                .expect("read source")
+                .expect("source exists");
+            let target = store
+                .get(target_id)
+                .expect("read target")
+                .expect("target exists");
+            let edge = crate::MemoryEdge {
+                source_id: source.id.clone(),
+                target_id: target.id.clone(),
+                relation: "reinforces".to_string(),
+                weight: 0.8,
+                metadata: json!({ "auto_link": true }),
+                created_at: "2026-07-05T01:00:00Z".to_string(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            assert!(store
+                .commit_confidence_reinforcement(
+                    &edge,
+                    increment,
+                    "2026-07-05T01:00:00Z",
+                    &ExpectedMemoryState::from_entry(&source, None),
+                    &ExpectedMemoryState::from_entry(&target, None),
+                )
+                .expect("commit typed confidence reinforcement"));
+        }
 
         let reinforced = store
             .get("with-confidence")
