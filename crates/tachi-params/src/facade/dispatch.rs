@@ -266,11 +266,11 @@ pub struct TachiDispatchParams {
 
     /// tachi#1173 item 1: the default dispatch response is a slim receipt
     /// (dispatch_id, state, run_dir, suggested_complete_command, plus other
-    /// small metadata) — the full routing card (`profile`, `identity_receipt`,
-    /// `dispatch_profile`/mbit_card) is selection-time information, not
-    /// receipt information, and is omitted by default. Set verbose=true to
-    /// get the full payload back on the dispatch response itself; operator
-    /// profile diagnostics remain on the local CLI surface.
+    /// small metadata) — the full routing card (`profile`, `identity_receipt`)
+    /// is selection-time information, not receipt information, and is omitted
+    /// by default. Set verbose=true to get the full payload back on the
+    /// dispatch response itself; operator profile diagnostics remain on the
+    /// local CLI surface.
     #[serde(default)]
     pub verbose: Option<bool>,
 

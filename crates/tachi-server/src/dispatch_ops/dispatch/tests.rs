@@ -1089,7 +1089,9 @@ async fn canonical_external_staffing_start_and_terminal_receipt_share_one_run_di
 /// assertion is RED before the fix (those keys are always present) and GREEN
 /// after (they're absent by default). The default receipt must still carry
 /// the four fields the issue names: dispatch_id, state, run_dir,
-/// suggested_complete_command.
+/// suggested_complete_command. #1690 slice B retires the mbit_card surface
+/// end-to-end, so `dispatch_profile` (its dispatch-response projection) is
+/// gone from every response, verbose or not.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn dispatch_response_default_omits_fat_routing_card() {
@@ -1132,7 +1134,7 @@ async fn dispatch_response_default_omits_fat_routing_card() {
     );
     assert!(
         response.get("dispatch_profile").is_none(),
-        "default dispatch response must not carry the mbit_card dispatch_profile: {response}"
+        "default dispatch response must not carry dispatch_profile: {response}"
     );
     assert!(
         !dispatch_response.contains("mbit_card"),
@@ -1155,8 +1157,10 @@ async fn dispatch_response_default_omits_fat_routing_card() {
 }
 
 /// tachi#1173 item 1 discriminator (verbose escape hatch): verbose=true must
-/// restore the exact pre-#1173 full routing card so no information is lost,
-/// only deferred behind an explicit opt-in.
+/// restore the pre-#1173 full routing card so no information is lost, only
+/// deferred behind an explicit opt-in. #1690 slice B additionally retires the
+/// mbit_card surface, so the verbose card carries `profile` +
+/// `identity_receipt` and never `dispatch_profile`/`mbit_card`.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn dispatch_response_verbose_true_restores_full_routing_card() {
@@ -1186,29 +1190,20 @@ async fn dispatch_response_verbose_true_restores_full_routing_card() {
         "verbose=true must carry the full routing card: {response}"
     );
     assert!(
-        response["profile"]["mbit_card"].is_object(),
-        "verbose=true's `profile` is the full ResolvedDispatchProfile, which nests its own mbit_card: {response}"
+        response["profile"].get("mbit_card").is_none(),
+        "verbose=true's `profile` must not nest the retired mbit_card: {response}"
     );
     assert!(
         response["identity_receipt"].is_object(),
         "verbose=true must carry identity_receipt: {response}"
     );
     assert!(
-        response["dispatch_profile"].is_object(),
-        "verbose=true must carry the dispatch_profile mbit_card: {response}"
+        response.get("dispatch_profile").is_none(),
+        "the dispatch_profile mbit_card projection is retired (#1690): {response}"
     );
-    // #1182 checkpoint 3 (weak verbose proof): both `response["profile"]["mbit_card"]`
-    // and `response["dispatch_profile"]` are built from the SAME underlying
-    // value (`resolved_profile.mbit_card`, see response_helpers.rs's
-    // `object.insert("dispatch_profile", inputs.resolved_profile.mbit_card...)`
-    // vs `profile_payload = serde_json::to_value(&resolved_profile)` in
-    // start.rs) — PR #1182's own review-hint #2 calls this the self-nesting
-    // duplication the issue names. Assert the equality directly instead of
-    // only checking `is_object()`, which would pass even if the two values
-    // diverged.
-    assert_eq!(
-        response["profile"]["mbit_card"], response["dispatch_profile"],
-        "self-nested mbit_card copies must be the exact same value: {response}"
+    assert!(
+        !dispatch_response.contains("mbit_card"),
+        "{dispatch_response}"
     );
 }
 

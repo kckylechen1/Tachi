@@ -6,9 +6,7 @@ use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
 use tachi_dispatch::{
-    profile_demotion_targets_from_overlay, profile_projected_evidence_required_from_overlay,
-    profile_projected_passive_traits_from_overlay, profile_projected_signature_skills_from_overlay,
-    profile_projected_weak_against_from_overlay,
+    profile_projected_evidence_required_from_overlay, profile_projected_signature_skills_from_overlay,
 };
 
 pub(crate) fn handle_route_policy_apply(
@@ -153,11 +151,7 @@ pub(crate) fn handle_route_policy_apply(
                     .unwrap_or_default();
                 if !matches!(
                     operation,
-                    "promote_observed_skill_to_signature"
-                        | "add_evidence_backed_passive_trait"
-                        | "add_evidence_contract_required"
-                        | "add_card_weakness"
-                        | "mark_skill_demotion_target"
+                    "promote_observed_skill_to_signature" | "add_evidence_contract_required"
                 ) {
                     return Err(format!(
                         "unsupported loadout_evolution operation for {proposal_id}: {operation}"
@@ -200,19 +194,10 @@ pub(crate) fn handle_route_policy_apply(
 
                 let mut overlay_skills =
                     profile_projected_signature_skills_from_overlay(profile, Some(&overlay));
-                let mut overlay_traits =
-                    profile_projected_passive_traits_from_overlay(profile, Some(&overlay));
                 let mut overlay_evidence_required =
                     profile_projected_evidence_required_from_overlay(profile, Some(&overlay));
-                let mut overlay_weak_against =
-                    profile_projected_weak_against_from_overlay(profile, Some(&overlay));
-                let mut overlay_demotion_targets =
-                    profile_demotion_targets_from_overlay(profile, Some(&overlay));
                 let mut added_signature_skills = Vec::new();
-                let mut added_passive_traits = Vec::new();
                 let mut added_evidence_required = Vec::new();
-                let mut added_weak_against = Vec::new();
-                let mut added_demotion_targets = Vec::new();
                 let already_projected = match operation {
                     "promote_observed_skill_to_signature" => {
                         let skill_id = apply_payload
@@ -246,43 +231,6 @@ pub(crate) fn handle_route_policy_apply(
                             overlay_skills.push(skill_id.clone());
                         }
                         added_signature_skills.push(skill_id);
-                        already_projected
-                    }
-                    "add_evidence_backed_passive_trait" => {
-                        let trait_id = apply_payload
-                            .get("trait_id")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|trait_id| !trait_id.is_empty())
-                            .map(str::to_string)
-                            .or_else(|| {
-                                apply_payload
-                                    .get("proposed_patch")
-                                    .and_then(|patch| patch.get("add_passive_traits"))
-                                    .and_then(Value::as_array)
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(Value::as_str)
-                                    .map(str::trim)
-                                    .find(|trait_id| !trait_id.is_empty())
-                                    .map(str::to_string)
-                            })
-                            .ok_or_else(|| {
-                                format!(
-                                    "loadout_evolution proposal {proposal_id} missing trait_id"
-                                )
-                            })?;
-                        if profile.passive_traits.iter().any(|item| *item == trait_id) {
-                            return Err(format!(
-                                "loadout_evolution proposal {proposal_id} targets existing baseline passive trait {trait_id}"
-                            ));
-                        }
-                        let already_projected =
-                            overlay_traits.iter().any(|item| item == &trait_id);
-                        if !already_projected {
-                            overlay_traits.push(trait_id.clone());
-                        }
-                        added_passive_traits.push(trait_id);
                         already_projected
                     }
                     "add_evidence_contract_required" => {
@@ -323,92 +271,10 @@ pub(crate) fn handle_route_policy_apply(
                         added_evidence_required.push(evidence_id);
                         already_projected
                     }
-                    "add_card_weakness" => {
-                        let weakness_id = apply_payload
-                            .get("weakness_id")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|weakness_id| !weakness_id.is_empty())
-                            .map(str::to_string)
-                            .or_else(|| {
-                                apply_payload
-                                    .get("proposed_patch")
-                                    .and_then(|patch| patch.get("add_weak_against"))
-                                    .and_then(Value::as_array)
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(Value::as_str)
-                                    .map(str::trim)
-                                    .find(|weakness_id| !weakness_id.is_empty())
-                                    .map(str::to_string)
-                            })
-                            .ok_or_else(|| {
-                                format!(
-                                    "loadout_evolution proposal {proposal_id} missing weakness_id"
-                                )
-                            })?;
-                        if profile.weak_against.iter().any(|item| *item == weakness_id) {
-                            return Err(format!(
-                                "loadout_evolution proposal {proposal_id} targets existing baseline weakness {weakness_id}"
-                            ));
-                        }
-                        let already_projected =
-                            overlay_weak_against.iter().any(|item| item == &weakness_id);
-                        if !already_projected {
-                            overlay_weak_against.push(weakness_id.clone());
-                        }
-                        added_weak_against.push(weakness_id);
-                        already_projected
-                    }
-                    "mark_skill_demotion_target" => {
-                        let skill_id = apply_payload
-                            .get("skill_id")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|skill_id| !skill_id.is_empty())
-                            .map(str::to_string)
-                            .or_else(|| {
-                                apply_payload
-                                    .get("proposed_patch")
-                                    .and_then(|patch| patch.get("demotion_targets"))
-                                    .and_then(Value::as_array)
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(Value::as_str)
-                                    .map(str::trim)
-                                    .find(|skill_id| !skill_id.is_empty())
-                                    .map(str::to_string)
-                            })
-                            .ok_or_else(|| {
-                                format!(
-                                    "loadout_evolution proposal {proposal_id} missing skill_id"
-                                )
-                            })?;
-                        let known_skill = profile_required_skill_ids(profile)
-                            .into_iter()
-                            .any(|skill| skill == skill_id)
-                            || overlay_skills.iter().any(|skill| skill == &skill_id);
-                        if !known_skill {
-                            return Err(format!(
-                                "loadout_evolution proposal {proposal_id} targets unknown loadout skill {skill_id}"
-                            ));
-                        }
-                        let already_projected = overlay_demotion_targets
-                            .iter()
-                            .any(|item| item == &skill_id);
-                        if !already_projected {
-                            overlay_demotion_targets.push(skill_id.clone());
-                        }
-                        added_demotion_targets.push(skill_id);
-                        already_projected
-                    }
                     _ => unreachable!("unsupported operation checked above"),
                 };
                 crate::skill_policy::dedupe_preserve_order(&mut overlay_skills);
-                crate::skill_policy::dedupe_preserve_order(&mut overlay_traits);
                 crate::skill_policy::dedupe_preserve_order(&mut overlay_evidence_required);
-                crate::skill_policy::dedupe_preserve_order(&mut overlay_weak_against);
-                crate::skill_policy::dedupe_preserve_order(&mut overlay_demotion_targets);
 
                 let mut source_proposals = overlay
                     .get("source_proposal_ids")
@@ -424,10 +290,7 @@ pub(crate) fn handle_route_policy_apply(
                 overlay["profile"] = json!(profile.name);
                 overlay["kind"] = json!("profile_card_loadout_overlay");
                 overlay["add_signature_skills"] = json!(overlay_skills);
-                overlay["add_passive_traits"] = json!(overlay_traits);
                 overlay["add_evidence_required"] = json!(overlay_evidence_required);
-                overlay["add_weak_against"] = json!(overlay_weak_against);
-                overlay["demotion_targets"] = json!(overlay_demotion_targets);
                 overlay["source_proposal_ids"] = json!(source_proposals);
                 overlay["updated_at"] = json!(applied_at);
                 overlay["last_applied_proposal_id"] = json!(proposal_id);
@@ -442,10 +305,7 @@ pub(crate) fn handle_route_policy_apply(
                     "key": profile.name,
                     "already_projected": already_projected,
                     "added_signature_skills": added_signature_skills,
-                    "added_passive_traits": added_passive_traits,
                     "added_evidence_required": added_evidence_required,
-                    "added_weak_against": added_weak_against,
-                    "added_demotion_targets": added_demotion_targets,
                     "note": "Reviewed loadout evolution is projected as a durable profile/card overlay; built-in static definitions remain the baseline."
                 });
                 let next = serde_json::to_string(&value)

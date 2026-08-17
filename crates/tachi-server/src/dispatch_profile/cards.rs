@@ -46,12 +46,6 @@ fn inject_self_report_trust(
             serde_json::Value::String(trust.to_string()),
         );
     }
-    if let Some(card) = value.get_mut("mbit_card").and_then(|c| c.as_object_mut()) {
-        card.insert(
-            "self_report_trust".to_string(),
-            serde_json::Value::String(trust.to_string()),
-        );
-    }
     Ok(())
 }
 
@@ -77,17 +71,6 @@ pub(crate) fn profile_weak_against_for_server(
 ) -> Result<Vec<String>, String> {
     let overlay = load_profile_overlay(server, profile.name)?;
     Ok(tachi_dispatch::profile_weak_against_with_overlay(
-        profile,
-        overlay.as_ref(),
-    ))
-}
-
-pub(crate) fn profile_demotion_targets(
-    server: &MemoryServer,
-    profile: &DispatchProfileDef,
-) -> Result<Vec<String>, String> {
-    let overlay = load_profile_overlay(server, profile.name)?;
-    Ok(tachi_dispatch::profile_demotion_targets_from_overlay(
         profile,
         overlay.as_ref(),
     ))

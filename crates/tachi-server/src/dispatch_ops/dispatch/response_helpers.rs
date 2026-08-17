@@ -130,8 +130,8 @@ pub(super) fn build_dispatch_response(
     // tachi#1173 item 1: dispatch receipt slimming. The default response is a
     // slim receipt (dispatch_id/state/run_dir/suggested_complete_command plus
     // other small metadata already useful post-dispatch); the fat routing
-    // card (mbit_card x3 via `profile`/`dispatch_profile`, identity_receipt
-    // x2, personality dump) is selection-time information an agent needs
+    // card (`profile` — the full `ResolvedDispatchProfile` — plus
+    // `identity_receipt`) is selection-time information an agent needs
     // when CHOOSING a profile, not receipt information it needs after
     // dispatch already committed to one — so it moves behind verbose=true (or
     // a separate operator-only local `tachi card show` diagnostic).
@@ -185,14 +185,6 @@ pub(super) fn build_dispatch_response(
         object.insert(
             "identity_receipt".to_string(),
             serde_json::to_value(&inputs.resolved_profile.identity_receipt).unwrap_or(Value::Null),
-        );
-        object.insert(
-            "dispatch_profile".to_string(),
-            inputs
-                .resolved_profile
-                .mbit_card
-                .clone()
-                .unwrap_or(Value::Null),
         );
     }
 

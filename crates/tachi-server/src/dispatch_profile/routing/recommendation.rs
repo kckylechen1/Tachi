@@ -142,7 +142,6 @@ pub(crate) fn handle_dispatch_recommendation(
     let (recommended_transport, transport_readiness) =
         recommended_transport_for_profile(best_profile);
 
-    let profile_json = profile_json_for_server(server, best_profile)?;
     let mut payload = tachi_dispatch::build_dispatch_recommendation_response(
         task,
         &risk,
@@ -158,10 +157,6 @@ pub(crate) fn handle_dispatch_recommendation(
             evidence_contract: profile_evidence_contract_json_for_server(server, best_profile)?,
             resolved_skills: profile_required_skill_ids_for_server(server, best_profile)?,
             resolved_skill_loadout: profile_skill_loadout_json_for_server(server, best_profile)?,
-            mbit_card: profile_json
-                .get("mbit_card")
-                .cloned()
-                .unwrap_or(Value::Null),
         },
     )?;
 
@@ -507,7 +502,9 @@ mod evidence_flip_tests {
     /// Every key a pre-cutover consumer could already read off this response.
     /// The flip may ADD fields; removing or renaming one of these would break
     /// the feature briefing (`copilot_ops::feature_briefing::dispatch`), the
-    /// surviving production consumer.
+    /// surviving production consumer. The one deliberate exception is
+    /// `mbit_card`, retired end-to-end with the MBIT/card-personality surface
+    /// (#1690 slice B) — the briefing reads the remaining keys unchanged.
     const PRE_CUTOVER_KEYS: &[&str] = &[
         "task",
         "task_type",
@@ -533,7 +530,6 @@ mod evidence_flip_tests {
         "evidence_note",
         "live_eval",
         "route_policy_rules",
-        "mbit_card",
         "candidates",
         // tachi#1675 PR1 Seam A.
         "recommendation_id",

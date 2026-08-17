@@ -1,8 +1,7 @@
 use crate::agent_eval::{aggregate_performance_matrix, load_live_eval_rows};
 use crate::dispatch_profile::{
-    classify_dispatch_risk, profile_demotion_targets, profile_evidence_required_for_server,
-    profile_json, profile_required_skill_ids_for_server, profile_skill_loadout_json_for_server,
-    profile_weak_against_for_server, resolve_dispatch_profile, route_simulation_caveats,
+    classify_dispatch_risk, profile_evidence_required_for_server, profile_json,
+    profile_required_skill_ids_for_server, resolve_dispatch_profile, route_simulation_caveats,
     simulate_route_policy, DispatchProfileDef, DISPATCH_POLICY_PROPOSAL_NS,
     PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
 };
@@ -13,12 +12,11 @@ use sha2::{Digest, Sha256};
 use tachi_dispatch::policy::{
     build_loadout_evolution_proposals, build_route_policy_proposals, canonical_json,
     canonical_json_eq, loadout_evolution_v3_apply_payload, loadout_evolution_v3_identity_payload,
-    route_policy_v3_identity_payload, LoadoutEvalEntry, ProfileCardRiskInputs,
-    ProfilePositiveEvolutionInputs, LOADOUT_EVOLUTION_PROPOSAL_KIND,
-    LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION, LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION,
-    LOADOUT_EVOLUTION_PROPOSAL_TARGET, ROUTE_POLICY_PROPOSAL_KIND,
-    ROUTE_POLICY_PROPOSAL_POLICY_VERSION, ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION,
-    ROUTE_POLICY_PROPOSAL_TARGET,
+    route_policy_v3_identity_payload, LoadoutEvalEntry, ProfilePositiveEvolutionInputs,
+    LOADOUT_EVOLUTION_PROPOSAL_KIND, LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION,
+    LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION, LOADOUT_EVOLUTION_PROPOSAL_TARGET,
+    ROUTE_POLICY_PROPOSAL_KIND, ROUTE_POLICY_PROPOSAL_POLICY_VERSION,
+    ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION, ROUTE_POLICY_PROPOSAL_TARGET,
 };
 
 /// SHA-256 hex of the canonical identity payload. Used as the content-addressed
@@ -466,7 +464,6 @@ pub(crate) fn handle_route_policy_proposals(
         &eval_entries,
         limit.max(1),
         &generated_at,
-        |profile| profile_card_risk_inputs(server, profile),
         |profile| profile_positive_evolution_inputs(server, profile),
     )?);
 
@@ -854,38 +851,12 @@ fn load_live_eval_entries(
     Ok(entries)
 }
 
-fn profile_card_risk_inputs(
-    server: &MemoryServer,
-    profile: &DispatchProfileDef,
-) -> Result<ProfileCardRiskInputs, String> {
-    Ok(ProfileCardRiskInputs {
-        existing_weak_against: profile_weak_against_for_server(server, profile)?
-            .into_iter()
-            .collect(),
-        existing_demotion_targets: profile_demotion_targets(server, profile)?
-            .into_iter()
-            .collect(),
-        profile_required_skills: profile_required_skill_ids_for_server(server, profile)?,
-    })
-}
-
 fn profile_positive_evolution_inputs(
     server: &MemoryServer,
     profile: &DispatchProfileDef,
 ) -> Result<ProfilePositiveEvolutionInputs, String> {
     Ok(ProfilePositiveEvolutionInputs {
         profile_required_skills: profile_required_skill_ids_for_server(server, profile)?,
-        existing_passive_traits: profile_skill_loadout_json_for_server(server, profile)
-            .map(|loadout| {
-                loadout
-                    .get("passive_traits")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
-            })?
-            .into_iter()
-            .filter_map(|value| value.as_str().map(str::to_string))
-            .collect(),
         existing_evidence_required: profile_evidence_required_for_server(server, profile)?
             .into_iter()
             .collect(),

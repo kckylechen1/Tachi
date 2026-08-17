@@ -243,7 +243,6 @@ pub(super) async fn run_v2_plan_stage(
                 "profile": inputs.profile_payload,
                 "selected_profile": inputs.resolved_profile.selected_profile,
                 "tool_access": inputs.resolved_profile.mcp_access,
-                "dispatch_profile": inputs.resolved_profile.mbit_card,
                 "route_explanation": inputs.resolved_profile.route_explanation,
                 "fallback_chain": inputs.resolved_profile.fallback_chain,
                 "issue_ref": inputs.params.issue_ref,

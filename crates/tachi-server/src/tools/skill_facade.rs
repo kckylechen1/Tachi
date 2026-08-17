@@ -151,7 +151,6 @@ pub(super) async fn handle_tachi_skill_facade(
                 "auto_capability_bundle": profile.auto_capability_bundle,
                 "capability_bundle": bundle_value.get("bundle").cloned().unwrap_or(Value::Null),
                 "eval_feedback": crate::dispatch_profile::profile_eval_feedback_json(server, profile, params.limit.unwrap_or(500))?,
-                "mbit_card": crate::dispatch_profile::profile_json_for_server(server, profile)?.get("mbit_card").cloned().unwrap_or(Value::Null),
             }))
             .map_err(|e| format!("serialize skill loadout: {e}"))
         }
