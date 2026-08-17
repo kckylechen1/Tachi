@@ -564,6 +564,24 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
             },
             Site {
                 symbol: "install_authority_row_guards",
+                trigger: "TACHI_CANONICAL_SUPERSESSION_EDGE_DELETE_GUARD",
+                ddl: "46f26d0fed72be9c",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_CANONICAL_SUPERSESSION_EDGE_INSERT_GUARD",
+                ddl: "8c95df2eab0d1c3f",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_CANONICAL_SUPERSESSION_EDGE_UPDATE_GUARD",
+                ddl: "7d37af0a8da366de",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
                 trigger: "TACHI_SUPERSESSION_EVENT_DELETE_GUARD",
                 ddl: "9808dc1dc3f318ec",
                 occurrences: 1,
@@ -611,9 +629,10 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "the wall's own module. The six install_authority_row_guards \
+        reason: "the wall's own module. The nine install_authority_row_guards \
                  sites are the byte-exact TEMP triggers admitted only while \
-                 the internal typed-DML token is armed; bodies read 2026-08-17. \
+                 the internal typed-DML or canonical-edge token is armed; bodies \
+                 read 2026-08-17. \
                  INGEST_STABLE_OWNER_FENCE is the \
                  byte-exact temp-trigger shape the authorizer admits under the \
                  owner-fence token (install_ingest_stable_owner_fence, \
