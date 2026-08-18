@@ -383,6 +383,17 @@ pub(crate) fn plan_c_project_root_from_local_db(local_db: &Path) -> Option<PathB
     if tachi_dir.file_name().and_then(|name| name.to_str()) != Some(".tachi") {
         return None;
     }
+    let home = tachi_home();
+    if let (Ok(tachi_dir_canon), Ok(home_canon)) = (
+        std::fs::canonicalize(tachi_dir),
+        std::fs::canonicalize(&home),
+    ) {
+        if tachi_dir_canon == home_canon {
+            return None;
+        }
+    } else if tachi_dir == home {
+        return None;
+    }
     tachi_dir.parent().map(Path::to_path_buf)
 }
 
