@@ -525,8 +525,8 @@ where
     let digest = manifest
         .contract_digest()
         .map_err(|_| stage_error_for_id("manifest", "digest"))?;
-    let mut ledger =
-        PilotProgressLedgerV1::open(progress_path, &digest).map_err(PilotRunError::Progress)?;
+    let mut ledger = PilotProgressLedgerV1::open_relaxed_sync_for_test(progress_path, &digest)
+        .map_err(PilotRunError::Progress)?;
     run_manifest_inner(
         manifest,
         &digest,
@@ -668,8 +668,8 @@ where
     let digest = manifest
         .contract_digest()
         .map_err(|_| stage_error_for_id("manifest", "digest"))?;
-    let mut ledger =
-        PilotProgressLedgerV1::open(progress_path, &digest).map_err(PilotRunError::Progress)?;
+    let mut ledger = PilotProgressLedgerV1::open_relaxed_sync_for_test(progress_path, &digest)
+        .map_err(PilotRunError::Progress)?;
     run_case_inner(
         manifest,
         &digest,
