@@ -201,9 +201,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 178686,
-        "total_tool_definition_bytes": 214987,
-        "visible_tool_count": 98,
+        "total_input_schema_bytes": 166186,
+        "total_tool_definition_bytes": 200965,
+        "visible_tool_count": 93,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -215,8 +215,6 @@
           "dlq_list",
           "dlq_retry",
           "extract_facts",
-          "find_similar_memory",
-          "get_memory",
           "get_pipeline_status",
           "hub_call",
           "hub_disconnect",
@@ -239,7 +237,6 @@
           "recommend_capability",
           "recommend_skill",
           "recommend_toolchain",
-          "remember",
           "run_skill",
           "runtime_info",
           "sandbox_check",
@@ -248,8 +245,6 @@
           "sandbox_list_policies",
           "sandbox_set_policy",
           "sandbox_set_rule",
-          "save_memory",
-          "search_memory",
           "section_build",
           "skill_evolve",
           "sync_memories",
@@ -370,9 +365,9 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 119006,
-        "total_tool_definition_bytes": 138026,
-        "visible_tool_count": 50,
+        "total_input_schema_bytes": 117660,
+        "total_tool_definition_bytes": 136400,
+        "visible_tool_count": 49,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -380,7 +375,6 @@
           "compact_rollup",
           "compact_session_memory",
           "extract_facts",
-          "find_similar_memory",
           "get_pipeline_status",
           "hub_call",
           "hub_disconnect",
@@ -452,7 +446,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 98,
+      "tool_count": 93,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -464,8 +458,6 @@
         "dlq_list",
         "dlq_retry",
         "extract_facts",
-        "find_similar_memory",
-        "get_memory",
         "get_pipeline_status",
         "hub_call",
         "hub_disconnect",
@@ -488,7 +480,6 @@
         "recommend_capability",
         "recommend_skill",
         "recommend_toolchain",
-        "remember",
         "run_skill",
         "runtime_info",
         "sandbox_check",
@@ -497,8 +488,6 @@
         "sandbox_list_policies",
         "sandbox_set_policy",
         "sandbox_set_rule",
-        "save_memory",
-        "search_memory",
         "section_build",
         "skill_evolve",
         "sync_memories",

@@ -18,83 +18,6 @@ use crate::MemoryServer;
 
 #[tool_router(router = memory_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
-    #[tool(
-        description = "Save a memory entry to the store. Creates a new entry or updates an existing one if id is provided."
-    )]
-    pub(crate) async fn save_memory(
-        &self,
-        Parameters(params): Parameters<SaveMemoryParams>,
-    ) -> Result<String, String> {
-        if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "save_memory", &params).await?
-        {
-            return Ok(body);
-        }
-        // tachi#1446: the agent-facing arm — a `params.id` here came from
-        // outside the process, so a save that names an existing memory marks
-        // it used. In-process writers keep calling `handle_save_memory`.
-        handle_save_memory_from_caller(self, params).await
-    }
-
-    #[tool(
-        description = "Low-friction shortcut to save a note. Only `text` is required; path defaults to /notes/{YYYY-MM-DD}, category to \"fact\", importance to 0.6, scope to \"project\". Use save_memory directly when you need full control over path, importance, retention, vector, or auto-link."
-    )]
-    pub(crate) async fn remember(
-        &self,
-        Parameters(params): Parameters<RememberParams>,
-    ) -> Result<String, String> {
-        if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "remember", &params).await?
-        {
-            return Ok(body);
-        }
-        handle_remember(self, params).await
-    }
-
-    #[tool(
-        description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores. `format` defaults to a compact markdown digest; pass format=\"json\" for the full JSON row array."
-    )]
-    pub(crate) async fn search_memory(
-        &self,
-        Parameters(params): Parameters<SearchMemoryParams>,
-    ) -> Result<String, String> {
-        if let Some(body) =
-            crate::cli_client::maybe_forward_server_read(self, "search_memory", &params).await?
-        {
-            return Ok(body);
-        }
-        crate::memory_search_ops::handle_search_memory_with_access(self, params, false, true).await
-    }
-
-    #[tool(
-        description = "Find memory entries similar to a provided vector. Uses vector similarity only (no FTS/symbolic/decay weighting)."
-    )]
-    pub(crate) async fn find_similar_memory(
-        &self,
-        Parameters(params): Parameters<FindSimilarMemoryParams>,
-    ) -> Result<String, String> {
-        if let Some(body) =
-            crate::cli_client::maybe_forward_server_read(self, "find_similar_memory", &params)
-                .await?
-        {
-            return Ok(body);
-        }
-        handle_find_similar_memory(self, params).await
-    }
-
-    #[tool(description = "Get a single memory entry by ID.")]
-    pub(crate) async fn get_memory(
-        &self,
-        Parameters(params): Parameters<GetMemoryParams>,
-    ) -> Result<String, String> {
-        if let Some(body) =
-            crate::cli_client::maybe_forward_server_read(self, "get_memory", &params).await?
-        {
-            return Ok(body);
-        }
-        handle_get_memory(self, params).await
-    }
-
     #[tool(description = "List memory entries under a path prefix.")]
     pub(crate) async fn list_memories(
         &self,
@@ -177,5 +100,43 @@ impl MemoryServer {
         Parameters(params): Parameters<InitProjectDbParams>,
     ) -> Result<String, String> {
         handle_tachi_init_project_db(self, params).await
+    }
+}
+
+#[allow(dead_code)]
+impl MemoryServer {
+    pub(crate) async fn save_memory(
+        &self,
+        Parameters(params): Parameters<SaveMemoryParams>,
+    ) -> Result<String, String> {
+        handle_save_memory_from_caller(self, params).await
+    }
+
+    pub(crate) async fn remember(
+        &self,
+        Parameters(params): Parameters<RememberParams>,
+    ) -> Result<String, String> {
+        handle_remember(self, params).await
+    }
+
+    pub(crate) async fn search_memory(
+        &self,
+        Parameters(params): Parameters<SearchMemoryParams>,
+    ) -> Result<String, String> {
+        crate::memory_search_ops::handle_search_memory_with_access(self, params, false, true).await
+    }
+
+    pub(crate) async fn find_similar_memory(
+        &self,
+        Parameters(params): Parameters<FindSimilarMemoryParams>,
+    ) -> Result<String, String> {
+        handle_find_similar_memory(self, params).await
+    }
+
+    pub(crate) async fn get_memory(
+        &self,
+        Parameters(params): Parameters<GetMemoryParams>,
+    ) -> Result<String, String> {
+        handle_get_memory(self, params).await
     }
 }

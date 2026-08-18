@@ -91,7 +91,6 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "recall_context",
     "capture_session",
     "archive_memory",
-    "find_similar_memory",
     "get_pipeline_status",
     "sync_memories",
     "hub_call",

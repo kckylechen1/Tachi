@@ -100,9 +100,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "recommend_toolchain",
     "prepare_capability_bundle",
     "tachi_wiki_search",
-    "search_memory",
-    "find_similar_memory",
-    "get_memory",
     "list_memories",
     "memory_stats",
     "hub_discover",
@@ -124,8 +121,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
 /// either never invalidates the cache today) — preserved as-is; fixing that
 /// gap is a separate, unadjudicated change, not part of #1098's scope.
 pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
-    "save_memory",
-    "remember",
     "extract_facts",
     "ingest_event",
     "hub_register",
@@ -211,8 +206,6 @@ const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "recommend_toolchain",
     "prepare_capability_bundle",
     "tachi_wiki_search",
-    "find_similar_memory",
-    "get_memory",
     "list_memories",
     "memory_stats",
     "hub_discover",

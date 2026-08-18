@@ -80,7 +80,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "distill_trajectory",
     "dlq_list",
     "dlq_retry",
-    "get_memory",
     "hub_export_skills",
     "hub_feedback",
     "hub_get",
@@ -90,15 +89,12 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "hub_set_active_version",
     "hub_set_enabled",
     "hub_stats",
-    "remember",
     "sandbox_check",
     "sandbox_exec_audit",
     "sandbox_get_policy",
     "sandbox_list_policies",
     "sandbox_set_policy",
     "sandbox_set_rule",
-    "save_memory",
-    "search_memory",
     "skill_evolve",
     "tachi_audit_log",
     "tachi_init_project_db",
@@ -162,7 +158,12 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "check_inbox",
     "cyberbrain_write",
     "cyberbrain_search",
+    "find_similar_memory",
+    "get_memory",
     "post_card",
+    "remember",
+    "save_memory",
+    "search_memory",
     "section9_review",
     "section9_audit_log",
     "shell_set_policy",
@@ -177,12 +178,9 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "wiki_search",
 ];
 
-// Batch C (#757) removed `tachi_board` and `tachi_dispatch` — their canonical
-// replacements are tachi_task(action='board'/'dispatch'). Only `get_memory`
-// remains a folded admin-only compat tool here.
-const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory"];
+const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &[];
 
-const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &["remember", "save_memory", "search_memory"];
+const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[];
 
 #[test]
 fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {
@@ -533,7 +531,7 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
         let _ = crate::shared_defs::dlq_replay_is_explicitly_safe(name, None);
     }
 
-    for fixed_route in ["remember", "extract_facts", "ingest_event"] {
+    for fixed_route in ["extract_facts", "ingest_event"] {
         assert!(
             route_names.contains(fixed_route),
             "'{fixed_route}' must still be a live registered route for the \
