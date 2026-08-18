@@ -102,7 +102,11 @@ async fn seed_profile_eval_rows(
     rows: usize,
 ) {
     for idx in 0..rows {
-        let agent = if idx < rows / 2 { "claude" } else { "claude-alt" };
+        let agent = if idx < rows / 2 {
+            "claude"
+        } else {
+            "claude-alt"
+        };
         server
             .tachi_complete(Parameters(TachiCompleteParams {
                 task_id: Some(format!("{fixture}-{task_type}-{idx}")),

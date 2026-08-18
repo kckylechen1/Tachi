@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::eval::AgentPerformanceMatrixRow;
 use crate::{
     profile_evidence_contract_json, profile_matches_agent, profile_role_matches,
-    sanitize_policy_key, DispatchProfileDef, RouteSimulationSummary,
-    DISPATCH_PROFILES, MIN_LOADOUT_EVOLUTION_SAMPLES,
+    sanitize_policy_key, DispatchProfileDef, RouteSimulationSummary, DISPATCH_PROFILES,
+    MIN_LOADOUT_EVOLUTION_SAMPLES,
 };
 
 /// Policy-version tag bound into every v3 route-policy proposal identity. The
@@ -900,10 +900,11 @@ mod tests {
             ..AgentPerformanceMatrixRow::default()
         }];
 
-        let proposals = build_evidence_contract_evolution_proposals_all(&rows, 50, "now", |_profile| {
-            Err("positive inputs should stay lazy".to_string())
-        })
-        .expect("low-sample profiles never read positive inputs");
+        let proposals =
+            build_evidence_contract_evolution_proposals_all(&rows, 50, "now", |_profile| {
+                Err("positive inputs should stay lazy".to_string())
+            })
+            .expect("low-sample profiles never read positive inputs");
 
         assert!(proposals.is_empty());
     }

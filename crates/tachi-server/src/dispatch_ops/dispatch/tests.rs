@@ -1018,10 +1018,11 @@ fn c1_retired_capability_bundle_key_is_absent_from_status_writers() {
     let mut rs_files = Vec::new();
     collect_rs_files(&src_root, &mut rs_files);
 
-    let widened_offenders = status_writer_files(&rs_files, &own_path, status_writer_references_path)
-        .into_iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
+    let widened_offenders =
+        status_writer_files(&rs_files, &own_path, status_writer_references_path)
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
     assert!(
         widened_offenders.is_empty(),
         "no status.json writer (funnel or direct path writer) may emit the retired capability_bundle key (#1690 C1 / oracle K4), found in: {widened_offenders:?}"
@@ -1059,7 +1060,9 @@ fn status_writer_uses_funnel(source: &str) -> bool {
 /// prove; a new file may join only when it provably asserts absence.
 fn is_status_absence_asserting_test(path: &std::path::Path) -> bool {
     let name = path.to_string_lossy().to_string();
-    name.ends_with("tests/dispatch_tests/prompt_credentials_board/capability_dispatch/bundle_artifact.rs")
+    name.ends_with(
+        "tests/dispatch_tests/prompt_credentials_board/capability_dispatch/bundle_artifact.rs",
+    )
 }
 
 fn status_writer_files<'a>(
@@ -1095,7 +1098,9 @@ fn c1_widened_status_writer_sweep_catches_direct_path_writers() {
     )
     .expect("write synthetic direct status writer");
     let files = vec![synthetic.clone()];
-    let own = synthetic.clone();
+    // The synthetic file is a stand-in for a REAL writer, so the "own host"
+    // exclusion must not swallow it — pass a path that is not in the sweep.
+    let own = std::path::PathBuf::from("no-such-host-file.rs");
 
     let widened = status_writer_files(&files, &own, status_writer_references_path);
     assert!(

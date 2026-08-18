@@ -61,12 +61,11 @@ pub use profiles::{
     profile_json_with_loadout_and_evidence_contract, profile_json_with_overlay,
     profile_matches_agent, profile_projected_evidence_required_from_overlay,
     profile_required_skill_ids, profile_resolved_model, profile_skill_loadout_json,
-    profile_uses_opencode_adapter, profile_weak_against,
-    recommendation_identity_receipt, resolve_and_apply_dispatch_profile, resolve_dispatch_profile,
-    DispatchProfileAlias, DispatchProfileDef, ResolvedDispatchProfile, DISPATCH_POLICY_PROPOSAL_NS,
-    DISPATCH_PROFILES, DISPATCH_PROFILE_ALIASES, MIN_LOADOUT_EVOLUTION_SAMPLES,
-    MIN_ROUTE_POLICY_RULE_SAMPLES, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
-    ROUTE_POLICY_RULE_SCORE_BONUS,
+    profile_uses_opencode_adapter, profile_weak_against, recommendation_identity_receipt,
+    resolve_and_apply_dispatch_profile, resolve_dispatch_profile, DispatchProfileAlias,
+    DispatchProfileDef, ResolvedDispatchProfile, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
+    DISPATCH_PROFILE_ALIASES, MIN_LOADOUT_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES,
+    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 pub use registry::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported, normalize_dispatch_agent_name,
@@ -81,8 +80,8 @@ pub use routing::{
     AppliedRoutePolicyRule, DispatchRisk, ProfileCandidate, RecommendationProfilePayload,
     RouteEvalRow, RouteEvidenceSource, RoutePerformanceRow, RoutePolicyRuleLoadout,
     RoutePolicyRuleRecord, RouteSimulationChoice, RouteSimulationSummary, RouteSubagentScore,
-    SkippedRoutePolicyRule, NO_LEDGER_EVIDENCE_REASON,
-    RETIRED_EVIDENCE_SOURCE_SKIP_REASON, ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
+    SkippedRoutePolicyRule, NO_LEDGER_EVIDENCE_REASON, RETIRED_EVIDENCE_SOURCE_SKIP_REASON,
+    ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
 };
 pub use signatures::{
     dispatch_role_class, normalize_vendor, project_counter_clauses, resolve_signature_id,

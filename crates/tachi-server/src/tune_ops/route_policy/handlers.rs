@@ -330,8 +330,7 @@ pub(super) fn validate_evidence_contract_proposal(
         .get("identity_payload")
         .cloned()
         .unwrap_or(Value::Null);
-    if identity_payload.get("kind").and_then(Value::as_str)
-        != Some(EVIDENCE_CONTRACT_PROPOSAL_KIND)
+    if identity_payload.get("kind").and_then(Value::as_str) != Some(EVIDENCE_CONTRACT_PROPOSAL_KIND)
         || identity_payload
             .get("policy_version")
             .and_then(Value::as_str)
