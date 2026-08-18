@@ -530,7 +530,7 @@ mod evidence_flip_tests {
         "evidence_note",
         "live_eval",
         "route_policy_rules",
-        "profile_card",
+        "mbit_card",
         "candidates",
         // tachi#1675 PR1 Seam A.
         "recommendation_id",
