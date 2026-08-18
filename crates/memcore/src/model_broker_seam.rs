@@ -1,26 +1,18 @@
-//! Model-broker seam — the five frozen types shared by #1681 (operational
-//! resolver / catalog) and #1682 (provider wire adapters / gateway).
+//! Model-broker control-plane seam.
 //!
 //! # Why this module exists
 //!
-//! #1681 and #1682 are two Broker chains developed in parallel. #1682 must be
-//! able to build and test a gateway/executor *before* #1681's real resolver
-//! (#1681 PR-D) lands, and #1681 must know the exact shape #1682 will report
-//! health back in. The only way both can proceed independently is if the
-//! contract between them — the resolver's output vocabulary, the resolved
-//! deployment shape, and the health report shape — is frozen first, in one
-//! small module both leaves depend on. That is this file.
+//! Catalog, resolution, and health code share a stable vocabulary for model
+//! references, resolved deployments, and operational outcomes. Those values
+//! live below their consumers so neither the catalog nor a caller-facing crate
+//! owns the other's input types.
 //!
-//! # The one architectural invariant (codex #1681 review, OK-BUT-8)
+//! # Architectural invariant
 //!
 //! Every type here is **memcore-native plain data**. This module imports
-//! **nothing** from tachi-server, tachi-llm, or tachi-dispatch. The operational
-//! resolver lives in memcore precisely because memcore is the only node below
-//! both tachi-llm (which calls the resolver to route) and tachi-server (which
-//! projects HTTP ↔ canonical then calls it) — see the `resolve_auth_ref`
-//! placement rationale in `store::vault_accounts`. If the resolver's *input*
-//! types were owned by any of those upper crates, the dependency would invert.
-//! So the snapshot types the resolver consumes ([`CatalogSnapshot`],
+//! **nothing** from upper-layer crates. The operational resolver lives here so
+//! its input types do not invert the dependency graph. The snapshot types the
+//! resolver consumes ([`CatalogSnapshot`],
 //! [`HealthSnapshot`], [`AccountSnapshot`], the budget / pin / retry contexts)
 //! are all defined here, as memcore-owned data.
 //!
@@ -31,7 +23,7 @@
 //! this file may spell those paths out (a doc comment that did exactly that is
 //! what tripped the check at `cba796ad`).
 //!
-//! # Three disciplines this module holds (codex PR #1739 rework)
+//! # Three disciplines this module holds
 //!
 //! 1. **Validated construction is not bypassable.** Every type carrying an
 //!    invariant ([`ModelRef`], [`ResolvedDeployment`], [`ResolutionRevisions`],
@@ -47,8 +39,8 @@
 //!    (`#[serde(rename = ...)]`), and `as_str()` returns the same string; the
 //!    `*_serde_spelling_*` tests assert serde's output equals `as_str()` *and*
 //!    equals a literal golden, so neither side can drift alone. Round-trip
-//!    tests alone would not have caught `OpenAiCompat` serializing as
-//!    `open_ai_compat` while `as_str()` said `openai_compat` (codex BUG-6).
+//!    tests alone cannot prove that either spelling matches the external
+//!    contract.
 //! 3. **Failure is typed and loud.** An unknown or ambiguous alias, a drifted
 //!    policy revision, or an empty admitted set each get their own
 //!    [`AbstainReason`]; every filter axis — including the
@@ -61,13 +53,11 @@
 //!   #1681 catalog schema (that is #1681 PR-A). [`ResolvedDeployment`] is the
 //!   *resolved projection* a resolver hands out, not the `model_deployments`
 //!   row.
-//! - No wire/HTTP types. Canonical request / stream-event / disposition / usage
-//!   vocabularies are #1682's property (tachi-llm broker module).
-//! - No real resolver. [`StaticFixtureResolver`] is a deterministic stand-in so
-//!   #1682 can develop against a stable [`OperationalResolver`] before #1681's
-//!   real implementation exists — that is the entire point of a seam. It is
-//!   gated behind `feature = "broker-fixtures"` (default off) so it cannot be
-//!   reached from a production build.
+//! - No provider wire/HTTP execution types. This module describes control-plane
+//!   resolution and health only.
+//! - No second production resolver. [`StaticFixtureResolver`] is a deterministic
+//!   test fixture behind `feature = "broker-fixtures"` (default off), so it
+//!   cannot be reached from a production build.
 
 use serde::{Deserialize, Serialize};
 
@@ -142,9 +132,8 @@ pub enum SeamError {
         deployment_id: String,
     },
     /// A fallback entry named something other than an eligible, non-chosen
-    /// candidate. The fallback chain becomes durable receipt provenance
-    /// (#1682 discrimination 8), so it may only contain ids this resolution
-    /// actually evaluated and admitted.
+    /// candidate. The fallback chain becomes durable receipt provenance, so it
+    /// may only contain ids this resolution actually evaluated and admitted.
     FallbackEntryNotEligible {
         /// The offending fallback entry.
         deployment_id: String,
@@ -285,20 +274,18 @@ impl ModelRef {
 // 2. ResolvedDeployment
 // ---------------------------------------------------------------------------
 
-/// The wire dialect a deployment speaks. Closed set: the six provider grammars
-/// the #1682 census names, plus an explicit `Unknown` for a catalogued
-/// deployment whose grammar this build cannot operate.
+/// The wire dialect a deployment speaks. The closed set includes an explicit
+/// `Unknown` for a catalogued deployment whose grammar this build cannot
+/// operate.
 ///
 /// `Unknown` is deliberate rather than absent — "we catalogued it and cannot
 /// speak to it" must be distinguishable from "we never looked", the same rule
 /// as `AuthMode::Unsupported`.
 ///
 /// Each variant carries an explicit `rename` rather than relying on
-/// `rename_all = "snake_case"`: serde's snake_case of `OpenAiCompat` is
-/// `open_ai_compat`, which silently disagreed with `as_str()`'s
-/// `openai_compat` (codex #1739 BUG-6). The spelling is now declared once, next
-/// to the variant, and `wire_dialect_serde_spelling_matches_as_str_and_golden`
-/// pins it against a literal.
+/// `rename_all = "snake_case"`: serde's snake_case of `OpenAiCompat` would be
+/// `open_ai_compat`, while the contract spelling is `openai_compat`. The
+/// spelling is declared next to the variant and pinned against a literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireDialect {
     /// OpenAI `/v1/chat/completions` grammar (SiliconFlow / DeepSeek / ZAI /
@@ -561,7 +548,7 @@ impl ResolvedDeployment {
 }
 
 // ---------------------------------------------------------------------------
-// 3. ResolutionOutcome (codex #1682 BUG-10 full vocabulary)
+// 3. ResolutionOutcome
 // ---------------------------------------------------------------------------
 
 /// Why a candidate deployment was excluded from selection. One variant per
@@ -912,7 +899,7 @@ pub struct BudgetEstimate {
 /// What the resolver selected: one deployment, or a typed abstain.
 ///
 /// `Abstain` carries an [`AbstainReason`] — "nothing was selected" is never
-/// reported without saying why (codex #1739 BUG-1). For
+/// reported without saying why. For
 /// [`AbstainReason::NoEligibleCandidate`] the per-candidate reasons on the
 /// outcome carry the detail; the alias/policy variants are facts about the
 /// request itself, which no per-candidate reason could express.
@@ -1076,8 +1063,8 @@ impl ResolutionOutcome {
     }
 
     /// Deployment ids to try in order if the chosen one fails, bounded by
-    /// [`FALLBACK_ORDER_CAP`]. #1682 executes this order and records the chain
-    /// truthfully into the receipt; it does not author it.
+    /// [`FALLBACK_ORDER_CAP`]. A caller executes this order and records the
+    /// chain truthfully into its receipt; it does not author it.
     pub fn fallback_order(&self) -> &[String] {
         &self.fallback_order
     }
@@ -1255,7 +1242,7 @@ pub struct RetryContext {
 /// the frozen snapshots and contexts. All memcore-owned data — there is no
 /// server/llm/dispatch policy type reachable from here.
 ///
-/// **What "admitted" means here** (codex #1739 BUG-1): `admitted_candidates`
+/// **What "admitted" means here:** `admitted_candidates`
 /// holds the deployments a *semantic* admission gate already passed — the
 /// resolver receives the cut set and has no catalog handle to enumerate more.
 /// That is the structural enforcement of "healthy cheap ≠ semantically
@@ -1299,18 +1286,16 @@ pub struct ResolverInput {
 /// "fails", it selects or abstains with a typed [`AbstainReason`] plus visible
 /// per-candidate reasons.
 ///
-/// #1681 PR-D ships the real implementation; #1682 develops against
-/// [`StaticFixtureResolver`] until then.
 pub trait OperationalResolver {
     /// Resolve one request against a frozen input snapshot.
     fn resolve(&self, input: &ResolverInput) -> ResolutionOutcome;
 }
 
-/// A deterministic fixture resolver so #1682 can build before #1681 PR-D lands.
+/// A deterministic fixture resolver for downstream tests.
 ///
-/// **Not a production resolver, and mechanically so** (codex #1739 CONCERN-5):
-/// it is gated behind `feature = "broker-fixtures"`, which is **off by
-/// default**, plus memcore's own `cfg(test)`. A production build of memcore
+/// **Not a production resolver, and mechanically so:** it is gated behind
+/// `feature = "broker-fixtures"`, which is **off by default**, plus memcore's
+/// own `cfg(test)`. A production build of memcore
 /// does not compile this type at all, and the re-export in `lib.rs` carries the
 /// same gate — downstream test targets must opt in explicitly
 /// (`memcore = { …, features = ["broker-fixtures"] }` under `[dev-dependencies]`).
@@ -1318,7 +1303,7 @@ pub trait OperationalResolver {
 /// enabling it in production would silently downgrade routing.
 ///
 /// It is a real (if simplified) pure function over the input, not a canned
-/// constant, so #1682 gets realistic outcome shapes:
+/// constant, so tests exercise realistic outcome shapes:
 ///
 /// 1. Each admitted candidate is evaluated: stale (per catalog) →
 ///    [`ExclusionReason::StaleCatalog`]; on health cooldown →
@@ -1571,9 +1556,8 @@ impl InvocationErrorClass {
     ];
 }
 
-/// A `Retry-After` directive as read off the wire (#1682 codex BUG-4: the
-/// header must survive classification). HTTP allows either a delta-seconds or
-/// an HTTP-date form; both are preserved.
+/// A `Retry-After` directive as read off the wire. The header survives
+/// classification; HTTP delta-seconds and HTTP-date forms are both preserved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value")]
 pub enum RetryAfter {
@@ -1585,9 +1569,8 @@ pub enum RetryAfter {
     At(String),
 }
 
-/// What #1682 reports back to the health layer for one invocation outcome: the
-/// precise account/deployment pair, the error class, and any `Retry-After`.
-/// This is exactly #1681 discrimination 6's input type.
+/// One invocation outcome reported to the health layer: the precise
+/// account/deployment pair, error class, and any `Retry-After`.
 ///
 /// Note the pairing of `account_ref` and `deployment_id`: the D4 attribution
 /// rule needs both, because a 401/403 must reach the account surface while
@@ -1892,8 +1875,8 @@ mod tests {
         );
     }
 
-    // --- Discrimination (codex #1739 BUG-3/BUG-6): frozen spellings are
-    // pinned by literal goldens, and serde == as_str for every variant. ---
+    // Frozen spellings are pinned by literal goldens, and serde == as_str for
+    // every variant.
 
     /// Assert one enum variant's serde spelling equals both its `as_str()` and
     /// a literal golden — the three-way tie that makes a one-sided rename fail.
@@ -2091,9 +2074,8 @@ mod tests {
         );
     }
 
-    // --- Discrimination (codex #1739 BUG-4): the deserialize path cannot
-    // bypass constructor validation. Each case is a JSON payload that the
-    // matching constructor would refuse. ---
+    // The deserialize path cannot bypass constructor validation. Each case is
+    // a JSON payload that the matching constructor would refuse.
 
     #[test]
     fn model_ref_deserialize_rejects_blank_fields() {
