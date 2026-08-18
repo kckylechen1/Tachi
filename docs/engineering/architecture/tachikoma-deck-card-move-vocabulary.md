@@ -42,7 +42,7 @@ Keep the public model small.
 |---|---|
 | **Tachikoma backplane** | The whole Tachi shared work/memory/evidence/skill system that sits behind the primary IDE assistant or human. |
 | **Deck** | The set of available Cards for a project/runtime. |
-| **Card** | One subagent evaluation/profile unit. It defines role, permissions, behavior, evidence contract, metrics, and skill loadout. A Card is currently implemented as a `DispatchProfileDef` with a Tachikoma-facing JSON view. |
+| **Card** | One subagent evaluation/profile unit. It defines role, permissions, behavior, evidence contract, and skill loadout (the retired `mbit_card` metrics/evolution projection is deleted by #1690 C3). A Card is currently implemented as a `DispatchProfileDef` with a Tachikoma-facing JSON view. |
 | **Superpowers** | Development guidance / lifecycle doctrine. They govern when to plan, execute, review, verify, and ship. |
 | **Waza** | Concrete tactical techniques. They are working methods such as `check`, `health`, `hunt`, `read`, `think`, `write`. |
 | **External skill** | A discovered plugin/skill that must be inspected and approved before use. |
@@ -313,49 +313,40 @@ Guardrails:
 
 ## Card Schema
 
-A Card is exposed as a JSON object that extends the existing
-`DispatchProfileDef` runtime view. New fields are additive only.
+A Card is the `DispatchProfileDef` runtime JSON view
+(`profile_json_for_server` in `crates/tachi-server/src/dispatch_profile/cards.rs`,
+wrapping the static shape builder in `crates/tachi-dispatch/src/profiles.rs`).
+It exposes only **static reviewed profile / loadout / evidence fields** — there
+is no personality, metrics, or evolution projection at head.
 
 ```yaml
-id: poke
+name: poke
 display_name: Poke
-archetype: poke
+backend: <resolved backend>       # capability profile, not a hardcoded model name
 role: product_probe
 stage: probe
+card_archetype: poke              # statically derived from role/stage
+model: <resolved model>
+tool_profile: delegate
 
-authority:
-  write_code: false
-  merge: false
-  github_write: false
-  can_dispatch_followup: false
+mcp_access:
+  inject_tachi_mcp: true
+  allowed_facades: [...]
+  github_read: false
+  write_actions: false
 
-guidance:
-  superpowers:
-    - skill:superpowers-verification-before-completion
+credential_profiles: []
 
-moves:
-  waza:
+skill_loadout:                    # static reviewed baseline
+  common_skills:
     - skill:waza-health
     - skill:waza-check
     - skill:waza-tachi
-  external: []
-
-strengths:
-  - black_box_probe
-  - workflow_smoke
-  - artifact_check
-  - agent_facing_ux_regression
-
-weaknesses:
-  - deep_code_fix
-  - architecture_design
-  - large_refactor
-
-personality:
-  curiosity: 95
-  caution: 75
-  speed: 80
-  risk_control: 85
+  signature_skills: []
+  passive_traits: []
+  forbidden_skills: []
+  projection:
+    status: baseline
 
 evidence_contract:
   required:
@@ -363,17 +354,18 @@ evidence_contract:
     - expected_vs_observed
     - artifacts
     - repro_steps
+  projection:
+    status: baseline
 
-metrics:
-  task_count: 0
-  success_rate: null
-  false_positive_rate: null
-  avg_latency_ms: null
-  avg_cost_usd: null
-  human_override_rate: null
+weak_against:
+  - deep_code_fix
+  - architecture_design
+  - large_refactor
 
-# evolution status/proposals are retired by #1690 C3 — profile data is static
-# reviewed data; eval outcomes never auto-mutate the Card.
+# RETIRED by #1690 C3: the `mbit_card` projection (`archetype`/`stats`/
+# `evolution`), `personality`, and `metrics` fields do not exist in the profile
+# JSON; profile data is static reviewed data and eval outcomes never
+# auto-mutate a Card.
 ```
 
 ## Backend Is a Capability Requirement, Not a Model Name
@@ -527,7 +519,8 @@ Discover via web/search/registry
   -> normalize into Tachi move metadata
   -> register disabled or review-required
   -> bind to a Card only after approval
-  -> track outcomes and downgrade/promote over time
+  -> outcome evidence feeds human review (auto downgrade/promote of a
+     Card loadout is retired by #1690 C3)
 ```
 
 Do not directly install and execute arbitrary skills from the web.
@@ -678,9 +671,11 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - Add static Card definitions for Poke, SCV, Raven, and Medic mode metadata.
 - Add `skill/superpowers/manifest.yaml` and `skill/waza/manifest.yaml` with
   upstream repo/path/ref/sha mappings.
-- Extend the surviving static profile JSON view (`skill_loadout` /
-  `evidence_contract`) with `authority`, `guidance`, `moves`, and
-  `personality` fields (the retired `mbit_card` view was deleted by #1690 C3).
+- Map the proposed `authority` / `guidance` / `moves` concepts onto the
+  surviving static profile JSON view (`mcp_access` / `tool_profile` /
+  `skill_loadout` / `evidence_contract`); the retired `mbit_card` view —
+  `archetype`/`stats`/`evolution`, `personality`, `metrics` — was deleted by
+  #1690 C3.
 - Add a read-only `tachi card list` / `tachi card show` CLI convenience that
   calls the existing facade.
 - Optionally add a read-only `tachi skill-sources status` report.
