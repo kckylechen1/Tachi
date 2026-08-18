@@ -535,8 +535,8 @@ pub(crate) struct EnvCatalogImport {
 /// `catalog_source='env'` deployment rows (#1681 D7 PR-B).
 ///
 /// This is the production caller the projection was written for. Without it,
-/// `catalog_import` is a function only tests call, and #1685's cutover would
-/// be reading a table nothing populates.
+/// `catalog_import` would be a function only tests call and the status catalog
+/// would describe nothing the running process configured.
 ///
 /// # Which config
 ///
@@ -747,9 +747,8 @@ mod catalog_import_tests {
         server
     }
 
-    /// The production caller exists and reaches every lane. Before this, the
-    /// projection was a function only tests called — five deployment rows the
-    /// #1685 cutover would have found empty.
+    /// The production caller exists and reaches every lane rather than leaving
+    /// the projection as a function only tests call.
     #[test]
     fn the_serve_path_import_records_every_lane_including_embedding() {
         let _guard = crate::utils::global_test_lock()

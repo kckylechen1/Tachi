@@ -5,10 +5,9 @@
 //! The four chat-lane env precedence chains are live production routing. This
 //! module **observes** what they resolved to and records it as
 //! `catalog_source='env'` deployment rows; it changes nothing about how
-//! `LlmClient` routes. `lane_calls.rs` is untouched, `ProviderRuntimeConfig`
-//! is untouched, and no code in this crate reads the catalog back. Consumer
-//! cutover is #1685, and the discriminating test here — catalog contents ≡
-//! env-resolution results — is that leaf's launchpad.
+//! `LlmClient` routes. `ProviderRuntimeConfig` is untouched, and no code in
+//! this crate reads the catalog back to choose a route. The discriminating
+//! test pins catalog contents to the live env-resolution results.
 //!
 //! # Why this is a pure function of an already-resolved config
 //!
@@ -17,8 +16,8 @@
 //! resolution" would be a tautology about two calls to the same reader rather
 //! than a statement about the config the client is actually running on — and
 //! a drift between what the client holds and what the catalog says would be
-//! invisible. The import is a projection of the *live client's* config, which
-//! is exactly the object #1685 has to cut over.
+//! invisible. The import is therefore a projection of the *live client's*
+//! config, not a second routing authority.
 //!
 //! # Deployment identity
 //!
@@ -26,7 +25,7 @@
 //! endpoint and model (the ordinary state when `DISTILL_*` is unset — the
 //! client logs about it at construction) produce two rows with identical
 //! endpoint/model, which is truthful: env gives us *lane configurations*, not
-//! deployments, and the lane→row mapping is precisely what #1685 needs.
+//! deployments, and the lane→row mapping keeps that provenance explicit.
 //! Folding them into one deployment with two aliases is alias governance,
 //! which is #1681 D2's reviewed plan/apply path (PR-D), not something this
 //! import should decide on its own.
@@ -76,8 +75,8 @@ use super::provider_health::{ChatLaneConfig, ProviderRuntimeConfig};
 pub const ENV_CATALOG_PREFIX: &str = "env:";
 
 /// The four chat lanes, in the order `ProviderRuntimeConfig` resolves them.
-/// Public and ordered because the status projection and the #1685 cutover
-/// both need a stable lane list that cannot drift from this module's output.
+/// Public and ordered because the status projection needs a stable lane list
+/// that cannot drift from this module's output.
 pub const ENV_CHAT_LANES: [&str; 4] = ["extract", "summary", "reasoning", "distill"];
 
 /// The embedding lane's name. Not a chat lane — it speaks a different

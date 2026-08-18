@@ -58,8 +58,8 @@ pub const ALIAS_STATUS_RETIRED: &str = "retired";
 // ─── Closed vocabularies ─────────────────────────────────────────────────────
 
 /// Where a catalog row came from. Closed because "which rows did the env
-/// chains produce" is a query the #1685 cutover has to be able to ask
-/// exactly, and a free-text column cannot answer it exactly.
+/// chains produce" must be answerable exactly, and a free-text column cannot
+/// provide that guarantee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogSource {

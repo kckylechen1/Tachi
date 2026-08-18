@@ -529,7 +529,6 @@ impl super::super::LlmClient {
             claude_cli_failure: Arc::new(RwLock::new(None)),
             circuit_breakers: super::super::CircuitBreakerRegistry::new(),
             lane_outage: super::super::LaneOutageTracker::new(),
-            ingress_gate: super::super::ingress_gate::IngressReferenceGate::new(),
             #[cfg(test)]
             last_rerank_dispatch: Arc::new(std::sync::Mutex::new(None)),
         })

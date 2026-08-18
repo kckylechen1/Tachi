@@ -1360,10 +1360,8 @@ fn nothing_a_resolution_hands_downstream_carries_the_alias_it_resolved() {
     // value, so if the alias name is absent here it cannot reach a receipt
     // through a resolution at all.
     //
-    // The other half — a caller handing an alias straight to the provider call,
-    // bypassing resolution entirely — is not fixable by this type, which is
-    // exactly why the ingress gate counts it (tachi-llm `ingress_gate`) and why
-    // the cutover that closes it is #1685.
+    // A caller that bypasses resolution entirely is outside this type's
+    // authority; this test pins only what an actual resolution emits.
     let aliases = two_way_alias();
     let revision = aliases.policy_revision().to_string();
     let outcome = resolver(aliases)
