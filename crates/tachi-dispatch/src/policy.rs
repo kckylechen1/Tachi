@@ -5,7 +5,7 @@ use crate::eval::AgentPerformanceMatrixRow;
 use crate::{
     profile_evidence_contract_json, profile_matches_agent, profile_role_matches,
     sanitize_policy_key, DispatchProfileDef, RouteSimulationSummary, DISPATCH_PROFILES,
-    MIN_LOADOUT_EVOLUTION_SAMPLES,
+    MIN_EVOLUTION_SAMPLES,
 };
 
 /// Policy-version tag bound into every v3 route-policy proposal identity. The
@@ -264,10 +264,10 @@ pub fn profile_eval_feedback_json(
             "low_sample: no live /eval rows for this profile; keep the static reviewed loadout"
                 .to_string(),
         );
-    } else if profile_samples < MIN_LOADOUT_EVOLUTION_SAMPLES {
+    } else if profile_samples < MIN_EVOLUTION_SAMPLES {
         guidance.push(format!(
             "low_sample: {} profile samples below evolution threshold {}",
-            profile_samples, MIN_LOADOUT_EVOLUTION_SAMPLES
+            profile_samples, MIN_EVOLUTION_SAMPLES
         ));
     } else {
         guidance.push(
@@ -291,7 +291,7 @@ pub fn profile_eval_feedback_json(
     if verification_rate.unwrap_or(0.0) < 0.50 && profile_samples > 0 {
         guidance.push("evidence_gap: completions need stronger verification evidence".to_string());
     }
-    if profile_samples >= MIN_LOADOUT_EVOLUTION_SAMPLES
+    if profile_samples >= MIN_EVOLUTION_SAMPLES
         && failure_count == 0
         && human_override_rate.unwrap_or(0.0) < 0.10
         && avg_retry_count.unwrap_or(0.0) < 1.0
@@ -313,7 +313,7 @@ pub fn profile_eval_feedback_json(
         "matrix_rows": performance_matrix.len(),
         "profile_samples": profile_samples,
         "fallback_role_samples": fallback_role_samples,
-        "min_samples_for_evolution": MIN_LOADOUT_EVOLUTION_SAMPLES,
+        "min_samples_for_evolution": MIN_EVOLUTION_SAMPLES,
         "summary": summary,
         "performance_by_task": profile_rows,
         "role_backend_fallback": fallback_rows,
@@ -426,7 +426,7 @@ where
             .cloned()
             .collect::<Vec<_>>();
         let profile_samples = sum_matrix_samples(&profile_rows);
-        if profile_samples < MIN_LOADOUT_EVOLUTION_SAMPLES {
+        if profile_samples < MIN_EVOLUTION_SAMPLES {
             continue;
         }
         let failure_count = sum_matrix_failures(&profile_rows);
@@ -521,7 +521,7 @@ fn build_evidence_contract_evolution_proposals(
                 "source": "live_memory_eval",
                 "limit": limit,
                 "profile_samples": profile_samples,
-                "min_samples_for_evolution": MIN_LOADOUT_EVOLUTION_SAMPLES,
+                "min_samples_for_evolution": MIN_EVOLUTION_SAMPLES,
                 "min_task_hits": min_task_hits,
                 "task_type": row.task_type,
                 "task_samples": row.samples,

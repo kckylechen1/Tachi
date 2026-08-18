@@ -61,7 +61,7 @@ Examples: “inspect these three modules in parallel” stays inside the harness
 Before a T2/T3 packet is frozen, the leader consults the card store (surfaces in §4). The consult produces four things, in order:
 
 1. **operator profile consult** — an operator may inspect the static profile/admission diagnostic with `tachi card list` or `tachi card show <profile-id>`. It is not a model-facing Task action, does not inspect dynamic eval or route overlays, and is not permission or launch approval. Use `tachi_tune(action="route_simulate")` separately when an authorized route-policy simulation is needed.
-2. **loadout** — the skills, evidence contract, and overlays the profile projects (`tachi_skill(action="loadout")`).
+2. **loadout** — the static dispatch-profile definition: the reviewed skill loadout and evidence contract the profile projects (rendered via the dispatch-profile overlay; `tachi_skill(action="discover"|"run")` serves the reviewed static skills — the retired loadout/bundle capability intelligence was deleted in #1690 C3).
 3. **vaccination projection** — the top-N ACT-R-decayed counter-clauses for this `(role, vendor)`, injected verbatim into the packet's frozen-spec section as *additional mandatory clauses* (the wire is PR #738; see §4 and §6).
 4. **trust-flag consumption** — if the vendor carries an unresolved `falsified_ci_report` signature, its `self_report_trust` is low and the packet mandates independent re-verification of *every* self-report.
 
@@ -154,8 +154,8 @@ The card store is consumed through the existing domain facades — no new `tachi
 
 - `tachi card list [--json]` / `tachi card show <profile-id> [--json]` — operator-only static profile/admission diagnostics (`tachi.operator_profile.v1`); this is not a model-facing MCP surface and is not launch approval.
 - `tachi_tune(action="route_simulate")` — profile choice simulation from risk + eval matrix.
-- `tachi_tune(action="route_proposals" | "route_review" | "route_apply")` — human-gated route-policy and loadout-evolution proposals (admin/operator only since #1426).
-- `tachi_skill(action="loadout" | "bundle")` — sparse skill loadout + capability bundle for a profile/task.
+- `tachi_tune(action="route_proposals" | "route_review" | "route_apply")` — human-gated route-policy and evidence-contract proposals (admin/operator only since #1426; the loadout-evolution proposals that used to ride this surface are retired by #1690 C3).
+- `tachi_skill(action="discover" | "run")` — reviewed static skills only (the retired `loadout`/`bundle` actions and capability-bundle intelligence were deleted in #1690 C3).
 - `tachi_task(action="complete")` — writes the eval evidence row that feeds card evolution.
 
 ### 4.4 Vaccination projection (landed by PR #738)
@@ -185,7 +185,7 @@ One diagram. Each arrow is annotated **[code]** (exists at HEAD with an anchor i
    next packet (12 clauses + vaccines + goldens) ──[doctrine] dispatch──►  outcome ──►  eval row ──► card
 ```
 
-- **Present at HEAD [code]:** eval-row write on complete, the live performance matrix, `recommend` consuming that matrix, the skill/trait/weak-against overlay projection, the deterministic risk classifier, route-policy proposals/apply, `(role, vendor)` signature evidence, counter-clause projection, and the `self_report_trust` flag.
+- **Present at HEAD [code]:** eval-row write on complete, the live performance matrix, `recommend` consuming that matrix, the deterministic risk classifier, route-policy proposals/apply, `(role, vendor)` signature evidence, counter-clause projection, the `self_report_trust` flag, and the evidence-contract projection (the skill/trait/weak-against overlay projection is retired by #1690 C3).
 - **Doctrine-only [doctrine]:** the leader running the loop, the 12-clause packet emission, the three-tier verdict routing, completion-ownership, the anti-fabrication artifact check, first-exam eligibility. These are law carried by files and the leader, not yet by Tachi code.
 
 ---
@@ -199,7 +199,7 @@ Rows changed by the 2026-08-02 amendment were verified at base `274b930a`; untou
 | Deterministic risk classification | §2.2, §2.1 | **Present implementation reality at the 2026-07-19 anchor:** `crates/tachi-dispatch/src/routing.rs:266-286` (risk → required/blocked_profiles; high/critical currently requires named profiles `claude_plan`+`codex_55_review` and blocks `codex_53_fast`). This is a **migration gap** against the carrier-neutral, risk-tiered routing target in §2.1/§2.4; the doctrine amendment does not claim runtime migration. | "Migrate `routing.rs` from named carrier/profile coupling to risk-tiered carrier-neutral policy inputs; preserve explicit high/critical safety gates and add route discrimination coverage before changing the current profile behavior." |
 | Profile recommend (matrix-fed) | §2.2 | `crates/tachi-dispatch/src/routing.rs:288` `recommend_dispatch_profile_candidates`; matrix from `aggregate_live` | — |
 | Profile / card definition | §4.1 | `crates/tachi-dispatch/src/profiles.rs:37-60` `DispatchProfileDef` (role-keyed; per-backend profiles from `:62`) | — |
-| Card overlay projection (skills/traits/weak-against) | §4.4 | `crates/tachi-server/src/dispatch_profile/cards.rs:9-127` (overlay keyed by `profile.name`, `PROFILE_CARD_OVERLAY_NS`); `crates/tachi-server/src/dispatch_ops/prompt/overlays.rs:49-66` (`projected_signature_skills`) | — |
+| Card overlay projection (skills/traits/weak-against) | §4.4 | **RETIRED by #1690 C3** — `projected_signature_skills` survives only as an always-empty read-only loadout key; the surviving family is the evidence-contract projection (`crates/tachi-server/src/dispatch_profile/cards.rs` renders the static reviewed loadout + `self_report_trust`; `crates/tachi-server/src/dispatch_ops/prompt/overlays.rs` renders static loadout + `projected_required`) | — |
 | Eval row on complete | §3 | `crates/tachi-server/src/complete_ops/eval_record.rs:39` (path `/eval/{date}/{task_id}`), `:283` (`category="eval"`), `:206-223` (subagents); handler `crates/tachi-server/src/complete_ops/handler.rs:14` | — |
 | Route-policy proposals / apply | §4.3 | `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` per `crates/tachi-params/src/facade/tune.rs`; rules persisted to `dispatch_route_policy_rules` (dispatch-policy-learning-spec.md:266-274) | — |
 | Facade surface (no new router facade) | §4.3 | `crates/tachi-params/src/facade/task.rs:13-48`; `merge`=local worktree only (`:49-50`), PR merges via `tachi_gh(safe_merge)` | — |

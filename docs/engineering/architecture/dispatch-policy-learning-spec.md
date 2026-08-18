@@ -20,8 +20,10 @@ Issue or task
   -> feature flow intake
   -> feature briefing
   -> deterministic risk classification
-  -> DispatchProfile and MBIT card recommendation
-  -> capability and skill loadout resolution
+  -> DispatchProfile recommendation (the MBIT-card recommendation step is
+     retired by #1690 C3)
+  -> static skill loadout resolution (reviewed baseline; capability-bundle
+     resolution is retired by #1690 C3)
   -> freeze required guarantees and choose an admitted execution owner
   -> host-native worker by default; qualified external assignment only when
      native candidates cannot satisfy the frozen boundary requirement
@@ -56,7 +58,7 @@ invent calls that are not exposed yet.
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` / `tachi_complete` | implemented |
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
-| skill bundle/loadout | `tachi_skill(action="bundle"|"loadout")` | implemented |
+| skill bundle/loadout | `tachi_skill(action="discover"\|"run")` serves reviewed static skills; the retired `bundle`/`loadout` actions are gone (#1690 C3) | implemented (surviving set) |
 | PR gate preview | `tachi_gh(action="pr_status")` | implemented |
 | release and closure | `tachi_gh(action="release_note")` / `tachi_gh(action="close_loop")` | implemented |
 
@@ -94,6 +96,13 @@ Legacy `agent` dispatch remains supported, but lifecycle agents should prefer
 
 ## MBIT Card
 
+> **Retired by #1690 C3.** The MBIT-card machinery (card assembly, stats/
+> personality projection, card-risk and passive-trait evolution pipelines) is
+> retired end-to-end. The surviving surfaces are the static reviewed profile
+> baseline, the evidence contract (what a packet must carry), and human-gated
+> route-policy/evidence-contract proposals; the eval-informed future belongs to
+> #1675. This section is retained as historical record.
+
 > **Authority pointer (2026-08-10).** Owner ruling #1202 governs what an MBIT
 > card *is*: see `dispatch-lifecycle.md` §4.2 "Storage split — three layers,
 > never merged" (declaration / evidence / projection). MBIT and other
@@ -105,23 +114,24 @@ Legacy `agent` dispatch remains supported, but lifecycle agents should prefer
 > ledger, and a candidate with no usable ledger row resolves to **abstain**,
 > never to a `baseline_mbit_fit`.
 
-MBIT means Model Behavior Identity Tag. It is the machine-usable card attached
-to a dispatch profile. It is allowed to be lightweight and memorable, but it is
-not cosmetic.
+MBIT means Model Behavior Identity Tag. It was the machine-usable card attached
+to a dispatch profile. It was allowed to be lightweight and memorable, but it
+was not cosmetic.
 
-Each card should expose:
+Each card exposed:
 
 - display name;
 - type or role tags;
-- strong and weak match surfaces;
-- skill loadout;
-- evidence contract;
-- capability bundle preference;
-- evolution rules or proposal hooks when enough eval evidence exists.
+- strong and weak match surfaces (retained as static profile fields);
+- skill loadout (retained as the static reviewed baseline);
+- evidence contract (the surviving projection family);
+- capability bundle preference (retired by #1690 C3);
+- evolution rules or proposal hooks when enough eval evidence exists (retired
+  by #1690 C3).
 
-MBIT data feeds route explanations, fallback chains, prompt envelope selection,
+MBIT data fed route explanations, fallback chains, prompt envelope selection,
 and scorecard display — as a rendered projection over the reviewed declaration
-plus recorded evidence (#1202), not as an independent routing authority. It is
+plus recorded evidence (#1202), never an independent routing authority. It was
 not a scoring input to the route decision: routing evidence is the decision-fact
 ledger, and the absence of ledger evidence is answered with `abstain`, not with
 a card-fit score.
@@ -141,10 +151,9 @@ worker.
 Resolution order:
 
 ```text
-DispatchProfile
-  -> MBIT card
-  -> skill loadout
-  -> capability bundle
+DispatchProfile (static reviewed baseline)
+  -> skill loadout (static reviewed baseline; the MBIT-card and
+     capability-bundle resolution steps were retired by #1690 C3)
   -> prompt/context pack
   -> backend command
 ```
@@ -243,7 +252,8 @@ can guide an agent from issue to durable closure without relying on chat memory.
 As of 2026-06-28, the baseline includes:
 
 - feature-scoped `tachi_task(action="brief")`;
-- built-in dispatch profiles and MBIT-like profile cards;
+- built-in dispatch profiles and their static profile/card overlays (the
+  MBIT-like card machinery behind them is retired by #1690 C3);
 - profile recommendation with deterministic risk classification;
 - live eval performance matrix consumption by recommendation;
 - read-only route simulation over recent live eval rows for `current`,
@@ -287,8 +297,9 @@ projection hardening:
 
 - harden route-policy replay and regression coverage across larger live eval
   fixtures;
-- continue expanding card parsing and projection tests as new MBIT fields are
-  added.
+- continue expanding evidence-contract and route-policy projection tests as
+  profile/card overlay coverage grows (the MBIT-field parsing target is
+  retired with the MBIT machinery, #1690 C3).
 
 Implemented route-policy loader:
 
@@ -316,7 +327,10 @@ Implemented route-policy loader:
 - Do not store raw worker transcripts in normal memory.
 - Do not create a second unmanaged live JSONL eval ledger.
 - Do not force every task through a multi-agent pipeline.
-- Do not let MBIT cards become flavor text disconnected from routing.
+- Do not let MBIT cards become flavor text disconnected from routing. (MBIT
+  cards are retired by #1690 C3; the surviving form of this non-goal applies
+  to the static profile/card overlays — they must stay connected to routing,
+  not become decoration.)
 - Do not widen the public facade surface unless an existing domain facade cannot
   carry the capability.
 
@@ -324,8 +338,10 @@ Implemented route-policy loader:
 
 Issue #194 can close when:
 
-- profile dispatch, MBIT cards, risk classification, skill loadouts, and route
-  recommendation are available through the existing task/skill facades;
+- profile dispatch, MBIT cards (retired by #1690 C3 — the static reviewed
+  profile baseline stands in for the card criterion), risk classification,
+  skill loadouts, and route recommendation are available through the existing
+  task/skill facades;
 - recommendation consumes live eval performance evidence and explains fallbacks;
 - dispatch writes flow-visible worker state and evidence requirements;
 - at least one end-to-end feature flow proves intake, briefing, recommend,

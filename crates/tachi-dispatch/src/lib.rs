@@ -64,7 +64,7 @@ pub use profiles::{
     profile_uses_opencode_adapter, profile_weak_against, recommendation_identity_receipt,
     resolve_and_apply_dispatch_profile, resolve_dispatch_profile, DispatchProfileAlias,
     DispatchProfileDef, ResolvedDispatchProfile, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
-    DISPATCH_PROFILE_ALIASES, MIN_LOADOUT_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES,
+    DISPATCH_PROFILE_ALIASES, MIN_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES,
     PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 pub use registry::{
