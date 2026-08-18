@@ -1,5 +1,4 @@
-//! The resolver-at-ingress reporting gate (tachi#1681 PR-D debt (a); codex
-//! #1681 review BUG-5).
+//! Reports unresolved caller-supplied model references at LLM ingress.
 //!
 //! # The hole this measures
 //!
@@ -13,19 +12,16 @@
 //!
 //! # Why this gate reports and does not refuse
 //!
-//! Refusing here today would break live routing. The four env chains are the
-//! production path (#1681 D3's compatibility window), `model_override` is how
-//! several callers already steer within a lane, and there is no resolution in
-//! this code path yet to say which strings are legitimate — the resolver
-//! exists (`memcore::catalog::resolver`) but nothing has been cut over to it.
-//! That cutover is #1685.
+//! Refusing here would break the live direct-provider routing path:
+//! `model_override` is how several callers already steer within a lane, and
+//! this path has no resolver that can distinguish aliases from provider model
+//! names.
 //!
-//! So this is a **measurement**, deliberately: it counts how often a reference
-//! reaches the wire without having been resolved, per lane, and warns once per
-//! distinct reference. When #1685 flips the seam, this counter is the evidence
-//! for what the flip will break, and its going to zero is the evidence the flip
-//! is complete. A gate that silently changed behaviour instead would have made
-//! that measurement impossible to take.
+//! So this is deliberately **telemetry**, not resolution or admission: it
+//! counts how often a reference reaches the wire without having been resolved,
+//! per lane, and warns once per distinct reference. A gate that silently
+//! changed behavior would make the live call path depend on an unavailable
+//! control-plane decision.
 //!
 //! # Why the map is bounded, in both directions
 //!
@@ -37,10 +33,9 @@
 //! A cap on the number of entries is only half of it: sixty-four entries of
 //! unbounded length is still unbounded, and that is what the first cut stored
 //! and logged (#1681 PR-D review, CP5). Every reference is therefore bounded
-//! and scrubbed on the way in, by the same rule and for the same two reasons
-//! as `broker::disposition`'s `MAX_FINISH_REASON_CHARS`: a caller must not get
-//! to choose how much of this process's memory it consumes, and must not get
-//! to put control characters into a log line and forge a second one.
+//! and scrubbed on the way in: a caller must not choose how much of this
+//! process's memory it consumes or put control characters into a log line and
+//! forge a second one.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -51,10 +46,9 @@ const DISTINCT_REFERENCE_CAP: usize = 64;
 
 /// The most characters of a caller-supplied reference the gate retains.
 ///
-/// Sized like `MAX_FINISH_REASON_CHARS`, and for the same reason: every real
-/// model reference is a short token (`deepseek-reasoner`, `chat.premium`,
-/// `lane.summary`), so this is generous for the honest case and still a bound
-/// for the hostile one.
+/// Real model references are short tokens (`deepseek-reasoner`,
+/// `chat.premium`, `lane.summary`), so 64 characters is generous for the
+/// honest case while still bounding hostile input retained in memory or logs.
 const MAX_REFERENCE_CHARS: usize = 64;
 
 /// A caller-supplied reference, bounded and stripped of control characters.
@@ -65,11 +59,9 @@ const MAX_REFERENCE_CHARS: usize = 64;
 /// sightings are still counted, and a counter whose *totals* are exact while
 /// its per-key list is coarse is the same trade the entry cap already makes.
 ///
-/// `pub(crate)`: the CP5 review (#1681 PR-D) found the same unbounded
-/// `model_override` reaching a second write sink — `llm_usage.model`
-/// (`chat_lanes::lane_calls`) and its retry-log `eprintln!` — past this
-/// module's own boundary. Both sinks reuse this exact bound rather than
-/// growing a second copy of it.
+/// `pub(crate)` because the same untrusted `model_override` reaches two more
+/// sinks: `llm_usage.model` and the retry log in `chat_lanes::lane_calls`.
+/// Both reuse this bound rather than growing a second copy.
 pub(crate) fn bounded_reference(raw: &str) -> String {
     let mut bounded: String = raw
         .chars()

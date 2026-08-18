@@ -8,8 +8,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 mod auth_probe;
-/// tachi#1682 slice-1: sans-IO ProviderWire trait and OpenAI-compat adapter.
-pub mod broker;
 /// tachi#1681 D3/D7 PR-B: env-chain → catalog import. Public because the
 /// status projection (tachi-server) and the #1685 consumer cutover both
 /// consume the projection; nothing in this crate reads the catalog back.
