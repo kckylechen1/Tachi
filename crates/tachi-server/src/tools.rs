@@ -23,7 +23,6 @@ use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
     collect_wiki_browse_value, collect_wiki_read_value_for_plan, collect_wiki_search_value,
     handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_read_for_plan,
-    handle_wiki_search,
 };
 use crate::MemoryServer;
 
@@ -78,16 +77,6 @@ use self::task_router::*;
 
 #[tool_router(router = copilot_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
-    #[tool(
-        description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, intent, selected_sops, tool_plan, lightweight skill suggestions, and debugging checklist."
-    )]
-    pub(crate) async fn tachi_task_brief(
-        &self,
-        Parameters(params): Parameters<TaskBriefParams>,
-    ) -> Result<String, String> {
-        crate::copilot_ops::handle_tachi_task_brief(self, params).await
-    }
-
     #[tool(
         description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. Pass flow_id to append progress.jsonl."
     )]

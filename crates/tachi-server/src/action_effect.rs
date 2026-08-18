@@ -99,7 +99,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "recommend_skill",
     "recommend_toolchain",
     "prepare_capability_bundle",
-    "tachi_task_brief",
     "tachi_wiki_search",
     "search_memory",
     "find_similar_memory",
@@ -112,7 +111,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
-    "wiki_search",
     // Facade tools (read-only)
     "tachi_search",
     "tachi_web_search",
@@ -212,7 +210,6 @@ const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "recommend_skill",
     "recommend_toolchain",
     "prepare_capability_bundle",
-    "tachi_task_brief",
     "tachi_wiki_search",
     "find_similar_memory",
     "get_memory",
@@ -224,7 +221,6 @@ const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
-    "wiki_search",
     "tachi_web_search",
     "tachi_browse",
 ];

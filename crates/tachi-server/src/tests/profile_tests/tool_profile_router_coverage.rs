@@ -106,7 +106,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     // #757 Cut3-S1: folded sandbox verb (its six forwarding aliases above are
     // also admin-only) — absent from every profile bundle.
     "tachi_sandbox",
-    "tachi_task_brief",
     // #1426: the route/recall tuning facade is deliberately in no bundle —
     // `tool_visible` grants it to admin/full profiles only, by omission from
     // the standard, delegate, and bundle pattern arrays.
@@ -172,8 +171,10 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "shell_exec_audit",
     "tachi_plan",
     "tachi_progress_check",
+    "tachi_task_brief",
     "update_card",
     "wiki_browse",
+    "wiki_search",
 ];
 
 // Batch C (#757) removed `tachi_board` and `tachi_dispatch` — their canonical
@@ -181,12 +182,7 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
 // remains a folded admin-only compat tool here.
 const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory"];
 
-const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[
-    "remember",
-    "save_memory",
-    "search_memory",
-    "tachi_task_brief",
-];
+const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &["remember", "save_memory", "search_memory"];
 
 #[test]
 fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {

@@ -201,9 +201,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 182443,
-        "total_tool_definition_bytes": 219506,
-        "visible_tool_count": 100,
+        "total_input_schema_bytes": 178686,
+        "total_tool_definition_bytes": 214987,
+        "visible_tool_count": 98,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -276,7 +276,6 @@
           "tachi_staff",
           "tachi_status",
           "tachi_task",
-          "tachi_task_brief",
           "tachi_tools",
           "tachi_tune",
           "tachi_unstick",
@@ -303,14 +302,13 @@
           "vc_list",
           "vc_register",
           "vc_resolve",
-          "wiki_lint",
-          "wiki_search"
+          "wiki_lint"
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 126159,
-        "total_tool_definition_bytes": 144473,
-        "visible_tool_count": 39,
+        "total_input_schema_bytes": 123437,
+        "total_tool_definition_bytes": 141325,
+        "visible_tool_count": 38,
         "visible_tools": [
           "extract_facts",
           "hub_discover",
@@ -349,8 +347,7 @@
           "tachi_wiki",
           "tachi_wiki_ingest",
           "tachi_wiki_search",
-          "tachi_wiki_write",
-          "wiki_search"
+          "tachi_wiki_write"
         ]
       },
       "delegate": {
@@ -373,9 +370,9 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 121728,
-        "total_tool_definition_bytes": 141174,
-        "visible_tool_count": 51,
+        "total_input_schema_bytes": 119006,
+        "total_tool_definition_bytes": 138026,
+        "visible_tool_count": 50,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -426,8 +423,7 @@
           "vault_lock",
           "vault_status",
           "vault_unlock",
-          "wiki_lint",
-          "wiki_search"
+          "wiki_lint"
         ]
       },
       "standard": {
@@ -456,7 +452,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 100,
+      "tool_count": 98,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -529,7 +525,6 @@
         "tachi_staff",
         "tachi_status",
         "tachi_task",
-        "tachi_task_brief",
         "tachi_tools",
         "tachi_tune",
         "tachi_unstick",
@@ -556,8 +551,7 @@
         "vc_list",
         "vc_register",
         "vc_resolve",
-        "wiki_lint",
-        "wiki_search"
+        "wiki_lint"
       ]
     },
     "schema_surfaces": {

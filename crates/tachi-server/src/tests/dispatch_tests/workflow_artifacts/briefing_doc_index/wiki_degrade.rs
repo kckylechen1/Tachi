@@ -25,17 +25,19 @@ async fn tachi_task_brief_degrades_when_leftover_wiki_refuses_open() {
         })
         .expect("seed leftover-wiki task-brief sentinel");
 
-    let response = server
-        .tachi_task_brief(Parameters(TaskBriefParams {
+    let response = crate::copilot_ops::handle_tachi_task_brief(
+        &server,
+        TaskBriefParams {
             task: "LeftoverWikiTaskBriefSentinel".to_string(),
             agent_id: Some("copilot".to_string()),
             project: None,
             path_prefix: None,
             domain: None,
             top_k: 3,
-        }))
-        .await
-        .expect("task brief must not hard-fail when leftover wiki refuses open");
+        },
+    )
+    .await
+    .expect("task brief must not hard-fail when leftover wiki refuses open");
     let json: Value = serde_json::from_str(&response).expect("task brief JSON");
     assert_eq!(json["status"], "ok", "{json:#}");
     assert!(

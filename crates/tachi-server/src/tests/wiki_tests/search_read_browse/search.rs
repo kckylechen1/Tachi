@@ -16,8 +16,9 @@ async fn wiki_search_returns_compact_hits_without_related_entries() {
 
     let (server, _home) = seed_wiki_project_entries(vec![alpha, beta]);
 
-    let response = server
-        .wiki_search(Parameters(WikiSearchParams {
+    let response = crate::wiki_ops::handle_wiki_search(
+        &server,
+        WikiSearchParams {
             query: "MCP debugging".to_string(),
             path_prefix: Some("/wiki".to_string()),
             category: None,
@@ -30,9 +31,10 @@ async fn wiki_search_returns_compact_hits_without_related_entries() {
             error_context: None,
             weights: None,
             lifecycle: None,
-        }))
-        .await
-        .expect("wiki search should succeed");
+        },
+    )
+    .await
+    .expect("wiki search should succeed");
     assert!(response.starts_with("## Wiki search:"));
     assert!(
         response.contains("MCP schema debugging") || response.contains("MCP transport debugging")
