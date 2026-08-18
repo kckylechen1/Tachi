@@ -337,7 +337,6 @@ impl MemoryServer {
                 + Self::runtime_context_tool_router()
                 + Self::hub_tool_router()
                 + Self::pipeline_tool_router()
-                + Self::kanban_tool_router()
                 + Self::memory_tool_router()
                 + Self::vault_tool_router()
                 + Self::workflow_tool_router()

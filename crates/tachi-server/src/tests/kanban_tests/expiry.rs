@@ -5,8 +5,9 @@ async fn kanban_update_to_expired_status_prevents_further_updates() {
     let server = make_server();
 
     // Post a card
-    let post = server
-        .post_card(Parameters(PostCardParams {
+    let post = handle_post_card(
+        &server,
+        PostCardParams {
             from_agent: "sender".to_string(),
             to_agent: "receiver".to_string(),
             title: "Test Card".to_string(),
@@ -18,25 +19,29 @@ async fn kanban_update_to_expired_status_prevents_further_updates() {
             conversation_id: None,
             thread_id: None,
             agent_session_id: None,
-        }))
-        .await
-        .expect("post_card should succeed");
+        },
+    )
+    .await
+    .expect("post_card should succeed");
 
     let post_json: Value = serde_json::from_str(&post).unwrap();
     let card_id = post_json["card_id"].as_str().unwrap();
 
     // Update to expired status
-    server
-        .update_card(Parameters(UpdateCardParams {
+    handle_update_card(
+        &server,
+        UpdateCardParams {
             card_id: card_id.to_string(),
             new_status: "expired".to_string(),
             response_text: None,
-        }))
-        .await
-        .expect("update_card to expired should succeed");
+        },
+    )
+    .await
+    .expect("update_card to expired should succeed");
 
-    let inbox = server
-        .check_inbox(Parameters(CheckInboxParams {
+    let inbox = handle_check_inbox(
+        &server,
+        CheckInboxParams {
             agent_id: "receiver".to_string(),
             status_filter: Some("open".to_string()),
             since: None,
@@ -44,9 +49,10 @@ async fn kanban_update_to_expired_status_prevents_further_updates() {
             include_broadcast: true,
             workspace_id: None,
             conversation_id: None,
-        }))
-        .await
-        .expect("check_inbox should succeed");
+        },
+    )
+    .await
+    .expect("check_inbox should succeed");
 
     let inbox_json: Value = serde_json::from_str(&inbox).unwrap();
     let cards = inbox_json["cards"].as_array().unwrap();

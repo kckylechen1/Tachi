@@ -135,21 +135,17 @@ delete wrappers.
 | `tachi_wiki_write` | Direct wiki write remains in remember patterns at `patterns.rs:40`; CLI map routes `tachi_wiki_write` and `wiki_write` to `tachi_wiki(action="write")` at `tool_map.rs:21`. | `tachi_wiki(action="write")` | Fold/delete candidate. | Same wiki alias leaf. |
 | `tachi_browse` | Facade read tool remains in observe patterns at `patterns.rs:23`. | `tachi_wiki(action="browse")` if browse stays a wiki action. | Fold candidate, but not first cut. | Confirm delegate dogfood before removing; delegate currently exposes `tachi_browse`. |
 
-### Batch B: Retire Direct Kanban Tools
+### Batch B: Executed — Retire Direct Kanban Tools
 
-These routes are implementation details of the dispatch/card board. They should
-not be a model-facing collaboration API if `tachi_task` owns the agent workflow
-(`tachi_arena` was deleted in #1319-D2, so it is no longer an alternative home
-for any of these).
+These routes are implementation details of the dispatch/card board and have been
+removed from the model-facing MCP router (`kanban_tool_router` retired). Internal
+storage/handlers remain for test and internal orchestration.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `check_inbox` | Direct tool in `crates/tachi-server/src/tools.rs:109`; in coordinate profile at `patterns.rs:61`. | `tachi_task(action="board")`. | Profile-retire, then delete public route. | Move kanban tests to handlers or canonical facade; remove MCP route. |
-| `post_card` | Direct tool in `tools.rs:101`; in coordinate profile at `patterns.rs:64`. | `tachi_staff(action="start")` or an internal board write (`tachi_task(action="dispatch")` and `tachi_arena(action="spawn")` were both deleted, #1319-C2/D2). | Profile-retire, then delete public route. | Same kanban route deletion leaf. |
-| `update_card` | Direct tool in `tools.rs:117`; in coordinate profile at `patterns.rs:65`. | `tachi_task(action="complete"/"cancel"/"status")` or internal board update. | Profile-retire, then delete public route. | Same kanban route deletion leaf. |
-
-Do not delete the kanban storage/handler code in this batch. Only delete the MCP
-route after the canonical task/staff flows cover the same dogfood path.
+| `check_inbox` | **DONE Batch B:** Removed from MCP tool router; tests migrated to internal handlers. | `tachi_task(action="board")` / `tachi_a2a`. | Deleted direct MCP route. | — |
+| `post_card` | **DONE Batch B:** Removed from MCP tool router; tests migrated to internal handlers. | `tachi_staff(action="start")` / `tachi_a2a`. | Deleted direct MCP route. | — |
+| `update_card` | **DONE Batch B:** Removed from MCP tool router; tests migrated to internal handlers. | `tachi_task(action="status")` / `tachi_a2a`. | Deleted direct MCP route. | — |
 
 ### Batch C: Executed — deprecated dispatch facades removed (PR #822; tracked by #757)
 

@@ -77,7 +77,6 @@ fn bundle_count(tool_name: &str) -> usize {
 
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "chain_skills",
-    "check_inbox",
     "distill_trajectory",
     "dlq_list",
     "dlq_retry",
@@ -91,7 +90,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "hub_set_active_version",
     "hub_set_enabled",
     "hub_stats",
-    "post_card",
     "remember",
     "sandbox_check",
     "sandbox_exec_audit",
@@ -127,7 +125,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "vc_list",
     "vc_register",
     "vc_resolve",
-    "update_card",
 ];
 
 /// #757: graph/state primitives are no longer MCP-registered. #913 deleted
@@ -163,8 +160,10 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
 ];
 
 const RETIRED_NATIVE_ALIASES: &[&str] = &[
+    "check_inbox",
     "cyberbrain_write",
     "cyberbrain_search",
+    "post_card",
     "section9_review",
     "section9_audit_log",
     "shell_set_policy",
@@ -173,6 +172,7 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "shell_exec_audit",
     "tachi_plan",
     "tachi_progress_check",
+    "update_card",
     "wiki_browse",
 ];
 
@@ -182,13 +182,10 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
 const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory"];
 
 const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[
-    "check_inbox",
-    "post_card",
     "remember",
     "save_memory",
     "search_memory",
     "tachi_task_brief",
-    "update_card",
 ];
 
 #[test]

@@ -201,14 +201,13 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 183812,
-        "total_tool_definition_bytes": 221467,
-        "visible_tool_count": 103,
+        "total_input_schema_bytes": 182443,
+        "total_tool_definition_bytes": 219506,
+        "visible_tool_count": 100,
         "visible_tools": [
           "archive_memory",
           "capture_session",
           "chain_skills",
-          "check_inbox",
           "compact_context",
           "compact_rollup",
           "compact_session_memory",
@@ -235,7 +234,6 @@
           "list_memories",
           "memory_stats",
           "peer_query",
-          "post_card",
           "prepare_capability_bundle",
           "recall_context",
           "recommend_capability",
@@ -289,7 +287,6 @@
           "tachi_wiki_organize",
           "tachi_wiki_search",
           "tachi_wiki_write",
-          "update_card",
           "vault_get",
           "vault_init",
           "vault_lease_api_key",
@@ -459,12 +456,11 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 103,
+      "tool_count": 100,
       "tools": [
         "archive_memory",
         "capture_session",
         "chain_skills",
-        "check_inbox",
         "compact_context",
         "compact_rollup",
         "compact_session_memory",
@@ -491,7 +487,6 @@
         "list_memories",
         "memory_stats",
         "peer_query",
-        "post_card",
         "prepare_capability_bundle",
         "recall_context",
         "recommend_capability",
@@ -545,7 +540,6 @@
         "tachi_wiki_organize",
         "tachi_wiki_search",
         "tachi_wiki_write",
-        "update_card",
         "vault_get",
         "vault_init",
         "vault_lease_api_key",

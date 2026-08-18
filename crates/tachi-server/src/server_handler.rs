@@ -1295,7 +1295,6 @@ mod tests {
             + MemoryServer::runtime_context_tool_router()
             + MemoryServer::hub_tool_router()
             + MemoryServer::pipeline_tool_router()
-            + MemoryServer::kanban_tool_router()
             + MemoryServer::memory_tool_router()
             + MemoryServer::vault_tool_router()
             + MemoryServer::workflow_tool_router()

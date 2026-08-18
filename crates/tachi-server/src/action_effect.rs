@@ -150,8 +150,7 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // #1099: "handoff_leave"/"handoff_check" retired — the routes no longer
     // exist. "tachi_handoff" (below) stays, still mixed read/write via its
     // one surviving action (promote_issue).
-    "post_card",
-    "update_card",
+    // Batch B: "post_card"/"update_card" retired from MCP.
     "distill_trajectory",
     "tachi_unstick",
     "wiki_lint",
