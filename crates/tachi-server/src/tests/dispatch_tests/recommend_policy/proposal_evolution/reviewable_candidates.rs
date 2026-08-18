@@ -509,12 +509,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .as_array()
         .expect("projected passive traits")
         .contains(&json!("evidence_backed_planning")));
-    assert!(
-        loadout["mbit_card"]["skill_loadout"]["projected_passive_traits"]
-            .as_array()
-            .expect("mbit projected passive traits")
-            .contains(&json!("evidence_backed_planning"))
-    );
     assert!(loadout["evidence_required"]
         .as_array()
         .expect("loadout evidence required")
@@ -523,12 +517,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .as_array()
         .expect("loadout projected evidence")
         .contains(&json!("acceptance_criteria")));
-    assert!(
-        loadout["mbit_card"]["evidence_contract"]["projected_required"]
-            .as_array()
-            .expect("mbit projected evidence")
-            .contains(&json!("acceptance_criteria"))
-    );
 
     let agents_raw = server
         .tachi_agents(Parameters(TachiAgentsParams {

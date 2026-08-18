@@ -190,7 +190,7 @@ pub(super) fn build_dispatch_response(
             "dispatch_profile".to_string(),
             inputs
                 .resolved_profile
-                .mbit_card
+                .profile_card
                 .clone()
                 .unwrap_or(Value::Null),
         );

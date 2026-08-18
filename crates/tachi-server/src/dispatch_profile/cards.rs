@@ -46,12 +46,6 @@ fn inject_self_report_trust(
             serde_json::Value::String(trust.to_string()),
         );
     }
-    if let Some(card) = value.get_mut("mbit_card").and_then(|c| c.as_object_mut()) {
-        card.insert(
-            "self_report_trust".to_string(),
-            serde_json::Value::String(trust.to_string()),
-        );
-    }
     Ok(())
 }
 

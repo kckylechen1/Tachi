@@ -149,10 +149,6 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
         .await
         .expect("loadout should include projected weakness");
     let loadout: serde_json::Value = serde_json::from_str(&loadout_raw).expect("loadout JSON");
-    assert_eq!(
-        loadout["weak_against"], loadout["mbit_card"]["weak_against"],
-        "top-level loadout weak_against should match the MBIT card"
-    );
     assert!(loadout["weak_against"]
         .as_array()
         .expect("loadout weak_against")

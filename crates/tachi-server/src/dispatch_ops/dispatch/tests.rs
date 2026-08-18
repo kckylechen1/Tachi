@@ -1186,8 +1186,8 @@ async fn dispatch_response_verbose_true_restores_full_routing_card() {
         "verbose=true must carry the full routing card: {response}"
     );
     assert!(
-        response["profile"]["mbit_card"].is_object(),
-        "verbose=true's `profile` is the full ResolvedDispatchProfile, which nests its own mbit_card: {response}"
+        response["profile"]["profile_card"].is_object(),
+        "verbose=true's `profile` is the full ResolvedDispatchProfile, which nests its own profile_card: {response}"
     );
     assert!(
         response["identity_receipt"].is_object(),
@@ -1195,20 +1195,11 @@ async fn dispatch_response_verbose_true_restores_full_routing_card() {
     );
     assert!(
         response["dispatch_profile"].is_object(),
-        "verbose=true must carry the dispatch_profile mbit_card: {response}"
+        "verbose=true must carry the dispatch_profile: {response}"
     );
-    // #1182 checkpoint 3 (weak verbose proof): both `response["profile"]["mbit_card"]`
-    // and `response["dispatch_profile"]` are built from the SAME underlying
-    // value (`resolved_profile.mbit_card`, see response_helpers.rs's
-    // `object.insert("dispatch_profile", inputs.resolved_profile.mbit_card...)`
-    // vs `profile_payload = serde_json::to_value(&resolved_profile)` in
-    // start.rs) — PR #1182's own review-hint #2 calls this the self-nesting
-    // duplication the issue names. Assert the equality directly instead of
-    // only checking `is_object()`, which would pass even if the two values
-    // diverged.
     assert_eq!(
-        response["profile"]["mbit_card"], response["dispatch_profile"],
-        "self-nested mbit_card copies must be the exact same value: {response}"
+        response["profile"]["profile_card"], response["dispatch_profile"],
+        "self-nested profile_card copies must be the exact same value: {response}"
     );
 }
 

@@ -158,10 +158,7 @@ pub(crate) fn handle_dispatch_recommendation(
             evidence_contract: profile_evidence_contract_json_for_server(server, best_profile)?,
             resolved_skills: profile_required_skill_ids_for_server(server, best_profile)?,
             resolved_skill_loadout: profile_skill_loadout_json_for_server(server, best_profile)?,
-            mbit_card: profile_json
-                .get("mbit_card")
-                .cloned()
-                .unwrap_or(Value::Null),
+            profile_card: profile_json.clone(),
         },
     )?;
 
@@ -533,7 +530,7 @@ mod evidence_flip_tests {
         "evidence_note",
         "live_eval",
         "route_policy_rules",
-        "mbit_card",
+        "profile_card",
         "candidates",
         // tachi#1675 PR1 Seam A.
         "recommendation_id",
