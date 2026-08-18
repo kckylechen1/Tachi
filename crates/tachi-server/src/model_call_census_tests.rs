@@ -731,17 +731,24 @@ fn detect_model_api_calls(surface_lines: &[String]) -> Vec<(usize, ModelApi)> {
     let mut offset = 0usize;
     while offset < surface.len() {
         let rest = &surface[offset..];
+        let prefix_len = if rest.starts_with('.') {
+            Some(1)
+        } else if rest.starts_with("::") {
+            Some(2)
+        } else {
+            None
+        };
         let mut matched = None;
-        for api in ModelApi::all().iter().copied() {
-            for prefix in [".", "::"] {
-                let call = format!("{prefix}{}", api.as_str());
-                if rest.starts_with(&call) && model_api_call_has_open_paren(rest, call.len()) {
-                    matched = Some((api, call.len()));
+        if let Some(prefix_len) = prefix_len {
+            let after_prefix = &rest[prefix_len..];
+            for api in ModelApi::all().iter().copied() {
+                let name = api.as_str();
+                if after_prefix.starts_with(name)
+                    && model_api_call_has_open_paren(after_prefix, name.len())
+                {
+                    matched = Some((api, prefix_len + name.len()));
                     break;
                 }
-            }
-            if matched.is_some() {
-                break;
             }
         }
         if let Some((api, len)) = matched {
@@ -1109,6 +1116,23 @@ async fn production(llm: &LlmClient) {
         "{actual:#?}"
     );
     assert_eq!(actual[0].owner, "production");
+}
+
+#[test]
+fn model_call_scanner_rejects_similar_names_and_function_values() {
+    let actual = discover_model_calls_in_source(
+        "synthetic.rs",
+        r#"
+async fn production(llm: &LlmClient) {
+    let _function = llm.call_extract_llm;
+    llm.call_extract_llm_suffix("not the registered API").await;
+    llm.call_extract_llm /* comments are blanked by the lexical surface */
+        ("system", "user", None, 0.0, 8).await;
+}
+"#,
+    );
+    assert_eq!(actual.len(), 1, "{actual:#?}");
+    assert_eq!(actual[0].api, ModelApi::CallExtractLlm);
 }
 
 #[test]
