@@ -61,6 +61,7 @@ mod deployment_health;
 mod direct_provider_model_override;
 mod embedding_config;
 mod embedding_rerank;
+mod endpoint_credential_guard;
 mod extract_quality_golden;
 mod provider_key_persistence;
 mod provider_pool;
