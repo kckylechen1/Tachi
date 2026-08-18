@@ -419,9 +419,10 @@ To verify these patterns are real and not session-specific hallucinations:
    - Monitor whether pattern memory predicts future instances better than content memory alone.
 
 5. **crystallization_pipeline**
-   - Try to generate a skill from this pattern and see if it is useful in a future session.
-   - Verify that a future maturity gate can generate a wiki draft and a pending skill
-     candidate without listing the skill automatically.
+   - The skill-generation leg is retired by #1690 C3 (patterns never mint skill
+     candidates). Verify instead that a future maturity gate can generate a wiki
+     draft review artifact (promotion produces reviewed wiki/runbook artifacts
+     and agent-profile proposals only).
 
 ---
 
@@ -439,8 +440,9 @@ If the continuity memory system cannot capture and crystallize this session, it 
 
 Current code-alignment note: capture, projection, pattern search, wiki pattern
 references, explicit pattern feedback, `tachi_complete` evidence-ref feedback,
-`close_loop` pattern hit feedback, promotion review artifacts, and pending skill
-generation exist. `tachi_event action=promote` can execute conservative review
+`close_loop` pattern hit feedback, and promotion review artifacts (wiki draft +
+agent-profile proposal; the pending skill candidate is retired by #1690 C3)
+exist. `tachi_event action=promote` can execute conservative review
 artifact creation, and `tachi_event action=context` exposes first-slice
 `timeline[]` / `bonding[]` read models. Automatic Agent MD writes,
 briefing/context hit/miss decisions, enforced TimelineEntry/SharedLexicon schemas,

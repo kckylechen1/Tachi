@@ -335,13 +335,13 @@ The two integration modes once planned here are both retired:
 This mirrors the Karpathy LLM Wiki flow:
 
 ```
-Raw notes / sessions → pattern memory → wiki → skill
+Raw notes / sessions → pattern memory → wiki → skill   (historical Karpathy mirror; Tachi's skill leg is retired — see §3.3)
 ```
 
 Tachi maps this as:
 
 ```
-Notes / memory / session → /user/patterns/* → /wiki/drafts/patterns/* → skill:<name>
+Notes / memory / session → /user/patterns/* → /wiki/drafts/patterns/* → reviewed wiki/runbook   (no skill minting — retired by #1690 C3)
 ```
 
 ### 3.4 Eval — the credibility loop
@@ -425,8 +425,8 @@ Implemented integration slice:
 save_memory emit_continuity=true → memory.saved event
 tachi_search scope=patterns      → explicit read-only /user/patterns recall
 tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
-tachi_skill action=from_pattern  → pending/disabled Hub skill candidate
-tachi_event action=promote       → wiki draft + pending skill + agent-profile proposal review artifacts
+tachi_skill action=discover|run  → static reviewed skill surface only (from_pattern is deleted by #1690 C3; no skill candidate is ever minted from a pattern)
+tachi_event action=promote       → wiki draft + agent-profile proposal review artifacts (the disabled skill-candidate artifact is retired by #1690 C3)
 tachi_domain_adapter lorebook_import → repo lorebook shape → world_book events
 tachi_event action=context       → read-only local context bundle; caller session text is not evidence admission
 tachi_event action=a2a           → read-only A2A evidence bundle without context feedback writes
@@ -437,7 +437,7 @@ Target integration still to add:
 ```
 pattern maturity → external validation + cold-seat check
 review artifact → human-approved wiki/runbook promotion
-review artifact → human-approved generated skill promotion to listed/enabled
+review artifact → human-approved generated skill promotion to listed/enabled   (moot — RETIRED by #1690 C3: no generated skills exist)
 review artifact → human-approved Agent MD/profile write
 ```
 

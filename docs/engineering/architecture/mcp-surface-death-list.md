@@ -96,7 +96,7 @@ otherwise.
 | `tachi_tune` | route/recall tuning | Extracted from task/memory in #1426. Admin/operator only — never part of the standard keep-set. |
 | `tachi_verify` | verification ledger | Keep as evidence ledger for dispatch and safe-merge workflows. |
 | `tachi_wiki` | wiki facade | Canonical wiki search/browse/read/write facade. |
-| `tachi_skill` | skill facade | Canonical discover/loadout/run facade. |
+| `tachi_skill` | skill facade | Canonical discover/run facade (the retired `bundle`/`loadout` actions were deleted by #1690 C3). |
 | `tachi_web_search` | web search intake | Keep only as a compatibility intake where a host lacks web search; #1467 leaves research reasoning with the host model. |
 | `vault_status` | safe credential readiness | Read-only status only; write/get vault tools stay out of daily profiles. |
 | `tachi_gh` | GitHub/evidence facade | Keep if GitHub remains part of ship/evidence workflows; move duplicated task PR actions here. |

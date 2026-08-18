@@ -23,7 +23,7 @@ Do not dump all experience into one place. Each type has a different correct hom
 
 ## Implementation reconciliation
 
-**Built:** `dispatch_profile/cards` (loadout / overlay / evolution machinery), `complete` (per-subagent eval rows), `safe_merge`, and `tachi_gh`. PR #738 also landed the first-cut wire this document specified:
+**Built:** `dispatch_profile/cards` (static reviewed loadout + counter-clause/vaccination overlay projection — the loadout-evolution and MBIT machinery is retired by #1690 C3), `complete` (per-subagent eval rows), `safe_merge`, and `tachi_gh`. PR #738 also landed the first-cut wire this document specified:
 
 1. The **vendor axis** and typed evidence live in `crates/tachi-server/src/signature_evidence.rs` and `crates/tachi-dispatch/src/signatures.rs`.
 2. **Error-signature recording** is called from `crates/tachi-server/src/complete_ops/handler.rs`.

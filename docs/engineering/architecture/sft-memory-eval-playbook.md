@@ -147,8 +147,10 @@ Leader workflow:
 3. Integrate child outputs into the final decision; the leader owns the patch.
 4. Run the real verification gate.
 5. Call `tachi_complete` with `subagents=[...]`.
-6. Use `tachi_agent_eval(action="aggregate_live")` to update routing policy
-   from live evidence. For local fixture replay, set
+6. Inspect `tachi_agent_eval(action="aggregate_live")` as read-only reporting.
+   Routing policy consumes the **DecisionFactLedger**, not the live /eval matrix
+   (#1690 C3 S2: matrix consumption retired with the MBIT/evolution machinery;
+   #1675 owns the eval future). For local fixture replay, set
    `TACHI_AGENT_EVAL_ALLOW_FIXTURE=1` and call
    `tachi_agent_eval(action="aggregate", fixture_path=...)`.
 
@@ -157,7 +159,9 @@ aggregate fixture rows with live `/eval/YYYY-MM-DD/...` records unless the
 report says it is a mixed benchmark.
 
 For model-training benchmarks, compare the candidate against the current
-DispatchProfile / MBIT / live-eval policy baseline on the same fixture rows.
+DecisionFactLedger-based routing baseline on the same fixture rows. The retired
+DispatchProfile / MBIT / live-eval policy baseline and MBIT machinery were
+removed by #1690 C3; #1675 owns the eval future.
 The candidate may propose task type, risk, profile, blocked profiles, and
 evidence requirements, but it must not directly mutate route policy.
 

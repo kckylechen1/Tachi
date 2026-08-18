@@ -46,7 +46,7 @@ runtime timing. Tachi should support these neutral hook names:
 
 | Hook | Direction | Purpose |
 |---|---|---|
-| `before_session` | host -> Tachi | Load briefing, active flow, profile, and capability bundle before work starts. |
+| `before_session` | host -> Tachi | Load briefing, active flow, profile (static reviewed skills + explicit grants), and lifecycle guidance before work starts. |
 | `before_prompt` | host -> Tachi | Attach task-specific memory, docs/spec refs, and profile guidance before a user turn. |
 | `after_tool` | host -> Tachi | Record tool facts and run post-edit feedback providers when relevant. |
 | `after_compact` | host -> Tachi | Preserve compacted session state and avoid losing active flow context. |
@@ -220,7 +220,7 @@ Returns:
 - Tachi runtime identity and health warnings.
 - Project-scoped briefing.
 - Active flow or issue/PR hints.
-- Recommended capability bundle.
+- Static profile skills + explicit grants (the `capability_bundle.json` artifact and bundle actions were retired/deleted by #1690 C1/C3).
 - Host profile guidance.
 
 ### `before_prompt`

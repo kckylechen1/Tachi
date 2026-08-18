@@ -164,8 +164,9 @@ self-evolving assets.
 | Waza | `tw93/Waza` | tactical working-method / move source |
 
 Tachi vendors selected skills into `skill/superpowers/...` and
-`skill/waza/...` and registers them as builtin skills. Tachi may evolve its own
-Card loadouts and local overlays, but the authoritative source text of an
+`skill/waza/...` and registers them as builtin skills. Tachi Card profiles carry
+static reviewed skill loadouts and local overlays (the loadout-evolution/MBIT
+machinery is retired by #1690 C3), but the authoritative source text of an
 upstream skill may change only through a reviewed upstream sync.
 
 Hard rules:
@@ -173,8 +174,10 @@ Hard rules:
 - Tachi must not silently rewrite Superpowers/Waza source text based on local
   task outcomes.
 - Local task evidence may propose an upstream issue/PR or a Tachi-local Card
-  loadout change.
-- Card loadouts can evolve inside Tachi.
+  profile change (skill loadouts are static reviewed data; the loadout-evolution
+  machinery is retired by #1690 C3).
+- Card loadouts do not evolve automatically — profile changes go through the
+  reviewed change path (loadout evolution is retired by #1690 C3).
 - Upstream skill snapshots update only through reviewed sync.
 - External skills discovered from the web/registry must go through inspect +
   scan + review before becoming approved moves.
@@ -182,7 +185,7 @@ Hard rules:
 Use this rule:
 
 ```text
-Local evidence can change Tachi Card loadouts.
+Local evidence can propose Tachi Card profile changes; skill loadouts are static reviewed data (loadout evolution retired by #1690 C3).
 Upstream-managed skill sources change through upstream sync or upstream contribution.
 ```
 
@@ -570,7 +573,7 @@ carry the workflow.
 |---|---|---|
 | operator list/show diagnostics | `tachi card list` / `tachi card show <id>` | implemented; operator-only |
 | read-only Card CLI convenience | `tachi card list` / `tachi card show <id>` | starter implemented |
-| skill discovery / loadout | `tachi_skill(action="discover" \| "bundle" \| "loadout")` | implemented |
+| skill discovery / run | `tachi_skill(action="discover" \| "run")` | implemented (retired `bundle`/`loadout` actions deleted by #1690 C3) |
 | upstream source status | `tachi skill-surface sources` | implemented |
 | upstream source sync planning | `tachi skill-surface sync-plan` | starter implemented |
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |

@@ -231,7 +231,7 @@ zeroclaw (the Rust agent runtime behind Quant and RomanBath) adopts this loop by
 - the **evidence store** (`/eval` append-only rows via `tachi_complete`);
 - the **projection** (card overlay / counter-clause assembly);
 - the **eval ledger + performance matrix** (`aggregate_live`);
-- **recommend** (profile choice from risk + matrix).
+- **recommend** (profile choice consuming the DecisionFactLedger — evidence-backed, abstains without sufficient evidence; see §2.2).
 
 zeroclaw reaches these through the same `tachi_task` / `tachi_skill` / `tachi_complete` facades any host uses — the host-adapter lifecycle hooks (`before_prompt`, `after_session`) are the neutral wiring.
 
