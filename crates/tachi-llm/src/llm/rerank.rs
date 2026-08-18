@@ -97,14 +97,16 @@ impl RerankConfig {
     /// so both fail closed at construction — never deferring to a runtime
     /// belt-and-suspenders check.
     pub fn validate(&self) -> Result<(), String> {
-        if self.provider == RerankProviderKind::Local
-            && self
+        if self.provider == RerankProviderKind::Local {
+            let endpoint = self
                 .local_endpoint
                 .as_deref()
-                .map(|e| e.trim().is_empty())
-                .unwrap_or(true)
-        {
-            return Err(LOCAL_NOT_CONFIGURED.to_string());
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
+                .ok_or_else(|| LOCAL_NOT_CONFIGURED.to_string())?;
+            if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(endpoint) {
+                return Err(format!("local rerank endpoint refused: {leak}"));
+            }
         }
         Ok(())
     }
@@ -236,6 +238,9 @@ impl super::LlmClient {
         let effective_top_k = top_k.max(1).min(filtered_docs.len());
         let body = voyage_rerank_request_body(query, &filtered_docs, effective_top_k);
         let url = voyage_rerank_url();
+        if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&url) {
+            return Err(format!("Voyage rerank endpoint refused: {leak}"));
+        }
 
         let mut json: Option<Value> = None;
         let mut last_err = String::new();

@@ -141,10 +141,15 @@ impl super::LlmClient {
                 else {
                     continue;
                 };
-                // Bound here rather than hoisted out of the attempt loop so
-                // the endpoint is still resolved exactly once per attempt, in
-                // the same order, as before (#1681 D3's per-call resolution).
+                // Resolve at the existing per-attempt seam, after secret
+                // selection, then refuse before building a request. This
+                // preserves missing-key error precedence while covering the
+                // exact `VOYAGE_BASE_URL` value that would reach the wire.
                 let endpoint = voyage_endpoint("/v1/embeddings");
+                if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&endpoint)
+                {
+                    return Err(format!("Voyage embedding endpoint refused: {leak}"));
+                }
                 // The embedding lane has a catalog row of its own
                 // (`env:embedding`, #1681 D7 PR-B), so its outcomes are
                 // attributable the same way a chat lane's are.
