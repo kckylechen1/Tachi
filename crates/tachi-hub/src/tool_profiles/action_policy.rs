@@ -200,7 +200,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
         // internally by an exhaustive whitelist) and read-only, so it belongs
         // here rather than in an action-bundle map.
         "tachi_tools" | "runtime_info" | "tachi_web_search" | "tachi_browse" | "tachi_unstick"
-        | "tachi_complete" | "run_skill" | "peer_query" => true,
+        | "peer_query" => true,
         // Anything else — a tool not on the delegate allow-list at all, or a
         // gated facade we forgot to enumerate above — is denied by default.
         _ => false,
@@ -591,14 +591,14 @@ mod tests {
 
     #[test]
     fn f3_missing_action_on_non_gated_tool_is_not_profile_gated() {
-        // tachi_complete has no action concept; tool-level visibility is enough.
+        // tachi_unstick has no action concept; tool-level visibility is enough.
         assert!(facade_action_allowed(
-            "tachi_complete",
+            "tachi_unstick",
             None,
             Some(ToolProfile::delegate())
         ));
         assert!(facade_action_allowed(
-            "tachi_complete",
+            "tachi_unstick",
             None,
             Some(ToolProfile::observe())
         ));
@@ -707,8 +707,6 @@ mod tests {
             "tachi_web_search",
             "tachi_browse",
             "tachi_unstick",
-            "tachi_complete",
-            "run_skill",
         ] {
             assert!(facade_action_allowed(tool, None, profile));
             assert!(facade_action_allowed(tool, Some("whatever"), profile));

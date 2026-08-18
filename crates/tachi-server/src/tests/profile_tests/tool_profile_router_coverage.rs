@@ -77,11 +77,9 @@ fn bundle_count(tool_name: &str) -> usize {
 
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "chain_skills",
-    "check_inbox",
     "distill_trajectory",
     "dlq_list",
     "dlq_retry",
-    "get_memory",
     "hub_export_skills",
     "hub_feedback",
     "hub_get",
@@ -91,16 +89,12 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "hub_set_active_version",
     "hub_set_enabled",
     "hub_stats",
-    "post_card",
-    "remember",
     "sandbox_check",
     "sandbox_exec_audit",
     "sandbox_get_policy",
     "sandbox_list_policies",
     "sandbox_set_policy",
     "sandbox_set_rule",
-    "save_memory",
-    "search_memory",
     "skill_evolve",
     "tachi_audit_log",
     "tachi_init_project_db",
@@ -108,7 +102,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     // #757 Cut3-S1: folded sandbox verb (its six forwarding aliases above are
     // also admin-only) — absent from every profile bundle.
     "tachi_sandbox",
-    "tachi_task_brief",
     // #1426: the route/recall tuning facade is deliberately in no bundle —
     // `tool_visible` grants it to admin/full profiles only, by omission from
     // the standard, delegate, and bundle pattern arrays.
@@ -127,7 +120,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "vc_list",
     "vc_register",
     "vc_resolve",
-    "update_card",
 ];
 
 /// #757: graph/state primitives are no longer MCP-registered. #913 deleted
@@ -152,44 +144,46 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     // exist. "tachi_handoff" (below) survives as a non-admin write route.
     "ingest_event",
     "sync_memories",
-    "tachi_complete",
     "tachi_domain_adapter",
     "tachi_handoff",
     "tachi_memory",
     "tachi_orchestrator",
     "tachi_verify",
-    "tachi_save",
     "tachi_wiki_write",
 ];
 
 const RETIRED_NATIVE_ALIASES: &[&str] = &[
+    "check_inbox",
     "cyberbrain_write",
     "cyberbrain_search",
+    "find_similar_memory",
+    "get_memory",
+    "post_card",
+    "prepare_capability_bundle",
+    "remember",
+    "run_skill",
+    "save_memory",
+    "search_memory",
     "section9_review",
     "section9_audit_log",
     "shell_set_policy",
     "shell_get_policy",
     "shell_list_policies",
     "shell_exec_audit",
+    "tachi_briefing",
+    "tachi_complete",
     "tachi_plan",
     "tachi_progress_check",
-    "wiki_browse",
-];
-
-// Batch C (#757) removed `tachi_board` and `tachi_dispatch` — their canonical
-// replacements are tachi_task(action='board'/'dispatch'). Only `get_memory`
-// remains a folded admin-only compat tool here.
-const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory"];
-
-const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[
-    "check_inbox",
-    "post_card",
-    "remember",
-    "save_memory",
-    "search_memory",
+    "tachi_save",
     "tachi_task_brief",
     "update_card",
+    "wiki_browse",
+    "wiki_search",
 ];
+
+const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &[];
+
+const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[];
 
 #[test]
 fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {
@@ -266,9 +260,6 @@ fn every_non_admin_write_tool_is_bundled_and_invalidates_cache() {
             "non-admin write tool '{tool_name}' must invalidate the read cache"
         );
     }
-
-    assert!(!tool_matches_bundle("tachi_complete", ToolBundle::Observe));
-    assert!(tool_matches_bundle("tachi_complete", ToolBundle::Remember));
 }
 
 #[test]
@@ -375,7 +366,7 @@ fn profile_retired_direct_tools_stay_admin_only() {
 }
 
 #[test]
-fn standalone_skill_entrypoints_stay_routable_but_point_to_tachi_skill() {
+fn skill_facade_advertises_canonical_actions() {
     let descriptions = native_route_descriptions();
 
     let tachi_skill = descriptions
@@ -388,30 +379,6 @@ fn standalone_skill_entrypoints_stay_routable_but_point_to_tachi_skill() {
     assert!(
         tachi_skill.contains("action='bundle'"),
         "tachi_skill description should advertise canonical bundle action: {tachi_skill}"
-    );
-
-    let run_skill = descriptions
-        .get("run_skill")
-        .expect("run_skill compatibility route should stay registered");
-    assert!(
-        run_skill.contains("compatibility route"),
-        "run_skill description should mark it as a compatibility route: {run_skill}"
-    );
-    assert!(
-        run_skill.contains("tachi_skill(action='run')"),
-        "run_skill description should name the canonical tachi_skill action: {run_skill}"
-    );
-
-    let prepare_bundle = descriptions
-        .get("prepare_capability_bundle")
-        .expect("prepare_capability_bundle compatibility route should stay registered");
-    assert!(
-        prepare_bundle.contains("compatibility route"),
-        "prepare_capability_bundle description should mark it as a compatibility route: {prepare_bundle}"
-    );
-    assert!(
-        prepare_bundle.contains("tachi_skill(action='bundle')"),
-        "prepare_capability_bundle description should name the canonical tachi_skill action: {prepare_bundle}"
     );
 }
 
@@ -540,7 +507,7 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
         let _ = crate::shared_defs::dlq_replay_is_explicitly_safe(name, None);
     }
 
-    for fixed_route in ["remember", "extract_facts", "ingest_event"] {
+    for fixed_route in ["extract_facts", "ingest_event"] {
         assert!(
             route_names.contains(fixed_route),
             "'{fixed_route}' must still be a live registered route for the \

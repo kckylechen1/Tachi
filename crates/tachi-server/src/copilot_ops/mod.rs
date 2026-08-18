@@ -44,7 +44,9 @@ use self::feature_briefing::*;
 #[cfg(test)]
 use self::task_routing::*;
 
-pub(crate) use self::feature_briefing::{handle_tachi_feature_briefing, handle_tachi_task_brief};
+pub(crate) use self::feature_briefing::handle_tachi_feature_briefing;
+#[cfg(test)]
+pub(crate) use self::feature_briefing::handle_tachi_task_brief;
 pub(crate) use self::progress_check::handle_tachi_progress_check;
 pub(crate) use self::support::{
     is_wiki_projection_duplicate, wiki_parent_path, wiki_projection_supersedes_edge,

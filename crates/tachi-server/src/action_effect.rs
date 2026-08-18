@@ -98,12 +98,7 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
-    "prepare_capability_bundle",
-    "tachi_task_brief",
     "tachi_wiki_search",
-    "search_memory",
-    "find_similar_memory",
-    "get_memory",
     "list_memories",
     "memory_stats",
     "hub_discover",
@@ -112,7 +107,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
-    "wiki_search",
     // Facade tools (read-only)
     "tachi_search",
     "tachi_web_search",
@@ -126,8 +120,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
 /// either never invalidates the cache today) — preserved as-is; fixing that
 /// gap is a separate, unadjudicated change, not part of #1098's scope.
 pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
-    "save_memory",
-    "remember",
     "extract_facts",
     "ingest_event",
     "hub_register",
@@ -150,19 +142,16 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // #1099: "handoff_leave"/"handoff_check" retired — the routes no longer
     // exist. "tachi_handoff" (below) stays, still mixed read/write via its
     // one surviving action (promote_issue).
-    "post_card",
-    "update_card",
+    // Batch B: "post_card"/"update_card" retired from MCP.
     "distill_trajectory",
     "tachi_unstick",
     "wiki_lint",
     "tachi_wiki_write",
     "tachi_wiki_ingest",
     // Facade tools (write / mixed)
-    "tachi_save",
     "tachi_memory",
     "tachi_domain_adapter",
     "tachi_handoff",
-    "tachi_complete",
     "tachi_orchestrator",
     "tachi_task",
     "tachi_wiki",
@@ -212,11 +201,7 @@ const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
-    "prepare_capability_bundle",
-    "tachi_task_brief",
     "tachi_wiki_search",
-    "find_similar_memory",
-    "get_memory",
     "list_memories",
     "memory_stats",
     "hub_discover",
@@ -225,7 +210,6 @@ const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
-    "wiki_search",
     "tachi_web_search",
     "tachi_browse",
 ];
@@ -488,7 +472,6 @@ mod tests {
             "tachi_handoff",
             "tachi_orchestrator",
             "tachi_sandbox",
-            "tachi_complete",
         ] {
             assert!(
                 dlq_unsafe(tool, Some("anything")),

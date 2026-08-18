@@ -96,6 +96,7 @@ fn filter_wiki_hits_not_in_doc_index(wiki_hits: &[Value], doc_index: &Value) -> 
         .collect()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn handle_tachi_task_brief(
     server: &MemoryServer,
     params: TaskBriefParams,

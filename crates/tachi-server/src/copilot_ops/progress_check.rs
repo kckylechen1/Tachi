@@ -151,6 +151,7 @@ pub(super) fn record_progress_check_event(
     Ok(Some(path.display().to_string()))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) async fn build_route_recommendation(
     server: &MemoryServer,
     task: &str,

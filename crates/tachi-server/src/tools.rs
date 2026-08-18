@@ -18,16 +18,11 @@ use crate::copilot_ops::{
 use crate::event_ops::handle_tachi_event;
 use crate::gh_ops::handle_tachi_gh;
 use crate::hub_ops::{handle_hub_discover, handle_run_skill, handle_skill_from_pattern};
-use crate::kanban::{
-    handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
-    UpdateCardParams,
-};
 use crate::tool_params::*;
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
     collect_wiki_browse_value, collect_wiki_read_value_for_plan, collect_wiki_search_value,
     handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_read_for_plan,
-    handle_wiki_search,
 };
 use crate::MemoryServer;
 
@@ -83,16 +78,6 @@ use self::task_router::*;
 #[tool_router(router = copilot_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
-        description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, intent, selected_sops, tool_plan, lightweight skill suggestions, and debugging checklist."
-    )]
-    pub(crate) async fn tachi_task_brief(
-        &self,
-        Parameters(params): Parameters<TaskBriefParams>,
-    ) -> Result<String, String> {
-        crate::copilot_ops::handle_tachi_task_brief(self, params).await
-    }
-
-    #[tool(
         description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. Pass flow_id to append progress.jsonl."
     )]
     pub(crate) async fn tachi_unstick(
@@ -100,32 +85,5 @@ impl MemoryServer {
         Parameters(params): Parameters<ProgressCheckParams>,
     ) -> Result<String, String> {
         crate::copilot_ops::handle_tachi_progress_check(self, params).await
-    }
-}
-
-#[tool_router(router = kanban_tool_router, vis = "pub(crate)")]
-impl MemoryServer {
-    #[tool(description = "Post a kanban card from one agent to another.")]
-    pub(crate) async fn post_card(
-        &self,
-        Parameters(params): Parameters<PostCardParams>,
-    ) -> Result<String, String> {
-        handle_post_card(self, params).await
-    }
-
-    #[tool(description = "Check kanban inbox for a target agent.")]
-    pub(crate) async fn check_inbox(
-        &self,
-        Parameters(params): Parameters<CheckInboxParams>,
-    ) -> Result<String, String> {
-        handle_check_inbox(self, params).await
-    }
-
-    #[tool(description = "Update status of a kanban card.")]
-    pub(crate) async fn update_card(
-        &self,
-        Parameters(params): Parameters<UpdateCardParams>,
-    ) -> Result<String, String> {
-        handle_update_card(self, params).await
     }
 }

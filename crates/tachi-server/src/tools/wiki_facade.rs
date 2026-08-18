@@ -58,16 +58,6 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Search the wiki knowledge base for relevant entries. The wiki contains distilled knowledge from past development sessions organized by category (quant, engineering, agent, product). Supports short category aliases like 'quant', 'strategy', 'tachi', 'debugging', etc."
-    )]
-    pub(crate) async fn wiki_search(
-        &self,
-        Parameters(params): Parameters<WikiSearchParams>,
-    ) -> Result<String, String> {
-        handle_wiki_search(self, params).await
-    }
-
-    #[tool(
         description = "Browse wiki entries by category. Without a category, returns category stats. Supports short aliases like 'quant', 'engineering', 'tachi', etc."
     )]
     pub(crate) async fn tachi_browse(
