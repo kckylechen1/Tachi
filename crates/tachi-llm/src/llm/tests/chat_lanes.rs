@@ -407,13 +407,9 @@ async fn chat_lane_records_success_usage_to_vault_db() {
     server_task.abort();
 }
 
-/// #1681 PR-D review (CP5, round 2): `model` in `call_provider_tier` is
-/// `model_override` unwrapped — caller-controlled — and this success path
-/// used to persist it into `llm_usage.model` verbatim. This is the same
-/// hostile shape the ingress gate already bounds at the counting/log seam
-/// (newline, control character, length past the 64-char cap); the write
-/// sink must apply the identical bound rather than a second, unaudited copy
-/// of it.
+/// `model_override` is caller-controlled, while the success path persists a
+/// model identifier into `llm_usage.model`. Newlines, control characters, and
+/// values past the 64-character cap must be bounded before that durable write.
 #[tokio::test]
 async fn chat_lane_success_usage_bounds_the_caller_supplied_model_override() {
     use axum::{routing::post, Json, Router};
@@ -484,9 +480,8 @@ async fn chat_lane_success_usage_bounds_the_caller_supplied_model_override() {
         }],
     );
 
-    // Caller-controlled model_override: a newline (the same log-line-forging
-    // shape the gate closes) plus a control character plus well past the
-    // 64-char bound.
+    // Caller-controlled model_override: a newline, a control character, and a
+    // value well past the 64-character log/storage bound.
     let malicious_model = format!("evil\nmodel\u{0007}{}", "x".repeat(100));
     assert!(malicious_model.chars().count() > 64);
 
@@ -531,8 +526,8 @@ async fn chat_lane_success_usage_bounds_the_caller_supplied_model_override() {
     );
     assert!(
         stored_model.chars().count() <= 65,
-        "the stored model must respect the same 64-char + truncation-marker bound as the \
-         ingress gate: {stored_model:?}"
+        "the stored model must respect the 64-char + truncation-marker bound: \
+         {stored_model:?}"
     );
     assert!(
         stored_model.ends_with('…'),

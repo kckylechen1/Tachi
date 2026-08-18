@@ -7,12 +7,34 @@ use serde_json::{self, Value};
 use std::time::{Duration, Instant};
 
 use super::super::catalog_import::DeploymentAttribution;
-use super::super::ingress_gate::bounded_reference;
 use super::super::provider_health::{
     ChatLane, ChatLaneConfig, CompletionStatusV1, Generated, ModelInvocationLaneV1,
     ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
     ProviderInvocationReceipt, SelectedProviderSecret,
 };
+
+/// Maximum retained characters from a caller-supplied model override.
+const MAX_REFERENCE_CHARS: usize = 64;
+
+/// Bound and scrub a caller-supplied model override before it reaches a
+/// durable usage row or retry log. Routing still uses the original string.
+fn bounded_reference(raw: &str) -> String {
+    let mut bounded: String = raw
+        .chars()
+        .take(MAX_REFERENCE_CHARS)
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if raw.chars().nth(MAX_REFERENCE_CHARS).is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
 
 #[derive(Clone, Copy)]
 struct ChatUsageTokens {
@@ -185,18 +207,6 @@ impl super::super::LlmClient {
         let lane = ChatLane::Reasoning;
         let cfg = self.lane(lane).clone();
 
-        // Same report-only observation as `call_lane_llm` (#1681 PR-D debt
-        // (a)): this entry is a second public door onto `call_provider_tier`
-        // and was skipping the gate entirely, so a caller routed through it
-        // was invisible to the unresolved-reference count. Zero behavior
-        // change — see `llm::ingress_gate` for why measuring is correct here.
-        self.ingress_gate.observe(
-            lane.as_str(),
-            model,
-            &cfg.model,
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        );
-
         let breaker_key = format!("chat:{}", lane.as_str());
         if !self.circuit_breakers.allow(&breaker_key) {
             return Err(ProviderInvocationFailure {
@@ -299,19 +309,6 @@ impl super::super::LlmClient {
     ) -> Result<ProviderInvocationOutcome, String> {
         let primary_cfg = self.lane(lane).clone();
         let primary_breaker_key = format!("chat:{}", lane.as_str());
-
-        // #1681 PR-D debt (a): this is the seam that accepts an arbitrary
-        // model string, and after #1685's cutover a string arriving here must
-        // have come from a resolution. Nothing here can resolve one yet, so
-        // the gate counts and warns and changes nothing — see
-        // `llm::ingress_gate` for why measuring is the correct move at this
-        // point in the migration and refusing is not.
-        self.ingress_gate.observe(
-            lane.as_str(),
-            model_override,
-            &primary_cfg.model,
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        );
 
         let mut tiers: Vec<(ChatLaneConfig, String)> =
             vec![(primary_cfg.clone(), primary_breaker_key)];
@@ -729,12 +726,9 @@ impl super::super::LlmClient {
                 self.mark_secret_success(&selected, attribution);
                 self.circuit_breakers.record_success(breaker_key);
                 let usage = parse_usage_tokens(json.get("usage"));
-                // #1681 PR-D review (CP5): `model` here is `model_override`
-                // unwrapped, i.e. caller-controlled, and this is a durable
-                // write into `llm_usage.model` — bound it the same way the
-                // ingress gate bounds the identical string before it counts
-                // or logs it. Routing already happened above with the raw
-                // `model`; this is the write-sink bound only.
+                // `model` may be a caller-controlled override. Bound it before
+                // the durable `llm_usage.model` write; routing already happened
+                // above with the raw value, so this is a write-sink bound only.
                 self.record_successful_llm_usage(
                     lane,
                     &bounded_reference(model),
@@ -787,9 +781,8 @@ impl super::super::LlmClient {
                 .unwrap_or_else(|| "unknown".to_string());
 
             // Same bound as the successful-write sink above: `model` is
-            // caller-controlled and this string reaches `eprintln!` below
-            // (via `last_err`), so an un-bounded value here is the same
-            // newline-forging seam the ingress gate already closed once.
+            // caller-controlled and this string reaches `eprintln!` below via
+            // `last_err`, so it must not be able to forge a second log line.
             let bounded_model = bounded_reference(model);
             last_err = format!(
                 "Empty assistant content (finish_reason={finish_reason_label}, usage={usage}, model={bounded_model})"

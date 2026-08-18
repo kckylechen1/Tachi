@@ -300,8 +300,8 @@ pub fn list_model_deployments(conn: &Connection) -> Result<Vec<ModelDeployment>,
     Ok(out)
 }
 
-/// Deployments that came from one catalog source — the query the #1685
-/// cutover needs to ask exactly ("what did the env chains produce").
+/// Deployments that came from one catalog source, so provenance queries such
+/// as "what did the env chains produce" are exact.
 pub fn list_model_deployments_by_source(
     conn: &Connection,
     source: CatalogSource,
