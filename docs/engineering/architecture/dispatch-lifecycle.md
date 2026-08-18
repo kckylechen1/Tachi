@@ -156,7 +156,7 @@ The card store is consumed through the existing domain facades — no new `tachi
 - `tachi_tune(action="route_simulate")` — profile choice simulation from risk + eval matrix.
 - `tachi_tune(action="route_proposals" | "route_review" | "route_apply")` — human-gated route-policy and evidence-contract proposals (admin/operator only since #1426; the loadout-evolution proposals that used to ride this surface are retired by #1690 C3).
 - `tachi_skill(action="discover" | "run")` — reviewed static skills only (the retired `loadout`/`bundle` actions and capability-bundle intelligence were deleted in #1690 C3).
-- `tachi_task(action="complete")` — writes the eval evidence row that feeds card evolution.
+- `tachi_task(action="complete")` — writes the eval evidence row that feeds the surviving card surfaces: signature/vaccination evidence and human-gated route-policy/evidence-contract proposals (the loadout-evolution machinery is retired by #1690 C3).
 
 ### 4.4 Vaccination projection (landed by PR #738)
 

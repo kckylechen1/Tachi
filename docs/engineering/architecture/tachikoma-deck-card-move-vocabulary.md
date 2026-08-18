@@ -49,7 +49,7 @@ Keep the public model small.
 | **Move** | A concrete Waza or approved external skill available to a Card. Superpowers are guidance, not moves. |
 | **Guidance** | The Superpowers doctrine attached to a Card. Guidance shapes decision gates, not executable moves. |
 | **Evidence contract** | The artifacts and verification the Card must produce for a task to be considered complete. |
-| **Evolution** | Reviewed changes to a Card's skill set, evidence contract, strengths/weaknesses, or permissions based on task outcomes. |
+| **Evolution** | Reviewed changes to a Card's profile data based on task outcomes — the loadout-evolution machinery behind this term is **retired by #1690 C3**; profiles and skill loadouts are static reviewed data, and surviving changes go through the reviewed change path. |
 | **Execution backend** | The low-level adapter that runs a Tachi-assembled prompt/work packet through an agent transport such as a CLI subprocess or ACP client. It is transport, not planning or governance. |
 
 ## Product Loop
@@ -66,8 +66,9 @@ Primary IDE assistant / human
   -> evidence artifact collection
   -> leader verification
   -> /eval completion row
-  -> Card performance summary
-  -> evolution proposal (review-required)
+  -> read-only performance summary (aggregate_live / route_simulate)
+  -> evidence may propose a reviewed route-policy / Card profile change
+     (loadout evolution is retired by #1690 C3)
   -> GitHub issue/PR + docs + memory link-back
 ```
 
@@ -371,9 +372,8 @@ metrics:
   avg_cost_usd: null
   human_override_rate: null
 
-evolution:
-  status: starter
-  proposals: []
+# evolution status/proposals are retired by #1690 C3 — profile data is static
+# reviewed data; eval outcomes never auto-mutate the Card.
 ```
 
 ## Backend Is a Capability Requirement, Not a Model Name
@@ -532,36 +532,44 @@ Discover via web/search/registry
 
 Do not directly install and execute arbitrary skills from the web.
 
-## Card Evolution Loop
+## Card Evolution Loop (retired machinery)
 
-Cards evolve from evidence, but default Card changes must be reviewed before
-taking effect.
+> **Retired by #1690 C3.** The eval-driven loadout/card evolution machinery this
+> section used to describe — performance summaries feeding evolution proposals
+> that promote skills into the default loadout, mutate `weak_against`, or
+> auto-update a Card — is retired end-to-end. Profiles and skill loadouts are
+> **static reviewed data**; the eval-informed future belongs to #1675, never to
+> auto-minted loadout/profile projections. This section is retained as
+> historical record.
+
+What survives is evidence informing **human** review through the reviewed
+change path (see "Hard rules" above):
 
 ```text
 Task run
-  -> card_id + skills_used + outcome + evidence
-  -> eval row / evidence ledger
-  -> card performance summary
-  -> evolution proposal
-  -> human/main-assistant review
-  -> approved card update
+  -> outcome + evidence
+  -> local task evidence may propose an upstream issue/PR, or a Tachi Card
+     profile change through the reviewed change path
+  -> human review
+  -> reviewed change (or rejection)
 ```
 
-Examples:
+Surviving proposal surfaces:
 
-- SCV repeatedly succeeds on bugfixes when `waza/hunt` is present -> propose
-  promoting `waza/hunt` to default.
-- Raven misses UI regressions -> add `weak_against: ux_review` or propose a
-  specialized future card.
-- Poke produces too many false positives in one probe -> downgrade that probe
-  or tighten its evidence contract.
-- SCV expands scope too often -> tighten authority and required scope report.
+- Route-policy and evidence-contract proposals
+  (`tachi_tune(action="route_proposals"|"route_review"|"route_apply")`): human
+  approval is required before any durable rule is persisted, and a rule is
+  honored only when its evidence source is the decision-fact ledger.
+- A Card profile change is a reviewed data change (`weak_against` and other
+  profile fields are the static reviewed baseline; the legacy
+  `add_weak_against` overlay projection is retired by #1690).
 
-Evolution rules:
+Retired mechanics, kept for the record:
 
-- Observations may be automatic.
-- Proposals may be automatic.
-- Default card changes must be reviewed before taking effect.
+- Promoting a skill (e.g. `waza/hunt`) into the default loadout — loadout
+  evolution is retired by #1690 C3.
+- Automatic Card update from an evolution proposal — retired by #1690 C3.
+- `weak_against` mutation from eval outcomes — retired by #1690 C3.
 
 ## Public Facade Rule
 
@@ -700,9 +708,11 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 
 ### Phase 4: Card evaluation summary
 
-- Aggregate recent eval/dispatch rows by card.
+- Aggregate recent eval/dispatch rows by card (read-only reporting via
+  `aggregate_live` / `route_simulate`).
 - Show metrics and failure patterns.
-- Generate review-required evolution proposals.
+- Generate review-required route-policy / evidence-contract proposals through
+  `tachi_tune` (loadout-evolution proposals are retired by #1690 C3).
 
 ### Phase 5: Skill slot intake
 
@@ -725,7 +735,7 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - [x] Superpowers are modeled as development guidance, not just ordinary moves.
 - [x] Waza and approved external skills are modeled as moves/techniques.
 - [x] Poke smoke suite has a local isolated starter implementation.
-- [x] Card evolution produces proposals, not silent automatic mutations.
+- [x] Card evolution produces proposals, not silent automatic mutations (the loadout-evolution machinery is retired by #1690 C3; the surviving proposal surface is `tachi_tune` route-policy / evidence-contract review).
 - [x] External skill intake requires inspection/scanning/review before approval.
 - [x] Upstream Superpowers/Waza sources are tracked, pinned, and documented as
       upstream-managed corpora.

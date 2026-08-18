@@ -204,16 +204,24 @@ Ordinary recall excludes this evidence. `tachi_agent_eval(action="aggregate_live
 reads the live eval rows and produces aggregate scores and the performance
 matrix.
 
-Route simulation and profile-card policy consume that matrix. Matching telemetry can:
+Recommendation consumes the **DecisionFactLedger**, not the live /eval matrix.
+Scoring against usable ledger rows (terminal-reconciled, rubric-scored,
+independently adjudicated) can:
 
-- penalize failures;
-- penalize human overrides;
-- penalize repeated retries;
-- penalize slow or expensive profiles;
-- reward low-cost, high-quality matches when the evidence is strong enough.
+- penalize failures — rows that complete without verification, or never
+  complete, count against the profile (`live_eval_failures`);
+- reward completed, verification-backed matches when the evidence is strong
+  enough.
 
-When live samples are missing, route simulation should say so and fall back to
-the static reviewed profile fit rather than pretending the policy is learned.
+Human-override, retry, latency, and cost aggregates are not synthesized: the
+ledger path passes no `/eval`-derived rollups, so recommendation never invents
+statistics the ledger did not record. Without a usable ledger row in the
+window, `decision` **abstains** — the reported profile is the deterministic
+admission/role fit only, labeled `no_ledger_evidence`, never a matrix-learned
+fit. Route simulation (`tachi_tune(action="route_simulate")`) is a read-only
+replay over recent live eval rows (`read_only: true`, `source:
+live_memory_eval`) that never feeds routing; it says so rather than pretending
+the policy is learned.
 (#1690 C3 retired the MBIT/card and loadout-evolution machinery this section
 used to describe; static profiles are the reviewed baseline, and the eval
 future belongs to the #1675 context-bound evaluation, not to auto-minted

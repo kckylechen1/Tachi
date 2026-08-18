@@ -466,9 +466,12 @@ Runtime event
 Pattern matures (hit_rate / confidence threshold + external validation + cold-seat check)
     → projection report includes review_artifacts
     → review artifact can create /wiki/drafts/patterns/<name>.md
-    → review artifact can create skill:<name> candidate
+    → review artifact can create an agent_profile.proposal continuity event
+      (the skill:<name> candidate leg is retired by #1690 C3 — no skill
+      candidate is ever minted from a pattern)
     → human review
-    → promote to wiki + hub skill
+    → human-approved wiki/runbook promotion (hub-skill promotion is moot:
+      no generated skills exist)
 ```
 
 ---
@@ -498,7 +501,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `tachi_skill(action="from_pattern")` **RETIRED by #1690 C3** — no skill candidate is ever minted from a pattern; the `from_pattern` action is typed-rejected.
 - `recommend_skill` and feature/task lightweight skill recommendation **RETIRED by #1690 C3** — no skill matching consumes pattern context; the static task-brief intent map (`selected_sops`) is the only surviving advisory projection.
 - `tachi_event action="promote"` executes conservative review-artifact creation for mature patterns: a pending wiki draft and an `agent_profile.proposal` continuity event (the disabled skill-candidate artifact is retired by #1690 C3). It supports `dry_run`, `force`, per-artifact skip flags, and a promotion gate that marks external-validation / cold-seat-review readiness before any final promotion.
-- The daemon runs a scoped background continuity projection loop; projection reports include projected, skipped, and promotion candidate counters plus review artifacts for wiki drafts, skill candidates, and agent-profile proposals.
+- The daemon runs a scoped background continuity projection loop; projection reports include projected, skipped, and promotion candidate counters plus review artifacts for wiki drafts and agent-profile proposals (the `skill_candidate` review artifact is retired by #1690 C3).
 - Complete skill system: `hub_register`, `tachi_skill(action='run'|'discover')`, builtin skills. The native `run_skill` alias, `recommend_skill`, and `skill_evolve` are retired by #1690 C3.
 
 ### Missing / gaps
@@ -611,7 +614,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - **Function:** `handle_tachi_wiki_write`
 - **Current behavior:** when `include_patterns=true`, active patterns are queried and merged into `metadata.pattern_refs`.
 - **File:** `crates/tachi-server/src/continuity_ops/context.rs`
-- **Current behavior:** `pub(crate) fn list_active_patterns` is available for wiki/skill integration.
+- **Current behavior:** `pub(crate) fn list_active_patterns` is available for wiki integration (the skill-crystallization leg is retired by #1690 C3 — no skill caller exists).
 - **File:** `crates/tachi-params/src/memory/wiki.rs`
 - **Current behavior:** `WikiWriteParams` has `include_patterns`, `pattern_query`, and `pattern_top_k`.
 
@@ -634,7 +637,7 @@ behavior (kept for record):
 ## 9. Open questions
 
 1. **Should any memory categories auto-emit `memory.saved` events?** Current behavior is explicit only (`emit_continuity=true`).
-2. **What is the promotion threshold from pattern to wiki/skill?** Pure hit-rate, or hit-rate + external validation + timeline depth?
+2. **What is the promotion threshold from pattern to wiki/runbook?** Pure hit-rate, or hit-rate + external validation + timeline depth? (The skill promotion leg is retired by #1690 C3 — promotion targets wiki/runbook and agent-profile proposals only.)
 3. **How does the cold seat participate in cross-process A2A?** Does it subscribe to events but ignore timeline conclusions, or does it maintain a separate evidence stream?
 4. **Pattern scope is authority-specific, not one global switch.** Engineering
    instances may be project-scoped; user-model and dyadic relationship patterns
@@ -646,7 +649,7 @@ behavior (kept for record):
 
 ## 10. Summary
 
-Tachi already has a continuity observation substrate: the `tachi_events` ledger, projection machinery, counters, guardrails, typed timeline/bonding read-model slices, wiki references, pending pattern-derived skill candidates, and lifecycle/GitHub evidence surfaces. It does **not** yet have the revision-aware current-truth reducer or an exposed profile-pack rendering surface. Remaining work is reconciliation, loop closure, calibration, stronger schemas, causal endpoint resolution, and final promotion:
+Tachi already has a continuity observation substrate: the `tachi_events` ledger, projection machinery, counters, guardrails, typed timeline/bonding read-model slices, wiki references, pattern-derived wiki/runbook + agent-profile review artifacts (skill candidates are retired by #1690 C3), and lifecycle/GitHub evidence surfaces. It does **not** yet have the revision-aware current-truth reducer or an exposed profile-pack rendering surface. Remaining work is reconciliation, loop closure, calibration, stronger schemas, causal endpoint resolution, and final promotion:
 
 - Build the **predicate-authorized current-truth reducer** and derived action queue before treating timeline/handoff output as current state.
 - Extend **automatic pattern hit/miss feedback** beyond search/context/complete/close_loop into briefing runtime and outcome-backed hit/miss classification.
@@ -656,4 +659,4 @@ Tachi already has a continuity observation substrate: the `tachi_events` ledger,
 - Extend the local **A2A evidence/open-thread bundle** and poll surface into cross-process transport while preserving the cold seat.
 - Keep the **over-fit brake and cold seat** as un-revocable safeguards.
 
-The result is a system that learns the user's alignment, surfaces it when relevant, and turns it into durable knowledge and executable skills — without losing the ability to be challenged or corrected.
+The result is a system that learns the user's alignment, surfaces it when relevant, and turns it into durable knowledge and reviewed wiki/runbook + agent-profile artifacts — the skill-crystallization leg is retired by #1690 C3 — without losing the ability to be challenged or corrected.

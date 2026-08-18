@@ -195,7 +195,7 @@ pattern memory = "we identified structure Y that predicts Z"
 
 ### Pattern 5: `crystallization_pipeline`
 
-**Statement:** Raw sessions are distilled into patterns, which are reviewed and promoted into wiki pages, which are further crystallized into executable skills.
+**Statement:** Raw sessions are distilled into patterns, which are reviewed and promoted into wiki pages, which are further crystallized into executable skills — the skill-crystallization leg is **retired by #1690 C3** (patterns never mint skill candidates; the surviving promotion target is reviewed wiki/runbook artifacts plus agent-profile proposals).
 
 **Instances in this session:**
 - Karpathy LLM Wiki flow: Raw Sources → Wiki → Schema
@@ -212,14 +212,13 @@ pattern candidate (/user/patterns/*)
 wiki draft (/wiki/drafts/patterns/*)
     ↓ approve
 wiki page (/wiki/decision/ or /wiki/runbook/)
-    ↓ executable化
-skill:<name> (Hub)
+    (the skill:<name> leg is retired by #1690 C3 — no skill is ever minted)
 ```
 
 **Counters:**
 - `seen`: 1 session
 - `hit`: 1
-- `confidence`: medium (matches existing Tachi skill system + Karpathy reference, but promotion gate not yet exercised)
+- `confidence`: medium (historical: the skill leg this pattern described is retired by #1690 C3; the surviving promotion target is reviewed wiki/runbook artifacts plus agent-profile proposals)
 
 **Authority:** `CollectOnly`.
 
@@ -272,7 +271,7 @@ With `TACHI_CONTINUITY_PIPELINE=1`, the distill lane can emit five candidate eve
     ],
     "open_questions": [
       "Does this alignment-bridge pattern generalize beyond this user?",
-      "What is the exact promotion threshold from pattern to wiki/skill?"
+      "What is the exact promotion threshold from pattern to wiki/runbook?"
     ]
   }
 }
@@ -372,9 +371,9 @@ Do not treat memory as a "remember more" cache or as a way to make the model mor
 Historical implementation path (as of the 2026-06-23 slice): call `tachi_skill(action="from_pattern", query=..., args={"skill_id": "...", "name": "..."})`. The generated Hub capability starts `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`; promotion to `listed` remains a human/maturity-gated step. **Retired by #1690 C3**: `from_pattern` is a deleted action — this section is a record of the historical behavior, not current API.
 
 Historical implementation path: projection reports for mature patterns include
-review artifacts for a wiki draft, pending skill candidate, and agent-profile
-proposal (the skill-candidate artifact is retired by #1690 C3). The runtime still does not execute those artifacts automatically. Today an
-agent must call `from_pattern` explicitly — **retired** — and maturity gates do not yet require
+review artifacts for a wiki draft and an agent-profile proposal (the pending
+skill-candidate artifact is retired by #1690 C3). The runtime still does not
+execute those artifacts automatically, and maturity gates do not yet require
 external-validation, timeline-depth, or cold-seat checks before promotion.
 
 ```json

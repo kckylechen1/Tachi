@@ -201,7 +201,7 @@ entrypoints.
 | --- | --- | --- | --- |
 | `tachi_complete` | Delegate allow-list includes it at `patterns.rs:158`; facade granularity notes explain delegate cannot expose all of `tachi_task` because that would expose dispatch. | Keep until action-level filtering exists. | Let delegate call `tachi_task(action="complete")` without `dispatch`. |
 | `tachi_unstick` | Delegate allow-list includes it at `patterns.rs:157`; observe patterns include it at `patterns.rs:22`. | Keep as worker self-rescue. | Provide equivalent rescue path in a worker-safe facade. |
-| `run_skill` | Delegate allow-list includes it at `patterns.rs:161`; remember patterns include it at `patterns.rs:43`. | Keep for injected/recommended skills. | Replace with action-scoped `tachi_skill(action="run")` that is safe for delegates. |
+| `run_skill` | **RETIRED by #1690 C3 slice A** — the standalone route is gone: `facade_action_allowed` denies it, `DELEGATE_MINIMAL_TOOL_PATTERNS` no longer lists it (patterns.rs: "standalone `run_skill` is retired — workers use `tachi_skill(action='run')`"), and the remember tray dropped it. | Gone; no keep/backcompat surface. | Already replaced — `tachi_skill(action="run")` is the canonical worker surface (see the `tachi_skill` row above). |
 | `tachi_event` | Delegate allow-list includes it at `patterns.rs:153`. | Keep while continuity events are worker-facing. | Decide whether event append/query folds into memory/task. |
 | `runtime_info` and `tachi_tools` | Standard/delegate allow-lists include both at `patterns.rs:115-117` and `:148-149`; unknown-tool errors route users to `tachi_tools`. | Keep. | None; these are readiness/discovery, not product clutter. |
 | `tachi_verify` | Standard allow-list includes it at `patterns.rs:125`; dispatch law requires verification evidence. | Keep. | None until verification ledger is absorbed elsewhere. |
@@ -228,8 +228,9 @@ entrypoints.
    Move self-tuning actions to an admin-only `tachi_tune` or equivalent before
    deleting duplicate action aliases.
 7. **Introduce action-level filtering for delegates.**
-   Only after this can `tachi_complete`, `tachi_unstick`, `run_skill`, and
-   similar worker escape hatches be folded safely.
+   Only after this can `tachi_complete`, `tachi_unstick`, and similar worker
+   escape hatches be folded safely (`run_skill` is already folded — retired by
+   #1690 C3 slice A).
 8. **Decide admin facade shape.**
    Either keep admin as full bypass for emergency use only, or replace it with
    explicit admin facades (`tachi_admin`, `tachi_hub`, `tachi_vault`) and a
