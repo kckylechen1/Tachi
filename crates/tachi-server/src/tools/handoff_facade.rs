@@ -5,8 +5,7 @@ use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::handoff_ops::handle_handoff_promote_issue;
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::{
-    ChainSkillsParams, DlqListParams, DlqRetryParams, HandoffPromoteIssueParams,
-    TachiHandoffParams, TachiOrchestratorParams,
+    ChainSkillsParams, DlqListParams, DlqRetryParams, HandoffPromoteIssueParams, TachiHandoffParams,
 };
 use crate::MemoryServer;
 
@@ -80,15 +79,5 @@ impl MemoryServer {
                 params.action
             )),
         }
-    }
-}
-
-#[allow(dead_code)]
-impl MemoryServer {
-    pub(crate) async fn tachi_orchestrator(
-        &self,
-        Parameters(params): Parameters<TachiOrchestratorParams>,
-    ) -> Result<String, String> {
-        crate::orchestrator_ops::handle_orchestrator(self, params).await
     }
 }

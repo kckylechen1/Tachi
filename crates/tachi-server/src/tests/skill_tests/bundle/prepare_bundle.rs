@@ -17,16 +17,18 @@ async fn prepare_capability_bundle_returns_primary_skill_and_section() {
         })
         .expect("seed bundle registry");
 
-    let result = server
-        .prepare_capability_bundle(Parameters(PrepareCapabilityBundleParams {
+    let result = crate::capability_ops::handle_prepare_capability_bundle(
+        &server,
+        PrepareCapabilityBundleParams {
             query: "build an excel spreadsheet from csv exports".to_string(),
             host: Some("codex".to_string()),
             skill_limit: 3,
             capability_limit: 3,
             include_section: true,
-        }))
-        .await
-        .expect("prepare_capability_bundle should succeed");
+        },
+    )
+    .await
+    .expect("prepare_capability_bundle should succeed");
     let json: Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         json["bundle"]["primary_skill"]["id"],

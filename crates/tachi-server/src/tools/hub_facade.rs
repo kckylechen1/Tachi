@@ -1,16 +1,11 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
-use crate::capability_ops::{
-    handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
-    handle_recommend_toolchain,
-};
 use crate::hub_ops::{
-    handle_distill_trajectory, handle_export_skills, handle_hub_call, handle_hub_disconnect,
-    handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_quick_add,
-    handle_hub_register, handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled,
-    handle_hub_stats, handle_run_skill, handle_skill_evolve, handle_tachi_audit_log,
-    handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
+    handle_export_skills, handle_hub_call, handle_hub_disconnect, handle_hub_discover,
+    handle_hub_feedback, handle_hub_get, handle_hub_quick_add, handle_hub_register,
+    handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats,
+    handle_tachi_audit_log, handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -166,57 +161,5 @@ impl MemoryServer {
         Parameters(params): Parameters<HubDisconnectParams>,
     ) -> Result<String, String> {
         handle_hub_disconnect(self, params).await
-    }
-}
-
-#[allow(dead_code)]
-impl MemoryServer {
-    pub(crate) async fn run_skill(
-        &self,
-        Parameters(params): Parameters<RunSkillParams>,
-    ) -> Result<String, String> {
-        handle_run_skill(self, params).await
-    }
-
-    pub(crate) async fn prepare_capability_bundle(
-        &self,
-        Parameters(params): Parameters<PrepareCapabilityBundleParams>,
-    ) -> Result<String, String> {
-        handle_prepare_capability_bundle(self, params).await
-    }
-
-    pub(crate) async fn distill_trajectory(
-        &self,
-        Parameters(params): Parameters<DistillTrajectoryParams>,
-    ) -> Result<String, String> {
-        handle_distill_trajectory(self, params).await
-    }
-
-    pub(crate) async fn skill_evolve(
-        &self,
-        Parameters(params): Parameters<SkillEvolveParams>,
-    ) -> Result<String, String> {
-        handle_skill_evolve(self, params).await
-    }
-
-    pub(crate) async fn recommend_capability(
-        &self,
-        Parameters(params): Parameters<RecommendCapabilityParams>,
-    ) -> Result<String, String> {
-        handle_recommend_capability(self, params).await
-    }
-
-    pub(crate) async fn recommend_skill(
-        &self,
-        Parameters(params): Parameters<RecommendSkillParams>,
-    ) -> Result<String, String> {
-        handle_recommend_skill(self, params).await
-    }
-
-    pub(crate) async fn recommend_toolchain(
-        &self,
-        Parameters(params): Parameters<RecommendToolchainParams>,
-    ) -> Result<String, String> {
-        handle_recommend_toolchain(self, params).await
     }
 }

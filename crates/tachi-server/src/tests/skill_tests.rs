@@ -1,7 +1,6 @@
 use super::{make_entry, make_server, make_skill_capability};
 use crate::tool_params::{
-    DistillTrajectoryParams, HubRegisterParams, PrepareCapabilityBundleParams,
-    RecommendCapabilityParams, RecommendSkillParams, RecommendToolchainParams, RunSkillParams,
+    DistillTrajectoryParams, HubRegisterParams, PrepareCapabilityBundleParams, RunSkillParams,
     TachiCompleteParams, TachiSkillParams,
 };
 use rmcp::handler::server::wrapper::Parameters;

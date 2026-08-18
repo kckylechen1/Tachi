@@ -195,13 +195,15 @@ async fn run_skill_rejects_uncallable_skill() {
         .await
         .expect("hub_register skill should return response");
 
-    let err = server
-        .run_skill(Parameters(RunSkillParams {
+    let err = crate::hub_ops::handle_run_skill(
+        &server,
+        RunSkillParams {
             skill_id: "skill:dangerous".to_string(),
             args: json!({}),
-        }))
-        .await
-        .expect_err("disabled skill should not run");
+        },
+    )
+    .await
+    .expect_err("disabled skill should not run");
 
     assert!(
         err.contains("not callable"),

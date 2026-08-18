@@ -87,8 +87,9 @@ async fn distill_trajectory_creates_permanent_snapshot_and_skill() {
     let provider = MockTrajectoryProvider::start(DISTILLED_MARKDOWN, "stop").await;
     server.replace_llm(provider.llm.clone());
 
-    let response = server
-        .distill_trajectory(Parameters(DistillTrajectoryParams {
+    let response = crate::hub_ops::handle_distill_trajectory(
+        &server,
+        DistillTrajectoryParams {
             task_description: "Fix a flaky test".to_string(),
             execution_trace: vec![json!({"step":"reproduced"}), json!({"step":"fixed"})],
             final_outcome: json!({"success": true, "score": 0.92}),
@@ -99,9 +100,10 @@ async fn distill_trajectory_creates_permanent_snapshot_and_skill() {
             domain: Some("coding".to_string()),
             project: None,
             scope: "global".to_string(),
-        }))
-        .await
-        .expect("distill_trajectory should succeed");
+        },
+    )
+    .await
+    .expect("distill_trajectory should succeed");
     let response_json: Value = serde_json::from_str(&response).expect("distill response json");
 
     let snapshot_id = response_json["snapshot_id"]
@@ -157,8 +159,9 @@ async fn distill_trajectory_truncated_output_writes_no_snapshot_or_capability() 
     let provider = MockTrajectoryProvider::start("# apparently valid skill", "length").await;
     server.replace_llm(provider.llm.clone());
 
-    let error = server
-        .distill_trajectory(Parameters(DistillTrajectoryParams {
+    let error = crate::hub_ops::handle_distill_trajectory(
+        &server,
+        DistillTrajectoryParams {
             task_description: "Reject truncated trajectory output".to_string(),
             execution_trace: vec![json!({"step":"model truncated"})],
             final_outcome: json!({"success": false}),
@@ -169,9 +172,10 @@ async fn distill_trajectory_truncated_output_writes_no_snapshot_or_capability() 
             domain: Some("coding".to_string()),
             project: None,
             scope: "global".to_string(),
-        }))
-        .await
-        .expect_err("truncated trajectory output must be rejected");
+        },
+    )
+    .await
+    .expect_err("truncated trajectory output must be rejected");
     assert!(
         error.contains(tachi_llm::LLM_OUTPUT_TRUNCATED),
         "unexpected error: {error}"
