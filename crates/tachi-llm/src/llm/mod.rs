@@ -93,6 +93,12 @@ pub struct LlmClient {
     provider_materialization_lock: Arc<Mutex<()>>,
     provider_health_reload: Arc<RwLock<ProviderHealthReloadState>>,
     provider_health_persist: Arc<RwLock<ProviderHealthPersistState>>,
+    /// FIFO ownership for same-client background SQLite open+write phases.
+    /// Model calls enqueue work but never wait on this lock.
+    background_persist_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Tracks fire-and-forget usage writes so tests can join the exact
+    /// persistence boundary without changing production call latency.
+    llm_usage_persist: Arc<RwLock<ProviderHealthPersistState>>,
     /// Counts for the deployment-health seam (#1681 D4, PR-C). Not an
     /// `RwLock`: nothing reads these to decide anything, so atomics are the
     /// whole state — and a health counter must never be able to contend with
@@ -186,6 +192,16 @@ impl LlmClient {
         })
         .join();
         assert!(result.is_err(), "poisoning thread must panic");
+    }
+
+    #[cfg(test)]
+    pub(in crate::llm) async fn await_llm_usage_persistence_for_tests(&self) -> Result<(), String> {
+        let tracker = self
+            .llm_usage_persist
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tracker();
+        tracker.wait_until_terminal().await
     }
 }
 

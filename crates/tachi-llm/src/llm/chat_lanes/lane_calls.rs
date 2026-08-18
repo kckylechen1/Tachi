@@ -4,6 +4,7 @@ use reqwest::{
     Url,
 };
 use serde_json::{self, Value};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::super::catalog_import::DeploymentAttribution;
@@ -15,6 +16,7 @@ use super::super::provider_health::{
 
 /// Maximum retained characters from a caller-supplied model override.
 const MAX_REFERENCE_CHARS: usize = 64;
+const LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Bound and scrub a caller-supplied model override before it reaches a
 /// durable usage row or retry log. Routing still uses the original string.
@@ -848,20 +850,37 @@ impl super::super::LlmClient {
             response_chars: response_chars.min(i64::MAX as usize) as i64,
             duration_ms: duration.as_millis().min(i64::MAX as u128) as i64,
         };
+        let migration = self.vault_db_migration.clone();
+        let tracker = self
+            .llm_usage_persist
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tracker();
+        let background_persist_lock = Arc::clone(&self.background_persist_lock);
+        let completion = tracker.track();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(err) =
-                    tokio::task::spawn_blocking(move || persist_llm_usage_blocking(db_path, record))
-                        .await
-                        .map_err(|err| format!("persist llm usage join failed: {err}"))
-                        .and_then(|inner| inner)
-                {
+                let _completion = completion;
+                let result = {
+                    let _persist_guard = background_persist_lock.lock().await;
+                    tokio::task::spawn_blocking(move || {
+                        persist_llm_usage_blocking(db_path, migration, record)
+                    })
+                    .await
+                    .map_err(|err| format!("persist llm usage join failed: {err}"))
+                    .and_then(|inner| inner)
+                };
+                if let Err(err) = result {
+                    tracker.record_error(err.clone());
                     tracing::warn!("[llm] {err}");
                 }
             });
-        } else if let Err(err) = persist_llm_usage_blocking(db_path, record) {
-            tracing::warn!("[llm] {err}");
+        } else {
+            if let Err(err) = persist_llm_usage_blocking(db_path, migration, record) {
+                tracker.record_error(err.clone());
+                tracing::warn!("[llm] {err}");
+            }
         }
     }
 }
@@ -965,13 +984,23 @@ fn redact_provider_response(resp_text: &str) -> String {
 
 fn persist_llm_usage_blocking(
     db_path: std::path::PathBuf,
+    migration: memcore::MigrationAuthority,
     record: LlmUsageEvent,
 ) -> Result<(), String> {
     let db_path = db_path
         .to_str()
         .ok_or_else(|| "persist llm usage: invalid db path".to_string())?;
-    let store = memcore::MemoryStore::open(db_path)
-        .map_err(|err| format!("persist llm usage open db: {err}"))?;
+    let open_context = memcore::DbOpenContext {
+        intent: memcore::OpenIntent::OpenExisting,
+        migration,
+        required_profile: memcore::StoreProfile::TachiFull,
+    };
+    let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
+        db_path,
+        &open_context,
+        LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT,
+    )
+    .map_err(|err| format!("persist llm usage open db: {err}"))?;
     store
         .record_llm_usage(&record)
         .map_err(|err| format!("persist llm usage insert: {err}"))
