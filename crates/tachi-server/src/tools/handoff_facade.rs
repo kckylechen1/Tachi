@@ -43,7 +43,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Create/link a GitHub issue from an existing handoff memo (action='promote_issue' only). #1099: 'leave'/'check' were retired — use tachi_a2a(action='respond') for same-host advisory messaging, or tachi_orchestrator(action='handoff_write'/'handoff_read') for a structured task baton."
+        description = "Create/link a GitHub issue from an existing handoff memo (action='promote_issue' only). #1099: 'leave'/'check' were retired — use tachi_a2a(action='respond') for same-host advisory messaging, or tachi_task(action='status') for task handoff."
     )]
     pub(crate) async fn tachi_handoff(
         &self,
@@ -72,8 +72,8 @@ impl MemoryServer {
             }
             "leave" | "check" => Err(format!(
                 "action='{action}' was retired in #1099. Use tachi_a2a(action='respond') \
-                 for same-host advisory messaging, or tachi_orchestrator(action='handoff_write'|'handoff_read') \
-                 for a structured task baton. 'promote_issue' is the only action tachi_handoff still supports."
+                 for same-host advisory messaging, or tachi_task(action='status') \
+                 for structured task handoff. 'promote_issue' is the only action tachi_handoff still supports."
             )),
             _ => Err(format!(
                 "Invalid action '{}'. tachi_handoff only supports 'promote_issue'.",
