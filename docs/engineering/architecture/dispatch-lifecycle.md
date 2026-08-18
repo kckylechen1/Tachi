@@ -144,7 +144,7 @@ Owner ruling #1202 (2026-07-17) supersedes the original TOML-as-card-declaration
 
 - **Declaration** (role × vendor positioning, dated failure patterns, packet-ready counter-clauses, thin routing frontmatter) → reviewed Markdown lane cards under the governed dispatch-ledger card source. Leader/owner approval controls atomic append; model/eval output may draft but never writes the declaration directly. Tachi ingests a read-only mirror. TOML remains valid for typed runtime/profile configuration, not as a competing lane-card authority.
 - **Evidence** (eval rows, signatures, timestamps, adjudication/run references) → SQLite, append-only, temporal, `(role, vendor)`-queryable. Evidence proposes or supports a card amendment; it does not become declaration merely because it was recorded. The medical record.
-- **Projection** (current counter-clauses, card excerpt, routing index) → computed from the reviewed card plus evidence at render/assembly time, *never persisted as a second truth*. MBIT/statistical summaries are derived evidence only. The health report — always reproducible from the reviewed declaration and record, never hand-edited as an alternate authority.
+- **Projection** (current counter-clauses, card excerpt, routing index) → computed from the reviewed card plus evidence at render/assembly time, *never persisted as a second truth*. The MBIT/statistical summary machinery is **retired by #1690 C3** — where such summaries existed, they were derived evidence only, never an alternate authority. The health report — always reproducible from the reviewed declaration and record, never hand-edited as an alternate authority.
 
 Engineering precedent, user values/goals/habits, Soul disposition, and lane-card operational evidence remain separate content authorities even when they reuse proposal/review/apply machinery (#950, #953, #858, #1202).
 
@@ -174,18 +174,18 @@ One diagram. Each arrow is annotated **[code]** (exists at HEAD with an anchor i
    incident (a live dispatch failure or success)
         │  [doctrine] leader runs the T2 loop
         ▼
-   adjudication trace  ──[code] tachi_complete writes /eval row──►  eval evidence (SQLite, append-only)
-        │                                                                    │
-        │ [code] distill a typed error_signature                            │ [code] aggregate_live →
-        ▼                                                                    ▼  performance matrix
-   signature on the (role,vendor) card ──[code] ACT-R decay──►  projection (top-N counter-clauses)
-        │                                                                    │
-        │ [code] inject verbatim into packet frozen-spec                    │ [code] recommend consumes matrix
-        ▼                                                                    ▼
-   next packet (12 clauses + vaccines + goldens) ──[doctrine] dispatch──►  outcome ──►  eval row ──► card
+    adjudication trace  ──[code] tachi_complete writes /eval row──►  eval evidence (SQLite, append-only)
+         │                                                                    │
+         │ [code] distill a typed error_signature                            │ [code] aggregate_live →
+         ▼                                                                    ▼  performance matrix (reporting only)
+    signature on the (role,vendor) card ──[code] ACT-R decay──►  projection (top-N counter-clauses)
+         │                                                                    │
+         │ [code] inject verbatim into packet frozen-spec                    │ [code] recommend consumes the
+         ▼                                                                    ▼  DecisionFactLedger, NOT the matrix (#1690 C3 S2)
+    next packet (12 clauses + vaccines + goldens) ──[doctrine] dispatch──►  outcome ──►  eval row ──► card
 ```
 
-- **Present at HEAD [code]:** eval-row write on complete, the live performance matrix, `recommend` consuming that matrix, the deterministic risk classifier, route-policy proposals/apply, `(role, vendor)` signature evidence, counter-clause projection, the `self_report_trust` flag, and the evidence-contract projection (the skill/trait/weak-against overlay projection is retired by #1690 C3).
+- **Present at HEAD [code]:** eval-row write on complete, the live performance matrix (`aggregate_live` — a read-only reporting surface, no longer consumed by `recommend`), `recommend` consuming the **DecisionFactLedger** (#1690 C3 S2: live /eval matrix consumption is retired with the MBIT/evolution machinery; #1675 owns the eval future), the deterministic risk classifier, route-policy proposals/apply, `(role, vendor)` signature evidence, counter-clause projection, the `self_report_trust` flag, and the evidence-contract projection (the skill/trait/weak-against overlay projection is retired by #1690 C3).
 - **Doctrine-only [doctrine]:** the leader running the loop, the 12-clause packet emission, the three-tier verdict routing, completion-ownership, the anti-fabrication artifact check, first-exam eligibility. These are law carried by files and the leader, not yet by Tachi code.
 
 ---
@@ -197,7 +197,7 @@ Rows changed by the 2026-08-02 amendment were verified at base `274b930a`; untou
 | Lifecycle step | Doctrine (§) | Code anchor at HEAD, or GAP | Child-issue seed |
 |---|---|---|---|
 | Deterministic risk classification | §2.2, §2.1 | **Present implementation reality at the 2026-07-19 anchor:** `crates/tachi-dispatch/src/routing.rs:266-286` (risk → required/blocked_profiles; high/critical currently requires named profiles `claude_plan`+`codex_55_review` and blocks `codex_53_fast`). This is a **migration gap** against the carrier-neutral, risk-tiered routing target in §2.1/§2.4; the doctrine amendment does not claim runtime migration. | "Migrate `routing.rs` from named carrier/profile coupling to risk-tiered carrier-neutral policy inputs; preserve explicit high/critical safety gates and add route discrimination coverage before changing the current profile behavior." |
-| Profile recommend (matrix-fed) | §2.2 | `crates/tachi-dispatch/src/routing.rs:288` `recommend_dispatch_profile_candidates`; matrix from `aggregate_live` | — |
+| Profile recommend | §2.2 | `crates/tachi-dispatch/src/routing.rs:288` `recommend_dispatch_profile_candidates`; evidence from the **DecisionFactLedger** (`crates/tachi-server/src/dispatch_profile/routing/recommendation.rs`), NOT the live /eval matrix — matrix consumption is retired by #1690 C3 S2 (the no-evidence path abstains) | — |
 | Profile / card definition | §4.1 | `crates/tachi-dispatch/src/profiles.rs:37-60` `DispatchProfileDef` (role-keyed; per-backend profiles from `:62`) | — |
 | Card overlay projection (skills/traits/weak-against) | §4.4 | **RETIRED by #1690 C3** — `projected_signature_skills` survives only as an always-empty read-only loadout key; the surviving family is the evidence-contract projection (`crates/tachi-server/src/dispatch_profile/cards.rs` renders the static reviewed loadout + `self_report_trust`; `crates/tachi-server/src/dispatch_ops/prompt/overlays.rs` renders static loadout + `projected_required`) | — |
 | Eval row on complete | §3 | `crates/tachi-server/src/complete_ops/eval_record.rs:39` (path `/eval/{date}/{task_id}`), `:283` (`category="eval"`), `:206-223` (subagents); handler `crates/tachi-server/src/complete_ops/handler.rs:14` | — |

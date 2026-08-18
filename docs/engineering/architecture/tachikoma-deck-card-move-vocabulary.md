@@ -126,9 +126,10 @@ This model reuses what already exists instead of creating a parallel system.
   already carries `role`, `stage`, `common_skills`, `signature_skills`,
   `forbidden_skills`, `evidence_required`, `strong_against`, and
   `weak_against`.
-- The runtime JSON view (`profile_json_for_server`) already emits an
-  `mbit_card` object with a Poke/SCV/Raven `archetype`, `stats`,
-  `skill_loadout`, `evidence_contract`, and an `evolution` projection.
+- The runtime JSON view (`profile_json_for_server`) emits the static
+  reviewed `skill_loadout` and `evidence_contract`; the `mbit_card` object with
+  Poke/SCV/Raven `archetype`, `stats`, and `evolution` projection was retired by
+  #1690 C3.
    - The local operator-only `tachi card list/show` diagnostic exposes the
      static profile fields; model-facing Task does not expose this JSON.
 
@@ -138,13 +139,14 @@ This model reuses what already exists instead of creating a parallel system.
      `skill/waza/skills/`.
    - `crates/tachi-server/src/builtins.rs` seeds them into the Hub on startup
      and registers skill tools.
-   - `tachi_skill(action="discover" | "bundle" | "loadout" | "run")` exposes the
-     skill surface.
+   - `tachi_skill(action="discover" | "run")` exposes the skill surface (the
+     retired `bundle`/`loadout`/`from_pattern` actions are deleted by #1690 C3).
 
 3. **Dispatch already produces evidence artifacts.**
-   - `crates/tachi-server/src/dispatch_ops/` writes `prompt.md`, `context.md`,
-     `capability_bundle.json`, `trajectory.jsonl`, `progress.jsonl`,
-     `status.json`, and `result.md` under `~/.tachi/runs/<dispatch_id>/`.
+   - `crates/tachi-server/src/dispatch_ops/` writes `plan.md`, `prompt.md`,
+     `context.md`, `trajectory.jsonl`, `progress.jsonl`,
+     `status.json`, and `result.md` under `~/.tachi/runs/<dispatch_id>/`
+     (the retired `capability_bundle.json` artifact was deleted by #1690 C1).
 
 4. **Card evolution pieces already exist.**
    - `dispatch_profile_card_overlays` namespace stores reviewed overlays.
@@ -394,7 +396,7 @@ The execution backend is one layer below Card selection.
 ```text
 Tachi task / issue
   -> Card authority + Guidance + Moves + evidence contract
-  -> Tachi-generated prompt.md / context.md / capability_bundle.json
+  -> Tachi-generated plan.md / prompt.md / context.md
   -> execution_backend
   -> raw transport events
   -> Tachi-owned trajectory.jsonl / progress.jsonl / status.json / result.md
@@ -603,7 +605,7 @@ Initial probes:
 3. **Shell artifact probe**: run a local shell/flow action in a safe temp
    project, verify `instruction.md`, `status.json`, and injected SOP artifact.
 4. **Dispatch mock probe**: run no-op/mock dispatch path where possible,
-   verify `prompt.md`, `context.md`, `capability_bundle.json`,
+   verify `plan.md`, `prompt.md`, `context.md`,
    `trajectory.jsonl`, and `status.json`.
 5. **Verification ledger probe**: write/read a small verification item, ensure
    unrelated flow evidence is not treated as current proof.
@@ -665,8 +667,9 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - Add static Card definitions for Poke, SCV, Raven, and Medic mode metadata.
 - Add `skill/superpowers/manifest.yaml` and `skill/waza/manifest.yaml` with
   upstream repo/path/ref/sha mappings.
-- Extend the existing `mbit_card` JSON view with `authority`, `guidance`,
-  `moves`, and `personality` fields.
+- Extend the surviving static profile JSON view (`skill_loadout` /
+  `evidence_contract`) with `authority`, `guidance`, `moves`, and
+  `personality` fields (the retired `mbit_card` view was deleted by #1690 C3).
 - Add a read-only `tachi card list` / `tachi card show` CLI convenience that
   calls the existing facade.
 - Optionally add a read-only `tachi skill-sources status` report.

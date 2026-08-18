@@ -28,9 +28,10 @@ The target split is:
    - Default agent surface should be a narrow `observe + remember` kernel, not the full MCP catalog
 2. Runtime hooks stay explicit.
    - `recall_context`, `capture_session`, and later `compact_context` are runtime/adapter APIs, not part of the ordinary IDE default
-3. Capability selection should become a first-class public layer.
-   - `recommend_capability`, `recommend_skill`, and `recommend_toolchain` remain direct recommendation APIs; `tachi_skill(action="discover"|"run"|"bundle")` is the preferred skill workflow UX
-   - standalone `run_skill`, `prepare_capability_bundle`, and skill-focused `hub_discover` calls are compatibility routes, not the canonical new-caller path
+3. Capability selection is **retired as a first-class layer** (#1690 C3 delete list: "skill recommendation and auto-selection").
+   - `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `skill_evolve` are deleted end-to-end — the router rejects them as unknown tools
+   - `tachi_skill(action="discover"|"run")` is the canonical skill workflow; `bundle`/`loadout`/`from_pattern` actions are retired
+   - a dispatch's skills resolve ONLY from the explicit `skills` param plus the profile's STATIC reviewed skill list; `tachi_dispatch(action='recommend')` is the surviving deterministic recommendation surface (DecisionFactLedger-fed, abstains on no evidence)
    - raw hub / pack / vc governance tools should not leak into ordinary agent surfaces
 4. Workflow tools are not kernel primitives.
    - `ghost_*`, `post_card`, `check_inbox`, `update_card`, proposal review/project tools stay hidden unless a host or profile explicitly asks for them
@@ -136,21 +137,11 @@ OpenClaw now forces `TACHI_PROFILE=openclaw` when it launches the embedded MCP c
 
 Today this is a typed MCP/runtime primitive, not an OpenClaw hook integration yet. The current OpenClaw SDK only exposes `before_agent_start` and `agent_end`, so the actual `before_compaction` wiring is deferred until the host exposes that lifecycle event.
 
-### Capability recommendation primitive
+### Capability recommendation primitive (RETIRED by #1690 C3)
 
-`Tachi` now exposes a first-pass capability layer:
+The first-pass capability layer — `recommend_capability`, `recommend_skill`, `recommend_toolchain` — was **deleted end-to-end** in #1690 C3 (the "second model brain" tool family; the router rejects these tools as unknown).
 
-- `recommend_capability`
-- `recommend_skill`
-- `recommend_toolchain`
-
-Current behavior:
-
-- deterministic ranking over Hub capabilities
-- visibility/callability aware
-- host-aware scoring
-- Pack / projection-aware toolchain suggestions
-- simple host-tool inference for common task shapes
+Historical behavior (deterministic ranking over Hub capabilities, visibility/callability aware, host-aware scoring, Pack/projection-aware toolchain suggestions, simple host-tool inference) is kept for record only. The surviving recommendation surface is `tachi_dispatch(action='recommend')`: deterministic dispatch-profile recommendation from the DecisionFactLedger, abstaining when no usable evidence exists.
 
 OpenClaw does not expose these directly to the model yet. They are part of the kernel surface for direct MCP hosts and future adapter orchestration.
 

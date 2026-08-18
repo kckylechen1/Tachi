@@ -69,13 +69,8 @@ implemented_now:
       - "per-agent override slot exists (AgentProfile.rate_limit_rpm/burst) but is unreachable since issue 757 (no facade sets it); all sessions use the global env default"
 
   skill_evolve:
-    tools:
-      - skill_evolve
-    features:
-      - LLM-powered prompt improvement
-      - creates versioned capability (skill:name/vN)
-      - optional auto-activation via hub_version_routes
-      - feedback recording in handle_run_skill
+    retired: true
+    note: "#1690 C3: skill_evolve (LLM telemetry-driven skill versioning) is deleted end-to-end — router rejects it as an unknown tool; skill content is static reviewed content only"
 
   agent_profile:
     tools: []

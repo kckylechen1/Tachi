@@ -334,14 +334,12 @@ Implemented substrate:
   mixing them into ordinary memory recall.
 - `tachi_wiki_write include_patterns=true` persists reviewed `pattern_refs` and emits
   `wiki.saved` events.
-- `tachi_skill action="from_pattern"` registers disabled, pending-review,
-  discoverable skill candidates carrying `pattern_ref` metadata.
-- `recommend_skill` and `tachi_task` lightweight skill recommendation use active
-  pattern bridge signals so a query can route through remembered project/user
-  patterns into relevant skills. Matching recommendations expose `pattern_refs`.
+- `tachi_skill action="from_pattern"` — **RETIRED by #1690 C3** (deleted action; no skill candidate is ever minted from a pattern).
+- `recommend_skill` and `tachi_task` lightweight skill recommendation — **RETIRED by #1690 C3** (deleted; the static task-brief intent map is the only surviving advisory projection).
 - `tachi_event action="promote"` can materialize conservative review artifacts for
-  an eligible or forced mature pattern: a pending wiki draft, a disabled skill
-  candidate, and an `agent_profile.proposal` event. Promotion responses and reports
+  an eligible or forced mature pattern: a pending wiki draft and an
+  `agent_profile.proposal` event (the disabled skill candidate is retired by
+  #1690 C3). Promotion responses and reports
   include external-validation / cold-seat-review gate status.
 - The daemon runs a background continuity projection loop. Projection reports expose
   `projected_count`, `skipped_count`, `promotion_candidate_count`, and review

@@ -4,7 +4,7 @@
 **Participants:** user + Kimi Code CLI
 **Artifact produced:** [`tachi-continuity-memory-architecture.md`](../architecture/tachi-continuity-memory-architecture.md)
 **Purpose:** demonstrate how a real design conversation maps into the continuity memory pipeline.
-**Implementation note:** as of the first implementation slice, projected patterns can be searched with `tachi_search scope=patterns`, attached to wiki metadata with `include_patterns=true`, and turned into disabled/pending skill candidates with `tachi_skill action=from_pattern`.
+**Implementation note:** as of the first implementation slice, projected patterns can be searched with `tachi_search scope=patterns`, attached to wiki metadata with `include_patterns=true`, and turned into disabled/pending skill candidates with `tachi_skill action=from_pattern` — the `from_pattern` skill-generation surface is **retired by #1690 C3** (patterns never mint skill candidates; promotion creates reviewed wiki/runbook artifacts only).
 
 ---
 
@@ -369,12 +369,12 @@ Do not treat memory as a "remember more" cache or as a way to make the model mor
 
 ### Skill candidate generated from pattern
 
-Current implementation path: call `tachi_skill(action="from_pattern", query=..., args={"skill_id": "...", "name": "..."})`. The generated Hub capability starts `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`; promotion to `listed` remains a human/maturity-gated step.
+Historical implementation path (as of the 2026-06-23 slice): call `tachi_skill(action="from_pattern", query=..., args={"skill_id": "...", "name": "..."})`. The generated Hub capability starts `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`; promotion to `listed` remains a human/maturity-gated step. **Retired by #1690 C3**: `from_pattern` is a deleted action — this section is a record of the historical behavior, not current API.
 
-Current implementation path: projection reports for mature patterns now include
+Historical implementation path: projection reports for mature patterns include
 review artifacts for a wiki draft, pending skill candidate, and agent-profile
-proposal. The runtime still does not execute those artifacts automatically. Today an
-agent must call `from_pattern` explicitly, and maturity gates do not yet require
+proposal (the skill-candidate artifact is retired by #1690 C3). The runtime still does not execute those artifacts automatically. Today an
+agent must call `from_pattern` explicitly — **retired** — and maturity gates do not yet require
 external-validation, timeline-depth, or cold-seat checks before promotion.
 
 ```json

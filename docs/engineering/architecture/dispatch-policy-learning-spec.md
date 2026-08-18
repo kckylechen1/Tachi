@@ -255,7 +255,9 @@ As of 2026-06-28, the baseline includes:
 - built-in dispatch profiles and their static profile/card overlays (the
   MBIT-like card machinery behind them is retired by #1690 C3);
 - profile recommendation with deterministic risk classification;
-- live eval performance matrix consumption by recommendation;
+- recommendation consuming the **DecisionFactLedger** (live /eval matrix
+  consumption is retired by #1690 C3 S2 — the no-evidence path abstains;
+  #1675 owns the eval-informed future);
 - read-only route simulation over recent live eval rows for `current`,
   `cost_sensitive`, and `quality_first` policy variants;
 - route-policy proposal lifecycle through `tachi_tune(action="route_proposals")`,
@@ -342,7 +344,9 @@ Issue #194 can close when:
   profile baseline stands in for the card criterion), risk classification,
   skill loadouts, and route recommendation are available through the existing
   task/skill facades;
-- recommendation consumes live eval performance evidence and explains fallbacks;
+- recommendation consumes DecisionFactLedger evidence and explains fallbacks
+  (live /eval matrix consumption retired by #1690 C3 S2; the no-evidence path
+  abstains and reports only the deterministic admission fit);
 - dispatch writes flow-visible worker state and evidence requirements;
 - at least one end-to-end feature flow proves intake, briefing, recommend,
   dispatch, board, verification, PR status, release note, and close-loop;

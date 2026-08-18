@@ -670,7 +670,9 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Recommendations
 
-`recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`
+`tachi_dispatch(action='recommend')` — deterministic dispatch-profile recommendation from the DecisionFactLedger; the no-evidence path abstains.
+
+*(`recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, `skill_evolve` — the retired "second model brain" tool family — are deleted by #1690 C3 and rejected by the router as unknown tools.)*
 
 ### Facade & Delegation
 
