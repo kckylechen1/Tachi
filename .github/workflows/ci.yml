@@ -198,6 +198,9 @@ jobs:
       - name: Check release version sync
         run: python3 scripts/check_release_versions.py
 
+      - name: Test nextest census contracts
+        run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

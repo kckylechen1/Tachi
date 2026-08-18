@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -26,7 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "nextest-known-reds-diff.sh"
 NEXTEST_TOML = REPO_ROOT / ".config" / "nextest.toml"
 
-# The three exact full nextest test paths declared as known deterministic reds.
+# Synthetic known-red paths used to exercise the gate's non-empty override seam.
+# The live nextest configuration intentionally has no known-red members.
 KNOWN_REDS = [
     "tests::dispatch_tests::board_first::successful_dispatch_seeds_status_and_kanban_before_plan_completes",
     "tests::dispatch_tests::board_first::plan_review_pending_response_projects_input_required_kanban_state",
@@ -200,32 +202,27 @@ class KnownRedsGateTests(unittest.TestCase):
 
 
 class NextestTomlFilterTests(unittest.TestCase):
-    """#1413 concern 5: the test(/regex/) filter must be an exact full-path
-    match, not the unanchored short-fragment substring match it replaced."""
+    """Freeze the intentionally empty known-red roster in nextest config."""
 
-    def test_filter_is_anchored_to_full_paths(self) -> None:
-        text = NEXTEST_TOML.read_text(encoding="utf-8")
-        # Both override blocks (default + ci) must carry the anchored filter.
-        anchored = text.count("test(/^(tests::dispatch_tests::")
-        self.assertEqual(
-            anchored,
-            2,
-            f"expected both default+ci override filters anchored, found {anchored}",
+    def test_known_red_roster_is_intentionally_empty(self) -> None:
+        config = tomllib.loads(NEXTEST_TOML.read_text(encoding="utf-8"))
+        self.assertIn(
+            "known-deterministic-reds",
+            config.get("test-groups", {}),
+            "known-red group definition must remain present even with an empty roster",
         )
-        # The closing anchor must also be present on each filter line.
-        self.assertEqual(text.count(")$/)"), 2)
-
-    def test_old_unanchored_short_fragments_are_gone(self) -> None:
-        text = NEXTEST_TOML.read_text(encoding="utf-8")
-        # The pre-fix filter matched on bare `board_first::...` / `dispatch_confirmation::...`
-        # fragments without leading `tests::dispatch_tests::` — those must no
-        # longer appear as filter starts.
-        self.assertNotIn(
-            "test(/board_first::",
-            text,
-            "unanchored short-fragment filter must be replaced by exact full paths",
-        )
-
+        for profile_name in ("default", "ci"):
+            overrides = config.get("profile", {}).get(profile_name, {}).get("overrides", [])
+            members = [
+                override
+                for override in overrides
+                if override.get("test-group") == "known-deterministic-reds"
+            ]
+            self.assertEqual(
+                members,
+                [],
+                f"{profile_name} must not reintroduce an unreviewed known-red member",
+            )
 
 if __name__ == "__main__":
     unittest.main()
