@@ -982,6 +982,28 @@ async fn dispatch_receipt_carries_the_effective_authority_contract() {
     );
 }
 
+/// #1690 C1 discriminator: the retired capability-bundle key must be ABSENT
+/// from the receipt-first status.json seed. The seed is only observable on
+/// disk between the two synchronous `write_status_json` calls in
+/// `handle_tachi_dispatch` (prompt assembly sits between them); every
+/// post-return read sees the enrich write, which already drops the key — so a
+/// runtime read alone can never go RED for the INITIAL write. This source
+/// pin covers what runtime cannot: the seed lives in `dispatch.rs`, so the
+/// key literal anywhere in the writer file fails the test. RED pre-repair:
+/// the seed emits `"capability_bundle": Value::Null`; GREEN post-repair:
+/// absent from the writer entirely.
+#[test]
+fn c1_retired_capability_bundle_key_is_absent_from_status_writer() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dispatch_ops/dispatch.rs"),
+    )
+    .expect("read dispatch.rs");
+    assert!(
+        !source.contains("capability_bundle"),
+        "no status.json writer may emit the retired capability_bundle key (#1690 C1)"
+    );
+}
+
 /// #1324: a successful external-staffing start is receipt-first, and the
 /// accepted response and terminal worker evidence stay in one canonical run
 /// directory. This test exercises the canonical kernel directly; legacy

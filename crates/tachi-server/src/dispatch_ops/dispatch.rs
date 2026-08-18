@@ -405,8 +405,8 @@ pub(crate) async fn handle_tachi_dispatch(
     // (it comes from `write_dispatch_artifacts` below) and is seeded as a
     // neutral "pending" placeholder here, then overwritten by the existing
     // post-artifacts `write_status_json` call once real values exist.
-    // #1690 C1: `capability_bundle` was a field on this receipt and is
-    // retired — no status.json write may emit it, including as `null`.
+    // #1690 C1: the retired capability-bundle receipt field is NOT part of
+    // this seed — no status.json write may emit it, including as null.
     let harness_server_url = infer_harness_server_url(&params, &harness_transport);
     let v2_decision = v2_enabled_from_env(params.stage.as_deref());
     let v2 = matches!(v2_decision, V2Decision::Enabled);
@@ -506,8 +506,8 @@ pub(crate) async fn handle_tachi_dispatch(
 
     // Enrich status.json now that feedback_rules is known. Same call shape
     // as the original single seed — now the SECOND write, not the first
-    // (receipt-first seed above is the first). No capability_bundle field
-    // on either write (#1690 C1).
+    // (receipt-first seed above is the first). Neither write emits the
+    // retired capability-bundle key (#1690 C1).
     write_status_json(
         &workspace_dir,
         &dispatch_id,
