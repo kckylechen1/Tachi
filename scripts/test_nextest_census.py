@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,25 @@ import unittest
 
 
 SOURCE_SCRIPT = Path(__file__).with_name("nextest-census.sh")
+KNOWN_REDS_SCRIPT = Path(__file__).with_name("nextest-known-reds-diff.sh")
+EXPECTED_PACKAGES = [
+    "tachi-server",
+    "tachi-bootstrap-tests",
+    "tachi-contract-tests",
+    "tachi-credential-profile",
+    "tachi-github-runtime",
+    "tachi-lesson-forge",
+    "tachi-build-broker",
+    "tachi-llm",
+]
+
+
+def package_inventory(script: Path, assignment: str) -> list[str]:
+    text = script.read_text(encoding="utf-8")
+    match = re.search(rf"^[ \t]*{assignment}=\(([^)]*)\)$", text, re.MULTILINE)
+    if match is None:
+        raise AssertionError(f"missing {assignment} package inventory in {script}")
+    return re.findall(r"(?:^|\s)-p\s+([a-z0-9-]+)(?=\s|$)", match.group(1))
 
 
 def run_exit_contract_case(
@@ -132,8 +152,11 @@ sys.exit(7)
                 [
                     "nextest",
                     "run",
-                    "-p",
-                    "tachi-server",
+                    *[
+                        item
+                        for package in EXPECTED_PACKAGES
+                        for item in ("-p", package)
+                    ],
                     "--no-fail-fast",
                     "--profile",
                     "census",
@@ -169,6 +192,16 @@ sys.exit(7)
             self.assertFalse(second_row["target_clean_at_invocation"])
             self.assertEqual(second_row["prior_matching_failures"], 1)
             self.assertEqual(second_row["recurrence"], "recurrent")
+
+    def test_package_inventories_match_without_duplicates(self) -> None:
+        census_packages = package_inventory(SOURCE_SCRIPT, "nextest_args")
+        known_reds_packages = package_inventory(KNOWN_REDS_SCRIPT, "NEXTEST_PACKAGES")
+
+        self.assertEqual(census_packages, EXPECTED_PACKAGES)
+        self.assertEqual(known_reds_packages, EXPECTED_PACKAGES)
+        self.assertEqual(census_packages, known_reds_packages)
+        self.assertEqual(len(census_packages), len(set(census_packages)))
+        self.assertEqual(len(known_reds_packages), len(set(known_reds_packages)))
 
     def test_exit_contract_distinguishes_capture_failures(self) -> None:
         cases = (
