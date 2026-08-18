@@ -306,7 +306,9 @@ pub(crate) fn facade_action_effect(
         "tachi_skill" => (
             &[],
             &[],
-            &["discover", "run", "bundle", "loadout", "from_pattern"],
+            // #1690 C3/C4: bundle/loadout/from_pattern are retired — only the
+            // surviving actions discover/run keep typed metadata.
+            &["discover", "run"],
         ),
         "tachi_verify" => (&[], &[], &["start", "record", "status", "board"]),
         "tachi_orchestrator" => (
@@ -566,6 +568,26 @@ mod tests {
             "pattern_feedback",
         ] {
             assert_eq!(facade_action_effect("tachi_memory", Some(action)), None);
+        }
+    }
+
+    /// #1690 C4 re-anchor: the retired `tachi_skill` actions keep NO typed
+    /// replay metadata (they are dead inventory, fail-closed but stale). The
+    /// completeness ratchet (`f1098_every_typed_facade_action_has_effect_metadata`)
+    /// walks `TACHI_SKILL_ACTIONS` == {discover, run}, so this pins the other
+    /// side: a retired action must not be re-registered with metadata.
+    #[test]
+    fn retired_skill_actions_are_unclassified() {
+        for action in ["bundle", "loadout", "from_pattern"] {
+            assert_eq!(
+                facade_action_effect("tachi_skill", Some(action)),
+                None,
+                "retired skill action {action} must not have effect metadata"
+            );
+            assert!(
+                dlq_unsafe("tachi_skill", Some(action)),
+                "retired skill action {action} must fail closed for replay"
+            );
         }
     }
 

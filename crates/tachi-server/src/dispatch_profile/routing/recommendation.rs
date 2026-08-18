@@ -85,7 +85,10 @@ pub(crate) fn handle_dispatch_recommendation(
         &[],
         &route_policy_rules,
         tachi_dispatch::RouteEvidenceSource::DecisionFactLedger,
-        |profile| profile_weak_against_for_server(server, profile),
+        // #1690 B1: `weak_against` is the static reviewed baseline — the
+        // legacy `add_weak_against` overlay projection is retired, so the
+        // scorer no longer loads a profile overlay for it.
+        |profile| Ok(tachi_dispatch::profile_weak_against(profile)),
     )?;
     // tachi#1675 PR4, BUG-2 (codex review finding 2): HARD GATES FIRST, on the
     // set that gets SERIALIZED — not merely reported beside it.

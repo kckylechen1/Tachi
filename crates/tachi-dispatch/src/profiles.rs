@@ -918,18 +918,6 @@ pub fn profile_weak_against(profile: &DispatchProfileDef) -> Vec<String> {
     weak
 }
 
-pub fn profile_weak_against_with_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let mut weak = profile_weak_against(profile);
-    weak.extend(profile_projected_weak_against_from_overlay(
-        profile, overlay,
-    ));
-    dedupe_preserve_order(&mut weak);
-    weak
-}
-
 pub fn profile_evidence_contract_json(profile: &DispatchProfileDef) -> Value {
     json!({
         "required": profile_evidence_required(profile),
@@ -975,7 +963,11 @@ pub fn profile_json_with_overlay(profile: &DispatchProfileDef, overlay: Option<&
         profile,
         profile_skill_loadout_json_with_overlay(profile, overlay),
         profile_evidence_contract_json_with_overlay(profile, overlay),
-        profile_weak_against_with_overlay(profile, overlay),
+        // #1690 B1: `weak_against` is the STATIC reviewed baseline only — the
+        // legacy `add_weak_against` overlay merge is retired end-to-end, so an
+        // overlay row seeded with that key is inert history, never projected
+        // into the card.
+        profile_weak_against(profile),
     )
 }
 
@@ -1096,29 +1088,6 @@ pub fn profile_projected_evidence_required_from_overlay(
     evidence
 }
 
-pub fn profile_projected_weak_against_from_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let Some(overlay) = overlay else {
-        return Vec::new();
-    };
-    let baseline = profile.weak_against.iter().collect::<HashSet<_>>();
-    let mut weak = overlay
-        .get("add_weak_against")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|weakness_id| !weakness_id.is_empty())
-        .filter(|weakness_id| !baseline.contains(weakness_id))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut weak);
-    weak
-}
-
 pub fn profile_card_archetype(profile: &DispatchProfileDef) -> &'static str {
     let stage = profile.stage.unwrap_or_default();
     if profile.role == "explore" || stage == "explore" || stage == "probe" {
@@ -1128,72 +1097,6 @@ pub fn profile_card_archetype(profile: &DispatchProfileDef) -> &'static str {
     } else {
         "raven"
     }
-}
-
-pub fn profile_card_authority_json(profile: &DispatchProfileDef) -> Value {
-    json!({
-        "write_code": profile.write_actions,
-        "merge": false,
-        "github_read": profile.github_read,
-        "github_write": false,
-        "can_dispatch_followup": false,
-        "credential_profiles": profile.credential_profiles,
-        "tool_profile": profile.tool_profile,
-    })
-}
-
-pub fn profile_card_guidance_json(skill_loadout: &Value) -> Value {
-    json!({
-        "superpowers": profile_card_skills_by_prefix(skill_loadout, "skill:superpowers-"),
-    })
-}
-
-pub fn profile_card_moves_json(skill_loadout: &Value) -> Value {
-    let skills = profile_card_skill_ids_from_loadout(skill_loadout);
-    let mut tachi_native = skills
-        .iter()
-        .filter(|skill| {
-            skill.starts_with("skill:")
-                && !skill.starts_with("skill:superpowers-")
-                && !skill.starts_with("skill:waza-")
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut tachi_native);
-    json!({
-        "waza": profile_card_skills_by_prefix(skill_loadout, "skill:waza-"),
-        "external": [],
-        "tachi_native": tachi_native,
-    })
-}
-
-pub fn profile_card_skills_by_prefix(skill_loadout: &Value, prefix: &str) -> Vec<String> {
-    let mut skills = profile_card_skill_ids_from_loadout(skill_loadout)
-        .into_iter()
-        .filter(|skill| skill.starts_with(prefix))
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut skills);
-    skills
-}
-
-pub fn profile_card_skill_ids_from_loadout(skill_loadout: &Value) -> Vec<String> {
-    let mut skills = Vec::new();
-    for key in [
-        "common_skills",
-        "signature_skills",
-        "projected_signature_skills",
-    ] {
-        let Some(items) = skill_loadout.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        for item in items {
-            if let Some(skill) = item.as_str() {
-                skills.push(skill.to_string());
-            }
-        }
-    }
-    dedupe_preserve_order(&mut skills);
-    skills
 }
 
 pub fn dedupe_preserve_order(items: &mut Vec<String>) {
@@ -1339,13 +1242,15 @@ mod tests {
         assert_eq!(evidence["projected_required"], json!(["regression_tests"]));
         assert_eq!(evidence["projection"]["status"], json!("applied_overlay"));
 
+        // #1690 B1: the legacy `add_weak_against` overlay key is retired — the
+        // seeded "research_request" must NOT project into the card's
+        // `weak_against`, which carries the static reviewed baseline only.
         let card = profile_json_with_overlay(profile, Some(&overlay));
         assert_eq!(
             card["weak_against"],
             json!([
                 "ambiguous_architecture",
                 "unbounded_refactor",
-                "research_request"
             ])
         );
     }

@@ -248,6 +248,36 @@ async fn tachi_event_promote_creates_review_artifacts_for_mature_pattern() {
         .expect("promotion memory id")
         .to_string();
 
+    // #1690 C2 discriminator: the projected promotion candidate's
+    // review_artifacts must carry NO retired action strings — the
+    // skill_candidate fan-out (`tachi_skill` action `from_pattern`) is
+    // deleted. Grep-level over the serialized projection output so a stray
+    // retired artifact anywhere in the response fails this test. RED
+    // pre-repair: review_artifacts.skill_candidate.action == "from_pattern"
+    // is present; GREEN post-repair: absent, wiki_draft/agent_profile stay.
+    let projected_serialized = serde_json::to_string(&projected_json).expect("serialize projection");
+    assert!(
+        !projected_serialized.contains("from_pattern"),
+        "projection output must not advertise the retired from_pattern action: {projected_json}"
+    );
+    assert!(
+        !projected_serialized.contains("skill_candidate"),
+        "projection output must not carry a retired skill_candidate review artifact: {projected_json}"
+    );
+    let candidate = &projected_json["promotion_candidates"][0];
+    assert!(
+        candidate["review_artifacts"]
+            .get("wiki_draft")
+            .is_some_and(Value::is_object),
+        "wiki_draft review artifact stays on the projection candidate: {candidate}"
+    );
+    assert!(
+        candidate["review_artifacts"]
+            .get("agent_profile_proposal")
+            .is_some_and(Value::is_object),
+        "agent_profile_proposal review artifact stays on the projection candidate: {candidate}"
+    );
+
     let mut dry_run = tachi_event_params("promote");
     dry_run.id = Some(memory_id.clone());
     dry_run.dry_run = true;

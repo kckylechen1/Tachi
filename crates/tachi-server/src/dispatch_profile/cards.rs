@@ -65,17 +65,6 @@ pub(crate) fn profile_evidence_required_for_server(
     ))
 }
 
-pub(crate) fn profile_weak_against_for_server(
-    server: &MemoryServer,
-    profile: &DispatchProfileDef,
-) -> Result<Vec<String>, String> {
-    let overlay = load_profile_overlay(server, profile.name)?;
-    Ok(tachi_dispatch::profile_weak_against_with_overlay(
-        profile,
-        overlay.as_ref(),
-    ))
-}
-
 pub(crate) fn profile_evidence_contract_json_for_server(
     server: &MemoryServer,
     profile: &DispatchProfileDef,

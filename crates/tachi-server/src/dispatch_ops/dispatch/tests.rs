@@ -1034,6 +1034,19 @@ async fn canonical_external_staffing_start_and_terminal_receipt_share_one_run_di
     assert_eq!(accepted_status["dispatch_id"], json!(dispatch_id));
     assert_eq!(accepted_status["state"], response["state"]);
     assert_eq!(accepted_status["run_dir"], response["run_dir"]);
+    // #1690 C1 discriminator: the retired `capability_bundle` key must be
+    // ABSENT from the receipt-first status.json write — not merely null.
+    // RED pre-repair: the seed emits `"capability_bundle": null`.
+    assert!(
+        accepted_status.get("capability_bundle").is_none(),
+        "status.json initial write must not carry the retired capability_bundle key: {accepted_status}"
+    );
+    assert!(
+        !std::fs::read_to_string(run_dir.join("status.json"))
+            .expect("status text")
+            .contains("capability_bundle"),
+        "retired capability_bundle must not appear anywhere in the initial status.json"
+    );
 
     std::fs::write(&release_worker, b"release").expect("release custom worker");
     let result = wait_for_result(&run_dir).await;

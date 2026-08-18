@@ -335,7 +335,7 @@ enum ModelCallDisposition {
     PersistedModelInvocation,
     RecorderRunDirectory,
     RecorderRunDirectoryWithTypedReceipt,
-    ResponseAndTrajectoryDurableSink,
+    HubCallResponseOnly,
     ReadinessResponseOnly,
     RecallCacheEphemeral,
     FoundryRecallPersistenceDisabled,
@@ -357,7 +357,7 @@ impl ModelCallDisposition {
             Self::RecorderRunDirectoryWithTypedReceipt => {
                 "recorder_run_directory_with_typed_receipt"
             }
-            Self::ResponseAndTrajectoryDurableSink => "response_and_trajectory_durable_sink",
+            Self::HubCallResponseOnly => "hub_call_response_only",
             Self::ReadinessResponseOnly => "readiness_response_only",
             Self::RecallCacheEphemeral => "recall_cache_ephemeral",
             Self::FoundryRecallPersistenceDisabled => "foundry_recall_persistence_disabled",
@@ -565,7 +565,15 @@ fn model_call_registry() -> Vec<ModelCallRecord> {
         record("foundry_recall_compaction_extract", "foundry_runtime_ops/recall.rs", "run_compaction_model", CallExtractLlm, 1, "foundry recall persistence disabled", FoundryRecallPersistenceDisabled, Transient),
         record("recall_cache_query_extract", "foundry_runtime_ops/recall_cache/queries.rs", "generate_recall_cache_query_via_llm", CallExtractLlm, 1, "ephemeral recall_cache query", RecallCacheEphemeral, Transient),
         record("wiki_evolver_draft_distill_receipt", "foundry_runtime_ops/wiki_evolver.rs", "synthesize_wiki_draft", CallDistillLlmWithReceipt, 1, "REM wiki draft durable facade write", PersistedModelInvocation, Covered1522),
-        record("hub_call_execute_skill_extract_receipt", "hub_ops/call.rs", "execute_skill_prompt_with_receipt", CallExtractLlmWithReceipt, 1, "normal hub_call response plus trajectory distill durable snapshot/capability provenance sink", ResponseAndTrajectoryDurableSink, Covered1522),
+        // #1690 C3 re-anchor: hub_call's extract call is a response-only sink.
+        // The trajectory-distill durable snapshot this row used to cite is
+        // DELETED (slice C); the receipt-bearing API stays but the invocation
+        // is consumed by the truncation guard (`LLM_OUTPUT_TRUNCATED` reject in
+        // `execute_skill_prompt_with_receipt`) and dropped — no model
+        // invocation is persisted on the normal hub_call path. Keep the
+        // truncation guard pinned: it is the reason the receipt API is used
+        // here at all.
+        record("hub_call_execute_skill_extract_receipt", "hub_ops/call.rs", "execute_skill_prompt_with_receipt", CallExtractLlmWithReceipt, 1, "hub_call skill-execution response (invocation receipt consumed by the truncation guard only; trajectory-distill sink retired #1690)", HubCallResponseOnly, Covered1522),
         record_with_successor("hub_register_recorder", "hub_ops/register.rs", "handle_hub_register", RecordCall, RecordCallWithReceipt, 1, "hub capability register recorder", RecorderRunDirectory, Owned1535),
         record_with_successor("hub_register_extract", "hub_ops/register.rs", "handle_hub_register", CallExtractLlm, CallExtractLlmWithReceipt, 1, "hub capability register model call inside recorder closure", RecorderRunDirectory, Owned1535),
         record_with_successor("hub_security_scan_extract", "hub_ops/security_scan/llm_scan.rs", "scan_skill_definition_with_llm", CallExtractLlm, CallExtractLlmWithReceipt, 1, "hub capability security scan weak-tier call", StaffingTelemetry, Owned1535),

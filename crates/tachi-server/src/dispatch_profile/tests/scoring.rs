@@ -48,7 +48,7 @@ fn empty_route_policy_rules() -> RoutePolicyRuleLoadout {
 }
 
 fn recommended_candidates(
-    server: &MemoryServer,
+    _server: &MemoryServer,
     risk: &DispatchRisk,
     rows: &[EvalRow],
 ) -> Vec<tachi_dispatch::ProfileCandidate> {
@@ -61,8 +61,10 @@ fn recommended_candidates(
         // These cases score `/eval`-shaped `EvalRow`s, so they declare the
         // legacy evidence source: the flip (tachi#1675 PR4) changed which
         // evidence `recommend` reads, not how a row scores once read.
+        // #1690 B1: `weak_against` is the static reviewed baseline; the
+        // legacy `add_weak_against` overlay projection is retired.
         tachi_dispatch::RouteEvidenceSource::LiveEvalMemory,
-        |profile| profile_weak_against_for_server(server, profile),
+        |profile| Ok(tachi_dispatch::profile_weak_against(profile)),
     )
     .expect("recommend candidates")
 }

@@ -278,8 +278,10 @@ pub fn profile_eval_feedback_json(
 
     let mut guidance = Vec::new();
     if profile_samples == 0 {
+        // #1690 B2: static-content language — the loadout is the reviewed
+        // baseline, not a deterministic MBIT derivation.
         guidance.push(
-            "low_sample: no live /eval rows for this profile; keep deterministic MBIT loadout"
+            "low_sample: no live /eval rows for this profile; keep the static reviewed loadout"
                 .to_string(),
         );
     } else if profile_samples < MIN_LOADOUT_EVOLUTION_SAMPLES {
@@ -725,6 +727,19 @@ mod tests {
             .expect("guidance")
             .iter()
             .any(|item| item.as_str().unwrap_or_default().starts_with("low_sample:")));
+        // #1690 B2 re-anchor: the zero-sample guidance names the static
+        // reviewed loadout — pinned verbatim so a regression back to the
+        // retired "MBIT loadout" wording fails here.
+        assert!(
+            feedback["guidance"]
+                .as_array()
+                .expect("guidance")
+                .iter()
+                .any(|item| item
+                    .as_str()
+                    .is_some_and(|text| text.contains("keep the static reviewed loadout"))),
+            "zero-sample guidance must use static-content language: {feedback}"
+        );
     }
 
     #[test]
