@@ -95,9 +95,6 @@ impl ActionEffectMetadata {
 /// verbatim from the pre-#1098 `server_state::cache::CACHEABLE_TOOLS`.
 pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "section_build",
-    "recommend_capability",
-    "recommend_skill",
-    "recommend_toolchain",
     "tachi_wiki_search",
     "list_memories",
     "memory_stats",
@@ -127,7 +124,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_review",
     "hub_set_active_version",
     "hub_export_skills",
-    "skill_evolve",
     "capture_session",
     "archive_memory",
     "compact_rollup",
@@ -143,7 +139,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // exist. "tachi_handoff" (below) stays, still mixed read/write via its
     // one surviving action (promote_issue).
     // Batch B: "post_card"/"update_card" retired from MCP.
-    "distill_trajectory",
     "tachi_unstick",
     "wiki_lint",
     "tachi_wiki_write",
@@ -152,7 +147,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_memory",
     "tachi_domain_adapter",
     "tachi_handoff",
-    "tachi_orchestrator",
     "tachi_task",
     "tachi_wiki",
     "tachi_skill",
@@ -198,9 +192,6 @@ const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
 /// telemetry (`search_memory`), and therefore may not be replay-safe.
 const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "section_build",
-    "recommend_capability",
-    "recommend_skill",
-    "recommend_toolchain",
     "tachi_wiki_search",
     "list_memories",
     "memory_stats",
@@ -303,17 +294,6 @@ pub(crate) fn facade_action_effect(
             &["discover", "run", "bundle", "loadout", "from_pattern"],
         ),
         "tachi_verify" => (&[], &[], &["start", "record", "status", "board"]),
-        "tachi_orchestrator" => (
-            &[],
-            &[],
-            &[
-                "todo_list",
-                "todo_update",
-                "handoff_write",
-                "handoff_read",
-                "recovery_briefing",
-            ],
-        ),
         _ => return None,
     };
 
@@ -611,10 +591,6 @@ mod tests {
         // it proves the enumeration walks the REAL typed action universe for
         // them too, instead of never touching real inventories that exist.
         assert_all_classified("tachi_skill", tachi_params::TACHI_SKILL_ACTIONS);
-        assert_all_classified(
-            "tachi_orchestrator",
-            tachi_params::TACHI_ORCHESTRATOR_ACTIONS,
-        );
         let verify_actions = tachi_params::TachiVerifyAction::all_wire_strings();
         assert_all_classified("tachi_verify", &verify_actions);
     }

@@ -125,16 +125,6 @@
           "search"
         ]
       },
-      "tachi_orchestrator": {
-        "action_count": 5,
-        "actions": [
-          "handoff_read",
-          "handoff_write",
-          "recovery_briefing",
-          "todo_list",
-          "todo_update"
-        ]
-      },
       "tachi_skill": {
         "action_count": 5,
         "actions": [
@@ -201,9 +191,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 142604,
-        "total_tool_definition_bytes": 175421,
-        "visible_tool_count": 88,
+        "total_input_schema_bytes": 136886,
+        "total_tool_definition_bytes": 167773,
+        "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -211,7 +201,6 @@
           "compact_context",
           "compact_rollup",
           "compact_session_memory",
-          "distill_trajectory",
           "dlq_list",
           "dlq_retry",
           "extract_facts",
@@ -233,9 +222,6 @@
           "memory_stats",
           "peer_query",
           "recall_context",
-          "recommend_capability",
-          "recommend_skill",
-          "recommend_toolchain",
           "runtime_info",
           "sandbox_check",
           "sandbox_exec_audit",
@@ -244,7 +230,6 @@
           "sandbox_set_policy",
           "sandbox_set_rule",
           "section_build",
-          "skill_evolve",
           "sync_memories",
           "tachi_a2a",
           "tachi_agent_eval",
@@ -258,7 +243,6 @@
           "tachi_handoff",
           "tachi_init_project_db",
           "tachi_memory",
-          "tachi_orchestrator",
           "tachi_research",
           "tachi_sandbox",
           "tachi_search",
@@ -296,9 +280,9 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 100888,
-        "total_tool_definition_bytes": 117515,
-        "visible_tool_count": 35,
+        "total_input_schema_bytes": 97428,
+        "total_tool_definition_bytes": 112714,
+        "visible_tool_count": 31,
         "visible_tools": [
           "extract_facts",
           "hub_discover",
@@ -306,9 +290,6 @@
           "list_memories",
           "memory_stats",
           "peer_query",
-          "recommend_capability",
-          "recommend_skill",
-          "recommend_toolchain",
           "runtime_info",
           "tachi_a2a",
           "tachi_agent_eval",
@@ -320,7 +301,6 @@
           "tachi_gh",
           "tachi_handoff",
           "tachi_memory",
-          "tachi_orchestrator",
           "tachi_research",
           "tachi_search",
           "tachi_skill",
@@ -356,9 +336,9 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 94078,
-        "total_tool_definition_bytes": 110856,
-        "visible_tool_count": 44,
+        "total_input_schema_bytes": 92166,
+        "total_tool_definition_bytes": 108015,
+        "visible_tool_count": 41,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -375,9 +355,6 @@
           "memory_stats",
           "peer_query",
           "recall_context",
-          "recommend_capability",
-          "recommend_skill",
-          "recommend_toolchain",
           "runtime_info",
           "section_build",
           "sync_memories",
@@ -430,7 +407,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 88,
+      "tool_count": 82,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -438,7 +415,6 @@
         "compact_context",
         "compact_rollup",
         "compact_session_memory",
-        "distill_trajectory",
         "dlq_list",
         "dlq_retry",
         "extract_facts",
@@ -460,9 +436,6 @@
         "memory_stats",
         "peer_query",
         "recall_context",
-        "recommend_capability",
-        "recommend_skill",
-        "recommend_toolchain",
         "runtime_info",
         "sandbox_check",
         "sandbox_exec_audit",
@@ -471,7 +444,6 @@
         "sandbox_set_policy",
         "sandbox_set_rule",
         "section_build",
-        "skill_evolve",
         "sync_memories",
         "tachi_a2a",
         "tachi_agent_eval",
@@ -485,7 +457,6 @@
         "tachi_handoff",
         "tachi_init_project_db",
         "tachi_memory",
-        "tachi_orchestrator",
         "tachi_research",
         "tachi_sandbox",
         "tachi_search",
@@ -551,33 +522,6 @@
               "session_capabilities",
               "tool_profile",
               "work_claim_id"
-            ]
-          },
-          "tachi_orchestrator": {
-            "input_schema_bytes": 1548,
-            "property_count": 21,
-            "property_names": [
-              "action",
-              "agent",
-              "blocked_reason",
-              "commands_run",
-              "completed_steps",
-              "current_state",
-              "files_touched",
-              "issue_ref",
-              "known_blockers",
-              "newest_user_instruction",
-              "next_action",
-              "objective",
-              "parent_todo_id",
-              "references",
-              "remaining_steps",
-              "task_id",
-              "tests_run",
-              "todo_content",
-              "todo_id",
-              "todo_status",
-              "verification"
             ]
           },
           "tachi_staff": {
@@ -699,33 +643,6 @@
               "session_capabilities",
               "tool_profile",
               "work_claim_id"
-            ]
-          },
-          "tachi_orchestrator": {
-            "input_schema_bytes": 1548,
-            "property_count": 21,
-            "property_names": [
-              "action",
-              "agent",
-              "blocked_reason",
-              "commands_run",
-              "completed_steps",
-              "current_state",
-              "files_touched",
-              "issue_ref",
-              "known_blockers",
-              "newest_user_instruction",
-              "next_action",
-              "objective",
-              "parent_todo_id",
-              "references",
-              "remaining_steps",
-              "task_id",
-              "tests_run",
-              "todo_content",
-              "todo_id",
-              "todo_status",
-              "verification"
             ]
           },
           "tachi_staff": {

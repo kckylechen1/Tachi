@@ -176,7 +176,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
         "archive_memory"
             | "tachi_task"
             | "tachi_staff"
-            | "tachi_orchestrator"
             | "tachi_verify"
             | "tachi_gh"
             // #757 Cut3-S1 round-2 (review fixup): `tachi_sandbox` folds
