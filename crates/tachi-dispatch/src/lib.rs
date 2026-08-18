@@ -60,9 +60,8 @@ pub use profiles::{
     profile_evidence_required_with_overlay, profile_json,
     profile_json_with_loadout_and_evidence_contract, profile_json_with_overlay,
     profile_matches_agent, profile_projected_evidence_required_from_overlay,
-    profile_projected_signature_skills_from_overlay, profile_required_skill_ids,
-    profile_required_skill_ids_with_overlay, profile_resolved_model, profile_skill_loadout_json,
-    profile_skill_loadout_json_with_overlay, profile_uses_opencode_adapter, profile_weak_against,
+    profile_required_skill_ids, profile_resolved_model, profile_skill_loadout_json,
+    profile_uses_opencode_adapter, profile_weak_against,
     recommendation_identity_receipt, resolve_and_apply_dispatch_profile, resolve_dispatch_profile,
     DispatchProfileAlias, DispatchProfileDef, ResolvedDispatchProfile, DISPATCH_POLICY_PROPOSAL_NS,
     DISPATCH_PROFILES, DISPATCH_PROFILE_ALIASES, MIN_LOADOUT_EVOLUTION_SAMPLES,
@@ -82,9 +81,8 @@ pub use routing::{
     AppliedRoutePolicyRule, DispatchRisk, ProfileCandidate, RecommendationProfilePayload,
     RouteEvalRow, RouteEvidenceSource, RoutePerformanceRow, RoutePolicyRuleLoadout,
     RoutePolicyRuleRecord, RouteSimulationChoice, RouteSimulationSummary, RouteSubagentScore,
-    SkippedRoutePolicyRule, BASELINE_MBIT_FIT_REASON, NO_LEDGER_EVIDENCE_REASON,
+    SkippedRoutePolicyRule, NO_LEDGER_EVIDENCE_REASON,
     RETIRED_EVIDENCE_SOURCE_SKIP_REASON, ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
-    ROUTE_EVIDENCE_SOURCE_LIVE_EVAL_MEMORY,
 };
 pub use signatures::{
     dispatch_role_class, normalize_vendor, project_counter_clauses, resolve_signature_id,

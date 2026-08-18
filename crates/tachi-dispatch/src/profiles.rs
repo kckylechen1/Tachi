@@ -825,23 +825,6 @@ pub fn profile_required_skill_ids(profile: &DispatchProfileDef) -> Vec<String> {
     skills
 }
 
-pub fn profile_required_skill_ids_with_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let mut skills = profile
-        .common_skills
-        .iter()
-        .chain(profile.signature_skills.iter())
-        .map(|skill| skill.to_string())
-        .collect::<Vec<_>>();
-    skills.extend(profile_projected_signature_skills_from_overlay(
-        profile, overlay,
-    ));
-    dedupe_preserve_order(&mut skills);
-    skills
-}
-
 pub fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value {
     json!({
         "common_skills": profile.common_skills,
@@ -852,36 +835,6 @@ pub fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value {
         "forbidden_skills": profile.forbidden_skills,
         "projection": {
             "status": "baseline",
-        },
-    })
-}
-
-pub fn profile_skill_loadout_json_with_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Value {
-    let projected_signature_skills =
-        profile_projected_signature_skills_from_overlay(profile, overlay);
-    let mut signature_skills = profile
-        .signature_skills
-        .iter()
-        .map(|skill| skill.to_string())
-        .collect::<Vec<_>>();
-    signature_skills.extend(projected_signature_skills.iter().cloned());
-    dedupe_preserve_order(&mut signature_skills);
-    let source_proposal_ids = overlay_source_proposal_ids(overlay);
-    json!({
-        "common_skills": profile.common_skills,
-        "signature_skills": signature_skills,
-        "projected_signature_skills": projected_signature_skills,
-        "passive_traits": profile.passive_traits,
-        "projected_passive_traits": [],
-        "forbidden_skills": profile.forbidden_skills,
-        "projection": {
-            "status": if overlay.is_some() { "applied_overlay" } else { "baseline" },
-            "namespace": PROFILE_CARD_OVERLAY_NS,
-            "key": profile.name,
-            "source_proposal_ids": source_proposal_ids,
         },
     })
 }
@@ -961,7 +914,12 @@ pub fn profile_json(profile: &DispatchProfileDef) -> Value {
 pub fn profile_json_with_overlay(profile: &DispatchProfileDef, overlay: Option<&Value>) -> Value {
     profile_json_with_loadout_and_evidence_contract(
         profile,
-        profile_skill_loadout_json_with_overlay(profile, overlay),
+        // #1690 B1/C3: the loadout is the STATIC reviewed baseline only — the
+        // legacy `add_signature_skills` overlay merge is retired end-to-end,
+        // so an overlay row seeded with it is inert history, never projected
+        // into the card. The evidence contract (what a packet must carry) is
+        // enforcement and still merges its overlay.
+        profile_skill_loadout_json(profile),
         profile_evidence_contract_json_with_overlay(profile, overlay),
         // #1690 B1: `weak_against` is the STATIC reviewed baseline only — the
         // legacy `add_weak_against` overlay merge is retired end-to-end, so an
@@ -1040,29 +998,6 @@ fn overlay_source_proposal_ids(overlay: Option<&Value>) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
-}
-
-pub fn profile_projected_signature_skills_from_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let Some(overlay) = overlay else {
-        return Vec::new();
-    };
-    let forbidden = profile.forbidden_skills.iter().collect::<HashSet<_>>();
-    let mut skills = overlay
-        .get("add_signature_skills")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|skill| !skill.is_empty())
-        .filter(|skill| !forbidden.contains(skill))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut skills);
-    skills
 }
 
 pub fn profile_projected_evidence_required_from_overlay(
@@ -1228,16 +1163,16 @@ mod tests {
             "source_proposal_ids": ["proposal-a"],
         });
 
-        let loadout = profile_skill_loadout_json_with_overlay(profile, Some(&overlay));
-        assert_eq!(
-            loadout["projected_signature_skills"],
-            json!(["skill:custom-fast-fix"])
-        );
-        assert_eq!(
-            loadout["projection"]["source_proposal_ids"],
-            json!(["proposal-a"])
-        );
+        // #1690 C3: the loadout is the STATIC reviewed baseline — the legacy
+        // `add_signature_skills` overlay key is retired, so the seeded skill
+        // must NOT project and the loadout shape carries no overlay projection
+        // metadata at all.
+        let loadout = profile_skill_loadout_json(profile);
+        assert_eq!(loadout["projected_signature_skills"], json!([]));
+        assert_eq!(loadout["projection"]["status"], json!("baseline"));
 
+        // The evidence contract (what a packet must carry) is enforcement and
+        // still merges its overlay.
         let evidence = profile_evidence_contract_json_with_overlay(profile, Some(&overlay));
         assert_eq!(evidence["projected_required"], json!(["regression_tests"]));
         assert_eq!(evidence["projection"]["status"], json!("applied_overlay"));
@@ -1249,6 +1184,18 @@ mod tests {
         assert_eq!(
             card["weak_against"],
             json!(["ambiguous_architecture", "unbounded_refactor",])
+        );
+        // The skill-loadout half of the card is equally static: the seeded
+        // signature skill stays out of both `signature_skills` and the
+        // always-empty read-only `projected_signature_skills` history key.
+        assert!(!card["skill_loadout"]["signature_skills"]
+            .as_array()
+            .expect("signature skills")
+            .iter()
+            .any(|skill| skill == &json!("skill:custom-fast-fix")));
+        assert_eq!(
+            card["skill_loadout"]["projected_signature_skills"],
+            json!([])
         );
     }
 

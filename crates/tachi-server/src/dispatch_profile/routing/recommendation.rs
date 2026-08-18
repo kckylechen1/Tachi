@@ -787,12 +787,14 @@ mod evidence_flip_tests {
         );
     }
 
-    /// Design D7: with no usable evidence the answer is ABSTAIN, and
-    /// `baseline_mbit_fit` appears nowhere in the response — while the field a
-    /// consumer reads (`recommended_profile`) still carries the deterministic
-    /// admission fit, explicitly marked as not evidence-backed.
+    /// Design D7: with no usable evidence the answer is ABSTAIN, and the
+    /// retired `baseline_mbit_fit` token appears nowhere in the response —
+    /// while the field a consumer reads (`recommended_profile`) still carries
+    /// the deterministic admission fit, explicitly marked as not
+    /// evidence-backed. #1690 C3 deleted the legacy source that emitted the
+    /// token, so the literal is pinned as an absence here.
     #[test]
-    fn no_ledger_evidence_abstains_and_never_reports_a_baseline_mbit_fit() {
+    fn no_ledger_evidence_abstains_and_never_reports_the_retired_mbit_fit() {
         let (server, _home) = crate::tests::make_server_with_temp_home();
         let raw = handle_dispatch_recommendation(&server, TASK, None, 200, &[])
             .expect("recommendation succeeds on an empty ledger");
@@ -803,9 +805,9 @@ mod evidence_flip_tests {
         assert_eq!(payload["evidence_backed"], json!(false));
         assert_eq!(payload["ledger_evidence"]["usable_rows"], json!(0));
         assert!(
-            !raw.contains(tachi_dispatch::BASELINE_MBIT_FIT_REASON),
-            "the ledger path must never report a baseline MBIT fit anywhere in \
-             the response (#1202 / design D7): {raw}"
+            !raw.contains("baseline_mbit_fit"),
+            "the ledger path must never report the retired MBIT fit token \
+             anywhere in the response (#1202 / design D7 / #1690 C3): {raw}"
         );
         assert!(
             payload["recommended_profile"]

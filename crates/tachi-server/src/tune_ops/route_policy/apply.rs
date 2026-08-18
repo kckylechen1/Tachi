@@ -1,14 +1,11 @@
 use crate::dispatch_profile::{
-    profile_required_skill_ids, resolve_dispatch_profile, DISPATCH_POLICY_PROPOSAL_NS,
-    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
+    resolve_dispatch_profile, DISPATCH_POLICY_PROPOSAL_NS, PROFILE_CARD_OVERLAY_NS,
+    ROUTE_POLICY_RULE_NS,
 };
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
-use tachi_dispatch::{
-    profile_projected_evidence_required_from_overlay,
-    profile_projected_signature_skills_from_overlay,
-};
+use tachi_dispatch::profile_projected_evidence_required_from_overlay;
 
 pub(crate) fn handle_route_policy_apply(
     server: &MemoryServer,
@@ -121,8 +118,14 @@ pub(crate) fn handle_route_policy_apply(
                 tx.commit()
                     .map_err(|e| format!("commit route policy apply tx: {e}"))?;
             }
-            "loadout_evolution" => {
-                let identity_payload = super::handlers::validate_loadout_evolution_proposal(
+            "evidence_contract" => {
+                // #1690 C3: the former `loadout_evolution` apply arm also
+                // carried `promote_observed_skill_to_signature`, which is
+                // retired end-to-end (issue delete list: "skill
+                // generation/promotion/evolution pipelines"). The surviving
+                // operation is the evidence-contract one — what evidence a
+                // packet must carry — re-homed under its own kind.
+                let identity_payload = super::handlers::validate_evidence_contract_proposal(
                     proposal_id,
                     &value,
                     None,
@@ -132,30 +135,27 @@ pub(crate) fn handle_route_policy_apply(
                     .cloned()
                     .ok_or_else(|| {
                         format!(
-                            "loadout_evolution proposal {proposal_id} missing digest-bound apply payload"
+                            "evidence_contract proposal {proposal_id} missing digest-bound apply payload"
                         )
                     })?;
                 let profile_name = apply_payload
                     .get("profile")
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        format!("loadout_evolution proposal {proposal_id} missing profile")
+                        format!("evidence_contract proposal {proposal_id} missing profile")
                     })?;
                 let profile = resolve_dispatch_profile(profile_name).ok_or_else(|| {
                     format!(
-                        "loadout_evolution proposal {proposal_id} references unknown profile {profile_name}"
+                        "evidence_contract proposal {proposal_id} references unknown profile {profile_name}"
                     )
                 })?;
                 let operation = apply_payload
                     .get("operation")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if !matches!(
-                    operation,
-                    "promote_observed_skill_to_signature" | "add_evidence_contract_required"
-                ) {
+                if operation != "add_evidence_contract_required" {
                     return Err(format!(
-                        "unsupported loadout_evolution operation for {proposal_id}: {operation}"
+                        "unsupported evidence_contract operation for {proposal_id}: {operation}"
                     ));
                 }
 
@@ -166,15 +166,15 @@ pub(crate) fn handle_route_policy_apply(
                 let tx = store
                     .connection_mut()
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                    .map_err(|e| format!("open loadout evolution apply tx: {e}"))?;
+                    .map_err(|e| format!("open evidence contract apply tx: {e}"))?;
                 let overlay_snapshot =
                     memcore::db::get_state(&tx, PROFILE_CARD_OVERLAY_NS, profile.name)
                         .map_err(|e| format!("load profile/card overlay in apply tx: {e}"))?;
-                let live_source_revision = super::handlers::loadout_evolution_source_revision(
+                let live_source_revision = super::handlers::evidence_contract_source_revision(
                     profile,
                     overlay_snapshot.as_ref(),
                 );
-                super::handlers::validate_loadout_evolution_proposal(
+                super::handlers::validate_evidence_contract_proposal(
                     proposal_id,
                     &value,
                     Some(&live_source_revision),
@@ -187,94 +187,49 @@ pub(crate) fn handle_route_policy_apply(
                     json!({
                         "kind": "profile_card_loadout_overlay",
                         "profile": profile.name,
-                        "add_signature_skills": [],
+                        "add_evidence_required": [],
                         "source_proposal_ids": [],
                         "created_at": applied_at,
                     })
                 };
 
-                let mut overlay_skills =
-                    profile_projected_signature_skills_from_overlay(profile, Some(&overlay));
                 let mut overlay_evidence_required =
                     profile_projected_evidence_required_from_overlay(profile, Some(&overlay));
-                let mut added_signature_skills = Vec::new();
-                let mut added_evidence_required = Vec::new();
-                let already_projected = match operation {
-                    "promote_observed_skill_to_signature" => {
-                        let skill_id = apply_payload
-                            .get("skill_id")
-                            .and_then(Value::as_str)
+                let evidence_id = apply_payload
+                    .get("evidence_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|evidence_id| !evidence_id.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        apply_payload
+                            .get("proposed_patch")
+                            .and_then(|patch| patch.get("add_evidence_required"))
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
                             .map(str::trim)
-                            .filter(|skill| !skill.is_empty())
+                            .find(|evidence_id| !evidence_id.is_empty())
                             .map(str::to_string)
-                            .ok_or_else(|| {
-                                format!("loadout_evolution proposal {proposal_id} missing skill_id")
-                            })?;
-                        if profile
-                            .forbidden_skills
-                            .iter()
-                            .any(|skill| *skill == skill_id)
-                        {
-                            return Err(format!(
-                                "loadout_evolution proposal {proposal_id} targets forbidden skill {skill_id}"
-                            ));
-                        }
-                        let baseline_skills = profile_required_skill_ids(profile);
-                        if baseline_skills.iter().any(|skill| skill == &skill_id) {
-                            return Err(format!(
-                                "loadout_evolution proposal {proposal_id} targets existing baseline skill {skill_id}"
-                            ));
-                        }
-                        let already_projected =
-                            overlay_skills.iter().any(|skill| skill == &skill_id);
-
-                        if !already_projected {
-                            overlay_skills.push(skill_id.clone());
-                        }
-                        added_signature_skills.push(skill_id);
-                        already_projected
-                    }
-                    "add_evidence_contract_required" => {
-                        let evidence_id = apply_payload
-                            .get("evidence_id")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|evidence_id| !evidence_id.is_empty())
-                            .map(str::to_string)
-                            .or_else(|| {
-                                apply_payload
-                                    .get("proposed_patch")
-                                    .and_then(|patch| patch.get("add_evidence_required"))
-                                    .and_then(Value::as_array)
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(Value::as_str)
-                                    .map(str::trim)
-                                    .find(|evidence_id| !evidence_id.is_empty())
-                                    .map(str::to_string)
-                            })
-                            .ok_or_else(|| {
-                                format!(
-                                    "loadout_evolution proposal {proposal_id} missing evidence_id"
-                                )
-                            })?;
-                        if profile.evidence_required.iter().any(|item| *item == evidence_id) {
-                            return Err(format!(
-                                "loadout_evolution proposal {proposal_id} targets existing baseline evidence requirement {evidence_id}"
-                            ));
-                        }
-                        let already_projected = overlay_evidence_required
-                            .iter()
-                            .any(|item| item == &evidence_id);
-                        if !already_projected {
-                            overlay_evidence_required.push(evidence_id.clone());
-                        }
-                        added_evidence_required.push(evidence_id);
-                        already_projected
-                    }
-                    _ => unreachable!("unsupported operation checked above"),
-                };
-                crate::skill_policy::dedupe_preserve_order(&mut overlay_skills);
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "evidence_contract proposal {proposal_id} missing evidence_id"
+                        )
+                    })?;
+                if profile.evidence_required.iter().any(|item| *item == evidence_id) {
+                    return Err(format!(
+                        "evidence_contract proposal {proposal_id} targets existing baseline evidence requirement {evidence_id}"
+                    ));
+                }
+                let already_projected = overlay_evidence_required
+                    .iter()
+                    .any(|item| item == &evidence_id);
+                if !already_projected {
+                    overlay_evidence_required.push(evidence_id.clone());
+                }
+                let added_evidence_required = vec![evidence_id];
                 crate::skill_policy::dedupe_preserve_order(&mut overlay_evidence_required);
 
                 let mut source_proposals = overlay
@@ -290,7 +245,6 @@ pub(crate) fn handle_route_policy_apply(
 
                 overlay["profile"] = json!(profile.name);
                 overlay["kind"] = json!("profile_card_loadout_overlay");
-                overlay["add_signature_skills"] = json!(overlay_skills);
                 overlay["add_evidence_required"] = json!(overlay_evidence_required);
                 overlay["source_proposal_ids"] = json!(source_proposals);
                 overlay["updated_at"] = json!(applied_at);
@@ -305,12 +259,11 @@ pub(crate) fn handle_route_policy_apply(
                     "namespace": PROFILE_CARD_OVERLAY_NS,
                     "key": profile.name,
                     "already_projected": already_projected,
-                    "added_signature_skills": added_signature_skills,
                     "added_evidence_required": added_evidence_required,
-                    "note": "Reviewed loadout evolution is projected as a durable profile/card overlay; built-in static definitions remain the baseline."
+                    "note": "Reviewed evidence-contract evolution is projected as a durable profile/card overlay; built-in static definitions remain the baseline. Skill/loadout promotion is retired (#1690 C3) and has no apply path."
                 });
                 let next = serde_json::to_string(&value)
-                    .map_err(|e| format!("serialize applied loadout proposal: {e}"))?;
+                    .map_err(|e| format!("serialize applied evidence proposal: {e}"))?;
                 // Proposal lifecycle and overlay projection are independent
                 // per-row CAS operations in one transaction. Either stale row
                 // or either write failure rolls back both rows.
@@ -321,10 +274,10 @@ pub(crate) fn handle_route_policy_apply(
                     &next,
                     version,
                 )
-                .map_err(|e| format!("CAS applied loadout evolution proposal: {e}"))?;
+                .map_err(|e| format!("CAS applied evidence_contract proposal: {e}"))?;
                 if !cas_ok {
                     return Err(format!(
-                        "stale_state_version: loadout_evolution proposal {proposal_id} changed before apply; reload and retry"
+                        "stale_state_version: evidence_contract proposal {proposal_id} changed before apply; reload and retry"
                     ));
                 }
                 let overlay_cas_ok = match overlay_snapshot.as_ref() {
@@ -360,12 +313,12 @@ pub(crate) fn handle_route_policy_apply(
                 // Do not re-add a DDL-injected test here; it cannot run.
                 if !overlay_cas_ok {
                     return Err(format!(
-                        "stale_overlay_version: profile/card overlay {} changed before loadout_evolution proposal {proposal_id} could apply; reload, regenerate, and re-review",
+                        "stale_overlay_version: profile/card overlay {} changed before evidence_contract proposal {proposal_id} could apply; reload, regenerate, and re-review",
                         profile.name
                     ));
                 }
                 tx.commit()
-                    .map_err(|e| format!("commit loadout evolution apply tx: {e}"))?;
+                    .map_err(|e| format!("commit evidence contract apply tx: {e}"))?;
             }
             other => {
                 return Err(format!(
@@ -385,14 +338,14 @@ pub(crate) fn handle_route_policy_apply(
         "proposal_id": proposal_id,
         "applied": true,
         "routing_mutated": applied_kind == "route_policy",
-        "profile_card_mutated": applied_kind == "loadout_evolution",
+        "profile_card_mutated": applied_kind == "evidence_contract",
         "rule_namespace": if applied_kind == "route_policy" { Value::String(ROUTE_POLICY_RULE_NS.to_string()) } else { Value::Null },
-        "projection_namespace": if applied_kind == "loadout_evolution" { Value::String(PROFILE_CARD_OVERLAY_NS.to_string()) } else { Value::Null },
+        "projection_namespace": if applied_kind == "evidence_contract" { Value::String(PROFILE_CARD_OVERLAY_NS.to_string()) } else { Value::Null },
         "proposal": updated,
         "note": if applied_kind == "route_policy" {
             "Approved route-policy rule was persisted and will be consumed by recommend() when task type, risk gates, and sample thresholds match."
         } else {
-            "Approved loadout-evolution proposal was projected into the profile/card overlay and will be visible in profile, loadout, recommend, and dispatch prompt surfaces."
+            "Approved evidence-contract proposal was projected into the profile/card overlay and will be visible in profile, loadout, recommend, and dispatch prompt surfaces."
         },
     }))
     .map_err(|e| format!("serialize route policy apply response: {e}"))

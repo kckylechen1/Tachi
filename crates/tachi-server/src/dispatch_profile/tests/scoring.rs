@@ -58,12 +58,14 @@ fn recommended_candidates(
         &[],
         &[],
         &empty_route_policy_rules(),
-        // These cases score `/eval`-shaped `EvalRow`s, so they declare the
-        // legacy evidence source: the flip (tachi#1675 PR4) changed which
-        // evidence `recommend` reads, not how a row scores once read.
+        // These cases score `/eval`-shaped `EvalRow`s. The tachi#1675 PR4 flip
+        // changed which evidence `recommend` reads, not how a row scores once
+        // read, and #1690 C3 deleted the legacy `LiveEvalMemory` source
+        // variant — the surviving `DecisionFactLedger` declaration scores the
+        // same rows.
         // #1690 B1: `weak_against` is the static reviewed baseline; the
         // legacy `add_weak_against` overlay projection is retired.
-        tachi_dispatch::RouteEvidenceSource::LiveEvalMemory,
+        tachi_dispatch::RouteEvidenceSource::DecisionFactLedger,
         |profile| Ok(tachi_dispatch::profile_weak_against(profile)),
     )
     .expect("recommend candidates")

@@ -182,10 +182,14 @@ pub(super) fn render_dispatch_profile_overlay(
                 profile_def,
             ) {
                 Ok(loadout) => {
+                    // #1690 C3: `projected_signature_skills` (the retired
+                    // loadout-evolution overlay merge) is NOT rendered — the
+                    // loadout is the static reviewed baseline. The evidence
+                    // contract (what a packet must carry) is enforcement and
+                    // keeps its `projected_required` line below.
                     for label in [
                         "common_skills",
                         "signature_skills",
-                        "projected_signature_skills",
                         "passive_traits",
                         "projected_passive_traits",
                         "forbidden_skills",

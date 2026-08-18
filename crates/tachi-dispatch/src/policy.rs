@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::eval::AgentPerformanceMatrixRow;
 use crate::{
     profile_evidence_contract_json, profile_matches_agent, profile_role_matches,
-    profile_skill_loadout_json, sanitize_policy_key, DispatchProfileDef, RouteSimulationSummary,
+    sanitize_policy_key, DispatchProfileDef, RouteSimulationSummary,
     DISPATCH_PROFILES, MIN_LOADOUT_EVOLUTION_SAMPLES,
 };
 
@@ -129,36 +129,39 @@ pub fn recall_config_v3_identity_payload(
     Value::Object(map.into_iter().collect())
 }
 
-/// Content-addressed schema for profile/card loadout changes. The immutable
-/// apply payload is deliberately separate from descriptive proposal fields so
-/// a reviewer approves exactly what `apply_proposals` can mutate.
-pub const LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION: u64 = 3;
-pub const LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION: &str = "2026-07-loadout-evolution-v3";
-pub const LOADOUT_EVOLUTION_PROPOSAL_KIND: &str = "loadout_evolution";
-pub const LOADOUT_EVOLUTION_PROPOSAL_TARGET: &str = "profile_card_overlay";
+/// Content-addressed schema for evidence-contract changes on a profile/card.
+/// The immutable apply payload is deliberately separate from descriptive
+/// proposal fields so a reviewer approves exactly what `apply_proposals` can
+/// mutate.
+///
+/// #1690 C3: the former `loadout_evolution` kind (which also carried
+/// observed-skill promotion) was retired end-to-end by the contraction
+/// (issue delete list: "skill generation/promotion/evolution pipelines").
+/// The surviving half — what evidence a packet must carry — is re-homed under
+/// this kind; skill promotion has no proposal kind anymore.
+pub const EVIDENCE_CONTRACT_PROPOSAL_SCHEMA_VERSION: u64 = 3;
+pub const EVIDENCE_CONTRACT_PROPOSAL_POLICY_VERSION: &str = "2026-07-evidence-contract-v3";
+pub const EVIDENCE_CONTRACT_PROPOSAL_KIND: &str = "evidence_contract";
+pub const EVIDENCE_CONTRACT_PROPOSAL_TARGET: &str = "profile_card_overlay";
 
-/// Extract the complete payload consumed by the loadout apply operation. This
-/// is also the display-copy shape checked by the server before review/apply;
-/// do not add a field read by apply without binding it here.
-pub fn loadout_evolution_v3_apply_payload(proposal: &Value) -> Value {
+/// Extract the complete payload consumed by the evidence-contract apply
+/// operation. This is also the display-copy shape checked by the server
+/// before review/apply; do not add a field read by apply without binding it
+/// here.
+pub fn evidence_contract_v3_apply_payload(proposal: &Value) -> Value {
     json!({
         "profile": proposal.get("profile").cloned().unwrap_or(Value::Null),
         "operation": proposal.get("operation").cloned().unwrap_or(Value::Null),
-        "skill_id": proposal.get("skill_id").cloned().unwrap_or(Value::Null),
-        "trait_id": proposal.get("trait_id").cloned().unwrap_or(Value::Null),
         "evidence_id": proposal.get("evidence_id").cloned().unwrap_or(Value::Null),
-        "weakness_id": proposal.get("weakness_id").cloned().unwrap_or(Value::Null),
         "proposed_patch": proposal.get("proposed_patch").cloned().unwrap_or(Value::Null),
-        "current_loadout": proposal.get("current_loadout").cloned().unwrap_or(Value::Null),
         "current_evidence_contract": proposal.get("current_evidence_contract").cloned().unwrap_or(Value::Null),
-        "current_card": proposal.get("current_card").cloned().unwrap_or(Value::Null),
     })
 }
 
-/// Canonical identity payload for a loadout-evolution proposal. The identity
+/// Canonical identity payload for an evidence-contract proposal. The identity
 /// binds every value apply can consume, the exact reviewer evidence, the
 /// policy version, and the profile-card overlay target.
-pub fn loadout_evolution_v3_identity_payload(
+pub fn evidence_contract_v3_identity_payload(
     apply_payload: &Value,
     evidence_review: &Value,
     policy_version: &str,
@@ -166,7 +169,7 @@ pub fn loadout_evolution_v3_identity_payload(
     source_revision: &str,
 ) -> Value {
     let mut map: BTreeMap<String, Value> = BTreeMap::new();
-    map.insert("kind".to_string(), json!(LOADOUT_EVOLUTION_PROPOSAL_KIND));
+    map.insert("kind".to_string(), json!(EVIDENCE_CONTRACT_PROPOSAL_KIND));
     map.insert("policy_version".to_string(), json!(policy_version));
     map.insert("target".to_string(), json!(target));
     map.insert("source_revision".to_string(), json!(source_revision));
@@ -176,29 +179,6 @@ pub fn loadout_evolution_v3_identity_payload(
         canonical_json(evidence_review),
     );
     Value::Object(map.into_iter().collect())
-}
-
-#[derive(Debug, Clone)]
-pub struct LoadoutEvalEntry {
-    pub path: String,
-    pub metadata: Value,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ProfilePositiveEvolutionInputs {
-    pub profile_required_skills: Vec<String>,
-    pub existing_evidence_required: HashSet<String>,
-}
-
-#[derive(Default)]
-struct LoadoutSkillEvidence {
-    hits: u32,
-    verified: u32,
-    success: u32,
-    quality_sum: f64,
-    quality_count: u32,
-    task_types: HashMap<String, u32>,
-    eval_refs: Vec<String>,
 }
 
 pub fn sum_matrix_samples(rows: &[AgentPerformanceMatrixRow]) -> u32 {
@@ -417,15 +397,21 @@ pub fn build_route_policy_proposals(
     out
 }
 
-pub fn build_loadout_evolution_proposals<P>(
+/// Drive evidence-contract proposals across every dispatch profile. This is
+/// the surviving half of the former `build_loadout_evolution_proposals`
+/// (#1690 C3): the observed-skill mining/promotion half was retired
+/// end-to-end (issue delete list: "skill generation/promotion/evolution
+/// pipelines"), while the evidence-contract half — what evidence a packet
+/// must carry — is enforcement and is kept. `positive_inputs` stays lazy:
+/// profiles that fail the sample/failure gates below never read it.
+pub fn build_evidence_contract_evolution_proposals_all<P>(
     performance_matrix: &[AgentPerformanceMatrixRow],
-    entries: &[LoadoutEvalEntry],
     limit: usize,
     created_or_refreshed_at: &str,
     mut positive_inputs: P,
 ) -> Result<Vec<Value>, String>
 where
-    P: FnMut(&DispatchProfileDef) -> Result<ProfilePositiveEvolutionInputs, String>,
+    P: FnMut(&DispatchProfileDef) -> Result<HashSet<String>, String>,
 {
     let mut out = Vec::new();
 
@@ -457,141 +443,17 @@ where
             continue;
         }
 
-        let positive_inputs = positive_inputs(profile)?;
-        let existing_skills = positive_inputs
-            .profile_required_skills
-            .iter()
-            .cloned()
-            .chain(
-                profile
-                    .forbidden_skills
-                    .iter()
-                    .map(|skill| skill.to_string()),
-            )
-            .collect::<HashSet<_>>();
-        let mut buckets: HashMap<String, LoadoutSkillEvidence> = HashMap::new();
-        for entry in entries {
-            let Some(meta) = entry.metadata.as_object() else {
-                continue;
-            };
-            if meta.get("profile").and_then(Value::as_str) != Some(profile.name) {
-                continue;
-            }
-            let task_type = meta
-                .get("task_type")
-                .and_then(Value::as_str)
-                .unwrap_or("other")
-                .to_string();
-            let outcome = meta
-                .get("outcome")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let verified = meta
-                .get("verification_present")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let quality = meta.get("quality_score").and_then(Value::as_f64);
-            let skills = meta
-                .get("skills_used")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|skill| !skill.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-
-            for skill in skills {
-                if existing_skills.contains(&skill) {
-                    continue;
-                }
-                let evidence = buckets.entry(skill).or_default();
-                evidence.hits += 1;
-                if verified {
-                    evidence.verified += 1;
-                }
-                if matches!(outcome.as_str(), "success" | "completed") {
-                    evidence.success += 1;
-                }
-                if let Some(quality) = quality {
-                    evidence.quality_sum += quality;
-                    evidence.quality_count += 1;
-                }
-                *evidence.task_types.entry(task_type.clone()).or_insert(0) += 1;
-                if evidence.eval_refs.len() < 5 {
-                    evidence.eval_refs.push(entry.path.clone());
-                }
-            }
-        }
-
-        let min_skill_hits = (profile_samples / 2).max(3);
+        let existing_evidence_required = positive_inputs(profile)?;
+        let min_task_hits = (profile_samples / 2).max(3);
         out.extend(build_evidence_contract_evolution_proposals(
             profile,
             &profile_rows,
             profile_samples,
-            &positive_inputs.existing_evidence_required,
+            &existing_evidence_required,
             limit,
-            min_skill_hits,
+            min_task_hits,
             created_or_refreshed_at,
         ));
-        for (skill, evidence) in buckets {
-            if evidence.hits < min_skill_hits {
-                continue;
-            }
-            let verified_rate = evidence.verified as f64 / evidence.hits as f64;
-            let success_rate = evidence.success as f64 / evidence.hits as f64;
-            if verified_rate < 0.50 || success_rate < 0.80 {
-                continue;
-            }
-            let avg_quality = (evidence.quality_count > 0)
-                .then(|| evidence.quality_sum / evidence.quality_count as f64);
-            let id = format!(
-                "loadout_evolution:{}:promote_signature:{}",
-                sanitize_policy_key(profile.name),
-                sanitize_policy_key(&skill)
-            );
-            out.push(json!({
-                "proposal_id": id,
-                "kind": "loadout_evolution",
-                "status": "pending",
-                "requires_human_approval": true,
-                "created_or_refreshed_at": created_or_refreshed_at,
-                "profile": profile.name,
-                "operation": "promote_observed_skill_to_signature",
-                "skill_id": skill.clone(),
-                "current_loadout": profile_skill_loadout_json(profile),
-                "proposed_patch": {
-                    "add_signature_skills": [skill.clone()],
-                    "preserve_common_skills": profile.common_skills,
-                    "preserve_forbidden_skills": profile.forbidden_skills,
-                },
-                "evidence": {
-                    "source": "live_memory_eval",
-                    "limit": limit,
-                    "profile_samples": profile_samples,
-                    "min_samples_for_evolution": MIN_LOADOUT_EVOLUTION_SAMPLES,
-                    "min_skill_hits": min_skill_hits,
-                    "skill_hits": evidence.hits,
-                    "verified_rate": round2(verified_rate),
-                    "success_rate": round2(success_rate),
-                    "avg_quality_score": avg_quality.map(round2),
-                    "profile_summary": summarize_matrix_rows(&profile_rows),
-                    "task_types": evidence.task_types,
-                    "eval_refs": evidence.eval_refs,
-                    "loadout_call": "tachi_skill(action='loadout', profile=..., limit=...)",
-                },
-                "rationale": format!(
-                    "{} appeared in {}/{} verified successful {} runs and is not part of the current sparse loadout",
-                    skill, evidence.hits, profile_samples, profile.name
-                ),
-                "projection": {
-                    "status": "pending_profile_card_projection",
-                    "note": "Human approval records the proposal; apply_proposals projects approved changes into the profile/card overlay."
-                }
-            }));
-        }
     }
 
     Ok(out)
@@ -632,13 +494,13 @@ fn build_evidence_contract_evolution_proposals(
             continue;
         }
         let id = format!(
-            "loadout_evolution:{}:add_evidence_required:{}",
+            "evidence_contract:{}:add_evidence_required:{}",
             sanitize_policy_key(profile.name),
             sanitize_policy_key(evidence_id)
         );
         out.push(json!({
             "proposal_id": id,
-            "kind": "loadout_evolution",
+            "kind": EVIDENCE_CONTRACT_PROPOSAL_KIND,
             "status": "pending",
             "requires_human_approval": true,
             "created_or_refreshed_at": created_or_refreshed_at,
@@ -665,7 +527,7 @@ fn build_evidence_contract_evolution_proposals(
                 "avg_retry_count": round2(row.avg_retry_count),
                 "human_override_rate": round2(row.human_override_rate),
                 "profile_summary": summarize_matrix_rows(profile_rows),
-                "loadout_call": "tachi_skill(action='loadout', profile=..., limit=...)",
+                "mined_by": "tachi_tune(action='route_proposals', limit=...)",
             },
             "rationale": format!(
                 "{} has {} clean verified {} samples; require evidence artifact {}",
@@ -1029,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn loadout_evolution_does_not_read_positive_inputs_for_low_sample_profiles() {
+    fn evidence_contract_does_not_read_positive_inputs_for_low_sample_profiles() {
         let rows = vec![AgentPerformanceMatrixRow {
             profile: Some("claude_plan".to_string()),
             task_type: "plan_request".to_string(),
@@ -1038,7 +900,7 @@ mod tests {
             ..AgentPerformanceMatrixRow::default()
         }];
 
-        let proposals = build_loadout_evolution_proposals(&rows, &[], 50, "now", |_profile| {
+        let proposals = build_evidence_contract_evolution_proposals_all(&rows, 50, "now", |_profile| {
             Err("positive inputs should stay lazy".to_string())
         })
         .expect("low-sample profiles never read positive inputs");
