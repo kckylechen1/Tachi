@@ -717,25 +717,6 @@ fn prepare_proxy_tool_call(
     mut request: rmcp::model::CallToolRequestParams,
     client_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolRequestParams, rmcp::ErrorData> {
-    if request.name.as_ref() == "tachi_briefing" {
-        let mut args = serde_json::Map::new();
-        args.insert("action".to_string(), serde_json::json!("briefing"));
-        args.insert("format".to_string(), serde_json::json!("markdown"));
-        args.insert("compact".to_string(), serde_json::json!(true));
-        if let Some(project) = client_project {
-            args.insert("project".to_string(), serde_json::json!(project));
-            args.insert(
-                "query".to_string(),
-                serde_json::json!(format!(
-                    "{project} current task recent decisions blockers next steps"
-                )),
-            );
-        }
-        request.name = "tachi_memory".into();
-        request.arguments = Some(args);
-        return Ok(request);
-    }
-
     if let Some(project) = client_project {
         crate::session_identity::enforce_session_project(
             request.name.as_ref(),

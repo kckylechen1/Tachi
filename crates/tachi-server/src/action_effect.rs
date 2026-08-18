@@ -294,17 +294,6 @@ pub(crate) fn facade_action_effect(
             &["discover", "run", "bundle", "loadout", "from_pattern"],
         ),
         "tachi_verify" => (&[], &[], &["start", "record", "status", "board"]),
-        "tachi_orchestrator" => (
-            &[],
-            &[],
-            &[
-                "todo_list",
-                "todo_update",
-                "handoff_write",
-                "handoff_read",
-                "recovery_briefing",
-            ],
-        ),
         _ => return None,
     };
 
@@ -602,10 +591,6 @@ mod tests {
         // it proves the enumeration walks the REAL typed action universe for
         // them too, instead of never touching real inventories that exist.
         assert_all_classified("tachi_skill", tachi_params::TACHI_SKILL_ACTIONS);
-        assert_all_classified(
-            "tachi_orchestrator",
-            tachi_params::TACHI_ORCHESTRATOR_ACTIONS,
-        );
         let verify_actions = tachi_params::TachiVerifyAction::all_wire_strings();
         assert_all_classified("tachi_verify", &verify_actions);
     }
