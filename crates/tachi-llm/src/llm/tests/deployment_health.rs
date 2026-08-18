@@ -487,30 +487,41 @@ async fn a_chat_lane_protocol_failure_records_an_unusable_response() {
 
 #[tokio::test]
 async fn a_chat_lane_transport_failure_records_the_deployment_as_unreachable() {
-    use axum::{routing::post, Router};
+    use tokio::io::AsyncReadExt;
 
-    // The socket is bound, the client connects, and the server is killed
-    // before it can answer: no status line ever arrives, which is the one
-    // outcome that has no credential reading at all.
+    // Accept one real request, then drop the socket without writing an HTTP
+    // status line. Aborting `axum::serve` does not close a connection already
+    // handed to a handler task, so a pending handler would only exercise the
+    // production client's 60-second request deadline.
     let temp = tempfile::tempdir().expect("temp db");
     let db_path = temp.path().join("vault.db");
-    let app = Router::new().route(
-        "/chat/completions",
-        post(|| async {
-            // Never answers. The connection is dropped when the task is
-            // aborted below, which is what the client sees as a transport
-            // failure.
-            std::future::pending::<()>().await;
-        }),
-    );
-    let (client, server) = chat_lane_against(app, &db_path).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept request");
+        let mut request = [0_u8; 4096];
+        let bytes_read = socket.read(&mut request).await.expect("read request");
+        assert!(bytes_read > 0, "the mock peer must observe a real request");
+        // `socket` drops here: EOF before a status line is the transport
+        // failure this production seam classifies.
+    });
 
-    let call = client.call_extract_llm("system", "user", None, 0.0, 16);
-    let abort = async {
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        server.abort();
-    };
-    let (result, ()) = tokio::join!(call, abort);
+    let config = config_at(&format!("http://127.0.0.1:{port}/chat/completions"));
+    let client = client_with_catalog_at(&db_path, &config);
+    client.set_provider_secret_pool(
+        KEY_ENV,
+        vec![crate::ProviderSecret {
+            key_id: format!("{KEY_ENV}_1"),
+            value: "test-key".to_string(),
+        }],
+    );
+
+    let result = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await;
+    server.await.expect("mock provider task");
     result.expect_err("a dropped connection fails the call");
     client
         .await_provider_health_persistence()
@@ -525,6 +536,12 @@ async fn a_chat_lane_transport_failure_records_the_deployment_as_unreachable() {
         Some("no response from the provider")
     );
     assert_eq!(deployment.cooldown_until, None);
+
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("reopen");
+    assert!(store
+        .vault_get_key_health(KEY_ENV, &format!("{KEY_ENV}_1"))
+        .expect("read credential health")
+        .is_none());
 }
 
 #[tokio::test]
