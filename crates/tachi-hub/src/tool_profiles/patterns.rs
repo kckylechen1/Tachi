@@ -2,12 +2,6 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_a2a",
     "tachi_tools",
     "tachi_wiki_search",
-    "recommend_capability",
-    "recommend_skill",
-    "recommend_toolchain",
-    // #517 soft-deprecate: standalone prepare_capability_bundle removed from
-    // default observe tray — use tachi_skill(action='bundle'). Tool remains
-    // registered for explicit allow-lists / backcompat callers.
     // General Hub discovery remains visible for broad observe profiles; skill
     // workflow discovery should prefer tachi_skill(action='discover').
     "hub_discover",
@@ -66,7 +60,6 @@ pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // (`promote_issue`).
     // Facade coordination tools
     "tachi_handoff",
-    "tachi_orchestrator",
     "tachi_agents",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)
     "tachi_gh",

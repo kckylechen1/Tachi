@@ -81,10 +81,10 @@ impl MemoryServer {
             )),
         }
     }
+}
 
-    #[tool(
-        description = "Persistent orchestrator state outside LLM context: todo_list, todo_update, handoff_write, handoff_read, recovery_briefing. Stored in hard_state (survives compaction). Use task_id = dispatch_id or issue id."
-    )]
+#[allow(dead_code)]
+impl MemoryServer {
     pub(crate) async fn tachi_orchestrator(
         &self,
         Parameters(params): Parameters<TachiOrchestratorParams>,
