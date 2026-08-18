@@ -982,22 +982,33 @@ async fn dispatch_receipt_carries_the_effective_authority_contract() {
     );
 }
 
-/// #1690 C1 discriminator: the retired capability-bundle key must be ABSENT
-/// from every status.json construction/write site in the crate. The
-/// receipt-first seed in `dispatch.rs` is only observable on disk between the
-/// two synchronous `write_status_json` calls in `handle_tachi_dispatch`
-/// (prompt assembly sits between them); every post-return read sees the
-/// enrich write, which already drops the key — so a runtime read alone can
-/// never go RED for the INITIAL write. Every writer goes through the
-/// `write_status_json` funnel (its definition in `dispatch_v2.rs` and all
-/// callers, the `dispatch.rs` seed included), so this pin sweeps every .rs
-/// file in the crate and fails if any funnel file contains the retired key
-/// literal. The concurrent-poll runtime discriminator is not required: the
-/// typed capability-bundle field is deleted, so emission can only come from a
-/// raw `json!` key, and a raw key in any funnel writer is exactly what this
-/// widened source pin catches. This test's own host file is excluded: it
-/// asserts on the key (the runtime receipts below) and never writes
-/// status.json. RED pre-repair: the seed emits `"capability_bundle":
+/// #1690 C1 discriminator (oracle K4 widening): the retired capability-bundle
+/// key must be ABSENT from every status.json construction/write site in the
+/// crate. The receipt-first seed in `dispatch.rs` is only observable on disk
+/// between the two synchronous `write_status_json` calls in
+/// `handle_tachi_dispatch` (prompt assembly sits between them); every
+/// post-return read sees the enrich write, which already drops the key — so a
+/// runtime read alone can never go RED for the INITIAL write.
+///
+/// The pin is two layers:
+/// 1. WIDENED sweep (this test): every .rs file that references the
+///    `status.json` filename literal — the `write_status_json` funnel's
+///    definition and callers, plus DIRECT writers that never call the funnel
+///    (`task_lifecycle/utils.rs` and `research_ops.rs` write the path
+///    themselves) — must not contain the retired key literal. The old pin
+///    keyed on `write_status_json(` and let a direct path writer smuggle the
+///    key in (oracle K4); a file that touches status.json any way is now in
+///    scope.
+/// 2. FUNNEL sweep: `write_status_json(` call sites (kept as a second layer so
+///    a caller that forwards into the funnel without naming the path itself is
+///    still caught).
+///
+/// Exclusions: this test's own host file (it asserts on the key and never
+/// writes status.json) and test files that assert the key's ABSENCE
+/// (`bundle_artifact.rs` reads status.json and pins the key gone) — they
+/// legitimately contain the token without emitting it. The exclusion list is
+/// named because "asserts absence" is a semantic property no path heuristic
+/// can prove. RED pre-repair: the seed emits `"capability_bundle":
 /// Value::Null`; GREEN: absent from every writer.
 #[test]
 fn c1_retired_capability_bundle_key_is_absent_from_status_writers() {
@@ -1006,18 +1017,96 @@ fn c1_retired_capability_bundle_key_is_absent_from_status_writers() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dispatch_ops/dispatch/tests.rs");
     let mut rs_files = Vec::new();
     collect_rs_files(&src_root, &mut rs_files);
-    let offenders = rs_files
-        .iter()
-        .filter(|path| **path != own_path)
-        .filter(|path| {
-            let source = std::fs::read_to_string(path).expect("read status writer source");
-            source.contains("write_status_json(") && source.contains("capability_bundle")
-        })
+
+    let widened_offenders = status_writer_files(&rs_files, &own_path, status_writer_references_path)
+        .into_iter()
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
     assert!(
-        offenders.is_empty(),
-        "no status.json writer may emit the retired capability_bundle key (#1690 C1), found in: {offenders:?}"
+        widened_offenders.is_empty(),
+        "no status.json writer (funnel or direct path writer) may emit the retired capability_bundle key (#1690 C1 / oracle K4), found in: {widened_offenders:?}"
+    );
+
+    let funnel_offenders = status_writer_files(&rs_files, &own_path, status_writer_uses_funnel)
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        funnel_offenders.is_empty(),
+        "no write_status_json(...) funnel caller may emit the retired capability_bundle key (#1690 C1), found in: {funnel_offenders:?}"
+    );
+}
+
+/// A .rs file under src/ that references the `status.json` filename literal —
+/// the funnel's definition and callers plus DIRECT writers that construct the
+/// path themselves (`task_lifecycle/utils.rs`, `research_ops.rs`).
+fn status_writer_references_path(source: &str) -> bool {
+    source.contains("status.json")
+}
+
+/// A .rs file that calls (or defines) the `write_status_json` funnel. Kept as
+/// a second layer: a caller forwarding into the funnel without naming the
+/// path itself must still be swept.
+fn status_writer_uses_funnel(source: &str) -> bool {
+    source.contains("write_status_json(")
+}
+
+/// Test files that legitimately contain the retired token while asserting its
+/// ABSENCE (runtime receipts, prompt-scan discriminators, absence seeds).
+/// They never emit the key into a status.json payload, so the pin excludes
+/// them exactly as it excludes its own host. The list is named and justified
+/// because "asserts absence" is a semantic property no path heuristic can
+/// prove; a new file may join only when it provably asserts absence.
+fn is_status_absence_asserting_test(path: &std::path::Path) -> bool {
+    let name = path.to_string_lossy().to_string();
+    name.ends_with("tests/dispatch_tests/prompt_credentials_board/capability_dispatch/bundle_artifact.rs")
+}
+
+fn status_writer_files<'a>(
+    rs_files: &'a [std::path::PathBuf],
+    own_path: &std::path::Path,
+    is_writer: fn(&str) -> bool,
+) -> Vec<&'a std::path::PathBuf> {
+    rs_files
+        .iter()
+        .filter(|path| **path != own_path && !is_status_absence_asserting_test(path))
+        .filter(|path| {
+            let source = std::fs::read_to_string(path).expect("read status writer source");
+            is_writer(&source) && source.contains("capability_bundle")
+        })
+        .collect()
+}
+
+/// #1690 C1 / oracle K4 discriminator: the WIDENED predicate catches a direct
+/// status.json path writer that the old funnel-only predicate misses. RED
+/// pre-repair: a direct writer (`task_lifecycle/utils.rs`,
+/// `research_ops.rs` shape — path constructed in-file, no
+/// `write_status_json(` call) could smuggle the retired key past the pin;
+/// GREEN: the widened sweep flags it. The temp file is a synthetic stand-in
+/// for exactly those writers, so the discriminator does not depend on their
+/// current content.
+#[test]
+fn c1_widened_status_writer_sweep_catches_direct_path_writers() {
+    let tmp = tempfile::tempdir().expect("temp dir for synthetic status writer");
+    let synthetic = tmp.path().join("direct_status_writer.rs");
+    std::fs::write(
+        &synthetic,
+        "fn write() {\n    let path = run_dir.join(\"status.json\");\n    let obj = serde_json::json!({\"capability_bundle\": \"seed\"});\n    std::fs::write(&path, obj.to_string()).unwrap();\n}\n",
+    )
+    .expect("write synthetic direct status writer");
+    let files = vec![synthetic.clone()];
+    let own = synthetic.clone();
+
+    let widened = status_writer_files(&files, &own, status_writer_references_path);
+    assert!(
+        !widened.is_empty(),
+        "the widened sweep must flag a direct status.json path writer that carries the retired key"
+    );
+
+    let funnel = status_writer_files(&files, &own, status_writer_uses_funnel);
+    assert!(
+        funnel.is_empty(),
+        "the funnel-only sweep misses direct path writers — which is exactly the gap the oracle K4 widening closes"
     );
 }
 

@@ -684,7 +684,7 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Utilities
 
-`skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
+`chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
 
 Default `tachi doctor` is the canonical read-only diagnostic owner. It does not
 write the manifest, database, sidecars, cache, or daily markers; `--fix` and

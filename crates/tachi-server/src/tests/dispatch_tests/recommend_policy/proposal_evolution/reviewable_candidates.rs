@@ -1,13 +1,22 @@
 use super::*;
 use crate::MemoryServer;
 
-async fn mint_loadout_v3_fixture(server: &MemoryServer, fixture: &str) -> String {
+/// Seed 10 `plan_request` eval rows for `claude_plan` (5 per agent so the
+/// performance matrix holds 2 rows of 5 samples each), mint proposals, and
+/// return the current id of the minted `evidence_contract` proposal for
+/// `claude_plan` / `acceptance_criteria`.
+///
+/// #1690 C3 re-anchor: the helper used to mint a
+/// `promote_observed_skill_to_signature` proposal; that proposal family is
+/// retired end-to-end, so the surviving evidence-contract proposal is what
+/// fixtures mint and walk.
+async fn mint_evidence_contract_v3_fixture(server: &MemoryServer, fixture: &str) -> String {
     for idx in 0..10 {
         let agent = if idx < 5 { "claude" } else { "claude-alt" };
         server
             .tachi_complete(Parameters(TachiCompleteParams {
-                task_id: Some(format!("loadout-v3-{fixture}-{idx}")),
-                task: "Plan a dispatch loadout evolution slice".to_string(),
+                task_id: Some(format!("evidence-contract-v3-{fixture}-{idx}")),
+                task: "Plan a dispatch policy evolution slice".to_string(),
                 agent: agent.to_string(),
                 outcome: "success".to_string(),
                 task_type: Some("plan_request".to_string()),
@@ -18,14 +27,14 @@ async fn mint_loadout_v3_fixture(server: &MemoryServer, fixture: &str) -> String
                 cost_tokens: Some(1200),
                 cost_usd: Some(0.03),
                 quality_score: Some(0.92),
-                notes: Some(format!("Seed {fixture} loadout identity fixture.")),
+                notes: Some(format!("Seed {fixture} evidence-contract fixture.")),
                 trajectory: None,
                 diff: None,
                 worktree: None,
                 subagents: Vec::new(),
                 feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
-                flow_id: Some(format!("flow-loadout-v3-{fixture}")),
+                flow_id: Some(format!("flow-evidence-contract-v3-{fixture}")),
                 issue_ref: Some("kckylechen1/tachi#1431".to_string()),
                 pr_ref: None,
                 evidence_refs: vec![
@@ -42,7 +51,7 @@ async fn mint_loadout_v3_fixture(server: &MemoryServer, fixture: &str) -> String
                 eval_run_ids: Vec::new(),
             }))
             .await
-            .expect("seed loadout identity fixture");
+            .expect("seed evidence-contract fixture");
     }
 
     let mut proposal_params = tune_params("route_proposals");
@@ -55,59 +64,22 @@ async fn mint_loadout_v3_fixture(server: &MemoryServer, fixture: &str) -> String
         .as_array()
         .and_then(|items| {
             items.iter().find(|proposal| {
-                proposal["kind"] == json!("loadout_evolution")
-                    && proposal["operation"] == json!("promote_observed_skill_to_signature")
+                proposal["kind"] == json!("evidence_contract")
+                    && proposal["operation"] == json!("add_evidence_contract_required")
             })
         })
         .and_then(|proposal| proposal["proposal_id"].as_str())
-        .expect("minted loadout proposal id")
+        .expect("minted evidence-contract proposal id")
         .to_string()
 }
 
-async fn approve_loadout_v3_fixture(server: &MemoryServer, proposal_id: &str) {
+async fn approve_evidence_contract_v3_fixture(server: &MemoryServer, proposal_id: &str) {
     let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.to_string());
     review.review_status = Some("approved".to_string());
     run_tune(server, review)
         .await
-        .expect("loadout proposal approval should succeed");
-}
-
-/// Re-mint and return the current id of one `loadout_evolution` proposal.
-///
-/// #1431 binds every proposal to the profile/card overlay revision it was minted
-/// against, and refuses on drift. Applying one proposal moves that overlay, so
-/// the other proposals from the SAME `proposals` call are legitimately stale
-/// afterwards — a reviewer approved them against a baseline that no longer
-/// holds. Tests that walk several proposals therefore have to re-mint between
-/// applies, exactly as an operator would have to re-review.
-async fn remint_loadout_proposal_id(
-    server: &MemoryServer,
-    operation: &str,
-    key_field: &str,
-    key_value: &str,
-) -> String {
-    let mut params = tune_params("route_proposals");
-    params.limit = Some(50);
-    let raw = run_tune(server, params)
-        .await
-        .expect("re-mint proposals should succeed");
-    let proposals: serde_json::Value = serde_json::from_str(&raw).expect("re-mint proposals JSON");
-    proposals["proposals"]
-        .as_array()
-        .and_then(|items| {
-            items.iter().find(|proposal| {
-                proposal["kind"] == json!("loadout_evolution")
-                    && proposal["profile"] == json!("claude_plan")
-                    && proposal["operation"] == json!(operation)
-                    && proposal[key_field] == json!(key_value)
-            })
-        })
-        .and_then(|proposal| proposal["proposal_id"].as_str())
-        .unwrap_or_else(|| {
-            panic!("re-minted {operation} proposal for {key_field}={key_value} must exist")
-        })
-        .to_string()
+        .expect("evidence-contract proposal approval should succeed");
 }
 
 fn read_loadout_state(server: &MemoryServer, namespace: &str, key: &str) -> Option<(String, u32)> {
@@ -120,38 +92,40 @@ fn read_loadout_state(server: &MemoryServer, namespace: &str, key: &str) -> Opti
         .expect("read loadout fixture state")
 }
 
-#[tokio::test]
-async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() {
-    let server = make_server();
-
-    for idx in 0..10 {
-        let agent = if idx < 5 { "claude" } else { "claude-alt" };
+/// Seed N+1 eval rows for `claude_plan` (split across two agents so the
+/// performance matrix holds 2 rows of >= threshold samples each) with the
+/// given task type.
+async fn seed_profile_eval_rows(
+    server: &MemoryServer,
+    fixture: &str,
+    task_type: &str,
+    rows: usize,
+) {
+    for idx in 0..rows {
+        let agent = if idx < rows / 2 { "claude" } else { "claude-alt" };
         server
             .tachi_complete(Parameters(TachiCompleteParams {
-                task_id: Some(format!("loadout-proposal-plan-{idx}")),
-                task: "Plan a dispatch loadout evolution slice".to_string(),
+                task_id: Some(format!("{fixture}-{task_type}-{idx}")),
+                task: format!("Dispatch policy {task_type} slice"),
                 agent: agent.to_string(),
                 outcome: "success".to_string(),
-                task_type: Some("plan_request".to_string()),
+                task_type: Some(task_type.to_string()),
                 profile: Some("claude_plan".to_string()),
                 risk: Some("medium".to_string()),
                 duration_ms: Some(20_000),
-                skills_used: vec![
-                    "skill:superpowers-writing-plans".to_string(),
-                    "skill:planning-ux-review".to_string(),
-                ],
+                skills_used: vec!["skill:planning-ux-review".to_string()],
                 cost_tokens: Some(1200),
                 cost_usd: Some(0.03),
                 quality_score: Some(0.92),
-                notes: Some("Seed loadout evolution proposal fixture.".to_string()),
+                notes: Some(format!("Seed {fixture} eval fixture.")),
                 trajectory: None,
                 diff: None,
                 worktree: None,
                 subagents: Vec::new(),
                 feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
-                flow_id: Some("flow-loadout-evolution-proposal".to_string()),
-                issue_ref: Some("kckylechen1/tachi#194".to_string()),
+                flow_id: Some(format!("flow-{fixture}-{task_type}")),
+                issue_ref: Some("kckylechen1/tachi#1431".to_string()),
                 pr_ref: None,
                 evidence_refs: vec![
                     "docs/engineering/architecture/dispatch-policy-learning-spec.md".to_string(),
@@ -167,8 +141,20 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
                 eval_run_ids: Vec::new(),
             }))
             .await
-            .expect("seed loadout eval row");
+            .expect("seed profile eval row");
     }
+}
+
+/// #1690 C3 discriminator K1(a): `route_proposals` output contains NO
+/// loadout/skill-evolution proposal kind on a seeded eval store — while the
+/// surviving evidence-contract proposals (packet-carry enforcement) still
+/// mint from the same matrix. RED pre-repair: the seeded store minted
+/// `kind=loadout_evolution` with `operation=promote_observed_skill_to_signature`;
+/// GREEN post-repair: that kind and operation appear nowhere.
+#[tokio::test]
+async fn route_proposals_mints_no_loadout_evolution_kind() {
+    let server = make_server();
+    seed_profile_eval_rows(&server, "k1a", "plan_request", 10).await;
 
     let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
@@ -179,54 +165,107 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
     assert!(proposals["proposal_kinds"]
         .as_array()
         .expect("proposal kinds")
-        .contains(&json!("loadout_evolution")));
+        .contains(&json!("evidence_contract")));
+    assert!(
+        !proposals["proposal_kinds"]
+            .as_array()
+            .expect("proposal kinds")
+            .contains(&json!("loadout_evolution")),
+        "the retired loadout_evolution proposal kind must not be advertised: {proposals}"
+    );
     let proposal_items = proposals["proposals"].as_array().expect("proposal list");
     assert!(
         !proposal_items.iter().any(|proposal| {
             proposal["kind"] == json!("loadout_evolution")
-                && proposal["skill_id"] == json!("skill:superpowers-writing-plans")
+                || proposal["operation"] == json!("promote_observed_skill_to_signature")
         }),
-        "existing profile skills should not generate loadout evolution proposals: {proposal_items:?}"
+        "no proposal may carry the retired loadout/skill-evolution kind or operation: {proposal_items:?}"
+    );
+    assert!(
+        proposal_items
+            .iter()
+            .any(|proposal| proposal["kind"] == json!("evidence_contract")),
+        "the surviving evidence-contract family must still mint: {proposal_items:?}"
+    );
+    assert!(
+        !raw.contains("promote_observed_skill_to_signature"),
+        "the retired operation token must not appear anywhere in the response: {raw}"
+    );
+}
+
+/// The full surviving lifecycle: mint evidence-contract proposals on a seeded
+/// eval store, review, apply into the profile/card overlay, verify the overlay
+/// projection reaches the agents registry — and pin that the retired
+/// skill-promotion surface is absent end to end.
+///
+/// #1690 C3 re-anchor of `tachi_task_proposals_include_reviewable_loadout_evolution_candidates`:
+/// the skill-promotion half (observed-skill mining -> `projected_signature_skills`)
+/// is retired by the issue delete list; its assertions are re-anchored to
+/// evidence-contract (the enforcement half that survives) and to the ABSENCE
+/// of the retired half.
+#[tokio::test]
+async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() {
+    let server = make_server();
+
+    seed_profile_eval_rows(&server, "loadout-proposal", "plan_request", 10).await;
+
+    let mut proposal_params = tune_params("route_proposals");
+    proposal_params.limit = Some(50);
+    let raw = run_tune(&server, proposal_params)
+        .await
+        .expect("proposals should succeed");
+    let proposals: serde_json::Value = serde_json::from_str(&raw).expect("proposals JSON");
+    assert!(proposals["proposal_kinds"]
+        .as_array()
+        .expect("proposal kinds")
+        .contains(&json!("evidence_contract")));
+    let proposal_items = proposals["proposals"].as_array().expect("proposal list");
+    assert!(
+        !proposal_items.iter().any(|proposal| {
+            proposal["kind"] == json!("loadout_evolution")
+                && proposal["operation"] == json!("promote_observed_skill_to_signature")
+        }),
+        "the retired observed-skill promotion proposals must not be minted: {proposal_items:?}"
     );
     let proposal = proposals["proposals"]
         .as_array()
         .and_then(|items| {
             items.iter().find(|proposal| {
-                proposal["kind"] == json!("loadout_evolution")
+                proposal["kind"] == json!("evidence_contract")
                     && proposal["profile"] == json!("claude_plan")
-                    && proposal["skill_id"] == json!("skill:planning-ux-review")
+                    && proposal["operation"] == json!("add_evidence_contract_required")
+                    && proposal["evidence_id"] == json!("acceptance_criteria")
             })
         })
-        .expect("loadout evolution proposal");
+        .expect("evidence contract proposal");
     assert_eq!(proposal["status"], json!("pending"));
     assert_eq!(proposal["requires_human_approval"], json!(true));
     assert_eq!(
         proposal["operation"],
-        json!("promote_observed_skill_to_signature")
+        json!("add_evidence_contract_required")
     );
     assert_eq!(proposal["evidence"]["profile_samples"], json!(10));
-    assert_eq!(proposal["evidence"]["skill_hits"], json!(10));
     assert_eq!(
-        proposal["proposed_patch"]["add_signature_skills"][0],
-        json!("skill:planning-ux-review")
+        proposal["proposed_patch"]["add_evidence_required"][0],
+        json!("acceptance_criteria")
     );
     assert_eq!(proposal["schema_version"], json!(3));
     assert_eq!(
         proposal["policy_version"],
-        json!("2026-07-loadout-evolution-v3")
+        json!("2026-07-evidence-contract-v3")
     );
     assert_eq!(proposal["target"], json!("profile_card_overlay"));
     assert_eq!(
         proposal["identity_payload"]["kind"],
-        json!("loadout_evolution")
+        json!("evidence_contract")
     );
     assert_eq!(
         proposal["identity_payload"]["apply_payload"]["profile"],
         proposal["profile"]
     );
     assert_eq!(
-        proposal["identity_payload"]["apply_payload"]["skill_id"],
-        proposal["skill_id"]
+        proposal["identity_payload"]["apply_payload"]["evidence_id"],
+        proposal["evidence_id"]
     );
     assert_eq!(
         proposal["identity_payload"]["apply_payload"]["proposed_patch"],
@@ -240,32 +279,21 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         proposal["content_digest"]
             .as_str()
             .is_some_and(|digest| digest.len() == 64),
-        "minted loadout proposal must expose its SHA-256 content digest: {proposal:?}"
+        "minted evidence proposal must expose its SHA-256 content digest: {proposal:?}"
     );
     let proposal_id = proposal["proposal_id"]
         .as_str()
         .expect("proposal id")
         .to_string();
     assert!(
-        proposal_id.starts_with("loadout_evolution:v3:"),
-        "loadout proposal id must be content-addressed: {proposal_id}"
+        proposal_id.starts_with("evidence_contract:v3:"),
+        "evidence proposal id must be content-addressed: {proposal_id}"
     );
-    let evidence_proposal = proposals["proposals"]
-        .as_array()
-        .and_then(|items| {
-            items.iter().find(|proposal| {
-                proposal["kind"] == json!("loadout_evolution")
-                    && proposal["profile"] == json!("claude_plan")
-                    && proposal["operation"] == json!("add_evidence_contract_required")
-                    && proposal["evidence_id"] == json!("acceptance_criteria")
-            })
-        })
-        .expect("evidence contract evolution proposal");
     assert_eq!(
         proposal_items
             .iter()
             .filter(|proposal| {
-                proposal["kind"] == json!("loadout_evolution")
+                proposal["kind"] == json!("evidence_contract")
                     && proposal["profile"] == json!("claude_plan")
                     && proposal["operation"] == json!("add_evidence_contract_required")
                     && proposal["evidence_id"] == json!("acceptance_criteria")
@@ -274,32 +302,24 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         1,
         "duplicate agent/model matrix rows should not emit duplicate evidence contract proposals: {proposal_items:?}"
     );
-    assert_eq!(
-        evidence_proposal["proposed_patch"]["add_evidence_required"][0],
-        json!("acceptance_criteria")
-    );
-    let stale_evidence_proposal_id = evidence_proposal["proposal_id"]
-        .as_str()
-        .expect("evidence proposal id")
-        .to_string();
 
     let mut review = tune_params("route_review");
     review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("approved".to_string());
-    review.notes = Some("Human approved loadout evolution candidate.".to_string());
+    review.notes = Some("Human approved evidence contract candidate.".to_string());
     let reviewed_raw = run_tune(&server, review)
         .await
         .expect("review should succeed");
     let reviewed: serde_json::Value = serde_json::from_str(&reviewed_raw).expect("review JSON");
     assert_eq!(reviewed["proposal"]["status"], json!("approved"));
-    assert_eq!(reviewed["proposal"]["kind"], json!("loadout_evolution"));
+    assert_eq!(reviewed["proposal"]["kind"], json!("evidence_contract"));
 
     let mut apply = tune_params("route_apply");
     apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
     let applied_raw = run_tune(&server, apply)
         .await
-        .expect("approved loadout evolution should project");
+        .expect("approved evidence contract should project");
     let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply JSON");
     assert_eq!(applied["applied"], json!(true));
     assert_eq!(applied["profile_card_mutated"], json!(true));
@@ -311,6 +331,10 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
     assert_eq!(
         applied["proposal"]["projection"]["status"],
         json!("applied_profile_card_overlay")
+    );
+    assert_eq!(
+        applied["proposal"]["projection"]["added_evidence_required"][0],
+        json!("acceptance_criteria")
     );
 
     let overlay_before_second_apply = server
@@ -339,57 +363,14 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         "a refused second apply must not mutate the already projected overlay"
     );
 
-    // The skill-promotion apply above moved the overlay, so the
-    // evidence-contract proposal minted from the same `proposals` call is now
-    // bound to a stale source revision and is refused by design (#1431). Pin
-    // that refusal before re-minting — it is the property the source-revision
-    // binding exists for, and without this assertion the re-mint below would
-    // hide it.
-    let mut stale_evidence_review = tune_params("route_review");
-    stale_evidence_review.proposal_id = Some(stale_evidence_proposal_id.clone());
-    stale_evidence_review.review_status = Some("approved".to_string());
-    stale_evidence_review.notes = Some("Stale baseline must be refused.".to_string());
-    let stale_evidence_err = run_tune(&server, stale_evidence_review)
-        .await
-        .expect_err("a proposal bound to a superseded overlay revision must be refused");
-    assert!(
-        stale_evidence_err.contains("source_state_drift"),
-        "expected source_state_drift for the stale evidence proposal, got: {stale_evidence_err}"
-    );
-
-    let evidence_proposal_id = remint_loadout_proposal_id(
-        &server,
-        "add_evidence_contract_required",
-        "evidence_id",
-        "acceptance_criteria",
-    )
-    .await;
-    let mut evidence_review = tune_params("route_review");
-    evidence_review.proposal_id = Some(evidence_proposal_id.clone());
-    evidence_review.review_status = Some("approved".to_string());
-    evidence_review.notes = Some("Human approved evidence contract projection.".to_string());
-    let evidence_reviewed_raw = run_tune(&server, evidence_review)
-        .await
-        .expect("evidence review should succeed");
-    let evidence_reviewed: serde_json::Value =
-        serde_json::from_str(&evidence_reviewed_raw).expect("evidence review JSON");
-    assert_eq!(
-        evidence_reviewed["proposal"]["operation"],
-        json!("add_evidence_contract_required")
-    );
-
-    let mut evidence_apply = tune_params("route_apply");
-    evidence_apply.proposal_id = Some(evidence_proposal_id);
-    evidence_apply.confirm = true;
-    let evidence_applied_raw = run_tune(&server, evidence_apply)
-        .await
-        .expect("approved evidence contract should project");
-    let evidence_applied: serde_json::Value =
-        serde_json::from_str(&evidence_applied_raw).expect("evidence apply JSON");
-    assert_eq!(
-        evidence_applied["proposal"]["projection"]["added_evidence_required"][0],
-        json!("acceptance_criteria")
-    );
+    // #1431's source-revision binding is pinned by the dedicated
+    // `*_refuses_live_overlay_drift_without_mutation` tests below (review and
+    // apply). The pre-contraction sibling-staleness flow (apply one proposal,
+    // then review ANOTHER from the same mint) is no longer constructible: the
+    // sibling used to be the skill-promotion proposal, which the #1690 C3
+    // contraction retired — with one proposal family per profile per mint and
+    // the sample gate admitting a single task type per profile, two
+    // same-profile proposals can no longer share one mint.
 
     let agents_raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
@@ -406,67 +387,43 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .iter()
         .find(|profile| profile["name"] == json!("claude_plan"))
         .expect("claude_plan in agent registry");
-    assert!(agent_claude_profile["skill_loadout"]["signature_skills"]
-        .as_array()
-        .expect("agent signature skills")
-        .contains(&json!("skill:planning-ux-review")));
+    // #1690 C3: the promoted-skill overlay write is retired — the seeded
+    // `skill:planning-ux-review` never appears in signature skills, and the
+    // loadout overlay half stays inert.
+    assert!(
+        !agent_claude_profile["skill_loadout"]["signature_skills"]
+            .as_array()
+            .expect("agent signature skills")
+            .contains(&json!("skill:planning-ux-review")),
+        "retired observed-skill promotion must not project into the registry: {agent_claude_profile}"
+    );
+    assert_eq!(
+        agent_claude_profile["skill_loadout"]["projected_signature_skills"],
+        json!([]),
+        "the loadout overlay projection is retired; the history key stays empty: {agent_claude_profile}"
+    );
+    // The surviving enforcement half DOES project: the evidence contract's
+    // `projected_required` carries the applied acceptance_criteria.
     assert!(
         agent_claude_profile["evidence_contract"]["projected_required"]
             .as_array()
             .expect("agent projected evidence")
-            .contains(&json!("acceptance_criteria"))
+            .contains(&json!("acceptance_criteria")),
+        "applied evidence contract must project into the registry: {agent_claude_profile}"
     );
 }
 
 /// Discrimination: the shipped `review_proposal` / `apply_proposals` facade
-/// must bind the exact loadout payload a human approved. On the pre-#1431
-/// implementation, changing only the top-level skill id after approval was
-/// accepted and projected into the durable overlay.
+/// must bind the exact evidence-contract payload a human approved. On the
+/// pre-#1431 implementation, changing only the top-level evidence id after
+/// approval was accepted and projected into the durable overlay.
+///
+/// #1690 C3 re-anchor: the tamper target moves from `skill_id` (retired
+/// surface) to `evidence_id` — the surviving bindable apply field.
 #[tokio::test]
-async fn loadout_apply_refuses_tampered_payload_without_overlay_mutation() {
+async fn evidence_contract_apply_refuses_tampered_payload_without_overlay_mutation() {
     let server = make_server();
-    for idx in 0..10 {
-        let agent = if idx < 5 { "claude" } else { "claude-alt" };
-        server
-            .tachi_complete(Parameters(TachiCompleteParams {
-                task_id: Some(format!("loadout-tamper-plan-{idx}")),
-                task: "Plan a dispatch loadout evolution slice".to_string(),
-                agent: agent.to_string(),
-                outcome: "success".to_string(),
-                task_type: Some("plan_request".to_string()),
-                profile: Some("claude_plan".to_string()),
-                risk: Some("medium".to_string()),
-                duration_ms: Some(20_000),
-                skills_used: vec!["skill:planning-ux-review".to_string()],
-                cost_tokens: Some(1200),
-                cost_usd: Some(0.03),
-                quality_score: Some(0.92),
-                notes: Some("Seed loadout payload-tamper fixture.".to_string()),
-                trajectory: None,
-                diff: None,
-                worktree: None,
-                subagents: Vec::new(),
-                feedback_rules_applied: Vec::new(),
-                dispatch_id: None,
-                flow_id: Some("flow-loadout-tamper".to_string()),
-                issue_ref: Some("kckylechen1/tachi#1431".to_string()),
-                pr_ref: None,
-                evidence_refs: vec![
-                    "docs/engineering/architecture/dispatch-policy-learning-spec.md".to_string(),
-                ],
-                tests_run: vec!["cargo test -p tachi-server dispatch".to_string()],
-                diff_present: Some(false),
-                scope: Some("project".to_string()),
-                project: None,
-                format: None,
-                signatures: Vec::new(),
-                rulings: Vec::new(),
-                adjudication: None,
-                eval_run_ids: Vec::new(),
-            }))
-            .await
-            .expect("seed loadout eval row");
-    }
+    seed_profile_eval_rows(&server, "evidence-tamper", "plan_request", 10).await;
 
     let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
@@ -478,12 +435,12 @@ async fn loadout_apply_refuses_tampered_payload_without_overlay_mutation() {
         .as_array()
         .and_then(|items| {
             items.iter().find(|proposal| {
-                proposal["kind"] == json!("loadout_evolution")
-                    && proposal["operation"] == json!("promote_observed_skill_to_signature")
+                proposal["kind"] == json!("evidence_contract")
+                    && proposal["operation"] == json!("add_evidence_contract_required")
             })
         })
         .and_then(|proposal| proposal["proposal_id"].as_str())
-        .expect("minted loadout proposal id")
+        .expect("minted evidence proposal id")
         .to_string();
 
     let mut review = tune_params("route_review");
@@ -491,16 +448,16 @@ async fn loadout_apply_refuses_tampered_payload_without_overlay_mutation() {
     review.review_status = Some("approved".to_string());
     run_tune(&server, review)
         .await
-        .expect("approve loadout proposal");
+        .expect("approve evidence proposal");
 
     server
         .with_global_store(|store| {
             let (raw, _version) = store
                 .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
                 .map_err(|e| e.to_string())?
-                .expect("loadout proposal row");
+                .expect("evidence proposal row");
             let mut value: serde_json::Value = serde_json::from_str(&raw).expect("proposal JSON");
-            value["skill_id"] = json!("skill:attacker-controlled");
+            value["evidence_id"] = json!("attacker-controlled-evidence");
             store
                 .set_state(
                     tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
@@ -623,8 +580,8 @@ async fn legacy_loadout_rows_stay_listable_but_refuse_review_and_apply() {
         .await
         .expect_err("legacy loadout row must not be reviewable");
     assert!(
-        review_err.contains("legacy_unbound_proposal"),
-        "expected loud legacy refusal, got: {review_err}"
+        review_err.contains("unsupported_proposal_kind"),
+        "expected loud retirement refusal, got: {review_err}"
     );
     let review_after = server
         .with_global_store_read(|store| {
@@ -659,8 +616,8 @@ async fn legacy_loadout_rows_stay_listable_but_refuse_review_and_apply() {
         .await
         .expect_err("legacy loadout row must not be applicable");
     assert!(
-        apply_err.contains("legacy_unbound_proposal"),
-        "expected loud legacy refusal, got: {apply_err}"
+        apply_err.contains("does not support proposal kind"),
+        "expected loud retirement refusal, got: {apply_err}"
     );
     let apply_after = server
         .with_global_store_read(|store| {
@@ -687,50 +644,9 @@ async fn legacy_loadout_rows_stay_listable_but_refuse_review_and_apply() {
 }
 
 #[tokio::test]
-async fn loadout_review_refuses_evidence_drift_without_partial_mutation() {
+async fn evidence_contract_review_refuses_evidence_drift_without_partial_mutation() {
     let server = make_server();
-    for idx in 0..10 {
-        let agent = if idx < 5 { "claude" } else { "claude-alt" };
-        server
-            .tachi_complete(Parameters(TachiCompleteParams {
-                task_id: Some(format!("loadout-evidence-drift-plan-{idx}")),
-                task: "Plan a dispatch loadout evolution slice".to_string(),
-                agent: agent.to_string(),
-                outcome: "success".to_string(),
-                task_type: Some("plan_request".to_string()),
-                profile: Some("claude_plan".to_string()),
-                risk: Some("medium".to_string()),
-                duration_ms: Some(20_000),
-                skills_used: vec!["skill:planning-ux-review".to_string()],
-                cost_tokens: Some(1200),
-                cost_usd: Some(0.03),
-                quality_score: Some(0.92),
-                notes: Some("Seed loadout evidence-drift fixture.".to_string()),
-                trajectory: None,
-                diff: None,
-                worktree: None,
-                subagents: Vec::new(),
-                feedback_rules_applied: Vec::new(),
-                dispatch_id: None,
-                flow_id: Some("flow-loadout-evidence-drift".to_string()),
-                issue_ref: Some("kckylechen1/tachi#1431".to_string()),
-                pr_ref: None,
-                evidence_refs: vec![
-                    "docs/engineering/architecture/dispatch-policy-learning-spec.md".to_string(),
-                ],
-                tests_run: vec!["cargo test -p tachi-server dispatch".to_string()],
-                diff_present: Some(false),
-                scope: Some("project".to_string()),
-                project: None,
-                format: None,
-                signatures: Vec::new(),
-                rulings: Vec::new(),
-                adjudication: None,
-                eval_run_ids: Vec::new(),
-            }))
-            .await
-            .expect("seed loadout eval row");
-    }
+    seed_profile_eval_rows(&server, "evidence-drift", "plan_request", 10).await;
 
     let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
@@ -742,12 +658,12 @@ async fn loadout_review_refuses_evidence_drift_without_partial_mutation() {
         .as_array()
         .and_then(|items| {
             items.iter().find(|proposal| {
-                proposal["kind"] == json!("loadout_evolution")
-                    && proposal["operation"] == json!("promote_observed_skill_to_signature")
+                proposal["kind"] == json!("evidence_contract")
+                    && proposal["operation"] == json!("add_evidence_contract_required")
             })
         })
         .and_then(|proposal| proposal["proposal_id"].as_str())
-        .expect("minted loadout proposal id")
+        .expect("minted evidence proposal id")
         .to_string();
 
     server
@@ -755,7 +671,7 @@ async fn loadout_review_refuses_evidence_drift_without_partial_mutation() {
             let (raw, _version) = store
                 .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
                 .map_err(|e| e.to_string())?
-                .expect("loadout proposal row");
+                .expect("evidence proposal row");
             let mut value: serde_json::Value = serde_json::from_str(&raw).expect("proposal JSON");
             value["evidence"]["source"] = json!("attacker-controlled-evidence");
             store
@@ -819,19 +735,19 @@ async fn loadout_review_refuses_evidence_drift_without_partial_mutation() {
 }
 
 #[tokio::test]
-async fn loadout_v3_review_refuses_baseline_display_tamper_without_mutation() {
+async fn evidence_contract_v3_review_refuses_baseline_display_tamper_without_mutation() {
     let server = make_server();
-    let proposal_id = mint_loadout_v3_fixture(&server, "baseline-display-tamper").await;
+    let proposal_id = mint_evidence_contract_v3_fixture(&server, "baseline-display-tamper").await;
 
     server
         .with_global_store(|store| {
             let (raw, _version) = store
                 .get_state_kv(tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS, &proposal_id)
                 .map_err(|err| err.to_string())?
-                .expect("loadout proposal row");
+                .expect("evidence proposal row");
             let mut value: serde_json::Value = serde_json::from_str(&raw).expect("proposal JSON");
-            value["current_loadout"]["signature_skills"] =
-                json!(["skill:attacker-controlled-baseline"]);
+            value["current_evidence_contract"]["required"] =
+                json!(["attacker-controlled-baseline"]);
             store
                 .set_state(
                     tachi_dispatch::DISPATCH_POLICY_PROPOSAL_NS,
@@ -883,9 +799,9 @@ async fn loadout_v3_review_refuses_baseline_display_tamper_without_mutation() {
 }
 
 #[tokio::test]
-async fn loadout_v3_review_refuses_live_overlay_drift_without_mutation() {
+async fn evidence_contract_v3_review_refuses_live_overlay_drift_without_mutation() {
     let server = make_server();
-    let proposal_id = mint_loadout_v3_fixture(&server, "overlay-drift-review").await;
+    let proposal_id = mint_evidence_contract_v3_fixture(&server, "overlay-drift-review").await;
     server
         .with_global_store(|store| {
             store
@@ -940,10 +856,10 @@ async fn loadout_v3_review_refuses_live_overlay_drift_without_mutation() {
 }
 
 #[tokio::test]
-async fn loadout_v3_apply_refuses_live_overlay_drift_without_mutation() {
+async fn evidence_contract_v3_apply_refuses_live_overlay_drift_without_mutation() {
     let server = make_server();
-    let proposal_id = mint_loadout_v3_fixture(&server, "overlay-drift-apply").await;
-    approve_loadout_v3_fixture(&server, &proposal_id).await;
+    let proposal_id = mint_evidence_contract_v3_fixture(&server, "overlay-drift-apply").await;
+    approve_evidence_contract_v3_fixture(&server, &proposal_id).await;
     server
         .with_global_store(|store| {
             store

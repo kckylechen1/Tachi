@@ -1,5 +1,14 @@
 use super::*;
 
+/// #1690 C3 discriminator K1(b): a seeded signature-skill overlay row does
+/// NOT alter the dispatch prompt — the static baseline loadout still renders,
+/// the `projected_signature_skills` label is gone, and the overlay row is
+/// inert history. The evidence-contract half (what a packet must carry) is
+/// enforcement and still projects its overlay into the prompt.
+///
+/// RED pre-repair: the seeded `add_signature_skills` renders as
+/// `projected_signature_skills: skill:planning-ux-review`; GREEN post-repair:
+/// the label never renders and the baseline is what shows.
 #[tokio::test]
 async fn dispatch_prompt_includes_profile_overlay() {
     let server = make_server();
@@ -50,6 +59,7 @@ async fn dispatch_prompt_includes_profile_overlay() {
         "{prompt}"
     );
     assert!(prompt.contains("- skill_loadout:"), "{prompt}");
+    // The STATIC baseline signature skills still render.
     assert!(
         prompt.contains("skill:superpowers-subagent-driven-development"),
         "{prompt}"
@@ -58,19 +68,25 @@ async fn dispatch_prompt_includes_profile_overlay() {
         prompt.contains("skill:coding-architecture-decision"),
         "{prompt}"
     );
-    assert!(prompt.contains("skill:planning-ux-review"), "{prompt}");
+    // The retired overlay-merged skill must NOT render — no label, no skill.
     assert!(
-        prompt.contains("projected_signature_skills: skill:planning-ux-review"),
-        "{prompt}"
+        !prompt.contains("projected_signature_skills"),
+        "the retired loadout-evolution projection label must not render: {prompt}"
     );
     assert!(
-        prompt.contains("projection_status: applied_overlay"),
-        "{prompt}"
+        !prompt.contains("skill:planning-ux-review"),
+        "a seeded signature-skill overlay row must be inert in the prompt: {prompt}"
     );
     assert!(
         prompt.contains("passive_traits: plan_before_execute"),
         "{prompt}"
     );
+    // The static loadout renders its own baseline projection marker.
+    assert!(
+        prompt.contains("projection_status: baseline"),
+        "the static baseline loadout must render its projection status: {prompt}"
+    );
+    // The surviving enforcement half still projects its overlay.
     assert!(prompt.contains("- evidence_contract:"), "{prompt}");
     assert!(
         prompt.contains("required: plan, risks, validation_plan, acceptance_criteria"),

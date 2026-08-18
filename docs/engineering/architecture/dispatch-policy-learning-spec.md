@@ -204,7 +204,11 @@ Route simulation and profile-card policy consume that matrix. Matching telemetry
 - reward low-cost, high-quality matches when the evidence is strong enough.
 
 When live samples are missing, route simulation should say so and fall back to
-deterministic MBIT/risk fit rather than pretending the policy is learned.
+the static reviewed profile fit rather than pretending the policy is learned.
+(#1690 C3 retired the MBIT/card and loadout-evolution machinery this section
+used to describe; static profiles are the reviewed baseline, and the eval
+future belongs to the #1675 context-bound evaluation, not to auto-minted
+profile projections.)
 
 ## Feature Workflow UX
 
@@ -213,7 +217,11 @@ Every substantial policy-learning slice should be able to pass this workflow:
 1. `tachi_task(action="intake", issue_ref=...)`
 2. `tachi_task(action="brief", flow_id=...)`
 3. `tachi_task(action="status", flow_id=...)` (the cycle view is nested under `status.cycle`)
-4. Operator-only static diagnostics (`tachi card list/show`) and `tachi_skill(action="loadout")` are separate surfaces when needed; the model-facing Task facade does not inspect profile/card projections.
+4. Operator-only static diagnostics (`tachi card list/show`) are a separate
+   surface when needed; the model-facing Task facade does not inspect
+   profile/card projections. (`tachi_skill(action="loadout")` is retired by
+   #1690 C3; `tachi_skill(action="discover"|"run")` is the surviving static
+   surface.)
 6. launch the host harness's native subagent with the frozen packet; use the
    admin/operator external staffing exception only when a proven boundary
    requirement exceeds host-native guarantees
@@ -244,21 +252,20 @@ As of 2026-06-28, the baseline includes:
   `review_proposal`, and `apply_proposals`, with human approval required before
   durable route-policy rules are persisted;
 - sensitive file-context risk escalation;
-- skill loadout fields on profiles;
-- `tachi_skill(action="bundle"|"loadout")` maps worker tasks and dispatch
-  profiles to sparse skill loadouts plus capability bundles;
-- capability bundle auto-injection is visible in dispatch prompt artifacts and
-  can be disabled per dispatch;
-- `tachi_skill(action="loadout")` includes live `/eval` feedback summaries,
-  sample thresholds, and guidance before any loadout evolution proposal is made;
+- skill loadout fields on profiles (static reviewed baseline only);
+- `tachi_skill(action="discover"|"run")` serves reviewed static skills; the
+  retired `bundle`/`loadout`/`from_pattern` actions and capability-bundle
+  auto-injection are gone (#1690 C3 delete list: "bundle / loadout /
+  from_pattern intelligence", "automatic capability-bundle injection");
 - `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` includes
-  human-reviewed `loadout_evolution` proposals once profile samples,
-  verification, and observed skill usage pass the evidence thresholds, then
-  projects approved signature-skill, passive-trait, and evidence-contract
-  changes into durable profile/card overlays;
-- MBIT cards include stats plus reviewed card-risk projections for learned
-  weakness markers and skill demotion targets, and merged weak-against signals
-  affect route recommendation scoring;
+  human-reviewed evidence-contract proposals once profile samples and
+  verification pass the evidence thresholds, then projects approved
+  evidence-requirement changes into durable profile/card overlays — the
+  skill-generation/promotion/evolution pipelines that used to ride this
+  surface are retired end-to-end by #1690 C3, and any eval-informed skill
+  future belongs to #1675, never to auto-minted loadout/profile projections;
+- MBIT-card and loadout-evolution machinery is retired (#1690 C3); the static
+  reviewed profile baseline is what routing and prompts consume;
 - credentialed `opencode_builder` profile;
 - feature lifecycle: `tachi_task` owns `intake` / `status` (cycle view);
   `tachi_gh` owns `close_loop` (including its dry-run reference/promotion
