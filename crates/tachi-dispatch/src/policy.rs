@@ -271,12 +271,13 @@ pub fn profile_eval_feedback_json(
         ));
     } else {
         guidance.push(
-            "evidence_available: profile has enough live samples for loadout review".to_string(),
+            "evidence_available: profile has enough live samples for evidence-contract review"
+                .to_string(),
         );
     }
     if failure_count > 0 {
         guidance.push(format!(
-            "caution: {} failures present before promoting signature skills",
+            "caution: {} failures present before proposing evidence-contract changes",
             failure_count
         ));
     }
@@ -285,7 +286,7 @@ pub fn profile_eval_feedback_json(
     }
     if avg_retry_count.unwrap_or(0.0) >= 1.0 {
         guidance
-            .push("review_required: retry count suggests loadout or prompt friction".to_string());
+            .push("review_required: retry count suggests prompt or process friction".to_string());
     }
     if verification_rate.unwrap_or(0.0) < 0.50 && profile_samples > 0 {
         guidance.push("evidence_gap: completions need stronger verification evidence".to_string());
@@ -296,8 +297,11 @@ pub fn profile_eval_feedback_json(
         && avg_retry_count.unwrap_or(0.0) < 1.0
         && success_rate.or(useful_rate).unwrap_or(0.0) >= 0.80
     {
+        // #1690 C3: the loadout/skill-promotion pipeline is retired — the
+        // stable-profile signal now only feeds the surviving evidence-contract
+        // proposals (packet-carry enforcement), never skill promotion.
         guidance.push(
-            "promotion_candidate: stable profile feedback can seed a reviewed loadout proposal"
+            "evolution_candidate: stable profile feedback can seed a reviewed evidence-contract proposal"
                 .to_string(),
         );
     }
