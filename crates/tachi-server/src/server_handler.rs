@@ -164,7 +164,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
         "runtime_info"
             | "tachi_status"
             | "tachi_tools"
-            | "tachi_briefing"
             | "tachi_component"
             | "tachi_web_search"
             | "vault_status"

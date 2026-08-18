@@ -141,16 +141,6 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Standalone skill execution compatibility route. Prefer canonical tachi_skill(action='run') for new callers; this direct run_skill route remains callable for backcompat."
-    )]
-    pub(crate) async fn run_skill(
-        &self,
-        Parameters(params): Parameters<RunSkillParams>,
-    ) -> Result<String, String> {
-        handle_run_skill(self, params).await
-    }
-
-    #[tool(
         description = "Distill a completed task trajectory into a reusable Skill, persist a permanent skill snapshot, and register/update the distilled Hub Skill."
     )]
     pub(crate) async fn distill_trajectory(
@@ -200,16 +190,6 @@ impl MemoryServer {
         handle_recommend_toolchain(self, params).await
     }
 
-    #[tool(
-        description = "Standalone capability bundle preparation compatibility route. Prefer canonical tachi_skill(action='bundle') for new callers; this direct prepare_capability_bundle route remains callable for backcompat."
-    )]
-    pub(crate) async fn prepare_capability_bundle(
-        &self,
-        Parameters(params): Parameters<PrepareCapabilityBundleParams>,
-    ) -> Result<String, String> {
-        handle_prepare_capability_bundle(self, params).await
-    }
-
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]
     pub(crate) async fn tachi_audit_log(
         &self,
@@ -236,5 +216,22 @@ impl MemoryServer {
         Parameters(params): Parameters<HubDisconnectParams>,
     ) -> Result<String, String> {
         handle_hub_disconnect(self, params).await
+    }
+}
+
+#[allow(dead_code)]
+impl MemoryServer {
+    pub(crate) async fn run_skill(
+        &self,
+        Parameters(params): Parameters<RunSkillParams>,
+    ) -> Result<String, String> {
+        handle_run_skill(self, params).await
+    }
+
+    pub(crate) async fn prepare_capability_bundle(
+        &self,
+        Parameters(params): Parameters<PrepareCapabilityBundleParams>,
+    ) -> Result<String, String> {
+        handle_prepare_capability_bundle(self, params).await
     }
 }

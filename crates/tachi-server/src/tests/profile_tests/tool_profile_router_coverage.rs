@@ -144,13 +144,11 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     // exist. "tachi_handoff" (below) survives as a non-admin write route.
     "ingest_event",
     "sync_memories",
-    "tachi_complete",
     "tachi_domain_adapter",
     "tachi_handoff",
     "tachi_memory",
     "tachi_orchestrator",
     "tachi_verify",
-    "tachi_save",
     "tachi_wiki_write",
 ];
 
@@ -161,7 +159,9 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "find_similar_memory",
     "get_memory",
     "post_card",
+    "prepare_capability_bundle",
     "remember",
+    "run_skill",
     "save_memory",
     "search_memory",
     "section9_review",
@@ -170,8 +170,11 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "shell_get_policy",
     "shell_list_policies",
     "shell_exec_audit",
+    "tachi_briefing",
+    "tachi_complete",
     "tachi_plan",
     "tachi_progress_check",
+    "tachi_save",
     "tachi_task_brief",
     "update_card",
     "wiki_browse",
@@ -257,9 +260,6 @@ fn every_non_admin_write_tool_is_bundled_and_invalidates_cache() {
             "non-admin write tool '{tool_name}' must invalidate the read cache"
         );
     }
-
-    assert!(!tool_matches_bundle("tachi_complete", ToolBundle::Observe));
-    assert!(tool_matches_bundle("tachi_complete", ToolBundle::Remember));
 }
 
 #[test]
@@ -366,7 +366,7 @@ fn profile_retired_direct_tools_stay_admin_only() {
 }
 
 #[test]
-fn standalone_skill_entrypoints_stay_routable_but_point_to_tachi_skill() {
+fn skill_facade_advertises_canonical_actions() {
     let descriptions = native_route_descriptions();
 
     let tachi_skill = descriptions
@@ -379,30 +379,6 @@ fn standalone_skill_entrypoints_stay_routable_but_point_to_tachi_skill() {
     assert!(
         tachi_skill.contains("action='bundle'"),
         "tachi_skill description should advertise canonical bundle action: {tachi_skill}"
-    );
-
-    let run_skill = descriptions
-        .get("run_skill")
-        .expect("run_skill compatibility route should stay registered");
-    assert!(
-        run_skill.contains("compatibility route"),
-        "run_skill description should mark it as a compatibility route: {run_skill}"
-    );
-    assert!(
-        run_skill.contains("tachi_skill(action='run')"),
-        "run_skill description should name the canonical tachi_skill action: {run_skill}"
-    );
-
-    let prepare_bundle = descriptions
-        .get("prepare_capability_bundle")
-        .expect("prepare_capability_bundle compatibility route should stay registered");
-    assert!(
-        prepare_bundle.contains("compatibility route"),
-        "prepare_capability_bundle description should mark it as a compatibility route: {prepare_bundle}"
-    );
-    assert!(
-        prepare_bundle.contains("tachi_skill(action='bundle')"),
-        "prepare_capability_bundle description should name the canonical tachi_skill action: {prepare_bundle}"
     );
 }
 

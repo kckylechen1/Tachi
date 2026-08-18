@@ -98,7 +98,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
-    "prepare_capability_bundle",
     "tachi_wiki_search",
     "list_memories",
     "memory_stats",
@@ -150,11 +149,9 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_wiki_write",
     "tachi_wiki_ingest",
     // Facade tools (write / mixed)
-    "tachi_save",
     "tachi_memory",
     "tachi_domain_adapter",
     "tachi_handoff",
-    "tachi_complete",
     "tachi_orchestrator",
     "tachi_task",
     "tachi_wiki",
@@ -204,7 +201,6 @@ const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
-    "prepare_capability_bundle",
     "tachi_wiki_search",
     "list_memories",
     "memory_stats",
@@ -476,7 +472,6 @@ mod tests {
             "tachi_handoff",
             "tachi_orchestrator",
             "tachi_sandbox",
-            "tachi_complete",
         ] {
             assert!(
                 dlq_unsafe(tool, Some("anything")),

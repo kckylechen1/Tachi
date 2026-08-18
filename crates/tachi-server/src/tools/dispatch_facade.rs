@@ -21,19 +21,14 @@ impl MemoryServer {
     ) -> Result<String, String> {
         crate::agent_eval::handle_agent_eval(self, params).await
     }
+}
 
-    #[tool(
-        description = "Declare task completion and write an entry to the eval ledger. Records agent, outcome, duration, cost, skills used, and (optionally) trajectory/diff for later distillation. Returns a review bundle. Does not auto-merge worktrees."
-    )]
+#[allow(dead_code)]
+impl MemoryServer {
     pub(crate) async fn tachi_complete(
         &self,
         Parameters(params): Parameters<TachiCompleteParams>,
     ) -> Result<String, String> {
-        // #1041 B7: `tachi_complete` (unlike `tachi_task`) is never in
-        // `session_identity::project_defaults_to_bound_project`'s list, so
-        // `enforce_session_project` never auto-injects a default `project=`
-        // for this tool — a present `project` here is always the direct
-        // caller's own choice.
         let project_explicit = params.project.is_some();
         crate::complete_ops::handle_tachi_complete(self, params, project_explicit).await
     }
