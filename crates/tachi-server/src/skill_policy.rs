@@ -1,4 +1,8 @@
-use serde_json::Value;
+// Stage/skill auto-derivation helpers (`dispatch_stage_skills`,
+// `append_builtin_sops`) were retired in #1690 C3 S1: a dispatch's skills
+// resolve ONLY from the explicit `params.skills` param plus the profile's
+// STATIC reviewed list. The consts below survive for `is_native_skill` (used by
+// the copilot briefing's static intent-map projection) and the profile tests.
 
 pub(crate) const SUPERPOWER_BRAINSTORMING: &str = tachi_dispatch::SUPERPOWER_BRAINSTORMING;
 pub(crate) const SUPERPOWER_WRITING_PLANS: &str = tachi_dispatch::SUPERPOWER_WRITING_PLANS;
@@ -48,30 +52,6 @@ pub(crate) fn dispatch_stage_instruction(stage_key: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn dispatch_stage_skills(stage_key: &str) -> Vec<String> {
-    match stage_key {
-        "brainstorm" => ids(&[SUPERPOWER_BRAINSTORMING, WAZA_THINK]),
-        "plan" | "auto" => ids(&[SUPERPOWER_WRITING_PLANS, WAZA_THINK]),
-        "dispatch" => ids(&[
-            SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT,
-            SUPERPOWER_EXECUTING_PLANS,
-            WAZA_TACHI,
-        ]),
-        "execute" => ids(&[SUPERPOWER_EXECUTING_PLANS]),
-        "review" => ids(&[
-            SUPERPOWER_REQUESTING_CODE_REVIEW,
-            SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
-            WAZA_CHECK,
-        ]),
-        "ship" => ids(&[
-            SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
-            SUPERPOWER_FINISHING_BRANCH,
-            WAZA_CHECK,
-        ]),
-        _ => Vec::new(),
-    }
-}
-
 pub(crate) fn is_native_skill(id: &str) -> bool {
     matches!(
         id,
@@ -102,33 +82,35 @@ pub(crate) fn dedupe_preserve_order(items: &mut Vec<String>) {
     items.retain(|item| seen.insert(item.clone()));
 }
 
-pub(crate) fn append_builtin_sops(skills: &mut Vec<String>, sops: impl Iterator<Item = Value>) {
-    for sop in sops {
-        let Some(id) = sop.get("id").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        if id.starts_with("skill:") && is_native_skill(id) {
-            skills.push(id.to_string());
-        }
-    }
-    dedupe_preserve_order(skills);
-}
-
-fn ids(values: &[&str]) -> Vec<String> {
-    values.iter().map(|value| (*value).to_string()).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// #1690 C3 S1 re-anchor: the stage→skills map is retired, so the
+    /// executor-vs-planner skill split the old map guarded now lives in the
+    /// profiles' STATIC reviewed skill lists — the only surviving skill source
+    /// for a dispatch. An executor profile carries the execution skill and NOT
+    /// the subagent-factory skill; the planner carries the subagent factory.
     #[test]
-    fn dispatch_policy_keeps_subagent_factory_on_parent_dispatch() {
-        let dispatch = dispatch_stage_skills("dispatch");
-        assert!(dispatch.contains(&SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT.to_string()));
+    fn executor_profiles_carry_execution_skills_but_not_the_subagent_factory() {
+        let impl_profile =
+            tachi_dispatch::resolve_dispatch_profile("glm_impl").expect("glm_impl profile");
+        let impl_skills = tachi_dispatch::profile_required_skill_ids(impl_profile);
+        assert!(
+            impl_skills.contains(&SUPERPOWER_EXECUTING_PLANS.to_string()),
+            "executor static skills must carry the execution skill: {impl_skills:?}"
+        );
+        assert!(
+            !impl_skills.contains(&SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT.to_string()),
+            "executor static skills must NOT carry the subagent factory: {impl_skills:?}"
+        );
 
-        let execute = dispatch_stage_skills("execute");
-        assert!(!execute.contains(&SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT.to_string()));
-        assert!(execute.contains(&SUPERPOWER_EXECUTING_PLANS.to_string()));
+        let plan_profile =
+            tachi_dispatch::resolve_dispatch_profile("claude_plan").expect("claude_plan profile");
+        let plan_skills = tachi_dispatch::profile_required_skill_ids(plan_profile);
+        assert!(
+            plan_skills.contains(&SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT.to_string()),
+            "planner static skills must carry the subagent factory: {plan_skills:?}"
+        );
     }
 }

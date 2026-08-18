@@ -81,16 +81,12 @@ pub(super) fn compile_dispatch_contract(
         command: params.command.clone(),
     })?;
 
-    // Materialize the skill mount BEFORE compiling, so the compiler sees the
-    // list the agent would actually get (profile skills, or the stage defaults
-    // that `resolve_effective_skills` would have derived later). Writing them
-    // back into `params.skills` is behavior-preserving: `resolve_effective_skills`
-    // returns `params.skills` verbatim when it is non-empty, and computes the
-    // same `auto_instruction` either way.
-    if params.skills.is_empty() {
-        let (effective_skills, _) = resolve_effective_skills(params);
-        params.skills = effective_skills;
-    }
+    // Compile the mount from `params.skills` exactly as the caller (or the
+    // profile's STATIC reviewed skills, materialized by
+    // `resolve_and_apply_dispatch_profile` when the caller passed none) left
+    // it. #1690 C3 S1: there is NO stage-default or task-SOP auto-derivation —
+    // the old `resolve_effective_skills` fallback is retired, so an empty list
+    // stays empty all the way to the compiler.
     let skills = params
         .skills
         .iter()

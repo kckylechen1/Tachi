@@ -107,7 +107,9 @@ pub(crate) async fn assemble_prompt_with_trace(
     }
     let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
 
-    // Resolve skills with stage defaults
+    // Resolve skills: explicit param only (profile static skills are already
+    // materialized into `params.skills` by profile resolution; #1690 C3 S1
+    // retired stage-default and task-SOP auto-derivation).
     let (effective_skills, extra_instruction) = resolve_effective_skills(params);
 
     // 1. Context from memory/wiki (v2: default query = task if none provided)
@@ -260,7 +262,8 @@ pub(crate) async fn assemble_prompt_with_trace(
         }
     }
 
-    // 2. Skill invocation contract (effective = explicit + stage/intent defaults)
+    // 2. Skill invocation contract (effective = explicit param + profile static
+    // skills; stage/task-derived defaults retired in #1690 C3 S1)
     let mut skill_sections = Vec::new();
     for skill_id in &effective_skills {
         let section = if let Ok(cap) = server.get_capability(skill_id) {

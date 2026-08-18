@@ -1,26 +1,21 @@
 use crate::tool_params::TachiDispatchParams;
 
-/// Resolve effective skills list, applying stage-based defaults when the caller
-/// did not explicitly provide skills.
+/// Resolve the effective skills list. Per #1690 C3 S1, skills come ONLY from
+/// the explicit `params.skills` param — which already includes the profile's
+/// STATIC reviewed skill list (`common_skills` + `signature_skills`,
+/// materialized by `resolve_and_apply_dispatch_profile` when the caller passed
+/// none). There is NO automatic derivation from the stage or from task-selected
+/// SOPs: stage defaults and task-SOP promotion are retired.
+///
+/// The stage key is an explicit caller-chosen param, so its advisory
+/// instruction (e.g. the "plan first" line for stage=auto) is still rendered:
+/// that is a projection of the explicit stage choice, not skill selection.
 pub(in crate::dispatch_ops) fn resolve_effective_skills(
     params: &TachiDispatchParams,
 ) -> (Vec<String>, Option<String>) {
     let stage_key = crate::skill_policy::dispatch_stage_key(params.stage.as_deref());
     let auto_instruction = crate::skill_policy::dispatch_stage_instruction(&stage_key);
-
-    if !params.skills.is_empty() {
-        return (params.skills.clone(), auto_instruction);
-    }
-
-    let mut skills = crate::skill_policy::dispatch_stage_skills(&stage_key);
-
-    if stage_key != "brainstorm" {
-        let route = crate::copilot_ops::build_task_brief_routing(&params.task);
-        crate::skill_policy::append_builtin_sops(&mut skills, route.selected_sops.into_iter());
-    }
-
-    crate::skill_policy::dedupe_preserve_order(&mut skills);
-    (skills, auto_instruction)
+    (params.skills.clone(), auto_instruction)
 }
 
 pub(super) fn render_skill_invocation_contract(
