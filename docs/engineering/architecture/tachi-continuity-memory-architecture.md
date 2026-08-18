@@ -26,7 +26,7 @@ Because this bridge can drift toward the user's short-term feedback at the expen
 
 ### 1.1 Core invariant: one ledger, many read models
 
-Continuity memory is an **append-only evidence substrate** plus projected read models. Pattern, timeline, bonding, affect, lorebook/world-book, eval, wiki, and skill crystallization share one logical event protocol and provenance model, not isolated cache semantics. Physically isolated trust-domain partitions are required for private user, relationship, and journal material; “one ledger” does not mean one readable database.
+Continuity memory is an **append-only evidence substrate** plus projected read models. Pattern, timeline, bonding, affect, lorebook/world-book, eval, and wiki share one logical event protocol and provenance model, not isolated cache semantics. The event protocol itself survives; the skill-crystallization leg is **RETIRED by #1690 C3** — promotion emits wiki drafts and agent-profile proposals only, never skill candidates. Physically isolated trust-domain partitions are required for private user, relationship, and journal material; “one ledger” does not mean one readable database.
 
 This means:
 
@@ -325,7 +325,7 @@ A wiki page derived from a pattern must retain a `pattern_ref` link. It is **not
 
 ### 3.3 Skill — pattern execution path
 
-Skill is the **executable crystallization** of patterns. Tachi has a complete skill system (`hub_register`, `tachi_skill(action='run'|'discover')`). The retired "second model brain" surfaces that used to ride here — `run_skill` (native alias), `recommend_skill`, `skill_evolve`, and `tachi_skill(action='from_pattern')` — are deleted end-to-end by #1690 C3 (delete list: "skill recommendation and auto-selection", "skill generation"). Pattern memory is a **read-model source for reviewed artifacts**, not an evidence-driven skill-selection layer.
+Skill **was** the executable crystallization of patterns; that crystallization leg is **RETIRED by #1690 C3** — promotion emits wiki drafts and agent-profile proposals only, never skill candidates. This section is kept as a historical record of the retired path. Tachi has a complete skill system (`hub_register`, `tachi_skill(action='run'|'discover')`). The retired "second model brain" surfaces that used to ride here — `run_skill` (native alias), `recommend_skill`, `skill_evolve`, and `tachi_skill(action='from_pattern')` — are deleted end-to-end by #1690 C3 (delete list: "skill recommendation and auto-selection", "skill generation"). Pattern memory is a **read-model source for reviewed artifacts**, not an evidence-driven skill-selection layer.
 
 The two integration modes once planned here are both retired:
 

@@ -123,7 +123,7 @@ Deferred until needed:
 This model reuses what already exists instead of creating a parallel system.
 
 1. **Dispatch profiles are Cards.**
-- `DispatchProfileDef` in `crates/tachi-server/src/dispatch_profile.rs`
+- `DispatchProfileDef` in `crates/tachi-dispatch/src/profiles.rs:24`
   already carries `role`, `stage`, `common_skills`, `signature_skills`,
   `forbidden_skills`, `evidence_required`, `strong_against`, and
   `weak_against`.
