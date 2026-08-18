@@ -46,10 +46,9 @@ const DISTINCT_REFERENCE_CAP: usize = 64;
 
 /// The most characters of a caller-supplied reference the gate retains.
 ///
-/// Sized like `MAX_FINISH_REASON_CHARS`, and for the same reason: every real
-/// model reference is a short token (`deepseek-reasoner`, `chat.premium`,
-/// `lane.summary`), so this is generous for the honest case and still a bound
-/// for the hostile one.
+/// Real model references are short tokens (`deepseek-reasoner`,
+/// `chat.premium`, `lane.summary`), so 64 characters is generous for the
+/// honest case while still bounding hostile input retained in memory or logs.
 const MAX_REFERENCE_CHARS: usize = 64;
 
 /// A caller-supplied reference, bounded and stripped of control characters.
