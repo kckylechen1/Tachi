@@ -32,30 +32,21 @@ fn dispatch_profile_selects_backend_and_mcp_contract() {
     );
     let profile_payload = profile_json(resolve_dispatch_profile("claude_plan").unwrap());
     assert_eq!(profile_payload["card_archetype"], json!("raven"));
-    assert_eq!(profile_payload["mbit_card"]["archetype"], json!("raven"));
+    assert_eq!(profile_payload["authority"]["write_code"], json!(false));
     assert_eq!(
-        profile_payload["mbit_card"]["authority"]["write_code"],
-        json!(false)
-    );
-    assert_eq!(
-        profile_payload["mbit_card"]["guidance"]["superpowers"][0],
+        profile_payload["guidance"]["superpowers"][0],
         json!(SUPERPOWER_WRITING_PLANS)
     );
-    assert!(profile_payload["mbit_card"]["moves"]["waza"]
+    assert!(profile_payload["moves"]["waza"]
         .as_array()
         .expect("waza moves")
         .contains(&json!(WAZA_THINK)));
     assert_eq!(
-        profile_payload["mbit_card"]["personality"]["risk_control"],
-        profile_payload["mbit_card"]["stats"]["risk_control"]
-    );
-    assert_eq!(
-        profile_json(resolve_dispatch_profile("glm_51_impl").unwrap())["mbit_card"]["archetype"],
+        profile_json(resolve_dispatch_profile("glm_51_impl").unwrap())["card_archetype"],
         json!("scv")
     );
     assert_eq!(
-        profile_json(resolve_dispatch_profile("deepseek_explore").unwrap())["mbit_card"]
-            ["archetype"],
+        profile_json(resolve_dispatch_profile("deepseek_explore").unwrap())["card_archetype"],
         json!("poke")
     );
 }

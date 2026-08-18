@@ -299,7 +299,7 @@ pub fn profile_eval_feedback_json(
     let mut guidance = Vec::new();
     if profile_samples == 0 {
         guidance.push(
-            "low_sample: no live /eval rows for this profile; keep deterministic MBIT loadout"
+            "low_sample: no live /eval rows for this profile; keep deterministic baseline loadout"
                 .to_string(),
         );
     } else if profile_samples < MIN_LOADOUT_EVOLUTION_SAMPLES {
@@ -859,7 +859,7 @@ fn build_card_risk_evolution_proposals(
                 "operation": "add_card_weakness",
                 "weakness_id": weakness_id,
                 "weakness_label": format!("Repeated friction on {}", row.task_type),
-                "current_card": profile_json(profile).get("mbit_card").cloned().unwrap_or(Value::Null),
+                "current_card": profile_json(profile),
                 "proposed_patch": {
                     "add_weak_against": [row.task_type],
                     "preserve_baseline_weak_against": profile.weak_against,
@@ -882,7 +882,7 @@ fn build_card_risk_evolution_proposals(
                 ),
                 "projection": {
                     "status": "pending_profile_card_projection",
-                    "note": "Human approval records the proposal; apply_proposals projects approved weakness markers into the MBIT/profile card overlay."
+                    "note": "Human approval records the proposal; apply_proposals projects approved weakness markers into the profile card overlay."
                 }
             }));
         }
@@ -980,7 +980,7 @@ fn build_card_risk_evolution_proposals(
             ),
             "projection": {
                 "status": "pending_profile_card_projection",
-                "note": "Human approval records the proposal; apply_proposals projects approved demotion targets into the MBIT/profile card overlay without mutating baseline skills."
+                "note": "Human approval records the proposal; apply_proposals projects approved demotion targets into the profile card overlay without mutating baseline skills."
             }
         }));
     }

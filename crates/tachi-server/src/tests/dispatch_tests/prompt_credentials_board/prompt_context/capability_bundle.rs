@@ -92,7 +92,7 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
         prompt.contains("evidence_projection_status: applied_overlay"),
         "{prompt}"
     );
-    assert!(prompt.contains("- mbit_card_evolution:"), "{prompt}");
+    assert!(prompt.contains("- profile_card_evolution:"), "{prompt}");
     assert!(
         prompt.contains("projected_weak_against: plan_request"),
         "{prompt}"

@@ -344,7 +344,7 @@ pub struct ResolvedDispatchProfile {
     pub credential_profiles: Vec<String>,
     pub route_explanation: Vec<String>,
     pub host_adapter: Option<String>,
-    pub mbit_card: Option<Value>,
+    pub profile_card: Option<Value>,
     /// Frozen at resolution; runtime consumers copy this receipt instead of
     /// reconstructing identity from profiles that may later change.
     pub identity_receipt: crate::DispatchIdentityReceipt,
@@ -466,7 +466,7 @@ pub fn resolve_and_apply_dispatch_profile<F, S, E, C>(
     params: &mut TachiDispatchParams,
     mut profile_required_skills: S,
     mut profile_evidence_required: E,
-    profile_mbit_card: C,
+    profile_card: C,
     mut harness_attach_ready: F,
 ) -> Result<ResolvedDispatchProfile, String>
 where
@@ -723,7 +723,7 @@ where
         credential_profiles,
         route_explanation,
         host_adapter: profile.and_then(profile_host_adapter).map(str::to_string),
-        mbit_card: profile.map(profile_mbit_card).transpose()?,
+        profile_card: profile.map(profile_card).transpose()?,
         identity_receipt,
     })
 }
@@ -1009,11 +1009,9 @@ pub fn profile_json_with_loadout_and_evidence_contract(
     projected_weak_against: Vec<String>,
     demotion_targets: Vec<String>,
 ) -> Value {
-    let stats = profile_mbit_stats(profile);
     let authority = profile_card_authority_json(profile);
     let guidance = profile_card_guidance_json(&skill_loadout);
     let moves = profile_card_moves_json(&skill_loadout);
-    let personality = profile_card_personality_json(&stats);
     let archetype = profile_card_archetype(profile);
     let model_card = profile
         .model_alias
@@ -1077,26 +1075,15 @@ pub fn profile_json_with_loadout_and_evidence_contract(
         "skill_loadout": skill_loadout,
         "evidence_contract": evidence_contract,
         "weak_against": weak_against,
-        "mbit_card": {
-            "display_name": profile.display_name,
-            "archetype": archetype,
-            "type": [profile.role],
-            "stats": stats,
-            "authority": authority,
-            "guidance": guidance,
-            "moves": moves,
-            "personality": personality,
-            "strong_against": profile.strong_against,
-            "weak_against": weak_against,
-            "projected_weak_against": projected_weak_against,
-            "demotion_targets": demotion_targets,
-            "auto_capability_bundle": profile.auto_capability_bundle,
-            "skill_loadout": skill_loadout,
-            "evidence_contract": evidence_contract,
-            "evolution": {
-                "projection": card_projection,
-            },
-        }
+        "projected_weak_against": projected_weak_against,
+        "demotion_targets": demotion_targets,
+        "authority": authority,
+        "guidance": guidance,
+        "moves": moves,
+        "auto_capability_bundle": profile.auto_capability_bundle,
+        "evolution": {
+            "projection": card_projection,
+        },
     })
 }
 
@@ -1236,27 +1223,6 @@ pub fn profile_card_archetype(profile: &DispatchProfileDef) -> &'static str {
     }
 }
 
-pub fn profile_mbit_stats(profile: &DispatchProfileDef) -> Value {
-    let (precision, speed, cost, creativity, risk_control) = match profile.name {
-        "claude_plan" => (86, 58, 65, 82, 88),
-        "glm_impl" => (78, 76, 52, 70, 72),
-        "opencode_builder" => (74, 82, 48, 68, 70),
-        "codex_55_review" => (95, 55, 72, 60, 95),
-        "codex_53_fast" => (72, 92, 35, 52, 58),
-        "kimi_arch" => (88, 64, 58, 86, 84),
-        "deepseek_explore" => (76, 88, 30, 72, 62),
-        "kimi_ux" => (84, 70, 58, 88, 78),
-        _ => (70, 70, 70, 70, 70),
-    };
-    json!({
-        "precision": precision,
-        "speed": speed,
-        "cost": cost,
-        "creativity": creativity,
-        "risk_control": risk_control,
-    })
-}
-
 pub fn profile_card_authority_json(profile: &DispatchProfileDef) -> Value {
     json!({
         "write_code": profile.write_actions,
@@ -1291,15 +1257,6 @@ pub fn profile_card_moves_json(skill_loadout: &Value) -> Value {
         "waza": profile_card_skills_by_prefix(skill_loadout, "skill:waza-"),
         "external": [],
         "tachi_native": tachi_native,
-    })
-}
-
-pub fn profile_card_personality_json(stats: &Value) -> Value {
-    json!({
-        "curiosity": stats.get("creativity").and_then(Value::as_i64).unwrap_or(70),
-        "caution": stats.get("risk_control").and_then(Value::as_i64).unwrap_or(70),
-        "speed": stats.get("speed").and_then(Value::as_i64).unwrap_or(70),
-        "risk_control": stats.get("risk_control").and_then(Value::as_i64).unwrap_or(70),
     })
 }
 
@@ -1486,12 +1443,9 @@ mod tests {
                 "research_request"
             ])
         );
+        assert_eq!(card["projected_weak_against"], json!(["research_request"]));
         assert_eq!(
-            card["mbit_card"]["projected_weak_against"],
-            json!(["research_request"])
-        );
-        assert_eq!(
-            card["mbit_card"]["demotion_targets"],
+            card["demotion_targets"],
             json!([SUPERPOWER_EXECUTING_PLANS])
         );
     }
@@ -1513,7 +1467,7 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect("compat alias should resolve");
@@ -1550,7 +1504,7 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect("same-lineage override");
@@ -1576,7 +1530,7 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect_err("cross-lineage override must fail closed");
@@ -1675,7 +1629,7 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect("same-family override on a model-less profile must be allowed");
@@ -1693,7 +1647,7 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect_err("cross-family override must fail closed");
@@ -1811,7 +1765,7 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect("opencode builder should resolve");

@@ -223,7 +223,7 @@ pub struct RecommendationProfilePayload {
     pub evidence_contract: Value,
     pub resolved_skills: Vec<String>,
     pub resolved_skill_loadout: Value,
-    pub mbit_card: Value,
+    pub profile_card: Value,
 }
 
 pub fn route_eval_rows(rows: &[EvalRow]) -> Vec<RouteEvalRow> {
@@ -772,7 +772,8 @@ pub fn build_dispatch_recommendation_response(
             "performance_matrix_hits": performance_matrix_hits,
         },
         "route_policy_rules": route_policy_rules,
-        "mbit_card": profile_payload.mbit_card,
+        "profile_card": profile_payload.profile_card.clone(),
+        "mbit_card": profile_payload.profile_card,
         "candidates": candidates,
     }))
 }
