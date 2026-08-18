@@ -255,7 +255,8 @@ async fn tachi_event_promote_creates_review_artifacts_for_mature_pattern() {
     // retired artifact anywhere in the response fails this test. RED
     // pre-repair: review_artifacts.skill_candidate.action == "from_pattern"
     // is present; GREEN post-repair: absent, wiki_draft/agent_profile stay.
-    let projected_serialized = serde_json::to_string(&projected_json).expect("serialize projection");
+    let projected_serialized =
+        serde_json::to_string(&projected_json).expect("serialize projection");
     assert!(
         !projected_serialized.contains("from_pattern"),
         "projection output must not advertise the retired from_pattern action: {projected_json}"

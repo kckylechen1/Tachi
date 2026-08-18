@@ -1248,10 +1248,7 @@ mod tests {
         let card = profile_json_with_overlay(profile, Some(&overlay));
         assert_eq!(
             card["weak_against"],
-            json!([
-                "ambiguous_architecture",
-                "unbounded_refactor",
-            ])
+            json!(["ambiguous_architecture", "unbounded_refactor",])
         );
     }
 

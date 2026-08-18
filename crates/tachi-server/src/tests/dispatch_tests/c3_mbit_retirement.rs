@@ -219,7 +219,9 @@ async fn c3_legacy_add_weak_against_overlay_is_inert() {
         .as_array()
         .expect("weak_against array");
     assert!(
-        !weak_against.iter().any(|entry| entry == &json!("plan_request")),
+        !weak_against
+            .iter()
+            .any(|entry| entry == &json!("plan_request")),
         "legacy add_weak_against must not project into the agents card: {claude_plan}"
     );
     assert_eq!(

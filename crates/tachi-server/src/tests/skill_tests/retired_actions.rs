@@ -181,11 +181,7 @@ async fn delegate_profile_gate_admits_discover_run_and_blocks_retired_actions() 
     })
     .to_string();
     server
-        .with_global_store(|store| {
-            store
-                .hub_register(&doc_skill)
-                .map_err(|e| e.to_string())
-        })
+        .with_global_store(|store| store.hub_register(&doc_skill).map_err(|e| e.to_string()))
         .expect("seed delegate-gate document skill");
 
     let run = server
