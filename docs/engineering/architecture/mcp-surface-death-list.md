@@ -131,7 +131,7 @@ delete wrappers.
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
 | `tachi_wiki_search` | Direct wiki search remains in observe patterns at `patterns.rs:4`; CLI map already routes `tachi_wiki_search` and `wiki_search` to `tachi_wiki(action="search")` at `tool_map.rs:20`. | `tachi_wiki(action="search")` | Fold/delete candidate. | Migrate tests/docs to `tachi_wiki`. |
-| `wiki_search` | Direct alias remains in observe patterns at `patterns.rs:18`; same CLI map at `tool_map.rs:20`. | `tachi_wiki(action="search")` | Hard-retire alias. | Same wiki alias leaf. |
+| `wiki_search` | **DONE:** Retired and removed from MCP tool router and observe patterns. | `tachi_wiki(action="search")` | Hard-retired alias. | — |
 | `tachi_wiki_write` | Direct wiki write remains in remember patterns at `patterns.rs:40`; CLI map routes `tachi_wiki_write` and `wiki_write` to `tachi_wiki(action="write")` at `tool_map.rs:21`. | `tachi_wiki(action="write")` | Fold/delete candidate. | Same wiki alias leaf. |
 | `tachi_browse` | Facade read tool remains in observe patterns at `patterns.rs:23`. | `tachi_wiki(action="browse")` if browse stays a wiki action. | Fold candidate, but not first cut. | Confirm delegate dogfood before removing; delegate currently exposes `tachi_browse`. |
 
