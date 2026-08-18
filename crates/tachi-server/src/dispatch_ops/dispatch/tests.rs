@@ -983,25 +983,57 @@ async fn dispatch_receipt_carries_the_effective_authority_contract() {
 }
 
 /// #1690 C1 discriminator: the retired capability-bundle key must be ABSENT
-/// from the receipt-first status.json seed. The seed is only observable on
-/// disk between the two synchronous `write_status_json` calls in
-/// `handle_tachi_dispatch` (prompt assembly sits between them); every
-/// post-return read sees the enrich write, which already drops the key — so a
-/// runtime read alone can never go RED for the INITIAL write. This source
-/// pin covers what runtime cannot: the seed lives in `dispatch.rs`, so the
-/// key literal anywhere in the writer file fails the test. RED pre-repair:
-/// the seed emits `"capability_bundle": Value::Null`; GREEN post-repair:
-/// absent from the writer entirely.
+/// from every status.json construction/write site in the crate. The
+/// receipt-first seed in `dispatch.rs` is only observable on disk between the
+/// two synchronous `write_status_json` calls in `handle_tachi_dispatch`
+/// (prompt assembly sits between them); every post-return read sees the
+/// enrich write, which already drops the key — so a runtime read alone can
+/// never go RED for the INITIAL write. Every writer goes through the
+/// `write_status_json` funnel (its definition in `dispatch_v2.rs` and all
+/// callers, the `dispatch.rs` seed included), so this pin sweeps every .rs
+/// file in the crate and fails if any funnel file contains the retired key
+/// literal. The concurrent-poll runtime discriminator is not required: the
+/// typed capability-bundle field is deleted, so emission can only come from a
+/// raw `json!` key, and a raw key in any funnel writer is exactly what this
+/// widened source pin catches. This test's own host file is excluded: it
+/// asserts on the key (the runtime receipts below) and never writes
+/// status.json. RED pre-repair: the seed emits `"capability_bundle":
+/// Value::Null`; GREEN: absent from every writer.
 #[test]
-fn c1_retired_capability_bundle_key_is_absent_from_status_writer() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dispatch_ops/dispatch.rs"),
-    )
-    .expect("read dispatch.rs");
+fn c1_retired_capability_bundle_key_is_absent_from_status_writers() {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let own_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dispatch_ops/dispatch/tests.rs");
+    let mut rs_files = Vec::new();
+    collect_rs_files(&src_root, &mut rs_files);
+    let offenders = rs_files
+        .iter()
+        .filter(|path| **path != own_path)
+        .filter(|path| {
+            let source = std::fs::read_to_string(path).expect("read status writer source");
+            source.contains("write_status_json(") && source.contains("capability_bundle")
+        })
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
     assert!(
-        !source.contains("capability_bundle"),
-        "no status.json writer may emit the retired capability_bundle key (#1690 C1)"
+        offenders.is_empty(),
+        "no status.json writer may emit the retired capability_bundle key (#1690 C1), found in: {offenders:?}"
     );
+}
+
+/// Recursive .rs walk used by the C1 writer sweep so the pin follows the
+/// crate layout instead of hard-coding a file list that refactors would
+/// hollow out.
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read src dir") {
+        let entry = entry.expect("src dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
 }
 
 /// #1324: a successful external-staffing start is receipt-first, and the

@@ -258,6 +258,24 @@ fn tachi_event_action_schema_declares_enum_values() {
     assert!(values.contains(&json!("label_eval")));
 }
 
+/// #1690 slice C (oracle J2): `skip_skill_candidate` was a promote payload
+/// knob the public schema advertised long after promotion stopped honoring it
+/// (the continuity promote path only reads `force` / `skip_wiki_draft` /
+/// `skip_agent_profile_proposal`). The retired knob must be absent from the
+/// public TachiEventParams schema — the schemars description is part of the
+/// advertised surface. RED pre-repair: the description string still names it;
+/// GREEN: absent from the serialized schema.
+#[test]
+fn tachi_event_schema_does_not_advertise_retired_skill_candidate_key() {
+    let schema = rmcp::schemars::schema_for!(TachiEventParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let serialized = serde_json::to_string(&value).expect("schema string");
+    assert!(
+        !serialized.contains("skip_skill_candidate"),
+        "public tachi_event schema must not advertise the retired skip_skill_candidate promote knob (#1690 J2): {serialized}"
+    );
+}
+
 /// #1690 C3 discriminator (5a/5b, schema layer): `tachi_skill` survives only
 /// as the thin static discover/run surface — the action enum must contain
 /// exactly {discover, run}, the retired bundle/loadout/from_pattern actions
