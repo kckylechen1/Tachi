@@ -552,7 +552,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 **Goal:** mature patterns become executable skills.
 
 1. Done: `recommend_skill` and lightweight task skill recommendation use active pattern bridge signals and expose `pattern_refs` on matches.
-2. Done: `tachi_skill action=from_pattern` generates skill candidates from active patterns.
+2. Done: `tachi_event action="promote"` generates skill candidates from active patterns.
 3. Done: generated skills are `discoverable`, disabled, pending review, and carry `pattern_ref` metadata.
 4. Done: maturity gate creates review artifacts before promotion to `listed`.
 5. Done: `tachi_event action="promote"` can materialize the pending wiki draft, disabled skill candidate, and agent-profile proposal event for an eligible or forced pattern.

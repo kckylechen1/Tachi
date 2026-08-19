@@ -334,7 +334,7 @@ Implemented substrate:
   mixing them into ordinary memory recall.
 - `tachi_wiki_write include_patterns=true` persists reviewed `pattern_refs` and emits
   `wiki.saved` events.
-- `tachi_skill action="from_pattern"` registers disabled, pending-review,
+- `tachi_event action="promote"` registers disabled, pending-review,
   discoverable skill candidates carrying `pattern_ref` metadata.
 - `recommend_skill` and `tachi_task` lightweight skill recommendation use active
   pattern bridge signals so a query can route through remembered project/user

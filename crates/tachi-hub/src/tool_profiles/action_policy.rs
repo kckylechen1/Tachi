@@ -191,7 +191,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "alerts"
                 | "ask"
         ),
-        "tachi_skill" => matches!(action, "discover" | "run" | "bundle"),
+        "tachi_skill" => matches!(action, "discover" | "run"),
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
         "tachi_a2a" => matches!(action, "respond" | "status"),
         // Non-facade tools on the delegate list (no action concept): tool
@@ -344,7 +344,7 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_skill", Some("run"), profile));
-        assert!(facade_action_allowed(
+        assert!(!facade_action_allowed(
             "tachi_skill",
             Some("bundle"),
             profile
