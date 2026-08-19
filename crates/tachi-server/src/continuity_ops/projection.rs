@@ -667,8 +667,8 @@ fn maturity_review_artifacts(entry: &MemoryEntry, reason: &str) -> Value {
             "pattern_ref": pattern_ref,
         },
         "skill_candidate": {
-            "tool": "tachi_skill",
-            "action": "from_pattern",
+            "tool": "tachi_event",
+            "action": "promote",
             "args": {
                 "pattern_ref": entry.id,
                 "skill_id": format!("skill:pattern-{slug}"),
