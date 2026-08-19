@@ -277,8 +277,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 96633,
-        "total_tool_definition_bytes": 111532,
+        "total_input_schema_bytes": 96643,
+        "total_tool_definition_bytes": 111542,
         "visible_tool_count": 31,
         "visible_tools": [
           "extract_facts",
@@ -315,8 +315,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 44046,
-        "total_tool_definition_bytes": 49414,
+        "total_input_schema_bytes": 44048,
+        "total_tool_definition_bytes": 49416,
         "visible_tool_count": 11,
         "visible_tools": [
           "peer_query",
@@ -333,8 +333,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 91371,
-        "total_tool_definition_bytes": 106833,
+        "total_input_schema_bytes": 91381,
+        "total_tool_definition_bytes": 106843,
         "visible_tool_count": 41,
         "visible_tools": [
           "archive_memory",
@@ -381,8 +381,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 55835,
-        "total_tool_definition_bytes": 64516,
+        "total_input_schema_bytes": 55845,
+        "total_tool_definition_bytes": 64526,
         "visible_tool_count": 15,
         "visible_tools": [
           "peer_query",
@@ -994,7 +994,7 @@
           ]
         },
         "tachi_wiki": {
-          "input_schema_bytes": 2873,
+          "input_schema_bytes": 2883,
           "property_count": 24,
           "property_names": [
             "action",

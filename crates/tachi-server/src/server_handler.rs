@@ -311,6 +311,20 @@ fn narrow_gated_action_schemas(
                     hide_a2a_respond_properties(tool);
                 }
             }
+            "tachi_wiki" => {
+                let allowed: Vec<&str> = tachi_params::TACHI_WIKI_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_wiki", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required Tachi wiki facade action allowed by the active profile.",
+                );
+            }
             _ => {}
         }
     }
