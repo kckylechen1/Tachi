@@ -345,24 +345,6 @@ pub struct ExportSkillsParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct SkillEvolveParams {
-    /// Skill capability ID to evolve (e.g. "skill:code-review")
-    pub skill_id: String,
-
-    /// Optional user feedback about what to improve in the skill
-    #[serde(default)]
-    pub feedback: Option<String>,
-
-    /// If true, automatically activate the new version (default: false)
-    #[serde(default)]
-    pub auto_activate: bool,
-
-    /// If true, perform a dry-run — return the proposed improved prompt without persisting (default: false)
-    #[serde(default)]
-    pub dry_run: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ChainStep {
     /// Skill capability ID (e.g. "skill:summarize")
     pub skill_id: String,

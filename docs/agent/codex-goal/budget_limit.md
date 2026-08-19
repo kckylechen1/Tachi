@@ -25,6 +25,6 @@ Instead:
 1. **Summarize useful progress** made so far.
 2. **Identify remaining work** or blockers.
 3. **Leave a clear next step** for the operator to continue.
-4. **Report final status** via `tachi_complete` with outcome "partial" and detailed notes about what remains.
+4. **Report final status** via `tachi_task(action="complete")` with outcome "partial" and detailed notes about what remains.
 
-Do not call `tachi_complete` with status "success" unless the goal is actually complete within the existing work.
+Do not call `tachi_task(action="complete")` with outcome "success" unless the goal is actually complete within the existing work.

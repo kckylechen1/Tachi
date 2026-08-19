@@ -356,10 +356,6 @@ async fn tachi_event_promote_creates_review_artifacts_for_mature_pattern() {
         json!("/wiki/drafts/patterns/promote-continuity")
     );
     assert_eq!(
-        promoted_json["skill_candidate"]["review_status"],
-        json!("pending")
-    );
-    assert_eq!(
         promoted_json["agent_profile_proposal"]["event_type"],
         json!("agent_profile.proposal")
     );

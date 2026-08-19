@@ -37,6 +37,6 @@ Before deciding that the goal is achieved, you MUST perform a completion audit a
 - Do not rely on intent, partial progress, elapsed effort, memory of earlier work, or a plausible final answer as proof of completion.
 - Only mark the goal achieved when the audit shows that the objective has actually been achieved and no required work remains.
 - If any requirement is missing, incomplete, or unverified, keep working instead of marking complete.
-- If the objective is achieved, call `tachi_complete` with status "success" and include the audit checklist in the notes.
-- Do not call `tachi_complete` unless the goal is complete.
+- If the objective is achieved, call `tachi_task(action="complete")` with outcome "success" and include the audit checklist in the notes.
+- Do not call `tachi_task(action="complete")` unless the goal is complete.
 - Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.

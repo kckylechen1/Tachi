@@ -574,11 +574,11 @@ not a model-facing Memory action and is not hidden inside `save`.
 
 ### Handoff
 
-`tachi_handoff(action='promote_issue')` — the only surviving handoff action (#1099 retired `handoff_leave`/`handoff_check`; use `tachi_a2a(action='respond')` or `tachi_orchestrator(action='handoff_write'|'handoff_read')` instead).
+`tachi_handoff(action='promote_issue')` — the only surviving handoff action (#1099 retired `handoff_leave`/`handoff_check`; use `tachi_a2a(action='respond')` for same-host responses and `tachi_task` for durable task continuity).
 
 ### Kanban (Inter-Agent)
 
-`post_card`, `check_inbox`, `update_card`
+Kanban state is internal; model-facing task state uses `tachi_task(action='status'|'board')`.
 
 ### Vault (Encrypted Secrets)
 
@@ -670,21 +670,21 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Recommendations
 
-`recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`
+Use `tachi_skill(action='discover'|'run')` for reviewed static skills and `tachi_tune(action='route_simulate')` for operator routing analysis.
 
 ### Facade & Delegation
 
-`tachi_memory`, `tachi_web_search`, `tachi_save`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_verify`, `tachi_complete`
+`tachi_memory`, `tachi_web_search`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_verify`
 
 *(Compatibility/read-only helpers are kept behind the admin profile; daily agent surfaces should use the facade tools above.)*
 
 ### Wiki System
 
-`wiki_lint`, `tachi_wiki`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_search`, `tachi_browse`
+`wiki_lint`, `tachi_wiki`, `tachi_wiki_write`, `tachi_wiki_search`, `tachi_browse`
 
 ### Utilities
 
-`skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
+`chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
 
 Default `tachi doctor` is the canonical read-only diagnostic owner. It does not
 write the manifest, database, sidecars, cache, or daily markers; `--fix` and
@@ -699,10 +699,10 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 
 | Profile | Exposed surface | Best for |
 |---|---|---|
-| `standard` | Daily agent-intent surface: `tachi_save`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. `tachi_staff` and manual native-eval intake are hidden. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). Ordinary delegation uses the host's native subagent. |
-| `coordinate` | `remember` + `coordinate` bundles: adds advanced handoff/workflow/orchestrator/agents/staff tools. Tachi-owned staffing (`tachi_staff(action='start', task='review the API surface and write findings to result.md', staffing_reason='native_subagent_unavailable')`) remains operator-only. | Advanced coordination and adapter workflows. |
+| `standard` | Daily agent-intent surface: `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, and `tachi_tools`. `tachi_staff` and manual native-eval intake are hidden. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). Ordinary delegation uses the host's native subagent. |
+| `coordinate` | `remember` + `coordinate` bundles: adds advanced handoff/workflow/agents/staff tools. Tachi-owned staffing (`tachi_staff(action='start', task='review the API surface and write findings to result.md', staffing_reason='native_subagent_unavailable')`) remains operator-only. | Advanced coordination and adapter workflows. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
-| `delegate` | Curated 11-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_wiki(action='search'|'browse'|'read')`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run')`, and read-only `peer_query`. Standalone `run_skill` is a legacy compatibility route outside the default delegate profile. | Worker subagents spawned via `tachi_staff(action='start')`. |
+| `delegate` | Curated 10-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_skill(action='discover'|'run')`, and read-only `peer_query`. The broader `tachi_wiki` facade remains gated pending #1691. | Worker subagents spawned via `tachi_staff(action='start')`. |
 | `admin` | Full catalog, including explicitly justified durable/remote Tachi dispatch. | Maintenance, development, and operator-approved execution exceptions. |
 
 Host aliases:

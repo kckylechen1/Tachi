@@ -1,7 +1,7 @@
 use memcore::{AuthorityLevel, EffectScope, MemoryEntry, ProjectionKind, TachiEventRecord};
 use serde_json::{json, Value};
 
-use crate::tool_params::{TachiEventParams, TachiSkillParams, WikiWriteParams};
+use crate::tool_params::{TachiEventParams, WikiWriteParams};
 use crate::MemoryServer;
 use memory_server_runtime::trim_opt;
 
@@ -238,35 +238,6 @@ async fn create_wiki_draft(
     serde_json::from_str::<Value>(&response).map_err(|e| format!("parse wiki draft response: {e}"))
 }
 
-async fn create_skill_candidate(
-    server: &MemoryServer,
-    params: &TachiEventParams,
-    pattern: &MemoryEntry,
-    slug: &str,
-) -> Result<Value, String> {
-    let response = crate::hub_ops::handle_skill_from_pattern(
-        server,
-        &TachiSkillParams {
-            action: "from_pattern".to_string(),
-            query: Some(pattern.id.clone()),
-            cap_type: None,
-            enabled_only: None,
-            limit: Some(20),
-            skill_id: None,
-            args: Some(json!({
-                "pattern_ref": pattern.id,
-                "skill_id": format!("skill:pattern-{slug}"),
-                "name": format!("Pattern: {}", pattern.summary),
-                "description": format!("Reviewable skill candidate derived from {}", pattern.path),
-                "project": trim_opt(&params.project),
-            })),
-        },
-    )
-    .await?;
-    serde_json::from_str::<Value>(&response)
-        .map_err(|e| format!("parse skill candidate response: {e}"))
-}
-
 fn emit_agent_profile_proposal(
     server: &MemoryServer,
     params: &TachiEventParams,
@@ -331,11 +302,9 @@ pub(crate) async fn promote_pattern_review_artifacts(
     let gate = promotion_gate(&pattern);
     let slug = promotion_slug(&pattern);
     let wiki_enabled = !payload_bool(params.payload.as_ref(), "skip_wiki_draft");
-    let skill_enabled = !payload_bool(params.payload.as_ref(), "skip_skill_candidate");
     let profile_enabled = !payload_bool(params.payload.as_ref(), "skip_agent_profile_proposal");
     let planned = json!({
         "wiki_draft": wiki_enabled,
-        "skill_candidate": skill_enabled,
         "agent_profile_proposal": profile_enabled,
     });
     if params.dry_run {
@@ -356,13 +325,6 @@ pub(crate) async fn promote_pattern_review_artifacts(
     } else {
         None
     };
-    let skill_candidate = if skill_enabled {
-        create_skill_candidate(server, params, &pattern, &slug)
-            .await
-            .map(Some)?
-    } else {
-        None
-    };
     let agent_profile_proposal = if profile_enabled {
         emit_agent_profile_proposal(server, params, &pattern, reason, &gate).map(Some)?
     } else {
@@ -377,7 +339,6 @@ pub(crate) async fn promote_pattern_review_artifacts(
         "reason": reason,
         "gate": gate,
         "wiki_draft": wiki_draft.unwrap_or(Value::Null),
-        "skill_candidate": skill_candidate.unwrap_or(Value::Null),
         "agent_profile_proposal": agent_profile_proposal.unwrap_or(Value::Null),
     }))
 }

@@ -1,8 +1,6 @@
 mod call;
 mod discover;
-mod evolve;
 mod export;
-mod pattern_to_skill;
 mod quick_add;
 mod register;
 mod review;
@@ -17,9 +15,7 @@ pub(crate) use call::{
 pub(crate) use discover::{
     handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_stats,
 };
-pub(crate) use evolve::handle_skill_evolve;
 pub(crate) use export::handle_export_skills;
-pub(crate) use pattern_to_skill::handle_skill_from_pattern;
 pub(crate) use quick_add::handle_hub_quick_add;
 pub(crate) use register::handle_hub_register;
 pub(crate) use review::{handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled};
