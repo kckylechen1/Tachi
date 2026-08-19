@@ -498,6 +498,7 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
         let distill_interval_secs: u64 = std::env::var("DISTILL_INTERVAL_SECS")
             .ok()
             .and_then(|value| value.parse().ok())
+            .filter(|&v| v > 0)
             .unwrap_or(86_400);
 
         // Logged at decision time, not after the 60s warmup: a daemon that

@@ -168,7 +168,7 @@ fn delegate_profile_restricts_to_allow_list() {
             // Delegate tools (should pass)
             test_tool("tachi_memory"),
             test_tool("tachi_web_search"),
-            test_tool("tachi_browse"),
+            test_tool("tachi_wiki"),
             test_tool("tachi_unstick"),
             // F3: task facade is on the list; dispatch gated by action policy
             test_tool("tachi_task"),
@@ -179,6 +179,7 @@ fn delegate_profile_restricts_to_allow_list() {
             // Old tools that should be excluded from delegate
             test_tool("tachi_search"),
             test_tool("tachi_save"),
+            test_tool("tachi_browse"),
             // Should be excluded:
             test_tool("tachi_handoff"),
             test_tool("tachi_dispatch"),
@@ -205,7 +206,7 @@ fn delegate_profile_restricts_to_allow_list() {
         vec![
             "tachi_memory".to_string(),
             "tachi_web_search".to_string(),
-            "tachi_browse".to_string(),
+            "tachi_wiki".to_string(),
             "tachi_unstick".to_string(),
             "tachi_task".to_string(),
             "tachi_skill".to_string(),

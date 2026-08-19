@@ -191,6 +191,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "alerts"
                 | "ask"
         ),
+        "tachi_wiki" => matches!(action, "search" | "browse" | "read"),
         "tachi_skill" => matches!(action, "discover" | "run"),
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
         "tachi_a2a" => matches!(action, "respond" | "status"),
@@ -199,8 +200,9 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
         // `peer_query` (#1016 S1) is action-less (its selector is `noun`, gated
         // internally by an exhaustive whitelist) and read-only, so it belongs
         // here rather than in an action-bundle map.
-        "tachi_tools" | "runtime_info" | "tachi_web_search" | "tachi_browse" | "tachi_unstick"
-        | "peer_query" => true,
+        "tachi_tools" | "runtime_info" | "tachi_web_search" | "tachi_unstick" | "peer_query" => {
+            true
+        }
         // Anything else — a tool not on the delegate allow-list at all, or a
         // gated facade we forgot to enumerate above — is denied by default.
         _ => false,
@@ -371,6 +373,11 @@ mod tests {
             Some("consolidate"),
             profile
         ));
+
+        assert!(facade_action_allowed("tachi_wiki", Some("search"), profile));
+        assert!(facade_action_allowed("tachi_wiki", Some("browse"), profile));
+        assert!(facade_action_allowed("tachi_wiki", Some("read"), profile));
+        assert!(!facade_action_allowed("tachi_wiki", Some("write"), profile));
     }
 
     #[test]
@@ -704,7 +711,6 @@ mod tests {
             "tachi_tools",
             "runtime_info",
             "tachi_web_search",
-            "tachi_browse",
             "tachi_unstick",
         ] {
             assert!(facade_action_allowed(tool, None, profile));
