@@ -669,7 +669,8 @@ fn maturity_review_artifacts(entry: &MemoryEntry, reason: &str) -> Value {
         "skill_candidate": {
             "tool": "tachi_event",
             "action": "promote",
-            "args": {
+            "id": entry.id,
+            "payload": {
                 "pattern_ref": entry.id,
                 "skill_id": format!("skill:pattern-{slug}"),
                 "name": format!("Pattern: {}", entry.summary),
@@ -681,12 +682,14 @@ fn maturity_review_artifacts(entry: &MemoryEntry, reason: &str) -> Value {
         "agent_profile_proposal": {
             "tool": "tachi_event",
             "action": "promote",
-            "write": false,
-            "review_status": "pending",
-            "input": {
+            "id": entry.id,
+            "payload": {
                 "pattern_ref": pattern_ref,
                 "reason": reason,
+                "write": false,
             },
+            "write": false,
+            "review_status": "pending",
         },
     })
 }
