@@ -69,7 +69,7 @@ pub(crate) use named::{
 pub(crate) use symlink::{
     ensure_plan_c_canonical_alias_in_home, ensure_plan_c_symlink, ensure_plan_c_symlink_in_home,
     inspect_plan_c_alias_for_local_db, inspect_plan_c_alias_for_local_db_in_home,
-    inspect_plan_c_alias_in_home,
+    inspect_plan_c_alias_in_home, require_plan_c_alias_success,
 };
 #[cfg(all(test, unix))]
 pub(crate) use symlink::{install_plan_c_symlink_hook_for_test, PlanCSymlinkHookGuard};

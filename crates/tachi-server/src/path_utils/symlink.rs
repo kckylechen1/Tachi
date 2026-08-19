@@ -248,6 +248,20 @@ pub(crate) fn ensure_plan_c_canonical_alias_in_home(
     PlanCLinkOutcome::Skipped("Plan C canonical symlink unsupported on non-Unix hosts")
 }
 
+pub(crate) fn require_plan_c_alias_success(outcome: PlanCLinkOutcome) -> Result<(), String> {
+    match outcome {
+        PlanCLinkOutcome::Created(_)
+        | PlanCLinkOutcome::AlreadyLinked
+        | PlanCLinkOutcome::Skipped(_) => Ok(()),
+        PlanCLinkOutcome::SplitBrain(sb) => Err(sb.warning_message()),
+        PlanCLinkOutcome::AliasIntegrity(ai) => Err(ai.warning_message()),
+        PlanCLinkOutcome::Failed { path, error } => Err(format!(
+            "failed to establish Plan C canonical alias at {}: {error}",
+            path.display()
+        )),
+    }
+}
+
 pub(crate) fn inspect_plan_c_alias_for_local_db(local_db: &Path) -> PlanCAliasInspection {
     inspect_plan_c_alias_for_local_db_in_home(local_db, &tachi_home())
 }

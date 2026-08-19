@@ -398,11 +398,13 @@ impl MemoryServer {
                                 migrated.display()
                             ));
                         }
-                        crate::path_utils::ensure_plan_c_canonical_alias_in_home(
-                            &canonical_db,
-                            &root,
-                            tachi_home,
-                        );
+                        crate::path_utils::require_plan_c_alias_success(
+                            crate::path_utils::ensure_plan_c_canonical_alias_in_home(
+                                &canonical_db,
+                                &root,
+                                tachi_home,
+                            ),
+                        )?;
                     }
                     None => {
                         crate::project_db_ops::register_repo_local_manifest_entry_in_home(
@@ -410,11 +412,13 @@ impl MemoryServer {
                             &canonical_name,
                             tachi_home,
                         )?;
-                        crate::path_utils::ensure_plan_c_canonical_alias_in_home(
-                            &canonical_db,
-                            &root,
-                            tachi_home,
-                        );
+                        crate::path_utils::require_plan_c_alias_success(
+                            crate::path_utils::ensure_plan_c_canonical_alias_in_home(
+                                &canonical_db,
+                                &root,
+                                tachi_home,
+                            ),
+                        )?;
                     }
                 }
                 canonical_name

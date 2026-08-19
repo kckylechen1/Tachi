@@ -388,8 +388,10 @@ pub fn scope_hint_for_in_home(path: &Path, tachi_home: &Path) -> String {
     let n = path.to_string_lossy().replace('\\', "/");
     if n.contains("/.tachi/global/")
         || n.contains("/.sigil/global/")
-        || n.contains("/global/tachi-memory.db")
-        || n.contains("/global/memory.db")
+        || n.ends_with("/.tachi/tachi-memory.db")
+        || n.ends_with("/.tachi/memory.db")
+        || n.ends_with("/.sigil/tachi-memory.db")
+        || n.ends_with("/.sigil/memory.db")
     {
         return "global".to_string();
     }

@@ -212,7 +212,9 @@ pub(crate) fn register_repo_local_manifest_entry_in_home(
     if let Some(root) =
         crate::path_utils::plan_c_project_root_from_local_db_in_home(db_path, tachi_home)
     {
-        crate::path_utils::ensure_plan_c_canonical_alias_in_home(db_path, &root, tachi_home);
+        crate::path_utils::require_plan_c_alias_success(
+            crate::path_utils::ensure_plan_c_canonical_alias_in_home(db_path, &root, tachi_home),
+        )?;
     }
     Ok(())
 }
