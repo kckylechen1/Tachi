@@ -325,6 +325,7 @@ fn narrow_gated_action_schemas(
                     "Required Tachi wiki facade action allowed by the active profile.",
                 );
                 if !allowed.contains(&"write") {
+                    hide_wiki_write_properties(tool);
                     tool.description = Some(std::borrow::Cow::Owned(
                         "Stable, reusable knowledge base. action='search': look up lessons, patterns, and how-tos BEFORE debugging from scratch or reaching for web search — a prior lesson may already exist. action='browse': explore available categories. action='read': load a specific entry by path. WHEN: wiki for durable knowledge that helps future sessions (patterns, lessons, decisions, conventions). Use tachi_memory for session-specific facts (decisions, findings, commands for the current task). Pass project to target a named library.".to_string(),
                     ));
@@ -333,6 +334,38 @@ fn narrow_gated_action_schemas(
             _ => {}
         }
     }
+}
+
+fn hide_wiki_write_properties(tool: &mut rmcp::model::Tool) {
+    let mut schema = (*tool.input_schema).clone();
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        schema.clear();
+        schema.insert("not".to_string(), serde_json::json!({}));
+        tool.input_schema = std::sync::Arc::new(schema);
+        return;
+    };
+    for property in [
+        "title",
+        "text",
+        "topic",
+        "summary",
+        "keywords",
+        "entities",
+        "importance",
+        "scope",
+        "metadata",
+        "force",
+        "references",
+        "include_patterns",
+        "pattern_query",
+        "pattern_top_k",
+    ] {
+        properties.remove(property);
+    }
+    tool.input_schema = std::sync::Arc::new(schema);
 }
 
 fn hide_a2a_respond_properties(tool: &mut rmcp::model::Tool) {
@@ -1716,6 +1749,34 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn delegate_wiki_schema_hides_write_only_properties() {
+        let projected = project_tool_definitions(
+            native_tools(),
+            Some(tachi_hub::ToolProfile::delegate()),
+            None,
+        );
+        let wiki_tool = projected
+            .iter()
+            .find(|tool| tool.name.as_ref() == "tachi_wiki")
+            .expect("tachi_wiki is exposed to delegate");
+        let properties = wiki_tool.input_schema["properties"]
+            .as_object()
+            .expect("properties map");
+        for write_field in ["title", "text", "summary", "keywords", "entities", "force"] {
+            assert!(
+                !properties.contains_key(write_field),
+                "write field {write_field} must not be present in delegate wiki schema"
+            );
+        }
+        for read_field in ["action", "query", "category", "path"] {
+            assert!(
+                properties.contains_key(read_field),
+                "read field {read_field} must be present in delegate wiki schema"
+            );
         }
     }
 
