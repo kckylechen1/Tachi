@@ -374,9 +374,18 @@ mod tests {
             profile
         ));
 
-        assert!(facade_action_allowed("tachi_wiki", Some("search"), profile));
-        assert!(facade_action_allowed("tachi_wiki", Some("browse"), profile));
-        assert!(facade_action_allowed("tachi_wiki", Some("read"), profile));
+        assert!(facade_action_allowed("tachi_browse", None, profile));
+        assert!(!facade_action_allowed(
+            "tachi_wiki",
+            Some("search"),
+            profile
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_wiki",
+            Some("browse"),
+            profile
+        ));
+        assert!(!facade_action_allowed("tachi_wiki", Some("read"), profile));
         assert!(!facade_action_allowed("tachi_wiki", Some("write"), profile));
     }
 

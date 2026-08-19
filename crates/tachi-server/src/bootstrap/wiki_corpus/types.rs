@@ -882,13 +882,6 @@ impl RetainedBackup {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum ArtifactRacePoint {
-    Backup,
-    Manifest,
-}
-
 /// One legacy row that was not adopted, with the exact rule that excluded it.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AdoptionSkip {
