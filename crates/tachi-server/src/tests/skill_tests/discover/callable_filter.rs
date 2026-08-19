@@ -48,11 +48,6 @@ async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
             limit: Some(10),
             skill_id: None,
             args: None,
-            profile: None,
-            host: None,
-            skill_limit: None,
-            capability_limit: None,
-            include_section: None,
         }))
         .await
         .expect("tachi_skill discover should succeed");

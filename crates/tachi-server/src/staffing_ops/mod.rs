@@ -40,18 +40,12 @@
 use crate::dispatch_ops::{
     canonical_dir_is_within, dispatch_runs_root, handle_tachi_dispatch, is_valid_dispatch_id,
 };
-use crate::tool_params::{TachiDispatchParams, TachiDispatchReason};
 use crate::MemoryServer;
 use rmcp::schemars::JsonSchema;
 // The `#[derive(JsonSchema)]` macro expands to reference `schemars::...`, so
 // the crate must be in scope under that name.
 use rmcp::schemars;
 use serde_json::Value;
-
-/// Default per-dispatch timeout (seconds) when the Staff request does not
-/// declare one. Mirrors `default_dispatch_timeout` in `tachi-params` (600s);
-/// duplicated locally because the params crate keeps that fn private.
-const DEFAULT_STAFF_DISPATCH_TIMEOUT_SECS: u64 = 600;
 
 /// Minimal semantic request for externally staffing a worker. The model may
 /// only set intent fields here; execution fields (cwd, command, transport,
@@ -67,108 +61,7 @@ const DEFAULT_STAFF_DISPATCH_TIMEOUT_SECS: u64 = 600;
 /// execution-shaped field means an inbound JSON carrying `"cwd": "/evil"` or
 /// `"command": ["rm", "-rf"]` is silently ignored — those names have no field
 /// to bind to, so they cannot leak into the mapped params.
-#[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
-pub(crate) struct StaffStartRequest {
-    /// Task description / prompt for the worker. Required — a Staff request
-    /// with no task is meaningless.
-    pub task: String,
-    /// REQUIRED typed reason execution is leaving the host harness. Admission
-    /// fails closed without it (see the module-level admission-gate docs).
-    /// Reuses [`TachiDispatchReason`] so the vocabulary cannot drift from the
-    /// retired `tachi_task(dispatch)` gate.
-    pub staffing_reason: TachiDispatchReason,
-    /// Semantic dispatch profile hint — resolved through the existing profile
-    /// pipeline, not a raw agent/transport override.
-    #[serde(default)]
-    pub profile: Option<String>,
-    /// Worker/agent backend hint (e.g. "claude", "codex", "custom"). Resolved
-    /// to the canonical `agent` field; never a transport override.
-    #[serde(default)]
-    pub worker: Option<String>,
-    /// Optional named project DB for context search.
-    #[serde(default)]
-    pub project: Option<String>,
-    /// Dispatch stage: "plan" | "execute" | "auto".
-    #[serde(default)]
-    pub stage: Option<String>,
-    /// GitHub issue reference bound to this dispatch.
-    #[serde(default)]
-    pub issue_ref: Option<String>,
-    /// GitHub PR reference bound to this dispatch.
-    #[serde(default)]
-    pub pr_ref: Option<String>,
-    /// Tachi flow id for feature-scoped briefing/dispatch/eval linkage.
-    #[serde(default)]
-    pub flow_id: Option<String>,
-    /// tachi#1675 PR1 Seam B: the `recommendation_id` a prior
-    /// `tachi_dispatch(action='recommend')` call returned, when this start
-    /// was placed on that advice. Optional — absence is itself evidence
-    /// (`route_decisions.assignment_mode` records `unadvised`, never a
-    /// fabricated advisory).
-    #[serde(default)]
-    pub recommendation_ref: Option<String>,
-}
-
-impl StaffStartRequest {
-    /// Map a semantic Staff request onto the canonical dispatch params.
-    ///
-    /// Every execution-shaped field (`cwd`, `command`, `transport`,
-    /// `credentials`, `sandbox`, `allowed_tools`, MCP plumbing, watchdog
-    /// internals) is left at its kernel-side default: `None` / empty / the
-    /// default timeout. Those are resolved by the canonical admission / policy
-    /// / profile pipeline inside `handle_tachi_dispatch`, NEVER set here.
-    ///
-    /// `staffing_reason` IS mapped through (not dropped) — it carries the
-    /// admission contract into `TachiDispatchParams` so the kernel's
-    /// defense-in-depth check and the receipt stamp both see it.
-    ///
-    /// NOTE: `TachiDispatchParams` does NOT derive `Default` (it has 30+ fields
-    /// with non-trivial serde attributes), so this method enumerates every
-    /// field explicitly — same pattern the dispatch tests use for their
-    /// `test_dispatch_params` helper. Any new field added to
-    /// `TachiDispatchParams` will surface as a compile error here, forcing an
-    /// explicit decision about whether Staff should expose it (default: no).
-    fn into_params(self) -> TachiDispatchParams {
-        TachiDispatchParams {
-            task: self.task,
-            // #1319 admission contract: carry the typed reason into the kernel.
-            staffing_reason: self.staffing_reason,
-            agent: self.worker,
-            profile: self.profile,
-            project: self.project,
-            stage: self.stage,
-            issue_ref: self.issue_ref,
-            pr_ref: self.pr_ref,
-            flow_id: self.flow_id,
-            // ── Execution fields: intentionally left at kernel defaults ──────
-            cwd: None,
-            env_id: None,
-            unmanaged_cwd: None,
-            execution_level: None,
-            command: Vec::new(),
-            harness_transport: None,
-            harness_server_url: None,
-            sandbox: None,
-            allowed_tools: Vec::new(),
-            permission_profile: None,
-            inject_tachi_mcp: None,
-            inject_hub_mcps: None,
-            allowed_mcp_servers: Vec::new(),
-            tool_profile: None,
-            mcp_access: None,
-            credential_profiles: Vec::new(),
-            skills: Vec::new(),
-            context_query: None,
-            model: None,
-            completion_predicate: None,
-            max_turns: None,
-            timeout_secs: DEFAULT_STAFF_DISPATCH_TIMEOUT_SECS,
-            auto_capability_bundle: None,
-            verbose: None,
-            inject_card: None,
-        }
-    }
-}
+pub(crate) type StaffStartRequest = tachi_params::StaffAssignmentRequest;
 
 /// Read-only status probe. Only the canonical `dispatch_id` is accepted —
 /// there is no Staff-local id namespace.
@@ -179,7 +72,7 @@ pub(crate) struct StaffStatusRequest {
 
 /// Start a worker via the canonical dispatch kernel.
 ///
-/// Maps the semantic [`StaffStartRequest`] into [`TachiDispatchParams`] and
+/// Maps the semantic [`StaffAssignmentRequest`] into [`TachiDispatchParams`] and
 /// delegates to the single canonical choke-point
 /// [`handle_tachi_dispatch`]. The `staffing_reason` field is required on the
 /// request struct, so a caller that omits it is rejected at deserialization
@@ -212,7 +105,7 @@ pub(crate) async fn staff_start(
     // kernel-side defense-in-depth check inside handle_tachi_dispatch catches
     // any future caller that reaches it without going through this struct.
     let recommendation_ref = request.recommendation_ref.clone();
-    let params = request.into_params();
+    let params = request.into_dispatch_params();
     let raw = handle_tachi_dispatch(server, params).await?;
 
     record_route_decision_best_effort(server, &raw, recommendation_ref.as_deref());
@@ -442,6 +335,7 @@ async fn staff_status_impl(request: &StaffStatusRequest) -> Result<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_params::TachiDispatchReason;
 
     /// Discrimination test: a `StaffStartRequest` JSON that OMITS
     /// `staffing_reason` is REJECTED at deserialization — the field is
@@ -508,9 +402,11 @@ mod tests {
             worker: Some("codex".to_string()),
             project: Some("tachi".to_string()),
             stage: Some("execute".to_string()),
+            execution_level: None,
             issue_ref: Some("o/r#42".to_string()),
             pr_ref: Some("o/r#43".to_string()),
             flow_id: Some("flow_xyz".to_string()),
+            completion_predicate: None,
             recommendation_ref: Some("rec-xyz".to_string()),
         };
         let params = request.into_params();
@@ -586,7 +482,7 @@ mod tests {
         assert_eq!(params.permission_profile, None);
         assert_eq!(params.env_id, None);
         assert_eq!(params.unmanaged_cwd, None);
-        assert_eq!(params.timeout_secs, DEFAULT_STAFF_DISPATCH_TIMEOUT_SECS);
+        assert_eq!(params.timeout_secs, 600);
     }
 
     /// Discrimination test: the v1 schema does NOT expose `dispatch_id` on a

@@ -260,11 +260,6 @@ async fn create_skill_candidate(
                 "description": format!("Reviewable skill candidate derived from {}", pattern.path),
                 "project": trim_opt(&params.project),
             })),
-            profile: None,
-            host: None,
-            skill_limit: None,
-            capability_limit: None,
-            include_section: None,
         },
     )
     .await?;

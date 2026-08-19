@@ -288,11 +288,7 @@ pub(crate) fn facade_action_effect(
         "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
         // Preserve the existing conservative treatment of these facades while
         // making the set exhaustive. Unknown actions receive no metadata.
-        "tachi_skill" => (
-            &[],
-            &[],
-            &["discover", "run", "bundle", "loadout", "from_pattern"],
-        ),
+        "tachi_skill" => (&["discover"], &[], &["run"]),
         "tachi_verify" => (&[], &[], &["start", "record", "status", "board"]),
         _ => return None,
     };

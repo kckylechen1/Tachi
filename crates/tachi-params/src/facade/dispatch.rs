@@ -283,6 +283,240 @@ pub struct TachiDispatchParams {
     pub inject_card: Option<bool>,
 }
 
+// ─── Staffing Ownership Boundaries (Issue #1692 C5) ─────────────────────────
+
+/// Typed public semantic request for staffing (Issue #1692 C5).
+/// Contains only semantic intent, context, and user constraints.
+/// Machine/authority/transport plumbing is strictly omitted.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct StaffAssignmentRequest {
+    /// #1319 admission contract: typed reason execution is leaving the host harness.
+    pub staffing_reason: TachiDispatchReason,
+
+    /// Task description / semantic outcome required from the worker.
+    pub task: String,
+
+    /// Semantic dispatch profile hint (e.g. "claude_plan", "codex_55_review").
+    #[serde(default)]
+    pub profile: Option<String>,
+
+    /// Semantic worker backend hint (e.g. "claude", "codex", "custom").
+    #[serde(default)]
+    pub worker: Option<String>,
+
+    /// Task class/scope hints.
+    #[serde(default)]
+    pub stage: Option<String>,
+
+    /// Declared execution level.
+    #[serde(default)]
+    pub execution_level: Option<ExecutionLevel>,
+
+    /// GitHub issue reference bound to this assignment.
+    #[serde(default)]
+    pub issue_ref: Option<String>,
+
+    /// GitHub PR reference bound to this assignment.
+    #[serde(default)]
+    pub pr_ref: Option<String>,
+
+    /// Tachi flow id for feature-scoped linkage.
+    #[serde(default)]
+    pub flow_id: Option<String>,
+
+    /// Optional named project DB for context search.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Machine-checkable completion predicate for the assignment.
+    #[serde(default)]
+    pub completion_predicate: Option<CompletionPredicate>,
+
+    /// Recommendation reference if this assignment followed prior advice.
+    #[serde(default)]
+    pub recommendation_ref: Option<String>,
+}
+
+impl StaffAssignmentRequest {
+    pub fn from_dispatch_params(params: &TachiDispatchParams) -> Self {
+        Self {
+            staffing_reason: params.staffing_reason,
+            task: params.task.clone(),
+            profile: params.profile.clone(),
+            worker: params.agent.clone(),
+            stage: params.stage.clone(),
+            execution_level: params.execution_level,
+            issue_ref: params.issue_ref.clone(),
+            pr_ref: params.pr_ref.clone(),
+            flow_id: params.flow_id.clone(),
+            project: params.project.clone(),
+            completion_predicate: params.completion_predicate.clone(),
+            recommendation_ref: None,
+        }
+    }
+
+    pub fn into_dispatch_params(self) -> TachiDispatchParams {
+        TachiDispatchParams {
+            task: self.task,
+            staffing_reason: self.staffing_reason,
+            agent: self.worker,
+            profile: self.profile,
+            project: self.project,
+            stage: self.stage,
+            issue_ref: self.issue_ref,
+            pr_ref: self.pr_ref,
+            flow_id: self.flow_id,
+            execution_level: self.execution_level,
+            completion_predicate: self.completion_predicate,
+            cwd: None,
+            env_id: None,
+            unmanaged_cwd: None,
+            command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
+            sandbox: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            allowed_mcp_servers: Vec::new(),
+            tool_profile: None,
+            mcp_access: None,
+            credential_profiles: Vec::new(),
+            skills: Vec::new(),
+            context_query: None,
+            model: None,
+            max_turns: None,
+            timeout_secs: default_dispatch_timeout(),
+            auto_capability_bundle: None,
+            verbose: None,
+            inject_card: None,
+        }
+    }
+
+    pub fn into_params(self) -> TachiDispatchParams {
+        self.into_dispatch_params()
+    }
+}
+
+/// Server-produced admission and policy resolution result (Issue #1692 C5).
+/// Produced strictly by policy/admission gates.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct ResolvedStaffAssignment {
+    pub assignment_id: String,
+    pub staffing_reason: TachiDispatchReason,
+    pub selected_worker: String,
+    pub selected_profile: Option<String>,
+    pub selected_backend: String,
+    pub selected_model: Option<String>,
+    pub host_adapter: Option<String>,
+    pub evidence_required: Vec<String>,
+    pub fallback_chain: Vec<String>,
+    pub route_explanation: Vec<String>,
+    pub identity_receipt: serde_json::Value,
+}
+
+/// Authority-layer output granting permissions, sandbox, credentials, and tools (Issue #1692 C5).
+/// Minted exclusively by authority/resource enforcement layers.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct ExecutionGrant {
+    pub grant_id: String,
+    #[serde(default)]
+    pub env_id: Option<String>,
+    #[serde(default)]
+    pub unmanaged_cwd_allowed: bool,
+    #[serde(default)]
+    pub allowed_cwd: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub credential_profiles: Vec<String>,
+    #[serde(default)]
+    pub mcp_access: Option<DispatchMcpAccessParams>,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub permission_profile: Option<String>,
+    #[serde(default)]
+    pub sandbox: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default = "default_dispatch_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl ExecutionGrant {
+    pub fn from_dispatch_params(params: &TachiDispatchParams, grant_id: impl Into<String>) -> Self {
+        Self {
+            grant_id: grant_id.into(),
+            env_id: params.env_id.clone(),
+            unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
+            allowed_cwd: params.cwd.as_ref().map(std::path::PathBuf::from),
+            credential_profiles: params.credential_profiles.clone(),
+            mcp_access: params.mcp_access.clone(),
+            allowed_tools: params.allowed_tools.clone(),
+            permission_profile: params.permission_profile.clone(),
+            sandbox: params.sandbox.clone(),
+            max_turns: params.max_turns,
+            timeout_secs: params.timeout_secs,
+        }
+    }
+}
+
+/// Backend adapter execution mechanics (Issue #1692 C5).
+/// Consumed strictly by execution backends/adapters.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct LaunchSpec {
+    pub backend: String,
+    pub command: Vec<String>,
+    pub cwd: std::path::PathBuf,
+    pub env_vars: std::collections::HashMap<String, String>,
+    pub prompt: String,
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub harness_transport: Option<String>,
+    #[serde(default)]
+    pub harness_server_url: Option<String>,
+}
+
+/// Append-only observed lifecycle facts for a staffing run (Issue #1692 C5).
+/// Readback and observation only — never caller-authored success.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct StaffRunReceipt {
+    pub dispatch_id: String,
+    #[serde(default)]
+    pub assignment_id: Option<String>,
+    pub state: String,
+    pub run_dir: String,
+    pub suggested_complete_command: serde_json::Value,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub identity_receipt: Option<serde_json::Value>,
+}
+
+impl StaffRunReceipt {
+    pub fn new(
+        dispatch_id: impl Into<String>,
+        run_dir: impl Into<String>,
+        suggested_complete_command: serde_json::Value,
+    ) -> Self {
+        Self {
+            dispatch_id: dispatch_id.into(),
+            assignment_id: None,
+            state: "working".to_string(),
+            run_dir: run_dir.into(),
+            suggested_complete_command,
+            started_at: None,
+            finished_at: None,
+            exit_code: None,
+            identity_receipt: None,
+        }
+    }
+}
+
 // ─── Facade: task completion + eval ledger ───────────────────────────────────
 
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
@@ -820,4 +1054,83 @@ pub struct SignatureRecordParams {
     /// dispatch profile/agent.
     #[serde(default)]
     pub vendor: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staff_assignment_request_roundtrip_and_mapping() {
+        let raw = serde_json::json!({
+            "task": "Refactor staffing types",
+            "staffing_reason": "durable_cross_session",
+            "profile": "claude_plan",
+            "worker": "claude",
+            "stage": "plan",
+            "execution_level": "L1",
+            "issue_ref": "kckylechen1/tachi#1692",
+            "flow_id": "flow-c5",
+        });
+
+        let req: StaffAssignmentRequest = serde_json::from_value(raw).expect("deserializes");
+        assert_eq!(req.task, "Refactor staffing types");
+        assert_eq!(
+            req.staffing_reason,
+            TachiDispatchReason::DurableCrossSession
+        );
+        assert_eq!(req.execution_level, Some(ExecutionLevel::L1));
+
+        let params = req.into_dispatch_params();
+        assert_eq!(params.task, "Refactor staffing types");
+        assert_eq!(
+            params.staffing_reason,
+            TachiDispatchReason::DurableCrossSession
+        );
+        assert_eq!(params.profile.as_deref(), Some("claude_plan"));
+        assert_eq!(params.agent.as_deref(), Some("claude"));
+        assert_eq!(params.execution_level, Some(ExecutionLevel::L1));
+        assert_eq!(params.timeout_secs, 600);
+    }
+
+    #[test]
+    fn execution_grant_from_dispatch_params_extracts_authorities() {
+        let raw = serde_json::json!({
+            "task": "Test grant",
+            "staffing_reason": "explicit_user_request",
+            "cwd": "/workspace/target",
+            "unmanaged_cwd": true,
+            "sandbox": "workspace-write",
+            "permission_profile": "allowlist",
+            "allowed_tools": ["Bash", "Read"],
+            "max_turns": 25,
+            "timeout_secs": 1200,
+        });
+
+        let params: TachiDispatchParams = serde_json::from_value(raw).expect("deserializes");
+        let grant = ExecutionGrant::from_dispatch_params(&params, "grant-123");
+        assert_eq!(grant.grant_id, "grant-123");
+        assert!(grant.unmanaged_cwd_allowed);
+        assert_eq!(
+            grant.allowed_cwd,
+            Some(std::path::PathBuf::from("/workspace/target"))
+        );
+        assert_eq!(grant.sandbox.as_deref(), Some("workspace-write"));
+        assert_eq!(grant.allowed_tools, vec!["Bash", "Read"]);
+        assert_eq!(grant.max_turns, Some(25));
+        assert_eq!(grant.timeout_secs, 1200);
+    }
+
+    #[test]
+    fn staff_run_receipt_initial_state() {
+        let receipt = StaffRunReceipt::new(
+            "dispatch-20260819-claude-test",
+            "/tmp/runs/dispatch-20260819-claude-test",
+            serde_json::json!({"action": "complete", "status": "success"}),
+        );
+        assert_eq!(receipt.dispatch_id, "dispatch-20260819-claude-test");
+        assert_eq!(receipt.state, "working");
+        assert_eq!(receipt.exit_code, None);
+        assert_eq!(receipt.finished_at, None);
+    }
 }

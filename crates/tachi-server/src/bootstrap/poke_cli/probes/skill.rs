@@ -17,33 +17,13 @@ pub(in crate::bootstrap::poke_cli) async fn probe_skill_surface(
             limit: Some(12),
             skill_id: None,
             args: None,
-            profile: None,
-            host: None,
-            skill_limit: None,
-            capability_limit: None,
-            include_section: None,
         }))
         .await?;
     let discover: Value =
         serde_json::from_str(&discover_raw).map_err(|e| format!("parse skill discover: {e}"))?;
-    let loadout_raw = server
-        .tachi_skill(Parameters(TachiSkillParams {
-            action: "loadout".to_string(),
-            query: None,
-            cap_type: None,
-            enabled_only: None,
-            limit: None,
-            skill_id: None,
-            args: None,
-            profile: Some("codex_55_review".to_string()),
-            host: Some("codex".to_string()),
-            skill_limit: Some(8),
-            capability_limit: Some(8),
-            include_section: Some(true),
-        }))
-        .await?;
-    let loadout: Value =
-        serde_json::from_str(&loadout_raw).map_err(|e| format!("parse skill loadout: {e}"))?;
+    let profile = crate::dispatch_profile::resolve_dispatch_profile("codex_55_review")
+        .ok_or_else(|| "codex_55_review profile not found".to_string())?;
+    let loadout = crate::dispatch_profile::profile_skill_loadout_json_for_server(server, profile)?;
     let skills = collect_strings(&loadout);
     let has_waza = skills.iter().any(|item| item.contains("skill:waza-"));
     let has_superpower = skills
@@ -66,7 +46,6 @@ pub(in crate::bootstrap::poke_cli) async fn probe_skill_surface(
         },
         "repro_steps": [
             "tachi_skill discover query='waza check verification'",
-            "tachi_skill loadout profile=codex_55_review host=codex"
         ],
     }))
 }

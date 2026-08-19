@@ -231,6 +231,36 @@ pub struct TachiStaffParams {
     pub recommendation_ref: Option<String>,
 }
 
+impl TachiStaffParams {
+    pub fn to_assignment_request(&self) -> Result<crate::facade::StaffAssignmentRequest, String> {
+        let staffing_reason = self
+            .staffing_reason
+            .ok_or_else(|| "staffing_reason is required when action='start'".to_string())?;
+        let task = self
+            .task
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| "task is required when action='start'".to_string())?
+            .to_string();
+
+        Ok(crate::facade::StaffAssignmentRequest {
+            staffing_reason,
+            task,
+            profile: self.profile.clone(),
+            worker: self.worker.clone(),
+            stage: self.stage.clone(),
+            execution_level: None,
+            issue_ref: self.issue_ref.clone(),
+            pr_ref: self.pr_ref.clone(),
+            flow_id: self.flow_id.clone(),
+            project: self.project.clone(),
+            completion_predicate: None,
+            recommendation_ref: self.recommendation_ref.clone(),
+        })
+    }
+}
+
 // ─── Facade: orchestrator (persistent TODO / handoff) ────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

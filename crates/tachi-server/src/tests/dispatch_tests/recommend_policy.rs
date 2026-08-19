@@ -1,7 +1,7 @@
 use super::super::{make_server, make_server_with_temp_home};
 use super::completion_eval::seed_dispatch_run;
 use super::{run_tune, tune_params};
-use crate::tool_params::{TachiAgentsParams, TachiCompleteParams, TachiSkillParams};
+use crate::tool_params::{TachiAgentsParams, TachiCompleteParams};
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::json;
 

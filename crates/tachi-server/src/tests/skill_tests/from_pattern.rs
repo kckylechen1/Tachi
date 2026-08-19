@@ -13,16 +13,11 @@ fn skill_params(action: &str) -> TachiSkillParams {
             "name": "continuity-test-pattern",
             "description": "Candidate from continuity pattern"
         })),
-        profile: None,
-        host: None,
-        skill_limit: None,
-        capability_limit: None,
-        include_section: None,
     }
 }
 
 #[tokio::test]
-async fn tachi_skill_from_pattern_registers_pending_candidate() {
+async fn skill_from_pattern_registers_pending_candidate() {
     let server = make_server();
     server
         .with_global_store(|store| {
@@ -42,10 +37,10 @@ async fn tachi_skill_from_pattern_registers_pending_candidate() {
         })
         .expect("seed projected pattern");
 
-    let response = server
-        .tachi_skill(Parameters(skill_params("from_pattern")))
-        .await
-        .expect("from_pattern should succeed");
+    let response =
+        crate::hub_ops::handle_skill_from_pattern(&server, &skill_params("from_pattern"))
+            .await
+            .expect("from_pattern should succeed");
     let json: Value = serde_json::from_str(&response).expect("from_pattern JSON");
     assert_eq!(json["status"], json!("candidate_registered"));
     assert_eq!(json["id"], json!("skill:pattern-continuity-test"));
@@ -75,76 +70,18 @@ async fn tachi_skill_from_pattern_registers_pending_candidate() {
 }
 
 #[tokio::test]
-async fn delegate_profile_rejects_skill_candidate_writes() {
+async fn tachi_skill_facade_rejects_retired_actions() {
     let server = make_server();
-    server.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("delegate").expect("delegate profile should parse"),
-    ));
 
     let error = server
         .tachi_skill(Parameters(skill_params("from_pattern")))
         .await
-        .expect_err("delegate tachi_skill must not register skill candidates");
+        .expect_err("tachi_skill must reject retired from_pattern action");
+    assert!(error.contains("Invalid action 'from_pattern'. Use 'discover' or 'run'."));
 
-    assert!(error.contains("not available to the active tool profile"));
-    assert!(error.contains("discover"));
-    assert!(error.contains("run"));
-    assert!(error.contains("bundle"));
-
-    let candidate = server
-        .with_global_store_read(|store| {
-            store
-                .hub_get("skill:pattern-continuity-test")
-                .map_err(|e| e.to_string())
-        })
-        .expect("read hub");
-    assert!(candidate.is_none());
-}
-
-#[tokio::test]
-async fn delegate_profile_rejects_skill_loadout_but_keeps_bundle_available() {
-    let server = make_server();
-    server.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("delegate").expect("delegate profile should parse"),
-    ));
-
-    let loadout_error = server
-        .tachi_skill(Parameters(TachiSkillParams {
-            action: "loadout".to_string(),
-            query: None,
-            cap_type: None,
-            enabled_only: None,
-            limit: None,
-            skill_id: None,
-            args: None,
-            profile: Some("codex_default".to_string()),
-            host: None,
-            skill_limit: None,
-            capability_limit: None,
-            include_section: None,
-        }))
+    let bundle_error = server
+        .tachi_skill(Parameters(skill_params("bundle")))
         .await
-        .expect_err("delegate tachi_skill should not expose loadout internals");
-    assert!(loadout_error.contains("not available to the active tool profile"));
-
-    let bundle_response = server
-        .tachi_skill(Parameters(TachiSkillParams {
-            action: "bundle".to_string(),
-            query: Some("skill help".to_string()),
-            cap_type: None,
-            enabled_only: None,
-            limit: None,
-            skill_id: None,
-            args: None,
-            profile: None,
-            host: Some("codex".to_string()),
-            skill_limit: Some(1),
-            capability_limit: Some(1),
-            include_section: Some(false),
-        }))
-        .await
-        .expect("delegate should still be able to prepare skill bundles");
-    let json: Value = serde_json::from_str(&bundle_response).expect("bundle JSON");
-    assert_eq!(json["status"], json!("completed"));
-    assert_eq!(json["action"], json!("bundle"));
+        .expect_err("tachi_skill must reject retired bundle action");
+    assert!(bundle_error.contains("Invalid action 'bundle'. Use 'discover' or 'run'."));
 }

@@ -259,18 +259,14 @@ fn tachi_event_action_schema_declares_enum_values() {
 }
 
 #[test]
-fn tachi_skill_action_schema_declares_bundle_and_loadout() {
+fn tachi_skill_action_schema_exposes_only_discover_and_run() {
     let schema = rmcp::schemars::schema_for!(TachiSkillParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
     let action = &value["properties"]["action"];
 
     assert_eq!(action["type"], json!("string"));
     let values = action["enum"].as_array().expect("action enum");
-    assert!(values.contains(&json!("discover")));
-    assert!(values.contains(&json!("run")));
-    assert!(values.contains(&json!("bundle")));
-    assert!(values.contains(&json!("from_pattern")));
-    assert!(values.contains(&json!("loadout")));
+    assert_eq!(values, &vec![json!("discover"), json!("run")]);
 }
 
 #[test]

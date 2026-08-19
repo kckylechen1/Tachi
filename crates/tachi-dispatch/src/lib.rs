@@ -94,3 +94,6 @@ pub use signatures::{
     SignatureEvidenceRow, SignatureRowKind, ACT_R_ACTIVATION_FLOOR, ACT_R_DECAY_RATE,
     ACT_R_MIN_AGE_DAYS, COUNTER_CLAUSE_TOP_N, ERROR_SIGNATURE_TAXONOMY, SIGNATURE_ALIASES,
 };
+pub use tachi_params::{
+    ExecutionGrant, LaunchSpec, ResolvedStaffAssignment, StaffAssignmentRequest, StaffRunReceipt,
+};

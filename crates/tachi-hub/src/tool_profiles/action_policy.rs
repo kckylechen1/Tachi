@@ -232,8 +232,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
         },
         "tachi_skill" => match action.as_str() {
             "discover" => Some(ToolBundle::Observe),
-            "run" | "bundle" => Some(ToolBundle::Remember),
-            "loadout" | "from_pattern" => Some(ToolBundle::Operate),
+            "run" => Some(ToolBundle::Remember),
             _ => None,
         },
         "tachi_wiki" => match action.as_str() {

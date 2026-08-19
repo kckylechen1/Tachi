@@ -11,13 +11,12 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
-use crate::capability_ops::handle_prepare_capability_bundle;
 use crate::copilot_ops::{
     handle_tachi_feature_briefing, handle_tachi_wiki_search, handle_tachi_wiki_write,
 };
 use crate::event_ops::handle_tachi_event;
 use crate::gh_ops::handle_tachi_gh;
-use crate::hub_ops::{handle_hub_discover, handle_run_skill, handle_skill_from_pattern};
+use crate::hub_ops::{handle_hub_discover, handle_run_skill};
 use crate::tool_params::*;
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
