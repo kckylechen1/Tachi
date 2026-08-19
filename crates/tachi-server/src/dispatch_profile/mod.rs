@@ -9,9 +9,7 @@ use crate::agent_eval::CompletionStatus;
 // to aggregate. `load_live_eval_rows`/`aggregate_performance_matrix` stay for
 // the profile CARD surface (`cards::profile_eval_feedback_json`), which reads
 // `/eval` entries as human-readable feedback, not as routing evidence.
-use crate::agent_eval::{
-    aggregate_performance_matrix, load_live_eval_rows, AgentPerformanceMatrixRow, EvalRow,
-};
+use crate::agent_eval::{AgentPerformanceMatrixRow, EvalRow};
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
 use serde_json::{json, Value};
@@ -82,9 +80,9 @@ use self::routing::*;
 #[cfg(test)]
 pub(crate) use self::cards::profile_evidence_required;
 pub(crate) use self::cards::{
-    profile_demotion_targets, profile_eval_feedback_json,
-    profile_evidence_contract_json_for_server, profile_evidence_required_for_server, profile_json,
-    profile_json_for_server, profile_required_skill_ids, profile_required_skill_ids_for_server,
+    profile_demotion_targets, profile_evidence_contract_json_for_server,
+    profile_evidence_required_for_server, profile_json, profile_json_for_server,
+    profile_required_skill_ids, profile_required_skill_ids_for_server,
     profile_skill_loadout_json_for_server, profile_weak_against_for_server,
 };
 pub(crate) use self::policy::{route_simulation_caveats, simulate_route_policy};

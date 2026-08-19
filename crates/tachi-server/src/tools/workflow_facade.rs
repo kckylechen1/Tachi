@@ -2,10 +2,10 @@ use super::*;
 
 #[tool_router(router = workflow_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
-    // ─── Facade: skill (discover / run / bundle / loadout / from_pattern) ───
+    // ─── Facade: skill (discover / run) ───────────────────────────────────────
 
     #[tool(
-        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='bundle': prepare a host-aware capability bundle for a task query; action='loadout': resolve a DispatchProfile's sparse skill loadout plus capability bundle; action='from_pattern': create a disabled/pending skill candidate from a projected continuity pattern; action='run': execute a named skill by ID. Delegate tool profiles may use only discover/run/bundle. Always discover/bundle before writing custom multi-step logic."
+        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='run': execute a named skill by ID."
     )]
     pub(crate) async fn tachi_skill(
         &self,
@@ -72,33 +72,15 @@ impl MemoryServer {
         let format = params.format.clone();
         let raw = match action.as_str() {
             "start" => {
-                let task = params.task.unwrap_or_default();
-                if task.trim().is_empty() {
-                    return Err(
+                let request = params.to_assignment_request().map_err(|e| {
+                    if e.contains("staffing_reason") {
+                        "tachi_staff: action='start' requires a typed staffing_reason (the native-first exception); use the host harness's native subagent for ordinary delegation, or set staffing_reason to explicit_user_request / durable_cross_session / cross_device_remote / native_subagent_unavailable for an admitted exception; zero staffing or dispatch artifacts were created.".to_string()
+                    } else if e.contains("task") {
                         "tachi_staff: action='start' requires a non-empty `task`".to_string()
-                    );
-                }
-                // #1319 admission gate: a start request MUST carry a typed
-                // staffing_reason. None is rejected with zero artifacts (no
-                // run dir, no status.json) — same fail-closed shape as the
-                // retired require_tachi_dispatch_reason. This runs before
-                // staff_start → handle_tachi_dispatch, so no receipt is seeded.
-                let staffing_reason = params.staffing_reason.ok_or_else(|| {
-                    "tachi_staff: action='start' requires a typed staffing_reason (the native-first exception); use the host harness's native subagent for ordinary delegation, or set staffing_reason to explicit_user_request / durable_cross_session / cross_device_remote / native_subagent_unavailable for an admitted exception; zero staffing or dispatch artifacts were created.".to_string()
+                    } else {
+                        e
+                    }
                 })?;
-                let request = crate::staffing_ops::StaffStartRequest {
-                    task,
-                    staffing_reason,
-                    profile: params.profile,
-                    worker: params.worker,
-                    project: params.project,
-                    stage: params.stage,
-                    issue_ref: params.issue_ref,
-                    pr_ref: params.pr_ref,
-                    flow_id: params.flow_id,
-                    // tachi#1675 PR1 Seam B.
-                    recommendation_ref: params.recommendation_ref,
-                };
                 crate::staffing_ops::staff_start(self, request).await?
             }
             "status" => {

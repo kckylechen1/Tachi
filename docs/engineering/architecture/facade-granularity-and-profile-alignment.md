@@ -40,7 +40,7 @@ It answers three questions raised during a facade review:
 | `tachi_memory` | 9 | Contracted in #1689 to search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate; health, maintenance, ingestion, and pattern evidence use their canonical status, operator, adapter, or internal owners. |
 | `tachi_gh` | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
 | `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
-| `tachi_skill` | 5 | Healthy |
+| `tachi_skill` | 2 | Contracted to pure static `discover` / `run` (#1690) |
 | `tachi_wiki` / `tachi_verify` | 4 / 4 | Healthy |
 
 `tachi_skill` and `tachi_wiki` demonstrate that a **medium-grained facade

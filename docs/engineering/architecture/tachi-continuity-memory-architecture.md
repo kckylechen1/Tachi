@@ -330,7 +330,7 @@ Skill is the **executable crystallization** of patterns. Tachi already has a com
 Two integration modes:
 
 1. **Recommendation signal** (low risk): `recommend_skill` includes active patterns as context, improving skill matching without changing registration. Matching recommendations carry `pattern_refs`; `tachi_task`'s lightweight skill recommendations use the same bridge signal.
-2. **Skill generation** (higher risk): `tachi_skill action="from_pattern"` can generate a disabled, pending-review, discoverable skill candidate with `pattern_ref` traceability. Human/maturity promotion to a listed skill is still a target.
+2. **Skill generation** (higher risk): `tachi_event action="promote"` can generate a disabled, pending-review, discoverable skill candidate with `pattern_ref` traceability. Human/maturity promotion to a listed skill is still a target.
 
 This mirrors the Karpathy LLM Wiki flow:
 
@@ -425,7 +425,7 @@ Implemented integration slice:
 save_memory emit_continuity=true → memory.saved event
 tachi_search scope=patterns      → explicit read-only /user/patterns recall
 tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
-tachi_skill action=from_pattern  → pending/disabled Hub skill candidate
+tachi_skill action=discover/run  → discover and execute listed Hub skills
 tachi_event action=promote       → wiki draft + pending skill + agent-profile proposal review artifacts
 tachi_domain_adapter lorebook_import → repo lorebook shape → world_book events
 tachi_event action=context       → read-only local context bundle; caller session text is not evidence admission
@@ -495,7 +495,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `tachi_search` supports `scope="patterns"` and excludes continuity projection rows from ordinary `memory` recall.
 - `tachi_wiki_write` supports `include_patterns=true`, persisting active pattern references in wiki metadata.
 - `tachi_wiki_write` emits `wiki.saved` continuity events for reviewed wiki writes.
-- `tachi_skill(action="from_pattern")` registers a disabled, pending-review, discoverable skill candidate with a `pattern_ref`.
+- `tachi_skill(action="discover"|"run")` discovers and executes listed Hub skills.
 - `recommend_skill` and feature/task lightweight skill recommendation can use active patterns as a bridge between the user's query and the skill surface; recommendations attach `pattern_refs` when a pattern contributed to the score.
 - `tachi_event action="promote"` executes conservative review-artifact creation for mature patterns: a pending wiki draft, a disabled skill candidate, and an `agent_profile.proposal` continuity event. It supports `dry_run`, `force`, per-artifact skip flags, and a promotion gate that marks external-validation / cold-seat-review readiness before any final promotion.
 - The daemon runs a scoped background continuity projection loop; projection reports include projected, skipped, and promotion candidate counters plus review artifacts for wiki drafts, skill candidates, and agent-profile proposals.
@@ -552,7 +552,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 **Goal:** mature patterns become executable skills.
 
 1. Done: `recommend_skill` and lightweight task skill recommendation use active pattern bridge signals and expose `pattern_refs` on matches.
-2. Done: `tachi_skill action=from_pattern` generates skill candidates from active patterns.
+2. Done: `tachi_event action="promote"` generates skill candidates from active patterns.
 3. Done: generated skills are `discoverable`, disabled, pending review, and carry `pattern_ref` metadata.
 4. Done: maturity gate creates review artifacts before promotion to `listed`.
 5. Done: `tachi_event action="promote"` can materialize the pending wiki draft, disabled skill candidate, and agent-profile proposal event for an eligible or forced pattern.
@@ -615,21 +615,17 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - **File:** `crates/tachi-params/src/memory/wiki.rs`
 - **Current behavior:** `WikiWriteParams` has `include_patterns`, `pattern_query`, and `pattern_top_k`.
 
-### 8.5 Pattern → skill generator
+### 8.5 Pattern → skill generator (promotion ops)
 
-- **New file:** `crates/tachi-server/src/hub_ops/pattern_to_skill.rs`
-- **Function:** `handle_skill_from_pattern`
+- **File:** `crates/tachi-server/src/continuity_ops/promotion.rs`
+- **Function:** `materialize_pattern_skill_candidate`
 - **Current behavior:**
   1. Fetch active patterns.
   2. Build skill definition JSON (system, prompt, content, inputSchema, policy, tags, `pattern_ref`).
   3. Persist via `store.hub_register`.
   4. Keep generated skills disabled and pending review; do not auto-expose as listed tools.
-- **File:** `crates/tachi-server/src/hub_ops/mod.rs`
-- **Current behavior:** re-exports the new handler.
-- **File:** `crates/tachi-server/src/tools/skill_facade.rs`
-- **Current behavior:** routes `tachi_skill(action="from_pattern")` to the new handler.
-- **File:** `crates/tachi-params/src/facade.rs`
-- **Current behavior:** `from_pattern` is in the `TachiSkillParams` action schema.
+- **File:** `crates/tachi-server/src/continuity_ops/mod.rs`
+- **Current behavior:** executes via `tachi_event(action="promote")`.
 
 ---
 

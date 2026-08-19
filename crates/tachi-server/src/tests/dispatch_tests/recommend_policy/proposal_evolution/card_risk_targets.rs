@@ -131,26 +131,8 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
             .expect("card risk projection should apply");
     }
 
-    let loadout_raw = server
-        .tachi_skill(Parameters(TachiSkillParams {
-            action: "loadout".to_string(),
-            query: Some("Plan a dispatch card risk slice".to_string()),
-            cap_type: None,
-            enabled_only: None,
-            limit: Some(50),
-            skill_id: None,
-            args: None,
-            profile: Some("claude_plan".to_string()),
-            host: Some("codex".to_string()),
-            skill_limit: Some(3),
-            capability_limit: Some(2),
-            include_section: Some(false),
-        }))
-        .await
-        .expect("loadout should include projected weakness");
-    let loadout: serde_json::Value = serde_json::from_str(&loadout_raw).expect("loadout JSON");
-    assert!(loadout["weak_against"]
-        .as_array()
-        .expect("loadout weak_against")
-        .contains(&json!("plan_request")));
+    let profile = crate::dispatch_profile::resolve_dispatch_profile("claude_plan").unwrap();
+    let weak_against = crate::dispatch_profile::profile_weak_against_for_server(&server, profile)
+        .expect("profile weak_against");
+    assert!(weak_against.contains(&"plan_request".to_string()));
 }

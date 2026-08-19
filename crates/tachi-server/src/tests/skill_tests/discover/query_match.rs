@@ -26,11 +26,6 @@ async fn tachi_skill_discover_matches_tokenized_query_and_compacts_output() {
             limit: Some(5),
             skill_id: None,
             args: None,
-            profile: None,
-            host: None,
-            skill_limit: None,
-            capability_limit: None,
-            include_section: None,
         }))
         .await
         .expect("tachi_skill discover should succeed");

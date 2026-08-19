@@ -249,7 +249,7 @@ graph TD
 本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。项目内 Agent 可通过 `.tachi/vault.env` 别名解析 Vault 密钥。`tachi vault exec --require NAME -- <cmd>` 可在子进程中注入 Vault 凭证运行命令（Vault 只补全调用方未设置的环境变量）；默认情况下，若 Vault 不可用则拒绝派生无凭证的子进程，`--allow-unauthenticated` 可显式选择回退为继承当前环境运行。详见 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
 ### 6. Tachi Hub 与技能包
-一次注册 MCP 服务器、技能和工作流，所有已连接 Agent 都能发现并调用。`pack_register` / `pack_project` 安装 curated 技能集合并投射到 Claude、Cursor、Codex、Gemini、OpenCode 等格式。`tachi_skill(action="discover"|"run"|"bundle")` 是 canonical 技能门面；独立 `run_skill`、`prepare_capability_bundle` 和面向技能发现的 `hub_discover` 仍作为旧客户端兼容入口保留。
+一次注册 MCP 服务器、技能和工作流，所有已连接 Agent 都能发现并调用。`pack_register` / `pack_project` 安装 curated 技能集合并投射到 Claude、Cursor、Codex、Gemini、OpenCode 等格式。`tachi_skill(action="discover"|"run")` 是 canonical 技能门面；独立 `run_skill` 和面向技能发现的 `hub_discover` 仍作为旧客户端兼容入口保留。
 
 ### 7. 跨 Agent 协调
 - **幽灵低语** —— Agent 间持久化主题发布/订阅（`ghost_publish`、`ghost_subscribe`、`ghost_ack`、`ghost_reflect`、`ghost_promote`）。
@@ -284,7 +284,7 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 | `standard` | 日常 Agent 意图面：`tachi_save`、`tachi_memory`、`tachi_task` 的非派发动作、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`peer_query`、Vault 会话/状态工具，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。`tachi_staff` 和手工 eval intake 不暴露。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity；普通委派使用宿主原生 subagent。 |
 | `coordinate` | `remember` + `coordinate` bundles：增加高级 handoff/workflow/orchestrator/agents/staff 工具；Tachi 自有 worker launch（`tachi_staff(action='start', task='审阅 API 边界，并把发现写入 result.md。', staffing_reason='native_subagent_unavailable')`）仍是显式例外，不是默认执行器。 | 高级协调与适配器工作流，不替代宿主原生 subagent。 |
 | `operate` | `remember` + `operate` bundles：增加 Foundry 生命周期、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
-| `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_event`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_task`、`tachi_complete`、`tachi_skill(action='discover'|'run'|'bundle')` 和只读 `peer_query`。 | 由显式准入的 admin 派发产生的工作 Agent；无递归派发、无交接、无技能候选注册。 |
+| `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_event`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_task`、`tachi_complete`、`tachi_skill(action='discover'|'run')` 和只读 `peer_query`。 | 由显式准入的 admin 派发产生的工作 Agent；无递归派发、无交接、无技能候选注册。 |
 | `admin` | 完整目录，包括有类型理由的 durable/remote Tachi worker 例外。 | 维护、开发、治理和 operator 批准的执行例外。 |
 
 宿主别名自动解析：`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`。

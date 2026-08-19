@@ -30,11 +30,6 @@ fn tachi_skill_discover_prefers_hub_waza_skill_over_host_duplicate() {
                     limit: Some(10),
                     skill_id: None,
                     args: None,
-                    profile: None,
-                    host: None,
-                    skill_limit: None,
-                    capability_limit: None,
-                    include_section: None,
                 }))
                 .await
         })

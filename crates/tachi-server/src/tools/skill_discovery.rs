@@ -34,34 +34,6 @@ pub(super) fn canonical_skill_name(cap: &Value) -> Option<String> {
     let normalized = trimmed.trim().to_ascii_lowercase();
     (!normalized.is_empty()).then_some(normalized)
 }
-
-pub(super) fn required_skill_query(
-    params: &TachiSkillParams,
-    action: &str,
-) -> Result<String, String> {
-    params
-        .query
-        .as_deref()
-        .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| format!("query is required when action='{action}'"))
-}
-
-pub(super) fn skill_bundle_params(
-    params: &TachiSkillParams,
-    query: String,
-    host: Option<String>,
-) -> PrepareCapabilityBundleParams {
-    PrepareCapabilityBundleParams {
-        query,
-        host,
-        skill_limit: params.skill_limit.unwrap_or(3).max(1),
-        capability_limit: params.capability_limit.unwrap_or(3).max(1),
-        include_section: params.include_section.unwrap_or(true),
-    }
-}
-
 pub(super) fn discover_local_host_skills(query: &str, limit: usize) -> Vec<Value> {
     if limit == 0 {
         return Vec::new();

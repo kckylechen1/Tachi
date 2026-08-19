@@ -4,7 +4,7 @@
 **Participants:** user + Kimi Code CLI
 **Artifact produced:** [`tachi-continuity-memory-architecture.md`](../architecture/tachi-continuity-memory-architecture.md)
 **Purpose:** demonstrate how a real design conversation maps into the continuity memory pipeline.
-**Implementation note:** as of the first implementation slice, projected patterns can be searched with `tachi_search scope=patterns`, attached to wiki metadata with `include_patterns=true`, and turned into disabled/pending skill candidates with `tachi_skill action=from_pattern`.
+**Implementation note:** as of the first implementation slice, projected patterns can be searched with `tachi_search scope=patterns`, attached to wiki metadata with `include_patterns=true`, and turned into disabled/pending skill candidates via `tachi_event action=promote`.
 
 ---
 
@@ -369,13 +369,7 @@ Do not treat memory as a "remember more" cache or as a way to make the model mor
 
 ### Skill candidate generated from pattern
 
-Current implementation path: call `tachi_skill(action="from_pattern", query=..., args={"skill_id": "...", "name": "..."})`. The generated Hub capability starts `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`; promotion to `listed` remains a human/maturity-gated step.
-
-Current implementation path: projection reports for mature patterns now include
-review artifacts for a wiki draft, pending skill candidate, and agent-profile
-proposal. The runtime still does not execute those artifacts automatically. Today an
-agent must call `from_pattern` explicitly, and maturity gates do not yet require
-external-validation, timeline-depth, or cold-seat checks before promotion.
+Current implementation path: promotion reports for mature patterns generate candidates via `tachi_event(action="promote")`. The generated Hub capability starts `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`; promotion to `listed` remains a human/maturity-gated step.
 
 ```json
 {

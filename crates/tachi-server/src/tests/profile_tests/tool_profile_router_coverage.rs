@@ -376,12 +376,12 @@ fn skill_facade_advertises_canonical_actions() {
         .get("tachi_skill")
         .expect("canonical tachi_skill facade should stay registered");
     assert!(
-        tachi_skill.contains("action='run'"),
-        "tachi_skill description should advertise canonical run action: {tachi_skill}"
+        tachi_skill.contains("action='discover'"),
+        "tachi_skill description should advertise canonical discover action: {tachi_skill}"
     );
     assert!(
-        tachi_skill.contains("action='bundle'"),
-        "tachi_skill description should advertise canonical bundle action: {tachi_skill}"
+        tachi_skill.contains("action='run'"),
+        "tachi_skill description should advertise canonical run action: {tachi_skill}"
     );
 }
 

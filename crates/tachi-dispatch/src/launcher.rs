@@ -57,6 +57,27 @@ impl LaunchCommand {
     fn current_dir(&mut self, cwd: impl Into<PathBuf>) {
         self.current_dir = Some(cwd.into());
     }
+
+    pub fn into_launch_spec(
+        self,
+        backend: impl Into<String>,
+        prompt: impl Into<String>,
+        timeout_secs: u64,
+        env_vars: std::collections::HashMap<String, String>,
+    ) -> tachi_params::LaunchSpec {
+        let mut command = vec![self.program];
+        command.extend(self.args);
+        tachi_params::LaunchSpec {
+            backend: backend.into(),
+            command,
+            cwd: self.current_dir.unwrap_or_else(|| PathBuf::from(".")),
+            env_vars,
+            prompt: prompt.into(),
+            timeout_secs,
+            harness_transport: None,
+            harness_server_url: None,
+        }
+    }
 }
 
 /// Resolve the effective permission profile.
