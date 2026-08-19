@@ -22,16 +22,6 @@ fn tachi_staff_action_schema(
     )
 }
 
-fn tachi_orchestrator_action_schema(
-    generator: &mut rmcp::schemars::SchemaGenerator,
-) -> rmcp::schemars::Schema {
-    string_enum_schema(
-        action_inventory::TACHI_ORCHESTRATOR_ACTIONS,
-        "Required Tachi orchestrator action.",
-        generator,
-    )
-}
-
 // ─── Facade: tachi_verify (background verification ledger) ──────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -261,12 +251,11 @@ impl TachiStaffParams {
     }
 }
 
-// ─── Facade: orchestrator (persistent TODO / handoff) ────────────────────────
+// ─── Internal: orchestrator (persistent hard_state TODO / handoff) ─────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct TachiOrchestratorParams {
     /// todo_list | todo_update | handoff_write | handoff_read | recovery_briefing
-    #[schemars(schema_with = "tachi_orchestrator_action_schema")]
     pub action: String,
     #[serde(default)]
     pub task_id: Option<String>,

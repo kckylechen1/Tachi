@@ -564,8 +564,7 @@ mod tests {
     /// `tachi_params::facade::{tachi_event_action_schema, tachi_wiki_action_schema}`
     /// / `orchestration::tachi_staff_action_schema` string literals, with no
     /// shared source to catch drift between the schema and this test. Those
-    /// three schema functions — plus `tachi_skill_action_schema`,
-    /// `tachi_orchestrator_action_schema` — now
+    /// schema functions — plus `tachi_skill_action_schema` — now
     /// read from `tachi_params::facade::action_inventory` pub consts that this
     /// test also imports (`tachi_params::TACHI_EVENT_ACTIONS` etc.): one
     /// source, not a fourth independently-authored list.
