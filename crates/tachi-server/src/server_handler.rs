@@ -324,6 +324,11 @@ fn narrow_gated_action_schemas(
                     &allowed,
                     "Required Tachi wiki facade action allowed by the active profile.",
                 );
+                if !allowed.contains(&"write") {
+                    tool.description = Some(std::borrow::Cow::Owned(
+                        "Stable, reusable knowledge base. action='search': look up lessons, patterns, and how-tos BEFORE debugging from scratch or reaching for web search — a prior lesson may already exist. action='browse': explore available categories. action='read': load a specific entry by path. WHEN: wiki for durable knowledge that helps future sessions (patterns, lessons, decisions, conventions). Use tachi_memory for session-specific facts (decisions, findings, commands for the current task). Pass project to target a named library.".to_string(),
+                    ));
+                }
             }
             _ => {}
         }
@@ -1660,6 +1665,51 @@ mod tests {
                 if contains_word(description, wire) && !enum_actions.contains(wire) {
                     panic!(
                         "profile {:?} tachi_task description names action {wire:?}, \
+                         which is NOT in this profile's own projected action enum \
+                         ({enum_actions:?}): {description}",
+                        profile.as_str(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn projected_wiki_description_never_names_an_action_outside_its_own_enum() {
+        fn contains_word(haystack: &str, word: &str) -> bool {
+            haystack
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|token| token == word)
+        }
+
+        for profile in [
+            tachi_hub::ToolProfile::observe(),
+            tachi_hub::ToolProfile::remember(),
+            tachi_hub::ToolProfile::coordinate(),
+            tachi_hub::ToolProfile::operate(),
+            tachi_hub::ToolProfile::standard(),
+            tachi_hub::ToolProfile::delegate(),
+        ] {
+            let projected = project_tool_definitions(native_tools(), Some(profile), None);
+            let Some(wiki_tool) = projected
+                .iter()
+                .find(|tool| tool.name.as_ref() == "tachi_wiki")
+            else {
+                continue;
+            };
+            let description = wiki_tool.description.as_deref().unwrap_or_default();
+            let enum_actions: std::collections::HashSet<&str> = wiki_tool.input_schema
+                ["properties"]["action"]["enum"]
+                .as_array()
+                .expect("tachi_wiki action enum")
+                .iter()
+                .map(|v| v.as_str().expect("action enum entries are strings"))
+                .collect();
+
+            for wire in tachi_params::TACHI_WIKI_ACTIONS {
+                if contains_word(description, wire) && !enum_actions.contains(wire) {
+                    panic!(
+                        "profile {:?} tachi_wiki description names action {wire:?}, \
                          which is NOT in this profile's own projected action enum \
                          ({enum_actions:?}): {description}",
                         profile.as_str(),

@@ -316,7 +316,7 @@
       },
       "delegate": {
         "total_input_schema_bytes": 44048,
-        "total_tool_definition_bytes": 49416,
+        "total_tool_definition_bytes": 49330,
         "visible_tool_count": 11,
         "visible_tools": [
           "peer_query",
