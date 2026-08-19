@@ -55,9 +55,7 @@ invent calls that are not exposed yet.
 | external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (the retired `tachi_task(action="dispatch")` was deleted in #1319-C2) | implemented; not ordinary delegation |
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` / `tachi_complete` | implemented |
-| performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
-| skill bundle/loadout | `tachi_skill(action="bundle"|"loadout")` | implemented |
-| PR gate preview | `tachi_gh(action="pr_status")` | implemented |
+| skill discovery / execution | `tachi_skill(action="discover"|"run")` | implemented |
 | release and closure | `tachi_gh(action="release_note")` / `tachi_gh(action="close_loop")` | implemented |
 
 Do not add new public facades such as `tachi_mbit`, `tachi_policy`, or
@@ -213,7 +211,7 @@ Every substantial policy-learning slice should be able to pass this workflow:
 1. `tachi_task(action="intake", issue_ref=...)`
 2. `tachi_task(action="brief", flow_id=...)`
 3. `tachi_task(action="status", flow_id=...)` (the cycle view is nested under `status.cycle`)
-4. Operator-only static diagnostics (`tachi card list/show`) and `tachi_skill(action="loadout")` are separate surfaces when needed; the model-facing Task facade does not inspect profile/card projections.
+4. Operator-only static diagnostics (`tachi card list/show`) and `tachi_tune(action="route_simulate")` are separate surfaces when needed; the model-facing Task facade does not inspect profile/card projections.
 6. launch the host harness's native subagent with the frozen packet; use the
    admin/operator external staffing exception only when a proven boundary
    requirement exceeds host-native guarantees
@@ -245,11 +243,10 @@ As of 2026-06-28, the baseline includes:
   durable route-policy rules are persisted;
 - sensitive file-context risk escalation;
 - skill loadout fields on profiles;
-- `tachi_skill(action="bundle"|"loadout")` maps worker tasks and dispatch
-  profiles to sparse skill loadouts plus capability bundles;
+- `tachi_skill(action="discover"|"run")` maps worker tasks to sparse skill discovery and execution;
 - capability bundle auto-injection is visible in dispatch prompt artifacts and
   can be disabled per dispatch;
-- `tachi_skill(action="loadout")` includes live `/eval` feedback summaries,
+- `tachi_tune(action="route_simulate")` includes live `/eval` feedback summaries,
   sample thresholds, and guidance before any loadout evolution proposal is made;
 - `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` includes
   human-reviewed `loadout_evolution` proposals once profile samples,

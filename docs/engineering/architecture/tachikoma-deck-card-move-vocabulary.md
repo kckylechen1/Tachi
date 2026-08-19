@@ -138,7 +138,7 @@ This model reuses what already exists instead of creating a parallel system.
      `skill/waza/skills/`.
    - `crates/tachi-server/src/builtins.rs` seeds them into the Hub on startup
      and registers skill tools.
-   - `tachi_skill(action="discover" | "bundle" | "loadout" | "run")` exposes the
+   - `tachi_skill(action="discover" | "run")` exposes the
      skill surface.
 
 3. **Dispatch already produces evidence artifacts.**
@@ -568,7 +568,7 @@ carry the workflow.
 |---|---|---|
 | operator list/show diagnostics | `tachi card list` / `tachi card show <id>` | implemented; operator-only |
 | read-only Card CLI convenience | `tachi card list` / `tachi card show <id>` | starter implemented |
-| skill discovery / loadout | `tachi_skill(action="discover" \| "bundle" \| "loadout")` | implemented |
+| skill discovery / execution | `tachi_skill(action="discover" \| "run")` | implemented |
 | upstream source status | `tachi skill-surface sources` | implemented |
 | upstream source sync planning | `tachi skill-surface sync-plan` | starter implemented |
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |
