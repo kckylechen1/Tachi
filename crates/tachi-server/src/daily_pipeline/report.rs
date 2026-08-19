@@ -1,7 +1,7 @@
 use crate::server_state::MemoryServer;
 use crate::tool_params::WikiWriteParams;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tachi_llm::PersistedModelInvocationReceiptV1;
 
@@ -728,14 +728,11 @@ pub(crate) fn parse_llm_json(raw: &str) -> Result<Value, String> {
         })
 }
 
-pub(crate) fn parse_json_or_raw(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::daily_pipeline::{DailyPipelineReport, DailyStageReport};
+    use serde_json::json;
 
     fn stage(summary: &str) -> DailyStageReport {
         DailyStageReport {
