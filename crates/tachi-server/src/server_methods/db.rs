@@ -1237,6 +1237,8 @@ mod resolve_named_project_tests {
             let repo = tmp.path().join("Sigil");
             let local_db = repo.join(".tachi/tachi-memory.db");
             std::fs::create_dir_all(local_db.parent().unwrap()).expect("repo local parent");
+            let repo = std::fs::canonicalize(&repo).expect("canon repo");
+            let local_db = repo.join(".tachi/tachi-memory.db");
             std::fs::write(&local_db, b"sqlite-header-test-data").expect("write local db");
             let local_db = std::fs::canonicalize(&local_db).expect("canon local db");
 
