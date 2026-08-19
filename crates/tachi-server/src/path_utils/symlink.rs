@@ -156,6 +156,112 @@ pub(crate) fn ensure_plan_c_symlink_in_home(
     PlanCLinkOutcome::Skipped("Plan C symlink unsupported on non-Unix hosts")
 }
 
+/// Ensure the canonical (gen-4) alias directory and symlink exist for `project_root`
+/// in `tachi_home`, ensuring convergence between on-disk aliases and manifest records (#1573).
+#[cfg(unix)]
+pub(crate) fn ensure_plan_c_canonical_alias_in_home(
+    local_db: &Path,
+    project_root: &Path,
+    tachi_home: &Path,
+) -> PlanCLinkOutcome {
+    let canonical_name = match plan_c_dir_name_from_root(project_root) {
+        Some(name) => name,
+        None => return PlanCLinkOutcome::Skipped("cannot derive canonical name for project root"),
+    };
+    let canonical_alias_dir = tachi_home.join("projects").join(&canonical_name);
+    let canonical_link = canonical_alias_dir.join(memcore::MEMORY_DB_FILENAME);
+
+    if let Ok(meta) = std::fs::symlink_metadata(&canonical_link) {
+        if meta.file_type().is_symlink() {
+            if let Ok(target) = std::fs::read_link(&canonical_link) {
+                if target == local_db || canonical_paths_equal(&canonical_link, local_db) {
+                    return PlanCLinkOutcome::AlreadyLinked;
+                }
+                let actual_db = match std::fs::canonicalize(&canonical_link) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return PlanCLinkOutcome::AliasIntegrity(
+                            PlanCAliasIntegrity::SymlinkUnresolvable {
+                                alias_db: canonical_link,
+                                expected_db: local_db.to_path_buf(),
+                                error: error.to_string(),
+                            },
+                        );
+                    }
+                };
+                return PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::WrongTarget {
+                    alias_db: canonical_link,
+                    expected_db: local_db.to_path_buf(),
+                    actual_db,
+                });
+            }
+        }
+        if meta.file_type().is_file() && !same_file_identity(local_db, &canonical_link) {
+            return PlanCLinkOutcome::SplitBrain(PlanCSplitBrain {
+                project_name: canonical_name,
+                canonical_db: local_db.to_path_buf(),
+                alias_db: canonical_link.clone(),
+                canonical_rows: active_memory_count(local_db),
+                alias_rows: active_memory_count(&canonical_link),
+                canonical_bytes: file_len(local_db),
+                alias_bytes: file_len(&canonical_link),
+            });
+        }
+        return PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::UnexpectedAliasType {
+            alias_db: canonical_link,
+            file_type: "non-symlink alias",
+        });
+    }
+
+    if let Err(error) = std::fs::create_dir_all(&canonical_alias_dir) {
+        return PlanCLinkOutcome::Failed {
+            path: canonical_alias_dir,
+            error: format!("failed to create canonical Plan C project directory: {error}"),
+        };
+    }
+    if let Err(error) = std::os::unix::fs::symlink(local_db, &canonical_link) {
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return PlanCLinkOutcome::Failed {
+                path: canonical_link,
+                error: format!("failed to create canonical Plan C symlink: {error}"),
+            };
+        }
+        if canonical_paths_equal(&canonical_link, local_db) {
+            return PlanCLinkOutcome::AlreadyLinked;
+        }
+        return PlanCLinkOutcome::Failed {
+            path: canonical_link,
+            error: format!(
+                "canonical Plan C symlink already exists with different target: {error}"
+            ),
+        };
+    }
+    PlanCLinkOutcome::Created(canonical_link)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn ensure_plan_c_canonical_alias_in_home(
+    _local_db: &Path,
+    _project_root: &Path,
+    _tachi_home: &Path,
+) -> PlanCLinkOutcome {
+    PlanCLinkOutcome::Skipped("Plan C canonical symlink unsupported on non-Unix hosts")
+}
+
+pub(crate) fn require_plan_c_alias_success(outcome: PlanCLinkOutcome) -> Result<(), String> {
+    match outcome {
+        PlanCLinkOutcome::Created(_)
+        | PlanCLinkOutcome::AlreadyLinked
+        | PlanCLinkOutcome::Skipped(_) => Ok(()),
+        PlanCLinkOutcome::SplitBrain(sb) => Err(sb.warning_message()),
+        PlanCLinkOutcome::AliasIntegrity(ai) => Err(ai.warning_message()),
+        PlanCLinkOutcome::Failed { path, error } => Err(format!(
+            "failed to establish Plan C canonical alias at {}: {error}",
+            path.display()
+        )),
+    }
+}
+
 pub(crate) fn inspect_plan_c_alias_for_local_db(local_db: &Path) -> PlanCAliasInspection {
     inspect_plan_c_alias_for_local_db_in_home(local_db, &tachi_home())
 }

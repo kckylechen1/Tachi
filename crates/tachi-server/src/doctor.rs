@@ -42,6 +42,8 @@ pub use classify::classify_one;
 /// immutable-URI open (not `MemoryStore::open_read_only`) is required there
 /// to guarantee a plan-only pass never writes a WAL/SHM sidecar.
 pub(crate) use classify::make_immutable_uri;
+#[cfg(test)]
+pub use classify::{scope_hint_for, scope_hint_for_in_home};
 pub use hub_lint::hub_capability_discovery_status_warnings;
 pub use render::render_report;
 pub(crate) use scan::scan_strict_read_only;
@@ -58,8 +60,6 @@ pub use types::{
 
 #[cfg(test)]
 use autofix::quarantine_dest_filename;
-#[cfg(test)]
-use classify::scope_hint_for;
 
 #[cfg(test)]
 mod tests;

@@ -379,20 +379,41 @@ pub(crate) fn plan_c_global_db_path_existing_in_home(
 }
 
 pub(crate) fn plan_c_project_root_from_local_db(local_db: &Path) -> Option<PathBuf> {
+    plan_c_project_root_from_local_db_in_home(local_db, &tachi_home())
+}
+
+pub(crate) fn plan_c_project_root_from_local_db_in_home(
+    local_db: &Path,
+    tachi_home: &Path,
+) -> Option<PathBuf> {
     let tachi_dir = local_db.parent()?;
-    if tachi_dir.file_name().and_then(|name| name.to_str()) != Some(".tachi") {
+    let tachi_dir_name = tachi_dir.file_name().and_then(|name| name.to_str())?;
+    if tachi_dir_name != ".tachi" && tachi_dir_name != ".sigil" {
         return None;
     }
-    let home = tachi_home();
     if let (Ok(tachi_dir_canon), Ok(home_canon)) = (
         std::fs::canonicalize(tachi_dir),
-        std::fs::canonicalize(&home),
+        std::fs::canonicalize(tachi_home),
     ) {
         if tachi_dir_canon == home_canon {
             return None;
         }
-    } else if tachi_dir == home {
+    } else if tachi_dir == tachi_home {
         return None;
+    }
+    if let Some(user_home) = dirs::home_dir() {
+        for home_cand in [user_home.join(".tachi"), user_home.join(".sigil")] {
+            if let (Ok(tachi_dir_canon), Ok(home_canon)) = (
+                std::fs::canonicalize(tachi_dir),
+                std::fs::canonicalize(&home_cand),
+            ) {
+                if tachi_dir_canon == home_canon {
+                    return None;
+                }
+            } else if tachi_dir == home_cand {
+                return None;
+            }
+        }
     }
     tachi_dir.parent().map(Path::to_path_buf)
 }

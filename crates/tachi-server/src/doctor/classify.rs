@@ -363,14 +363,52 @@ fn job_breakdown_from_counts(counts: memcore::db::FoundryJobStatusCounts) -> Job
     }
 }
 
-pub(crate) fn scope_hint_for(path: &Path) -> String {
+pub fn scope_hint_for(path: &Path) -> String {
+    scope_hint_for_in_home(path, &crate::path_utils::tachi_home())
+}
+
+pub fn scope_hint_for_in_home(path: &Path, tachi_home: &Path) -> String {
+    let global_dir = tachi_home.join("global");
+    if path.starts_with(&global_dir) {
+        return "global".to_string();
+    }
+    if let (Ok(canon_path), Ok(canon_global)) = (
+        std::fs::canonicalize(path),
+        std::fs::canonicalize(&global_dir),
+    ) {
+        if canon_path.starts_with(&canon_global) {
+            return "global".to_string();
+        }
+    }
+    if path == tachi_home.join(memcore::MEMORY_DB_FILENAME)
+        || path == tachi_home.join(memcore::LEGACY_MEMORY_DB_FILENAME)
+    {
+        return "global".to_string();
+    }
     let n = path.to_string_lossy().replace('\\', "/");
-    if n.contains("/.tachi/global/") {
+    if n.contains("/.tachi/global/")
+        || n.contains("/.sigil/global/")
+        || n.ends_with("/.tachi/tachi-memory.db")
+        || n.ends_with("/.tachi/memory.db")
+        || n.ends_with("/.sigil/tachi-memory.db")
+        || n.ends_with("/.sigil/memory.db")
+    {
         return "global".to_string();
     }
     if let Some((_, rest)) = n.split_once("/.tachi/projects/") {
         let proj = rest.split('/').next().unwrap_or("unknown");
         return format!("project:{proj}");
+    }
+    if let Some((_, rest)) = n.split_once("/.sigil/projects/") {
+        let proj = rest.split('/').next().unwrap_or("unknown");
+        return format!("project:{proj}");
+    }
+    let projects_dir = tachi_home.join("projects");
+    if let Ok(rel) = path.strip_prefix(&projects_dir) {
+        if let Some(first) = rel.components().next() {
+            let proj = first.as_os_str().to_string_lossy();
+            return format!("project:{proj}");
+        }
     }
     if let Some((_, rest)) = n.split_once("/.openclaw/extensions/tachi/data/agents/") {
         let agent = rest.split('/').next().unwrap_or("unknown");

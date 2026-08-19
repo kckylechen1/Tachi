@@ -846,3 +846,52 @@ fn plan_c_project_root_does_not_treat_global_tachi_home_as_project_root() {
         );
     });
 }
+
+#[test]
+fn scope_hint_for_in_home_correctly_classifies_global_store_and_projects() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("scope-hint-");
+        let tachi_home = tmp.path().join("custom-tachi-home");
+        std::fs::create_dir_all(&tachi_home).expect("tachi home");
+
+        // 1. ~/.tachi/global/tachi-memory.db
+        let global_dir_db = tachi_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&global_dir_db, &tachi_home),
+            "global"
+        );
+
+        // 2. ~/.tachi/global/memory.db (legacy name)
+        let global_dir_legacy_db = tachi_home
+            .join("global")
+            .join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&global_dir_legacy_db, &tachi_home),
+            "global"
+        );
+
+        // 3. ~/.tachi/tachi-memory.db (root level)
+        let global_root_db = tachi_home.join(memcore::MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&global_root_db, &tachi_home),
+            "global"
+        );
+
+        // 4. ~/.tachi/memory.db (root level legacy)
+        let global_root_legacy_db = tachi_home.join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&global_root_legacy_db, &tachi_home),
+            "global"
+        );
+
+        // 5. ~/.tachi/projects/my-proj/tachi-memory.db
+        let project_alias = tachi_home
+            .join("projects")
+            .join("my-proj")
+            .join(memcore::MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&project_alias, &tachi_home),
+            "project:my-proj"
+        );
+    });
+}

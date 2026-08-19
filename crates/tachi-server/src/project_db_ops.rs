@@ -208,7 +208,15 @@ pub(crate) fn register_repo_local_manifest_entry_in_home(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     with_manifest_registration_file_lock(&manifest_path, || {
         register_repo_local_manifest_entry_locked(db_path, project_name, &manifest_path)
-    })
+    })?;
+    if let Some(root) =
+        crate::path_utils::plan_c_project_root_from_local_db_in_home(db_path, tachi_home)
+    {
+        crate::path_utils::require_plan_c_alias_success(
+            crate::path_utils::ensure_plan_c_canonical_alias_in_home(db_path, &root, tachi_home),
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn register_repo_local_manifest_entry_then_in_home<T>(
