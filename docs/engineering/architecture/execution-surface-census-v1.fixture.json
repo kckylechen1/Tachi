@@ -315,21 +315,21 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 42129,
-        "total_tool_definition_bytes": 47036,
+        "total_input_schema_bytes": 44046,
+        "total_tool_definition_bytes": 49414,
         "visible_tool_count": 11,
         "visible_tools": [
           "peer_query",
           "runtime_info",
           "tachi_a2a",
-          "tachi_browse",
           "tachi_event",
           "tachi_memory",
           "tachi_skill",
           "tachi_task",
           "tachi_tools",
           "tachi_unstick",
-          "tachi_web_search"
+          "tachi_web_search",
+          "tachi_wiki"
         ]
       },
       "operate": {

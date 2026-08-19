@@ -141,12 +141,13 @@ pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Continuity events (query + append; no promote under action policy)
     "tachi_event",
     "tachi_web_search",
-    "tachi_browse",
+    // Wiki facade (search/browse/read under action policy)
+    "tachi_wiki",
     // Self-rescue when stuck
     "tachi_unstick",
     // Task facade — action policy denies dispatch/recommend/merge/…
     "tachi_task",
-    // Canonical skill workflow facade (discover/run/bundle under action policy)
+    // Canonical skill workflow facade (discover/run under action policy)
     "tachi_skill",
     // Peer-publication broker (#1016 S1): a worker lane reads a peer's advisory
     // presence to avoid colliding blind. Read-only; no write path exists.
