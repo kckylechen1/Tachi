@@ -638,7 +638,7 @@ where
                     "profile_summary": summarize_matrix_rows(&profile_rows),
                     "task_types": evidence.task_types,
                     "eval_refs": evidence.eval_refs,
-                    "consult_command": "tachi card show <profile-id>",
+                    "review_command": "tachi_tune(action='route_review', proposal_id=...)",
                 },
                 "rationale": format!(
                     "{} appeared in {}/{} verified successful {} runs and is not part of the current sparse loadout",
@@ -723,7 +723,7 @@ fn build_evidence_contract_evolution_proposals(
                 "avg_retry_count": round2(row.avg_retry_count),
                 "human_override_rate": round2(row.human_override_rate),
                 "profile_summary": summarize_matrix_rows(profile_rows),
-                "consult_command": "tachi card show <profile-id>",
+                "review_command": "tachi_tune(action='route_review', proposal_id=...)",
             },
             "rationale": format!(
                 "{} has {} clean verified {} samples; require evidence artifact {}",
@@ -805,7 +805,7 @@ fn build_passive_trait_evolution_proposals(
                 "avg_retry_count": round2(row.avg_retry_count),
                 "human_override_rate": round2(row.human_override_rate),
                 "profile_summary": summarize_matrix_rows(profile_rows),
-                "consult_command": "tachi card show <profile-id>",
+                "review_command": "tachi_tune(action='route_review', proposal_id=...)",
             },
             "rationale": format!(
                 "{} has {} clean verified {} samples; add passive trait {}",

@@ -130,17 +130,12 @@ It should answer:
 
 Candidate APIs:
 
-- `recommend_capability`
-- `recommend_skill`
-- `recommend_toolchain`
-- `tachi_skill(action="bundle")`
+- `tachi_skill(action="discover"|"run")`
 
 Status:
 
-- first-pass recommendation APIs are now implemented
-- `tachi_skill(action="bundle")` now assembles a host-aware bundle with packs, skills, host tools, and a ready-to-inject section; standalone `prepare_capability_bundle` remains a compatibility route
+- `tachi_skill(action="discover")` searches static Hub/Pack skills, and `tachi_skill(action="run")` executes them
 - current implementation is deterministic and Hub/Pack-aware
-- future iterations can add richer outcome learning and LLM-assisted planning on top
 
 This layer does not execute the host’s tools directly. It selects and orchestrates them using:
 
@@ -259,10 +254,7 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 - `tachi_memory(action="get")`; native `get_memory` is admin/backcompat only
 - `list_memories`
 - `memory_stats`
-- `recommend_capability`
-- `recommend_skill`
-- `recommend_toolchain`
-- `tachi_skill(action="bundle")`; native `prepare_capability_bundle` is backcompat only
+- `tachi_skill(action="discover")`
 
 (`memory_graph` / `get_edges` were dropped from `observe` in #757 — internalized
 off the MCP surface entirely, not just this bundle.)
