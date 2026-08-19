@@ -155,18 +155,19 @@ impl Manifest {
             // Physical alias-dir retirement (adopting the new-name dir,
             // retiring drifted old-hash dirs) is a separate `--fix`-gated
             // operation tracked in #743.
-            let scope_hint = match crate::path_utils::plan_c_project_root_from_local_db(&canon) {
-                Some(project_root) => {
-                    let current_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
-                        .or_else(|| {
-                            crate::path_utils::plan_c_legacy_dir_name_from_root(&project_root)
-                        });
-                    match current_name {
-                        Some(name) => format!("project:{name}"),
-                        None => f.scope_hint.clone(),
-                    }
+            let scope_hint = if f.scope_hint == "global" {
+                "global".to_string()
+            } else if let Some(project_root) =
+                crate::path_utils::plan_c_project_root_from_local_db(&canon)
+            {
+                let current_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+                    .or_else(|| crate::path_utils::plan_c_legacy_dir_name_from_root(&project_root));
+                match current_name {
+                    Some(name) => format!("project:{name}"),
+                    None => f.scope_hint.clone(),
                 }
-                None => f.scope_hint.clone(),
+            } else {
+                f.scope_hint.clone()
             };
 
             // FIX-D (#736): derive role/owner from the CORRECTED scope hint,

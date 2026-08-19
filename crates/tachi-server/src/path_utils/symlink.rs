@@ -156,6 +156,61 @@ pub(crate) fn ensure_plan_c_symlink_in_home(
     PlanCLinkOutcome::Skipped("Plan C symlink unsupported on non-Unix hosts")
 }
 
+/// Ensure the canonical (gen-4) alias directory and symlink exist for `project_root`
+/// in `tachi_home`, ensuring convergence between on-disk aliases and manifest records (#1573).
+pub(crate) fn ensure_plan_c_canonical_alias_in_home(
+    local_db: &Path,
+    project_root: &Path,
+    tachi_home: &Path,
+) -> PlanCLinkOutcome {
+    let canonical_name = match plan_c_dir_name_from_root(project_root) {
+        Some(name) => name,
+        None => return PlanCLinkOutcome::Skipped("cannot derive canonical name for project root"),
+    };
+    let canonical_alias_dir = tachi_home.join("projects").join(&canonical_name);
+    let canonical_link = canonical_alias_dir.join(memcore::MEMORY_DB_FILENAME);
+
+    #[cfg(unix)]
+    {
+        if let Ok(meta) = std::fs::symlink_metadata(&canonical_link) {
+            if meta.file_type().is_symlink() {
+                if let Ok(target) = std::fs::canonicalize(&canonical_link) {
+                    if let Ok(local_canon) = std::fs::canonicalize(local_db) {
+                        if target == local_canon {
+                            return PlanCLinkOutcome::AlreadyLinked;
+                        }
+                    }
+                }
+            }
+        }
+        if let Err(error) = std::fs::create_dir_all(&canonical_alias_dir) {
+            return PlanCLinkOutcome::Failed {
+                path: canonical_alias_dir,
+                error: format!("failed to create canonical Plan C project directory: {error}"),
+            };
+        }
+        if let Err(error) = std::os::unix::fs::symlink(local_db, &canonical_link) {
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return PlanCLinkOutcome::Failed {
+                    path: canonical_link,
+                    error: format!("failed to create canonical Plan C symlink: {error}"),
+                };
+            }
+        }
+        PlanCLinkOutcome::Created(canonical_link)
+    }
+    #[cfg(not(unix))]
+    {
+        if let Err(error) = std::fs::create_dir_all(&canonical_alias_dir) {
+            return PlanCLinkOutcome::Failed {
+                path: canonical_alias_dir,
+                error: format!("failed to create canonical Plan C project directory: {error}"),
+            };
+        }
+        PlanCLinkOutcome::Created(canonical_link)
+    }
+}
+
 pub(crate) fn inspect_plan_c_alias_for_local_db(local_db: &Path) -> PlanCAliasInspection {
     inspect_plan_c_alias_for_local_db_in_home(local_db, &tachi_home())
 }

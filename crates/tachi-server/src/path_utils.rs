@@ -16,7 +16,8 @@ pub(crate) use alias::{
     plan_c_global_db_path, plan_c_global_db_path_existing, plan_c_global_db_path_existing_in_home,
     plan_c_global_db_path_in_home, plan_c_legacy_dir_name_from_root,
     plan_c_previous_dir_name_from_root, plan_c_previous_raw_dir_name_from_root,
-    plan_c_project_root_from_local_db, resolve_project_db_path,
+    plan_c_project_root_from_local_db, plan_c_project_root_from_local_db_in_home,
+    resolve_project_db_path,
 };
 
 /// Return whether a persisted project identity is safe to address without
@@ -66,8 +67,9 @@ pub(crate) use named::{
     named_project_for_db_path_in_home, named_project_from_path_in_home,
 };
 pub(crate) use symlink::{
-    ensure_plan_c_symlink, ensure_plan_c_symlink_in_home, inspect_plan_c_alias_for_local_db,
-    inspect_plan_c_alias_for_local_db_in_home, inspect_plan_c_alias_in_home,
+    ensure_plan_c_canonical_alias_in_home, ensure_plan_c_symlink, ensure_plan_c_symlink_in_home,
+    inspect_plan_c_alias_for_local_db, inspect_plan_c_alias_for_local_db_in_home,
+    inspect_plan_c_alias_in_home,
 };
 #[cfg(all(test, unix))]
 pub(crate) use symlink::{install_plan_c_symlink_hook_for_test, PlanCSymlinkHookGuard};
