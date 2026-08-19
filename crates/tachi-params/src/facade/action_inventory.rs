@@ -153,9 +153,8 @@ pub const TACHI_SKILL_ACTIONS: &[&str] = &["discover", "run"];
 /// completeness test.
 pub const TACHI_STAFF_ACTIONS: &[&str] = &["start", "status"];
 
-/// `tachi_orchestrator` facade actions. Single source for
-/// `orchestration::tachi_orchestrator_action_schema` and #1098's
-/// `action_effect` completeness test.
+/// Internal orchestrator actions (retired from MCP router; retained for
+/// internal hard_state TODOs and handoffs accounting).
 pub const TACHI_ORCHESTRATOR_ACTIONS: &[&str] = &[
     "todo_list",
     "todo_update",
@@ -282,6 +281,27 @@ mod tests {
         assert_eq!(
             TACHI_TUNE_ACTIONS,
             TachiTuneAction::all_wire_strings().as_slice()
+        );
+    }
+
+    #[test]
+    fn f0_skill_and_staff_and_wiki_and_a2a_counts() {
+        assert_eq!(TACHI_SKILL_ACTIONS, &["discover", "run"]);
+        assert_eq!(TACHI_STAFF_ACTIONS, &["start", "status"]);
+        assert_eq!(TACHI_WIKI_ACTIONS, &["search", "browse", "read", "write"]);
+        assert_eq!(TACHI_A2A_ACTIONS, &["respond", "status"]);
+        assert_eq!(
+            TACHI_EVENT_ACTIONS,
+            &[
+                "emit",
+                "query",
+                "metrics",
+                "project",
+                "promote",
+                "context",
+                "a2a",
+                "label_eval",
+            ]
         );
     }
 }
