@@ -469,7 +469,7 @@ impl StaffAssignmentRequest {
 
 /// Server-produced admission and policy resolution result (Issue #1692 C5).
 /// Produced strictly by policy/admission gates; not a public caller-authored schema.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ResolvedStaffAssignment {
     pub assignment_id: String,
     pub staffing_reason: TachiDispatchReason,
@@ -544,28 +544,18 @@ impl ResolvedStaffAssignment {
 
 /// Authority-layer output granting permissions, sandbox, credentials, and tools (Issue #1692 C5).
 /// Minted exclusively by authority/resource enforcement layers; cannot be deserialized from public Staff JSON.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ExecutionGrant {
     pub grant_id: String,
-    #[serde(default)]
     pub env_id: Option<String>,
-    #[serde(default)]
     pub unmanaged_cwd_allowed: bool,
-    #[serde(default)]
     pub allowed_cwd: Option<std::path::PathBuf>,
-    #[serde(default)]
     pub credential_profiles: Vec<String>,
-    #[serde(default)]
     pub mcp_access: Option<DispatchMcpAccessParams>,
-    #[serde(default)]
     pub allowed_tools: Vec<String>,
-    #[serde(default)]
     pub permission_profile: Option<String>,
-    #[serde(default)]
     pub sandbox: Option<String>,
-    #[serde(default)]
     pub max_turns: Option<u32>,
-    #[serde(default = "default_dispatch_timeout")]
     pub timeout_secs: u64,
 }
 
@@ -1442,10 +1432,8 @@ mod tests {
         assert_eq!(resolved.fallback_chain, vec!["claude"]);
 
         let serialized = serde_json::to_value(&resolved).expect("serializes");
-        let deserialized: ResolvedStaffAssignment =
-            serde_json::from_value(serialized).expect("deserializes");
-        assert_eq!(deserialized.assignment_id, "assign-456");
-        assert_eq!(deserialized.selected_worker, "codex");
+        assert_eq!(serialized["assignment_id"], "assign-456");
+        assert_eq!(serialized["selected_worker"], "codex");
     }
 
     #[test]
@@ -1475,9 +1463,8 @@ mod tests {
         assert_eq!(grant.timeout_secs, 1800);
 
         let serialized = serde_json::to_value(&grant).expect("serializes");
-        let deserialized: ExecutionGrant =
-            serde_json::from_value(serialized).expect("deserializes");
-        assert_eq!(deserialized.grant_id, "grant-789");
+        assert_eq!(serialized["grant_id"], "grant-789");
+        assert_eq!(serialized["env_id"], "env-managed-1");
     }
 
     #[test]

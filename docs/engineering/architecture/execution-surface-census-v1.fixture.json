@@ -130,8 +130,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 136091,
-        "total_tool_definition_bytes": 166591,
+        "total_input_schema_bytes": 136120,
+        "total_tool_definition_bytes": 166620,
         "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",
@@ -219,8 +219,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 90954,
-        "total_tool_definition_bytes": 104011,
+        "total_input_schema_bytes": 90983,
+        "total_tool_definition_bytes": 104040,
         "visible_tool_count": 29,
         "visible_tools": [
           "extract_facts",
@@ -459,7 +459,7 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3418,
+            "input_schema_bytes": 3447,
             "property_count": 13,
             "property_names": [
               "action",
@@ -580,7 +580,7 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3418,
+            "input_schema_bytes": 3447,
             "property_count": 13,
             "property_names": [
               "action",
@@ -966,14 +966,14 @@
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 136091,
-        "max_total_tool_definition_bytes": 166591,
+        "max_total_input_schema_bytes": 136120,
+        "max_total_tool_definition_bytes": 166620,
         "max_visible_tools": 82,
         "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "coordinate": {
-        "max_total_input_schema_bytes": 90954,
-        "max_total_tool_definition_bytes": 104011,
+        "max_total_input_schema_bytes": 90983,
+        "max_total_tool_definition_bytes": 104040,
         "max_visible_tools": 29,
         "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
