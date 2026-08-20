@@ -628,7 +628,19 @@ pub(crate) fn collect_wiki_read_value_for_plan(
 
     let entries =
         list_wiki_entries_for_plan(server, plan, knowledge_artifact_root(&resolved), 5000)?;
-    let exact_matches = entries
+    let mut eligible_entries = Vec::with_capacity(entries.len());
+    for stored in entries {
+        // Normal retrieval must gate lifecycle eligibility before exact-match
+        // ambiguity and prefix fallback. MigrationAudit is deliberately
+        // different: it is a historical census, so superseded and otherwise
+        // non-retrievable rows remain visible as audit evidence.
+        if matches!(plan, WikiReadPlan::MigrationAudit)
+            || wiki_entry_matches_lifecycle_scope(&stored.entry, None)?
+        {
+            eligible_entries.push(stored);
+        }
+    }
+    let exact_matches = eligible_entries
         .iter()
         .filter(|entry| entry.entry.path == resolved)
         .collect::<Vec<_>>();
@@ -648,7 +660,7 @@ pub(crate) fn collect_wiki_read_value_for_plan(
     }
     let entry = exact_matches.into_iter().next().or_else(|| {
         let prefix = format!("{resolved}/");
-        entries
+        eligible_entries
             .iter()
             .find(|entry| entry.entry.path.starts_with(&prefix))
     });
@@ -659,10 +671,9 @@ pub(crate) fn collect_wiki_read_value_for_plan(
             append_wiki_log(server, "read", &resolved);
             // #1072 RED case 3: expose id/revision/authority/lifecycle/
             // source refs/typed evidence refs/review receipt on read, not
-            // just search — a direct read of a `pending_review` path must
-            // still show the caller it is not reviewed truth, even though
-            // reading by an exact known path (unlike default search) is not
-            // itself gated.
+            // just search. Exact reads share the default-retrievable gate, so
+            // pending-review and applicability-invalid artifacts never expose
+            // their entry text through this surface.
             let effective =
                 derive_effective_knowledge_artifact(&entry.metadata, &entry.path, &entry.scope);
             let review_receipt = derive_wiki_review_receipt(&entry.metadata)

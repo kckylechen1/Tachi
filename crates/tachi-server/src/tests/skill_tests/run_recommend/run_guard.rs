@@ -205,3 +205,367 @@ async fn run_skill_rejects_uncallable_skill() {
         "unexpected error for disabled skill: {err}"
     );
 }
+
+#[tokio::test]
+async fn hub_register_rejects_retired_trajectory_distiller_in_project_scope() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-register");
+    let mut params = register_mock_skill_params();
+    params.id = crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string();
+    params.name = "trajectory-distiller".to_string();
+    params.scope = "project".to_string();
+
+    let err = server
+        .hub_register(Parameters(params))
+        .await
+        .expect_err("retired trajectory distiller registration must fail");
+
+    assert!(
+        err.contains("retired") && err.contains("cannot be registered"),
+        "unexpected retired registration error: {err}"
+    );
+    let persisted = server
+        .with_project_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("check project store after rejected registration");
+    assert!(persisted.is_none());
+}
+
+#[tokio::test]
+async fn run_skill_rejects_historical_project_trajectory_distiller_row() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-project-row");
+    let legacy = make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical project-scoped trajectory writer",
+        "listed",
+    );
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&legacy)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed historical project trajectory row below public registration boundary");
+
+    let err = crate::hub_ops::handle_run_skill(
+        &server,
+        RunSkillParams {
+            skill_id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            args: json!({}),
+        },
+    )
+    .await
+    .expect_err("historical project trajectory row must not run");
+
+    assert!(
+        err.contains("retired") && err.contains("cannot be run"),
+        "unexpected retired execution error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn cached_project_trajectory_distiller_is_not_advertised_after_restart_load() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-cached-tool");
+    let legacy = make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical cached project-scoped trajectory writer",
+        "listed",
+    );
+    assert!(
+        tachi_hub::should_expose_skill_tool(&legacy),
+        "fixture must reproduce the old cached-loader eligibility"
+    );
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&legacy)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed historical project row before cached-tool load");
+
+    let err = server
+        .register_skill_tool(&legacy)
+        .expect_err("restart loader must not expose a retired cached skill");
+    assert!(
+        err.contains("retired") && err.contains("cannot be exposed"),
+        "unexpected retired exposure error: {err}"
+    );
+    let advertised =
+        crate::utils::lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools")
+            .values()
+            .any(|skill_id| skill_id == crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID);
+    assert!(
+        !advertised,
+        "historical trajectory-distiller must not remain in the dynamic tool inventory"
+    );
+}
+
+#[tokio::test]
+async fn hub_review_cannot_reapprove_retired_project_trajectory_distiller() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-review");
+    let mut legacy = make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Rejected historical project trajectory writer",
+        "listed",
+    );
+    legacy.enabled = false;
+    legacy.review_status = "rejected".to_string();
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&legacy)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject rejected historical project row");
+
+    let err = crate::hub_ops::handle_hub_review(
+        &server,
+        crate::tool_params::HubReviewParams {
+            id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            review_status: "approved".to_string(),
+            enabled: Some(true),
+        },
+    )
+    .await
+    .expect_err("retired capability must not be re-approved");
+    assert!(
+        err.contains("retired") && err.contains("only review_status='rejected'"),
+        "unexpected retired review error: {err}"
+    );
+    let persisted = server
+        .with_project_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("reload rejected project row")
+        .expect("historical project row remains as tombstone");
+    assert!(!persisted.enabled);
+    assert_eq!(persisted.review_status, "rejected");
+}
+
+#[tokio::test]
+async fn hub_review_retired_state_allows_only_rejected_and_forces_disabled() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-review-contraction");
+    let legacy = make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical approved and enabled trajectory writer",
+        "listed",
+    );
+    assert!(legacy.enabled);
+    assert_eq!(legacy.review_status, "approved");
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&legacy)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject approved historical project row");
+
+    let err = crate::hub_ops::handle_hub_review(
+        &server,
+        crate::tool_params::HubReviewParams {
+            id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            review_status: "pending".to_string(),
+            enabled: None,
+        },
+    )
+    .await
+    .expect_err("pending must not replace the immutable retired review state");
+    assert!(
+        err.contains("only review_status='rejected'"),
+        "unexpected pending-state error: {err}"
+    );
+    let unchanged = server
+        .with_project_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("reload row after rejected pending transition")
+        .expect("historical row remains");
+    assert!(unchanged.enabled);
+    assert_eq!(unchanged.review_status, "approved");
+
+    crate::hub_ops::handle_hub_review(
+        &server,
+        crate::tool_params::HubReviewParams {
+            id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            review_status: "rejected".to_string(),
+            enabled: None,
+        },
+    )
+    .await
+    .expect("rejected with omitted enabled must contract to the tombstone state");
+    let contracted = server
+        .with_project_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("reload contracted retired row")
+        .expect("retired tombstone remains audit-visible");
+    assert!(!contracted.enabled);
+    assert_eq!(contracted.review_status, "rejected");
+}
+
+#[tokio::test]
+async fn hub_set_enabled_cannot_revive_retired_global_trajectory_distiller() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-enable");
+    let mut legacy = make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Disabled historical global trajectory writer",
+        "listed",
+    );
+    legacy.enabled = false;
+    legacy.review_status = "rejected".to_string();
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&legacy)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject disabled historical global row");
+
+    let err = crate::hub_ops::handle_hub_set_enabled(
+        &server,
+        crate::tool_params::HubSetEnabledParams {
+            id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            enabled: true,
+        },
+    )
+    .await
+    .expect_err("retired capability must not be enabled");
+    assert!(
+        err.contains("retired") && err.contains("cannot be enabled"),
+        "unexpected retired enable error: {err}"
+    );
+    let persisted = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("reload rejected global row")
+        .expect("historical global row remains as tombstone");
+    assert!(!persisted.enabled);
+    assert_eq!(persisted.review_status, "rejected");
+}
+
+#[tokio::test]
+async fn hub_feedback_rejects_retired_project_row_without_mutating_state() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-feedback");
+    let legacy = make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical project trajectory writer with immutable audit state",
+        "listed",
+    );
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&legacy)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject historical project feedback row");
+    let before = server
+        .with_project_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("load historical row before feedback")
+        .expect("historical row exists before feedback");
+    let before = serde_json::to_string(&before).expect("serialize pre-feedback state");
+
+    let err = crate::hub_ops::handle_hub_feedback(
+        &server,
+        crate::tool_params::HubFeedbackParams {
+            id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            success: true,
+            rating: Some(5.0),
+        },
+    )
+    .await
+    .expect_err("retired capability feedback must fail");
+    assert!(
+        err.contains("retired") && err.contains("cannot accept feedback"),
+        "unexpected retired feedback error: {err}"
+    );
+
+    let after = server
+        .with_project_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("load historical row after feedback")
+        .expect("historical row exists after feedback");
+    let after = serde_json::to_string(&after).expect("serialize post-feedback state");
+    assert_eq!(after, before, "feedback rejection must be mutation-free");
+}
+
+#[tokio::test]
+async fn hub_set_active_version_rejects_retired_target_without_persisting_alias() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-active-version");
+    let legacy = make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical project trajectory writer used as an alias target",
+        "listed",
+    );
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&legacy)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject historical project alias target");
+    let alias_id = "skill:retired-trajectory-alias";
+
+    let err = crate::hub_ops::handle_hub_set_active_version(
+        &server,
+        crate::tool_params::HubSetActiveVersionParams {
+            alias_id: alias_id.to_string(),
+            active_capability_id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+        },
+    )
+    .await
+    .expect_err("retired capability must not become an active-version target");
+    assert!(
+        err.contains("Retired capability IDs") && err.contains("active-version"),
+        "unexpected retired alias error: {err}"
+    );
+
+    let project_route = server
+        .with_project_store_read(|store| {
+            store
+                .hub_get_active_version_route(alias_id)
+                .map_err(|error| error.to_string())
+        })
+        .expect("check project alias route");
+    let global_route = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get_active_version_route(alias_id)
+                .map_err(|error| error.to_string())
+        })
+        .expect("check global alias route");
+    assert!(project_route.is_none());
+    assert!(global_route.is_none());
+}

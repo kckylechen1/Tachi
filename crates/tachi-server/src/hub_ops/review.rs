@@ -91,6 +91,14 @@ pub(crate) async fn handle_hub_review(
 ) -> Result<String, String> {
     let review_status = normalize_review_status(&params.review_status)
         .ok_or_else(|| "review_status must be one of: pending, approved, rejected".to_string())?;
+    if crate::builtins::is_retired_builtin_capability_id(&params.id)
+        && (review_status != "rejected" || params.enabled == Some(true))
+    {
+        return Err(format!(
+            "Capability '{}' is retired; only review_status='rejected' with enabled=false or omitted is allowed.",
+            params.id
+        ));
+    }
 
     let enabled_override = params.enabled.or(match review_status {
         "approved" => Some(true),
@@ -183,6 +191,14 @@ pub(crate) async fn handle_hub_set_active_version(
     if params.alias_id.trim().is_empty() || params.active_capability_id.trim().is_empty() {
         return Err("alias_id and active_capability_id must be non-empty".to_string());
     }
+    if crate::builtins::is_retired_builtin_capability_id(&params.alias_id)
+        || crate::builtins::is_retired_builtin_capability_id(&params.active_capability_id)
+    {
+        return Err(format!(
+            "Retired capability IDs cannot be used as an active-version alias or target (alias_id='{}', active_capability_id='{}').",
+            params.alias_id, params.active_capability_id
+        ));
+    }
 
     let active_cap = server
         .get_capability(&params.active_capability_id)
@@ -231,6 +247,12 @@ pub(crate) async fn handle_hub_set_enabled(
     server: &MemoryServer,
     params: HubSetEnabledParams,
 ) -> Result<String, String> {
+    if params.enabled && crate::builtins::is_retired_builtin_capability_id(&params.id) {
+        return Err(format!(
+            "Capability '{}' is retired and cannot be enabled.",
+            params.id
+        ));
+    }
     let mut updated = false;
     let mut target_db = "not_found";
 

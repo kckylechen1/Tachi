@@ -55,7 +55,7 @@
 | maintenance.rs:826 | generate_distill | 定期记忆蒸馏 |
 | recall.rs:214 | call_distill_llm | context compaction |
 | evolve.rs:104 | call_reasoning_llm | skill prompt 进化 |
-| complete_ops.rs:198 → call.rs:115 | distill_trajectory | trajectory 蒸馏 |
+| complete_ops.rs:198 → call.rs:115 | distill_trajectory（已退役） | 历史 trajectory 蒸馏；当前不再由 completion 调用 |
 | foundry_ops.rs:460 | call_reasoning_llm | agent evolution 综合 |
 
 ### OpenClaw harness 参考数据
@@ -89,7 +89,7 @@ Foundry LLM 选型参考 `~/.openclaw/agents/yaya/harness/eval/`：
 2. **确保 Foundry 调用点走 Distill/Reasoning lane**
    - evolve.rs:104 → 已走 Reasoning ✓
    - foundry_ops.rs:460 → 已走 Reasoning ✓
-   - distill_trajectory → 走 hub_call → skill 执行 → Reasoning ✓
+   - [历史设计，已退役] distill_trajectory → 走 hub_call → skill 执行 → Reasoning；当前不提供该自动 trajectory-to-skill 管线
 
 3. **load_lane fallback 链调整**
    - Extract: `EXTRACT_* → SILICONFLOW_*`（前台默认）
@@ -115,4 +115,4 @@ Foundry LLM 选型参考 `~/.openclaw/agents/yaya/harness/eval/`：
 - [ ] config.env 兼容性：旧配置不 break
 - [ ] Rust setup wizard 正确写入 EXTRACT_*/SUMMARY_* 和 DISTILL_*/REASONING_*
 - [ ] hub_call / security_scan / skill_analysis 走前台 LLM
-- [ ] distill / evolve / trajectory_distill 走 Foundry LLM
+- [x] 自动 trajectory-to-skill generation 已退役；`tachi_skill` 仅支持静态、已审查 skill 的 discover/run，`tachi_complete` 报告退役且不创建 skill

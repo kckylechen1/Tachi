@@ -70,6 +70,9 @@ fn run_skill_quality_guards_for_scope(
                 .map_err(|e| format!("hub list skills: {e}"))?;
             let mut out = Vec::new();
             for cap in caps {
+                if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+                    continue;
+                }
                 let Some(content) = extract_skill_content(&cap) else {
                     continue;
                 };

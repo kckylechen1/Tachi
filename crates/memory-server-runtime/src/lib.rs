@@ -1146,6 +1146,15 @@ impl DbRuntime {
             gate_hold,
             completed,
         });
+        if resource_hold >= WRITE_LOCK_HOLD_WARN_THRESHOLD {
+            tracing::warn!(
+                target: "tachi::db_runtime",
+                db_label = "global",
+                elapsed_ms = resource_hold.as_millis() as u64,
+                threshold_ms = WRITE_LOCK_HOLD_WARN_THRESHOLD.as_millis() as u64,
+                "global DB write lock held past threshold"
+            );
+        }
         match outcome {
             Ok(result) => result,
             Err(payload) => std::panic::resume_unwind(payload),

@@ -72,49 +72,6 @@ pub struct RunSkillParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct DistillTrajectoryParams {
-    /// Natural-language task description
-    pub task_description: String,
-
-    /// Key execution steps, failures, and recoveries
-    pub execution_trace: Vec<serde_json::Value>,
-
-    /// Final outcome payload, e.g. success flag, score, notes
-    pub final_outcome: serde_json::Value,
-
-    /// Source agent identifier
-    pub agent_id: String,
-
-    /// Memory / skill path, e.g. /skills/domain-pack/factor-evolution
-    pub skill_path: String,
-
-    /// Optional distilled skill capability id. Defaults to one derived from skill_path.
-    #[serde(default)]
-    pub skill_id: Option<String>,
-
-    /// Optional base importance for the permanent snapshot memory
-    #[serde(
-        default,
-        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
-    )]
-    #[schemars(schema_with = "super::coerce::opt_number_from_string_or_number_schema")]
-    pub importance: Option<f64>,
-
-    /// Optional domain. #1041 S2: an absent domain classifies to `general`,
-    /// it no longer inherits the process-wide `TACHI_DOMAIN` env var.
-    #[serde(default)]
-    pub domain: Option<String>,
-
-    /// Optional named project DB target
-    #[serde(default)]
-    pub project: Option<String>,
-
-    /// Target database scope for snapshot writes
-    #[serde(default = "default_scope")]
-    pub scope: String,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct HubRegisterParams {
     /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
     pub id: String,

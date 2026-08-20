@@ -138,3 +138,51 @@ async fn hub_export_skills_sanitizes_skill_file_names() {
 
     let _ = std::fs::remove_dir_all(&export_dir);
 }
+
+#[tokio::test]
+async fn hub_export_omits_retired_trajectory_distiller_from_historical_stores() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-export");
+    let global = crate::tests::make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical global trajectory writer",
+        "listed",
+    );
+    let mut project = global.clone();
+    project.description = "Historical project trajectory writer".to_string();
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&global)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject historical global export row");
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&project)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject historical project export row");
+    let export_dir =
+        crate::utils::test_fixture_path(format!("tachi-export-retired-{}", uuid::Uuid::new_v4()));
+
+    let result = server
+        .hub_export_skills(Parameters(ExportSkillsParams {
+            agent: "generic".to_string(),
+            skill_ids: Some(vec![
+                crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string()
+            ]),
+            visibility: "all".to_string(),
+            output_dir: Some(export_dir.display().to_string()),
+            clean: false,
+        }))
+        .await
+        .expect("retired-only export should return an empty result");
+    let json: Value = serde_json::from_str(&result).expect("export JSON");
+    assert_eq!(json["exported"], json!(0));
+    assert!(!export_dir.join("trajectory-distiller.md").exists());
+
+    let _ = std::fs::remove_dir_all(&export_dir);
+}

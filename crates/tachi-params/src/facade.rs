@@ -333,19 +333,12 @@ pub struct TachiDomainAdapterParams {
 
 // ─── Facade: unified handoff ─────────────────────────────────────────────────
 
-/// #1099: `leave`/`check` were retired (see #1016 — sticky/orchestrator
-/// replace them) along with the briefing projection and GC branch that only
-/// existed to serve them. `promote_issue` is the one capability that never
-/// got a replacement, so it is the sole surviving action here — this struct
-/// only carries fields it needs. Existing callers that still pass
-/// `action='leave'|'check'` get a loud, actionable error (never a silent
-/// accept) instead of a dropped/ignored field.
+/// #1099 retired `leave`/`check`, their briefing projection, and GC branch.
+/// `promote_issue` is the sole surviving action; retired inputs fail loudly.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiHandoffParams {
-    /// Action: only "promote_issue" (create/link a GitHub issue from an
-    /// existing handoff memo) is supported. "leave"/"check" were retired in
-    /// #1099 retired the old handoff memo routes; use
-    /// tachi_orchestrator(action='handoff_write'|'handoff_read') instead.
+    /// Action: only "promote_issue". Use `tachi_task(action='handoff')` for
+    /// work handoff or `tachi_a2a(action='respond')` for advisory messages.
     pub action: String,
 
     /// Handoff memo ID to promote (required for action="promote_issue", with or without "handoff:" prefix)

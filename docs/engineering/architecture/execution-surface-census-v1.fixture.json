@@ -130,8 +130,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 136120,
-        "total_tool_definition_bytes": 166620,
+        "total_input_schema_bytes": 136004,
+        "total_tool_definition_bytes": 166505,
         "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",
@@ -219,8 +219,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 90983,
-        "total_tool_definition_bytes": 104040,
+        "total_input_schema_bytes": 90867,
+        "total_tool_definition_bytes": 103925,
         "visible_tool_count": 29,
         "visible_tools": [
           "extract_facts",

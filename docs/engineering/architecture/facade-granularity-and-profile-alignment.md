@@ -166,11 +166,9 @@ purpose-built home, and #1016 rules `handoff_ops` **deprecated, not deleted**:
 
 - **Same-host advisory message** → `tachi_a2a(action='respond')` (#1751).
   Explicit AgentIdentity admission, idempotency, and delivery receipts replace the old memo loop.
-- **Structured baton for a resumed/handed-off task** → `orchestrator_ops::HandoffPacket`
-  (`tachi_orchestrator(action='handoff_write'|'handoff_read')`). Carries objective /
-  current_state / completed_steps / remaining_steps / files_touched / commands_run / tests_run /
-  known_blockers / next_action, keyed by `task_id` — the shape a resuming session needs, which the
-  memo shape never had.
+- **Structured baton for a resumed/handed-off task** → `tachi_task(action='handoff')`.
+  Its canonical WorkClaim fields carry the claimant, worktree, expected head, lease, and
+  transition evidence a resuming session needs, which the old memo shape never had.
 
 `promote_issue` (memo → GitHub issue) has no replacement yet and is unaffected. Deletion of
 `handoff_ops` is a later, separately-audited cut (#757-style) once callers are confirmed migrated;

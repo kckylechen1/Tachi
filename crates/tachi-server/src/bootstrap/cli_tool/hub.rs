@@ -8,6 +8,24 @@ use tachi_bootstrap::cli::{HubAction, McpAction};
 
 use super::super::{evaluate_cli_capability_enabled, open_cli_store, print_pretty_json};
 
+fn collect_visible_hub_stats(
+    hub_db: &Path,
+) -> Result<memory_server_hub_cli::HubStatsSnapshot, Box<dyn std::error::Error>> {
+    memory_server_hub_cli::collect_stats_filtered(hub_db, |cap| {
+        !crate::builtins::is_retired_builtin_capability_id(&cap.id)
+    })
+}
+
+fn collect_visible_hub_list(
+    hub_db: &Path,
+    cap_type: Option<&str>,
+    all: bool,
+) -> Result<Vec<HubCapability>, Box<dyn std::error::Error>> {
+    memory_server_hub_cli::collect_list_filtered_with(hub_db, cap_type, all, |cap| {
+        !crate::builtins::is_retired_builtin_capability_id(&cap.id)
+    })
+}
+
 pub(super) async fn run_hub_command(
     action: HubAction,
     app_home: &PathBuf,
@@ -19,8 +37,7 @@ pub(super) async fn run_hub_command(
             all,
             json: true,
         } => {
-            let store = open_cli_store(&hub_db)?;
-            let caps = store.hub_list(cap_type.as_deref(), all)?;
+            let caps = collect_visible_hub_list(&hub_db, cap_type.as_deref(), all)?;
             print_pretty_json(&serde_json::to_value(caps)?)
         }
         HubAction::List {
@@ -28,16 +45,9 @@ pub(super) async fn run_hub_command(
             all,
             json: false,
         } => {
-            memory_server_hub_cli::run(
-                &HubAction::List {
-                    cap_type,
-                    all,
-                    json: false,
-                },
-                &hub_db,
-                app_home,
-            )
-            .map_err(std::io::Error::other)?;
+            memory_server_hub_cli::cmd_list_filtered(&hub_db, cap_type.as_deref(), all, |cap| {
+                !crate::builtins::is_retired_builtin_capability_id(&cap.id)
+            })?;
             Ok(())
         }
         HubAction::Show { id } => {
@@ -62,6 +72,12 @@ pub(super) async fn run_hub_command(
             definition,
             description,
         } => {
+            if crate::builtins::is_retired_builtin_capability_id(&id) {
+                return Err(std::io::Error::other(format!(
+                    "Capability '{id}' is retired and cannot be registered."
+                ))
+                .into());
+            }
             let store = open_cli_store(&hub_db)?;
             let (enabled, warning) = evaluate_cli_capability_enabled(&cap_type, &definition)?;
             let is_mcp = cap_type.eq_ignore_ascii_case("mcp");
@@ -113,6 +129,12 @@ pub(super) async fn run_hub_command(
             print_pretty_json(&output)
         }
         HubAction::Enable { id } => {
+            if crate::builtins::is_retired_builtin_capability_id(&id) {
+                return Err(std::io::Error::other(format!(
+                    "Capability '{id}' is retired and cannot be enabled."
+                ))
+                .into());
+            }
             let store = open_cli_store(&hub_db)?;
             let updated = store.hub_set_enabled(&id, true)?;
             print_pretty_json(&json!({
@@ -131,25 +153,20 @@ pub(super) async fn run_hub_command(
             }))
         }
         HubAction::Stats { json: true } => {
-            let store = open_cli_store(&hub_db)?;
-            let caps = store.hub_list(None, false)?;
-            let mut by_type: HashMap<String, usize> = HashMap::new();
-            for cap in &caps {
-                *by_type.entry(cap.cap_type.clone()).or_insert(0) += 1;
-            }
-            let total_uses: u64 = caps.iter().map(|c| c.uses).sum();
-            let total_successes: u64 = caps.iter().map(|c| c.successes).sum();
+            let stats = collect_visible_hub_stats(&hub_db)?;
             print_pretty_json(&json!({
-                "total_capabilities": caps.len(),
-                "by_type": by_type,
-                "total_uses": total_uses,
-                "total_successes": total_successes,
-                "success_rate": if total_uses > 0 { total_successes as f64 / total_uses as f64 } else { 0.0 },
+                "total_capabilities": stats.capabilities,
+                "by_type": stats.by_type,
+                "total_uses": stats.total_uses,
+                "total_successes": stats.total_successes,
+                "success_rate": if stats.total_uses > 0 { stats.total_successes as f64 / stats.total_uses as f64 } else { 0.0 },
             }))
         }
         HubAction::Stats { json: false } => {
-            memory_server_hub_cli::cmd_stats(&hub_db)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            memory_server_hub_cli::cmd_stats_filtered(&hub_db, |cap| {
+                !crate::builtins::is_retired_builtin_capability_id(&cap.id)
+            })
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
             Ok(())
         }
     }
@@ -627,5 +644,202 @@ mod tests {
 
         assert!(err.contains("invalid MCP header at index 0"));
         assert!(!err.contains(SENTINEL_RAW_VALUE));
+    }
+
+    #[tokio::test]
+    async fn cli_hub_register_rejects_retired_id_before_creating_store() {
+        let app_home = crate::utils::test_fixture_path(format!(
+            "tachi-cli-retired-register-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let hub_db = memory_server_hub_cli::resolve_hub_db(None, &app_home);
+
+        let err = run_hub_command(
+            HubAction::Register {
+                id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+                cap_type: "skill".to_string(),
+                name: "trajectory-distiller".to_string(),
+                definition: json!({"content": "retired"}).to_string(),
+                description: Some("retired trajectory writer".to_string()),
+            },
+            &app_home,
+        )
+        .await
+        .expect_err("CLI must reject retired registration");
+
+        assert!(err.to_string().contains("retired"));
+        assert!(!hub_db.exists(), "rejection must not create the Hub store");
+        let _ = std::fs::remove_dir_all(&app_home);
+    }
+
+    #[tokio::test]
+    async fn cli_hub_enable_rejects_retired_id_without_mutating_row() {
+        let app_home = crate::utils::test_fixture_path(format!(
+            "tachi-cli-retired-enable-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let hub_db = memory_server_hub_cli::resolve_hub_db(None, &app_home);
+        std::fs::create_dir_all(hub_db.parent().expect("Hub DB parent")).unwrap();
+        let store = memcore::MemoryStore::open(hub_db.to_string_lossy().as_ref()).unwrap();
+        let legacy = HubCapability {
+            id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            cap_type: "skill".to_string(),
+            name: "trajectory-distiller".to_string(),
+            version: 1,
+            description: "retired trajectory writer".to_string(),
+            definition: json!({"content": "retired"}).to_string(),
+            enabled: false,
+            review_status: "rejected".to_string(),
+            health_status: "healthy".to_string(),
+            last_error: None,
+            last_success_at: None,
+            last_failure_at: None,
+            fail_streak: 0,
+            active_version: None,
+            exposure_mode: "direct".to_string(),
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        store.hub_register(&legacy).unwrap();
+        let before = serde_json::to_string(
+            &store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let err = run_hub_command(
+            HubAction::Enable {
+                id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            },
+            &app_home,
+        )
+        .await
+        .expect_err("CLI must reject retired enablement");
+        assert!(err.to_string().contains("retired"));
+        let after = serde_json::to_string(
+            &store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after, before, "rejection must not mutate the Hub row");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&app_home);
+    }
+
+    #[test]
+    fn cli_hub_stats_shared_json_and_text_source_excludes_retired_tombstones() {
+        for scope in ["global", "project"] {
+            let root = crate::utils::test_fixture_path(format!(
+                "tachi-cli-retired-stats-{scope}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let db_path = root.join(scope).join("memory.db");
+            std::fs::create_dir_all(db_path.parent().expect("stats DB parent")).unwrap();
+            let store = memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).unwrap();
+            let visible = HubCapability {
+                id: format!("skill:visible-{scope}"),
+                cap_type: "skill".to_string(),
+                name: format!("visible-{scope}"),
+                version: 1,
+                description: "visible stats fixture".to_string(),
+                definition: json!({"content": "visible"}).to_string(),
+                enabled: true,
+                review_status: "approved".to_string(),
+                health_status: "healthy".to_string(),
+                last_error: None,
+                last_success_at: None,
+                last_failure_at: None,
+                fail_streak: 0,
+                active_version: None,
+                exposure_mode: "direct".to_string(),
+                uses: 7,
+                successes: 5,
+                failures: 2,
+                avg_rating: 4.0,
+                last_used: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            };
+            let mut retired = visible.clone();
+            retired.id = crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string();
+            retired.name = "trajectory-distiller".to_string();
+            retired.uses = 1000;
+            retired.successes = 999;
+            store.hub_register(&visible).unwrap();
+            store.hub_register(&retired).unwrap();
+            drop(store);
+
+            let stats = collect_visible_hub_stats(&db_path)
+                .expect("shared JSON/text stats collector should succeed");
+            assert_eq!(stats.capabilities, 1, "scope={scope}");
+            assert_eq!(stats.enabled_capabilities, 1, "scope={scope}");
+            assert_eq!(stats.by_type.get("skill"), Some(&1), "scope={scope}");
+            assert_eq!(stats.total_uses, 7, "scope={scope}");
+            assert_eq!(stats.total_successes, 5, "scope={scope}");
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn cli_hub_list_all_shared_json_and_text_source_excludes_retired_tombstones() {
+        for scope in ["global", "project"] {
+            let root = crate::utils::test_fixture_path(format!(
+                "tachi-cli-retired-list-{scope}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let db_path = root.join(scope).join("memory.db");
+            std::fs::create_dir_all(db_path.parent().expect("list DB parent")).unwrap();
+            let store = memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).unwrap();
+            let visible = HubCapability {
+                id: format!("skill:visible-list-{scope}"),
+                cap_type: "skill".to_string(),
+                name: format!("visible-list-{scope}"),
+                version: 1,
+                description: "visible list fixture".to_string(),
+                definition: json!({"content": "visible"}).to_string(),
+                enabled: false,
+                review_status: "pending".to_string(),
+                health_status: "healthy".to_string(),
+                last_error: None,
+                last_success_at: None,
+                last_failure_at: None,
+                fail_streak: 0,
+                active_version: None,
+                exposure_mode: "direct".to_string(),
+                uses: 0,
+                successes: 0,
+                failures: 0,
+                avg_rating: 0.0,
+                last_used: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            };
+            let mut retired = visible.clone();
+            retired.id = crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string();
+            retired.name = "trajectory-distiller".to_string();
+            store.hub_register(&visible).unwrap();
+            store.hub_register(&retired).unwrap();
+            drop(store);
+
+            let listed = collect_visible_hub_list(&db_path, Some("skill"), true)
+                .expect("shared JSON/text list collector should succeed");
+            assert_eq!(
+                listed.len(),
+                1,
+                "--all must still filter tombstones; scope={scope}"
+            );
+            assert_eq!(listed[0].id, visible.id, "scope={scope}");
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 }

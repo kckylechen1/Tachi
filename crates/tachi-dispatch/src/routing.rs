@@ -773,7 +773,6 @@ pub fn build_dispatch_recommendation_response(
         },
         "route_policy_rules": route_policy_rules,
         "profile_card": profile_payload.profile_card.clone(),
-        "mbit_card": profile_payload.profile_card,
         "candidates": candidates,
     }))
 }
