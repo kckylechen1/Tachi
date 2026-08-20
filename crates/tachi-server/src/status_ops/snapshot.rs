@@ -491,4 +491,31 @@ mod env_drift_tests {
         assert!(snapshot.plan_c_split_brain.is_empty());
         assert!(snapshot.plan_c_alias_integrity.is_empty());
     }
+
+    #[test]
+    fn snapshot_synthesizes_global_db_fallback_when_absent_from_manifest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_home = temp.path();
+        let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global dir");
+        let _store =
+            memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("open global store");
+
+        // Manifest is completely empty / absent
+        let snapshot_default = collect_snapshot(app_home, &global_db, None);
+        assert_eq!(
+            snapshot_default.dbs.len(),
+            1,
+            "default snapshot must synthesize global DB fallback"
+        );
+        assert_eq!(snapshot_default.dbs[0].label, "global");
+
+        let snapshot_all = collect_snapshot_inner(app_home, &global_db, None, false, true);
+        assert_eq!(
+            snapshot_all.dbs.len(),
+            1,
+            "all_dbs snapshot must synthesize global DB fallback"
+        );
+        assert_eq!(snapshot_all.dbs[0].label, "global");
+    }
 }
