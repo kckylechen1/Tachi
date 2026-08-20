@@ -388,9 +388,15 @@ fn register_repo_local_manifest_entry_locked(
             None
         };
         if let Some(path) = target_global {
-            let canon_global = std::fs::canonicalize(&path).unwrap_or(path);
+            let canon_global = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
             let canon_global_str = canon_global.display().to_string();
-            if let Some(existing) = manifest.dbs.iter_mut().find(|e| e.path == canon_global_str) {
+            if let Some(existing) = manifest.dbs.iter_mut().find(|e| {
+                let e_path = std::path::Path::new(&e.path);
+                e.path == canon_global_str
+                    || std::fs::canonicalize(e_path)
+                        .map(|c| c == canon_global)
+                        .unwrap_or(false)
+            }) {
                 if existing.role != crate::manifest::DbRole::Global {
                     existing.role = crate::manifest::DbRole::Global;
                     existing.scope_hint = "global".to_string();
@@ -416,7 +422,13 @@ fn register_repo_local_manifest_entry_locked(
 
     let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
     let canon_str = canonical.display().to_string();
-    if let Some(entry) = manifest.dbs.iter_mut().find(|e| e.path == canon_str) {
+    if let Some(entry) = manifest.dbs.iter_mut().find(|e| {
+        let e_path = std::path::Path::new(&e.path);
+        e.path == canon_str
+            || std::fs::canonicalize(e_path)
+                .map(|c| c == canonical)
+                .unwrap_or(false)
+    }) {
         // A physical canonical DB path is unambiguous authority. Refresh only
         // its derived identity label; never move or auto-claim an alias path.
         let canonical_scope = format!("project:{project_name}");
@@ -1841,6 +1853,51 @@ mod resolve_or_register_workspace_root_tests {
             );
             assert!(reloaded.global().is_some());
             assert_eq!(reloaded.global().unwrap().scope_hint, "global");
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn re_registering_preserves_symlinked_global_store_without_duplication() {
+        with_test_home(|root| {
+            let real_global = root.join("external/real_memory.db");
+            std::fs::create_dir_all(real_global.parent().unwrap()).expect("real parent");
+            std::fs::write(&real_global, b"global_db").expect("real global DB");
+
+            let symlink_global = root.join("global").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(symlink_global.parent().unwrap()).expect("symlink parent");
+            std::os::unix::fs::symlink(&real_global, &symlink_global).expect("symlink");
+
+            let mut manifest = crate::manifest::Manifest::empty();
+            manifest.dbs.push(crate::manifest::DbEntry {
+                path: symlink_global.display().to_string(),
+                role: crate::manifest::DbRole::Global,
+                owner: "tachi".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: true,
+                allow_write: true,
+                last_doctor_at: String::new(),
+                last_classification: "healthy".to_string(),
+                scope_hint: "global".to_string(),
+                notes: String::new(),
+            });
+            manifest.save(&root.join("manifest.json")).expect("save");
+
+            let project_db = root.join("Gamma/data/project.db");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("project parent");
+            std::fs::write(&project_db, b"project_db").expect("project DB");
+
+            register_repo_local_manifest_entry_in_home(&project_db, "Gamma", root)
+                .expect("register project db");
+
+            let reloaded =
+                crate::manifest::Manifest::load(&root.join("manifest.json")).expect("manifest");
+            assert_eq!(
+                reloaded.dbs.len(),
+                2,
+                "must not duplicate the symlinked global store entry"
+            );
+            assert!(reloaded.global().is_some());
         });
     }
 
