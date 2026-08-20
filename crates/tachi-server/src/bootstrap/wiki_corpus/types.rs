@@ -509,9 +509,8 @@ pub(crate) struct SiblingRepairRow {
 /// `repair_sibling_damaged_target`), so a row that fails to compensate is
 /// recorded as `failed` in `rows`/`errors` instead of unwinding the rows
 /// already repaired. `had_failures` is the caller-facing summary bit; the CLI
-/// layer has no exit-code convention for a partially failed report today, so
-/// this field -- not the process exit code -- is the operator-visible signal
-/// that a re-run is needed.
+/// prints the complete report, then converts this bit into a non-zero exit so
+/// automation cannot accept a partial repair as success.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SiblingRepairReport {
     pub(crate) version: String,
