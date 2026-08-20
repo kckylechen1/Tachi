@@ -338,6 +338,73 @@ pub struct StaffAssignmentRequest {
 }
 
 impl StaffAssignmentRequest {
+    pub fn new(staffing_reason: TachiDispatchReason, task: impl Into<String>) -> Self {
+        Self {
+            staffing_reason,
+            task: task.into(),
+            profile: None,
+            worker: None,
+            stage: None,
+            execution_level: None,
+            issue_ref: None,
+            pr_ref: None,
+            flow_id: None,
+            project: None,
+            completion_predicate: None,
+            recommendation_ref: None,
+        }
+    }
+
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
+    }
+
+    pub fn with_worker(mut self, worker: impl Into<String>) -> Self {
+        self.worker = Some(worker.into());
+        self
+    }
+
+    pub fn with_stage(mut self, stage: impl Into<String>) -> Self {
+        self.stage = Some(stage.into());
+        self
+    }
+
+    pub fn with_execution_level(mut self, level: ExecutionLevel) -> Self {
+        self.execution_level = Some(level);
+        self
+    }
+
+    pub fn with_issue_ref(mut self, issue_ref: impl Into<String>) -> Self {
+        self.issue_ref = Some(issue_ref.into());
+        self
+    }
+
+    pub fn with_pr_ref(mut self, pr_ref: impl Into<String>) -> Self {
+        self.pr_ref = Some(pr_ref.into());
+        self
+    }
+
+    pub fn with_flow_id(mut self, flow_id: impl Into<String>) -> Self {
+        self.flow_id = Some(flow_id.into());
+        self
+    }
+
+    pub fn with_project(mut self, project: impl Into<String>) -> Self {
+        self.project = Some(project.into());
+        self
+    }
+
+    pub fn with_completion_predicate(mut self, predicate: CompletionPredicate) -> Self {
+        self.completion_predicate = Some(predicate);
+        self
+    }
+
+    pub fn with_recommendation_ref(mut self, recommendation_ref: impl Into<String>) -> Self {
+        self.recommendation_ref = Some(recommendation_ref.into());
+        self
+    }
+
     pub fn from_dispatch_params(params: &TachiDispatchParams) -> Self {
         Self {
             staffing_reason: params.staffing_reason,
@@ -416,6 +483,64 @@ pub struct ResolvedStaffAssignment {
     pub identity_receipt: serde_json::Value,
 }
 
+impl ResolvedStaffAssignment {
+    pub fn new(
+        assignment_id: impl Into<String>,
+        staffing_reason: TachiDispatchReason,
+        selected_worker: impl Into<String>,
+        selected_backend: impl Into<String>,
+    ) -> Self {
+        Self {
+            assignment_id: assignment_id.into(),
+            staffing_reason,
+            selected_worker: selected_worker.into(),
+            selected_profile: None,
+            selected_backend: selected_backend.into(),
+            selected_model: None,
+            host_adapter: None,
+            evidence_required: Vec::new(),
+            fallback_chain: Vec::new(),
+            route_explanation: Vec::new(),
+            identity_receipt: serde_json::Value::Null,
+        }
+    }
+
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.selected_profile = Some(profile.into());
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.selected_model = Some(model.into());
+        self
+    }
+
+    pub fn with_host_adapter(mut self, adapter: impl Into<String>) -> Self {
+        self.host_adapter = Some(adapter.into());
+        self
+    }
+
+    pub fn with_evidence_required(mut self, evidence: Vec<String>) -> Self {
+        self.evidence_required = evidence;
+        self
+    }
+
+    pub fn with_fallback_chain(mut self, chain: Vec<String>) -> Self {
+        self.fallback_chain = chain;
+        self
+    }
+
+    pub fn with_route_explanation(mut self, explanation: Vec<String>) -> Self {
+        self.route_explanation = explanation;
+        self
+    }
+
+    pub fn with_identity_receipt(mut self, receipt: serde_json::Value) -> Self {
+        self.identity_receipt = receipt;
+        self
+    }
+}
+
 /// Authority-layer output granting permissions, sandbox, credentials, and tools (Issue #1692 C5).
 /// Minted exclusively by authority/resource enforcement layers.
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
@@ -444,6 +569,72 @@ pub struct ExecutionGrant {
 }
 
 impl ExecutionGrant {
+    pub fn new(grant_id: impl Into<String>) -> Self {
+        Self {
+            grant_id: grant_id.into(),
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: None,
+            credential_profiles: Vec::new(),
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            sandbox: None,
+            max_turns: None,
+            timeout_secs: default_dispatch_timeout(),
+        }
+    }
+
+    pub fn with_env_id(mut self, env_id: impl Into<String>) -> Self {
+        self.env_id = Some(env_id.into());
+        self
+    }
+
+    pub fn with_unmanaged_cwd(mut self, allowed: bool) -> Self {
+        self.unmanaged_cwd_allowed = allowed;
+        self
+    }
+
+    pub fn with_allowed_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
+        self.allowed_cwd = Some(cwd.into());
+        self
+    }
+
+    pub fn with_credential_profiles(mut self, profiles: Vec<String>) -> Self {
+        self.credential_profiles = profiles;
+        self
+    }
+
+    pub fn with_mcp_access(mut self, access: DispatchMcpAccessParams) -> Self {
+        self.mcp_access = Some(access);
+        self
+    }
+
+    pub fn with_allowed_tools(mut self, tools: Vec<String>) -> Self {
+        self.allowed_tools = tools;
+        self
+    }
+
+    pub fn with_permission_profile(mut self, profile: impl Into<String>) -> Self {
+        self.permission_profile = Some(profile.into());
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: impl Into<String>) -> Self {
+        self.sandbox = Some(sandbox.into());
+        self
+    }
+
+    pub fn with_max_turns(mut self, max_turns: u32) -> Self {
+        self.max_turns = Some(max_turns);
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs;
+        self
+    }
+
     pub fn from_dispatch_params(params: &TachiDispatchParams, grant_id: impl Into<String>) -> Self {
         Self {
             grant_id: grant_id.into(),
@@ -475,6 +666,42 @@ pub struct LaunchSpec {
     pub harness_transport: Option<String>,
     #[serde(default)]
     pub harness_server_url: Option<String>,
+}
+
+impl LaunchSpec {
+    pub fn new(
+        backend: impl Into<String>,
+        command: Vec<String>,
+        cwd: impl Into<std::path::PathBuf>,
+        prompt: impl Into<String>,
+        timeout_secs: u64,
+    ) -> Self {
+        Self {
+            backend: backend.into(),
+            command,
+            cwd: cwd.into(),
+            env_vars: std::collections::HashMap::new(),
+            prompt: prompt.into(),
+            timeout_secs,
+            harness_transport: None,
+            harness_server_url: None,
+        }
+    }
+
+    pub fn with_env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env_vars.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn with_harness_transport(mut self, transport: impl Into<String>) -> Self {
+        self.harness_transport = Some(transport.into());
+        self
+    }
+
+    pub fn with_harness_server_url(mut self, url: impl Into<String>) -> Self {
+        self.harness_server_url = Some(url.into());
+        self
+    }
 }
 
 /// Append-only observed lifecycle facts for a staffing run (Issue #1692 C5).
@@ -514,6 +741,36 @@ impl StaffRunReceipt {
             exit_code: None,
             identity_receipt: None,
         }
+    }
+
+    pub fn with_assignment_id(mut self, assignment_id: impl Into<String>) -> Self {
+        self.assignment_id = Some(assignment_id.into());
+        self
+    }
+
+    pub fn with_state(mut self, state: impl Into<String>) -> Self {
+        self.state = state.into();
+        self
+    }
+
+    pub fn with_started_at(mut self, started_at: impl Into<String>) -> Self {
+        self.started_at = Some(started_at.into());
+        self
+    }
+
+    pub fn with_finished_at(mut self, finished_at: impl Into<String>) -> Self {
+        self.finished_at = Some(finished_at.into());
+        self
+    }
+
+    pub fn with_exit_code(mut self, exit_code: i32) -> Self {
+        self.exit_code = Some(exit_code);
+        self
+    }
+
+    pub fn with_identity_receipt(mut self, identity_receipt: serde_json::Value) -> Self {
+        self.identity_receipt = Some(identity_receipt);
+        self
     }
 }
 
@@ -1122,15 +1379,171 @@ mod tests {
     }
 
     #[test]
-    fn staff_run_receipt_initial_state() {
-        let receipt = StaffRunReceipt::new(
-            "dispatch-20260819-claude-test",
-            "/tmp/runs/dispatch-20260819-claude-test",
-            serde_json::json!({"action": "complete", "status": "success"}),
+    fn staff_assignment_request_builder_and_roundtrip() {
+        let req = StaffAssignmentRequest::new(
+            TachiDispatchReason::DurableCrossSession,
+            "Refactor staffing types",
+        )
+        .with_profile("claude_plan")
+        .with_worker("claude")
+        .with_stage("plan")
+        .with_execution_level(ExecutionLevel::L1)
+        .with_issue_ref("kckylechen1/tachi#1692")
+        .with_pr_ref("kckylechen1/tachi#1812")
+        .with_flow_id("flow-c5")
+        .with_project("tachi")
+        .with_recommendation_ref("rec-123");
+
+        assert_eq!(req.task, "Refactor staffing types");
+        assert_eq!(
+            req.staffing_reason,
+            TachiDispatchReason::DurableCrossSession
         );
-        assert_eq!(receipt.dispatch_id, "dispatch-20260819-claude-test");
-        assert_eq!(receipt.state, "working");
-        assert_eq!(receipt.exit_code, None);
-        assert_eq!(receipt.finished_at, None);
+        assert_eq!(req.profile.as_deref(), Some("claude_plan"));
+        assert_eq!(req.worker.as_deref(), Some("claude"));
+        assert_eq!(req.stage.as_deref(), Some("plan"));
+        assert_eq!(req.execution_level, Some(ExecutionLevel::L1));
+        assert_eq!(req.issue_ref.as_deref(), Some("kckylechen1/tachi#1692"));
+        assert_eq!(req.pr_ref.as_deref(), Some("kckylechen1/tachi#1812"));
+        assert_eq!(req.flow_id.as_deref(), Some("flow-c5"));
+        assert_eq!(req.project.as_deref(), Some("tachi"));
+        assert_eq!(req.recommendation_ref.as_deref(), Some("rec-123"));
+
+        let serialized = serde_json::to_value(&req).expect("serializes");
+        let deserialized: StaffAssignmentRequest =
+            serde_json::from_value(serialized).expect("deserializes");
+        assert_eq!(deserialized.task, req.task);
+        assert_eq!(deserialized.staffing_reason, req.staffing_reason);
+    }
+
+    #[test]
+    fn resolved_staff_assignment_builder_and_roundtrip() {
+        let resolved = ResolvedStaffAssignment::new(
+            "assign-456",
+            TachiDispatchReason::NativeSubagentUnavailable,
+            "codex",
+            "subprocess",
+        )
+        .with_profile("codex_55_review")
+        .with_model("gpt-5.5")
+        .with_host_adapter("codex_exec")
+        .with_evidence_required(vec!["test_result".into(), "clippy".into()])
+        .with_fallback_chain(vec!["claude".into()])
+        .with_route_explanation(vec!["review lane separation".into()])
+        .with_identity_receipt(serde_json::json!({"model": "gpt-5.5", "verified": true}));
+
+        assert_eq!(resolved.assignment_id, "assign-456");
+        assert_eq!(
+            resolved.staffing_reason,
+            TachiDispatchReason::NativeSubagentUnavailable
+        );
+        assert_eq!(resolved.selected_worker, "codex");
+        assert_eq!(resolved.selected_backend, "subprocess");
+        assert_eq!(
+            resolved.selected_profile.as_deref(),
+            Some("codex_55_review")
+        );
+        assert_eq!(resolved.selected_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(resolved.evidence_required.len(), 2);
+        assert_eq!(resolved.fallback_chain, vec!["claude"]);
+
+        let serialized = serde_json::to_value(&resolved).expect("serializes");
+        let deserialized: ResolvedStaffAssignment =
+            serde_json::from_value(serialized).expect("deserializes");
+        assert_eq!(deserialized.assignment_id, "assign-456");
+        assert_eq!(deserialized.selected_worker, "codex");
+    }
+
+    #[test]
+    fn execution_grant_builder_and_roundtrip() {
+        let grant = ExecutionGrant::new("grant-789")
+            .with_env_id("env-managed-1")
+            .with_unmanaged_cwd(false)
+            .with_allowed_cwd("/workspace/tachi")
+            .with_credential_profiles(vec!["github_read".into()])
+            .with_allowed_tools(vec!["view_file".into(), "run_command".into()])
+            .with_permission_profile("allowlist")
+            .with_sandbox("workspace-write")
+            .with_max_turns(30)
+            .with_timeout_secs(1800);
+
+        assert_eq!(grant.grant_id, "grant-789");
+        assert_eq!(grant.env_id.as_deref(), Some("env-managed-1"));
+        assert!(!grant.unmanaged_cwd_allowed);
+        assert_eq!(
+            grant.allowed_cwd,
+            Some(std::path::PathBuf::from("/workspace/tachi"))
+        );
+        assert_eq!(grant.credential_profiles, vec!["github_read"]);
+        assert_eq!(grant.allowed_tools, vec!["view_file", "run_command"]);
+        assert_eq!(grant.sandbox.as_deref(), Some("workspace-write"));
+        assert_eq!(grant.max_turns, Some(30));
+        assert_eq!(grant.timeout_secs, 1800);
+
+        let serialized = serde_json::to_value(&grant).expect("serializes");
+        let deserialized: ExecutionGrant =
+            serde_json::from_value(serialized).expect("deserializes");
+        assert_eq!(deserialized.grant_id, "grant-789");
+    }
+
+    #[test]
+    fn launch_spec_builder_and_roundtrip() {
+        let spec = LaunchSpec::new(
+            "codex_exec",
+            vec!["codex".into(), "exec".into()],
+            "/workspace/tachi",
+            "Execute review",
+            900,
+        )
+        .with_env_var("RUST_LOG", "info")
+        .with_harness_transport("subprocess")
+        .with_harness_server_url("http://127.0.0.1:4321");
+
+        assert_eq!(spec.backend, "codex_exec");
+        assert_eq!(spec.command, vec!["codex", "exec"]);
+        assert_eq!(spec.cwd, std::path::PathBuf::from("/workspace/tachi"));
+        assert_eq!(spec.prompt, "Execute review");
+        assert_eq!(spec.timeout_secs, 900);
+        assert_eq!(
+            spec.env_vars.get("RUST_LOG").map(String::as_str),
+            Some("info")
+        );
+        assert_eq!(spec.harness_transport.as_deref(), Some("subprocess"));
+        assert_eq!(
+            spec.harness_server_url.as_deref(),
+            Some("http://127.0.0.1:4321")
+        );
+
+        let serialized = serde_json::to_value(&spec).expect("serializes");
+        let deserialized: LaunchSpec = serde_json::from_value(serialized).expect("deserializes");
+        assert_eq!(deserialized.backend, "codex_exec");
+    }
+
+    #[test]
+    fn staff_run_receipt_builder_and_roundtrip() {
+        let receipt = StaffRunReceipt::new(
+            "dispatch-20260820-test",
+            "/tmp/runs/dispatch-20260820-test",
+            serde_json::json!({"action": "complete", "status": "success"}),
+        )
+        .with_assignment_id("assign-456")
+        .with_state("completed")
+        .with_started_at("2026-08-20T11:00:00Z")
+        .with_finished_at("2026-08-20T11:05:00Z")
+        .with_exit_code(0)
+        .with_identity_receipt(serde_json::json!({"verified": true}));
+
+        assert_eq!(receipt.dispatch_id, "dispatch-20260820-test");
+        assert_eq!(receipt.assignment_id.as_deref(), Some("assign-456"));
+        assert_eq!(receipt.state, "completed");
+        assert_eq!(receipt.exit_code, Some(0));
+        assert_eq!(receipt.started_at.as_deref(), Some("2026-08-20T11:00:00Z"));
+        assert_eq!(receipt.finished_at.as_deref(), Some("2026-08-20T11:05:00Z"));
+
+        let serialized = serde_json::to_value(&receipt).expect("serializes");
+        let deserialized: StaffRunReceipt =
+            serde_json::from_value(serialized).expect("deserializes");
+        assert_eq!(deserialized.dispatch_id, "dispatch-20260820-test");
+        assert_eq!(deserialized.state, "completed");
     }
 }
