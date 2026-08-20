@@ -374,22 +374,7 @@ fn register_repo_local_manifest_entry_locked(
         crate::manifest::Manifest::empty()
     };
 
-    let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
-    let canon_str = canonical.display().to_string();
-    if let Some(entry) = manifest.dbs.iter_mut().find(|e| e.path == canon_str) {
-        // A physical canonical DB path is unambiguous authority. Refresh only
-        // its derived identity label; never move or auto-claim an alias path.
-        let canonical_scope = format!("project:{project_name}");
-        if entry.scope_hint == canonical_scope {
-            return Ok(());
-        }
-        entry.scope_hint = canonical_scope;
-        manifest.generated_at = chrono::Utc::now().to_rfc3339();
-        return manifest
-            .save(manifest_path)
-            .map_err(|e| format!("save manifest {}: {e}", manifest_path.display()));
-    }
-
+    let mut manifest_changed = false;
     if manifest.global().is_none() {
         if let Some(parent) = manifest_path.parent() {
             let global_path = parent.join("global").join(memcore::MEMORY_DB_FILENAME);
@@ -417,8 +402,28 @@ fn register_repo_local_manifest_entry_locked(
                     scope_hint: "global".to_string(),
                     notes: "auto-registered global store".to_string(),
                 });
+                manifest_changed = true;
             }
         }
+    }
+
+    let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let canon_str = canonical.display().to_string();
+    if let Some(entry) = manifest.dbs.iter_mut().find(|e| e.path == canon_str) {
+        // A physical canonical DB path is unambiguous authority. Refresh only
+        // its derived identity label; never move or auto-claim an alias path.
+        let canonical_scope = format!("project:{project_name}");
+        if entry.scope_hint != canonical_scope {
+            entry.scope_hint = canonical_scope;
+            manifest_changed = true;
+        }
+        if manifest_changed {
+            manifest.generated_at = chrono::Utc::now().to_rfc3339();
+            return manifest
+                .save(manifest_path)
+                .map_err(|e| format!("save manifest {}: {e}", manifest_path.display()));
+        }
+        return Ok(());
     }
 
     manifest.dbs.push(crate::manifest::DbEntry {
@@ -1753,6 +1758,40 @@ mod resolve_or_register_workspace_root_tests {
             let roles: Vec<_> = manifest.dbs.iter().map(|e| e.role).collect();
             assert!(roles.contains(&crate::manifest::DbRole::Global));
             assert!(roles.contains(&crate::manifest::DbRole::Project));
+        });
+    }
+
+    #[test]
+    fn re_registering_existing_project_backfills_global_store() {
+        with_test_home(|root| {
+            let project_db = root.join("Alpha/data/project.db");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("project parent");
+            std::fs::write(&project_db, b"project_db").expect("project DB");
+
+            // First registration without global store present
+            register_repo_local_manifest_entry_in_home(&project_db, "Alpha", root)
+                .expect("register project db");
+            let m1 =
+                crate::manifest::Manifest::load(&root.join("manifest.json")).expect("manifest");
+            assert_eq!(m1.dbs.len(), 1);
+            assert!(m1.global().is_none());
+
+            // Create global store on disk
+            let global_db = root.join("global").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("global parent");
+            std::fs::write(&global_db, b"global_db").expect("global DB");
+
+            // Re-register the same project DB
+            register_repo_local_manifest_entry_in_home(&project_db, "Alpha", root)
+                .expect("re-register project db");
+
+            let m2 =
+                crate::manifest::Manifest::load(&root.join("manifest.json")).expect("manifest");
+            assert!(
+                m2.global().is_some(),
+                "re-registering project must backfill global store when present"
+            );
+            assert_eq!(m2.dbs.len(), 2);
         });
     }
 

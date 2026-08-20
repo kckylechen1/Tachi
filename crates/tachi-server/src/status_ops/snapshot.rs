@@ -93,11 +93,10 @@ fn collect_snapshot_inner(
     // are simply absent from `dbs` (and therefore from `Summary`'s "N dbs"
     // count) rather than shown with a placeholder, since unlike a missing
     // DB file this isn't an error condition worth flagging.
-    let fallback_global_entry: Option<DbEntry> = if !all_dbs
-        && !manifest
-            .dbs
-            .iter()
-            .any(|entry| paths_equal(&PathBuf::from(&entry.path), global_db_path))
+    let fallback_global_entry: Option<DbEntry> = if !manifest
+        .dbs
+        .iter()
+        .any(|entry| paths_equal(&PathBuf::from(&entry.path), global_db_path))
         && global_db_path.exists()
     {
         let canon =
@@ -119,7 +118,11 @@ fn collect_snapshot_inner(
     };
 
     let scoped_entries: Vec<&DbEntry> = if all_dbs {
-        manifest.dbs.iter().collect()
+        let mut entries: Vec<&DbEntry> = manifest.dbs.iter().collect();
+        if let Some(ref fallback) = fallback_global_entry {
+            entries.insert(0, fallback);
+        }
+        entries
     } else {
         let mut entries: Vec<&DbEntry> = manifest
             .dbs
