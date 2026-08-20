@@ -415,44 +415,12 @@ fn upsert_global_manifest_entry(
         })
         .collect::<Vec<_>>();
 
-    let mut changed = false;
     let target = matching
         .first()
         .copied()
         .or_else(|| stale_globals.first().copied());
-    if let Some(target) = target {
-        let replacing_stale = !matching.contains(&target);
-        let entry = &mut manifest.dbs[target];
-        if replacing_stale {
-            *entry = crate::manifest::DbEntry {
-                path: canonical.display().to_string(),
-                role: crate::manifest::DbRole::Global,
-                owner: "tachi".to_string(),
-                schema_kind: "tachi".to_string(),
-                vec_enabled: true,
-                allow_write: true,
-                last_doctor_at: chrono::Utc::now().to_rfc3339(),
-                last_classification: "healthy".to_string(),
-                scope_hint: "global".to_string(),
-                notes: "auto-registered global store".to_string(),
-            };
-            changed = true;
-        } else {
-            let identity_path = entry.path.clone();
-            *entry = crate::manifest::DbEntry {
-                path: identity_path,
-                role: crate::manifest::DbRole::Global,
-                owner: "tachi".to_string(),
-                schema_kind: "tachi".to_string(),
-                vec_enabled: true,
-                allow_write: true,
-                last_doctor_at: chrono::Utc::now().to_rfc3339(),
-                last_classification: "healthy".to_string(),
-                scope_hint: "global".to_string(),
-                notes: "auto-registered global store".to_string(),
-            };
-            changed = true;
-        }
+    let target = if let Some(target) = target {
+        target
     } else {
         manifest.dbs.push(crate::manifest::DbEntry {
             path: canonical.display().to_string(),
@@ -467,9 +435,40 @@ fn upsert_global_manifest_entry(
             notes: "auto-registered global store".to_string(),
         });
         return Ok(true);
+    };
+
+    let replacing_stale = !matching.contains(&target);
+    let entry = &mut manifest.dbs[target];
+    if replacing_stale {
+        *entry = crate::manifest::DbEntry {
+            path: canonical.display().to_string(),
+            role: crate::manifest::DbRole::Global,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "global".to_string(),
+            notes: "auto-registered global store".to_string(),
+        };
+    } else {
+        let identity_path = entry.path.clone();
+        *entry = crate::manifest::DbEntry {
+            path: identity_path,
+            role: crate::manifest::DbRole::Global,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "global".to_string(),
+            notes: "auto-registered global store".to_string(),
+        };
     }
 
-    let target = target.expect("global target established above");
+    let changed = true;
     let mut remove = matching
         .into_iter()
         .filter(|index| *index != target)
@@ -479,7 +478,6 @@ fn upsert_global_manifest_entry(
     remove.dedup();
     for index in remove.into_iter().rev() {
         manifest.dbs.remove(index);
-        changed = true;
     }
     Ok(changed)
 }

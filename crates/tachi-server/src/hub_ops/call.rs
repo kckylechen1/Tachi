@@ -8,7 +8,6 @@ use serde_json::Value;
 use tachi_hub::{
     build_skill_execution_envelope, capability_callable, SkillExecution, SkillExecutionMode,
 };
-use tachi_llm::PersistedModelInvocationReceiptV1;
 
 pub(crate) use hub::{handle_hub_call, handle_hub_disconnect, handle_tachi_audit_log};
 
@@ -30,21 +29,14 @@ pub(crate) async fn execute_registered_skill_prompt(
     skill_id: &str,
     args: &Value,
 ) -> Result<SkillExecution, String> {
-    execute_registered_skill_prompt_with_receipt(server, skill_id, args)
-        .await
-        .map(|result| result.execution)
+    execute_registered_skill_prompt_inner(server, skill_id, args).await
 }
 
-pub(crate) struct SkillExecutionWithReceipt {
-    pub(crate) execution: SkillExecution,
-    pub(crate) model_invocation: Option<PersistedModelInvocationReceiptV1>,
-}
-
-pub(crate) async fn execute_registered_skill_prompt_with_receipt(
+async fn execute_registered_skill_prompt_inner(
     server: &MemoryServer,
     skill_id: &str,
     args: &Value,
-) -> Result<SkillExecutionWithReceipt, String> {
+) -> Result<SkillExecution, String> {
     if crate::builtins::is_retired_builtin_capability_id(skill_id) {
         return Err(format!("Skill '{skill_id}' is retired and cannot be run."));
     }
@@ -67,14 +59,14 @@ pub(crate) async fn execute_registered_skill_prompt_with_receipt(
         found.ok_or_else(|| format!("Skill '{skill_id}' not found in Hub"))?
     };
 
-    execute_loaded_skill_prompt_with_receipt(server, &cap, args).await
+    execute_loaded_skill_prompt(server, &cap, args).await
 }
 
-async fn execute_loaded_skill_prompt_with_receipt(
+async fn execute_loaded_skill_prompt(
     server: &MemoryServer,
     cap: &HubCapability,
     args: &Value,
-) -> Result<SkillExecutionWithReceipt, String> {
+) -> Result<SkillExecution, String> {
     if cap.cap_type != "skill" {
         return Err(format!(
             "'{}' is type '{}', not 'skill'",
@@ -93,7 +85,7 @@ async fn execute_loaded_skill_prompt_with_receipt(
 
     let empty_args = serde_json::Map::new();
     let args_obj = args.as_object().unwrap_or(&empty_args);
-    let result = execute_skill_prompt_with_receipt(server, cap, &def, args_obj).await;
+    let result = execute_skill_prompt(server, cap, &def, args_obj).await;
 
     let success = result.is_ok();
     let error_msg = result.as_ref().err().map(|e| e.to_string());
@@ -102,12 +94,12 @@ async fn execute_loaded_skill_prompt_with_receipt(
     result.map_err(|e| format!("skill execution failed: {e}"))
 }
 
-async fn execute_skill_prompt_with_receipt(
+async fn execute_skill_prompt(
     server: &MemoryServer,
     _cap: &HubCapability,
     def: &Value,
     args: &serde_json::Map<String, Value>,
-) -> Result<SkillExecutionWithReceipt, String> {
+) -> Result<SkillExecution, String> {
     if def.get("execution").and_then(Value::as_str) == Some("document") {
         let output = def
             .get("content")
@@ -118,12 +110,9 @@ async fn execute_skill_prompt_with_receipt(
                 "document skill definition missing 'content', 'prompt', or 'template' field"
                     .to_string()
             })?;
-        return Ok(SkillExecutionWithReceipt {
-            execution: SkillExecution {
-                output: output.to_string(),
-                execution: SkillExecutionMode::Document,
-            },
-            model_invocation: None,
+        return Ok(SkillExecution {
+            output: output.to_string(),
+            execution: SkillExecutionMode::Document,
         });
     }
 
@@ -144,12 +133,9 @@ async fn execute_skill_prompt_with_receipt(
         .map_err(|e| format!("serialize skill args: {e}"))?;
 
     if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str()) {
-        Ok(SkillExecutionWithReceipt {
-            execution: SkillExecution {
-                output: mock_response.to_string(),
-                execution: SkillExecutionMode::MockResponse,
-            },
-            model_invocation: None,
+        Ok(SkillExecution {
+            output: mock_response.to_string(),
+            execution: SkillExecutionMode::MockResponse,
         })
     } else {
         let default_system = "You are an AI assistant executing a specialized skill.";
@@ -183,12 +169,9 @@ async fn execute_skill_prompt_with_receipt(
                 {
                     return Err(tachi_llm::LLM_OUTPUT_TRUNCATED.to_string());
                 }
-                Ok(SkillExecutionWithReceipt {
-                    execution: SkillExecution {
-                        output: output.value,
-                        execution: SkillExecutionMode::LlmGenerated,
-                    },
-                    model_invocation: Some(output.invocation),
+                Ok(SkillExecution {
+                    output: output.value,
+                    execution: SkillExecutionMode::LlmGenerated,
                 })
             })
     }

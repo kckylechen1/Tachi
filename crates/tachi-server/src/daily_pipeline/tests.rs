@@ -1433,12 +1433,35 @@ async fn concurrent_publishers_commit_distinct_bound_generations() {
 async fn skill_evolution_excludes_retired_global_and_project_tombstones() {
     let (server, _project_db) =
         crate::tests::make_server_with_project_fixture("retired-trajectory-evolution");
-    let mut global = crate::tests::make_skill_capability(
-        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
-        "trajectory-distiller",
-        "Historical global trajectory writer omitted from evolution",
-        "listed",
-    );
+    let mut global = memcore::HubCapability {
+        id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+        cap_type: "skill".to_string(),
+        name: "trajectory-distiller".to_string(),
+        version: 1,
+        description: "Historical global trajectory writer omitted from evolution".to_string(),
+        definition: serde_json::json!({
+            "prompt": "Run historical trajectory distiller",
+            "content": "Historical retired skill",
+            "policy": { "visibility": "listed" }
+        })
+        .to_string(),
+        enabled: true,
+        review_status: "approved".to_string(),
+        health_status: "healthy".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "direct".to_string(),
+        uses: 0,
+        successes: 0,
+        failures: 0,
+        avg_rating: 0.0,
+        last_used: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
     global.health_status = "unhealthy".to_string();
     global.fail_streak = 99;
     let mut project = global.clone();

@@ -367,7 +367,6 @@ pub(crate) async fn handle_tachi_complete(
         safe_skills_used,
         safe_evidence_refs,
         safe_tests_run,
-        safe_trajectory: _,
         safe_subagents,
         safe_feedback_rules,
         outcome_norm,
