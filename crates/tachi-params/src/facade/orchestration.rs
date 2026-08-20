@@ -224,6 +224,12 @@ pub struct TachiStaffParams {
 
 impl TachiStaffParams {
     pub fn to_assignment_request(&self) -> Result<crate::facade::StaffAssignmentRequest, String> {
+        if self.dispatch_id.is_some() {
+            return Err(
+                "dispatch_id is minted by the kernel and cannot be specified when action='start'"
+                    .to_string(),
+            );
+        }
         let staffing_reason = self
             .staffing_reason
             .ok_or_else(|| "staffing_reason is required when action='start'".to_string())?;
@@ -742,5 +748,21 @@ mod tests {
         assert_eq!(req.pr_ref.as_deref(), Some("kckylechen1/tachi#1812"));
         assert_eq!(req.flow_id.as_deref(), Some("flow-c5"));
         assert_eq!(req.recommendation_ref.as_deref(), Some("rec-999"));
+    }
+
+    #[test]
+    fn tachi_staff_params_rejects_forged_dispatch_id_on_start() {
+        let raw = serde_json::json!({
+            "action": "start",
+            "task": "Forged dispatch_id",
+            "staffing_reason": "explicit_user_request",
+            "dispatch_id": "forged-id-123",
+        });
+        let params: TachiStaffParams = serde_json::from_value(raw).expect("deserializes");
+        let err = params.to_assignment_request().unwrap_err();
+        assert!(
+            err.contains("dispatch_id is minted by the kernel"),
+            "action='start' must reject caller-supplied dispatch_id: {err}"
+        );
     }
 }

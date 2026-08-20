@@ -32,10 +32,11 @@
 //! # Why an explicit allowlist struct
 //!
 //! [`StaffStartRequest`] deliberately has NO field named `cwd`, `command`,
-//! `transport`, `credentials`, `sandbox`, or `allowed_tools`. A request JSON
-//! that attempts to set any of those is silently ignored (no matching field
-//! exists to deserialize into), so the resulting [`TachiDispatchParams`] maps
-//! every execution field to its kernel-side default.
+//! `transport`, `credentials`, `sandbox`, or `allowed_tools`. Both
+//! [`StaffStartRequest`] and [`tachi_params::TachiStaffParams`] enforce
+//! `#[serde(deny_unknown_fields)]`: a request JSON that attempts to set any
+//! hostile execution field fails deserialization loudly before reaching any
+//! handler or creating any artifacts.
 
 use crate::dispatch_ops::{
     canonical_dir_is_within, dispatch_runs_root, handle_tachi_dispatch, is_valid_dispatch_id,
@@ -57,10 +58,9 @@ use serde_json::Value;
 /// field; an unknown variant fails schema deserialization). The reason is
 /// stamped into the canonical receipt so staffing is auditable.
 ///
-/// `#[serde(default)]` on the optional fields plus the absence of any
-/// execution-shaped field means an inbound JSON carrying `"cwd": "/evil"` or
-/// `"command": ["rm", "-rf"]` is silently ignored — those names have no field
-/// to bind to, so they cannot leak into the mapped params.
+/// `#[serde(deny_unknown_fields)]` ensures that an inbound JSON carrying
+/// `"cwd": "/evil"` or `"command": ["rm", "-rf"]` is rejected loudly at
+/// deserialization — those names cannot leak into the mapped params.
 pub(crate) type StaffStartRequest = tachi_params::StaffAssignmentRequest;
 
 /// Read-only status probe. Only the canonical `dispatch_id` is accepted —

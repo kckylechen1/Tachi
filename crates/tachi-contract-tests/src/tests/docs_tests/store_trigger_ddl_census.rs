@@ -1029,7 +1029,7 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  reaching a guarded connection from here.",
     },
     Exemption {
-        path: "crates/tachi-server/src/bootstrap/wiki_corpus.rs",
+        path: "crates/tachi-server/src/bootstrap/wiki_corpus/apply.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "Codex Luna, bodies read 2026-08-01",
         },
@@ -1040,6 +1040,19 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 ddl: "ffd56ed2b7788f70",
                 occurrences: 1,
             },
+        ],
+        reason: "maybe_inject_copy_after_receipt_prepared installs the hard-delete \
+                 sentinel through a second direct rusqlite::Connection::open(target_path). \
+                 These test-fixture sites use an unrestricted/file connection to install \
+                 or remove the sentinel; they are not #1443 false-failure injection \
+                 through guarded MemoryStore::connection. Bodies read 2026-08-01.",
+    },
+    Exemption {
+        path: "crates/tachi-server/src/bootstrap/wiki_corpus/tests.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Luna, bodies read 2026-08-01",
+        },
+        sites: &[
             Site {
                 symbol: "remove_memory_hard_delete_guard",
                 trigger: "WIKI_CORPUS_NO_HARD_DELETE",
@@ -1047,13 +1060,11 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "maybe_inject_copy_after_receipt_prepared installs the hard-delete \
-                 sentinel through a second direct rusqlite::Connection::open(target_path), \
-                 and remove_memory_hard_delete_guard removes it through a second \
-                 direct rusqlite::Connection::open(path). These test-fixture sites \
-                 use an unrestricted/file connection to install or remove the sentinel; \
-                 they are not #1443 false-failure injection through guarded \
-                 MemoryStore::connection. Bodies read 2026-08-01.",
+        reason: "remove_memory_hard_delete_guard removes the hard-delete sentinel \
+                 through a second direct rusqlite::Connection::open(path). These \
+                 test-fixture sites use an unrestricted/file connection to install \
+                 or remove the sentinel; they are not #1443 false-failure injection \
+                 through guarded MemoryStore::connection. Bodies read 2026-08-01.",
     },
     Exemption {
         path: "crates/tachi-server/src/mcp_pool/proxy.rs",
