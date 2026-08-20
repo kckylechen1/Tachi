@@ -695,21 +695,16 @@ impl LaunchSpec {
 
 /// Append-only observed lifecycle facts for a staffing run (Issue #1692 C5).
 /// Readback and observation only — never caller-authored success.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StaffRunReceipt {
     pub dispatch_id: String,
-    #[serde(default)]
     pub assignment_id: Option<String>,
     pub state: String,
     pub run_dir: String,
     pub suggested_complete_command: serde_json::Value,
-    #[serde(default)]
     pub started_at: Option<String>,
-    #[serde(default)]
     pub finished_at: Option<String>,
-    #[serde(default)]
     pub exit_code: Option<i32>,
-    #[serde(default)]
     pub identity_receipt: Option<serde_json::Value>,
 }
 
@@ -1554,9 +1549,8 @@ mod tests {
         assert_eq!(receipt.finished_at.as_deref(), Some("2026-08-20T11:05:00Z"));
 
         let serialized = serde_json::to_value(&receipt).expect("serializes");
-        let deserialized: StaffRunReceipt =
-            serde_json::from_value(serialized).expect("deserializes");
-        assert_eq!(deserialized.dispatch_id, "dispatch-20260820-test");
-        assert_eq!(deserialized.state, "working");
+        assert_eq!(serialized["dispatch_id"], "dispatch-20260820-test");
+        assert_eq!(serialized["state"], "working");
+        assert_eq!(serialized["assignment_id"], "assign-456");
     }
 }
