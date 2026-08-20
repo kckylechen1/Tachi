@@ -427,20 +427,14 @@ mod tests {
     }
 
     /// Boundary test: a `StaffStartRequest` JSON that attempts to set
-    /// execution-shaped fields is silently ignored, and the resulting mapped
-    /// `TachiDispatchParams` maps every execution field to its kernel-side
-    /// default. The forbidden names simply don't exist on the struct.
+    /// execution-shaped fields fails deserialization loudly (deny_unknown_fields).
     #[test]
     fn staff_start_request_has_no_execution_fields() {
-        let raw = serde_json::json!({
+        let hostile = serde_json::json!({
             "task": "prove the boundary",
             "staffing_reason": "native_subagent_unavailable",
             "worker": "claude",
-            "profile": "codex_55_review",
-            "project": "tachi",
-            "stage": "execute",
-            "flow_id": "flow-123",
-            // ── hostile / out-of-boundary fields: must be ignored ──────────
+            // ── hostile / out-of-boundary fields: must fail loudly ──────────
             "cwd": "/evil/absolute/path",
             "command": ["rm", "-rf", "/"],
             "transport": "acpx",
@@ -455,7 +449,22 @@ mod tests {
             "env_id": "lease-evil",
             "unmanaged_cwd": true,
         });
-        let request: StaffStartRequest = serde_json::from_value(raw).expect("parses");
+        let err = serde_json::from_value::<StaffStartRequest>(hostile).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "hostile execution fields must fail deserialization loudly: {err}"
+        );
+
+        let valid = serde_json::json!({
+            "task": "prove the boundary",
+            "staffing_reason": "native_subagent_unavailable",
+            "worker": "claude",
+            "profile": "codex_55_review",
+            "project": "tachi",
+            "stage": "execute",
+            "flow_id": "flow-123",
+        });
+        let request: StaffStartRequest = serde_json::from_value(valid).expect("parses");
         let params = request.into_params();
 
         // Intent fields + reason DO map through.
@@ -494,8 +503,11 @@ mod tests {
             "staffing_reason": "explicit_user_request",
             "dispatch_id": "caller-forged-id",
         });
-        let request: StaffStartRequest = serde_json::from_value(raw).expect("parses");
-        assert_eq!(request.task, "prove no dispatch_id on start");
+        let err = serde_json::from_value::<StaffStartRequest>(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "caller-forged dispatch_id must fail deserialization loudly: {err}"
+        );
     }
 
     /// `staff_status` reads ONLY the canonical receipt. Seeds a canonical

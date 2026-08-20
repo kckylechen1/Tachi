@@ -287,8 +287,9 @@ pub struct TachiDispatchParams {
 
 /// Typed public semantic request for staffing (Issue #1692 C5).
 /// Contains only semantic intent, context, and user constraints.
-/// Machine/authority/transport plumbing is strictly omitted.
+/// Machine/authority/transport plumbing is strictly omitted and rejected.
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StaffAssignmentRequest {
     /// #1319 admission contract: typed reason execution is leaving the host harness.
     pub staffing_reason: TachiDispatchReason,
@@ -467,8 +468,8 @@ impl StaffAssignmentRequest {
 }
 
 /// Server-produced admission and policy resolution result (Issue #1692 C5).
-/// Produced strictly by policy/admission gates.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+/// Produced strictly by policy/admission gates; not a public caller-authored schema.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedStaffAssignment {
     pub assignment_id: String,
     pub staffing_reason: TachiDispatchReason,
@@ -542,8 +543,8 @@ impl ResolvedStaffAssignment {
 }
 
 /// Authority-layer output granting permissions, sandbox, credentials, and tools (Issue #1692 C5).
-/// Minted exclusively by authority/resource enforcement layers.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+/// Minted exclusively by authority/resource enforcement layers; cannot be deserialized from public Staff JSON.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionGrant {
     pub grant_id: String,
     #[serde(default)]
@@ -653,8 +654,8 @@ impl ExecutionGrant {
 }
 
 /// Backend adapter execution mechanics (Issue #1692 C5).
-/// Consumed strictly by execution backends/adapters.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+/// Consumed strictly by execution backends/adapters; has no public schema and does not accept arbitrary caller fields.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchSpec {
     pub backend: String,
     pub command: Vec<String>,
@@ -662,9 +663,7 @@ pub struct LaunchSpec {
     pub env_vars: std::collections::HashMap<String, String>,
     pub prompt: String,
     pub timeout_secs: u64,
-    #[serde(default)]
     pub harness_transport: Option<String>,
-    #[serde(default)]
     pub harness_server_url: Option<String>,
 }
 
@@ -706,7 +705,7 @@ impl LaunchSpec {
 
 /// Append-only observed lifecycle facts for a staffing run (Issue #1692 C5).
 /// Readback and observation only — never caller-authored success.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StaffRunReceipt {
     pub dispatch_id: String,
     #[serde(default)]
@@ -745,11 +744,6 @@ impl StaffRunReceipt {
 
     pub fn with_assignment_id(mut self, assignment_id: impl Into<String>) -> Self {
         self.assignment_id = Some(assignment_id.into());
-        self
-    }
-
-    pub fn with_state(mut self, state: impl Into<String>) -> Self {
-        self.state = state.into();
         self
     }
 
@@ -1515,8 +1509,41 @@ mod tests {
         );
 
         let serialized = serde_json::to_value(&spec).expect("serializes");
-        let deserialized: LaunchSpec = serde_json::from_value(serialized).expect("deserializes");
-        assert_eq!(deserialized.backend, "codex_exec");
+        assert_eq!(serialized["backend"], "codex_exec");
+        assert_eq!(serialized["prompt"], "Execute review");
+    }
+
+    #[test]
+    fn staff_assignment_request_rejects_hostile_execution_fields() {
+        let hostile = serde_json::json!({
+            "task": "Reject hostile fields",
+            "staffing_reason": "durable_cross_session",
+            "cwd": "/root",
+            "command": ["sh", "-c", "echo pwned"],
+            "sandbox": "danger-full-access",
+            "allowed_tools": ["Bash"],
+            "credentials": ["admin"],
+            "env_id": "fake-env",
+        });
+        let err = serde_json::from_value::<StaffAssignmentRequest>(hostile).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "hostile execution fields must fail deserialization loudly: {err}"
+        );
+    }
+
+    #[test]
+    fn staff_assignment_request_rejects_caller_minted_dispatch_id() {
+        let hostile = serde_json::json!({
+            "task": "Reject forged dispatch id",
+            "staffing_reason": "explicit_user_request",
+            "dispatch_id": "forged-id",
+        });
+        let err = serde_json::from_value::<StaffAssignmentRequest>(hostile).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "forged dispatch_id must fail deserialization: {err}"
+        );
     }
 
     #[test]
@@ -1527,7 +1554,6 @@ mod tests {
             serde_json::json!({"action": "complete", "status": "success"}),
         )
         .with_assignment_id("assign-456")
-        .with_state("completed")
         .with_started_at("2026-08-20T11:00:00Z")
         .with_finished_at("2026-08-20T11:05:00Z")
         .with_exit_code(0)
@@ -1535,7 +1561,7 @@ mod tests {
 
         assert_eq!(receipt.dispatch_id, "dispatch-20260820-test");
         assert_eq!(receipt.assignment_id.as_deref(), Some("assign-456"));
-        assert_eq!(receipt.state, "completed");
+        assert_eq!(receipt.state, "working");
         assert_eq!(receipt.exit_code, Some(0));
         assert_eq!(receipt.started_at.as_deref(), Some("2026-08-20T11:00:00Z"));
         assert_eq!(receipt.finished_at.as_deref(), Some("2026-08-20T11:05:00Z"));
@@ -1544,6 +1570,6 @@ mod tests {
         let deserialized: StaffRunReceipt =
             serde_json::from_value(serialized).expect("deserializes");
         assert_eq!(deserialized.dispatch_id, "dispatch-20260820-test");
-        assert_eq!(deserialized.state, "completed");
+        assert_eq!(deserialized.state, "working");
     }
 }
