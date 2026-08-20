@@ -20,9 +20,7 @@ fn retire_removed_builtins(server: &MemoryServer) -> Result<(), String> {
             .hub_set_review(RETIRED_TRAJECTORY_DISTILLER_ID, "rejected", Some(false))
             .map(|_| ())
             .map_err(|e| {
-                format!(
-                    "retire removed builtin capability {RETIRED_TRAJECTORY_DISTILLER_ID}: {e}"
-                )
+                format!("retire removed builtin capability {RETIRED_TRAJECTORY_DISTILLER_ID}: {e}")
             })
     })?;
     server

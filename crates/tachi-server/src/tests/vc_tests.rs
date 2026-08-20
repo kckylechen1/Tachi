@@ -245,8 +245,7 @@ async fn vc_register_and_bind_workflow() {
 #[tokio::test]
 async fn vc_register_cannot_replace_retired_historical_row() {
     let server = make_server();
-    let mut historical =
-        make_mcp_capability(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID, 1);
+    let mut historical = make_mcp_capability(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID, 1);
     historical.cap_type = "skill".to_string();
     historical.name = "trajectory-distiller".to_string();
     server
@@ -322,5 +321,8 @@ async fn vc_bind_cannot_persist_retired_capability_relationship() {
                 .map_err(|error| error.to_string())
         })
         .expect("list bindings after rejected retired target");
-    assert!(bindings.is_empty(), "rejected binding must not be persisted");
+    assert!(
+        bindings.is_empty(),
+        "rejected binding must not be persisted"
+    );
 }

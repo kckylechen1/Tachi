@@ -45,12 +45,9 @@ pub(super) async fn run_hub_command(
             all,
             json: false,
         } => {
-            memory_server_hub_cli::cmd_list_filtered(
-                &hub_db,
-                cap_type.as_deref(),
-                all,
-                |cap| !crate::builtins::is_retired_builtin_capability_id(&cap.id),
-            )?;
+            memory_server_hub_cli::cmd_list_filtered(&hub_db, cap_type.as_deref(), all, |cap| {
+                !crate::builtins::is_retired_builtin_capability_id(&cap.id)
+            })?;
             Ok(())
         }
         HubAction::Show { id } => {
@@ -169,7 +166,7 @@ pub(super) async fn run_hub_command(
             memory_server_hub_cli::cmd_stats_filtered(&hub_db, |cap| {
                 !crate::builtins::is_retired_builtin_capability_id(&cap.id)
             })
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
             Ok(())
         }
     }
@@ -835,7 +832,11 @@ mod tests {
 
             let listed = collect_visible_hub_list(&db_path, Some("skill"), true)
                 .expect("shared JSON/text list collector should succeed");
-            assert_eq!(listed.len(), 1, "--all must still filter tombstones; scope={scope}");
+            assert_eq!(
+                listed.len(),
+                1,
+                "--all must still filter tombstones; scope={scope}"
+            );
             assert_eq!(listed[0].id, visible.id, "scope={scope}");
 
             let _ = std::fs::remove_dir_all(&root);

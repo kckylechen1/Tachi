@@ -451,9 +451,7 @@ mod tests {
         for path in [
             configured.join(memcore::MEMORY_DB_FILENAME),
             configured.join(memcore::LEGACY_MEMORY_DB_FILENAME),
-            configured
-                .join("global")
-                .join(memcore::MEMORY_DB_FILENAME),
+            configured.join("global").join(memcore::MEMORY_DB_FILENAME),
             configured
                 .join("global")
                 .join(memcore::LEGACY_MEMORY_DB_FILENAME),
@@ -462,10 +460,7 @@ mod tests {
         }
 
         assert_ne!(
-            scope_hint_for_in_home(
-                Path::new("/repo/.tachi/global/memory.db"),
-                configured
-            ),
+            scope_hint_for_in_home(Path::new("/repo/.tachi/global/memory.db"), configured),
             "global"
         );
         assert_ne!(

@@ -463,7 +463,10 @@ async fn wiki_read_rejects_pending_review_and_invalid_applicability_artifacts() 
         let value = collect_wiki_read_value(&server, path, "wiki")
             .expect("gated read should return a structured miss");
         assert_eq!(value["status"], json!("not_found"), "path={path}");
-        assert!(value["entry"].is_null(), "gated read leaked entry: {value:#}");
+        assert!(
+            value["entry"].is_null(),
+            "gated read leaked entry: {value:#}"
+        );
         assert!(
             value["entry"]["text"].is_null(),
             "gated read must not return entry text: {value:#}"
@@ -476,14 +479,15 @@ async fn wiki_read_filters_ineligible_exact_duplicates_before_ambiguity() {
     let mut active = active_wiki_entry();
     active.path = "/wiki/drafts/lifecycle-gate-draft".to_string();
     active.text = "LifecycleGateNeedle is the reviewed duplicate.".to_string();
-    let (server, _home) = seed_wiki_project_entries(vec![
-        pending_review_draft_entry(),
-        active,
-    ]);
+    let (server, _home) = seed_wiki_project_entries(vec![pending_review_draft_entry(), active]);
 
     let value = collect_wiki_read_value(&server, "/wiki/drafts/lifecycle-gate-draft", "wiki")
         .expect("mixed exact read should succeed");
-    assert_eq!(value["status"], json!("found"), "ineligible duplicate caused ambiguity: {value:#}");
+    assert_eq!(
+        value["status"],
+        json!("found"),
+        "ineligible duplicate caused ambiguity: {value:#}"
+    );
     assert_eq!(
         value["entry"]["text"],
         json!("LifecycleGateNeedle is the reviewed duplicate.")
@@ -499,13 +503,14 @@ async fn wiki_read_filters_ineligible_prefix_children_before_selection() {
     active.text = "LifecycleGateNeedle is the reviewed child.".to_string();
     let (server, _home) = seed_wiki_project_entries(vec![invalid, active]);
 
-    let value = collect_wiki_read_value(
-        &server,
-        "/wiki/engineering/lifecycle/mixed-prefix",
-        "wiki",
-    )
-    .expect("mixed prefix read should succeed");
-    assert_eq!(value["status"], json!("found"), "ineligible child hid active child: {value:#}");
+    let value =
+        collect_wiki_read_value(&server, "/wiki/engineering/lifecycle/mixed-prefix", "wiki")
+            .expect("mixed prefix read should succeed");
+    assert_eq!(
+        value["status"],
+        json!("found"),
+        "ineligible child hid active child: {value:#}"
+    );
     assert_eq!(
         value["entry"]["path"],
         json!("/wiki/engineering/lifecycle/mixed-prefix/10-active")

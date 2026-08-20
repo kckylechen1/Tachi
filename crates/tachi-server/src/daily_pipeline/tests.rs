@@ -1442,8 +1442,7 @@ async fn skill_evolution_excludes_retired_global_and_project_tombstones() {
     global.health_status = "unhealthy".to_string();
     global.fail_streak = 99;
     let mut project = global.clone();
-    project.description =
-        "Historical project trajectory writer omitted from evolution".to_string();
+    project.description = "Historical project trajectory writer omitted from evolution".to_string();
     server
         .with_global_store(|store| {
             store

@@ -1021,7 +1021,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let _interval = EnvRestore::set("DISTILL_INTERVAL_SECS", "0");
-        assert_eq!(configured_distill_interval_secs(), DEFAULT_DISTILL_INTERVAL_SECS);
+        assert_eq!(
+            configured_distill_interval_secs(),
+            DEFAULT_DISTILL_INTERVAL_SECS
+        );
     }
 
     /// #1605 discriminating test: a global-store-only daemon that still has a

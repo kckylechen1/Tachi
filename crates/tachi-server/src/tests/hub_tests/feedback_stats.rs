@@ -176,7 +176,10 @@ async fn hub_stats_excludes_retired_global_and_project_tombstones() {
             .expect("post-injection hub_stats should succeed"),
     )
     .expect("post-injection stats JSON");
-    assert_eq!(after, before, "retired tombstones must not affect Hub stats");
+    assert_eq!(
+        after, before,
+        "retired tombstones must not affect Hub stats"
+    );
 }
 
 #[tokio::test]

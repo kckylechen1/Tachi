@@ -1087,5 +1087,8 @@ fn skill_quality_refresh_does_not_mutate_retired_tombstone() {
         })
         .expect("load retired row after quality refresh");
     let after = serde_json::to_string(&after).expect("serialize post-refresh state");
-    assert_eq!(after, before, "quality refresh must not mutate the tombstone");
+    assert_eq!(
+        after, before,
+        "quality refresh must not mutate the tombstone"
+    );
 }

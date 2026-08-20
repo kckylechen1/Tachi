@@ -297,12 +297,10 @@ async fn cached_project_trajectory_distiller_is_not_advertised_after_restart_loa
         err.contains("retired") && err.contains("cannot be exposed"),
         "unexpected retired exposure error: {err}"
     );
-    let advertised = crate::utils::lock_or_recover(
-        &server.tool_discovery.skill_tools,
-        "skill_tools",
-    )
-    .values()
-    .any(|skill_id| skill_id == crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID);
+    let advertised =
+        crate::utils::lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools")
+            .values()
+            .any(|skill_id| skill_id == crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID);
     assert!(
         !advertised,
         "historical trajectory-distiller must not remain in the dynamic tool inventory"

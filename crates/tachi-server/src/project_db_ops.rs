@@ -474,11 +474,7 @@ fn upsert_global_manifest_entry(
         .into_iter()
         .filter(|index| *index != target)
         .collect::<Vec<_>>();
-    remove.extend(
-        stale_globals
-            .into_iter()
-            .filter(|index| *index != target),
-    );
+    remove.extend(stale_globals.into_iter().filter(|index| *index != target));
     remove.sort_unstable();
     remove.dedup();
     for index in remove.into_iter().rev() {
@@ -505,9 +501,7 @@ fn register_repo_local_manifest_entry_locked(
         let global_candidates = [
             parent.join(memcore::MEMORY_DB_FILENAME),
             parent.join(memcore::LEGACY_MEMORY_DB_FILENAME),
-            parent
-                .join("global")
-                .join(memcore::MEMORY_DB_FILENAME),
+            parent.join("global").join(memcore::MEMORY_DB_FILENAME),
             parent
                 .join("global")
                 .join(memcore::LEGACY_MEMORY_DB_FILENAME),
@@ -1914,7 +1908,9 @@ mod resolve_or_register_workspace_root_tests {
 
             let manifest =
                 crate::manifest::Manifest::load(&root.join("manifest.json")).expect("manifest");
-            let global = manifest.global().expect("root global store must be registered");
+            let global = manifest
+                .global()
+                .expect("root global store must be registered");
             assert_eq!(
                 std::path::PathBuf::from(&global.path),
                 std::fs::canonicalize(&global_db).expect("canonical root global DB")
@@ -1928,9 +1924,7 @@ mod resolve_or_register_workspace_root_tests {
         with_test_home(|root| {
             let root_global = root.join(memcore::MEMORY_DB_FILENAME);
             std::fs::write(&root_global, b"root global DB").expect("root global DB");
-            let nested_global = root
-                .join("global")
-                .join(memcore::MEMORY_DB_FILENAME);
+            let nested_global = root.join("global").join(memcore::MEMORY_DB_FILENAME);
             std::fs::create_dir_all(nested_global.parent().unwrap()).expect("global parent");
             std::fs::write(&nested_global, b"nested global DB").expect("nested global DB");
 
@@ -2023,8 +2017,7 @@ mod resolve_or_register_workspace_root_tests {
             let global_db = root.join(memcore::MEMORY_DB_FILENAME);
             std::fs::write(&global_db, b"candidate global DB").expect("candidate global DB");
             let existing_global = root.join("existing-global.db");
-            std::fs::write(&existing_global, b"existing global DB")
-                .expect("existing global DB");
+            std::fs::write(&existing_global, b"existing global DB").expect("existing global DB");
 
             let mut manifest = crate::manifest::Manifest::empty();
             manifest.dbs.push(crate::manifest::DbEntry {

@@ -47,8 +47,7 @@ pub fn cmd_list_filtered<F>(
 where
     F: Fn(&memcore::HubCapability) -> bool,
 {
-    let capabilities =
-        collect_list_filtered_with(db, type_filter, show_all, include_capability)?;
+    let capabilities = collect_list_filtered_with(db, type_filter, show_all, include_capability)?;
 
     if capabilities.is_empty() {
         println!("(no capabilities)");
