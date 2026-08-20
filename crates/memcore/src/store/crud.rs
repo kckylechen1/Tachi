@@ -371,23 +371,60 @@ fn retry_search_locked<T>(
 ) -> Result<T, MemoryError> {
     let started = Instant::now();
     let mut backoff = SEARCH_LOCK_RETRY_INITIAL_BACKOFF;
+    let mut attempt = 0usize;
     loop {
+        attempt += 1;
         match operation() {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                if attempt > 1 {
+                    tracing::info!(
+                        op = "search",
+                        db_label,
+                        attempts = attempt,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "memcore search lock retry: recovered from database busy/locked"
+                    );
+                }
+                return Ok(value);
+            }
             Err(MemoryError::Sqlite(error))
                 if db::sqlite_error_is_locked(&error)
                     && started.elapsed().saturating_add(backoff) < SEARCH_LOCK_RETRY_BUDGET =>
             {
-                tracing::debug!(
+                tracing::warn!(
                     op = "search",
                     db_label,
+                    attempt,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
                     backoff_ms = backoff.as_millis() as u64,
                     "memcore search lock retry: database busy/locked, backing off"
                 );
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(SEARCH_LOCK_RETRY_MAX_BACKOFF);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if attempt > 1
+                    || matches!(&error, MemoryError::Sqlite(e) if db::sqlite_error_is_locked(e))
+                {
+                    let error_kind = if matches!(&error, MemoryError::Sqlite(e) if db::sqlite_error_is_locked(e))
+                    {
+                        "sqlite_locked"
+                    } else if matches!(&error, MemoryError::Sqlite(_)) {
+                        "sqlite_other"
+                    } else {
+                        "non_sqlite"
+                    };
+                    tracing::error!(
+                        op = "search",
+                        db_label,
+                        attempts = attempt,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        error_kind,
+                        "memcore search lock retry: giving up after database busy/locked retries"
+                    );
+                }
+                return Err(error);
+            }
         }
     }
 }

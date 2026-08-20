@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_MEMORY_READ_POOL_SIZE: usize = 4;
 const MAX_MEMORY_READ_POOL_SIZE: usize = 32;
 const DEFAULT_DB_CONTENTION_RECEIPT_CAPACITY: usize = 4096;
+pub const WRITE_LOCK_HOLD_WARN_THRESHOLD: Duration = Duration::from_millis(1000);
 
 /// Logical memory database scope used by server handlers and background jobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -885,7 +886,19 @@ impl DbRuntime {
         let state = self.attached_project_state(db_path, label)?;
         let _gate = write_or_recover(&state.rw_gate, "path_db_rw_gate");
         let mut store = lock_or_recover(&state.store, label.text());
-        f(&mut store)
+        let started = Instant::now();
+        let result = f(&mut store);
+        let elapsed = started.elapsed();
+        if elapsed >= WRITE_LOCK_HOLD_WARN_THRESHOLD {
+            tracing::warn!(
+                target: "tachi::db_runtime",
+                db_label = label.text(),
+                elapsed_ms = elapsed.as_millis() as u64,
+                threshold_ms = WRITE_LOCK_HOLD_WARN_THRESHOLD.as_millis() as u64,
+                "path DB write lock held past threshold"
+            );
+        }
+        result
     }
 
     /// Read a DB whose manifest role the caller has already resolved (the
@@ -1073,7 +1086,19 @@ impl DbRuntime {
         let Some(recorder) = self.global_contention_recorder.get().cloned() else {
             let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
             let mut store = lock_or_recover(&self.global_store, "global_store");
-            return f(&mut store);
+            let started = Instant::now();
+            let result = f(&mut store);
+            let elapsed = started.elapsed();
+            if elapsed >= WRITE_LOCK_HOLD_WARN_THRESHOLD {
+                tracing::warn!(
+                    target: "tachi::db_runtime",
+                    db_label = "global",
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    threshold_ms = WRITE_LOCK_HOLD_WARN_THRESHOLD.as_millis() as u64,
+                    "global DB write lock held past threshold"
+                );
+            }
+            return result;
         };
 
         let gate_wait_started = Instant::now();
@@ -1242,7 +1267,19 @@ impl DbRuntime {
             .ok_or_else(|| "No project database available".to_string())?;
         let _gate = write_or_recover(&state.rw_gate, "project_rw_gate");
         let mut store = lock_or_recover(&state.store, "project_store");
-        f(&mut store)
+        let started = Instant::now();
+        let result = f(&mut store);
+        let elapsed = started.elapsed();
+        if elapsed >= WRITE_LOCK_HOLD_WARN_THRESHOLD {
+            tracing::warn!(
+                target: "tachi::db_runtime",
+                db_label = "project",
+                elapsed_ms = elapsed.as_millis() as u64,
+                threshold_ms = WRITE_LOCK_HOLD_WARN_THRESHOLD.as_millis() as u64,
+                "project DB write lock held past threshold"
+            );
+        }
+        result
     }
 
     pub fn with_project_store_read<T>(

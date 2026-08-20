@@ -11,3 +11,4 @@ test-support = []
 memcore = { path = "../memcore" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
