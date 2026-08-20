@@ -182,3 +182,58 @@ fn verification_gate_treats_skipped_required_without_head_sha_as_stale() {
         std::env::remove_var("TACHI_RUN_ROOT");
     }
 }
+
+#[test]
+fn f1691_verify_identity_spine_distinguishes_facts_evidence_verdicts() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+
+    let flow_id = "flow_spine_isolation";
+
+    // 1. Execution fact: executor self-reporting success does NOT produce verification evidence
+    let gate_before = evaluate_verification_gate(Some(flow_id), "candidate_sha").unwrap();
+    assert!(
+        gate_before.is_none(),
+        "no verification ledger must exist from mere execution self-report"
+    );
+
+    // 2. Verification evidence: only explicit ledger writes populate verification.json
+    let path = ledger_path_for_flow(flow_id).unwrap();
+    write_json(
+        &path,
+        &json!({
+            "flow_id": flow_id,
+            "overall": "passed",
+            "items": [
+                {"id": "cargo_test", "status": "passed", "head_sha": "candidate_sha", "required": true}
+            ]
+        }),
+    )
+    .unwrap();
+
+    let gate_after = evaluate_verification_gate(Some(flow_id), "candidate_sha")
+        .unwrap()
+        .expect("verification evidence present");
+    assert_eq!(gate_after["overall"], "passed");
+    assert_eq!(gate_after["passed"].as_array().unwrap().len(), 1);
+
+    // 3. Stale candidate head SHA invalidates verification evidence
+    let gate_stale = evaluate_verification_gate(Some(flow_id), "new_diverged_sha")
+        .unwrap()
+        .expect("verification evidence present");
+    assert_eq!(gate_stale["overall"], "pending");
+    assert_eq!(
+        gate_stale["waiting_on"].as_array().unwrap()[0],
+        "verification:cargo_test:stale"
+    );
+
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}

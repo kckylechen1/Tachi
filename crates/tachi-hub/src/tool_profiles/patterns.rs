@@ -20,10 +20,6 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Unified memory facade (search action is read-only)
     "tachi_memory",
-    // Continuity event facade (query action is read-only)
-    "tachi_event",
-    // Component governance read model (Issue #796)
-    "tachi_component",
     // Research verb (read-side evidence pipeline; #530)
     "tachi_research",
     // Peer-publication broker read surface (#1016 S1): advisory, structurally
@@ -47,8 +43,6 @@ pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "tachi_skill",
     // Unified memory facade (save / extract_facts are write ops)
     "tachi_memory",
-    // Continuity event facade (emit action is append-only write)
-    "tachi_event",
     // Repo-shape adapter facade (imports into continuity events/projections)
     "tachi_domain_adapter",
 ];
@@ -138,8 +132,6 @@ pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "runtime_info",
     // Unified memory facade (daily actions only under action policy)
     "tachi_memory",
-    // Continuity events (query + append; no promote under action policy)
-    "tachi_event",
     "tachi_web_search",
     // Wiki facade (search/browse/read under action policy)
     "tachi_wiki",
