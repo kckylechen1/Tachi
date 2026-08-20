@@ -375,23 +375,30 @@ fn register_repo_local_manifest_entry_locked(
     };
 
     let mut manifest_changed = false;
-    if manifest.global().is_none() {
-        if let Some(parent) = manifest_path.parent() {
-            let global_path = parent.join("global").join(memcore::MEMORY_DB_FILENAME);
-            let legacy_global = parent
-                .join("global")
-                .join(memcore::LEGACY_MEMORY_DB_FILENAME);
-            let target_global = if global_path.exists() {
-                Some(global_path)
-            } else if legacy_global.exists() {
-                Some(legacy_global)
+    if let Some(parent) = manifest_path.parent() {
+        let global_path = parent.join("global").join(memcore::MEMORY_DB_FILENAME);
+        let legacy_global = parent
+            .join("global")
+            .join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        let target_global = if global_path.exists() {
+            Some(global_path)
+        } else if legacy_global.exists() {
+            Some(legacy_global)
+        } else {
+            None
+        };
+        if let Some(path) = target_global {
+            let canon_global = std::fs::canonicalize(&path).unwrap_or(path);
+            let canon_global_str = canon_global.display().to_string();
+            if let Some(existing) = manifest.dbs.iter_mut().find(|e| e.path == canon_global_str) {
+                if existing.role != crate::manifest::DbRole::Global {
+                    existing.role = crate::manifest::DbRole::Global;
+                    existing.scope_hint = "global".to_string();
+                    manifest_changed = true;
+                }
             } else {
-                None
-            };
-            if let Some(path) = target_global {
-                let canon_global = std::fs::canonicalize(&path).unwrap_or(path);
                 manifest.dbs.push(crate::manifest::DbEntry {
-                    path: canon_global.display().to_string(),
+                    path: canon_global_str,
                     role: crate::manifest::DbRole::Global,
                     owner: "tachi".to_string(),
                     schema_kind: "tachi".to_string(),
@@ -1792,6 +1799,48 @@ mod resolve_or_register_workspace_root_tests {
                 "re-registering project must backfill global store when present"
             );
             assert_eq!(m2.dbs.len(), 2);
+        });
+    }
+
+    #[test]
+    fn re_registering_repairs_drifted_global_role_without_duplication() {
+        with_test_home(|root| {
+            let global_db = root.join("global").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("global parent");
+            std::fs::write(&global_db, b"global_db").expect("global DB");
+
+            let canon_global = std::fs::canonicalize(&global_db).unwrap();
+            let mut manifest = crate::manifest::Manifest::empty();
+            manifest.dbs.push(crate::manifest::DbEntry {
+                path: canon_global.display().to_string(),
+                role: crate::manifest::DbRole::Unknown,
+                owner: "legacy".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: true,
+                allow_write: true,
+                last_doctor_at: String::new(),
+                last_classification: "healthy".to_string(),
+                scope_hint: "legacy_global".to_string(),
+                notes: String::new(),
+            });
+            manifest.save(&root.join("manifest.json")).expect("save");
+
+            let project_db = root.join("Beta/data/project.db");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("project parent");
+            std::fs::write(&project_db, b"project_db").expect("project DB");
+
+            register_repo_local_manifest_entry_in_home(&project_db, "Beta", root)
+                .expect("register project db");
+
+            let reloaded =
+                crate::manifest::Manifest::load(&root.join("manifest.json")).expect("manifest");
+            assert_eq!(
+                reloaded.dbs.len(),
+                2,
+                "must not duplicate the global store entry"
+            );
+            assert!(reloaded.global().is_some());
+            assert_eq!(reloaded.global().unwrap().scope_hint, "global");
         });
     }
 

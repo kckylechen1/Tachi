@@ -1003,13 +1003,20 @@ pub(crate) fn retry_memory_locked<T>(
             }
             Err(error) => {
                 if memory_error_is_locked(&error) || attempt > 1 {
+                    let error_kind = if memory_error_is_locked(&error) {
+                        "sqlite_locked"
+                    } else if matches!(&error, MemoryError::Sqlite(_)) {
+                        "sqlite_other"
+                    } else {
+                        "non_sqlite"
+                    };
                     tracing::error!(
                         op,
                         db_label,
                         attempts = attempt,
                         elapsed_ms = started_at.elapsed().as_millis() as u64,
                         explicit_backoff_ms = explicit_backoff.as_millis() as u64,
-                        error = %error,
+                        error_kind,
                         "memcore lock retry: exhausted retries or non-retryable lock error"
                     );
                 }

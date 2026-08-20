@@ -406,12 +406,20 @@ fn retry_search_locked<T>(
                 if attempt > 1
                     || matches!(&error, MemoryError::Sqlite(e) if db::sqlite_error_is_locked(e))
                 {
+                    let error_kind = if matches!(&error, MemoryError::Sqlite(e) if db::sqlite_error_is_locked(e))
+                    {
+                        "sqlite_locked"
+                    } else if matches!(&error, MemoryError::Sqlite(_)) {
+                        "sqlite_other"
+                    } else {
+                        "non_sqlite"
+                    };
                     tracing::error!(
                         op = "search",
                         db_label,
                         attempts = attempt,
                         elapsed_ms = started.elapsed().as_millis() as u64,
-                        error = %error,
+                        error_kind,
                         "memcore search lock retry: giving up after database busy/locked retries"
                     );
                 }
