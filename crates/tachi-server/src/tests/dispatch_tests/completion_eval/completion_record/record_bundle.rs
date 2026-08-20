@@ -393,7 +393,7 @@ async fn tachi_complete_does_not_auto_distill_stringified_trajectory() {
         json!("skipped (automatic distillation retired)")
     );
 
-    let count_auto_skills = |store: &memcore::MemoryStore| {
+    let count_auto_skills = |store: &mut memcore::MemoryStore| {
         store
             .hub_list(Some("skill"), true)
             .map(|caps| {
