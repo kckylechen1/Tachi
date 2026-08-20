@@ -143,6 +143,9 @@ fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
         pr_refs: Vec::new(),
         fallback: Some("report unavailable".to_string()),
     });
+    params.inject_tachi_mcp = Some(true);
+    params.inject_hub_mcps = Some(false);
+    params.allowed_mcp_servers = vec!["context7".to_string()];
     let env_resolution = crate::exec_env_ops::EnvResolution::Default;
     let grant = mint_execution_grant(&mut params, "mcp-grant", &env_resolution)
         .expect("typed grant projects populated MCP access");
@@ -160,13 +163,65 @@ fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
 }
 
 #[test]
+fn execution_grant_preserves_top_level_mcp_precedence_over_nested_conflicts() {
+    let mut params = test_dispatch_params(Some("custom"), "canonical MCP precedence");
+    params.inject_tachi_mcp = Some(true);
+    params.inject_hub_mcps = Some(false);
+    params.allowed_mcp_servers = vec!["top-level-server".to_string()];
+    params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
+        inject_tachi_mcp: Some(false),
+        inject_hub_mcps: Some(true),
+        allowed_facades: Vec::new(),
+        allowed_mcp_servers: vec!["nested-server".to_string()],
+        github_read: Some(false),
+        write_actions: Some(false),
+        issue_refs: Vec::new(),
+        pr_refs: Vec::new(),
+        fallback: None,
+    });
+
+    let grant = mint_execution_grant(
+        &mut params,
+        "mcp-conflict-grant",
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("grant preserves the existing top-level launch authority");
+    let mcp = grant.mcp_access.clone().expect("canonical MCP access");
+    assert_eq!(mcp.inject_tachi_mcp, Some(true));
+    assert_eq!(mcp.inject_hub_mcps, Some(false));
+    assert_eq!(mcp.allowed_mcp_servers, vec!["top-level-server".to_string()]);
+    assert_grant_legacy_projection(&params, &grant)
+        .expect("launch-facing top-level fields and grant stay identical");
+}
+
+#[test]
 fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
     let mut padded = test_dispatch_params(Some("custom"), "canonical managed env");
     padded.env_id = Some("  env-canonical  ".to_string());
-    let managed = crate::exec_env_ops::EnvResolution::Managed {
-        cwd: "/canonical/worktree".to_string(),
+    let lease = memcore::ExecEnvLease {
         env_id: "env-canonical".to_string(),
+        kind: "worktree".to_string(),
+        path: "/canonical/worktree".to_string(),
+        repo_root: "/repo".to_string(),
+        branch: "branch".to_string(),
+        base_sha: "base".to_string(),
+        dispatch_id: None,
+        agent_identity_id: None,
+        claim_id: None,
+        env_class: Default::default(),
+        state: memcore::ExecEnvState::Active,
+        reclaim_reason: None,
+        schema_version: 1,
+        created_at: "2026-08-21T00:00:00Z".to_string(),
+        reclaimed_at: None,
     };
+    let managed = crate::exec_env_ops::resolve_env_binding(
+        padded.env_id.as_deref(),
+        None,
+        false,
+        Some(&lease),
+    )
+    .expect("padded env id resolves through the real env gate");
     let grant = mint_execution_grant(&mut padded, "managed-grant", &managed)
         .expect("canonical managed resolution mints a grant");
     assert_eq!(grant.env_id.as_deref(), Some("env-canonical"));
@@ -175,15 +230,75 @@ fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
 
     let mut whitespace = test_dispatch_params(Some("custom"), "canonical default env");
     whitespace.env_id = Some(" \t ".to_string());
+    let default = crate::exec_env_ops::resolve_env_binding(
+        whitespace.env_id.as_deref(),
+        None,
+        false,
+        None,
+    )
+    .expect("whitespace-only env id resolves through the real env gate");
     let grant = mint_execution_grant(
         &mut whitespace,
         "default-grant",
-        &crate::exec_env_ops::EnvResolution::Default,
+        &default,
     )
     .expect("whitespace-only env id resolves to the daemon default");
     assert_eq!(grant.env_id, None);
     assert_eq!(grant.allowed_cwd, None);
     assert_eq!(whitespace.env_id, None, "projection drops non-canonical whitespace input");
+}
+
+#[test]
+fn compiled_permission_projection_preserves_verify_headless_spelling() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _full = EnvRestore::remove("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE");
+    let _verify = EnvRestore::set("TACHI_DISPATCH_VERIFY_HEADLESS", "true");
+    let server = crate::tests::make_server();
+
+    let mut omitted = test_dispatch_params(Some("claude"), "default permission projection");
+    let omitted_start = resolve_dispatch_start(
+        &server,
+        &mut omitted,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    )
+    .expect("omitted permission profile resolves");
+    compile_dispatch_contract(
+        &mut omitted,
+        &omitted_start.agent_norm,
+        "cli",
+        &omitted_start.resolved_profile,
+        tachi_dispatch::PROVIDER_QUALIFICATIONS,
+        None,
+    )
+    .expect("default permission authority compiles");
+    assert_eq!(omitted.permission_profile.as_deref(), Some("default"));
+
+    let mut verify = test_dispatch_params(Some("claude"), "verify permission projection");
+    verify.permission_profile = Some("verify".to_string());
+    let verify_start = resolve_dispatch_start(
+        &server,
+        &mut verify,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    )
+    .expect("verify permission profile resolves");
+    compile_dispatch_contract(
+        &mut verify,
+        &verify_start.agent_norm,
+        "cli",
+        &verify_start.resolved_profile,
+        tachi_dispatch::PROVIDER_QUALIFICATIONS,
+        None,
+    )
+    .expect("verify-headless authority compiles without the full opt-in");
+    assert_eq!(
+        verify.permission_profile.as_deref(),
+        Some("verify"),
+        "the launcher must replay the admitted verify spelling, not full"
+    );
 }
 
 fn spawn_auth_gated_opencode_doc_server() -> (String, std::thread::JoinHandle<()>) {

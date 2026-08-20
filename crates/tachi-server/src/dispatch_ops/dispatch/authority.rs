@@ -49,6 +49,15 @@ pub(super) fn mint_execution_grant(
     grant_id: impl Into<String>,
     env_resolution: &crate::exec_env_ops::EnvResolution,
 ) -> Result<tachi_params::ExecutionGrant, String> {
+    // The running launch path historically reads the top-level MCP knobs.
+    // Preserve that precedence when a caller also supplies nested mcp_access,
+    // then project this one canonical result back to both representations.
+    let mut mcp_access = params.mcp_access.clone();
+    if let Some(access) = mcp_access.as_mut() {
+        access.inject_tachi_mcp = params.inject_tachi_mcp;
+        access.inject_hub_mcps = params.inject_hub_mcps;
+        access.allowed_mcp_servers = params.allowed_mcp_servers.clone();
+    }
     let grant = tachi_params::ExecutionGrant {
         grant_id: grant_id.into(),
         env_id: env_resolution.env_id().map(str::to_string),
@@ -58,7 +67,7 @@ pub(super) fn mint_execution_grant(
         ),
         allowed_cwd: env_resolution.cwd().map(std::path::PathBuf::from),
         credential_profiles: params.credential_profiles.clone(),
-        mcp_access: params.mcp_access.clone(),
+        mcp_access,
         allowed_tools: params.allowed_tools.clone(),
         permission_profile: params.permission_profile.clone(),
         sandbox: params.sandbox.clone(),
@@ -84,6 +93,11 @@ fn apply_grant_legacy_projection(
         .map(|cwd| cwd.to_string_lossy().to_string());
     params.credential_profiles = grant.credential_profiles.clone();
     params.mcp_access = grant.mcp_access.clone();
+    if let Some(access) = grant.mcp_access.as_ref() {
+        params.inject_tachi_mcp = access.inject_tachi_mcp;
+        params.inject_hub_mcps = access.inject_hub_mcps;
+        params.allowed_mcp_servers = access.allowed_mcp_servers.clone();
+    }
     params.allowed_tools = grant.allowed_tools.clone();
     params.permission_profile = grant.permission_profile.clone();
     params.sandbox = grant.sandbox.clone();
@@ -111,7 +125,19 @@ pub(super) fn assert_grant_legacy_projection(
         && grant.sandbox == params.sandbox
         && grant.max_turns == params.max_turns
         && grant.timeout_secs == params.timeout_secs;
-    if matches {
+    let mcp_matches = match grant.mcp_access.as_ref() {
+        Some(access) => {
+            access.inject_tachi_mcp == params.inject_tachi_mcp
+                && access.inject_hub_mcps == params.inject_hub_mcps
+                && access.allowed_mcp_servers == params.allowed_mcp_servers
+        }
+        None => {
+            params.inject_tachi_mcp.is_none()
+                && params.inject_hub_mcps.is_none()
+                && params.allowed_mcp_servers.is_empty()
+        }
+    };
+    if matches && mcp_matches {
         Ok(())
     } else {
         Err("execution grant and legacy compatibility projection diverged".to_string())
@@ -148,6 +174,7 @@ pub(super) fn compile_dispatch_contract(
     qualifications: &[ProviderQualification],
     backend_version: Option<&str>,
 ) -> Result<EffectiveContract, String> {
+    let admitted_permission_spelling = params.permission_profile.clone();
     let permission_profile = tachi_dispatch::resolve_permission_profile(&DispatchLaunchParams {
         cwd: params.cwd.clone(),
         model: params.model.clone(),
@@ -196,9 +223,12 @@ pub(super) fn compile_dispatch_contract(
 
     params.sandbox = contract.sandbox_arg.clone();
     params.skills = contract.mounted_skills.clone();
-    // The grant records the compiled value, not the caller spelling: omitted
-    // becomes `default`, and the headless `verify` alias resolves to `full`.
-    params.permission_profile = Some(permission_profile.as_str().to_string());
+    // The typed grant records this admitted authority. Keep a successful
+    // `verify` spelling replay-safe for the downstream launcher: it is an
+    // accepted alias with a distinct headless opt-in, not a request to replay
+    // as `full`. Omitted input projects to the explicit default spelling.
+    params.permission_profile = admitted_permission_spelling
+        .or_else(|| Some(permission_profile.as_str().to_string()));
     Ok(contract)
 }
 
