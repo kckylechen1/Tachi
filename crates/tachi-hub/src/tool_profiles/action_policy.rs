@@ -193,7 +193,6 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
         ),
         "tachi_wiki" => matches!(action, "search" | "browse" | "read"),
         "tachi_skill" => matches!(action, "discover" | "run"),
-        "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
         "tachi_a2a" => matches!(action, "respond" | "status"),
         // Non-facade tools on the delegate list (no action concept): tool
         // visibility is enough, regardless of what's in the `action` arg.
