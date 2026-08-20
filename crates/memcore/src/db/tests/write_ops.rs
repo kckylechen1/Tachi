@@ -1213,3 +1213,35 @@ fn normalize_for_write_empty_id_rejected_by_upsert() {
     let err = upsert(&mut make_conn(), &e, false);
     assert!(err.is_err(), "empty id should be rejected");
 }
+
+#[test]
+fn retry_memory_locked_recovers_after_transient_busy_and_releases_lock() {
+    let mut attempts = 0;
+    let result = crate::db::retry_memory_locked("test_op", "test_db", || {
+        attempts += 1;
+        if attempts < 3 {
+            Err(crate::MemoryError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("database is locked".to_string()),
+            )))
+        } else {
+            Ok("success")
+        }
+    });
+    assert_eq!(result.unwrap(), "success");
+    assert_eq!(attempts, 3);
+}
+
+#[test]
+fn retry_memory_locked_exhausts_and_returns_error_on_persistent_lock() {
+    let mut attempts = 0;
+    let result = crate::db::retry_memory_locked::<()>("test_exhaust", "test_db", || {
+        attempts += 1;
+        Err(crate::MemoryError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_string()),
+        )))
+    });
+    assert!(result.is_err());
+    assert_eq!(attempts, 6);
+}

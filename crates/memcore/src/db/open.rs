@@ -970,10 +970,11 @@ pub(crate) fn retry_memory_locked<T>(
         match operation() {
             Ok(value) => {
                 if attempt > 1 {
-                    tracing::debug!(
+                    tracing::info!(
                         op,
                         db_label,
                         attempts = attempt,
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
                         explicit_backoff_ms = explicit_backoff.as_millis() as u64,
                         "memcore lock retry: recovered from database busy/locked"
                     );
@@ -987,10 +988,11 @@ pub(crate) fn retry_memory_locked<T>(
                     && sqlite_busy_deadline_remaining()
                         .is_none_or(|remaining| !remaining.is_zero() && backoff < remaining) =>
             {
-                tracing::debug!(
+                tracing::warn!(
                     op,
                     db_label,
                     attempt,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
                     backoff_ms = backoff.as_millis() as u64,
                     "memcore lock retry: database busy/locked, backing off"
                 );
@@ -1000,13 +1002,15 @@ pub(crate) fn retry_memory_locked<T>(
                 backoff = (backoff * 2).min(max_backoff);
             }
             Err(error) => {
-                if attempt > 1 {
-                    tracing::debug!(
+                if memory_error_is_locked(&error) || attempt > 1 {
+                    tracing::error!(
                         op,
                         db_label,
                         attempts = attempt,
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
                         explicit_backoff_ms = explicit_backoff.as_millis() as u64,
-                        "memcore lock retry: giving up after retries"
+                        error = %error,
+                        "memcore lock retry: exhausted retries or non-retryable lock error"
                     );
                 }
                 return Err(error);

@@ -93,10 +93,35 @@ fn collect_snapshot_inner(
     // are simply absent from `dbs` (and therefore from `Summary`'s "N dbs"
     // count) rather than shown with a placeholder, since unlike a missing
     // DB file this isn't an error condition worth flagging.
+    let fallback_global_entry: Option<DbEntry> = if !all_dbs
+        && !manifest
+            .dbs
+            .iter()
+            .any(|entry| paths_equal(&PathBuf::from(&entry.path), global_db_path))
+        && global_db_path.exists()
+    {
+        let canon =
+            std::fs::canonicalize(global_db_path).unwrap_or_else(|_| global_db_path.to_path_buf());
+        Some(DbEntry {
+            path: canon.display().to_string(),
+            role: DbRole::Global,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: String::new(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "global".to_string(),
+            notes: "implicit global store fallback".to_string(),
+        })
+    } else {
+        None
+    };
+
     let scoped_entries: Vec<&DbEntry> = if all_dbs {
         manifest.dbs.iter().collect()
     } else {
-        manifest
+        let mut entries: Vec<&DbEntry> = manifest
             .dbs
             .iter()
             .filter(|entry| {
@@ -104,7 +129,11 @@ fn collect_snapshot_inner(
                 paths_equal(&path, global_db_path)
                     || project_db_path.is_some_and(|p| paths_equal(&path, p))
             })
-            .collect()
+            .collect();
+        if let Some(ref fallback) = fallback_global_entry {
+            entries.insert(0, fallback);
+        }
+        entries
     };
 
     let mut dbs: Vec<DbStatus> = Vec::with_capacity(scoped_entries.len());
