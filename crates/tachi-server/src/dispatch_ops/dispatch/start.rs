@@ -4,8 +4,8 @@ pub(super) struct DispatchStart {
     pub(super) dispatch_id: String,
     pub(super) agent_norm: String,
     pub(super) resolved_profile: ResolvedDispatchProfile,
+    pub(super) resolved_assignment: tachi_params::ResolvedStaffAssignment,
     pub(super) profile_payload: Value,
-    pub(super) timeout_secs_for_status: u64,
     pub(super) timeout: Duration,
     pub(super) inject_tachi: bool,
     pub(super) inject_hub: bool,
@@ -36,10 +36,31 @@ pub(super) fn resolve_dispatch_start(
     };
     params.agent = Some(agent_norm.clone());
 
+    // #1815 P1: the profile resolver still writes the legacy ingress for
+    // untouched P2/P3/#1814 consumers. This typed result is the authoritative
+    // selection record; the exact legacy projection is checked below and must
+    // be deleted when those consumers migrate.
+    let resolved_assignment = tachi_params::ResolvedStaffAssignment {
+        assignment_id: dispatch_id.clone(),
+        staffing_reason: params.staffing_reason.clone(),
+        selected_worker: agent_norm.clone(),
+        selected_profile: resolved_profile.selected_profile.clone(),
+        selected_backend: agent_norm.clone(),
+        selected_model: params.model.clone(),
+        execution_level: params.execution_level.clone(),
+        recommendation_ref: None,
+        host_adapter: resolved_profile.host_adapter.clone(),
+        evidence_required: resolved_profile.evidence_required.clone(),
+        fallback_chain: resolved_profile.fallback_chain.clone(),
+        route_explanation: resolved_profile.route_explanation.clone(),
+        identity_receipt: serde_json::to_value(&resolved_profile.identity_receipt)
+            .unwrap_or(serde_json::Value::Null),
+    };
+    assert_assignment_legacy_projection(params, &resolved_assignment)?;
+
     let profile_payload =
         serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
-    let timeout_secs_for_status = params.timeout_secs;
-    let timeout = Duration::from_secs(timeout_secs_for_status);
+    let timeout = Duration::from_secs(params.timeout_secs);
     let inject_tachi = params.inject_tachi_mcp.unwrap_or(false);
     let inject_hub = params.inject_hub_mcps.unwrap_or(false);
 
@@ -73,12 +94,34 @@ pub(super) fn resolve_dispatch_start(
         dispatch_id,
         agent_norm,
         resolved_profile,
+        resolved_assignment,
         profile_payload,
-        timeout_secs_for_status,
         timeout,
         inject_tachi,
         inject_hub,
         workspace_dir,
         host_adapter,
     })
+}
+
+/// #1815 P1 compatibility assertion. P2/P3 migrate these consumers to the
+/// typed assignment; final #1814 removes the legacy `TachiDispatchParams`
+/// projection. Keeping this comparison at the ingress makes a one-sided edit
+/// fail before receipt, artifact, backend, or spawn work begins.
+pub(super) fn assert_assignment_legacy_projection(
+    params: &TachiDispatchParams,
+    assignment: &tachi_params::ResolvedStaffAssignment,
+) -> Result<(), String> {
+    let matches = assignment.staffing_reason == params.staffing_reason
+        && params.agent.as_deref() == Some(assignment.selected_backend.as_str())
+        && assignment.selected_worker == assignment.selected_backend
+        && assignment.selected_profile == params.profile
+        && assignment.selected_model == params.model
+        && assignment.execution_level == params.execution_level
+        && assignment.recommendation_ref.is_none();
+    if matches {
+        Ok(())
+    } else {
+        Err("dispatch assignment and legacy compatibility projection diverged".to_string())
+    }
 }

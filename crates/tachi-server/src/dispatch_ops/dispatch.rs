@@ -138,7 +138,10 @@ mod workspace_setup;
 mod tests;
 
 use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
-use self::authority::{compile_dispatch_contract, contract_receipt};
+use self::authority::{
+    assert_grant_legacy_projection, compile_dispatch_contract, contract_receipt,
+    mint_execution_grant,
+};
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{
@@ -246,8 +249,8 @@ pub(crate) async fn handle_tachi_dispatch(
         dispatch_id,
         agent_norm,
         resolved_profile,
+        resolved_assignment,
         profile_payload,
-        timeout_secs_for_status,
         timeout,
         inject_tachi,
         inject_hub,
@@ -270,7 +273,6 @@ pub(crate) async fn handle_tachi_dispatch(
         params.cwd = Some(resolved_cwd.to_string());
     }
     let env_stamp = env_resolution.stamp();
-    let env_id_stamp = env_resolution.env_id().map(str::to_string);
 
     // #1001: zero-ceremony presence claim — auto-register/heartbeat so a
     // briefing read from another session sees this dispatch is in flight.
@@ -333,6 +335,8 @@ pub(crate) async fn handle_tachi_dispatch(
         backend_version.as_deref(),
     )?;
     let authority_receipt = contract_receipt(&effective_contract);
+    let execution_grant = mint_execution_grant(&params, format!("{dispatch_id}:authority"))?;
+    let timeout_secs_for_status = execution_grant.timeout_secs;
 
     // #1319-E1 defense-in-depth staffing-reason gate. `staffing_reason` is
     // non-optional on `TachiDispatchParams`, so every well-typed caller carries
@@ -422,7 +426,7 @@ pub(crate) async fn handle_tachi_dispatch(
         None,
         None,
         Some(json!({
-            "agent": agent_norm.clone(),
+            "agent": resolved_assignment.selected_backend.clone(),
             "task": params.task.clone(),
             "state": "TASK_STATE_WORKING",
             "updated_at": Utc::now().to_rfc3339(),
@@ -430,7 +434,7 @@ pub(crate) async fn handle_tachi_dispatch(
             "result_written": false,
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
-            "host_adapter": host_adapter.clone(),
+            "host_adapter": resolved_assignment.host_adapter.clone(),
             "host_profile": host_profile.name(),
             "execution_level": execution_level.as_str(),
             "capability_bundle": Value::Null,
@@ -444,13 +448,13 @@ pub(crate) async fn handle_tachi_dispatch(
             // #1319-E1: stamp the typed staffing reason into the canonical
             // receipt so external staffing is auditable — the reason admission
             // happened on (not just that it was non-None).
-            "staffing_reason": serde_json::to_value(params.staffing_reason)
+            "staffing_reason": serde_json::to_value(&resolved_assignment.staffing_reason)
                 .unwrap_or(Value::Null),
-            "identity_receipt": resolved_profile.identity_receipt,
+            "identity_receipt": resolved_assignment.identity_receipt.clone(),
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
-            "cwd": params.cwd.clone(),
+            "cwd": execution_grant.allowed_cwd.clone(),
             "completion_predicate":
                 serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
             // #774 round 3: stamp the dispatch's named project (if any) into
@@ -521,7 +525,7 @@ pub(crate) async fn handle_tachi_dispatch(
         None,
         None,
         Some(json!({
-            "agent": agent_norm.clone(),
+            "agent": resolved_assignment.selected_backend.clone(),
             "task": params.task.clone(),
             "state": "TASK_STATE_WORKING",
             "updated_at": Utc::now().to_rfc3339(),
@@ -529,7 +533,7 @@ pub(crate) async fn handle_tachi_dispatch(
             "result_written": false,
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
-            "host_adapter": host_adapter.clone(),
+            "host_adapter": resolved_assignment.host_adapter.clone(),
             "host_profile": host_profile.name(),
             "execution_level": execution_level.as_str(),
             "capability_bundle": capability_bundle_card.clone(),
@@ -541,18 +545,18 @@ pub(crate) async fn handle_tachi_dispatch(
             // #1319-E1: stamp the typed staffing reason into the canonical
             // receipt so external staffing is auditable — the reason admission
             // happened on (not just that it was non-None).
-            "staffing_reason": serde_json::to_value(params.staffing_reason)
+            "staffing_reason": serde_json::to_value(&resolved_assignment.staffing_reason)
                 .unwrap_or(Value::Null),
-            "identity_receipt": resolved_profile.identity_receipt,
+            "identity_receipt": resolved_assignment.identity_receipt.clone(),
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
-            "cwd": params.cwd.clone(),
+            "cwd": execution_grant.allowed_cwd.clone(),
             // #894 S1: record how the working directory was bound so the ledger
             // distinguishes managed (leased) envs from opted-in unmanaged cwds
             // and the daemon default.
             "env": env_stamp,
-            "env_id": env_id_stamp,
+            "env_id": execution_grant.env_id.clone(),
             "completion_predicate":
                 serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
             // #774 round 3: same rationale as the receipt-first seed above —
@@ -584,8 +588,8 @@ pub(crate) async fn handle_tachi_dispatch(
         trajectory_path: &trajectory_path,
         capability_bundle_card: &capability_bundle_card,
         capability_bundle_file: &capability_bundle_file,
-        evidence_required: &resolved_profile.evidence_required,
-        route_explanation: &resolved_profile.route_explanation,
+        evidence_required: &resolved_assignment.evidence_required,
+        route_explanation: &resolved_assignment.route_explanation,
         identity_receipt: &resolved_profile.identity_receipt,
     })
     .await?;
@@ -676,7 +680,7 @@ pub(crate) async fn handle_tachi_dispatch(
                 server,
                 params: &params,
                 agent_norm: &agent_norm,
-                selected_profile: resolved_profile.selected_profile.as_deref(),
+                selected_profile: resolved_assignment.selected_profile.as_deref(),
                 workspace_dir: &workspace_dir,
                 trajectory_path: &trajectory_path,
                 dispatch_id: &dispatch_id,

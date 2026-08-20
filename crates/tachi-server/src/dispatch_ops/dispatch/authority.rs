@@ -41,6 +41,45 @@ use tachi_dispatch::{
     ProviderQualification, SkillRequest,
 };
 
+/// #1815 P1 authority issuance. The compiled contract first applies the
+/// existing narrowing to the temporary legacy ingress; this established typed
+/// grant then records the exact values P3/#1814 will consume directly.
+pub(super) fn mint_execution_grant(
+    params: &TachiDispatchParams,
+    grant_id: impl Into<String>,
+) -> Result<tachi_params::ExecutionGrant, String> {
+    let grant = tachi_params::ExecutionGrant::from_dispatch_params(params, grant_id);
+    assert_grant_legacy_projection(params, &grant)?;
+    Ok(grant)
+}
+
+/// The temporary flat projection is permitted only through P2/P3 and final
+/// #1814. Reject a one-sided update rather than silently letting the launch
+/// path and the server-owned grant describe different authority.
+pub(super) fn assert_grant_legacy_projection(
+    params: &TachiDispatchParams,
+    grant: &tachi_params::ExecutionGrant,
+) -> Result<(), String> {
+    let legacy_cwd = params.cwd.as_ref().map(std::path::PathBuf::from);
+    let legacy_mcp = serde_json::to_value(&params.mcp_access).unwrap_or(Value::Null);
+    let grant_mcp = serde_json::to_value(&grant.mcp_access).unwrap_or(Value::Null);
+    let matches = grant.env_id == params.env_id
+        && grant.unmanaged_cwd_allowed == params.unmanaged_cwd.unwrap_or(false)
+        && grant.allowed_cwd == legacy_cwd
+        && grant.credential_profiles == params.credential_profiles
+        && grant_mcp == legacy_mcp
+        && grant.allowed_tools == params.allowed_tools
+        && grant.permission_profile == params.permission_profile
+        && grant.sandbox == params.sandbox
+        && grant.max_turns == params.max_turns
+        && grant.timeout_secs == params.timeout_secs;
+    if matches {
+        Ok(())
+    } else {
+        Err("execution grant and legacy compatibility projection diverged".to_string())
+    }
+}
+
 /// Compile the dispatch's effective authority contract and apply it to
 /// `params`. Returns the contract (for the receipt) or a typed-error string.
 ///

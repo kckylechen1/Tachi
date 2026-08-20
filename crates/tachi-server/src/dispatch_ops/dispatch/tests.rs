@@ -43,6 +43,58 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
     }
 }
 
+#[test]
+fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(Some("custom"), "resolve typed assignment");
+    params.model = Some("gpt-5.6-terra".to_string());
+    params.execution_level = Some(tachi_params::ExecutionLevel::L2);
+
+    let start = resolve_dispatch_start(&server, &mut params, Utc::now())
+        .expect("profile-less custom dispatch resolves");
+
+    assert_eq!(start.resolved_assignment.assignment_id, start.dispatch_id);
+    assert_eq!(start.resolved_assignment.selected_worker, "custom");
+    assert_eq!(
+        start.resolved_assignment.selected_backend,
+        params.agent.as_deref().expect("canonical backend").to_string()
+    );
+    assert_eq!(start.resolved_assignment.selected_model, params.model.clone());
+    assert_eq!(
+        start.resolved_assignment.execution_level,
+        Some(tachi_params::ExecutionLevel::L2)
+    );
+    assert_assignment_legacy_projection(&params, &start.resolved_assignment)
+        .expect("typed assignment and temporary legacy projection agree");
+}
+
+#[test]
+fn execution_grant_detects_a_one_sided_legacy_projection_mutant() {
+    let mut params = test_dispatch_params(Some("custom"), "mint typed grant");
+    params.env_id = Some("managed-env".to_string());
+    params.cwd = Some("/workspace/tachi".to_string());
+    params.unmanaged_cwd = Some(true);
+    params.credential_profiles = vec!["dispatch-token".to_string()];
+    params.allowed_tools = vec!["Read".to_string(), "Write".to_string()];
+    params.permission_profile = Some("allowlist".to_string());
+    params.sandbox = Some("workspace-write".to_string());
+    params.max_turns = Some(7);
+    params.timeout_secs = 42;
+
+    let grant = mint_execution_grant(&params, "dispatch-grant")
+        .expect("typed grant exactly projects legacy authority");
+    assert_grant_legacy_projection(&params, &grant)
+        .expect("matching grant remains compatible");
+
+    // Deliberate one-sided mutant: the grant stays authoritative while the
+    // untouched P3 legacy projection changes. The ingress guard must reject it.
+    params.timeout_secs = 43;
+    assert!(
+        assert_grant_legacy_projection(&params, &grant).is_err(),
+        "a one-sided compatibility mutation must be rejected"
+    );
+}
+
 fn spawn_auth_gated_opencode_doc_server() -> (String, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe server");
     let port = listener.local_addr().expect("local addr").port();
