@@ -463,6 +463,9 @@ fn collect_capabilities(
 
     for (db, caps) in [("project", project_caps), ("global", global_caps)] {
         for cap in caps {
+            if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+                continue;
+            }
             if !seen.insert(cap.id.clone()) {
                 continue;
             }
