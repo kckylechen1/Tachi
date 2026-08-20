@@ -19,22 +19,28 @@ pub(super) fn resolve_dispatch_start(
     server: &MemoryServer,
     params: &mut TachiDispatchParams,
     now: chrono::DateTime<Utc>,
+    execution_level: tachi_params::ExecutionLevel,
 ) -> Result<DispatchStart, String> {
-    let resolved_profile = resolve_and_apply_dispatch_profile_for_server(server, params)?;
+    // #1815 P1: resolve into the acknowledged compatibility projection first.
+    // The canonical outputs below are minted before that projection reaches the
+    // remaining P2/P3 consumers; final #1814 deletes this bridge entirely.
+    let mut legacy_projection = params.clone();
+    let resolved_profile =
+        resolve_and_apply_dispatch_profile_for_server(server, &mut legacy_projection)?;
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);
 
     agent_norm = if let Some(agent) = normalize_dispatch_agent_name(&agent_norm) {
         agent
     } else {
-        let agent = params.agent.as_deref().unwrap_or("");
+        let agent = legacy_projection.agent.as_deref().unwrap_or("");
         return Err(format!(
             "Unknown agent '{}'. Supported: {}",
             agent.trim(),
             dispatch_agent_help_list()
         ));
     };
-    params.agent = Some(agent_norm.clone());
+    legacy_projection.agent = Some(agent_norm.clone());
 
     // #1815 P1: the profile resolver still writes the legacy ingress for
     // untouched P2/P3/#1814 consumers. This typed result is the authoritative
@@ -42,12 +48,12 @@ pub(super) fn resolve_dispatch_start(
     // be deleted when those consumers migrate.
     let resolved_assignment = tachi_params::ResolvedStaffAssignment {
         assignment_id: dispatch_id.clone(),
-        staffing_reason: params.staffing_reason.clone(),
+        staffing_reason: legacy_projection.staffing_reason.clone(),
         selected_worker: agent_norm.clone(),
         selected_profile: resolved_profile.selected_profile.clone(),
         selected_backend: agent_norm.clone(),
-        selected_model: params.model.clone(),
-        execution_level: params.execution_level.clone(),
+        selected_model: legacy_projection.model.clone(),
+        execution_level: Some(execution_level),
         recommendation_ref: None,
         host_adapter: resolved_profile.host_adapter.clone(),
         evidence_required: resolved_profile.evidence_required.clone(),
@@ -56,7 +62,7 @@ pub(super) fn resolve_dispatch_start(
         identity_receipt: serde_json::to_value(&resolved_profile.identity_receipt)
             .unwrap_or(serde_json::Value::Null),
     };
-    assert_assignment_legacy_projection(params, &resolved_assignment)?;
+    apply_assignment_legacy_projection(params, legacy_projection, &resolved_assignment)?;
 
     let profile_payload =
         serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
@@ -124,4 +130,20 @@ pub(super) fn assert_assignment_legacy_projection(
     } else {
         Err("dispatch assignment and legacy compatibility projection diverged".to_string())
     }
+}
+
+fn apply_assignment_legacy_projection(
+    params: &mut TachiDispatchParams,
+    mut legacy_projection: TachiDispatchParams,
+    assignment: &tachi_params::ResolvedStaffAssignment,
+) -> Result<(), String> {
+    // This is the sole temporary P1 write-back. The selected values come from
+    // the typed assignment; the remaining fields were resolved by the private
+    // ResolvedDispatchProfile context while preserving untouched caller input.
+    legacy_projection.agent = Some(assignment.selected_backend.clone());
+    legacy_projection.profile = assignment.selected_profile.clone();
+    legacy_projection.model = assignment.selected_model.clone();
+    legacy_projection.execution_level = assignment.execution_level;
+    *params = legacy_projection;
+    assert_assignment_legacy_projection(params, assignment)
 }

@@ -45,12 +45,50 @@ use tachi_dispatch::{
 /// existing narrowing to the temporary legacy ingress; this established typed
 /// grant then records the exact values P3/#1814 will consume directly.
 pub(super) fn mint_execution_grant(
-    params: &TachiDispatchParams,
+    params: &mut TachiDispatchParams,
     grant_id: impl Into<String>,
+    env_resolution: &crate::exec_env_ops::EnvResolution,
 ) -> Result<tachi_params::ExecutionGrant, String> {
-    let grant = tachi_params::ExecutionGrant::from_dispatch_params(params, grant_id);
+    let grant = tachi_params::ExecutionGrant {
+        grant_id: grant_id.into(),
+        env_id: env_resolution.env_id().map(str::to_string),
+        unmanaged_cwd_allowed: matches!(
+            env_resolution,
+            crate::exec_env_ops::EnvResolution::Unmanaged { .. }
+        ),
+        allowed_cwd: env_resolution.cwd().map(std::path::PathBuf::from),
+        credential_profiles: params.credential_profiles.clone(),
+        mcp_access: params.mcp_access.clone(),
+        allowed_tools: params.allowed_tools.clone(),
+        permission_profile: params.permission_profile.clone(),
+        sandbox: params.sandbox.clone(),
+        max_turns: params.max_turns,
+        timeout_secs: params.timeout_secs,
+    };
+    apply_grant_legacy_projection(params, &grant);
     assert_grant_legacy_projection(params, &grant)?;
     Ok(grant)
+}
+
+fn apply_grant_legacy_projection(
+    params: &mut TachiDispatchParams,
+    grant: &tachi_params::ExecutionGrant,
+) {
+    // #1815 P1 temporary projection, deleted by P3/#1814 once backend,
+    // credential, and launch consumers take ExecutionGrant directly.
+    params.env_id = grant.env_id.clone();
+    params.unmanaged_cwd = Some(grant.unmanaged_cwd_allowed);
+    params.cwd = grant
+        .allowed_cwd
+        .as_ref()
+        .map(|cwd| cwd.to_string_lossy().to_string());
+    params.credential_profiles = grant.credential_profiles.clone();
+    params.mcp_access = grant.mcp_access.clone();
+    params.allowed_tools = grant.allowed_tools.clone();
+    params.permission_profile = grant.permission_profile.clone();
+    params.sandbox = grant.sandbox.clone();
+    params.max_turns = grant.max_turns;
+    params.timeout_secs = grant.timeout_secs;
 }
 
 /// The temporary flat projection is permitted only through P2/P3 and final
@@ -158,6 +196,9 @@ pub(super) fn compile_dispatch_contract(
 
     params.sandbox = contract.sandbox_arg.clone();
     params.skills = contract.mounted_skills.clone();
+    // The grant records the compiled value, not the caller spelling: omitted
+    // becomes `default`, and the headless `verify` alias resolves to `full`.
+    params.permission_profile = Some(permission_profile.as_str().to_string());
     Ok(contract)
 }
 

@@ -50,7 +50,12 @@ fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
     params.model = Some("gpt-5.6-terra".to_string());
     params.execution_level = Some(tachi_params::ExecutionLevel::L2);
 
-    let start = resolve_dispatch_start(&server, &mut params, Utc::now())
+    let start = resolve_dispatch_start(
+        &server,
+        &mut params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L2,
+    )
         .expect("profile-less custom dispatch resolves");
 
     assert_eq!(start.resolved_assignment.assignment_id, start.dispatch_id);
@@ -81,7 +86,10 @@ fn execution_grant_detects_a_one_sided_legacy_projection_mutant() {
     params.max_turns = Some(7);
     params.timeout_secs = 42;
 
-    let grant = mint_execution_grant(&params, "dispatch-grant")
+    let env_resolution = crate::exec_env_ops::EnvResolution::Unmanaged {
+        cwd: "/workspace/tachi".to_string(),
+    };
+    let grant = mint_execution_grant(&mut params, "dispatch-grant", &env_resolution)
         .expect("typed grant exactly projects legacy authority");
     assert_grant_legacy_projection(&params, &grant)
         .expect("matching grant remains compatible");
@@ -93,6 +101,89 @@ fn execution_grant_detects_a_one_sided_legacy_projection_mutant() {
         assert_grant_legacy_projection(&params, &grant).is_err(),
         "a one-sided compatibility mutation must be rejected"
     );
+}
+
+#[test]
+fn explicit_profile_assignment_is_authoritative_before_legacy_projection() {
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(None, "resolve an explicit profile");
+    params.profile = Some("glm_51_impl".to_string());
+
+    let start = resolve_dispatch_start(
+        &server,
+        &mut params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    )
+    .expect("profile alias resolves before legacy projection");
+
+    assert_eq!(start.resolved_assignment.selected_profile.as_deref(), Some("glm_impl"));
+    assert_eq!(
+        params.profile,
+        start.resolved_assignment.selected_profile,
+        "legacy profile is only the exact typed assignment projection"
+    );
+    assert_eq!(
+        params.agent.as_deref(),
+        Some(start.resolved_assignment.selected_backend.as_str())
+    );
+}
+
+#[test]
+fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
+    let mut params = test_dispatch_params(Some("custom"), "mint populated MCP grant");
+    params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
+        inject_tachi_mcp: Some(true),
+        inject_hub_mcps: Some(false),
+        allowed_facades: vec!["search".to_string()],
+        allowed_mcp_servers: vec!["context7".to_string()],
+        github_read: Some(true),
+        write_actions: Some(false),
+        issue_refs: vec!["kckylechen1/tachi#1815".to_string()],
+        pr_refs: Vec::new(),
+        fallback: Some("report unavailable".to_string()),
+    });
+    let env_resolution = crate::exec_env_ops::EnvResolution::Default;
+    let grant = mint_execution_grant(&mut params, "mcp-grant", &env_resolution)
+        .expect("typed grant projects populated MCP access");
+
+    params
+        .mcp_access
+        .as_mut()
+        .expect("legacy projection populated")
+        .allowed_mcp_servers
+        .push("mutant".to_string());
+    assert!(
+        assert_grant_legacy_projection(&params, &grant).is_err(),
+        "a populated MCP projection must reject one-sided drift"
+    );
+}
+
+#[test]
+fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
+    let mut padded = test_dispatch_params(Some("custom"), "canonical managed env");
+    padded.env_id = Some("  env-canonical  ".to_string());
+    let managed = crate::exec_env_ops::EnvResolution::Managed {
+        cwd: "/canonical/worktree".to_string(),
+        env_id: "env-canonical".to_string(),
+    };
+    let grant = mint_execution_grant(&mut padded, "managed-grant", &managed)
+        .expect("canonical managed resolution mints a grant");
+    assert_eq!(grant.env_id.as_deref(), Some("env-canonical"));
+    assert_eq!(grant.allowed_cwd.as_deref(), Some(std::path::Path::new("/canonical/worktree")));
+    assert_eq!(padded.env_id, grant.env_id, "legacy env id is only the grant projection");
+
+    let mut whitespace = test_dispatch_params(Some("custom"), "canonical default env");
+    whitespace.env_id = Some(" \t ".to_string());
+    let grant = mint_execution_grant(
+        &mut whitespace,
+        "default-grant",
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("whitespace-only env id resolves to the daemon default");
+    assert_eq!(grant.env_id, None);
+    assert_eq!(grant.allowed_cwd, None);
+    assert_eq!(whitespace.env_id, None, "projection drops non-canonical whitespace input");
 }
 
 fn spawn_auth_gated_opencode_doc_server() -> (String, std::thread::JoinHandle<()>) {

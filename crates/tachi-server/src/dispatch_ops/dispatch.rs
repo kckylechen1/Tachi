@@ -256,7 +256,7 @@ pub(crate) async fn handle_tachi_dispatch(
         inject_hub,
         workspace_dir,
         host_adapter,
-    } = resolve_dispatch_start(server, &mut params, now)?;
+    } = resolve_dispatch_start(server, &mut params, now, execution_level)?;
 
     // 0a. Resolve the execution-environment binding through the fail-safe gate
     // (#894 S1) before ANY workspace/preflight/spawn work. env_id → cwd from the
@@ -335,7 +335,11 @@ pub(crate) async fn handle_tachi_dispatch(
         backend_version.as_deref(),
     )?;
     let authority_receipt = contract_receipt(&effective_contract);
-    let execution_grant = mint_execution_grant(&params, format!("{dispatch_id}:authority"))?;
+    let execution_grant = mint_execution_grant(
+        &mut params,
+        format!("{dispatch_id}:authority"),
+        &env_resolution,
+    )?;
     let timeout_secs_for_status = execution_grant.timeout_secs;
 
     // #1319-E1 defense-in-depth staffing-reason gate. `staffing_reason` is
