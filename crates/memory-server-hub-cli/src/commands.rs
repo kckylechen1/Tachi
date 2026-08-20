@@ -16,70 +16,41 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-type CapabilityRow = (
-    String,
-    String,
-    String,
-    i64,
-    String,
-    i32,
-    String,
-    String,
-    i64,
-);
-
-pub(super) fn cmd_list(
+pub fn collect_list_filtered_with<F>(
     db: &Path,
     type_filter: Option<&str>,
     show_all: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+    include_capability: F,
+) -> Result<Vec<memcore::HubCapability>, Box<dyn std::error::Error>>
+where
+    F: Fn(&memcore::HubCapability) -> bool,
+{
     let conn = open_ro(db)?;
-    let mut sql = String::from(
-        "SELECT id, type, name, version, description, enabled, review_status, health_status, uses
-         FROM hub_capabilities WHERE 1=1",
-    );
-    if !show_all {
-        sql.push_str(" AND enabled = 1");
-    }
-    if type_filter.is_some() {
-        sql.push_str(" AND type = ?1");
-    }
-    sql.push_str(" ORDER BY type, name");
+    let mut capabilities = memcore::db::hub_list(&conn, type_filter, !show_all)?
+        .into_iter()
+        .filter(include_capability)
+        .collect::<Vec<_>>();
+    capabilities.sort_by(|left, right| {
+        left.cap_type
+            .cmp(&right.cap_type)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(capabilities)
+}
 
-    let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<CapabilityRow> = if let Some(t) = type_filter {
-        stmt.query_map([t], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-                r.get(8)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    } else {
-        stmt.query_map([], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-                r.get(8)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    };
+pub fn cmd_list_filtered<F>(
+    db: &Path,
+    type_filter: Option<&str>,
+    show_all: bool,
+    include_capability: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: Fn(&memcore::HubCapability) -> bool,
+{
+    let capabilities =
+        collect_list_filtered_with(db, type_filter, show_all, include_capability)?;
 
-    if rows.is_empty() {
+    if capabilities.is_empty() {
         println!("(no capabilities)");
         return Ok(());
     }
@@ -89,27 +60,35 @@ pub(super) fn cmd_list(
         "id", "type", "name", "v", "review", "health", "uses"
     );
     println!("{}", "─".repeat(120));
-    for (id, ty, name, ver, desc, enabled, review, health, uses) in &rows {
-        let id_disp = if *enabled == 0 {
-            format!("{} (off)", id)
+    for cap in &capabilities {
+        let id_disp = if !cap.enabled {
+            format!("{} (off)", cap.id)
         } else {
-            id.clone()
+            cap.id.clone()
         };
         println!(
             "{:<32} {:<7} {:<28} {:>3} {:<9} {:<8} {:>5}  {}",
             truncate(&id_disp, 32),
-            truncate(ty, 7),
-            truncate(name, 28),
-            ver,
-            truncate(review, 9),
-            truncate(health, 8),
-            uses,
-            truncate(desc, 60)
+            truncate(&cap.cap_type, 7),
+            truncate(&cap.name, 28),
+            cap.version,
+            truncate(&cap.review_status, 9),
+            truncate(&cap.health_status, 8),
+            cap.uses,
+            truncate(&cap.description, 60)
         );
     }
     println!();
-    println!("{} capabilities shown", rows.len());
+    println!("{} capabilities shown", capabilities.len());
     Ok(())
+}
+
+pub(super) fn cmd_list(
+    db: &Path,
+    type_filter: Option<&str>,
+    show_all: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_list_filtered(db, type_filter, show_all, |_| true)
 }
 
 pub(super) fn cmd_show(db: &Path, id: &str) -> Result<(), Box<dyn std::error::Error>> {

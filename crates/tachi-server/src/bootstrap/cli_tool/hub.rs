@@ -16,6 +16,16 @@ fn collect_visible_hub_stats(
     })
 }
 
+fn collect_visible_hub_list(
+    hub_db: &Path,
+    cap_type: Option<&str>,
+    all: bool,
+) -> Result<Vec<HubCapability>, Box<dyn std::error::Error>> {
+    memory_server_hub_cli::collect_list_filtered_with(hub_db, cap_type, all, |cap| {
+        !crate::builtins::is_retired_builtin_capability_id(&cap.id)
+    })
+}
+
 pub(super) async fn run_hub_command(
     action: HubAction,
     app_home: &PathBuf,
@@ -27,8 +37,7 @@ pub(super) async fn run_hub_command(
             all,
             json: true,
         } => {
-            let store = open_cli_store(&hub_db)?;
-            let caps = store.hub_list(cap_type.as_deref(), all)?;
+            let caps = collect_visible_hub_list(&hub_db, cap_type.as_deref(), all)?;
             print_pretty_json(&serde_json::to_value(caps)?)
         }
         HubAction::List {
@@ -36,16 +45,12 @@ pub(super) async fn run_hub_command(
             all,
             json: false,
         } => {
-            memory_server_hub_cli::run(
-                &HubAction::List {
-                    cap_type,
-                    all,
-                    json: false,
-                },
+            memory_server_hub_cli::cmd_list_filtered(
                 &hub_db,
-                app_home,
-            )
-            .map_err(std::io::Error::other)?;
+                cap_type.as_deref(),
+                all,
+                |cap| !crate::builtins::is_retired_builtin_capability_id(&cap.id),
+            )?;
             Ok(())
         }
         HubAction::Show { id } => {
@@ -782,6 +787,56 @@ mod tests {
             assert_eq!(stats.by_type.get("skill"), Some(&1), "scope={scope}");
             assert_eq!(stats.total_uses, 7, "scope={scope}");
             assert_eq!(stats.total_successes, 5, "scope={scope}");
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn cli_hub_list_all_shared_json_and_text_source_excludes_retired_tombstones() {
+        for scope in ["global", "project"] {
+            let root = crate::utils::test_fixture_path(format!(
+                "tachi-cli-retired-list-{scope}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let db_path = root.join(scope).join("memory.db");
+            std::fs::create_dir_all(db_path.parent().expect("list DB parent")).unwrap();
+            let store = memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).unwrap();
+            let visible = HubCapability {
+                id: format!("skill:visible-list-{scope}"),
+                cap_type: "skill".to_string(),
+                name: format!("visible-list-{scope}"),
+                version: 1,
+                description: "visible list fixture".to_string(),
+                definition: json!({"content": "visible"}).to_string(),
+                enabled: false,
+                review_status: "pending".to_string(),
+                health_status: "healthy".to_string(),
+                last_error: None,
+                last_success_at: None,
+                last_failure_at: None,
+                fail_streak: 0,
+                active_version: None,
+                exposure_mode: "direct".to_string(),
+                uses: 0,
+                successes: 0,
+                failures: 0,
+                avg_rating: 0.0,
+                last_used: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            };
+            let mut retired = visible.clone();
+            retired.id = crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string();
+            retired.name = "trajectory-distiller".to_string();
+            store.hub_register(&visible).unwrap();
+            store.hub_register(&retired).unwrap();
+            drop(store);
+
+            let listed = collect_visible_hub_list(&db_path, Some("skill"), true)
+                .expect("shared JSON/text list collector should succeed");
+            assert_eq!(listed.len(), 1, "--all must still filter tombstones; scope={scope}");
+            assert_eq!(listed[0].id, visible.id, "scope={scope}");
 
             let _ = std::fs::remove_dir_all(&root);
         }
