@@ -8,7 +8,7 @@ use tachi_bootstrap::cli::HubAction;
 
 mod commands;
 
-pub use self::commands::cmd_stats;
+pub use self::commands::{cmd_stats, cmd_stats_filtered, collect_stats_filtered, HubStatsSnapshot};
 use self::commands::{cmd_bindings, cmd_doctor, cmd_list, cmd_show};
 
 pub(crate) fn expand_path(raw: &str) -> PathBuf {

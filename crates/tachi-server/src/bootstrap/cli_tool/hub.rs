@@ -8,6 +8,14 @@ use tachi_bootstrap::cli::{HubAction, McpAction};
 
 use super::super::{evaluate_cli_capability_enabled, open_cli_store, print_pretty_json};
 
+fn collect_visible_hub_stats(
+    hub_db: &Path,
+) -> Result<memory_server_hub_cli::HubStatsSnapshot, Box<dyn std::error::Error>> {
+    memory_server_hub_cli::collect_stats_filtered(hub_db, |cap| {
+        !crate::builtins::is_retired_builtin_capability_id(&cap.id)
+    })
+}
+
 pub(super) async fn run_hub_command(
     action: HubAction,
     app_home: &PathBuf,
@@ -143,24 +151,19 @@ pub(super) async fn run_hub_command(
             }))
         }
         HubAction::Stats { json: true } => {
-            let store = open_cli_store(&hub_db)?;
-            let caps = store.hub_list(None, false)?;
-            let mut by_type: HashMap<String, usize> = HashMap::new();
-            for cap in &caps {
-                *by_type.entry(cap.cap_type.clone()).or_insert(0) += 1;
-            }
-            let total_uses: u64 = caps.iter().map(|c| c.uses).sum();
-            let total_successes: u64 = caps.iter().map(|c| c.successes).sum();
+            let stats = collect_visible_hub_stats(&hub_db)?;
             print_pretty_json(&json!({
-                "total_capabilities": caps.len(),
-                "by_type": by_type,
-                "total_uses": total_uses,
-                "total_successes": total_successes,
-                "success_rate": if total_uses > 0 { total_successes as f64 / total_uses as f64 } else { 0.0 },
+                "total_capabilities": stats.capabilities,
+                "by_type": stats.by_type,
+                "total_uses": stats.total_uses,
+                "total_successes": stats.total_successes,
+                "success_rate": if stats.total_uses > 0 { stats.total_successes as f64 / stats.total_uses as f64 } else { 0.0 },
             }))
         }
         HubAction::Stats { json: false } => {
-            memory_server_hub_cli::cmd_stats(&hub_db)
+            memory_server_hub_cli::cmd_stats_filtered(&hub_db, |cap| {
+                !crate::builtins::is_retired_builtin_capability_id(&cap.id)
+            })
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             Ok(())
         }
@@ -727,5 +730,60 @@ mod tests {
 
         drop(store);
         let _ = std::fs::remove_dir_all(&app_home);
+    }
+
+    #[test]
+    fn cli_hub_stats_shared_json_and_text_source_excludes_retired_tombstones() {
+        for scope in ["global", "project"] {
+            let root = crate::utils::test_fixture_path(format!(
+                "tachi-cli-retired-stats-{scope}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let db_path = root.join(scope).join("memory.db");
+            std::fs::create_dir_all(db_path.parent().expect("stats DB parent")).unwrap();
+            let store = memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).unwrap();
+            let visible = HubCapability {
+                id: format!("skill:visible-{scope}"),
+                cap_type: "skill".to_string(),
+                name: format!("visible-{scope}"),
+                version: 1,
+                description: "visible stats fixture".to_string(),
+                definition: json!({"content": "visible"}).to_string(),
+                enabled: true,
+                review_status: "approved".to_string(),
+                health_status: "healthy".to_string(),
+                last_error: None,
+                last_success_at: None,
+                last_failure_at: None,
+                fail_streak: 0,
+                active_version: None,
+                exposure_mode: "direct".to_string(),
+                uses: 7,
+                successes: 5,
+                failures: 2,
+                avg_rating: 4.0,
+                last_used: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            };
+            let mut retired = visible.clone();
+            retired.id = crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string();
+            retired.name = "trajectory-distiller".to_string();
+            retired.uses = 1000;
+            retired.successes = 999;
+            store.hub_register(&visible).unwrap();
+            store.hub_register(&retired).unwrap();
+            drop(store);
+
+            let stats = collect_visible_hub_stats(&db_path)
+                .expect("shared JSON/text stats collector should succeed");
+            assert_eq!(stats.capabilities, 1, "scope={scope}");
+            assert_eq!(stats.enabled_capabilities, 1, "scope={scope}");
+            assert_eq!(stats.by_type.get("skill"), Some(&1), "scope={scope}");
+            assert_eq!(stats.total_uses, 7, "scope={scope}");
+            assert_eq!(stats.total_successes, 5, "scope={scope}");
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 }

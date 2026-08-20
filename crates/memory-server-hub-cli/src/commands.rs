@@ -237,30 +237,90 @@ pub(super) fn cmd_bindings(db: &Path) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-pub fn cmd_stats(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct HubStatsSnapshot {
+    pub memories: i64,
+    pub edges: i64,
+    pub capabilities: usize,
+    pub enabled_capabilities: usize,
+    pub by_type: std::collections::HashMap<String, usize>,
+    pub total_uses: u64,
+    pub total_successes: u64,
+    pub virtual_bindings: i64,
+}
+
+pub fn collect_stats_filtered<F>(
+    db: &Path,
+    include_capability: F,
+) -> Result<HubStatsSnapshot, Box<dyn std::error::Error>>
+where
+    F: Fn(&memcore::HubCapability) -> bool,
+{
     let conn = open_ro(db)?;
 
     let count = |sql: &str| -> rusqlite::Result<i64> { conn.query_row(sql, [], |r| r.get(0)) };
 
     let memories = count("SELECT COUNT(*) FROM memories").unwrap_or(0);
     let edges = count("SELECT COUNT(*) FROM edges").unwrap_or(0);
-    let caps_total = count("SELECT COUNT(*) FROM hub_capabilities").unwrap_or(0);
-    let caps_enabled =
-        count("SELECT COUNT(*) FROM hub_capabilities WHERE enabled = 1").unwrap_or(0);
-    let skills = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='skill'").unwrap_or(0);
-    let plugins = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='plugin'").unwrap_or(0);
-    let mcps = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='mcp'").unwrap_or(0);
-    let bindings = count("SELECT COUNT(*) FROM virtual_capability_bindings").unwrap_or(0);
+    let capabilities = memcore::db::hub_list(&conn, None, false)?
+        .into_iter()
+        .filter(include_capability)
+        .collect::<Vec<_>>();
+    let enabled_capabilities = capabilities.iter().filter(|cap| cap.enabled).count();
+    let mut by_type = std::collections::HashMap::new();
+    for cap in &capabilities {
+        *by_type.entry(cap.cap_type.clone()).or_insert(0) += 1;
+    }
+    let total_uses = capabilities.iter().map(|cap| cap.uses).sum();
+    let total_successes = capabilities.iter().map(|cap| cap.successes).sum();
+    let virtual_bindings = count("SELECT COUNT(*) FROM virtual_capability_bindings").unwrap_or(0);
+
+    Ok(HubStatsSnapshot {
+        memories,
+        edges,
+        capabilities: capabilities.len(),
+        enabled_capabilities,
+        by_type,
+        total_uses,
+        total_successes,
+        virtual_bindings,
+    })
+}
+
+pub fn cmd_stats_filtered<F>(
+    db: &Path,
+    include_capability: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: Fn(&memcore::HubCapability) -> bool,
+{
+    let stats = collect_stats_filtered(db, include_capability)?;
 
     println!("Tachi Hub stats — {}", db.display());
-    println!("  memories          : {memories}");
-    println!("  edges             : {edges}");
-    println!("  capabilities      : {caps_total} ({caps_enabled} enabled)");
-    println!("    └─ skill  : {skills}");
-    println!("    └─ plugin : {plugins}");
-    println!("    └─ mcp    : {mcps}");
-    println!("  virtual bindings  : {bindings}");
+    println!("  memories          : {}", stats.memories);
+    println!("  edges             : {}", stats.edges);
+    println!(
+        "  capabilities      : {} ({} enabled)",
+        stats.capabilities, stats.enabled_capabilities
+    );
+    println!(
+        "    └─ skill  : {}",
+        stats.by_type.get("skill").copied().unwrap_or(0)
+    );
+    println!(
+        "    └─ plugin : {}",
+        stats.by_type.get("plugin").copied().unwrap_or(0)
+    );
+    println!(
+        "    └─ mcp    : {}",
+        stats.by_type.get("mcp").copied().unwrap_or(0)
+    );
+    println!("  virtual bindings  : {}", stats.virtual_bindings);
     Ok(())
+}
+
+pub fn cmd_stats(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_stats_filtered(db, |_| true)
 }
 
 pub(super) fn cmd_doctor(app_home: &Path, fix: bool) -> Result<(), Box<dyn std::error::Error>> {
