@@ -1,11 +1,10 @@
 //! #1285 P0 — campaign (session-boundary) handoff publication.
 //!
 //! **Domain split (does not rename anything else, #1037's reserved slot):**
-//! `orchestrator_ops::HandoffPacket` (`tachi_orchestrator(action='handoff_write'|
-//! 'handoff_read')`) is the `task_id`-keyed resumable baton; `tachi_gh(action=
-//! 'pr_handoff')` (`task_lifecycle::handle_task_pr_handoff`) is the `flow_id`-keyed
-//! PR-handoff artifact; `tachi_a2a` is the same-host advisory mailbox. This
-//! module is the third, previously-unimplemented domain: a **campaign/session**
+//! `tachi_task(action='handoff')` is the canonical structured work baton;
+//! `tachi_gh(action='pr_handoff')` (`task_lifecycle::handle_task_pr_handoff`)
+//! is the `flow_id`-keyed PR-handoff artifact; `tachi_a2a` is the same-host
+//! advisory mailbox. This module is the third, previously-unimplemented domain: a **campaign/session**
 //! boundary publication, addressed by neither a `task_id` nor a `flow_id` —
 //! a GitHub issue (durable, commentable, closeable) mirrored into `/wiki` for
 //! typed-evidence retrieval.

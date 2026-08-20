@@ -2,18 +2,33 @@ use super::coding::builtin_coding_skills;
 use super::mcp::builtin_mcp_capabilities;
 use super::superpowers::builtin_superpowers_skills;
 use super::trading::builtin_trading_skills;
-use super::trajectory::builtin_trajectory_distiller;
 use super::waza::builtin_waza_skills;
 use super::*;
 
 fn builtin_capabilities() -> Result<Vec<HubCapability>, String> {
-    let mut caps = vec![builtin_trajectory_distiller()?];
-    caps.extend(builtin_coding_skills()?);
+    let mut caps = builtin_coding_skills()?;
     caps.extend(builtin_trading_skills()?);
     caps.extend(builtin_superpowers_skills()?);
     caps.extend(builtin_waza_skills()?);
     caps.extend(builtin_mcp_capabilities()?);
     Ok(caps)
+}
+
+fn retire_removed_builtins(server: &MemoryServer) -> Result<(), String> {
+    server.with_global_store(|store| {
+        store
+            .hub_set_review(RETIRED_TRAJECTORY_DISTILLER_ID, "rejected", Some(false))
+            .map(|_| ())
+            .map_err(|e| {
+                format!(
+                    "retire removed builtin capability {RETIRED_TRAJECTORY_DISTILLER_ID}: {e}"
+                )
+            })
+    })?;
+    server
+        .unregister_skill_tool(RETIRED_TRAJECTORY_DISTILLER_ID)
+        .map(|_| ())
+        .map_err(|e| format!("unregister removed builtin skill tool: {e}"))
 }
 
 /// A builtin definition is owned by the seed corpus, while these fields are
@@ -72,6 +87,7 @@ fn seed_builtin_sandbox_policy(server: &MemoryServer, capability_id: &str) -> Re
 }
 
 pub(crate) fn seed_builtin_capabilities(server: &MemoryServer) -> Result<(), String> {
+    retire_removed_builtins(server)?;
     let caps = builtin_capabilities()?;
     let inserted_or_updated = server.with_global_store(|store| {
         let mut changed = Vec::new();

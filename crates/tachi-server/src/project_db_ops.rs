@@ -362,6 +362,132 @@ fn with_manifest_registration_file_lock<T>(
     f()
 }
 
+fn manifest_entry_matches_canonical(
+    entry: &crate::manifest::DbEntry,
+    canonical: &std::path::Path,
+) -> bool {
+    let canonical_str = canonical.display().to_string();
+    entry.path == canonical_str
+        || std::fs::canonicalize(std::path::Path::new(&entry.path))
+            .map(|path| path == canonical)
+            .unwrap_or(false)
+}
+
+fn upsert_global_manifest_entry(
+    manifest: &mut crate::manifest::Manifest,
+    canonical: &std::path::Path,
+) -> Result<bool, String> {
+    let matching = manifest
+        .dbs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            manifest_entry_matches_canonical(entry, canonical).then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    let live_conflicts = manifest
+        .dbs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            (entry.role == crate::manifest::DbRole::Global
+                && !matching.contains(&index)
+                && std::path::Path::new(&entry.path).exists())
+            .then_some(entry.path.clone())
+        })
+        .collect::<Vec<_>>();
+    if !live_conflicts.is_empty() {
+        return Err(format!(
+            "global manifest authority conflict: live Global path(s) {} conflict with candidate {}",
+            live_conflicts.join(", "),
+            canonical.display()
+        ));
+    }
+
+    let stale_globals = manifest
+        .dbs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            (entry.role == crate::manifest::DbRole::Global && !matching.contains(&index))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    let mut changed = false;
+    let target = matching
+        .first()
+        .copied()
+        .or_else(|| stale_globals.first().copied());
+    if let Some(target) = target {
+        let replacing_stale = !matching.contains(&target);
+        let entry = &mut manifest.dbs[target];
+        if replacing_stale {
+            *entry = crate::manifest::DbEntry {
+                path: canonical.display().to_string(),
+                role: crate::manifest::DbRole::Global,
+                owner: "tachi".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: true,
+                allow_write: true,
+                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_classification: "healthy".to_string(),
+                scope_hint: "global".to_string(),
+                notes: "auto-registered global store".to_string(),
+            };
+            changed = true;
+        } else {
+            let identity_path = entry.path.clone();
+            *entry = crate::manifest::DbEntry {
+                path: identity_path,
+                role: crate::manifest::DbRole::Global,
+                owner: "tachi".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: true,
+                allow_write: true,
+                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_classification: "healthy".to_string(),
+                scope_hint: "global".to_string(),
+                notes: "auto-registered global store".to_string(),
+            };
+            changed = true;
+        }
+    } else {
+        manifest.dbs.push(crate::manifest::DbEntry {
+            path: canonical.display().to_string(),
+            role: crate::manifest::DbRole::Global,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "global".to_string(),
+            notes: "auto-registered global store".to_string(),
+        });
+        return Ok(true);
+    }
+
+    let target = target.expect("global target established above");
+    let mut remove = matching
+        .into_iter()
+        .filter(|index| *index != target)
+        .collect::<Vec<_>>();
+    remove.extend(
+        stale_globals
+            .into_iter()
+            .filter(|index| *index != target),
+    );
+    remove.sort_unstable();
+    remove.dedup();
+    for index in remove.into_iter().rev() {
+        manifest.dbs.remove(index);
+        changed = true;
+    }
+    Ok(changed)
+}
+
 fn register_repo_local_manifest_entry_locked(
     db_path: &std::path::Path,
     project_name: &str,
@@ -376,47 +502,40 @@ fn register_repo_local_manifest_entry_locked(
 
     let mut manifest_changed = false;
     if let Some(parent) = manifest_path.parent() {
-        let global_path = parent.join("global").join(memcore::MEMORY_DB_FILENAME);
-        let legacy_global = parent
-            .join("global")
-            .join(memcore::LEGACY_MEMORY_DB_FILENAME);
-        let target_global = if global_path.exists() {
-            Some(global_path)
-        } else if legacy_global.exists() {
-            Some(legacy_global)
-        } else {
-            None
-        };
-        if let Some(path) = target_global {
-            let canon_global = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-            let canon_global_str = canon_global.display().to_string();
-            if let Some(existing) = manifest.dbs.iter_mut().find(|e| {
-                let e_path = std::path::Path::new(&e.path);
-                e.path == canon_global_str
-                    || std::fs::canonicalize(e_path)
-                        .map(|c| c == canon_global)
-                        .unwrap_or(false)
-            }) {
-                if existing.role != crate::manifest::DbRole::Global {
-                    existing.role = crate::manifest::DbRole::Global;
-                    existing.scope_hint = "global".to_string();
-                    manifest_changed = true;
-                }
-            } else {
-                manifest.dbs.push(crate::manifest::DbEntry {
-                    path: canon_global_str,
-                    role: crate::manifest::DbRole::Global,
-                    owner: "tachi".to_string(),
-                    schema_kind: "tachi".to_string(),
-                    vec_enabled: true,
-                    allow_write: true,
-                    last_doctor_at: chrono::Utc::now().to_rfc3339(),
-                    last_classification: "healthy".to_string(),
-                    scope_hint: "global".to_string(),
-                    notes: "auto-registered global store".to_string(),
-                });
-                manifest_changed = true;
+        let global_candidates = [
+            parent.join(memcore::MEMORY_DB_FILENAME),
+            parent.join(memcore::LEGACY_MEMORY_DB_FILENAME),
+            parent
+                .join("global")
+                .join(memcore::MEMORY_DB_FILENAME),
+            parent
+                .join("global")
+                .join(memcore::LEGACY_MEMORY_DB_FILENAME),
+        ];
+        let mut seen_global_paths = Vec::new();
+        for path in global_candidates {
+            if !path.exists() {
+                continue;
             }
+            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+            if seen_global_paths.iter().any(|seen| seen == &canonical) {
+                continue;
+            }
+            seen_global_paths.push(canonical.clone());
+        }
+        if seen_global_paths.len() > 1 {
+            let candidates = seen_global_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "ambiguous global store identity under {}: distinct candidate databases: {candidates}",
+                parent.display()
+            ));
+        }
+        for canonical in seen_global_paths {
+            manifest_changed |= upsert_global_manifest_entry(&mut manifest, &canonical)?;
         }
     }
 
@@ -1781,6 +1900,194 @@ mod resolve_or_register_workspace_root_tests {
     }
 
     #[test]
+    fn register_repo_local_manifest_entry_in_home_includes_root_global_store() {
+        with_test_home(|root| {
+            let global_db = root.join(memcore::MEMORY_DB_FILENAME);
+            std::fs::write(&global_db, b"global_db").expect("root global DB");
+
+            let project_db = root.join("Alpha/data/project.db");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("project parent");
+            std::fs::write(&project_db, b"project_db").expect("project DB");
+
+            register_repo_local_manifest_entry_in_home(&project_db, "Alpha", root)
+                .expect("register project db");
+
+            let manifest =
+                crate::manifest::Manifest::load(&root.join("manifest.json")).expect("manifest");
+            let global = manifest.global().expect("root global store must be registered");
+            assert_eq!(
+                std::path::PathBuf::from(&global.path),
+                std::fs::canonicalize(&global_db).expect("canonical root global DB")
+            );
+            assert_eq!(manifest.dbs.len(), 2);
+        });
+    }
+
+    #[test]
+    fn register_repo_local_manifest_entry_rejects_ambiguous_global_candidates() {
+        with_test_home(|root| {
+            let root_global = root.join(memcore::MEMORY_DB_FILENAME);
+            std::fs::write(&root_global, b"root global DB").expect("root global DB");
+            let nested_global = root
+                .join("global")
+                .join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(nested_global.parent().unwrap()).expect("global parent");
+            std::fs::write(&nested_global, b"nested global DB").expect("nested global DB");
+
+            let project_db = root.join("Alpha/data/project.db");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("project parent");
+            std::fs::write(&project_db, b"project DB").expect("project DB");
+
+            let manifest_path = root.join("manifest.json");
+            crate::manifest::Manifest::empty()
+                .save(&manifest_path)
+                .expect("seed manifest");
+            let error = register_repo_local_manifest_entry_in_home(&project_db, "Alpha", root)
+                .expect_err("distinct global candidates must fail closed");
+            assert!(
+                error.contains("ambiguous global store identity"),
+                "unexpected ambiguity error: {error}"
+            );
+
+            let manifest =
+                crate::manifest::Manifest::load(&manifest_path).expect("manifest remains valid");
+            assert!(
+                manifest.global().is_none(),
+                "ambiguous candidates must not write global authority"
+            );
+            assert!(
+                manifest.dbs.is_empty(),
+                "ambiguous candidates must fail before project registration mutation"
+            );
+        });
+    }
+
+    #[test]
+    fn register_repo_local_manifest_entry_replaces_stale_global_authority() {
+        with_test_home(|root| {
+            let global_db = root.join(memcore::MEMORY_DB_FILENAME);
+            std::fs::write(&global_db, b"live global DB").expect("live global DB");
+            let stale_path = root.join("stale/missing-global.db");
+
+            let mut manifest = crate::manifest::Manifest::empty();
+            manifest.dbs.push(crate::manifest::DbEntry {
+                path: stale_path.display().to_string(),
+                role: crate::manifest::DbRole::Global,
+                owner: "legacy-owner".to_string(),
+                schema_kind: "legacy".to_string(),
+                vec_enabled: false,
+                allow_write: false,
+                last_doctor_at: "stale-at".to_string(),
+                last_classification: "corrupt".to_string(),
+                scope_hint: "global".to_string(),
+                notes: "stale metadata".to_string(),
+            });
+            let manifest_path = root.join("manifest.json");
+            manifest.save(&manifest_path).expect("seed stale manifest");
+
+            let project_db = root.join("Alpha/data/project.db");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("project parent");
+            std::fs::write(&project_db, b"project DB").expect("project DB");
+
+            register_repo_local_manifest_entry_in_home(&project_db, "Alpha", root)
+                .expect("stale global authority should be replaceable");
+
+            let manifest =
+                crate::manifest::Manifest::load(&manifest_path).expect("manifest remains valid");
+            let global = manifest.global().expect("one live global authority");
+            assert_eq!(
+                std::path::PathBuf::from(&global.path),
+                std::fs::canonicalize(&global_db).expect("canonical live global DB")
+            );
+            assert_eq!(global.owner, "tachi");
+            assert_eq!(global.schema_kind, "tachi");
+            assert!(global.vec_enabled);
+            assert!(global.allow_write);
+            assert_eq!(global.last_classification, "healthy");
+            assert_ne!(global.last_doctor_at, "stale-at");
+            assert_eq!(global.notes, "auto-registered global store");
+            assert_eq!(
+                manifest
+                    .dbs
+                    .iter()
+                    .filter(|entry| entry.role == crate::manifest::DbRole::Global)
+                    .count(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn register_repo_local_manifest_entry_rejects_live_distinct_global_authority() {
+        with_test_home(|root| {
+            let global_db = root.join(memcore::MEMORY_DB_FILENAME);
+            std::fs::write(&global_db, b"candidate global DB").expect("candidate global DB");
+            let existing_global = root.join("existing-global.db");
+            std::fs::write(&existing_global, b"existing global DB")
+                .expect("existing global DB");
+
+            let mut manifest = crate::manifest::Manifest::empty();
+            manifest.dbs.push(crate::manifest::DbEntry {
+                path: existing_global.display().to_string(),
+                role: crate::manifest::DbRole::Global,
+                owner: "tachi".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: true,
+                allow_write: true,
+                last_doctor_at: String::new(),
+                last_classification: "healthy".to_string(),
+                scope_hint: "global".to_string(),
+                notes: String::new(),
+            });
+            let manifest_path = root.join("manifest.json");
+            manifest.save(&manifest_path).expect("seed live manifest");
+            let before = std::fs::read(&manifest_path).expect("manifest bytes");
+
+            let project_db = root.join("Alpha/data/project.db");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("project parent");
+            std::fs::write(&project_db, b"project DB").expect("project DB");
+
+            let error = register_repo_local_manifest_entry_in_home(&project_db, "Alpha", root)
+                .expect_err("live distinct global authority must fail closed");
+            assert!(
+                error.contains("global manifest authority conflict"),
+                "unexpected conflict error: {error}"
+            );
+            assert_eq!(
+                before,
+                std::fs::read(&manifest_path).expect("manifest remains unchanged")
+            );
+        });
+    }
+
+    #[test]
+    fn register_repo_local_manifest_entry_in_home_ignores_repo_local_global_lookalike() {
+        with_test_home(|root| {
+            let lookalike = root
+                .join("repo/.tachi/global")
+                .join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(lookalike.parent().unwrap()).expect("lookalike parent");
+            std::fs::write(&lookalike, b"repo-local global lookalike")
+                .expect("repo-local lookalike DB");
+
+            let project_db = root.join("Alpha/data/project.db");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("project parent");
+            std::fs::write(&project_db, b"project_db").expect("project DB");
+
+            register_repo_local_manifest_entry_in_home(&project_db, "Alpha", root)
+                .expect("register project db");
+
+            let manifest =
+                crate::manifest::Manifest::load(&root.join("manifest.json")).expect("manifest");
+            assert!(
+                manifest.global().is_none(),
+                "a repo-local .tachi/global lookalike is not the configured global store"
+            );
+            assert_eq!(manifest.dbs.len(), 1);
+        });
+    }
+
+    #[test]
     fn re_registering_existing_project_backfills_global_store() {
         with_test_home(|root| {
             let project_db = root.join("Alpha/data/project.db");
@@ -1826,14 +2133,14 @@ mod resolve_or_register_workspace_root_tests {
             manifest.dbs.push(crate::manifest::DbEntry {
                 path: canon_global.display().to_string(),
                 role: crate::manifest::DbRole::Unknown,
-                owner: "legacy".to_string(),
-                schema_kind: "tachi".to_string(),
-                vec_enabled: true,
-                allow_write: true,
-                last_doctor_at: String::new(),
-                last_classification: "healthy".to_string(),
+                owner: "legacy-owner".to_string(),
+                schema_kind: "legacy".to_string(),
+                vec_enabled: false,
+                allow_write: false,
+                last_doctor_at: "stale-at".to_string(),
+                last_classification: "corrupt".to_string(),
                 scope_hint: "legacy_global".to_string(),
-                notes: String::new(),
+                notes: "stale metadata".to_string(),
             });
             manifest.save(&root.join("manifest.json")).expect("save");
 
@@ -1853,6 +2160,22 @@ mod resolve_or_register_workspace_root_tests {
             );
             assert!(reloaded.global().is_some());
             assert_eq!(reloaded.global().unwrap().scope_hint, "global");
+            let global = reloaded.global().unwrap();
+            assert_eq!(global.owner, "tachi");
+            assert_eq!(global.schema_kind, "tachi");
+            assert!(global.vec_enabled);
+            assert!(global.allow_write);
+            assert_eq!(global.last_classification, "healthy");
+            assert_ne!(global.last_doctor_at, "stale-at");
+            assert_eq!(global.notes, "auto-registered global store");
+            assert_eq!(
+                reloaded
+                    .dbs
+                    .iter()
+                    .filter(|entry| entry.role == crate::manifest::DbRole::Global)
+                    .count(),
+                1
+            );
         });
     }
 

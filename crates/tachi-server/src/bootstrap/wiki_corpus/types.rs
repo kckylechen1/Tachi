@@ -456,6 +456,13 @@ pub(crate) struct WikiCorpusReport {
 }
 
 impl WikiCorpusReport {
+    /// True when a sibling-repair run recorded one or more failures.
+    pub(crate) fn sibling_repair_had_failures(&self) -> bool {
+        self.sibling_repair
+            .as_ref()
+            .is_some_and(|report| report.had_failures)
+    }
+
     /// True when a legacy-adoption run reached a failure it recorded in the
     /// receipt instead of throwing the receipt away with an `Err`.
     ///

@@ -11,6 +11,12 @@ pub(crate) async fn handle_vc_register(
     server: &MemoryServer,
     params: VirtualCapabilityRegisterParams,
 ) -> Result<String, String> {
+    if crate::builtins::is_retired_builtin_capability_id(&params.id) {
+        return Err(format!(
+            "Capability '{}' is retired and cannot be replaced by a virtual capability.",
+            params.id
+        ));
+    }
     if !params.id.starts_with("vc:") {
         return Err("Virtual capability id must start with 'vc:'".to_string());
     }
@@ -110,6 +116,14 @@ pub(crate) async fn handle_vc_bind(
     server: &MemoryServer,
     params: VirtualCapabilityBindParams,
 ) -> Result<String, String> {
+    if crate::builtins::is_retired_builtin_capability_id(&params.vc_id)
+        || crate::builtins::is_retired_builtin_capability_id(&params.capability_id)
+    {
+        return Err(format!(
+            "Retired capability IDs cannot participate in virtual-capability bindings (vc_id='{}', capability_id='{}').",
+            params.vc_id, params.capability_id
+        ));
+    }
     let vc_cap = server
         .get_capability(&params.vc_id)
         .map_err(|e| format!("{e}"))?;

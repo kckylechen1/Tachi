@@ -1044,3 +1044,48 @@ async fn wiki_lint_still_sees_pending_review_drafts() {
          by this leaf): {orphan_ids:?}"
     );
 }
+
+#[test]
+fn skill_quality_refresh_does_not_mutate_retired_tombstone() {
+    let server = make_server();
+    let mut retired = crate::tests::make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical trajectory writer excluded from quality evolution",
+        "listed",
+    );
+    retired.definition = json!({
+        "content": "A substantial historical trajectory distillation workflow that quality guards would otherwise annotate.",
+        "skill_path": "/skills/general/trajectory-distiller",
+        "policy": {"visibility": "listed"}
+    })
+    .to_string();
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&retired)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject retired quality tombstone");
+    let before = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("load retired row before quality refresh");
+    let before = serde_json::to_string(&before).expect("serialize pre-refresh state");
+
+    crate::wiki_ops::refresh_skill_quality_guards(&server)
+        .expect("quality refresh should skip retired rows");
+
+    let after = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("load retired row after quality refresh");
+    let after = serde_json::to_string(&after).expect("serialize post-refresh state");
+    assert_eq!(after, before, "quality refresh must not mutate the tombstone");
+}

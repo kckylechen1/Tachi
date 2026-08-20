@@ -10,6 +10,12 @@ use tachi_hub::{build_skill_tool_from_cap, make_text_tool_result};
 impl MemoryServer {
     pub(crate) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
         let _ = self.unregister_skill_tool(&cap.id);
+        if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+            return Err(format!(
+                "Skill '{}' is retired and cannot be exposed as a dynamic tool.",
+                cap.id
+            ));
+        }
         let (tool_name, tool) = build_skill_tool_from_cap(cap)?;
         {
             lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")

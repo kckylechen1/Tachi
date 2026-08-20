@@ -927,24 +927,45 @@ fn project_secret_file_warnings_detects_generated_provider_env_values() {
 
 #[test]
 fn scope_hints() {
-    assert_eq!(
-        scope_hint_for(Path::new("/Users/x/.tachi/global/memory.db")),
-        "global"
-    );
-    assert_eq!(
-        scope_hint_for(Path::new("/Users/x/.tachi/projects/hyperion/memory.db")),
-        "project:hyperion"
-    );
-    assert_eq!(
-        scope_hint_for(Path::new(
-            "/Users/x/.openclaw/extensions/tachi/data/agents/main/memory.db"
-        )),
-        "openclaw-agent:main"
-    );
-    assert_eq!(
-        scope_hint_for(Path::new("/Users/x/.gemini/antigravity/memory.db")),
-        "antigravity"
-    );
+    with_env_lock(|| {
+        let temp = tempdir().unwrap();
+        let tachi_home = temp.path().join("configured-tachi-home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+        assert_eq!(
+            scope_hint_for(&tachi_home.join("global").join(memcore::MEMORY_DB_FILENAME)),
+            "global"
+        );
+        assert_eq!(
+            scope_hint_for(&tachi_home.join(memcore::LEGACY_MEMORY_DB_FILENAME)),
+            "global"
+        );
+        assert_eq!(
+            scope_hint_for(Path::new("/Users/x/.tachi/projects/hyperion/memory.db")),
+            "project:hyperion"
+        );
+        assert_eq!(
+            scope_hint_for(Path::new(
+                "/Users/x/.openclaw/extensions/tachi/data/agents/main/memory.db"
+            )),
+            "openclaw-agent:main"
+        );
+        assert_eq!(
+            scope_hint_for(Path::new("/Users/x/.gemini/antigravity/memory.db")),
+            "antigravity"
+        );
+
+        assert_ne!(
+            scope_hint_for(Path::new("/Users/x/.tachi/global/memory.db")),
+            "global"
+        );
+        assert_ne!(
+            scope_hint_for(Path::new("/Users/x/.sigil/global/memory.db")),
+            "global"
+        );
+    });
 }
 
 #[test]

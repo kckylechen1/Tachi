@@ -344,24 +344,8 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
 }
 
 #[tokio::test]
-async fn tachi_complete_accepts_stringified_trajectory_array() {
+async fn tachi_complete_does_not_auto_distill_stringified_trajectory() {
     let server = make_server();
-    const DISTILLED_MARKDOWN: &str =
-        "# 适用场景\n- string trajectory\n\n# 核心步骤\n- parse\n\n# 踩坑记录\n- none\n\n# 验证标准\n- enqueued\n\n# 适用域标签\n- test";
-
-    server
-        .with_global_store(|store| {
-            let mut cap = store
-                .hub_get("skill:trajectory-distiller")
-                .map_err(|e| e.to_string())?
-                .expect("trajectory distiller should exist");
-            let mut def: Value =
-                serde_json::from_str(&cap.definition).map_err(|e| e.to_string())?;
-            def["mock_response"] = json!(DISTILLED_MARKDOWN);
-            cap.definition = serde_json::to_string(&def).map_err(|e| e.to_string())?;
-            store.hub_register(&cap).map_err(|e| e.to_string())
-        })
-        .expect("inject mock trajectory distiller");
 
     let resp = server
         .tachi_complete(Parameters(TachiCompleteParams {
@@ -389,7 +373,7 @@ async fn tachi_complete_accepts_stringified_trajectory_array() {
             pr_ref: None,
             evidence_refs: Vec::new(),
             tests_run: vec![
-                "cargo test -p tachi-server tachi_complete_accepts_stringified_trajectory_array"
+                "cargo test -p tachi-server tachi_complete_does_not_auto_distill_stringified_trajectory"
                     .to_string(),
             ],
             diff_present: None,
@@ -404,7 +388,47 @@ async fn tachi_complete_accepts_stringified_trajectory_array() {
         .await
         .expect("tachi_complete should accept stringified trajectory");
     let bundle: Value = serde_json::from_str(&resp).expect("complete response JSON");
-    assert_eq!(bundle["pipeline"]["distill_trajectory"], json!("enqueued"));
+    assert_eq!(
+        bundle["pipeline"]["distill_trajectory"],
+        json!("skipped (automatic distillation retired)")
+    );
+
+    let count_auto_skills = |store: &memcore::MemoryStore| {
+        store
+            .hub_list(Some("skill"), true)
+            .map(|caps| {
+                caps.into_iter()
+                    .filter(|cap| {
+                        serde_json::from_str::<Value>(&cap.definition)
+                            .ok()
+                            .and_then(|definition| {
+                                definition
+                                    .get("source")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .as_deref()
+                            == Some("distill_trajectory")
+                    })
+                    .count()
+            })
+            .map_err(|error| error.to_string())
+    };
+    let global_auto_skill_count = server
+        .with_global_store_read(count_auto_skills)
+        .expect("list global skills");
+    let project_auto_skill_count = if server.has_project_db() {
+        server
+            .with_project_store_read(count_auto_skills)
+            .expect("list project skills")
+    } else {
+        0
+    };
+    let auto_skill_count = global_auto_skill_count + project_auto_skill_count;
+    assert_eq!(
+        auto_skill_count, 0,
+        "completion must not create a trajectory-distilled skill"
+    );
 
     let eval_id = bundle["eval_entry"]["id"]
         .as_str()

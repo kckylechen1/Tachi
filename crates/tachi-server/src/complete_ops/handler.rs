@@ -2,9 +2,8 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::facade_memory_ops::shape_complete_response;
-use crate::hub_ops::handle_distill_trajectory;
 use crate::memory_search_ops::save_eval_memory;
-use crate::tool_params::{DistillTrajectoryParams, TachiCompleteParams};
+use crate::tool_params::TachiCompleteParams;
 use crate::MemoryServer;
 
 use super::eval_record::{build_complete_eval_record, CompleteEvalRecord};
@@ -368,7 +367,7 @@ pub(crate) async fn handle_tachi_complete(
         safe_skills_used,
         safe_evidence_refs,
         safe_tests_run,
-        safe_trajectory,
+        safe_trajectory: _,
         safe_subagents,
         safe_feedback_rules,
         outcome_norm,
@@ -548,7 +547,7 @@ pub(crate) async fn handle_tachi_complete(
         "dispatch_outcome": dispatch_outcome_status,
         "adjudication": adjudication_status,
         "kanban_update": "skipped (no dispatch_id)",
-        "distill_trajectory": "skipped (no trajectory data)",
+        "distill_trajectory": "skipped (automatic distillation retired)",
         "skill_evolve": "skipped",
         "continuity_events": "pending",
         "post_complete_hooks": "pending",
@@ -695,65 +694,6 @@ pub(crate) async fn handle_tachi_complete(
             "errors": [],
         })
     };
-
-    if let Some(ref trajectory) = safe_trajectory {
-        if let Some(trace_arr) = trajectory.as_array() {
-            if !trace_arr.is_empty() && outcome_norm == "success" {
-                let server_clone = server.clone();
-                let task_desc = safe_task.clone();
-                let agent = safe_agent.clone();
-                let trace = trace_arr.clone();
-                let skills_used = safe_skills_used.clone();
-                let skill_path = if skills_used.is_empty() {
-                    format!("/skills/auto/{}", task_id)
-                } else {
-                    skills_used[0].clone()
-                };
-                pipeline_status["distill_trajectory"] = json!("enqueued");
-                pipeline_status["skill_evolve"] = json!("will follow distill if successful");
-                tokio::spawn(async move {
-                    // #1041 F5: `domain: None` here is an intentional S2
-                    // consequence, not a regression. Before S2,
-                    // `resolve_domain(None)` fell back to the daemon-wide
-                    // `TACHI_DOMAIN` env var, so a trajectory distilled from
-                    // a `tachi_complete` call on a trading daemon inherited
-                    // "equity_trading" even though nothing here actually
-                    // classified this trajectory as trading content — S1's
-                    // whole point is that inheriting a per-process domain
-                    // onto unclassified content is how cross-domain drift
-                    // happens in the first place. `TachiCompleteParams` (the
-                    // public `tachi_complete` params struct) has NO `domain`
-                    // field for a caller to supply — there is no explicit
-                    // domain anywhere in this call's context to thread
-                    // through instead — so this now resolves to `general`
-                    // via `pipeline_ops::helpers::resolve_domain`, same as
-                    // any other domain-less write. If a real need for
-                    // caller-supplied domain on `tachi_complete` shows up,
-                    // add the field to `TachiCompleteParams` rather than
-                    // reaching back for the env var.
-                    let distill_params = DistillTrajectoryParams {
-                        task_description: task_desc,
-                        execution_trace: trace,
-                        final_outcome: serde_json::json!({"outcome": "success", "agent": agent}),
-                        agent_id: agent.clone(),
-                        skill_path,
-                        skill_id: None,
-                        importance: None,
-                        domain: None,
-                        project: None,
-                        scope: "project".to_string(),
-                    };
-                    match handle_distill_trajectory(&server_clone, distill_params).await {
-                        Ok(r) => eprintln!(
-                            "[tachi_complete/worker] distill OK: {}",
-                            &r[..r.len().min(200)]
-                        ),
-                        Err(e) => eprintln!("[tachi_complete/worker] distill failed: {e}"),
-                    }
-                });
-            }
-        }
-    }
 
     // --- Kanban Hook: auto-update task board ---
     if let Some(ref did) = params.dispatch_id {

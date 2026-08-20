@@ -105,15 +105,15 @@ Brainstorm ────────────┘     ↑  内生产出
 └── reference/      ← 竞品对比、技术调研（参考）
 ```
 
-### Skill（已有）
+### Skill（当前契约）
 
-Hub 注册的可执行技能，通过 `hub_discover` / `run_skill` 调用。
+仅支持静态、已审查 skill 的 discover/run；不会由 trajectory 或 `tachi_complete` 自动创建或注册。
 
-## 两类 Worker
+## 两类 Worker（历史设计，已退役）
 
-### 后台 Worker（蒸馏员）
+### 后台 Worker（蒸馏员，历史设计）
 
-扩展现有 `distill_trajectory` 框架：
+历史方案曾计划扩展 `distill_trajectory` 框架。该自动 trajectory-to-skill 生成路径已退役，以下内容不是当前可调用流程：
 
 - 定期扫描 Notes 目录
 - 识别高价值内容（信息密度 + 可操作性评分）
@@ -166,11 +166,13 @@ Hub 注册的可执行技能，通过 `hub_discover` / `run_skill` 调用。
 │  → 优化下次 prompt assembly               │
 └──────────────────────────────────────────┘
     ↓
-┌─ Worker (后台自动) ──────────────────────┐
+┌─ Worker（历史设计，已退役；非当前流程）────────┐
 │  蒸馏员: Notes → Wiki（永久知识）         │
 │  分类员: 可复用模式 → 新 Skill            │
 └──────────────────────────────────────────┘
 ```
+
+当前契约：自动 trajectory-to-skill generation 已退役；`tachi_skill` 只对静态、已审查 skill 提供 discover/run，`tachi_complete` 报告退役且不创建 skill。
 
 ### Dispatch 编排 = 确定性代码
 
@@ -329,7 +331,7 @@ tachi_complete → eval 记录
 
 - 这个 task 做得好不好 → 下次注入更好的上下文
 - 哪类 prompt 容易翻车 → 避坑指南
-- 哪个 skill 匹配度高 → 自动 skill 选择
+- 哪个静态、已审查 skill 匹配度高 → 在允许集合中选择
 - 耗时/成本追踪 → 性价比优化
 
 ## 知识复利飞轮
@@ -406,7 +408,7 @@ Superpowers = 能力层骨架。Tachi 在此基础上多：知识持久化、eva
 
 ### P2 — 闭环（两周内）
 7. `tachi_dispatch` 注入 `skill:implement-task` 给 delegate
-8. 前台 Worker：识别可复用模式 → 注册新 Skill
+8. 前台 Worker：识别可复用模式 → 注册新 Skill（历史设计，已退役；当前仅人工审查后维护静态 Skill）
 9. Wiki 分区重构 + 交叉引用维护
 
 ### P3 — Eval + 反思（三周内）

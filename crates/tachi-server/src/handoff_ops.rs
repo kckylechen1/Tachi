@@ -6,11 +6,10 @@
 //! - **Same-host agent advisory message** → `tachi_a2a(action='respond')`.
 //!   Delivery is bound to explicit admitted AgentIdentity rows and receipts.
 //! - **Structured baton for a resumed/handed-off task** →
-//!   `orchestrator_ops::HandoffPacket` (`tachi_orchestrator(action='handoff_write'|'handoff_read')`).
-//!   Carries objective/current_state/completed_steps/remaining_steps/
-//!   files_touched/commands_run/tests_run/known_blockers/next_action —
-//!   the shape a resuming session actually needs, keyed by `task_id`
-//!   rather than a loosely-addressed "next agent".
+//!   `tachi_task(action='handoff')`. The canonical Task work-claim fields
+//!   carry the claimant, worktree, expected head, lease, and transition
+//!   evidence a resuming session needs, rather than a loosely-addressed
+//!   "next agent" memo.
 //!
 //! **#1016 first deprecated this module without deleting anything.** **#1099
 //! (owner-ratified 2026-07-17) retires the write/read cycle for real**: the

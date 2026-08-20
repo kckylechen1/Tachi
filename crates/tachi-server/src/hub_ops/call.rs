@@ -1,4 +1,3 @@
-mod distill;
 mod hub;
 
 use crate::tool_params::RunSkillParams;
@@ -11,7 +10,6 @@ use tachi_hub::{
 };
 use tachi_llm::PersistedModelInvocationReceiptV1;
 
-pub(crate) use distill::handle_distill_trajectory;
 pub(crate) use hub::{handle_hub_call, handle_hub_disconnect, handle_tachi_audit_log};
 
 pub(crate) async fn handle_run_skill(
@@ -47,6 +45,9 @@ pub(crate) async fn execute_registered_skill_prompt_with_receipt(
     skill_id: &str,
     args: &Value,
 ) -> Result<SkillExecutionWithReceipt, String> {
+    if crate::builtins::is_retired_builtin_capability_id(skill_id) {
+        return Err(format!("Skill '{skill_id}' is retired and cannot be run."));
+    }
     let cap = {
         let mut found = None;
         if server.has_project_db() {

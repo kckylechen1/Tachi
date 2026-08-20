@@ -241,3 +241,86 @@ async fn vc_register_and_bind_workflow() {
     let resolve_json: Value = serde_json::from_str(&resolve).unwrap();
     assert_eq!(resolve_json["resolved_id"], "mcp:concrete");
 }
+
+#[tokio::test]
+async fn vc_register_cannot_replace_retired_historical_row() {
+    let server = make_server();
+    let mut historical =
+        make_mcp_capability(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID, 1);
+    historical.cap_type = "skill".to_string();
+    historical.name = "trajectory-distiller".to_string();
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&historical)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject historical retired row");
+    let before = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("load retired row before VC registration");
+    let before = serde_json::to_string(&before).expect("serialize pre-VC state");
+
+    let err = server
+        .vc_register(Parameters(VirtualCapabilityRegisterParams {
+            id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            name: "retired replacement".to_string(),
+            description: "must not overwrite the tombstone".to_string(),
+            contract: "trajectory_distillation".to_string(),
+            routing_strategy: "priority".to_string(),
+            tags: vec!["retired".to_string()],
+            input_schema: None,
+            scope: "global".to_string(),
+        }))
+        .await
+        .expect_err("VC registration must reject the retired ID");
+    assert!(
+        err.contains("retired") && err.contains("cannot be replaced"),
+        "unexpected retired VC error: {err}"
+    );
+
+    let after = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("load retired row after VC registration");
+    let after = serde_json::to_string(&after).expect("serialize post-VC state");
+    assert_eq!(after, before, "VC rejection must not mutate the tombstone");
+}
+
+#[tokio::test]
+async fn vc_bind_cannot_persist_retired_capability_relationship() {
+    let server = make_server();
+    let vc_id = "vc:retired-target-guard";
+
+    let err = server
+        .vc_bind(Parameters(VirtualCapabilityBindParams {
+            vc_id: vc_id.to_string(),
+            capability_id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            priority: 1,
+            enabled: true,
+            version_pin: None,
+            metadata: None,
+        }))
+        .await
+        .expect_err("VC binding must reject a retired target before lookup or persistence");
+    assert!(
+        err.contains("Retired capability IDs") && err.contains("bindings"),
+        "unexpected retired binding error: {err}"
+    );
+
+    let bindings = server
+        .with_global_store_read(|store| {
+            store
+                .vc_list_bindings(vc_id)
+                .map_err(|error| error.to_string())
+        })
+        .expect("list bindings after rejected retired target");
+    assert!(bindings.is_empty(), "rejected binding must not be persisted");
+}

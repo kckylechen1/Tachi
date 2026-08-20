@@ -1095,9 +1095,9 @@ export const memoryHybridBridgePlugin = {
       // only in-repo reference to the raw names). Leaving the passthroughs
       // registered here would advertise tools that always return `tool not
       // found`, mirroring the ghost_whisper/ghost_listen precedent above.
-      // Removed — agents that want a handoff-style memo should use
-      // tachi_a2a(action='respond') or
-      // tachi_orchestrator(action='handoff_write'|'handoff_read') instead.
+      // Removed — agents that want same-host advisory delivery should use
+      // tachi_a2a(action='respond'); structured task handoff uses
+      // tachi_task(action='handoff').
       registerTachiPassthrough(
         "tachi_run_skill",
         "run_skill",

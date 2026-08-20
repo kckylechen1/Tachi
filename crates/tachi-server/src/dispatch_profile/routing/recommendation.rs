@@ -530,7 +530,6 @@ mod evidence_flip_tests {
         "evidence_note",
         "live_eval",
         "route_policy_rules",
-        "mbit_card",
         "candidates",
         // tachi#1675 PR1 Seam A.
         "recommendation_id",
@@ -833,6 +832,10 @@ mod evidence_flip_tests {
                     "pre-cutover key {key} disappeared: {payload:#}"
                 );
             }
+            assert!(
+                !object.contains_key("mbit_card"),
+                "retired mbit_card response alias must not be emitted: {payload:#}"
+            );
             let candidates = payload["candidates"].as_array().expect("candidates");
             assert!(!candidates.is_empty());
             for candidate in candidates {

@@ -62,6 +62,12 @@ pub(super) async fn run_hub_command(
             definition,
             description,
         } => {
+            if crate::builtins::is_retired_builtin_capability_id(&id) {
+                return Err(std::io::Error::other(format!(
+                    "Capability '{id}' is retired and cannot be registered."
+                ))
+                .into());
+            }
             let store = open_cli_store(&hub_db)?;
             let (enabled, warning) = evaluate_cli_capability_enabled(&cap_type, &definition)?;
             let is_mcp = cap_type.eq_ignore_ascii_case("mcp");
@@ -113,6 +119,12 @@ pub(super) async fn run_hub_command(
             print_pretty_json(&output)
         }
         HubAction::Enable { id } => {
+            if crate::builtins::is_retired_builtin_capability_id(&id) {
+                return Err(std::io::Error::other(format!(
+                    "Capability '{id}' is retired and cannot be enabled."
+                ))
+                .into());
+            }
             let store = open_cli_store(&hub_db)?;
             let updated = store.hub_set_enabled(&id, true)?;
             print_pretty_json(&json!({
@@ -627,5 +639,93 @@ mod tests {
 
         assert!(err.contains("invalid MCP header at index 0"));
         assert!(!err.contains(SENTINEL_RAW_VALUE));
+    }
+
+    #[tokio::test]
+    async fn cli_hub_register_rejects_retired_id_before_creating_store() {
+        let app_home = crate::utils::test_fixture_path(format!(
+            "tachi-cli-retired-register-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let hub_db = memory_server_hub_cli::resolve_hub_db(None, &app_home);
+
+        let err = run_hub_command(
+            HubAction::Register {
+                id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+                cap_type: "skill".to_string(),
+                name: "trajectory-distiller".to_string(),
+                definition: json!({"content": "retired"}).to_string(),
+                description: Some("retired trajectory writer".to_string()),
+            },
+            &app_home,
+        )
+        .await
+        .expect_err("CLI must reject retired registration");
+
+        assert!(err.to_string().contains("retired"));
+        assert!(!hub_db.exists(), "rejection must not create the Hub store");
+        let _ = std::fs::remove_dir_all(&app_home);
+    }
+
+    #[tokio::test]
+    async fn cli_hub_enable_rejects_retired_id_without_mutating_row() {
+        let app_home = crate::utils::test_fixture_path(format!(
+            "tachi-cli-retired-enable-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let hub_db = memory_server_hub_cli::resolve_hub_db(None, &app_home);
+        std::fs::create_dir_all(hub_db.parent().expect("Hub DB parent")).unwrap();
+        let store = memcore::MemoryStore::open(hub_db.to_string_lossy().as_ref()).unwrap();
+        let legacy = HubCapability {
+            id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            cap_type: "skill".to_string(),
+            name: "trajectory-distiller".to_string(),
+            version: 1,
+            description: "retired trajectory writer".to_string(),
+            definition: json!({"content": "retired"}).to_string(),
+            enabled: false,
+            review_status: "rejected".to_string(),
+            health_status: "healthy".to_string(),
+            last_error: None,
+            last_success_at: None,
+            last_failure_at: None,
+            fail_streak: 0,
+            active_version: None,
+            exposure_mode: "direct".to_string(),
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        store.hub_register(&legacy).unwrap();
+        let before = serde_json::to_string(
+            &store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let err = run_hub_command(
+            HubAction::Enable {
+                id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+            },
+            &app_home,
+        )
+        .await
+        .expect_err("CLI must reject retired enablement");
+        assert!(err.to_string().contains("retired"));
+        let after = serde_json::to_string(
+            &store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after, before, "rejection must not mutate the Hub row");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&app_home);
     }
 }

@@ -29,7 +29,13 @@ pub use dlq::*;
 pub use facade::*;
 pub use foundry::*;
 pub use gh::*;
-pub use hub::*;
+pub use hub::{
+    AuditLogParams, ChainSkillsParams, ChainStep, ExportSkillsParams, HubCallParams,
+    HubDisconnectParams, HubDiscoverParams, HubFeedbackParams, HubGetParams, HubQuickAddParams,
+    HubRegisterParams, HubReviewParams, HubSetActiveVersionParams, HubSetEnabledParams,
+    RunSkillParams, VirtualCapabilityBindParams, VirtualCapabilityRegisterParams,
+    VirtualCapabilityResolveParams,
+};
 pub use knowledge_artifact::*;
 pub use lane_card_governance::*;
 pub use lesson_forge::*;

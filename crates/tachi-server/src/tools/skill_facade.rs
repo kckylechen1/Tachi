@@ -67,6 +67,11 @@ pub(super) async fn handle_tachi_skill_facade(
                 });
                 results.extend(local);
             }
+            results.retain(|cap| {
+                cap.get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| !crate::builtins::is_retired_builtin_capability_id(id))
+            });
             serde_json::to_string(&json!({
                 "status": "completed",
                 "action": "discover",

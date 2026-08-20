@@ -440,18 +440,79 @@ async fn public_read_and_browse_normalize_backslash_guide_paths() {
 }
 
 /// #1072 fail-closed truthful-retrieval: a direct read of a
-/// `pending_review` draft's exact path is NOT gated (the caller asked for
-/// this exact path), but it must never render as plain reviewed wiki
-/// content — the markdown response carries a visible lifecycle warning.
+/// `pending_review` or applicability-invalid artifact's exact path is gated
+/// before entry text is returned.
 #[tokio::test]
-async fn wiki_read_marks_pending_review_drafts_as_not_reviewed() {
-    let (server, _home) = seed_wiki_project_entries(vec![pending_review_draft_entry()]);
+async fn wiki_read_rejects_pending_review_and_invalid_applicability_artifacts() {
+    let (server, _home) = seed_wiki_project_entries(vec![
+        pending_review_draft_entry(),
+        declared_malformed_applicability_entry(),
+    ]);
 
     let markdown = handle_wiki_read(&server, "/wiki/drafts/lifecycle-gate-draft", "wiki")
-        .expect("read should succeed even for a draft path");
+        .expect("gated read should return a structured miss");
     assert!(
-        markdown.contains("pending_review") && markdown.contains("not reviewed"),
-        "draft read must be visibly labeled unreviewed: {markdown}"
+        markdown.contains("No entry found"),
+        "pending-review draft must be rejected before rendering text: {markdown}"
+    );
+
+    for path in [
+        "/wiki/drafts/lifecycle-gate-draft",
+        "/wiki/engineering/lifecycle/declared-malformed",
+    ] {
+        let value = collect_wiki_read_value(&server, path, "wiki")
+            .expect("gated read should return a structured miss");
+        assert_eq!(value["status"], json!("not_found"), "path={path}");
+        assert!(value["entry"].is_null(), "gated read leaked entry: {value:#}");
+        assert!(
+            value["entry"]["text"].is_null(),
+            "gated read must not return entry text: {value:#}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wiki_read_filters_ineligible_exact_duplicates_before_ambiguity() {
+    let mut active = active_wiki_entry();
+    active.path = "/wiki/drafts/lifecycle-gate-draft".to_string();
+    active.text = "LifecycleGateNeedle is the reviewed duplicate.".to_string();
+    let (server, _home) = seed_wiki_project_entries(vec![
+        pending_review_draft_entry(),
+        active,
+    ]);
+
+    let value = collect_wiki_read_value(&server, "/wiki/drafts/lifecycle-gate-draft", "wiki")
+        .expect("mixed exact read should succeed");
+    assert_eq!(value["status"], json!("found"), "ineligible duplicate caused ambiguity: {value:#}");
+    assert_eq!(
+        value["entry"]["text"],
+        json!("LifecycleGateNeedle is the reviewed duplicate.")
+    );
+}
+
+#[tokio::test]
+async fn wiki_read_filters_ineligible_prefix_children_before_selection() {
+    let mut invalid = declared_malformed_applicability_entry();
+    invalid.path = "/wiki/engineering/lifecycle/mixed-prefix/00-invalid".to_string();
+    let mut active = active_wiki_entry();
+    active.path = "/wiki/engineering/lifecycle/mixed-prefix/10-active".to_string();
+    active.text = "LifecycleGateNeedle is the reviewed child.".to_string();
+    let (server, _home) = seed_wiki_project_entries(vec![invalid, active]);
+
+    let value = collect_wiki_read_value(
+        &server,
+        "/wiki/engineering/lifecycle/mixed-prefix",
+        "wiki",
+    )
+    .expect("mixed prefix read should succeed");
+    assert_eq!(value["status"], json!("found"), "ineligible child hid active child: {value:#}");
+    assert_eq!(
+        value["entry"]["path"],
+        json!("/wiki/engineering/lifecycle/mixed-prefix/10-active")
+    );
+    assert_eq!(
+        value["entry"]["text"],
+        json!("LifecycleGateNeedle is the reviewed child.")
     );
 }
 
