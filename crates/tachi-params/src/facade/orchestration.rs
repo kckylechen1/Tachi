@@ -152,6 +152,7 @@ pub struct TachiVerifyParams {
 /// level (so `status` can omit it) but REQUIRED semantically for `start` —
 /// enforced by the handler, not by a cross-action struct field.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TachiStaffParams {
     /// Action: "start" | "status"
     #[schemars(schema_with = "tachi_staff_action_schema")]
@@ -223,6 +224,12 @@ pub struct TachiStaffParams {
 
 impl TachiStaffParams {
     pub fn to_assignment_request(&self) -> Result<crate::facade::StaffAssignmentRequest, String> {
+        if self.dispatch_id.is_some() {
+            return Err(
+                "dispatch_id is minted by the kernel and cannot be specified when action='start'"
+                    .to_string(),
+            );
+        }
         let staffing_reason = self
             .staffing_reason
             .ok_or_else(|| "staffing_reason is required when action='start'".to_string())?;
@@ -686,4 +693,76 @@ pub struct TachiBoardParams {
     /// flag.
     #[serde(default)]
     pub verbose: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tachi_staff_params_rejects_hostile_execution_fields() {
+        let hostile = serde_json::json!({
+            "action": "start",
+            "task": "Do work",
+            "staffing_reason": "explicit_user_request",
+            "cwd": "/etc",
+            "command": ["rm", "-rf", "/"],
+            "sandbox": "danger-full-access",
+            "allowed_tools": ["Bash"],
+            "credentials": ["admin"],
+        });
+        let err = serde_json::from_value::<TachiStaffParams>(hostile).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "tachi_staff params must reject hostile execution fields: {err}"
+        );
+    }
+
+    #[test]
+    fn tachi_staff_params_to_assignment_request_maps_cleanly() {
+        let raw = serde_json::json!({
+            "action": "start",
+            "task": "Clean mapping",
+            "staffing_reason": "durable_cross_session",
+            "worker": "claude",
+            "profile": "claude_plan",
+            "stage": "plan",
+            "project": "tachi",
+            "issue_ref": "kckylechen1/tachi#1692",
+            "pr_ref": "kckylechen1/tachi#1812",
+            "flow_id": "flow-c5",
+            "recommendation_ref": "rec-999",
+        });
+        let params: TachiStaffParams = serde_json::from_value(raw).expect("deserializes");
+        let req = params.to_assignment_request().expect("maps to request");
+        assert_eq!(req.task, "Clean mapping");
+        assert_eq!(
+            req.staffing_reason,
+            crate::facade::TachiDispatchReason::DurableCrossSession
+        );
+        assert_eq!(req.worker.as_deref(), Some("claude"));
+        assert_eq!(req.profile.as_deref(), Some("claude_plan"));
+        assert_eq!(req.stage.as_deref(), Some("plan"));
+        assert_eq!(req.project.as_deref(), Some("tachi"));
+        assert_eq!(req.issue_ref.as_deref(), Some("kckylechen1/tachi#1692"));
+        assert_eq!(req.pr_ref.as_deref(), Some("kckylechen1/tachi#1812"));
+        assert_eq!(req.flow_id.as_deref(), Some("flow-c5"));
+        assert_eq!(req.recommendation_ref.as_deref(), Some("rec-999"));
+    }
+
+    #[test]
+    fn tachi_staff_params_rejects_forged_dispatch_id_on_start() {
+        let raw = serde_json::json!({
+            "action": "start",
+            "task": "Forged dispatch_id",
+            "staffing_reason": "explicit_user_request",
+            "dispatch_id": "forged-id-123",
+        });
+        let params: TachiStaffParams = serde_json::from_value(raw).expect("deserializes");
+        let err = params.to_assignment_request().unwrap_err();
+        assert!(
+            err.contains("dispatch_id is minted by the kernel"),
+            "action='start' must reject caller-supplied dispatch_id: {err}"
+        );
+    }
 }
