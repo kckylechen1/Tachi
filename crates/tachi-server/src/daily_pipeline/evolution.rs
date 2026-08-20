@@ -27,6 +27,7 @@ pub(crate) async fn run_skill_evolution_stage(server: &MemoryServer) -> DailySta
     let mut seen = HashSet::new();
     let low_health = skills
         .into_iter()
+        .filter(|skill| !crate::builtins::is_retired_builtin_capability_id(&skill.id))
         .filter(|skill| seen.insert(skill.id.clone()))
         .filter(|skill| {
             !skill.health_status.eq_ignore_ascii_case("healthy") || skill.fail_streak > 3

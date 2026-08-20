@@ -205,6 +205,10 @@ pub(crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, St
             .hub_list(None, false)
             .map_err(|e| format!("hub list: {e}"))
     })?;
+    let global_caps = global_caps
+        .into_iter()
+        .filter(|cap| !crate::builtins::is_retired_builtin_capability_id(&cap.id))
+        .collect::<Vec<_>>();
     let project_caps = if server.has_project_db() {
         server.with_project_store(|store| {
             store
@@ -214,6 +218,10 @@ pub(crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, St
     } else {
         vec![]
     };
+    let project_caps = project_caps
+        .into_iter()
+        .filter(|cap| !crate::builtins::is_retired_builtin_capability_id(&cap.id))
+        .collect::<Vec<_>>();
 
     let total = global_caps.len() + project_caps.len();
     let mut by_type: HashMap<String, usize> = HashMap::new();

@@ -1428,3 +1428,47 @@ async fn concurrent_publishers_commit_distinct_bound_generations() {
         .expect("highest valid generation");
     assert!(latest.ends_with("2026-08-06.r2.md"), "latest={latest}");
 }
+
+#[tokio::test]
+async fn skill_evolution_excludes_retired_global_and_project_tombstones() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-evolution");
+    let mut global = crate::tests::make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical global trajectory writer omitted from evolution",
+        "listed",
+    );
+    global.health_status = "unhealthy".to_string();
+    global.fail_streak = 99;
+    let mut project = global.clone();
+    project.description =
+        "Historical project trajectory writer omitted from evolution".to_string();
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&global)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject retired global evolution row");
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&project)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject retired project evolution row");
+
+    let report = run_skill_evolution_stage(&server).await;
+    let output = serde_json::to_string(&report.details).expect("evolution details JSON");
+    assert!(
+        !output.contains(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID),
+        "retired tombstone must not appear in evolution output: {output}"
+    );
+    assert!(
+        !report
+            .summary
+            .contains(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID),
+        "retired tombstone must not appear in evolution summary"
+    );
+}
