@@ -180,7 +180,11 @@ pub(super) fn render_dispatch_profile_overlay(
     allowed_mcp_servers: &[String],
 ) -> String {
     let mut lines = vec!["## Dispatch profile".to_string()];
-    if let Some(profile_name) = profile.selected_profile.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(profile_name) = profile
+        .selected_profile
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         lines.push(format!("- profile: {profile_name}"));
         if let Some(profile_def) = crate::dispatch_profile::resolve_dispatch_profile(profile_name) {
             lines.push("- skill_loadout:".to_string());
@@ -293,7 +297,11 @@ pub(super) fn render_dispatch_profile_overlay(
     if let Some(flow_id) = request.flow_id.as_deref().filter(|s| !s.trim().is_empty()) {
         lines.push(format!("- flow_id: {flow_id}"));
     }
-    if let Some(issue_ref) = request.issue_ref.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(issue_ref) = request
+        .issue_ref
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         lines.push(format!("- issue_ref: {issue_ref}"));
     }
     if let Some(pr_ref) = request.pr_ref.as_deref().filter(|s| !s.trim().is_empty()) {

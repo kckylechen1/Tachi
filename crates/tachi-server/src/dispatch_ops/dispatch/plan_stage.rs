@@ -5,7 +5,7 @@ use super::*;
 
 pub(super) struct PlanStageInputs<'a> {
     pub(super) server: &'a MemoryServer,
-    pub(super) params: &'a TachiDispatchParams,
+    pub(super) request: &'a tachi_params::StaffAssignmentRequest,
     pub(super) dispatch_id: &'a str,
     pub(super) agent_norm: &'a str,
     pub(super) resolved_profile: &'a ResolvedDispatchProfile,
@@ -45,7 +45,7 @@ pub(super) async fn run_v2_plan_stage(
     if v2 {
         let label = format!("dispatch-plan-{}", inputs.dispatch_id);
         let plan_timeout = Duration::from_secs(plan_timeout_secs());
-        let plan_fut = run_plan_stage(inputs.server, &inputs.params.task, &label);
+        let plan_fut = run_plan_stage(inputs.server, &inputs.request.task, &label);
         let plan_outcome = match tokio::time::timeout(plan_timeout, plan_fut).await {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
@@ -246,9 +246,9 @@ pub(super) async fn run_v2_plan_stage(
                 "dispatch_profile": inputs.resolved_profile.profile_card,
                 "route_explanation": inputs.resolved_profile.route_explanation,
                 "fallback_chain": inputs.resolved_profile.fallback_chain,
-                "issue_ref": inputs.params.issue_ref,
-                "pr_ref": inputs.params.pr_ref,
-                "flow_id": inputs.params.flow_id,
+                "issue_ref": inputs.request.issue_ref,
+                "pr_ref": inputs.request.pr_ref,
+                "flow_id": inputs.request.flow_id,
                 "auto_capability_bundle": inputs.resolved_profile.auto_capability_bundle,
                 "capability_bundle": inputs.capability_bundle_card,
                 "capability_bundle_file": inputs.capability_bundle_file,
@@ -256,7 +256,7 @@ pub(super) async fn run_v2_plan_stage(
                 "v2": true,
                 "plan_review_status": "pending_review",
                 "message": "Plan generated. DISPATCH_V2_PLAN_REVIEW=true — execute stage paused. Audit plan.md and re-dispatch with the env var unset to proceed.",
-                "suggested_complete_command": suggested_complete_payload(inputs.dispatch_id, inputs.agent_norm, inputs.params),
+                "suggested_complete_command": suggested_complete_payload(inputs.dispatch_id, inputs.agent_norm, inputs.request),
                 "plan_file": inputs.plan_path.to_string_lossy(),
                 "prompt_file": inputs.prompt_md_path.to_string_lossy(),
                 "context_file": inputs.context_md_path.to_string_lossy(),
@@ -286,7 +286,7 @@ pub(super) async fn run_v2_plan_stage(
         );
         prompt = build_execute_prompt(
             &plan_outcome.plan_md,
-            &inputs.params.task,
+            &inputs.request.task,
             inputs.base_prompt,
         );
     }

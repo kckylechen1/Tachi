@@ -70,9 +70,10 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
         PromptInputBudget::from_env(SKILL_TEXT_BUDGET_ENV, DEFAULT_SKILL_TEXT_BUDGET_CHARS);
 
     let agent = input.assignment.selected_backend.as_str();
-    if let Some(overlay) =
-        memory_server_prompt_envelope::render_envelope_overlay(agent, input.request.stage.as_deref())
-    {
+    if let Some(overlay) = memory_server_prompt_envelope::render_envelope_overlay(
+        agent,
+        input.request.stage.as_deref(),
+    ) {
         parts.push(overlay);
     }
 
@@ -99,12 +100,9 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
     // Vendor-keyed vaccination clauses fire on the (role, vendor) lane whether or
     // not a named profile is set, so a codex-as-implementer packet carries them
     // even though only a glm implementer profile exists today (#735).
-    if let Some(overlay) = render_vendor_vaccination_overlay(
-        server,
-        input.request,
-        input.assignment,
-        input.profile,
-    ) {
+    if let Some(overlay) =
+        render_vendor_vaccination_overlay(server, input.request, input.assignment, input.profile)
+    {
         parts.push(overlay);
     }
 
@@ -361,7 +359,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
                 weights: None,
                 context_symbols: Vec::new(),
                 agent_role: None,
-                project: params.project.clone(),
+                project: input.request.project.clone(),
                 domain: None,
                 file_context: None,
                 error_context: None,
@@ -379,7 +377,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
                     let mut sections = Vec::new();
                     for row in &rows {
                         if let Some(text) =
-                            prompt_row_text(server, row, params.project.as_deref()).await
+                            prompt_row_text(server, row, input.request.project.as_deref()).await
                         {
                             let path = row
                                 .get("path")
@@ -544,7 +542,10 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
     }
 
     // 6. Task itself
-    parts.push(format!("## Task\n{}", sanitize_untrusted(&input.request.task)));
+    parts.push(format!(
+        "## Task\n{}",
+        sanitize_untrusted(&input.request.task)
+    ));
 
     let prompt = parts.join("\n\n");
 

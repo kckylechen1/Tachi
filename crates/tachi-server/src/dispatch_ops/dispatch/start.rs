@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct DispatchStart {
     pub(super) dispatch_id: String,
+    pub(super) request: tachi_params::StaffAssignmentRequest,
     pub(super) agent_norm: String,
     pub(super) resolved_profile: ResolvedDispatchProfile,
     pub(super) resolved_assignment: tachi_params::ResolvedStaffAssignment,
@@ -11,6 +12,8 @@ pub(super) struct DispatchStart {
     pub(super) inject_hub: bool,
     pub(super) workspace_dir: PathBuf,
     pub(super) host_adapter: Option<String>,
+    pub(super) inject_card: bool,
+    pub(super) verbose: bool,
 }
 
 // ─── Dispatch start resolution ───────────────────────────────────────────────
@@ -70,11 +73,15 @@ pub(super) fn resolve_dispatch_start(
         &resolved_profile,
     )?;
 
+    let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
+
     let profile_payload =
         serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
     let timeout = Duration::from_secs(params.timeout_secs);
     let inject_tachi = params.inject_tachi_mcp.unwrap_or(false);
     let inject_hub = params.inject_hub_mcps.unwrap_or(false);
+    let inject_card = params.inject_card.unwrap_or(true);
+    let verbose = params.verbose.unwrap_or(false);
 
     // Validate backend/MCP compatibility before creating the run ledger. A
     // rejected dispatch should not leave an empty run directory with no status.
@@ -104,6 +111,7 @@ pub(super) fn resolve_dispatch_start(
 
     Ok(DispatchStart {
         dispatch_id,
+        request,
         agent_norm,
         resolved_profile,
         resolved_assignment,
@@ -113,6 +121,8 @@ pub(super) fn resolve_dispatch_start(
         inject_hub,
         workspace_dir,
         host_adapter,
+        inject_card,
+        verbose,
     })
 }
 

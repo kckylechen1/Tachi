@@ -180,6 +180,7 @@ fn canonical_credential_profiles(raw: &[String]) -> Vec<String> {
 /// the evidence stops describing the thing you are about to run.
 pub(super) fn compile_dispatch_contract(
     params: &mut TachiDispatchParams,
+    request: &tachi_params::StaffAssignmentRequest,
     agent_norm: &str,
     harness_transport: &str,
     resolved_profile: &ResolvedDispatchProfile,
@@ -204,7 +205,7 @@ pub(super) fn compile_dispatch_contract(
     // returns `params.skills` verbatim when it is non-empty, and computes the
     // same `auto_instruction` either way.
     if params.skills.is_empty() {
-        let (effective_skills, _) = resolve_effective_skills(params);
+        let (effective_skills, _) = resolve_assignment_skills(request, &params.skills);
         params.skills = effective_skills;
     }
     let skills = params

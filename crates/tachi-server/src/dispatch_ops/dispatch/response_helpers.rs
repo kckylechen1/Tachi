@@ -3,20 +3,20 @@ use super::*;
 pub(super) fn suggested_complete_payload(
     dispatch_id: &str,
     agent: &str,
-    params: &TachiDispatchParams,
+    request: &tachi_params::StaffAssignmentRequest,
 ) -> serde_json::Value {
     json!({
         "tool": "tachi_task",
         "arguments": {
             "action": "complete",
             "dispatch_id": dispatch_id,
-            "task": params.task,
+            "task": request.task,
             "agent": agent,
             "outcome": "success|failure|partial|aborted",
-            "profile": params.profile,
-            "flow_id": params.flow_id,
-            "issue_ref": params.issue_ref,
-            "pr_ref": params.pr_ref,
+            "profile": request.profile,
+            "flow_id": request.flow_id,
+            "issue_ref": request.issue_ref,
+            "pr_ref": request.pr_ref,
             "evidence_refs": [],
             "tests_run": [],
             "diff_present": null,
@@ -109,7 +109,8 @@ pub(super) struct DispatchResponseInputs<'a> {
     pub(super) native_acp_enabled: bool,
     pub(super) v2: bool,
     pub(super) plan_duration_ms: Option<u64>,
-    pub(super) params: &'a TachiDispatchParams,
+    pub(super) request: &'a tachi_params::StaffAssignmentRequest,
+    pub(super) verbose: bool,
     pub(super) plan_path: &'a Path,
     pub(super) prompt_md_path: &'a Path,
     pub(super) context_md_path: &'a Path,
@@ -135,7 +136,7 @@ pub(super) fn build_dispatch_response(
     // when CHOOSING a profile, not receipt information it needs after
     // dispatch already committed to one — so it moves behind verbose=true (or
     // a separate operator-only local `tachi card show` diagnostic).
-    let verbose = inputs.params.verbose.unwrap_or(false);
+    let verbose = inputs.verbose;
 
     let mut response = json!({
         "dispatch_id": inputs.dispatch_id,
@@ -151,9 +152,9 @@ pub(super) fn build_dispatch_response(
         "credentials": inputs.credential_reports_json,
         "route_explanation": inputs.resolved_profile.route_explanation,
         "fallback_chain": inputs.resolved_profile.fallback_chain,
-        "issue_ref": inputs.params.issue_ref,
-        "pr_ref": inputs.params.pr_ref,
-        "flow_id": inputs.params.flow_id,
+        "issue_ref": inputs.request.issue_ref,
+        "pr_ref": inputs.request.pr_ref,
+        "flow_id": inputs.request.flow_id,
         "auto_capability_bundle": inputs.resolved_profile.auto_capability_bundle,
         "capability_bundle": inputs.capability_bundle_card,
         "capability_bundle_file": inputs.capability_bundle_file,
@@ -168,7 +169,7 @@ pub(super) fn build_dispatch_response(
         "plan_review_status": if inputs.v2 { "approved" } else { "n/a" },
         "duration_ms_plan": inputs.plan_duration_ms,
         "message": "Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.",
-        "suggested_complete_command": suggested_complete_payload(inputs.dispatch_id, inputs.agent_norm, inputs.params),
+        "suggested_complete_command": suggested_complete_payload(inputs.dispatch_id, inputs.agent_norm, inputs.request),
         "plan_file": inputs.plan_path.to_string_lossy(),
         "prompt_file": inputs.prompt_md_path.to_string_lossy(),
         "context_file": inputs.context_md_path.to_string_lossy(),
