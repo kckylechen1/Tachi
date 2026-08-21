@@ -19,39 +19,51 @@ impl FakeClaudeCleanup {
         }
     }
 
-    fn release_and_wait(&self) {
+    async fn release_and_wait(&self) {
         std::fs::write(&self.release, b"release").expect("release fake claude");
+        let cleaned = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+            loop {
+                if !self.pending_mcp_config() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .is_ok();
         assert!(
-            self.wait_for_cleanup(),
+            cleaned,
             "fake claude completion must clean the generated MCP config"
         );
     }
 
-    fn wait_for_cleanup(&self) -> bool {
+    fn pending_mcp_config(&self) -> bool {
+        std::fs::read_dir(&self.mcp_tmp_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with("dispatch-") && name.ends_with("-mcp.json")
+                })
+            })
+    }
+
+    fn wait_for_cleanup_on_drop(&self) {
         for _ in 0..480 {
-            let pending_mcp_config = std::fs::read_dir(&self.mcp_tmp_dir)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-                .any(|entry| {
-                    entry.file_name().to_str().is_some_and(|name| {
-                        name.starts_with("dispatch-") && name.ends_with("-mcp.json")
-                    })
-                });
-            if !pending_mcp_config {
-                return true;
+            if !self.pending_mcp_config() {
+                return;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        false
     }
 }
 
 impl Drop for FakeClaudeCleanup {
     fn drop(&mut self) {
         let _ = std::fs::write(&self.release, b"release");
-        let _ = self.wait_for_cleanup();
+        self.wait_for_cleanup_on_drop();
     }
 }
 
@@ -677,7 +689,7 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     let _guard = crate::utils::global_test_lock()
@@ -791,7 +803,7 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
 
     // Capture all real-handler evidence before releasing the fake subprocess;
     // this is also the explicit cleanup assertion, while Drop covers panic.
-    cleanup.release_and_wait();
+    cleanup.release_and_wait().await;
 
     assert!(
         config["mcpServers"].get("tachi").is_some(),
