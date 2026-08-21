@@ -285,9 +285,6 @@ pub(super) fn render_dispatch_profile_overlay(
     if !assignment.selected_backend.trim().is_empty() {
         lines.push(format!("- backend: {}", assignment.selected_backend));
     }
-    if let Some(role) = profile.role.as_deref().filter(|s| !s.trim().is_empty()) {
-        lines.push(format!("- role: {role}"));
-    }
     if let Some(stage) = request.stage.as_deref().filter(|s| !s.trim().is_empty()) {
         lines.push(format!("- stage: {stage}"));
     }

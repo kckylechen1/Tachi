@@ -143,10 +143,25 @@ pub(super) struct PlanOutcome {
 #[cfg(test)]
 #[derive(Clone)]
 pub(super) enum PlanStageTestOverride {
-    Success { plan_md: String, duration_ms: u64 },
+    Success {
+        plan_md: String,
+        duration_ms: u64,
+    },
+    SuccessWithAssertion {
+        plan_md: String,
+        duration_ms: u64,
+        assert_before_return: PlanStageTestAssertion,
+    },
     Failure(String),
     Pending,
 }
+
+#[cfg(test)]
+pub(super) type PlanStageTestAssertion =
+    for<'a> fn(
+        &'a crate::MemoryServer,
+        &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 
 #[cfg(test)]
 fn plan_stage_test_override() -> &'static std::sync::Mutex<Option<PlanStageTestOverride>> {
@@ -188,6 +203,17 @@ pub(super) async fn run_plan_stage(
                 plan_md,
                 duration_ms,
             }),
+            PlanStageTestOverride::SuccessWithAssertion {
+                plan_md,
+                duration_ms,
+                assert_before_return,
+            } => {
+                assert_before_return(server, label).await;
+                Ok(PlanOutcome {
+                    plan_md,
+                    duration_ms,
+                })
+            }
             PlanStageTestOverride::Failure(error) => Err(error),
             PlanStageTestOverride::Pending => std::future::pending().await,
         };

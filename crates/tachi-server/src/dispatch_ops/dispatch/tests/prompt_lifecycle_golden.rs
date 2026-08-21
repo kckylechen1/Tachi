@@ -53,7 +53,6 @@ Bullet list: done / blocked / next.
 ## Dispatch profile
 - profile: typed-profile
 - backend: codex
-- role: implementer
 - stage: implementation
 - tachi_tool_profile: typed-tool-profile
 - flow_id: missing-flow
@@ -119,10 +118,51 @@ async fn real_handler_is_receipt_then_board_then_planner_and_pending_response_is
         }
     }
     let _planner_reset = PlannerReset;
+    fn assert_board_and_flow_before_planner_return<'a>(
+        server: &'a crate::MemoryServer,
+        label: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let dispatch_id = label
+                .strip_prefix("dispatch-plan-")
+                .expect("planner label carries dispatch id");
+            assert_eq!(
+                crate::dispatch_ops::get_kanban_state(server, dispatch_id)
+                    .await
+                    .as_deref(),
+                Some("TASK_STATE_WORKING"),
+                "the board row must exist before the planner returns"
+            );
+            let flow_run_dir =
+                crate::task_lifecycle::run_dir_for_flow_id("flow_20260822T000000Z_prompt_golden")
+                    .expect("flow run directory");
+            let status: Value = serde_json::from_str(
+                &std::fs::read_to_string(flow_run_dir.join("status.json"))
+                    .expect("flow status before planner return"),
+            )
+            .expect("flow status JSON");
+            assert_eq!(status["state"], json!("dispatched"), "{status}");
+            assert_eq!(status["last_dispatch_id"], json!(dispatch_id), "{status}");
+            let card_path = status["artifacts"]["dispatches"][dispatch_id]
+                .as_str()
+                .expect("flow dispatch card path");
+            let card: Value = serde_json::from_str(
+                &std::fs::read_to_string(card_path).expect("flow dispatch card"),
+            )
+            .expect("flow dispatch card JSON");
+            assert_eq!(
+                card["flow_id"],
+                json!("flow_20260822T000000Z_prompt_golden")
+            );
+            assert_eq!(card["dispatch_id"], json!(dispatch_id));
+            assert_eq!(card["task"], json!("golden pending lifecycle"));
+        })
+    }
     crate::dispatch_ops::dispatch_v2::set_plan_stage_test_override(Some(
-        crate::dispatch_ops::dispatch_v2::PlanStageTestOverride::Success {
+        crate::dispatch_ops::dispatch_v2::PlanStageTestOverride::SuccessWithAssertion {
             plan_md: "## Goal\nreview literal pending response".to_string(),
             duration_ms: 7,
+            assert_before_return: assert_board_and_flow_before_planner_return,
         },
     ));
     let cwd = tempfile::tempdir().expect("dispatch cwd");

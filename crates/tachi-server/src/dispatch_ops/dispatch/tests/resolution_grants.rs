@@ -385,6 +385,11 @@ fn explicit_profile_assignment_is_authoritative_before_legacy_projection() {
     );
     assert_ne!(start.resolved_assignment.identity_receipt, Value::Null);
     assert_eq!(
+        start.request.stage.as_deref(),
+        Some("execute"),
+        "a named profile's omitted stage must reach the typed request before default skills and prompt bytes are derived"
+    );
+    assert_eq!(
         start.request.profile.as_deref(),
         Some("glm_51_impl"),
         "the pre-projection request keeps the caller's raw alias for diagnostics and replay"

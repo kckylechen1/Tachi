@@ -25,9 +25,10 @@ pub(super) fn resolve_dispatch_start(
     now: chrono::DateTime<Utc>,
     execution_level: tachi_params::ExecutionLevel,
 ) -> Result<DispatchStart, String> {
-    // Freeze semantic diagnostics before the P1 compatibility projection can
-    // resolve aliases or mutate the legacy carrier.
-    let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
+    // Preserve only the caller's profile spelling for diagnostics/replay. The
+    // typed request itself must be minted after profile resolution so omitted
+    // stage and other profile defaults reach every typed consumer.
+    let raw_request_profile = params.profile.clone();
     // #1815 P1: resolve into the acknowledged compatibility projection first.
     // The canonical outputs below are minted before that projection reaches the
     // remaining P2/P3 consumers; final #1814 deletes this bridge entirely.
@@ -35,6 +36,9 @@ pub(super) fn resolve_dispatch_start(
     let resolved_profile =
         resolve_and_apply_dispatch_profile_for_server(server, &mut legacy_projection)?;
     reconcile_resolved_profile_compatibility(&mut legacy_projection, &resolved_profile);
+    let mut request =
+        tachi_params::StaffAssignmentRequest::from_dispatch_params(&legacy_projection);
+    request.profile = raw_request_profile;
     let legacy_auto_capability_bundle = legacy_projection.auto_capability_bundle;
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);
