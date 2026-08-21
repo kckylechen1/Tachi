@@ -149,19 +149,15 @@ fn apply_assignment_legacy_projection(
     assert_assignment_legacy_projection(params, assignment)
 }
 
-/// Reconcile the two legacy MCP spellings at the profile boundary. The
-/// top-level fields are what the existing workspace/launch path consumed, so
-/// they retain precedence over nested `mcp_access`; after this point the private
-/// profile payload, grant, compatibility projection, and launch all share the
-/// same values. Credential profiles are likewise the resolver's trimmed and
-/// deduplicated context, not the caller's raw spelling.
+/// Preserve the resolver's nested MCP profile context for profile-facing
+/// consumers. The existing top-level MCP fields remain the independent
+/// workspace/launch authority and are reconciled into the grant later. Credential
+/// profiles are the resolver's trimmed and deduplicated context, not the caller's
+/// raw spelling.
 fn reconcile_resolved_profile_compatibility(
     legacy_projection: &mut TachiDispatchParams,
-    resolved_profile: &mut ResolvedDispatchProfile,
+    resolved_profile: &ResolvedDispatchProfile,
 ) {
-    resolved_profile.mcp_access.inject_tachi_mcp = legacy_projection.inject_tachi_mcp;
-    resolved_profile.mcp_access.inject_hub_mcps = legacy_projection.inject_hub_mcps;
-    resolved_profile.mcp_access.allowed_mcp_servers = legacy_projection.allowed_mcp_servers.clone();
     legacy_projection.mcp_access = Some(resolved_profile.mcp_access.clone());
     legacy_projection.credential_profiles = resolved_profile.credential_profiles.clone();
 }

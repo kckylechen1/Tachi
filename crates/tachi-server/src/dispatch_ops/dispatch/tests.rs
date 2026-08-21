@@ -334,7 +334,7 @@ fn execution_grant_preserves_top_level_mcp_precedence_over_nested_conflicts() {
 }
 
 #[test]
-fn profile_payload_and_launch_inputs_share_composed_mcp_authority() {
+fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
     let server = crate::tests::make_server();
     let mut params = test_dispatch_params(Some("claude"), "compose MCP authority");
     params.inject_tachi_mcp = Some(true);
@@ -363,13 +363,13 @@ fn profile_payload_and_launch_inputs_share_composed_mcp_authority() {
     assert!(!start.inject_hub, "launch input keeps top-level false");
     assert_eq!(
         start.profile_payload["mcp_access"]["inject_tachi_mcp"],
-        json!(true),
-        "response/plan profile payload must match launch authority"
+        json!(false),
+        "response/plan profile payload must retain the nested profile authority"
     );
     assert_eq!(
         start.profile_payload["mcp_access"]["allowed_mcp_servers"],
-        json!(["top-level-server"]),
-        "response/plan profile payload must not retain nested conflict"
+        json!(["nested-server"]),
+        "response/plan profile payload must retain the nested profile allowlist"
     );
     assert_eq!(
         params
@@ -377,7 +377,7 @@ fn profile_payload_and_launch_inputs_share_composed_mcp_authority() {
             .as_ref()
             .expect("legacy projection")
             .allowed_mcp_servers,
-        vec!["top-level-server".to_string()]
+        vec!["nested-server".to_string()]
     );
 
     let authority = Value::Null;
@@ -415,8 +415,23 @@ fn profile_payload_and_launch_inputs_share_composed_mcp_authority() {
     let response: Value = serde_json::from_str(&response).expect("response JSON");
     assert_eq!(
         response["tool_access"]["allowed_mcp_servers"],
-        json!(["top-level-server"]),
-        "accepted response must match the generated launch inputs"
+        json!(["nested-server"]),
+        "accepted response must retain the nested profile allowlist"
+    );
+    let grant = mint_execution_grant(
+        &mut params,
+        "profile-launch-mcp-grant",
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("grant preserves top-level launch authority");
+    assert_eq!(
+        grant
+            .mcp_access
+            .as_ref()
+            .expect("grant MCP access")
+            .allowed_mcp_servers,
+        vec!["top-level-server".to_string()],
+        "grant must not inherit the nested response/profile allowlist"
     );
 }
 
@@ -529,23 +544,23 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     );
     assert_eq!(
         response["tool_access"]["inject_tachi_mcp"],
-        json!(true),
-        "accepted response must use the same composed authority: {response}"
+        json!(false),
+        "accepted response must retain the nested profile authority: {response}"
     );
     assert_eq!(
         response["tool_access"]["allowed_mcp_servers"],
-        json!(["canonical-server"]),
-        "accepted response must not retain the nested allowlist: {response}"
+        json!(["nested-server"]),
+        "accepted response must retain the nested profile allowlist: {response}"
     );
     assert_eq!(
         response["profile"]["mcp_access"]["inject_tachi_mcp"],
-        json!(true),
-        "verbose planning profile must match the generated launch config: {response}"
+        json!(false),
+        "verbose planning profile must retain the nested authority: {response}"
     );
     assert_eq!(
         response["profile"]["mcp_access"]["allowed_mcp_servers"],
-        json!(["canonical-server"]),
-        "verbose planning profile must use the launch allowlist: {response}"
+        json!(["nested-server"]),
+        "verbose planning profile must retain the nested allowlist: {response}"
     );
     std::fs::write(&release, b"release").expect("release fake claude");
     for _ in 0..120 {
