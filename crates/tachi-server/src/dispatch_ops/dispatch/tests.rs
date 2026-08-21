@@ -220,8 +220,9 @@ fn projection_guards_reject_each_owned_field_family_mutant() {
     );
     assignment_mutant!(
         "route_explanation",
-        |m: &mut tachi_params::ResolvedStaffAssignment| m.route_explanation =
-            Some("mutant".to_string())
+        |m: &mut tachi_params::ResolvedStaffAssignment| m
+            .route_explanation
+            .push("mutant".to_string())
     );
     assignment_mutant!(
         "identity_receipt",
