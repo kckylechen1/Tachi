@@ -52,4 +52,4 @@ pub(crate) use predicate::{
     resolve_completion_predicate_context, resolve_completion_state, PredicateVerdict,
 };
 #[cfg(test)]
-pub(crate) use prompt::{assemble_prompt, assemble_prompt_with_trace};
+pub(crate) use prompt::{assemble_resolved_prompt_with_trace, PromptDispatchInput};
