@@ -43,6 +43,8 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
     }
 }
 
+mod resolution_grants;
+
 fn spawn_auth_gated_opencode_doc_server() -> (String, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe server");
     let port = listener.local_addr().expect("local addr").port();

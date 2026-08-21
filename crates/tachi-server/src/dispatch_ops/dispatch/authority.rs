@@ -41,13 +41,128 @@ use tachi_dispatch::{
     ProviderQualification, SkillRequest,
 };
 
+/// #1815 P1 authority issuance. The compiled contract first applies the
+/// existing narrowing to the temporary legacy ingress; this established typed
+/// grant then records the exact values P3/#1814 will consume directly.
+pub(super) fn mint_execution_grant(
+    params: &mut TachiDispatchParams,
+    grant_id: impl Into<String>,
+    env_resolution: &crate::exec_env_ops::EnvResolution,
+) -> Result<tachi_params::ExecutionGrant, String> {
+    // The running launch path historically reads the top-level MCP knobs.
+    // Preserve that precedence in the grant without rewriting the independent
+    // nested profile metadata consumed by prompt, receipt, and progress paths.
+    let mut mcp_access = params.mcp_access.clone();
+    if let Some(access) = mcp_access.as_mut() {
+        access.inject_tachi_mcp = params.inject_tachi_mcp;
+        access.inject_hub_mcps = params.inject_hub_mcps;
+        access.allowed_mcp_servers = params.allowed_mcp_servers.clone();
+    }
+    let grant = tachi_params::ExecutionGrant {
+        grant_id: grant_id.into(),
+        env_id: env_resolution.env_id().map(str::to_string),
+        unmanaged_cwd_allowed: matches!(
+            env_resolution,
+            crate::exec_env_ops::EnvResolution::Unmanaged { .. }
+        ),
+        allowed_cwd: env_resolution.cwd().map(std::path::PathBuf::from),
+        credential_profiles: canonical_credential_profiles(&params.credential_profiles),
+        mcp_access,
+        allowed_tools: params.allowed_tools.clone(),
+        permission_profile: params.permission_profile.clone(),
+        sandbox: params.sandbox.clone(),
+        max_turns: params.max_turns,
+        timeout_secs: params.timeout_secs,
+    };
+    apply_grant_legacy_projection(params, &grant);
+    assert_grant_legacy_projection(params, &grant, env_resolution)?;
+    Ok(grant)
+}
+
+fn apply_grant_legacy_projection(
+    params: &mut TachiDispatchParams,
+    grant: &tachi_params::ExecutionGrant,
+) {
+    // #1815 P1 temporary projection, deleted by P3/#1814 once backend,
+    // credential, and launch consumers take ExecutionGrant directly.
+    if let Some(access) = grant.mcp_access.as_ref() {
+        params.inject_tachi_mcp = access.inject_tachi_mcp;
+        params.inject_hub_mcps = access.inject_hub_mcps;
+        params.allowed_mcp_servers = access.allowed_mcp_servers.clone();
+    }
+    params.allowed_tools = grant.allowed_tools.clone();
+    params.permission_profile = grant.permission_profile.clone();
+    params.sandbox = grant.sandbox.clone();
+    params.max_turns = grant.max_turns;
+    params.timeout_secs = grant.timeout_secs;
+}
+
+/// The temporary flat projection is permitted only through P2/P3 and final
+/// #1814. Reject a one-sided update rather than silently letting the launch
+/// path and the server-owned grant describe different authority.
+pub(super) fn assert_grant_legacy_projection(
+    params: &TachiDispatchParams,
+    grant: &tachi_params::ExecutionGrant,
+    env_resolution: &crate::exec_env_ops::EnvResolution,
+) -> Result<(), String> {
+    let matches = grant.env_id == env_resolution.env_id().map(str::to_string)
+        && grant.allowed_cwd == env_resolution.cwd().map(std::path::PathBuf::from)
+        && grant.unmanaged_cwd_allowed
+            == matches!(
+                env_resolution,
+                crate::exec_env_ops::EnvResolution::Unmanaged { .. }
+            )
+        && grant.credential_profiles == canonical_credential_profiles(&params.credential_profiles)
+        && grant.allowed_tools == params.allowed_tools
+        && grant.permission_profile == params.permission_profile
+        && grant.sandbox == params.sandbox
+        && grant.max_turns == params.max_turns
+        && grant.timeout_secs == params.timeout_secs;
+    let mcp_matches = match grant.mcp_access.as_ref() {
+        Some(access) => {
+            access.inject_tachi_mcp == params.inject_tachi_mcp
+                && access.inject_hub_mcps == params.inject_hub_mcps
+                && access.allowed_mcp_servers == params.allowed_mcp_servers
+                && params.mcp_access.as_ref().is_some_and(|nested| {
+                    access.allowed_facades == nested.allowed_facades
+                        && access.github_read == nested.github_read
+                        && access.write_actions == nested.write_actions
+                        && access.issue_refs == nested.issue_refs
+                        && access.pr_refs == nested.pr_refs
+                        && access.fallback == nested.fallback
+                })
+        }
+        None => {
+            !params.inject_tachi_mcp.unwrap_or(false)
+                && !params.inject_hub_mcps.unwrap_or(false)
+                && params.allowed_mcp_servers.is_empty()
+                && params.mcp_access.is_none()
+        }
+    };
+    if matches && mcp_matches {
+        Ok(())
+    } else {
+        Err("execution grant and legacy compatibility projection diverged".to_string())
+    }
+}
+
+fn canonical_credential_profiles(raw: &[String]) -> Vec<String> {
+    raw.iter().fold(Vec::new(), |mut canonical, profile| {
+        let profile = profile.trim();
+        if !profile.is_empty() && !canonical.iter().any(|seen| seen == profile) {
+            canonical.push(profile.to_string());
+        }
+        canonical
+    })
+}
+
 /// Compile the dispatch's effective authority contract and apply it to
 /// `params`. Returns the contract (for the receipt) or a typed-error string.
 ///
-/// `params` is mutated in exactly two ways, both of which can only *narrow*:
+/// `params` is mutated in exactly three ways, all derived from effective authority:
 /// `sandbox` becomes the compiled level (or `None` for providers with no
 /// sandbox primitive — never a vendor default), and `skills` becomes the
-/// mounted subset.
+/// mounted subset; `permission_profile` records the admitted replay spelling.
 ///
 /// `qualifications` and `backend_version` are parameters rather than the const +
 /// a probe call, so the tests can pin each world explicitly: the certified binary
@@ -71,6 +186,7 @@ pub(super) fn compile_dispatch_contract(
     qualifications: &[ProviderQualification],
     backend_version: Option<&str>,
 ) -> Result<EffectiveContract, String> {
+    let admitted_permission_spelling = params.permission_profile.clone();
     let permission_profile = tachi_dispatch::resolve_permission_profile(&DispatchLaunchParams {
         cwd: params.cwd.clone(),
         model: params.model.clone(),
@@ -119,6 +235,12 @@ pub(super) fn compile_dispatch_contract(
 
     params.sandbox = contract.sandbox_arg.clone();
     params.skills = contract.mounted_skills.clone();
+    // The typed grant records this admitted authority. Keep a successful
+    // `verify` spelling replay-safe for the downstream launcher: it is an
+    // accepted alias with a distinct headless opt-in, not a request to replay
+    // as `full`. Omitted input projects to the explicit default spelling.
+    params.permission_profile =
+        admitted_permission_spelling.or_else(|| Some(permission_profile.as_str().to_string()));
     Ok(contract)
 }
 

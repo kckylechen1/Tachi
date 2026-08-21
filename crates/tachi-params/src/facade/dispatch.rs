@@ -477,6 +477,8 @@ pub struct ResolvedStaffAssignment {
     pub selected_profile: Option<String>,
     pub selected_backend: String,
     pub selected_model: Option<String>,
+    pub execution_level: Option<ExecutionLevel>,
+    pub recommendation_ref: Option<String>,
     pub host_adapter: Option<String>,
     pub evidence_required: Vec<String>,
     pub fallback_chain: Vec<String>,
@@ -498,6 +500,8 @@ impl ResolvedStaffAssignment {
             selected_profile: None,
             selected_backend: selected_backend.into(),
             selected_model: None,
+            execution_level: None,
+            recommendation_ref: None,
             host_adapter: None,
             evidence_required: Vec::new(),
             fallback_chain: Vec::new(),
@@ -513,6 +517,16 @@ impl ResolvedStaffAssignment {
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.selected_model = Some(model.into());
+        self
+    }
+
+    pub fn with_execution_level(mut self, execution_level: ExecutionLevel) -> Self {
+        self.execution_level = Some(execution_level);
+        self
+    }
+
+    pub fn with_recommendation_ref(mut self, recommendation_ref: impl Into<String>) -> Self {
+        self.recommendation_ref = Some(recommendation_ref.into());
         self
     }
 
