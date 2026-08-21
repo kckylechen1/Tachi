@@ -126,6 +126,93 @@ async fn typed_prompt(
     .await
 }
 
+async fn typed_prompt_from_pre_projection_snapshot(
+    server: &MemoryServer,
+    params: &crate::tool_params::TachiDispatchParams,
+) -> crate::dispatch_ops::prompt::PromptAssembly {
+    let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
+    let mut resolved_params = params.clone();
+    let raw_profile = resolved_params.profile.clone();
+    let profile = crate::dispatch_profile::resolve_and_apply_dispatch_profile_for_server(
+        server,
+        &mut resolved_params,
+    )
+    .or_else(|_| {
+        resolved_params.profile = None;
+        crate::dispatch_profile::resolve_and_apply_dispatch_profile_for_server(
+            server,
+            &mut resolved_params,
+        )
+        .map(|mut resolved| {
+            resolved.selected_profile = raw_profile;
+            resolved
+        })
+    })
+    .expect("pre-projection snapshot resolves");
+    let backend = params.agent.clone().unwrap_or_else(|| profile.agent.clone());
+    let mut assignment = tachi_params::ResolvedStaffAssignment::new(
+        "test-assignment",
+        params.staffing_reason,
+        backend.clone(),
+        backend,
+    );
+    if let Some(profile_name) = params.profile.clone() {
+        assignment = assignment.with_profile(profile_name);
+    }
+    if let Some(model) = params.model.clone() {
+        assignment = assignment.with_model(model);
+    }
+    let mut grant = tachi_params::ExecutionGrant::from_dispatch_params(params, "test-grant");
+    if let (Some(inject_tachi_mcp), Some(access)) =
+        (params.inject_tachi_mcp, grant.mcp_access.as_mut())
+    {
+        access.inject_tachi_mcp = Some(inject_tachi_mcp);
+    }
+    let (skills, stage_instruction) = resolve_assignment_skills(&request, &params.skills);
+    crate::dispatch_ops::assemble_resolved_prompt_with_trace(
+        server,
+        &request,
+        &assignment,
+        &grant,
+        &profile,
+        &skills,
+        stage_instruction.as_deref(),
+        params.auto_capability_bundle,
+        params.context_query.as_deref(),
+        params.inject_card != Some(false),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn p2_unpoisoned_legacy_adapter_matches_typed_snapshot_then_diverges() {
+    let server = crate::tests::make_server();
+    let mut legacy = test_dispatch_params(Some("custom"), "pre-projection parity task");
+    legacy.stage = Some("implementation".to_string());
+    legacy.project = Some("parity-project".to_string());
+    legacy.issue_ref = Some("#1817".to_string());
+    legacy.pr_ref = Some("#1817".to_string());
+    legacy.flow_id = Some("parity-flow".to_string());
+    legacy.auto_capability_bundle = None;
+    let snapshot = legacy.clone();
+
+    let legacy_baseline = crate::dispatch_ops::assemble_prompt_with_trace(&server, &legacy).await;
+    let typed_baseline = typed_prompt_from_pre_projection_snapshot(&server, &snapshot).await;
+    assert_eq!(legacy_baseline.prompt, typed_baseline.prompt);
+    assert_eq!(legacy_baseline.capability_bundle, typed_baseline.capability_bundle);
+    assert_eq!(legacy_baseline.feedback_rules, typed_baseline.feedback_rules);
+
+    // Only the legacy projection changes after the typed contexts have frozen.
+    legacy.task = "legacy-only poisoned task".to_string();
+    let legacy_after = crate::dispatch_ops::assemble_prompt_with_trace(&server, &legacy).await;
+    let typed_after = typed_prompt_from_pre_projection_snapshot(&server, &snapshot).await;
+    assert_ne!(legacy_baseline.prompt, legacy_after.prompt);
+    assert!(legacy_after.prompt.contains("legacy-only poisoned task"));
+    assert_eq!(typed_baseline.prompt, typed_after.prompt);
+    assert_eq!(typed_baseline.capability_bundle, typed_after.capability_bundle);
+    assert_eq!(typed_baseline.feedback_rules, typed_after.feedback_rules);
+}
+
 #[tokio::test]
 async fn p2_typed_prompt_contexts_ignore_poisoned_legacy_projection() {
     let server = crate::tests::make_server();
