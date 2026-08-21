@@ -227,8 +227,8 @@ pub(super) fn compile_dispatch_contract(
     // `verify` spelling replay-safe for the downstream launcher: it is an
     // accepted alias with a distinct headless opt-in, not a request to replay
     // as `full`. Omitted input projects to the explicit default spelling.
-    params.permission_profile = admitted_permission_spelling
-        .or_else(|| Some(permission_profile.as_str().to_string()));
+    params.permission_profile =
+        admitted_permission_spelling.or_else(|| Some(permission_profile.as_str().to_string()));
     Ok(contract)
 }
 

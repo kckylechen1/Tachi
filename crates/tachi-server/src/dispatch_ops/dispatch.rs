@@ -138,9 +138,9 @@ mod workspace_setup;
 mod tests;
 
 use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
-use self::authority::{compile_dispatch_contract, contract_receipt, mint_execution_grant};
 #[cfg(test)]
 use self::authority::assert_grant_legacy_projection;
+use self::authority::{compile_dispatch_contract, contract_receipt, mint_execution_grant};
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{

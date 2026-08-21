@@ -56,15 +56,22 @@ fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
         Utc::now(),
         tachi_params::ExecutionLevel::L2,
     )
-        .expect("profile-less custom dispatch resolves");
+    .expect("profile-less custom dispatch resolves");
 
     assert_eq!(start.resolved_assignment.assignment_id, start.dispatch_id);
     assert_eq!(start.resolved_assignment.selected_worker, "custom");
     assert_eq!(
         start.resolved_assignment.selected_backend,
-        params.agent.as_deref().expect("canonical backend").to_string()
+        params
+            .agent
+            .as_deref()
+            .expect("canonical backend")
+            .to_string()
     );
-    assert_eq!(start.resolved_assignment.selected_model, params.model.clone());
+    assert_eq!(
+        start.resolved_assignment.selected_model,
+        params.model.clone()
+    );
     assert_eq!(
         start.resolved_assignment.execution_level,
         Some(tachi_params::ExecutionLevel::L2)
@@ -91,8 +98,7 @@ fn execution_grant_detects_a_one_sided_legacy_projection_mutant() {
     };
     let grant = mint_execution_grant(&mut params, "dispatch-grant", &env_resolution)
         .expect("typed grant exactly projects legacy authority");
-    assert_grant_legacy_projection(&params, &grant)
-        .expect("matching grant remains compatible");
+    assert_grant_legacy_projection(&params, &grant).expect("matching grant remains compatible");
 
     // Deliberate one-sided mutant: the grant stays authoritative while the
     // untouched P3 legacy projection changes. The ingress guard must reject it.
@@ -117,10 +123,12 @@ fn explicit_profile_assignment_is_authoritative_before_legacy_projection() {
     )
     .expect("profile alias resolves before legacy projection");
 
-    assert_eq!(start.resolved_assignment.selected_profile.as_deref(), Some("glm_impl"));
     assert_eq!(
-        params.profile,
-        start.resolved_assignment.selected_profile,
+        start.resolved_assignment.selected_profile.as_deref(),
+        Some("glm_impl")
+    );
+    assert_eq!(
+        params.profile, start.resolved_assignment.selected_profile,
         "legacy profile is only the exact typed assignment projection"
     );
     assert_eq!(
@@ -196,10 +204,18 @@ fn typed_ingress_equivalence_matrix_covers_missing_and_effective_values() {
             params.credential_profiles = vec!["token".to_string()];
         }
 
-        let start = resolve_dispatch_start(&server, &mut params, Utc::now(), case.level)
-            .expect(case.name);
-        assert_eq!(start.resolved_assignment.selected_worker, "custom", "{}", case.name);
-        assert_eq!(start.resolved_assignment.selected_model, params.model, "{}", case.name);
+        let start =
+            resolve_dispatch_start(&server, &mut params, Utc::now(), case.level).expect(case.name);
+        assert_eq!(
+            start.resolved_assignment.selected_worker, "custom",
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            start.resolved_assignment.selected_model, params.model,
+            "{}",
+            case.name
+        );
         assert_eq!(
             start.resolved_assignment.execution_level,
             Some(case.level),
@@ -309,7 +325,10 @@ fn execution_grant_preserves_top_level_mcp_precedence_over_nested_conflicts() {
     let mcp = grant.mcp_access.clone().expect("canonical MCP access");
     assert_eq!(mcp.inject_tachi_mcp, Some(true));
     assert_eq!(mcp.inject_hub_mcps, Some(false));
-    assert_eq!(mcp.allowed_mcp_servers, vec!["top-level-server".to_string()]);
+    assert_eq!(
+        mcp.allowed_mcp_servers,
+        vec!["top-level-server".to_string()]
+    );
     assert_grant_legacy_projection(&params, &grant)
         .expect("launch-facing top-level fields and grant stay identical");
 }
@@ -501,7 +520,10 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
         "generated launch config must exclude stale and disallowed Hub MCPs: {config}"
     );
     assert_eq!(
-        config["mcpServers"].as_object().expect("MCP server object").len(),
+        config["mcpServers"]
+            .as_object()
+            .expect("MCP server object")
+            .len(),
         2,
         "generated launch config must contain exactly Tachi and the canonical Hub server: {config}"
     );
@@ -598,27 +620,28 @@ fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
     let grant = mint_execution_grant(&mut padded, "managed-grant", &managed)
         .expect("canonical managed resolution mints a grant");
     assert_eq!(grant.env_id.as_deref(), Some("env-canonical"));
-    assert_eq!(grant.allowed_cwd.as_deref(), Some(std::path::Path::new("/canonical/worktree")));
-    assert_eq!(padded.env_id, grant.env_id, "legacy env id is only the grant projection");
+    assert_eq!(
+        grant.allowed_cwd.as_deref(),
+        Some(std::path::Path::new("/canonical/worktree"))
+    );
+    assert_eq!(
+        padded.env_id, grant.env_id,
+        "legacy env id is only the grant projection"
+    );
 
     let mut whitespace = test_dispatch_params(Some("custom"), "canonical default env");
     whitespace.env_id = Some(" \t ".to_string());
-    let default = crate::exec_env_ops::resolve_env_binding(
-        whitespace.env_id.as_deref(),
-        None,
-        false,
-        None,
-    )
-    .expect("whitespace-only env id resolves through the real env gate");
-    let grant = mint_execution_grant(
-        &mut whitespace,
-        "default-grant",
-        &default,
-    )
-    .expect("whitespace-only env id resolves to the daemon default");
+    let default =
+        crate::exec_env_ops::resolve_env_binding(whitespace.env_id.as_deref(), None, false, None)
+            .expect("whitespace-only env id resolves through the real env gate");
+    let grant = mint_execution_grant(&mut whitespace, "default-grant", &default)
+        .expect("whitespace-only env id resolves to the daemon default");
     assert_eq!(grant.env_id, None);
     assert_eq!(grant.allowed_cwd, None);
-    assert_eq!(whitespace.env_id, None, "projection drops non-canonical whitespace input");
+    assert_eq!(
+        whitespace.env_id, None,
+        "projection drops non-canonical whitespace input"
+    );
 }
 
 #[test]
