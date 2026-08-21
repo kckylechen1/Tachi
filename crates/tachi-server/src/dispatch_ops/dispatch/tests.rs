@@ -174,6 +174,14 @@ fn typed_ingress_equivalence_matrix_covers_missing_and_effective_values() {
             timeout_secs: 42,
             populated: true,
         },
+        Case {
+            name: "explicit zero ingress budgets",
+            model: None,
+            level: tachi_params::ExecutionLevel::L1,
+            max_turns: Some(0),
+            timeout_secs: 0,
+            populated: false,
+        },
     ];
     let server = crate::tests::make_server();
 
@@ -212,6 +220,8 @@ fn typed_ingress_equivalence_matrix_covers_missing_and_effective_values() {
         .expect(case.name);
         assert_eq!(grant.max_turns, case.max_turns, "{}", case.name);
         assert_eq!(grant.timeout_secs, case.timeout_secs, "{}", case.name);
+        assert_eq!(params.max_turns, case.max_turns, "{}", case.name);
+        assert_eq!(params.timeout_secs, case.timeout_secs, "{}", case.name);
         assert_eq!(grant.allowed_tools, params.allowed_tools, "{}", case.name);
         assert_eq!(
             grant.credential_profiles, params.credential_profiles,
@@ -426,13 +436,23 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     let path = std::env::join_paths(path_entries).expect("join test PATH");
     let _path = EnvRestore::set_os("PATH", &path);
     let server = crate::tests::make_server();
+    let canonical_hub = crate::tests::make_mcp_capability("mcp:canonical-server", 1);
+    let disallowed_hub = crate::tests::make_mcp_capability("mcp:disallowed-server", 1);
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&canonical_hub)
+                .and_then(|_| store.hub_register(&disallowed_hub))
+                .map_err(|error| format!("register test Hub MCP capability: {error}"))
+        })
+        .expect("seed Hub MCP capabilities for generated launch config");
     let mut params = test_dispatch_params(Some("claude"), "real composed MCP dispatch");
     params.inject_tachi_mcp = Some(true);
-    params.inject_hub_mcps = Some(false);
-    params.allowed_mcp_servers = vec!["top-level-server".to_string()];
+    params.inject_hub_mcps = Some(true);
+    params.allowed_mcp_servers = vec!["canonical-server".to_string()];
     params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
         inject_tachi_mcp: Some(false),
-        inject_hub_mcps: Some(true),
+        inject_hub_mcps: Some(false),
         allowed_facades: vec!["tachi_search".to_string()],
         allowed_mcp_servers: vec!["nested-server".to_string()],
         github_read: Some(false),
@@ -471,6 +491,20 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
         config["mcpServers"].get("tachi").is_some(),
         "generated launch config must use top-level inject_tachi=true: {config}"
     );
+    assert!(
+        config["mcpServers"].get("canonical-server").is_some(),
+        "generated launch config must receive the canonical Hub allowlist: {config}"
+    );
+    assert!(
+        config["mcpServers"].get("nested-server").is_none()
+            && config["mcpServers"].get("disallowed-server").is_none(),
+        "generated launch config must exclude stale and disallowed Hub MCPs: {config}"
+    );
+    assert_eq!(
+        config["mcpServers"].as_object().expect("MCP server object").len(),
+        2,
+        "generated launch config must contain exactly Tachi and the canonical Hub server: {config}"
+    );
     assert_eq!(
         response["tool_access"]["inject_tachi_mcp"],
         json!(true),
@@ -478,13 +512,18 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     );
     assert_eq!(
         response["tool_access"]["allowed_mcp_servers"],
-        json!(["top-level-server"]),
+        json!(["canonical-server"]),
         "accepted response must not retain the nested allowlist: {response}"
     );
     assert_eq!(
         response["profile"]["mcp_access"]["inject_tachi_mcp"],
         json!(true),
         "verbose planning profile must match the generated launch config: {response}"
+    );
+    assert_eq!(
+        response["profile"]["mcp_access"]["allowed_mcp_servers"],
+        json!(["canonical-server"]),
+        "verbose planning profile must use the launch allowlist: {response}"
     );
     std::fs::write(&release, b"release").expect("release fake claude");
     for _ in 0..120 {
@@ -632,6 +671,25 @@ fn compiled_permission_projection_preserves_verify_headless_spelling() {
         verify.permission_profile.as_deref(),
         Some("verify"),
         "the launcher must replay the admitted verify spelling, not full"
+    );
+    let grant = mint_execution_grant(
+        &mut verify,
+        "verify-headless-grant",
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("verify-headless grant minting preserves the admitted spelling");
+    assert_eq!(
+        grant.permission_profile.as_deref(),
+        Some("verify"),
+        "grant must preserve replay-safe verify rather than rewrite it to full"
+    );
+    assert_grant_legacy_projection(&verify, &grant)
+        .expect("grant projection must retain the replay-safe verify spelling");
+    let mut full_mutant = grant.clone();
+    full_mutant.permission_profile = Some("full".to_string());
+    assert!(
+        assert_grant_legacy_projection(&verify, &full_mutant).is_err(),
+        "verify-to-full grant mutant must be observable before a different env gate can run"
     );
 }
 
