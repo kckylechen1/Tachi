@@ -722,3 +722,71 @@ async fn p2_artifact_flow_and_kanban_metadata_are_exact_after_named_normalizatio
 {"agent":"codex","allowed_mcp_servers":["launch-mcp"],"auto_capability_bundle":false,"capability_bundle":{"artifact_file":"<RUN>/capability_bundle.json","disabled":true,"error":null,"host":"codex","host_tools_count":0,"injected":false,"packs_count":0,"primary_skill":null,"query":"typed prompt lifecycle task","reason":"auto_capability_bundle=false","requested":false,"source":"unset","status":"disabled","supporting_capabilities_count":0},"dispatch_id":"typed-dispatch","event":"dispatch_started","feedback_rules":{"count":0,"rules":[],"status":"none"},"flow_id":"missing-flow","issue_ref":"#1817","mcp_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"pr_ref":"#1817","profile":"typed-profile","stage":"implementation","timestamp":"<TIMESTAMP>","tool_profile":"typed-tool-profile","v2":false}
 {"dispatch_id":"typed-dispatch","error":"Invalid flow_id: 'missing-flow'. Expected a safe id starting with 'flow_' and containing only ASCII letters, numbers, '_' or '-'. Example: flow_20260609T014037Z_tachi_dispatch_ux_smoke","event":"flow_dispatch_marker_failed","flow_id":"missing-flow","timestamp":"<TIMESTAMP>"}"##);
 }
+
+#[tokio::test]
+async fn p2_real_plan_stage_matrix_is_board_first_and_receipt_bound() {
+    let _guard = crate::utils::global_test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let prior_review = std::env::var_os("DISPATCH_V2_PLAN_REVIEW");
+    let prior_timeout = std::env::var_os("DISPATCH_V2_PLAN_TIMEOUT_SECS");
+    struct Case {
+        name: &'static str, v2: bool, review: Option<&'static str>, timeout: Option<&'static str>,
+        planner: Option<crate::dispatch_ops::dispatch_v2::PlanStageTestOverride>, expected_state: &'static str,
+        expected_error: Option<&'static str>, early: bool,
+    }
+    let cases = [
+        Case { name: "v1", v2: false, review: None, timeout: None, planner: None, expected_state: "TASK_STATE_WORKING", expected_error: None, early: false },
+        Case { name: "v2_auto_approved", v2: true, review: None, timeout: None, planner: Some(crate::dispatch_ops::dispatch_v2::PlanStageTestOverride::Success { plan_md: "## Goal\nplanner success".into(), duration_ms: 7 }), expected_state: "TASK_STATE_WORKING", expected_error: None, early: false },
+        Case { name: "pending_review", v2: true, review: Some("true"), timeout: None, planner: Some(crate::dispatch_ops::dispatch_v2::PlanStageTestOverride::Success { plan_md: "## Goal\npending review".into(), duration_ms: 8 }), expected_state: "TASK_STATE_INPUT_REQUIRED", expected_error: None, early: true },
+        Case { name: "planner_failure", v2: true, review: None, timeout: None, planner: Some(crate::dispatch_ops::dispatch_v2::PlanStageTestOverride::Failure("planner-failure-only".into())), expected_state: "TASK_STATE_FAILED", expected_error: Some("planner-failure-only"), early: false },
+        Case { name: "timeout", v2: true, review: None, timeout: Some("0"), planner: Some(crate::dispatch_ops::dispatch_v2::PlanStageTestOverride::Pending), expected_state: "TASK_STATE_FAILED", expected_error: Some("timed out after 0s"), early: false },
+    ];
+    for case in cases {
+        match case.review { Some(value) => std::env::set_var("DISPATCH_V2_PLAN_REVIEW", value), None => std::env::remove_var("DISPATCH_V2_PLAN_REVIEW") };
+        match case.timeout { Some(value) => std::env::set_var("DISPATCH_V2_PLAN_TIMEOUT_SECS", value), None => std::env::remove_var("DISPATCH_V2_PLAN_TIMEOUT_SECS") };
+        crate::dispatch_ops::dispatch_v2::set_plan_stage_test_override(case.planner.clone());
+        let server = crate::tests::make_server();
+        let (request, assignment, grant, mut profile, skills) = typed_context();
+        profile.auto_capability_bundle = false;
+        let assembly = typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
+        let workspace = tempfile::tempdir().expect(case.name);
+        let artifacts = write_dispatch_artifacts(DispatchArtifactInputs {
+            workspace_dir: workspace.path(), dispatch_id: case.name, request: &request, assignment: &assignment,
+            grant: &grant, profile: &profile, base_prompt: &assembly.prompt, prompt_assembly: &assembly,
+            effective_skills_for_files: &skills, v2: case.v2,
+        }).await.expect(case.name);
+        init_kanban_and_flow(FlowSetupInputs {
+            server: &server, dispatch_id: case.name, request: &request, assignment: &assignment, grant: &grant,
+            resolved_profile: &profile, plan_path: &artifacts.plan_path, workspace_dir: workspace.path(), prompt_md_path: &artifacts.prompt_md_path,
+            context_md_path: &artifacts.context_md_path, trajectory_path: &artifacts.trajectory_path,
+            capability_bundle_card: &artifacts.capability_bundle_card, capability_bundle_file: &artifacts.capability_bundle_file,
+        }).await.expect(case.name);
+        assert_eq!(crate::dispatch_ops::get_kanban_state(&server, case.name).await.as_deref(), Some("TASK_STATE_WORKING"), "{} must seed board before planning", case.name);
+        let profile_payload = json!({"profile": "typed-profile"});
+        let outcome = super::super::plan_stage::run_v2_plan_stage(super::super::plan_stage::PlanStageInputs {
+            server: &server, request: &request, dispatch_id: case.name, assignment: &assignment, resolved_profile: &profile,
+            profile_payload: &profile_payload, base_prompt: &assembly.prompt, plan_path: &artifacts.plan_path,
+            prompt_md_path: &artifacts.prompt_md_path, context_md_path: &artifacts.context_md_path,
+            trajectory_path: &artifacts.trajectory_path, workspace_dir: workspace.path(), capability_bundle_card: &artifacts.capability_bundle_card,
+            capability_bundle_file: &artifacts.capability_bundle_file, feedback_rules_trace: &artifacts.feedback_rules_trace,
+            v2_decision: if case.v2 { crate::dispatch_ops::dispatch_v2::V2Decision::Enabled } else { crate::dispatch_ops::dispatch_v2::V2Decision::Disabled },
+        }).await;
+        match case.expected_error {
+            Some(expected) => match outcome { Err(error) => assert!(error.contains(expected), "{}", case.name), Ok(_) => panic!("{} unexpectedly succeeded", case.name), },
+            None => {
+                let outcome = outcome.expect(case.name);
+                assert_eq!(outcome.early_response.is_some(), case.early, "{}", case.name);
+                if case.v2 && !case.early { assert!(outcome.prompt.contains("## Plan (from Stage 1)"), "{}", case.name); }
+                if case.early {
+                    let response: Value = serde_json::from_str(outcome.early_response.as_deref().expect(case.name)).expect(case.name);
+                    assert_eq!(response["task"]["status"]["state"], json!("TASK_STATE_INPUT_REQUIRED"));
+                }
+            }
+        }
+        assert_eq!(crate::dispatch_ops::get_kanban_state(&server, case.name).await.as_deref(), Some(case.expected_state), "{}", case.name);
+        let trace = std::fs::read_to_string(&artifacts.trajectory_path).expect(case.name);
+        assert!(trace.lines().next().expect(case.name).contains("dispatch_started"), "{} artifact receipt must predate planner", case.name);
+    }
+    crate::dispatch_ops::dispatch_v2::set_plan_stage_test_override(None);
+    match prior_review { Some(value) => std::env::set_var("DISPATCH_V2_PLAN_REVIEW", value), None => std::env::remove_var("DISPATCH_V2_PLAN_REVIEW") };
+    match prior_timeout { Some(value) => std::env::set_var("DISPATCH_V2_PLAN_TIMEOUT_SECS", value), None => std::env::remove_var("DISPATCH_V2_PLAN_TIMEOUT_SECS") };
+}

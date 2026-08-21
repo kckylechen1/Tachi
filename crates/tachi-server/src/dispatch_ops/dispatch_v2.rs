@@ -140,6 +140,30 @@ pub(super) struct PlanOutcome {
     pub duration_ms: u64,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) enum PlanStageTestOverride {
+    Success { plan_md: String, duration_ms: u64 },
+    Failure(String),
+    Pending,
+}
+
+#[cfg(test)]
+fn plan_stage_test_override() -> &'static std::sync::Mutex<Option<PlanStageTestOverride>> {
+    static OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<PlanStageTestOverride>>> =
+        std::sync::OnceLock::new();
+    OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// One-shot planner outcome injection for the dispatch lifecycle discriminator.
+/// Compiled out of production: provider execution remains the only runtime path.
+#[cfg(test)]
+pub(super) fn set_plan_stage_test_override(value: Option<PlanStageTestOverride>) {
+    *plan_stage_test_override()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
+}
+
 /// Run Stage 1. Returns the plan body and elapsed time, or a descriptive
 /// error suitable for surfacing to the caller AND for writing to status.json.
 pub(super) async fn run_plan_stage(
@@ -147,6 +171,27 @@ pub(super) async fn run_plan_stage(
     task: &str,
     label: &str,
 ) -> Result<PlanOutcome, String> {
+    #[cfg(test)]
+    let override_result = {
+        plan_stage_test_override()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    };
+    #[cfg(test)]
+    if let Some(override_result) = override_result {
+        return match override_result {
+            PlanStageTestOverride::Success {
+                plan_md,
+                duration_ms,
+            } => Ok(PlanOutcome {
+                plan_md,
+                duration_ms,
+            }),
+            PlanStageTestOverride::Failure(error) => Err(error),
+            PlanStageTestOverride::Pending => std::future::pending().await,
+        };
+    }
     if task.trim().is_empty() {
         return Err("dispatch v2: task is empty; cannot plan".to_string());
     }
