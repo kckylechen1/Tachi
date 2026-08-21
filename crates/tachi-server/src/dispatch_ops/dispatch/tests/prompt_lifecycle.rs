@@ -502,3 +502,223 @@ fn p2_typed_response_keeps_profile_mcp_and_slim_verbose_shape() {
     assert_eq!(slim["issue_ref"], "#1817");
     assert_eq!(slim["flow_id"], "missing-flow");
 }
+
+fn response_for(
+    request: &tachi_params::StaffAssignmentRequest,
+    assignment: &tachi_params::ResolvedStaffAssignment,
+    profile: &crate::dispatch_profile::ResolvedDispatchProfile,
+    verbose: bool,
+) -> String {
+    let authority = json!({"authority": "typed"});
+    let reports = Vec::new();
+    let empty = Value::Null;
+    let no_server_url = None;
+    let no_backend_metadata = None;
+    let profile_payload = json!({"profile": "typed-profile"});
+    build_dispatch_response(DispatchResponseInputs {
+        dispatch_id: "typed-dispatch",
+        assignment,
+        profile_payload: &profile_payload,
+        resolved_profile: profile,
+        authority: &authority,
+        credential_reports_json: &reports,
+        capability_bundle_card: &empty,
+        capability_bundle_file: "bundle.json",
+        feedback_rules_trace: &empty,
+        harness_transport: "cli",
+        harness_server_url: &no_server_url,
+        execution_backend_name: None,
+        execution_backend_metadata: &no_backend_metadata,
+        acpx_enabled: false,
+        native_acp_enabled: false,
+        v2: false,
+        plan_duration_ms: None,
+        request,
+        verbose,
+        plan_path: std::path::Path::new("plan.md"),
+        prompt_md_path: std::path::Path::new("prompt.md"),
+        context_md_path: std::path::Path::new("context.md"),
+        trajectory_path: std::path::Path::new("trajectory.jsonl"),
+        workspace_dir: std::path::Path::new("run"),
+    })
+    .expect("typed response")
+}
+
+#[test]
+fn p2_response_slim_and_verbose_serialization_are_exact_goldens() {
+    let (request, assignment, _grant, profile, _skills) = typed_context();
+    let slim = response_for(&request, &assignment, &profile, false);
+    let verbose = response_for(&request, &assignment, &profile, true);
+
+    assert_eq!(slim, r##"{"acp_native":null,"acpx":null,"agent":"codex","authority":{"authority":"typed"},"auto_capability_bundle":true,"capability_bundle":null,"capability_bundle_file":"bundle.json","context_file":"context.md","credentials":[],"dispatch_id":"typed-dispatch","duration_ms_plan":null,"execution_backend":null,"fallback_chain":["typed-fallback"],"feedback_rules":null,"flow_id":"missing-flow","harness_server_url":null,"harness_transport":"cli","host_adapter":null,"issue_ref":"#1817","message":"Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.","plan_file":"plan.md","plan_review_status":"n/a","pr_ref":"#1817","prompt_file":"prompt.md","route_explanation":["typed assignment route"],"run_dir":"run","selected_profile":"typed-profile","state":"TASK_STATE_WORKING","suggested_complete_command":{"arguments":{"action":"complete","agent":"codex","diff_present":null,"dispatch_id":"typed-dispatch","evidence_refs":[],"flow_id":"missing-flow","issue_ref":"#1817","outcome":"success|failure|partial|aborted","pr_ref":"#1817","profile":"typed-profile","task":"typed prompt lifecycle task","tests_run":[]},"tool":"tachi_task"},"task":{"id":"typed-dispatch","status":{"state":"TASK_STATE_WORKING"}},"tool_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"trajectory_file":"trajectory.jsonl","v2":false,"verbose":false}"##);
+    assert_eq!(verbose, r##"{"acp_native":null,"acpx":null,"agent":"codex","authority":{"authority":"typed"},"auto_capability_bundle":true,"capability_bundle":null,"capability_bundle_file":"bundle.json","context_file":"context.md","credentials":[],"dispatch_id":"typed-dispatch","dispatch_profile":{"card":"typed-profile"},"duration_ms_plan":null,"execution_backend":null,"fallback_chain":["typed-fallback"],"feedback_rules":null,"flow_id":"missing-flow","harness_server_url":null,"harness_transport":"cli","host_adapter":null,"identity_receipt":{"planned":"typed"},"issue_ref":"#1817","message":"Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.","plan_file":"plan.md","plan_review_status":"n/a","pr_ref":"#1817","profile":{"profile":"typed-profile"},"prompt_file":"prompt.md","route_explanation":["typed assignment route"],"run_dir":"run","selected_profile":"typed-profile","state":"TASK_STATE_WORKING","suggested_complete_command":{"arguments":{"action":"complete","agent":"codex","diff_present":null,"dispatch_id":"typed-dispatch","evidence_refs":[],"flow_id":"missing-flow","issue_ref":"#1817","outcome":"success|failure|partial|aborted","pr_ref":"#1817","profile":"typed-profile","task":"typed prompt lifecycle task","tests_run":[]},"tool":"tachi_task"},"task":{"id":"typed-dispatch","status":{"state":"TASK_STATE_WORKING"}},"tool_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"trajectory_file":"trajectory.jsonl","v2":false,"verbose":true}"##);
+}
+
+#[tokio::test]
+async fn p2_request_and_assignment_outputs_are_one_owner_discriminators() {
+    let server = crate::tests::make_server();
+    let (request, assignment, grant, profile, skills) = typed_context();
+
+    struct RequestCase {
+        name: &'static str,
+        mutate: fn(&mut tachi_params::StaffAssignmentRequest),
+        pointer: &'static str,
+        expected: &'static str,
+        sibling: &'static str,
+    }
+    let request_cases = [
+        RequestCase { name: "task", mutate: |v| v.task = "request-task-only".into(), pointer: "/suggested_complete_command/arguments/task", expected: "request-task-only", sibling: "typed prompt lifecycle task" },
+        RequestCase { name: "issue", mutate: |v| v.issue_ref = Some("#request-issue-only".into()), pointer: "/issue_ref", expected: "#request-issue-only", sibling: "#1817" },
+        RequestCase { name: "pr", mutate: |v| v.pr_ref = Some("#request-pr-only".into()), pointer: "/pr_ref", expected: "#request-pr-only", sibling: "#1817" },
+        RequestCase { name: "flow", mutate: |v| v.flow_id = Some("request-flow-only".into()), pointer: "/flow_id", expected: "request-flow-only", sibling: "missing-flow" },
+    ];
+    for case in request_cases {
+        let mut mutant = request.clone();
+        (case.mutate)(&mut mutant);
+        let response: Value = serde_json::from_str(&response_for(&mutant, &assignment, &profile, false)).expect(case.name);
+        assert_eq!(response.pointer(case.pointer), Some(&json!(case.expected)), "{} must own {}", case.name, case.pointer);
+        assert_ne!(response.pointer(case.pointer), Some(&json!(case.sibling)), "{} must reject its baseline sibling", case.name);
+    }
+
+    let baseline_prompt = typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
+    let mut stage = request.clone();
+    stage.stage = Some("request-stage-only".into());
+    let stage_prompt = typed_prompt(&server, &stage, &assignment, &grant, &profile, &skills).await;
+    assert_ne!(stage_prompt.prompt, baseline_prompt.prompt);
+    assert!(stage_prompt.prompt.contains("- stage: request-stage-only"));
+    assert!(!stage_prompt.prompt.contains("- stage: implementation"));
+
+    struct AssignmentCase {
+        name: &'static str,
+        mutate: fn(&mut tachi_params::ResolvedStaffAssignment),
+        pointer: &'static str,
+        expected: Value,
+        sibling: Value,
+    }
+    let assignment_cases = [
+        AssignmentCase { name: "backend", mutate: |v| v.selected_backend = "assignment-backend-only".into(), pointer: "/agent", expected: json!("assignment-backend-only"), sibling: json!("codex") },
+        AssignmentCase { name: "profile", mutate: |v| v.selected_profile = Some("assignment-profile-only".into()), pointer: "/selected_profile", expected: json!("assignment-profile-only"), sibling: json!("typed-profile") },
+        AssignmentCase { name: "route", mutate: |v| v.route_explanation = vec!["assignment-route-only".into()], pointer: "/route_explanation", expected: json!(["assignment-route-only"]), sibling: json!(["typed assignment route"]) },
+        AssignmentCase { name: "fallback", mutate: |v| v.fallback_chain = vec!["assignment-fallback-only".into()], pointer: "/fallback_chain", expected: json!(["assignment-fallback-only"]), sibling: json!(["typed-fallback"]) },
+        AssignmentCase { name: "identity", mutate: |v| v.identity_receipt = json!({"identity": "assignment-only"}), pointer: "/identity_receipt", expected: json!({"identity": "assignment-only"}), sibling: json!({"planned": "typed"}) },
+        AssignmentCase { name: "host", mutate: |v| v.host_adapter = Some("assignment-host-only".into()), pointer: "/host_adapter", expected: json!("assignment-host-only"), sibling: Value::Null },
+    ];
+    for case in assignment_cases {
+        let mut mutant = assignment.clone();
+        (case.mutate)(&mut mutant);
+        let response: Value = serde_json::from_str(&response_for(&request, &mutant, &profile, case.name == "identity")).expect(case.name);
+        assert_eq!(response.pointer(case.pointer), Some(&case.expected), "{} must own {}", case.name, case.pointer);
+        assert_ne!(response.pointer(case.pointer), Some(&case.sibling), "{} must reject its baseline sibling", case.name);
+    }
+}
+
+#[tokio::test]
+async fn p2_grant_and_private_profile_prompt_matrix_is_one_owner() {
+    let server = crate::tests::make_server();
+    let (request, assignment, grant, profile, skills) = typed_context();
+    let baseline = typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
+
+    let mut launch_mcp = grant.clone();
+    launch_mcp.mcp_access = Some(mcp_access(&["grant-launch-only"], true));
+    let launch = typed_prompt(&server, &request, &assignment, &launch_mcp, &profile, &skills).await;
+    assert_ne!(launch.prompt, baseline.prompt);
+    assert!(launch.prompt.contains("grant-launch-only"));
+    assert!(!launch.prompt.contains("launch-mcp"));
+
+    let mut filtered_profile = profile.clone();
+    filtered_profile.auto_capability_bundle = false;
+    let filtered = typed_prompt(&server, &request, &assignment, &grant, &filtered_profile, &[]).await;
+    assert!(!filtered.prompt.contains("typed-skill"));
+    assert_eq!(filtered.capability_bundle["requested"], json!(false));
+    assert_eq!(filtered.capability_bundle["source"], json!("unset"));
+
+    let mut private = profile.clone();
+    private.tool_profile = Some("private-tool-only".into());
+    private.mcp_access = mcp_access(&["private-profile-mcp-only"], false);
+    private.profile_card = Some(json!({"card": "private-card-only"}));
+    private.auto_capability_bundle = false;
+    let private_prompt = typed_prompt(&server, &request, &assignment, &grant, &private, &skills).await;
+    assert_ne!(private_prompt.prompt, baseline.prompt);
+    assert!(private_prompt.prompt.contains("private-tool-only"));
+    assert!(private_prompt.prompt.contains("private-profile-mcp-only"));
+    assert!(!private_prompt.prompt.contains("typed-tool-profile"));
+    assert_eq!(private_prompt.capability_bundle["requested"], json!(false));
+
+    let private_response: Value = serde_json::from_str(&response_for(&request, &assignment, &private, true)).expect("private response");
+    assert_eq!(private_response["dispatch_profile"], json!({"card": "private-card-only"}));
+    assert_eq!(private_response["tool_access"]["allowed_mcp_servers"], json!(["private-profile-mcp-only"]));
+}
+
+fn normalize_dynamic_bytes(bytes: String, root: &str) -> String {
+    bytes.replace(root, "<RUN>")
+}
+
+#[tokio::test]
+async fn p2_artifact_flow_and_kanban_metadata_are_exact_after_named_normalization() {
+    let server = crate::tests::make_server();
+    let (request, assignment, grant, mut profile, skills) = typed_context();
+    profile.auto_capability_bundle = false;
+    let assembly = typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
+    let workspace = tempfile::tempdir().expect("typed lifecycle workspace");
+    let trajectory = workspace.path().join("trajectory.jsonl");
+    append_trajectory_event(&trajectory, json!({"event": "dispatch_received", "dispatch_id": "typed-dispatch", "timestamp": "FIXED"}));
+    let artifacts = write_dispatch_artifacts(DispatchArtifactInputs {
+        workspace_dir: workspace.path(), dispatch_id: "typed-dispatch", request: &request, assignment: &assignment,
+        grant: &grant, profile: &profile, base_prompt: &assembly.prompt, prompt_assembly: &assembly,
+        effective_skills_for_files: &skills, v2: false,
+    }).await.expect("typed artifacts write");
+
+    let root = workspace.path().to_string_lossy();
+    assert_eq!(std::fs::read_to_string(&artifacts.plan_path).expect("plan bytes"), assembly.prompt);
+    assert_eq!(std::fs::read_to_string(&artifacts.prompt_md_path).expect("prompt bytes"), assembly.prompt);
+    let context = normalize_dynamic_bytes(std::fs::read_to_string(&artifacts.context_md_path).expect("context bytes"), &root);
+    let expected_context = format!(
+        "# Dispatch Context: typed-dispatch\n\nAgent: codex\n\nDispatch profile: typed-profile\n\nTool profile: typed-tool-profile\n\nFlow: missing-flow\n\nIssue: #1817\n\nPR: #1817\n\nStage: implementation\n\nV2: false\n\nSkills: [\"typed-skill\"]\n\nCapability bundle: status=disabled requested=false injected=false artifact=<RUN>/capability_bundle.json\n\n\n\n{}",
+        assembly.prompt,
+    );
+    assert_eq!(context, expected_context);
+
+    let bundle = normalize_dynamic_bytes(std::fs::read_to_string(workspace.path().join("capability_bundle.json")).expect("bundle bytes"), &root);
+    assert_eq!(bundle, r#"{
+  "activation_steps": [],
+  "disabled": true,
+  "error": null,
+  "feedback_rules": {
+    "count": 0,
+    "rules": [],
+    "status": "none"
+  },
+  "host": "codex",
+  "host_tools": [],
+  "injected": false,
+  "packs": [],
+  "primary_skill": null,
+  "query": "typed prompt lifecycle task",
+  "rationale": null,
+  "reason": "auto_capability_bundle=false",
+  "requested": false,
+  "requested_raw": null,
+  "section": null,
+  "source": "unset",
+  "status": "disabled",
+  "supporting_capabilities": []
+}"#);
+
+    init_kanban_and_flow(FlowSetupInputs {
+        server: &server, dispatch_id: "typed-dispatch", request: &request, assignment: &assignment, grant: &grant,
+        resolved_profile: &profile, plan_path: &artifacts.plan_path, workspace_dir: workspace.path(), prompt_md_path: &artifacts.prompt_md_path,
+        context_md_path: &artifacts.context_md_path, trajectory_path: &artifacts.trajectory_path,
+        capability_bundle_card: &artifacts.capability_bundle_card, capability_bundle_file: &artifacts.capability_bundle_file,
+    }).await.expect("board-first initialization");
+    assert_eq!(crate::dispatch_ops::get_kanban_state(&server, "typed-dispatch").await.as_deref(), Some("TASK_STATE_WORKING"));
+
+    let mut events = std::fs::read_to_string(&artifacts.trajectory_path).expect("trajectory")
+        .lines().map(|line| serde_json::from_str::<Value>(line).expect("trajectory JSON")).collect::<Vec<_>>();
+    for event in &mut events {
+        if event["timestamp"] != json!("FIXED") { event["timestamp"] = json!("<TIMESTAMP>"); }
+    }
+    let events = events.into_iter().map(|event| normalize_dynamic_bytes(serde_json::to_string(&event).expect("event serialize"), &root)).collect::<Vec<_>>().join("\n");
+    assert_eq!(events, r##"{"dispatch_id":"typed-dispatch","event":"dispatch_received","timestamp":"FIXED"}
+{"agent":"codex","allowed_mcp_servers":["launch-mcp"],"auto_capability_bundle":false,"capability_bundle":{"artifact_file":"<RUN>/capability_bundle.json","disabled":true,"error":null,"host":"codex","host_tools_count":0,"injected":false,"packs_count":0,"primary_skill":null,"query":"typed prompt lifecycle task","reason":"auto_capability_bundle=false","requested":false,"source":"unset","status":"disabled","supporting_capabilities_count":0},"dispatch_id":"typed-dispatch","event":"dispatch_started","feedback_rules":{"count":0,"rules":[],"status":"none"},"flow_id":"missing-flow","issue_ref":"#1817","mcp_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"pr_ref":"#1817","profile":"typed-profile","stage":"implementation","timestamp":"<TIMESTAMP>","tool_profile":"typed-tool-profile","v2":false}
+{"dispatch_id":"typed-dispatch","error":"Invalid flow_id: 'missing-flow'. Expected a safe id starting with 'flow_' and containing only ASCII letters, numbers, '_' or '-'. Example: flow_20260609T014037Z_tachi_dispatch_ux_smoke","event":"flow_dispatch_marker_failed","flow_id":"missing-flow","timestamp":"<TIMESTAMP>"}"##);
+}
