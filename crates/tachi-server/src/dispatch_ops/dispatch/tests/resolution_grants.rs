@@ -667,7 +667,7 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
     let no_backend_metadata = None;
     let response = build_dispatch_response(DispatchResponseInputs {
         dispatch_id: &start.dispatch_id,
-        agent_norm: &start.agent_norm,
+        assignment: &start.resolved_assignment,
         profile_payload: &start.profile_payload,
         resolved_profile: &start.resolved_profile,
         authority: &authority,
@@ -677,7 +677,6 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
         feedback_rules_trace: &empty_value,
         harness_transport: "cli",
         harness_server_url: &no_server_url,
-        host_adapter: &start.host_adapter,
         execution_backend_name: None,
         execution_backend_metadata: &no_backend_metadata,
         acpx_enabled: false,

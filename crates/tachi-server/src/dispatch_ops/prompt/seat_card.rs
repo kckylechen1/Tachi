@@ -213,14 +213,10 @@ pub(super) fn resolve_seat_card_readiness(
     if !inject_card {
         return None;
     }
-    let profile_id = profile
+    let profile_id = assignment
         .selected_profile
         .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .or(assignment
-            .selected_profile
-            .as_deref()
-            .filter(|s| !s.trim().is_empty()))
         .map(str::to_string);
     let vendor = resolve_dispatch_vendor(assignment, profile);
     if profile_id.is_none() && vendor.is_none() {

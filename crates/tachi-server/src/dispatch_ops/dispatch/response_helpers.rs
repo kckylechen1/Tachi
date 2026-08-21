@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn suggested_complete_payload(
     dispatch_id: &str,
-    agent: &str,
+    assignment: &tachi_params::ResolvedStaffAssignment,
     request: &tachi_params::StaffAssignmentRequest,
 ) -> serde_json::Value {
     json!({
@@ -11,7 +11,7 @@ pub(super) fn suggested_complete_payload(
             "action": "complete",
             "dispatch_id": dispatch_id,
             "task": request.task,
-            "agent": agent,
+            "agent": assignment.selected_backend,
             "outcome": "success|failure|partial|aborted",
             "profile": request.profile,
             "flow_id": request.flow_id,
@@ -91,7 +91,7 @@ impl Drop for McpCleanup {
 
 pub(super) struct DispatchResponseInputs<'a> {
     pub(super) dispatch_id: &'a str,
-    pub(super) agent_norm: &'a str,
+    pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
     pub(super) profile_payload: &'a Value,
     pub(super) resolved_profile: &'a ResolvedDispatchProfile,
     /// #894 S2d effective-authority receipt (compiled contract + enforcement).
@@ -102,7 +102,6 @@ pub(super) struct DispatchResponseInputs<'a> {
     pub(super) feedback_rules_trace: &'a Value,
     pub(super) harness_transport: &'a str,
     pub(super) harness_server_url: &'a Option<String>,
-    pub(super) host_adapter: &'a Option<String>,
     pub(super) execution_backend_name: Option<&'static str>,
     pub(super) execution_backend_metadata: &'a Option<Value>,
     pub(super) acpx_enabled: bool,
@@ -145,13 +144,13 @@ pub(super) fn build_dispatch_response(
             "id": inputs.dispatch_id,
             "status": { "state": DISPATCH_RESPONSE_INITIAL_STATE },
         },
-        "agent": inputs.agent_norm,
-        "selected_profile": inputs.resolved_profile.selected_profile,
+        "agent": inputs.assignment.selected_backend,
+        "selected_profile": inputs.assignment.selected_profile,
         "authority": inputs.authority,
         "tool_access": inputs.resolved_profile.mcp_access,
         "credentials": inputs.credential_reports_json,
-        "route_explanation": inputs.resolved_profile.route_explanation,
-        "fallback_chain": inputs.resolved_profile.fallback_chain,
+        "route_explanation": inputs.assignment.route_explanation,
+        "fallback_chain": inputs.assignment.fallback_chain,
         "issue_ref": inputs.request.issue_ref,
         "pr_ref": inputs.request.pr_ref,
         "flow_id": inputs.request.flow_id,
@@ -161,7 +160,7 @@ pub(super) fn build_dispatch_response(
         "feedback_rules": inputs.feedback_rules_trace,
         "harness_transport": inputs.harness_transport,
         "harness_server_url": inputs.harness_server_url,
-        "host_adapter": inputs.host_adapter,
+        "host_adapter": inputs.assignment.host_adapter,
         "execution_backend": inputs.execution_backend_name,
         "acpx": if inputs.acpx_enabled { inputs.execution_backend_metadata.clone() } else { None },
         "acp_native": if inputs.native_acp_enabled { inputs.execution_backend_metadata.clone() } else { None },
@@ -169,7 +168,7 @@ pub(super) fn build_dispatch_response(
         "plan_review_status": if inputs.v2 { "approved" } else { "n/a" },
         "duration_ms_plan": inputs.plan_duration_ms,
         "message": "Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.",
-        "suggested_complete_command": suggested_complete_payload(inputs.dispatch_id, inputs.agent_norm, inputs.request),
+        "suggested_complete_command": suggested_complete_payload(inputs.dispatch_id, inputs.assignment, inputs.request),
         "plan_file": inputs.plan_path.to_string_lossy(),
         "prompt_file": inputs.prompt_md_path.to_string_lossy(),
         "context_file": inputs.context_md_path.to_string_lossy(),
@@ -185,7 +184,7 @@ pub(super) fn build_dispatch_response(
         object.insert("profile".to_string(), inputs.profile_payload.clone());
         object.insert(
             "identity_receipt".to_string(),
-            serde_json::to_value(&inputs.resolved_profile.identity_receipt).unwrap_or(Value::Null),
+            inputs.assignment.identity_receipt.clone(),
         );
         object.insert(
             "dispatch_profile".to_string(),

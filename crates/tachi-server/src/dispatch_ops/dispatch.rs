@@ -12,9 +12,7 @@ use super::launcher::{
     build_kimi_command, build_opencode_command,
 };
 use super::mcp_config::generate_mcp_config;
-use super::prompt::{
-    assemble_resolved_prompt_with_trace, resolve_assignment_skills, PromptDispatchInput,
-};
+use super::prompt::{assemble_resolved_prompt_with_trace, resolve_assignment_skills};
 use crate::agent_registry::{
     dispatch_agent_help_list, mcp_inject_supported, normalize_dispatch_agent_name,
     resolve_dispatch_agent,
@@ -498,32 +496,19 @@ pub(crate) async fn handle_tachi_dispatch(
     );
 
     // 2. Assemble prompt & write audit files to workspace
-    let allowed_mcp_servers = execution_grant
-        .mcp_access
-        .as_ref()
-        .map(|access| access.allowed_mcp_servers.as_slice())
-        .unwrap_or_default();
+    let (effective_skills_for_files, _) = resolve_assignment_skills(&request, &params.skills);
     let prompt_assembly = assemble_resolved_prompt_with_trace(
         server,
-        &PromptDispatchInput {
-            request: &request,
-            assignment: &resolved_assignment,
-            grant: &execution_grant,
-            profile: &resolved_profile,
-            skills: &params.skills,
-            context_query: params.context_query.as_deref(),
-            inject_tachi_mcp: execution_grant
-                .mcp_access
-                .as_ref()
-                .and_then(|access| access.inject_tachi_mcp)
-                .unwrap_or(false),
-            inject_card,
-            allowed_mcp_servers,
-        },
+        &request,
+        &resolved_assignment,
+        &execution_grant,
+        &resolved_profile,
+        &effective_skills_for_files,
+        params.context_query.as_deref(),
+        inject_card,
     )
     .await;
     let base_prompt = prompt_assembly.prompt.clone();
-    let (effective_skills_for_files, _) = resolve_assignment_skills(&request, &params.skills);
 
     let DispatchArtifacts {
         plan_path,
@@ -536,7 +521,6 @@ pub(crate) async fn handle_tachi_dispatch(
     } = write_dispatch_artifacts(DispatchArtifactInputs {
         workspace_dir: &workspace_dir,
         dispatch_id: &dispatch_id,
-        agent_norm: &agent_norm,
         request: &request,
         assignment: &resolved_assignment,
         grant: &execution_grant,
@@ -654,7 +638,7 @@ pub(crate) async fn handle_tachi_dispatch(
             server,
             request: &request,
             dispatch_id: &dispatch_id,
-            agent_norm: &agent_norm,
+            assignment: &resolved_assignment,
             resolved_profile: &resolved_profile,
             profile_payload: &profile_payload,
             base_prompt: &base_prompt,
@@ -835,7 +819,7 @@ pub(crate) async fn handle_tachi_dispatch(
     // 9. Immediately return — main agent is unblocked!
     build_dispatch_response(DispatchResponseInputs {
         dispatch_id: &dispatch_id,
-        agent_norm: &agent_norm,
+        assignment: &resolved_assignment,
         profile_payload: &profile_payload,
         resolved_profile: &resolved_profile,
         authority: &authority_receipt,
@@ -845,7 +829,6 @@ pub(crate) async fn handle_tachi_dispatch(
         feedback_rules_trace: &feedback_rules_trace,
         harness_transport: &harness_transport,
         harness_server_url: &harness_server_url,
-        host_adapter: &host_adapter,
         execution_backend_name,
         execution_backend_metadata: &execution_backend_metadata,
         acpx_enabled,

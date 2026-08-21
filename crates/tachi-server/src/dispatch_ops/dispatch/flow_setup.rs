@@ -40,7 +40,7 @@ pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<
             inputs.dispatch_id,
             json!({
                 "agent": inputs.assignment.selected_backend,
-                "profile": inputs.request.profile.clone(),
+                "profile": inputs.assignment.selected_profile.clone(),
                 "tool_profile": inputs.resolved_profile.tool_profile.clone(),
                 "stage": inputs.request.stage.clone(),
                 "task": inputs.request.task.clone(),
@@ -55,8 +55,8 @@ pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<
                 "capability_bundle_file": inputs.capability_bundle_file,
                 "evidence_required": inputs.assignment.evidence_required,
                 "route_explanation": inputs.assignment.route_explanation,
-                "identity_receipt": inputs.resolved_profile.identity_receipt,
-                "suggested_complete": suggested_complete_payload(inputs.dispatch_id, inputs.assignment.selected_backend.as_str(), inputs.request),
+                "identity_receipt": inputs.assignment.identity_receipt,
+                "suggested_complete": suggested_complete_payload(inputs.dispatch_id, inputs.assignment, inputs.request),
             }),
         ) {
             append_trajectory_event(

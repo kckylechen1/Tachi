@@ -3,7 +3,6 @@ use super::*;
 pub(super) struct DispatchArtifactInputs<'a> {
     pub(super) workspace_dir: &'a Path,
     pub(super) dispatch_id: &'a str,
-    pub(super) agent_norm: &'a str,
     pub(super) request: &'a tachi_params::StaffAssignmentRequest,
     pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
     pub(super) grant: &'a tachi_params::ExecutionGrant,
@@ -60,7 +59,7 @@ pub(super) async fn write_dispatch_artifacts(
     let context_summary = {
         let mut sections = Vec::new();
         sections.push(format!("# Dispatch Context: {}", ctx.dispatch_id));
-        sections.push(format!("Agent: {}", ctx.agent_norm));
+        sections.push(format!("Agent: {}", ctx.assignment.selected_backend));
         sections.push(format!(
             "Dispatch profile: {}",
             ctx.request.profile.as_deref().unwrap_or("none")

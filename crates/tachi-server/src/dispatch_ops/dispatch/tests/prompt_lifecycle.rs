@@ -109,30 +109,17 @@ async fn typed_prompt(
     assignment: &tachi_params::ResolvedStaffAssignment,
     grant: &tachi_params::ExecutionGrant,
     profile: &crate::dispatch_profile::ResolvedDispatchProfile,
-    skills: &[String],
+    effective_skills: &[String],
 ) -> crate::dispatch_ops::prompt::PromptAssembly {
-    let allowed_servers = grant
-        .mcp_access
-        .as_ref()
-        .map(|access| access.allowed_mcp_servers.as_slice())
-        .unwrap_or_default();
     crate::dispatch_ops::assemble_resolved_prompt_with_trace(
         server,
-        &crate::dispatch_ops::PromptDispatchInput {
-            request,
-            assignment,
-            grant,
-            profile,
-            skills,
-            context_query: Some("typed context query"),
-            inject_tachi_mcp: grant
-                .mcp_access
-                .as_ref()
-                .and_then(|access| access.inject_tachi_mcp)
-                .unwrap_or(false),
-            inject_card: true,
-            allowed_mcp_servers: allowed_servers,
-        },
+        request,
+        assignment,
+        grant,
+        profile,
+        effective_skills,
+        Some("typed context query"),
+        true,
     )
     .await
 }
@@ -156,6 +143,11 @@ async fn p2_typed_prompt_contexts_ignore_poisoned_legacy_projection() {
     let after_poison =
         typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
 
+    let legacy_after =
+        crate::dispatch_ops::assemble_prompt_with_trace(&server, &poisoned_legacy).await;
+    assert!(legacy_after.prompt.contains("poisoned legacy task"));
+    assert_ne!(baseline.prompt, legacy_after.prompt);
+
     assert_eq!(baseline.prompt, after_poison.prompt);
     assert_eq!(baseline.capability_bundle, after_poison.capability_bundle);
     assert_eq!(baseline.feedback_rules, after_poison.feedback_rules);
@@ -178,6 +170,27 @@ async fn p2_typed_prompt_contexts_ignore_poisoned_legacy_projection() {
     assert!(semantic_prompt.prompt.contains("semantic request mutant"));
     assert_ne!(baseline.prompt, semantic_prompt.prompt);
 
+    let mut assignment_mutant = assignment.clone();
+    assignment_mutant.selected_backend = "assignment-mutant-backend".to_string();
+    assignment_mutant.selected_profile = Some("assignment-mutant-profile".to_string());
+    assignment_mutant.selected_model = Some("assignment-mutant-model".to_string());
+    let assignment_prompt = typed_prompt(
+        &server,
+        &request,
+        &assignment_mutant,
+        &grant,
+        &profile,
+        &skills,
+    )
+    .await;
+    assert!(assignment_prompt
+        .prompt
+        .contains("assignment-mutant-backend"));
+    assert!(assignment_prompt
+        .prompt
+        .contains("assignment-mutant-profile"));
+    assert_ne!(baseline.prompt, assignment_prompt.prompt);
+
     let mut grant_mutant = grant.clone();
     grant_mutant.mcp_access = Some(mcp_access(&["mutant-launch-mcp"], false));
     let grant_prompt = typed_prompt(
@@ -193,6 +206,29 @@ async fn p2_typed_prompt_contexts_ignore_poisoned_legacy_projection() {
     assert!(grant_prompt
         .prompt
         .contains("not available in this worker lane"));
+
+    let mut private_profile = profile.clone();
+    private_profile.selected_profile = Some("ignored-private-profile-alias".to_string());
+    private_profile.tool_profile = Some("private-mutant-tool-profile".to_string());
+    private_profile.mcp_access = mcp_access(&["private-mutant-mcp"], false);
+    private_profile.auto_capability_bundle = false;
+    let private_prompt = typed_prompt(
+        &server,
+        &request,
+        &assignment,
+        &grant,
+        &private_profile,
+        &skills,
+    )
+    .await;
+    assert!(private_prompt
+        .prompt
+        .contains("private-mutant-tool-profile"));
+    assert!(private_prompt.prompt.contains("private-mutant-mcp"));
+    assert!(!private_prompt
+        .prompt
+        .contains("ignored-private-profile-alias"));
+    assert_ne!(baseline.prompt, private_prompt.prompt);
 }
 
 #[tokio::test]
@@ -209,7 +245,6 @@ async fn p2_typed_artifacts_keep_receipt_first_and_flow_failure_observable() {
     let artifacts = write_dispatch_artifacts(DispatchArtifactInputs {
         workspace_dir: workspace.path(),
         dispatch_id: "typed-dispatch",
-        agent_norm: "codex",
         request: &request,
         assignment: &assignment,
         grant: &grant,
@@ -231,6 +266,8 @@ async fn p2_typed_artifacts_keep_receipt_first_and_flow_failure_observable() {
         assembly.prompt
     );
     let context = std::fs::read_to_string(&artifacts.context_md_path).expect("context bytes");
+    assert!(context.contains("Agent: codex"));
+    assert!(context.contains("Dispatch profile: typed-profile"));
     assert!(context.contains("typed prompt lifecycle task"));
     assert!(context.contains("missing-flow"));
     let events = std::fs::read_to_string(&artifacts.trajectory_path).expect("trajectory");
@@ -270,7 +307,7 @@ async fn p2_typed_artifacts_keep_receipt_first_and_flow_failure_observable() {
 
 #[test]
 fn p2_typed_response_keeps_profile_mcp_and_slim_verbose_shape() {
-    let (request, _assignment, _grant, profile, _skills) = typed_context();
+    let (request, assignment, _grant, profile, _skills) = typed_context();
     let authority = json!({"authority": "typed"});
     let reports = Vec::new();
     let empty = Value::Null;
@@ -280,7 +317,7 @@ fn p2_typed_response_keeps_profile_mcp_and_slim_verbose_shape() {
     let response = |verbose| {
         build_dispatch_response(DispatchResponseInputs {
             dispatch_id: "typed-dispatch",
-            agent_norm: "codex",
+            assignment: &assignment,
             profile_payload: &profile_payload,
             resolved_profile: &profile,
             authority: &authority,
@@ -290,7 +327,6 @@ fn p2_typed_response_keeps_profile_mcp_and_slim_verbose_shape() {
             feedback_rules_trace: &empty,
             harness_transport: "cli",
             harness_server_url: &no_server_url,
-            host_adapter: &None,
             execution_backend_name: None,
             execution_backend_metadata: &no_backend_metadata,
             acpx_enabled: false,
@@ -316,6 +352,11 @@ fn p2_typed_response_keeps_profile_mcp_and_slim_verbose_shape() {
     assert!(slim.get("profile").is_none());
     assert!(verbose["profile"].is_object());
     assert!(verbose["identity_receipt"].is_object());
+    assert_eq!(slim["agent"], "codex");
+    assert_eq!(slim["selected_profile"], "typed-profile");
+    assert_eq!(slim["route_explanation"], json!(["typed assignment route"]));
+    assert_eq!(slim["fallback_chain"], json!(["typed-fallback"]));
+    assert_eq!(verbose["identity_receipt"], json!({"planned": "typed"}));
     assert_eq!(slim["issue_ref"], "#1817");
     assert_eq!(slim["flow_id"], "missing-flow");
 }

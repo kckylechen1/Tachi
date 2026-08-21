@@ -54,5 +54,4 @@ pub(crate) use predicate::{
 #[cfg(test)]
 pub(crate) use prompt::{
     assemble_prompt, assemble_prompt_with_trace, assemble_resolved_prompt_with_trace,
-    PromptDispatchInput,
 };

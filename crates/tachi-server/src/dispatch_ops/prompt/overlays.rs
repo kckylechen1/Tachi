@@ -62,14 +62,16 @@ pub(super) fn resolve_dispatch_vendor(
     assignment: &ResolvedStaffAssignment,
     profile: &ResolvedDispatchProfile,
 ) -> Option<String> {
-    let profile_def = profile
+    let profile_def = assignment
         .selected_profile
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .and_then(crate::dispatch_profile::resolve_dispatch_profile);
-    let backend = (!assignment.selected_backend.trim().is_empty())
-        .then_some(assignment.selected_backend.as_str())
-        .unwrap_or(profile.agent.as_str());
+    let backend = if !assignment.selected_backend.trim().is_empty() {
+        assignment.selected_backend.as_str()
+    } else {
+        profile.agent.as_str()
+    };
     let model = assignment
         .selected_model
         .as_deref()
@@ -175,12 +177,11 @@ pub(super) fn render_dispatch_profile_overlay(
     server: &MemoryServer,
     request: &StaffAssignmentRequest,
     assignment: &ResolvedStaffAssignment,
-    _grant: &ExecutionGrant,
+    grant: &ExecutionGrant,
     profile: &ResolvedDispatchProfile,
-    allowed_mcp_servers: &[String],
 ) -> String {
     let mut lines = vec!["## Dispatch profile".to_string()];
-    if let Some(profile_name) = profile
+    if let Some(profile_name) = assignment
         .selected_profile
         .as_deref()
         .filter(|s| !s.trim().is_empty())
@@ -310,6 +311,11 @@ pub(super) fn render_dispatch_profile_overlay(
     if let Ok(compact) = serde_json::to_string(&profile.mcp_access) {
         lines.push(format!("- tool_access: {compact}"));
     }
+    let allowed_mcp_servers = grant
+        .mcp_access
+        .as_ref()
+        .map(|access| access.allowed_mcp_servers.as_slice())
+        .unwrap_or_default();
     if !allowed_mcp_servers.is_empty() {
         lines.push(format!(
             "- allowed_mcp_servers: {}",
