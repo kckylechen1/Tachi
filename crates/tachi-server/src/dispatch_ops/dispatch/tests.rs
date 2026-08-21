@@ -391,6 +391,111 @@ fn profile_payload_and_launch_inputs_share_composed_mcp_authority() {
     );
 }
 
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let cwd = tempfile::tempdir().expect("dispatch cwd");
+    let fake_bin = tempfile::tempdir().expect("fake claude bin");
+    let release = cwd.path().join("release-fake-claude");
+    let captured_config = cwd.path().join("captured-mcp.json");
+    let fake_claude = fake_bin.path().join("claude");
+    std::fs::write(
+        &fake_claude,
+        format!(
+            "#!/bin/sh\nconfig=\nprev=\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"--mcp-config\" ]; then config=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$config\" ]; then cp \"$config\" '{}'; fi\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nprintf fake-claude\\n",
+            captured_config.display(),
+            release.display()
+        ),
+    )
+    .expect("write fake claude");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake claude executable");
+    }
+    let mut path_entries = vec![fake_bin.path().to_path_buf()];
+    path_entries.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH is set for dispatch test"),
+    ));
+    let path = std::env::join_paths(path_entries).expect("join test PATH");
+    let _path = EnvRestore::set_os("PATH", &path);
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(Some("claude"), "real composed MCP dispatch");
+    params.inject_tachi_mcp = Some(true);
+    params.inject_hub_mcps = Some(false);
+    params.allowed_mcp_servers = vec!["top-level-server".to_string()];
+    params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
+        inject_tachi_mcp: Some(false),
+        inject_hub_mcps: Some(true),
+        allowed_facades: vec!["tachi_search".to_string()],
+        allowed_mcp_servers: vec!["nested-server".to_string()],
+        github_read: Some(false),
+        write_actions: Some(false),
+        issue_refs: Vec::new(),
+        pr_refs: Vec::new(),
+        fallback: None,
+    });
+    params.verbose = Some(true);
+    params.cwd = Some(cwd.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
+
+    let raw = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("real dispatch reaches the accepted response");
+    let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+    let config_path = temp_home
+        .path()
+        .join(".tachi")
+        .join("tmp")
+        .join(format!("dispatch-{dispatch_id}-mcp.json"));
+    for _ in 0..120 {
+        if captured_config.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let config: Value = serde_json::from_str(
+        &std::fs::read_to_string(&captured_config)
+            .expect("fake launcher captured generated MCP config"),
+    )
+    .expect("MCP config JSON");
+
+    assert!(
+        config["mcpServers"].get("tachi").is_some(),
+        "generated launch config must use top-level inject_tachi=true: {config}"
+    );
+    assert_eq!(
+        response["tool_access"]["inject_tachi_mcp"],
+        json!(true),
+        "accepted response must use the same composed authority: {response}"
+    );
+    assert_eq!(
+        response["tool_access"]["allowed_mcp_servers"],
+        json!(["top-level-server"]),
+        "accepted response must not retain the nested allowlist: {response}"
+    );
+    assert_eq!(
+        response["profile"]["mcp_access"]["inject_tachi_mcp"],
+        json!(true),
+        "verbose planning profile must match the generated launch config: {response}"
+    );
+    std::fs::write(&release, b"release").expect("release fake claude");
+    for _ in 0..120 {
+        if !config_path.exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("fake claude completion must clean the generated MCP config");
+}
+
 #[test]
 fn profile_context_and_grant_canonicalize_credential_profiles() {
     let server = crate::tests::make_server();
