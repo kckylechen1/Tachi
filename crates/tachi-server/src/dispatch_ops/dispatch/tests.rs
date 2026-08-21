@@ -286,12 +286,7 @@ fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
     let grant = mint_execution_grant(&mut params, "mcp-grant", &env_resolution)
         .expect("typed grant projects populated MCP access");
 
-    params
-        .mcp_access
-        .as_mut()
-        .expect("legacy projection populated")
-        .allowed_mcp_servers
-        .push("mutant".to_string());
+    params.allowed_mcp_servers.push("mutant".to_string());
     assert!(
         assert_grant_legacy_projection(&params, &grant).is_err(),
         "a populated MCP projection must reject one-sided drift"
@@ -331,6 +326,15 @@ fn execution_grant_preserves_top_level_mcp_precedence_over_nested_conflicts() {
     );
     assert_grant_legacy_projection(&params, &grant)
         .expect("launch-facing top-level fields and grant stay identical");
+    assert_eq!(
+        params
+            .mcp_access
+            .as_ref()
+            .expect("nested profile MCP metadata remains present")
+            .allowed_mcp_servers,
+        vec!["nested-server".to_string()],
+        "grant projection must not overwrite the nested profile MCP metadata"
+    );
 }
 
 #[test]
@@ -433,6 +437,15 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
         vec!["top-level-server".to_string()],
         "grant must not inherit the nested response/profile allowlist"
     );
+    assert_eq!(
+        params
+            .mcp_access
+            .as_ref()
+            .expect("nested profile projection")
+            .allowed_mcp_servers,
+        vec!["nested-server".to_string()],
+        "grant projection must leave profile-facing nested metadata unchanged"
+    );
 }
 
 #[tokio::test]
@@ -520,6 +533,32 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
             .expect("fake launcher captured generated MCP config"),
     )
     .expect("MCP config JSON");
+    let run_dir = std::path::PathBuf::from(
+        response["run_dir"]
+            .as_str()
+            .expect("accepted response carries run directory"),
+    );
+    let prompt = std::fs::read_to_string(
+        response["prompt_file"]
+            .as_str()
+            .expect("accepted response carries prompt path"),
+    )
+    .expect("real handler writes prompt artifact");
+    let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+        .expect("real handler writes trajectory artifact");
+    let progress = std::fs::read_to_string(run_dir.join("progress.jsonl"))
+        .expect("real handler writes progress artifact");
+    let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+    let kanban = server
+        .with_global_store(|store| {
+            store
+                .list_by_path(&format!("/kanban/tasks/{dispatch_id}"), 1, false)
+                .map_err(|error| format!("read real-handler kanban metadata: {error}"))
+        })
+        .expect("real handler seeds kanban entry")
+        .into_iter()
+        .next()
+        .expect("one real-handler kanban entry");
 
     assert!(
         config["mcpServers"].get("tachi").is_some(),
@@ -562,6 +601,29 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
         json!(["nested-server"]),
         "verbose planning profile must retain the nested allowlist: {response}"
     );
+    assert!(
+        prompt.contains("\"allowed_mcp_servers\":[\"nested-server\"]")
+            && prompt.contains("allowed_mcp_servers: canonical-server"),
+        "prompt must retain nested profile metadata alongside the independent launch allowlist: {prompt}"
+    );
+    for (name, stream) in [("trajectory", &trajectory), ("progress", &progress)] {
+        let event: Value = stream
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("event JSON"))
+            .find(|event: &Value| event["event"] == "dispatch_started")
+            .unwrap_or_else(|| panic!("{name} contains dispatch_started"));
+        assert_eq!(
+            event["mcp_access"]["allowed_mcp_servers"],
+            json!(["nested-server"]),
+            "{name} must retain nested profile MCP metadata: {event}"
+        );
+    }
+    assert_eq!(
+        kanban.metadata["mcp_access"]["allowed_mcp_servers"],
+        json!(["nested-server"]),
+        "kanban must retain nested profile MCP metadata: {}",
+        kanban.metadata
+    );
     std::fs::write(&release, b"release").expect("release fake claude");
     for _ in 0..120 {
         if !config_path.exists() {
@@ -570,6 +632,64 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("fake claude completion must clean the generated MCP config");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(Some("custom"), "preserve whitespace profile spelling");
+    params.profile = Some("   ".to_string());
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    let raw = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("whitespace profile dispatch is accepted");
+    let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    assert!(
+        response["selected_profile"].is_null(),
+        "typed assignment may canonicalize whitespace-only profile to None: {response}"
+    );
+    assert_eq!(
+        response["suggested_complete_command"]["arguments"]["profile"],
+        json!("   "),
+        "completion payload must retain the base legacy profile spelling: {response}"
+    );
+    let run_dir = std::path::PathBuf::from(
+        response["run_dir"]
+            .as_str()
+            .expect("response carries run directory"),
+    );
+    let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+        .expect("trajectory artifact exists");
+    let started: Value = trajectory
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("trajectory event JSON"))
+        .find(|event: &Value| event["event"] == "dispatch_started")
+        .expect("trajectory contains dispatch_started");
+    assert_eq!(started["profile"], json!("   "), "{started}");
+    let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+    let kanban = server
+        .with_global_store(|store| {
+            store
+                .list_by_path(&format!("/kanban/tasks/{dispatch_id}"), 1, false)
+                .map_err(|error| format!("read whitespace-profile kanban metadata: {error}"))
+        })
+        .expect("whitespace profile kanban entry")
+        .into_iter()
+        .next()
+        .expect("one whitespace-profile kanban entry");
+    assert_eq!(
+        kanban.metadata["profile"],
+        json!("   "),
+        "{}",
+        kanban.metadata
+    );
 }
 
 #[test]

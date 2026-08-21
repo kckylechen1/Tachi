@@ -122,7 +122,6 @@ pub(super) fn assert_assignment_legacy_projection(
     let matches = assignment.staffing_reason == params.staffing_reason
         && params.agent.as_deref() == Some(assignment.selected_backend.as_str())
         && assignment.selected_worker == assignment.selected_backend
-        && assignment.selected_profile == params.profile
         && assignment.selected_model == params.model
         && assignment.execution_level == params.execution_level
         && assignment.recommendation_ref.is_none();
@@ -142,7 +141,6 @@ fn apply_assignment_legacy_projection(
     // the typed assignment; the remaining fields were resolved by the private
     // ResolvedDispatchProfile context while preserving untouched caller input.
     legacy_projection.agent = Some(assignment.selected_backend.clone());
-    legacy_projection.profile = assignment.selected_profile.clone();
     legacy_projection.model = assignment.selected_model.clone();
     legacy_projection.execution_level = assignment.execution_level;
     *params = legacy_projection;

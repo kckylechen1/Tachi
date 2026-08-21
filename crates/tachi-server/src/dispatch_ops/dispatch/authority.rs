@@ -50,8 +50,8 @@ pub(super) fn mint_execution_grant(
     env_resolution: &crate::exec_env_ops::EnvResolution,
 ) -> Result<tachi_params::ExecutionGrant, String> {
     // The running launch path historically reads the top-level MCP knobs.
-    // Preserve that precedence when a caller also supplies nested mcp_access,
-    // then project this one canonical result back to both representations.
+    // Preserve that precedence in the grant without rewriting the independent
+    // nested profile metadata consumed by prompt, receipt, and progress paths.
     let mut mcp_access = params.mcp_access.clone();
     if let Some(access) = mcp_access.as_mut() {
         access.inject_tachi_mcp = params.inject_tachi_mcp;
@@ -92,7 +92,6 @@ fn apply_grant_legacy_projection(
         .as_ref()
         .map(|cwd| cwd.to_string_lossy().to_string());
     params.credential_profiles = grant.credential_profiles.clone();
-    params.mcp_access = grant.mcp_access.clone();
     if let Some(access) = grant.mcp_access.as_ref() {
         params.inject_tachi_mcp = access.inject_tachi_mcp;
         params.inject_hub_mcps = access.inject_hub_mcps;
@@ -113,13 +112,10 @@ pub(super) fn assert_grant_legacy_projection(
     grant: &tachi_params::ExecutionGrant,
 ) -> Result<(), String> {
     let legacy_cwd = params.cwd.as_ref().map(std::path::PathBuf::from);
-    let legacy_mcp = serde_json::to_value(&params.mcp_access).unwrap_or(Value::Null);
-    let grant_mcp = serde_json::to_value(&grant.mcp_access).unwrap_or(Value::Null);
     let matches = grant.env_id == params.env_id
         && grant.unmanaged_cwd_allowed == params.unmanaged_cwd.unwrap_or(false)
         && grant.allowed_cwd == legacy_cwd
         && grant.credential_profiles == params.credential_profiles
-        && grant_mcp == legacy_mcp
         && grant.allowed_tools == params.allowed_tools
         && grant.permission_profile == params.permission_profile
         && grant.sandbox == params.sandbox
