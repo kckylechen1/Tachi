@@ -131,7 +131,11 @@ pub(super) async fn write_dispatch_artifacts(
         "issue_ref": ctx.request.issue_ref,
         "pr_ref": ctx.request.pr_ref,
         "flow_id": ctx.request.flow_id,
-        "auto_capability_bundle": ctx.profile.auto_capability_bundle,
+        "auto_capability_bundle": if capability_bundle_trace["source"] == "unset" {
+            None
+        } else {
+            capability_bundle_trace["requested"].as_bool()
+        },
         "capability_bundle": capability_bundle_card.clone(),
         "feedback_rules": feedback_rules_trace.clone(),
         "v2": ctx.v2,

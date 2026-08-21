@@ -384,6 +384,44 @@ fn explicit_profile_assignment_is_authoritative_before_legacy_projection() {
         start.resolved_profile.route_explanation
     );
     assert_ne!(start.resolved_assignment.identity_receipt, Value::Null);
+    assert_eq!(
+        start.request.profile.as_deref(),
+        Some("glm_51_impl"),
+        "the pre-projection request keeps the caller's raw alias for diagnostics and replay"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_canonical() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let cwd = tempfile::tempdir().expect("dispatch cwd");
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(None, "raw alias completion diagnostics");
+    params.profile = Some("glm_51_impl".to_string());
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.cwd = Some(cwd.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
+
+    let raw = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("alias dispatch starts");
+    let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    assert_eq!(response["selected_profile"], json!("glm_impl"), "{response}");
+    let run_dir = std::path::Path::new(response["run_dir"].as_str().expect("run dir"));
+    let started: Value = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+        .expect("trajectory")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event JSON"))
+        .find(|event: &Value| event["event"] == "dispatch_started")
+        .expect("dispatch_started receipt");
+    assert_eq!(started["profile"], json!("glm_51_impl"), "{started}");
+    let completion = &response["suggested_complete_command"]["arguments"];
+    assert_eq!(completion["profile"], json!("glm_51_impl"), "{completion}");
 }
 
 #[test]

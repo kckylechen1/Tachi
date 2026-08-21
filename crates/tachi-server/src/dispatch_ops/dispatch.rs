@@ -249,7 +249,7 @@ pub(crate) async fn handle_tachi_dispatch(
     let DispatchStart {
         dispatch_id,
         request,
-        auto_capability_bundle,
+        legacy_auto_capability_bundle,
         agent_norm,
         resolved_profile,
         resolved_assignment,
@@ -510,7 +510,7 @@ pub(crate) async fn handle_tachi_dispatch(
         &resolved_profile,
         &effective_skills_for_files,
         stage_instruction.as_deref(),
-        auto_capability_bundle,
+        legacy_auto_capability_bundle,
         params.context_query.as_deref(),
         inject_card,
     )

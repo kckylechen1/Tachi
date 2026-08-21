@@ -15,7 +15,7 @@ fn mcp_access(servers: &[&str], inject_tachi_mcp: bool) -> tachi_params::Dispatc
     }
 }
 
-fn typed_context() -> (
+pub(super) fn typed_context() -> (
     tachi_params::StaffAssignmentRequest,
     tachi_params::ResolvedStaffAssignment,
     tachi_params::ExecutionGrant,
@@ -103,7 +103,7 @@ fn typed_context() -> (
     )
 }
 
-async fn typed_prompt(
+pub(super) async fn typed_prompt(
     server: &MemoryServer,
     request: &tachi_params::StaffAssignmentRequest,
     assignment: &tachi_params::ResolvedStaffAssignment,
@@ -119,7 +119,7 @@ async fn typed_prompt(
         profile,
         effective_skills,
         None,
-        None,
+        Some(profile.auto_capability_bundle),
         Some("typed context query"),
         true,
     )
@@ -180,7 +180,11 @@ async fn typed_prompt_from_pre_projection_snapshot(
         &profile,
         &skills,
         stage_instruction.as_deref(),
-        params.auto_capability_bundle,
+        assignment
+            .selected_profile
+            .as_ref()
+            .map(|_| profile.auto_capability_bundle)
+            .or(params.auto_capability_bundle),
         params.context_query.as_deref(),
         params.inject_card != Some(false),
     )
@@ -858,7 +862,6 @@ async fn p2_artifact_flow_and_kanban_metadata_are_exact_after_named_normalizatio
   "rationale": null,
   "reason": "auto_capability_bundle=false",
   "requested": false,
-  "requested_raw": null,
   "section": null,
   "source": "unset",
   "status": "disabled",

@@ -26,6 +26,11 @@ pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<
         inputs.assignment,
         inputs.grant,
         inputs.resolved_profile,
+        if inputs.capability_bundle_card["source"] == "unset" {
+            None
+        } else {
+            inputs.capability_bundle_card["requested"].as_bool()
+        },
         Some(&inputs.plan_path.to_string_lossy()),
     )
     .await?;

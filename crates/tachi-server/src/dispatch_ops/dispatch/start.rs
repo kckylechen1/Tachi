@@ -3,9 +3,7 @@ use super::*;
 pub(super) struct DispatchStart {
     pub(super) dispatch_id: String,
     pub(super) request: tachi_params::StaffAssignmentRequest,
-    /// Preserve raw ingress separately from the profile's effective bundle
-    /// decision so omitted/null remains observable in diagnostic outputs.
-    pub(super) auto_capability_bundle: Option<bool>,
+    pub(super) legacy_auto_capability_bundle: Option<bool>,
     pub(super) agent_norm: String,
     pub(super) resolved_profile: ResolvedDispatchProfile,
     pub(super) resolved_assignment: tachi_params::ResolvedStaffAssignment,
@@ -30,7 +28,6 @@ pub(super) fn resolve_dispatch_start(
     // Freeze semantic diagnostics before the P1 compatibility projection can
     // resolve aliases or mutate the legacy carrier.
     let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
-    let auto_capability_bundle = params.auto_capability_bundle;
     // #1815 P1: resolve into the acknowledged compatibility projection first.
     // The canonical outputs below are minted before that projection reaches the
     // remaining P2/P3 consumers; final #1814 deletes this bridge entirely.
@@ -38,6 +35,7 @@ pub(super) fn resolve_dispatch_start(
     let resolved_profile =
         resolve_and_apply_dispatch_profile_for_server(server, &mut legacy_projection)?;
     reconcile_resolved_profile_compatibility(&mut legacy_projection, &resolved_profile);
+    let legacy_auto_capability_bundle = legacy_projection.auto_capability_bundle;
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);
 
@@ -117,7 +115,7 @@ pub(super) fn resolve_dispatch_start(
     Ok(DispatchStart {
         dispatch_id,
         request,
-        auto_capability_bundle,
+        legacy_auto_capability_bundle,
         agent_norm,
         resolved_profile,
         resolved_assignment,

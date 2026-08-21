@@ -124,9 +124,6 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
     let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
 
     let capability_requested = profile.auto_capability_bundle;
-    // The private profile owns the effective decision. Keep the raw ingress
-    // spelling distinct so an omitted/null request is not rewritten as an
-    // explicit profile default in trace or artifact JSON.
     let capability_source = if auto_capability_bundle.is_some() {
         "params"
     } else {
@@ -140,7 +137,6 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
         "host": agent,
         "query": request.task,
         "source": capability_source,
-        "requested_raw": auto_capability_bundle,
         "primary_skill": Value::Null,
         "supporting_capabilities": [],
         "packs": [],
@@ -186,7 +182,6 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
                         "host": value.get("host").cloned().unwrap_or_else(|| json!(agent)),
                         "query": value.get("query").cloned().unwrap_or_else(|| json!(request.task)),
                         "source": capability_source,
-                        "requested_raw": auto_capability_bundle,
                         "primary_skill": value.pointer("/bundle/primary_skill").cloned().unwrap_or(Value::Null),
                         "supporting_capabilities": value.pointer("/bundle/supporting_capabilities").cloned().unwrap_or_else(|| json!([])),
                         "packs": value.pointer("/bundle/packs").cloned().unwrap_or_else(|| json!([])),
@@ -211,7 +206,6 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
                         "host": agent,
                         "query": request.task,
                         "source": capability_source,
-                        "requested_raw": auto_capability_bundle,
                         "primary_skill": Value::Null,
                         "supporting_capabilities": [],
                         "packs": [],
@@ -236,7 +230,6 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
                     "host": agent,
                     "query": request.task,
                     "source": capability_source,
-                    "requested_raw": auto_capability_bundle,
                     "primary_skill": Value::Null,
                     "supporting_capabilities": [],
                     "packs": [],
@@ -611,7 +604,11 @@ pub(crate) async fn assemble_prompt_with_trace(
         &profile,
         &effective_skills,
         stage_instruction.as_deref(),
-        params.auto_capability_bundle,
+        assignment
+            .selected_profile
+            .as_ref()
+            .map(|_| profile.auto_capability_bundle)
+            .or(params.auto_capability_bundle),
         params.context_query.as_deref(),
         params.inject_card != Some(false),
     )
