@@ -144,7 +144,7 @@ pub(super) fn assert_nested_mcp_profile_projection(
     resolved_profile: &ResolvedDispatchProfile,
 ) -> Result<(), String> {
     if serde_json::to_value(&params.mcp_access).ok()
-        == serde_json::to_value(&Some(&resolved_profile.mcp_access)).ok()
+        == serde_json::to_value(Some(&resolved_profile.mcp_access)).ok()
     {
         Ok(())
     } else {
