@@ -45,8 +45,10 @@
 //!   prompt to today). `inject_card=false` on the dispatch params suppresses
 //!   this overlay unconditionally.
 
-use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
+use tachi_params::ResolvedStaffAssignment;
+
+use crate::dispatch_profile::ResolvedDispatchProfile;
 
 use super::budget::PromptInputBudget;
 use super::overlays::resolve_dispatch_vendor;
@@ -182,13 +184,15 @@ pub(crate) fn card_kind_participates_in_seat_projection(kind: Option<&str>) -> b
 /// `render_vendor_vaccination_overlay` already uses for #735).
 pub(super) fn render_seat_countermeasures_overlay(
     server: &MemoryServer,
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    profile: &ResolvedDispatchProfile,
+    inject_card: bool,
 ) -> Option<String> {
-    if params.inject_card == Some(false) {
+    if !inject_card {
         return None;
     }
 
-    let readiness = resolve_seat_card_readiness(server, params)?;
+    let readiness = resolve_seat_card_readiness(server, assignment, profile, inject_card)?;
     let mut budget = PromptInputBudget::new(SEAT_CARD_BUDGET_CHARS);
     let admitted = budget.admit(&readiness.counter_clauses)?;
 
@@ -202,17 +206,20 @@ pub(super) fn render_seat_countermeasures_overlay(
 /// rendering. Suppression and fail-closed matching semantics are shared.
 pub(super) fn resolve_seat_card_readiness(
     server: &MemoryServer,
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    profile: &ResolvedDispatchProfile,
+    inject_card: bool,
 ) -> Option<SeatCardReadinessReceipt> {
-    if params.inject_card == Some(false) {
+    if !inject_card {
         return None;
     }
-    let profile_id = params
-        .profile
+    let profile_id = profile
+        .selected_profile
         .as_deref()
         .filter(|s| !s.trim().is_empty())
+        .or(assignment.selected_profile.as_deref().filter(|s| !s.trim().is_empty()))
         .map(str::to_string);
-    let vendor = resolve_dispatch_vendor(params);
+    let vendor = resolve_dispatch_vendor(assignment, profile);
     if profile_id.is_none() && vendor.is_none() {
         return None;
     }

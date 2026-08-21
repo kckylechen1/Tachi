@@ -1,21 +1,22 @@
-use crate::tool_params::TachiDispatchParams;
+use tachi_params::StaffAssignmentRequest;
 
 /// Resolve effective skills list, applying stage-based defaults when the caller
 /// did not explicitly provide skills.
-pub(in crate::dispatch_ops) fn resolve_effective_skills(
-    params: &TachiDispatchParams,
+pub(in crate::dispatch_ops) fn resolve_assignment_skills(
+    request: &StaffAssignmentRequest,
+    explicit_skills: &[String],
 ) -> (Vec<String>, Option<String>) {
-    let stage_key = crate::skill_policy::dispatch_stage_key(params.stage.as_deref());
+    let stage_key = crate::skill_policy::dispatch_stage_key(request.stage.as_deref());
     let auto_instruction = crate::skill_policy::dispatch_stage_instruction(&stage_key);
 
-    if !params.skills.is_empty() {
-        return (params.skills.clone(), auto_instruction);
+    if !explicit_skills.is_empty() {
+        return (explicit_skills.to_vec(), auto_instruction);
     }
 
     let mut skills = crate::skill_policy::dispatch_stage_skills(&stage_key);
 
     if stage_key != "brainstorm" {
-        let route = crate::copilot_ops::build_task_brief_routing(&params.task, &[]);
+        let route = crate::copilot_ops::build_task_brief_routing(&request.task, &[]);
         crate::skill_policy::append_builtin_sops(&mut skills, route.selected_sops.into_iter());
     }
 
