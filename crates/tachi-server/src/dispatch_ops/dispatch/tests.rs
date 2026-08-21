@@ -149,6 +149,136 @@ fn execution_grant_detects_a_one_sided_legacy_projection_mutant() {
 }
 
 #[test]
+fn projection_guards_reject_each_owned_field_family_mutant() {
+    let server = crate::tests::make_server();
+    let mut assignment_params = test_dispatch_params(Some("custom"), "assignment mutant matrix");
+    let start = resolve_dispatch_start(
+        &server,
+        &mut assignment_params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    )
+    .expect("assignment baseline");
+    let assignment = start.resolved_assignment;
+    macro_rules! assignment_mutant {
+        ($name:literal, $body:expr) => {{
+            let mut mutant = assignment.clone();
+            $body(&mut mutant);
+            assert!(
+                assert_assignment_legacy_projection(&assignment_params, &mutant).is_err(),
+                "assignment mutant must fail: {}",
+                $name
+            );
+        }};
+    }
+    assignment_mutant!("reason", |m: &mut tachi_params::ResolvedStaffAssignment| {
+        m.staffing_reason = tachi_params::TachiDispatchReason::DurableCrossSession
+    });
+    assignment_mutant!(
+        "backend",
+        |m: &mut tachi_params::ResolvedStaffAssignment| m.selected_backend = "mutant".to_string()
+    );
+    assignment_mutant!("worker", |m: &mut tachi_params::ResolvedStaffAssignment| {
+        m.selected_worker = "mutant".to_string()
+    });
+    assignment_mutant!("model", |m: &mut tachi_params::ResolvedStaffAssignment| m
+        .selected_model =
+        Some("mutant".to_string()));
+    assignment_mutant!(
+        "execution",
+        |m: &mut tachi_params::ResolvedStaffAssignment| m.execution_level =
+            Some(tachi_params::ExecutionLevel::L2)
+    );
+    assignment_mutant!(
+        "recommendation",
+        |m: &mut tachi_params::ResolvedStaffAssignment| m.recommendation_ref =
+            Some("mutant".to_string())
+    );
+
+    let mut params = test_dispatch_params(Some("custom"), "grant mutant matrix");
+    params.inject_tachi_mcp = Some(true);
+    params.inject_hub_mcps = Some(true);
+    params.allowed_mcp_servers = vec!["top".to_string()];
+    params.allowed_tools = vec!["Read".to_string()];
+    params.permission_profile = Some("default".to_string());
+    params.sandbox = Some("workspace-write".to_string());
+    params.max_turns = Some(3);
+    params.timeout_secs = 4;
+    params.credential_profiles = vec!["cred".to_string()];
+    params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
+        inject_tachi_mcp: Some(false),
+        inject_hub_mcps: Some(false),
+        allowed_facades: vec!["facade".to_string()],
+        allowed_mcp_servers: vec!["nested".to_string()],
+        github_read: Some(false),
+        write_actions: Some(false),
+        issue_refs: vec!["issue".to_string()],
+        pr_refs: vec!["pr".to_string()],
+        fallback: Some("fallback".to_string()),
+    });
+    let env = crate::exec_env_ops::EnvResolution::Unmanaged {
+        cwd: "/tmp".to_string(),
+    };
+    let grant =
+        mint_execution_grant(&mut params, "grant-mutant-matrix", &env).expect("grant baseline");
+    macro_rules! grant_mutant {
+        ($name:literal, $body:expr) => {{
+            let mut mutant = grant.clone();
+            $body(&mut mutant);
+            assert!(
+                assert_grant_legacy_projection(&params, &mutant, &env).is_err(),
+                "grant mutant must fail: {}",
+                $name
+            );
+        }};
+    }
+    grant_mutant!("env_id", |m: &mut tachi_params::ExecutionGrant| m.env_id =
+        Some("mutant".to_string()));
+    grant_mutant!("tools", |m: &mut tachi_params::ExecutionGrant| m
+        .allowed_tools
+        .push("Write".to_string()));
+    grant_mutant!("sandbox", |m: &mut tachi_params::ExecutionGrant| m
+        .sandbox =
+        Some("read-only".to_string()));
+    grant_mutant!("max_turns", |m: &mut tachi_params::ExecutionGrant| m
+        .max_turns =
+        Some(4));
+    grant_mutant!("timeout", |m: &mut tachi_params::ExecutionGrant| m
+        .timeout_secs =
+        5);
+    let mut top_tachi = params.clone();
+    top_tachi.inject_tachi_mcp = Some(false);
+    assert!(assert_grant_legacy_projection(&top_tachi, &grant, &env).is_err());
+    let mut top_hub = params.clone();
+    top_hub.inject_hub_mcps = Some(false);
+    assert!(assert_grant_legacy_projection(&top_hub, &grant, &env).is_err());
+    macro_rules! nested_mutant {
+        ($body:expr) => {{
+            let mut p = params.clone();
+            $body(p.mcp_access.as_mut().unwrap());
+            assert!(assert_grant_legacy_projection(&p, &grant, &env).is_err());
+        }};
+    }
+    nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m.inject_tachi_mcp = Some(true));
+    nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m.inject_hub_mcps = Some(true));
+    nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m
+        .allowed_mcp_servers
+        .push("x".to_string()));
+    nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m
+        .allowed_facades
+        .push("x".to_string()));
+    nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m.github_read = Some(true));
+    nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m.write_actions = Some(true));
+    nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m
+        .issue_refs
+        .push("x".to_string()));
+    nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m.pr_refs.push("x".to_string()));
+    nested_mutant!(
+        |m: &mut tachi_params::DispatchMcpAccessParams| m.fallback = Some("x".to_string())
+    );
+}
+
+#[test]
 fn explicit_profile_assignment_is_authoritative_before_legacy_projection() {
     let server = crate::tests::make_server();
     let mut params = test_dispatch_params(None, "resolve an explicit profile");

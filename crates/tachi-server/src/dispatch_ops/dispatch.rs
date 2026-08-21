@@ -141,7 +141,6 @@ use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, Dispatch
 #[cfg(test)]
 use self::authority::assert_grant_legacy_projection;
 use self::authority::{compile_dispatch_contract, contract_receipt, mint_execution_grant};
-use self::start::assert_nested_mcp_profile_projection;
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{
@@ -155,6 +154,7 @@ use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
 use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
 use self::plan_stage::{run_v2_plan_stage, PlanStageInputs};
 use self::response_helpers::*;
+use self::start::assert_nested_mcp_profile_projection;
 use self::start::*;
 use self::workspace_setup::prepare_workspace_and_mcp;
 
