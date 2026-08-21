@@ -794,6 +794,35 @@ fn profile_context_and_grant_canonicalize_credential_profiles() {
         .is_err(),
         "dropping ordinary resolved nested MCP metadata must be observable"
     );
+    let mut empty_params = test_dispatch_params(Some("custom"), "empty nested MCP cardinality");
+    empty_params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
+        inject_tachi_mcp: None,
+        inject_hub_mcps: None,
+        allowed_facades: Vec::new(),
+        allowed_mcp_servers: Vec::new(),
+        github_read: None,
+        write_actions: None,
+        issue_refs: Vec::new(),
+        pr_refs: Vec::new(),
+        fallback: None,
+    });
+    let empty_grant = mint_execution_grant(
+        &mut empty_params,
+        "empty-nested-mcp",
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("Some(empty) nested MCP mints Some grant metadata");
+    let mut empty_drop_mutant = empty_grant.clone();
+    empty_drop_mutant.mcp_access = None;
+    assert!(
+        assert_grant_legacy_projection(
+            &empty_params,
+            &empty_drop_mutant,
+            &crate::exec_env_ops::EnvResolution::Default,
+        )
+        .is_err(),
+        "Some(empty) nested MCP must not be collapsed to None"
+    );
 }
 
 #[test]

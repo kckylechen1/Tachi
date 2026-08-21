@@ -141,6 +141,7 @@ use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, Dispatch
 #[cfg(test)]
 use self::authority::assert_grant_legacy_projection;
 use self::authority::{compile_dispatch_contract, contract_receipt, mint_execution_grant};
+use self::start::assert_nested_mcp_profile_projection;
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{
@@ -339,6 +340,7 @@ pub(crate) async fn handle_tachi_dispatch(
         format!("{dispatch_id}:authority"),
         &env_resolution,
     )?;
+    assert_nested_mcp_profile_projection(&params, &resolved_profile)?;
     let timeout_secs_for_status = execution_grant.timeout_secs;
 
     // #1319-E1 defense-in-depth staffing-reason gate. `staffing_reason` is

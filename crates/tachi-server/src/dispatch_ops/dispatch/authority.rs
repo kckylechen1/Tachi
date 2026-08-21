@@ -136,17 +136,7 @@ pub(super) fn assert_grant_legacy_projection(
             !params.inject_tachi_mcp.unwrap_or(false)
                 && !params.inject_hub_mcps.unwrap_or(false)
                 && params.allowed_mcp_servers.is_empty()
-                && params.mcp_access.as_ref().is_none_or(|nested| {
-                    nested.inject_tachi_mcp.is_none()
-                        && nested.inject_hub_mcps.is_none()
-                        && nested.allowed_facades.is_empty()
-                        && nested.allowed_mcp_servers.is_empty()
-                        && nested.github_read.is_none()
-                        && nested.write_actions.is_none()
-                        && nested.issue_refs.is_empty()
-                        && nested.pr_refs.is_empty()
-                        && nested.fallback.is_none()
-                })
+                && params.mcp_access.is_none()
         }
     };
     if matches && mcp_matches {
