@@ -25,8 +25,9 @@ pub(super) fn resolve_dispatch_start(
     // The canonical outputs below are minted before that projection reaches the
     // remaining P2/P3 consumers; final #1814 deletes this bridge entirely.
     let mut legacy_projection = params.clone();
-    let resolved_profile =
+    let mut resolved_profile =
         resolve_and_apply_dispatch_profile_for_server(server, &mut legacy_projection)?;
+    reconcile_resolved_profile_compatibility(&mut legacy_projection, &mut resolved_profile);
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);
 
@@ -146,4 +147,21 @@ fn apply_assignment_legacy_projection(
     legacy_projection.execution_level = assignment.execution_level;
     *params = legacy_projection;
     assert_assignment_legacy_projection(params, assignment)
+}
+
+/// Reconcile the two legacy MCP spellings at the profile boundary. The
+/// top-level fields are what the existing workspace/launch path consumed, so
+/// they retain precedence over nested `mcp_access`; after this point the private
+/// profile payload, grant, compatibility projection, and launch all share the
+/// same values. Credential profiles are likewise the resolver's trimmed and
+/// deduplicated context, not the caller's raw spelling.
+fn reconcile_resolved_profile_compatibility(
+    legacy_projection: &mut TachiDispatchParams,
+    resolved_profile: &mut ResolvedDispatchProfile,
+) {
+    resolved_profile.mcp_access.inject_tachi_mcp = legacy_projection.inject_tachi_mcp;
+    resolved_profile.mcp_access.inject_hub_mcps = legacy_projection.inject_hub_mcps;
+    resolved_profile.mcp_access.allowed_mcp_servers = legacy_projection.allowed_mcp_servers.clone();
+    legacy_projection.mcp_access = Some(resolved_profile.mcp_access.clone());
+    legacy_projection.credential_profiles = resolved_profile.credential_profiles.clone();
 }

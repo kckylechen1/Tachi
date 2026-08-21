@@ -195,6 +195,125 @@ fn execution_grant_preserves_top_level_mcp_precedence_over_nested_conflicts() {
 }
 
 #[test]
+fn profile_payload_and_launch_inputs_share_composed_mcp_authority() {
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(Some("claude"), "compose MCP authority");
+    params.inject_tachi_mcp = Some(true);
+    params.inject_hub_mcps = Some(false);
+    params.allowed_mcp_servers = vec!["top-level-server".to_string()];
+    params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
+        inject_tachi_mcp: Some(false),
+        inject_hub_mcps: Some(true),
+        allowed_facades: Vec::new(),
+        allowed_mcp_servers: vec!["nested-server".to_string()],
+        github_read: Some(false),
+        write_actions: Some(false),
+        issue_refs: Vec::new(),
+        pr_refs: Vec::new(),
+        fallback: None,
+    });
+    let start = resolve_dispatch_start(
+        &server,
+        &mut params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    )
+    .expect("composed MCP profile resolves");
+
+    assert!(start.inject_tachi, "launch input keeps top-level true");
+    assert!(!start.inject_hub, "launch input keeps top-level false");
+    assert_eq!(
+        start.profile_payload["mcp_access"]["inject_tachi_mcp"],
+        json!(true),
+        "response/plan profile payload must match launch authority"
+    );
+    assert_eq!(
+        start.profile_payload["mcp_access"]["allowed_mcp_servers"],
+        json!(["top-level-server"]),
+        "response/plan profile payload must not retain nested conflict"
+    );
+    assert_eq!(
+        params
+            .mcp_access
+            .as_ref()
+            .expect("legacy projection")
+            .allowed_mcp_servers,
+        vec!["top-level-server".to_string()]
+    );
+
+    let authority = Value::Null;
+    let empty_reports = Vec::new();
+    let empty_value = Value::Null;
+    let no_server_url = None;
+    let no_backend_metadata = None;
+    let response = build_dispatch_response(DispatchResponseInputs {
+        dispatch_id: &start.dispatch_id,
+        agent_norm: &start.agent_norm,
+        profile_payload: &start.profile_payload,
+        resolved_profile: &start.resolved_profile,
+        authority: &authority,
+        credential_reports_json: &empty_reports,
+        capability_bundle_card: &empty_value,
+        capability_bundle_file: "",
+        feedback_rules_trace: &empty_value,
+        harness_transport: "cli",
+        harness_server_url: &no_server_url,
+        host_adapter: &start.host_adapter,
+        execution_backend_name: None,
+        execution_backend_metadata: &no_backend_metadata,
+        acpx_enabled: false,
+        native_acp_enabled: false,
+        v2: false,
+        plan_duration_ms: None,
+        params: &params,
+        plan_path: std::path::Path::new("plan.md"),
+        prompt_md_path: std::path::Path::new("prompt.md"),
+        context_md_path: std::path::Path::new("context.md"),
+        trajectory_path: std::path::Path::new("trajectory.jsonl"),
+        workspace_dir: std::path::Path::new("run"),
+    })
+    .expect("composed dispatch response");
+    let response: Value = serde_json::from_str(&response).expect("response JSON");
+    assert_eq!(
+        response["tool_access"]["allowed_mcp_servers"],
+        json!(["top-level-server"]),
+        "accepted response must match the generated launch inputs"
+    );
+}
+
+#[test]
+fn profile_context_and_grant_canonicalize_credential_profiles() {
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(Some("custom"), "canonical credentials");
+    params.credential_profiles = vec![
+        " primary ".to_string(),
+        "".to_string(),
+        "primary".to_string(),
+        " secondary ".to_string(),
+    ];
+    let start = resolve_dispatch_start(
+        &server,
+        &mut params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    )
+    .expect("credential profile context resolves");
+    let expected = vec!["primary".to_string(), "secondary".to_string()];
+    assert_eq!(start.resolved_profile.credential_profiles, expected);
+    assert_eq!(params.credential_profiles, expected);
+
+    let grant = mint_execution_grant(
+        &mut params,
+        "credential-grant",
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("grant uses canonical credential profiles");
+    assert_eq!(grant.credential_profiles, expected);
+    assert_grant_legacy_projection(&params, &grant)
+        .expect("materializer-facing legacy projection equals the grant");
+}
+
+#[test]
 fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
     let mut padded = test_dispatch_params(Some("custom"), "canonical managed env");
     padded.env_id = Some("  env-canonical  ".to_string());
