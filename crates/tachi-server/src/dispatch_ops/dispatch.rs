@@ -249,6 +249,7 @@ pub(crate) async fn handle_tachi_dispatch(
     let DispatchStart {
         dispatch_id,
         request,
+        auto_capability_bundle,
         agent_norm,
         resolved_profile,
         resolved_assignment,
@@ -326,6 +327,10 @@ pub(crate) async fn handle_tachi_dispatch(
     // pre-spawn: no primitive, no receipt, no isolation (see
     // `tachi_dispatch::authority` invariants 4 and 5).
     let harness_transport = effective_harness_transport(&params, &agent_norm);
+    // Resolve default skills and their stage instruction once. Authority may
+    // narrow this list; its mounted output is the sole downstream skill list.
+    let (requested_skills, stage_instruction) = resolve_assignment_skills(&request, &params.skills);
+    params.skills = requested_skills;
     let backend_version = tachi_dispatch::probe_provider_version(
         &agent_norm,
         tachi_dispatch::transport_kind(&harness_transport),
@@ -496,7 +501,7 @@ pub(crate) async fn handle_tachi_dispatch(
     );
 
     // 2. Assemble prompt & write audit files to workspace
-    let (effective_skills_for_files, _) = resolve_assignment_skills(&request, &params.skills);
+    let effective_skills_for_files = effective_contract.mounted_skills.clone();
     let prompt_assembly = assemble_resolved_prompt_with_trace(
         server,
         &request,
@@ -504,6 +509,8 @@ pub(crate) async fn handle_tachi_dispatch(
         &execution_grant,
         &resolved_profile,
         &effective_skills_for_files,
+        stage_instruction.as_deref(),
+        auto_capability_bundle,
         params.context_query.as_deref(),
         inject_card,
     )

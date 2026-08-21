@@ -3,6 +3,9 @@ use super::*;
 pub(super) struct DispatchStart {
     pub(super) dispatch_id: String,
     pub(super) request: tachi_params::StaffAssignmentRequest,
+    /// Preserve raw ingress separately from the profile's effective bundle
+    /// decision so omitted/null remains observable in diagnostic outputs.
+    pub(super) auto_capability_bundle: Option<bool>,
     pub(super) agent_norm: String,
     pub(super) resolved_profile: ResolvedDispatchProfile,
     pub(super) resolved_assignment: tachi_params::ResolvedStaffAssignment,
@@ -24,6 +27,10 @@ pub(super) fn resolve_dispatch_start(
     now: chrono::DateTime<Utc>,
     execution_level: tachi_params::ExecutionLevel,
 ) -> Result<DispatchStart, String> {
+    // Freeze semantic diagnostics before the P1 compatibility projection can
+    // resolve aliases or mutate the legacy carrier.
+    let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
+    let auto_capability_bundle = params.auto_capability_bundle;
     // #1815 P1: resolve into the acknowledged compatibility projection first.
     // The canonical outputs below are minted before that projection reaches the
     // remaining P2/P3 consumers; final #1814 deletes this bridge entirely.
@@ -73,8 +80,6 @@ pub(super) fn resolve_dispatch_start(
         &resolved_profile,
     )?;
 
-    let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
-
     let profile_payload =
         serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
     let timeout = Duration::from_secs(params.timeout_secs);
@@ -112,6 +117,7 @@ pub(super) fn resolve_dispatch_start(
     Ok(DispatchStart {
         dispatch_id,
         request,
+        auto_capability_bundle,
         agent_norm,
         resolved_profile,
         resolved_assignment,

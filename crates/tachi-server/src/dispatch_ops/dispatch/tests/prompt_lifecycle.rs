@@ -118,6 +118,8 @@ async fn typed_prompt(
         grant,
         profile,
         effective_skills,
+        None,
+        None,
         Some("typed context query"),
         true,
     )
@@ -229,6 +231,59 @@ async fn p2_typed_prompt_contexts_ignore_poisoned_legacy_projection() {
         .prompt
         .contains("ignored-private-profile-alias"));
     assert_ne!(baseline.prompt, private_prompt.prompt);
+}
+
+#[tokio::test]
+async fn p2_admitted_empty_skills_and_raw_bundle_ingress_stay_distinct() {
+    let server = crate::tests::make_server();
+    let (request, assignment, grant, mut profile, skills) = typed_context();
+    profile.auto_capability_bundle = false;
+
+    // This models the authority compiler admitting none of the explicit or
+    // default candidates. Prompt assembly must consume that empty mount as-is,
+    // rather than resolving the original defaults a second time.
+    let empty_mount = crate::dispatch_ops::assemble_resolved_prompt_with_trace(
+        &server,
+        &request,
+        &assignment,
+        &grant,
+        &profile,
+        &[],
+        Some("exact pre-resolved stage instruction"),
+        None,
+        Some("typed context query"),
+        true,
+    )
+    .await;
+    assert!(!empty_mount.prompt.contains(&skills[0]));
+    assert!(empty_mount
+        .prompt
+        .contains("exact pre-resolved stage instruction"));
+    assert_eq!(empty_mount.capability_bundle["source"], json!("unset"));
+    assert_eq!(empty_mount.capability_bundle["requested_raw"], Value::Null);
+    assert_eq!(empty_mount.capability_bundle["requested"], json!(false));
+
+    // An explicit ingress value changes only the raw diagnostic projection;
+    // the private profile remains the effective bundle decision.
+    let explicit_false = crate::dispatch_ops::assemble_resolved_prompt_with_trace(
+        &server,
+        &request,
+        &assignment,
+        &grant,
+        &profile,
+        &[],
+        None,
+        Some(false),
+        Some("typed context query"),
+        true,
+    )
+    .await;
+    assert_eq!(explicit_false.capability_bundle["source"], json!("params"));
+    assert_eq!(
+        explicit_false.capability_bundle["requested_raw"],
+        json!(false)
+    );
+    assert_eq!(explicit_false.capability_bundle["requested"], json!(false));
 }
 
 #[tokio::test]

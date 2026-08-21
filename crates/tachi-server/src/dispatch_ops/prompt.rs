@@ -50,6 +50,8 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
     grant: &ExecutionGrant,
     profile: &ResolvedDispatchProfile,
     effective_skills: &[String],
+    stage_instruction: Option<&str>,
+    auto_capability_bundle: Option<bool>,
     context_query: Option<&str>,
     inject_card: bool,
 ) -> PromptAssembly {
@@ -121,14 +123,15 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
     }
     let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
 
-    // Resolve skills with stage defaults
-    let (effective_skills, extra_instruction) =
-        resolve_assignment_skills(request, effective_skills);
-
     let capability_requested = profile.auto_capability_bundle;
-    // The decision is resolved in the private profile context, but this trace
-    // field is a frozen legacy receipt label consumed by existing artifacts.
-    let capability_source = "params";
+    // The private profile owns the effective decision. Keep the raw ingress
+    // spelling distinct so an omitted/null request is not rewritten as an
+    // explicit profile default in trace or artifact JSON.
+    let capability_source = if auto_capability_bundle.is_some() {
+        "params"
+    } else {
+        "unset"
+    };
     let mut capability_bundle = json!({
         "status": if capability_requested { "requested" } else { "disabled" },
         "requested": capability_requested,
@@ -137,6 +140,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
         "host": agent,
         "query": request.task,
         "source": capability_source,
+        "requested_raw": auto_capability_bundle,
         "primary_skill": Value::Null,
         "supporting_capabilities": [],
         "packs": [],
@@ -182,6 +186,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
                         "host": value.get("host").cloned().unwrap_or_else(|| json!(agent)),
                         "query": value.get("query").cloned().unwrap_or_else(|| json!(request.task)),
                         "source": capability_source,
+                        "requested_raw": auto_capability_bundle,
                         "primary_skill": value.pointer("/bundle/primary_skill").cloned().unwrap_or(Value::Null),
                         "supporting_capabilities": value.pointer("/bundle/supporting_capabilities").cloned().unwrap_or_else(|| json!([])),
                         "packs": value.pointer("/bundle/packs").cloned().unwrap_or_else(|| json!([])),
@@ -206,6 +211,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
                         "host": agent,
                         "query": request.task,
                         "source": capability_source,
+                        "requested_raw": auto_capability_bundle,
                         "primary_skill": Value::Null,
                         "supporting_capabilities": [],
                         "packs": [],
@@ -230,6 +236,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
                     "host": agent,
                     "query": request.task,
                     "source": capability_source,
+                    "requested_raw": auto_capability_bundle,
                     "primary_skill": Value::Null,
                     "supporting_capabilities": [],
                     "packs": [],
@@ -395,7 +402,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
 
     // 2. Skill invocation contract (effective = explicit + stage/intent defaults)
     let mut skill_sections = Vec::new();
-    for skill_id in &effective_skills {
+    for skill_id in effective_skills {
         let section = if let Ok(cap) = server.get_capability(skill_id) {
             let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
             render_skill_invocation_contract(skill_id, &cap, &def)
@@ -503,8 +510,8 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
     parts.push(String::new());
 
     // 5. Extra instruction from stage (e.g. auto → "plan first")
-    if let Some(ref instr) = extra_instruction {
-        parts.push(instr.clone());
+    if let Some(instr) = stage_instruction {
+        parts.push(instr.to_string());
         parts.push(String::new());
     }
 
@@ -595,21 +602,20 @@ pub(crate) async fn assemble_prompt_with_trace(
     {
         access.inject_tachi_mcp = Some(inject_tachi_mcp);
     }
-    let (effective_skills, _) = resolve_assignment_skills(&request, &params.skills);
-    let mut assembly = assemble_resolved_prompt_with_trace(
+    let (effective_skills, stage_instruction) = resolve_assignment_skills(&request, &params.skills);
+    let assembly = assemble_resolved_prompt_with_trace(
         server,
         &request,
         &assignment,
         &grant,
         &profile,
         &effective_skills,
+        stage_instruction.as_deref(),
+        params.auto_capability_bundle,
         params.context_query.as_deref(),
         params.inject_card != Some(false),
     )
     .await;
-    if let Some(trace) = assembly.capability_bundle.as_object_mut() {
-        trace.insert("source".to_string(), Value::String("params".to_string()));
-    }
     assembly
 }
 
