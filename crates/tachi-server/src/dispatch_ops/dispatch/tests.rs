@@ -78,6 +78,44 @@ fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
     );
     assert_assignment_legacy_projection(&params, &start.resolved_assignment)
         .expect("typed assignment and temporary legacy projection agree");
+    let mut profile_mutant = start.resolved_assignment.clone();
+    profile_mutant.selected_profile = Some("mutant".to_string());
+    assert!(
+        assert_assignment_legacy_projection(&params, &profile_mutant).is_err(),
+        "one-sided selected-profile mutation must be observable"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn raw_credential_profile_spelling_reaches_failure_trajectory() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(Some("custom"), "raw credential trajectory");
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.credential_profiles = vec![" missing-profile ".to_string()];
+
+    let err = handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("missing credential profile fails after receipt creation");
+    assert!(err.contains("missing-profile"), "{err}");
+    let trajectory =
+        std::fs::read_to_string(single_run_dir(&dispatch_runs_root()).join("trajectory.jsonl"))
+            .expect("credential failure trajectory exists");
+    let event: Value = trajectory
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("trajectory event JSON"))
+        .find(|event: &Value| event["event"] == "credentials_materialization_failed")
+        .expect("credential failure event");
+    assert_eq!(
+        event["credential_profiles"],
+        json!([" missing-profile "]),
+        "{event}"
+    );
 }
 
 #[test]
@@ -711,7 +749,16 @@ fn profile_context_and_grant_canonicalize_credential_profiles() {
     .expect("credential profile context resolves");
     let expected = vec!["primary".to_string(), "secondary".to_string()];
     assert_eq!(start.resolved_profile.credential_profiles, expected);
-    assert_eq!(params.credential_profiles, expected);
+    assert_eq!(
+        params.credential_profiles,
+        vec![
+            " primary ".to_string(),
+            "".to_string(),
+            "primary".to_string(),
+            " secondary ".to_string(),
+        ],
+        "legacy ingress retains raw credential selectors"
+    );
 
     let grant = mint_execution_grant(
         &mut params,
@@ -760,8 +807,9 @@ fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
         Some(std::path::Path::new("/canonical/worktree"))
     );
     assert_eq!(
-        padded.env_id, grant.env_id,
-        "legacy env id is only the grant projection"
+        padded.env_id.as_deref(),
+        Some("  env-canonical  "),
+        "legacy env id retains raw spelling while the grant is canonical"
     );
 
     let mut whitespace = test_dispatch_params(Some("custom"), "canonical default env");
@@ -774,8 +822,9 @@ fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
     assert_eq!(grant.env_id, None);
     assert_eq!(grant.allowed_cwd, None);
     assert_eq!(
-        whitespace.env_id, None,
-        "projection drops non-canonical whitespace input"
+        whitespace.env_id.as_deref(),
+        Some(" \t "),
+        "legacy whitespace input remains untouched while the grant uses the default"
     );
 }
 

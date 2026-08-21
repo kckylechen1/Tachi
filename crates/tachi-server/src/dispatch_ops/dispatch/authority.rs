@@ -66,7 +66,7 @@ pub(super) fn mint_execution_grant(
             crate::exec_env_ops::EnvResolution::Unmanaged { .. }
         ),
         allowed_cwd: env_resolution.cwd().map(std::path::PathBuf::from),
-        credential_profiles: params.credential_profiles.clone(),
+        credential_profiles: canonical_credential_profiles(&params.credential_profiles),
         mcp_access,
         allowed_tools: params.allowed_tools.clone(),
         permission_profile: params.permission_profile.clone(),
@@ -85,13 +85,6 @@ fn apply_grant_legacy_projection(
 ) {
     // #1815 P1 temporary projection, deleted by P3/#1814 once backend,
     // credential, and launch consumers take ExecutionGrant directly.
-    params.env_id = grant.env_id.clone();
-    params.unmanaged_cwd = Some(grant.unmanaged_cwd_allowed);
-    params.cwd = grant
-        .allowed_cwd
-        .as_ref()
-        .map(|cwd| cwd.to_string_lossy().to_string());
-    params.credential_profiles = grant.credential_profiles.clone();
     if let Some(access) = grant.mcp_access.as_ref() {
         params.inject_tachi_mcp = access.inject_tachi_mcp;
         params.inject_hub_mcps = access.inject_hub_mcps;
@@ -111,11 +104,8 @@ pub(super) fn assert_grant_legacy_projection(
     params: &TachiDispatchParams,
     grant: &tachi_params::ExecutionGrant,
 ) -> Result<(), String> {
-    let legacy_cwd = params.cwd.as_ref().map(std::path::PathBuf::from);
-    let matches = grant.env_id == params.env_id
-        && grant.unmanaged_cwd_allowed == params.unmanaged_cwd.unwrap_or(false)
-        && grant.allowed_cwd == legacy_cwd
-        && grant.credential_profiles == params.credential_profiles
+    let matches = grant.credential_profiles
+        == canonical_credential_profiles(&params.credential_profiles)
         && grant.allowed_tools == params.allowed_tools
         && grant.permission_profile == params.permission_profile
         && grant.sandbox == params.sandbox
@@ -126,6 +116,14 @@ pub(super) fn assert_grant_legacy_projection(
             access.inject_tachi_mcp == params.inject_tachi_mcp
                 && access.inject_hub_mcps == params.inject_hub_mcps
                 && access.allowed_mcp_servers == params.allowed_mcp_servers
+                && params.mcp_access.as_ref().is_some_and(|nested| {
+                    access.allowed_facades == nested.allowed_facades
+                        && access.github_read == nested.github_read
+                        && access.write_actions == nested.write_actions
+                        && access.issue_refs == nested.issue_refs
+                        && access.pr_refs == nested.pr_refs
+                        && access.fallback == nested.fallback
+                })
         }
         None => {
             params.inject_tachi_mcp.is_none()
@@ -140,13 +138,23 @@ pub(super) fn assert_grant_legacy_projection(
     }
 }
 
+fn canonical_credential_profiles(raw: &[String]) -> Vec<String> {
+    raw.iter().fold(Vec::new(), |mut canonical, profile| {
+        let profile = profile.trim();
+        if !profile.is_empty() && !canonical.iter().any(|seen| seen == profile) {
+            canonical.push(profile.to_string());
+        }
+        canonical
+    })
+}
+
 /// Compile the dispatch's effective authority contract and apply it to
 /// `params`. Returns the contract (for the receipt) or a typed-error string.
 ///
-/// `params` is mutated in exactly two ways, both of which can only *narrow*:
+/// `params` is mutated in exactly three ways, all derived from effective authority:
 /// `sandbox` becomes the compiled level (or `None` for providers with no
 /// sandbox primitive — never a vendor default), and `skills` becomes the
-/// mounted subset.
+/// mounted subset; `permission_profile` records the admitted replay spelling.
 ///
 /// `qualifications` and `backend_version` are parameters rather than the const +
 /// a probe call, so the tests can pin each world explicitly: the certified binary

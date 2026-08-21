@@ -451,7 +451,7 @@ pub(crate) async fn handle_tachi_dispatch(
             // #1319-E1: stamp the typed staffing reason into the canonical
             // receipt so external staffing is auditable — the reason admission
             // happened on (not just that it was non-None).
-            "staffing_reason": serde_json::to_value(&resolved_assignment.staffing_reason)
+            "staffing_reason": serde_json::to_value(resolved_assignment.staffing_reason)
                 .unwrap_or(Value::Null),
             "identity_receipt": resolved_assignment.identity_receipt.clone(),
             // #878-A: persist the working directory + completion predicate so
@@ -548,7 +548,7 @@ pub(crate) async fn handle_tachi_dispatch(
             // #1319-E1: stamp the typed staffing reason into the canonical
             // receipt so external staffing is auditable — the reason admission
             // happened on (not just that it was non-None).
-            "staffing_reason": serde_json::to_value(&resolved_assignment.staffing_reason)
+            "staffing_reason": serde_json::to_value(resolved_assignment.staffing_reason)
                 .unwrap_or(Value::Null),
             "identity_receipt": resolved_assignment.identity_receipt.clone(),
             // #878-A: persist the working directory + completion predicate so
