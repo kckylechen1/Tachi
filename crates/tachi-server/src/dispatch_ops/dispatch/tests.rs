@@ -127,6 +127,116 @@ fn explicit_profile_assignment_is_authoritative_before_legacy_projection() {
         params.agent.as_deref(),
         Some(start.resolved_assignment.selected_backend.as_str())
     );
+    assert_eq!(
+        start.resolved_assignment.host_adapter,
+        start.resolved_profile.host_adapter
+    );
+    assert_eq!(
+        start.resolved_assignment.evidence_required,
+        start.resolved_profile.evidence_required
+    );
+    assert_eq!(
+        start.resolved_assignment.fallback_chain,
+        start.resolved_profile.fallback_chain
+    );
+    assert_eq!(
+        start.resolved_assignment.route_explanation,
+        start.resolved_profile.route_explanation
+    );
+    assert_ne!(start.resolved_assignment.identity_receipt, Value::Null);
+}
+
+#[test]
+fn typed_ingress_equivalence_matrix_covers_missing_and_effective_values() {
+    struct Case {
+        name: &'static str,
+        model: Option<&'static str>,
+        level: tachi_params::ExecutionLevel,
+        max_turns: Option<u32>,
+        timeout_secs: u64,
+        populated: bool,
+    }
+
+    let cases = [
+        Case {
+            name: "missing optional ingress values",
+            model: None,
+            level: tachi_params::ExecutionLevel::L1,
+            max_turns: None,
+            timeout_secs: 5,
+            populated: false,
+        },
+        Case {
+            name: "effective populated ingress values",
+            model: Some("gpt-5.6-terra"),
+            level: tachi_params::ExecutionLevel::L2,
+            max_turns: Some(7),
+            timeout_secs: 42,
+            populated: true,
+        },
+    ];
+    let server = crate::tests::make_server();
+
+    for case in cases {
+        let mut params = test_dispatch_params(Some("custom"), case.name);
+        params.model = case.model.map(str::to_string);
+        params.max_turns = case.max_turns;
+        params.timeout_secs = case.timeout_secs;
+        if case.populated {
+            params.skills = vec!["skill:review".to_string()];
+            params.allowed_tools = vec!["Read".to_string()];
+            params.credential_profiles = vec!["token".to_string()];
+        }
+
+        let start = resolve_dispatch_start(&server, &mut params, Utc::now(), case.level)
+            .expect(case.name);
+        assert_eq!(start.resolved_assignment.selected_worker, "custom", "{}", case.name);
+        assert_eq!(start.resolved_assignment.selected_model, params.model, "{}", case.name);
+        assert_eq!(
+            start.resolved_assignment.execution_level,
+            Some(case.level),
+            "{}",
+            case.name
+        );
+        assert!(
+            start.resolved_assignment.recommendation_ref.is_none(),
+            "semantic ingress has no recommendation source in P1: {}",
+            case.name
+        );
+
+        let grant = mint_execution_grant(
+            &mut params,
+            format!("matrix-{}", case.timeout_secs),
+            &crate::exec_env_ops::EnvResolution::Default,
+        )
+        .expect(case.name);
+        assert_eq!(grant.max_turns, case.max_turns, "{}", case.name);
+        assert_eq!(grant.timeout_secs, case.timeout_secs, "{}", case.name);
+        assert_eq!(grant.allowed_tools, params.allowed_tools, "{}", case.name);
+        assert_eq!(
+            grant.credential_profiles, params.credential_profiles,
+            "{}",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn invalid_profile_is_refused_before_typed_assignment_or_launch() {
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(None, "invalid profile refusal");
+    params.profile = Some("not-a-dispatch-profile".to_string());
+
+    let err = match resolve_dispatch_start(
+        &server,
+        &mut params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    ) {
+        Ok(_) => panic!("unknown profile must be refused before typed assignment or launch"),
+        Err(err) => err,
+    };
+    assert!(err.contains("Unknown dispatch profile"), "{err}");
 }
 
 #[test]
