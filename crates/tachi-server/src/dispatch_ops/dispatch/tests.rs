@@ -136,13 +136,14 @@ fn execution_grant_detects_a_one_sided_legacy_projection_mutant() {
     };
     let grant = mint_execution_grant(&mut params, "dispatch-grant", &env_resolution)
         .expect("typed grant exactly projects legacy authority");
-    assert_grant_legacy_projection(&params, &grant).expect("matching grant remains compatible");
+    assert_grant_legacy_projection(&params, &grant, &env_resolution)
+        .expect("matching grant remains compatible");
 
     // Deliberate one-sided mutant: the grant stays authoritative while the
     // untouched P3 legacy projection changes. The ingress guard must reject it.
     params.timeout_secs = 43;
     assert!(
-        assert_grant_legacy_projection(&params, &grant).is_err(),
+        assert_grant_legacy_projection(&params, &grant, &env_resolution).is_err(),
         "a one-sided compatibility mutation must be rejected"
     );
 }
@@ -326,7 +327,12 @@ fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
 
     params.allowed_mcp_servers.push("mutant".to_string());
     assert!(
-        assert_grant_legacy_projection(&params, &grant).is_err(),
+        assert_grant_legacy_projection(
+            &params,
+            &grant,
+            &crate::exec_env_ops::EnvResolution::Default,
+        )
+        .is_err(),
         "a populated MCP projection must reject one-sided drift"
     );
 }
@@ -362,8 +368,12 @@ fn execution_grant_preserves_top_level_mcp_precedence_over_nested_conflicts() {
         mcp.allowed_mcp_servers,
         vec!["top-level-server".to_string()]
     );
-    assert_grant_legacy_projection(&params, &grant)
-        .expect("launch-facing top-level fields and grant stay identical");
+    assert_grant_legacy_projection(
+        &params,
+        &grant,
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("launch-facing top-level fields and grant stay identical");
     assert_eq!(
         params
             .mcp_access
@@ -767,8 +777,23 @@ fn profile_context_and_grant_canonicalize_credential_profiles() {
     )
     .expect("grant uses canonical credential profiles");
     assert_eq!(grant.credential_profiles, expected);
-    assert_grant_legacy_projection(&params, &grant)
-        .expect("materializer-facing legacy projection equals the grant");
+    assert_grant_legacy_projection(
+        &params,
+        &grant,
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("materializer-facing legacy projection equals the grant");
+    let mut dropped_mcp = grant.clone();
+    dropped_mcp.mcp_access = None;
+    assert!(
+        assert_grant_legacy_projection(
+            &params,
+            &dropped_mcp,
+            &crate::exec_env_ops::EnvResolution::Default,
+        )
+        .is_err(),
+        "dropping ordinary resolved nested MCP metadata must be observable"
+    );
 }
 
 #[test]
@@ -811,6 +836,12 @@ fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
         Some("  env-canonical  "),
         "legacy env id retains raw spelling while the grant is canonical"
     );
+    let mut managed_env_mutant = grant.clone();
+    managed_env_mutant.allowed_cwd = None;
+    assert!(
+        assert_grant_legacy_projection(&padded, &managed_env_mutant, &managed).is_err(),
+        "managed env grant must retain the authoritative resolved cwd"
+    );
 
     let mut whitespace = test_dispatch_params(Some("custom"), "canonical default env");
     whitespace.env_id = Some(" \t ".to_string());
@@ -825,6 +856,12 @@ fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
         whitespace.env_id.as_deref(),
         Some(" \t "),
         "legacy whitespace input remains untouched while the grant uses the default"
+    );
+    let mut default_env_mutant = grant.clone();
+    default_env_mutant.unmanaged_cwd_allowed = true;
+    assert!(
+        assert_grant_legacy_projection(&whitespace, &default_env_mutant, &default).is_err(),
+        "default env grant must not become unmanaged"
     );
 }
 
@@ -890,12 +927,21 @@ fn compiled_permission_projection_preserves_verify_headless_spelling() {
         Some("verify"),
         "grant must preserve replay-safe verify rather than rewrite it to full"
     );
-    assert_grant_legacy_projection(&verify, &grant)
-        .expect("grant projection must retain the replay-safe verify spelling");
+    assert_grant_legacy_projection(
+        &verify,
+        &grant,
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("grant projection must retain the replay-safe verify spelling");
     let mut full_mutant = grant.clone();
     full_mutant.permission_profile = Some("full".to_string());
     assert!(
-        assert_grant_legacy_projection(&verify, &full_mutant).is_err(),
+        assert_grant_legacy_projection(
+            &verify,
+            &full_mutant,
+            &crate::exec_env_ops::EnvResolution::Default,
+        )
+        .is_err(),
         "verify-to-full grant mutant must be observable before a different env gate can run"
     );
 }

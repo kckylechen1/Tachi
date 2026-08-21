@@ -75,7 +75,7 @@ pub(super) fn mint_execution_grant(
         timeout_secs: params.timeout_secs,
     };
     apply_grant_legacy_projection(params, &grant);
-    assert_grant_legacy_projection(params, &grant)?;
+    assert_grant_legacy_projection(params, &grant, env_resolution)?;
     Ok(grant)
 }
 
@@ -103,9 +103,16 @@ fn apply_grant_legacy_projection(
 pub(super) fn assert_grant_legacy_projection(
     params: &TachiDispatchParams,
     grant: &tachi_params::ExecutionGrant,
+    env_resolution: &crate::exec_env_ops::EnvResolution,
 ) -> Result<(), String> {
-    let matches = grant.credential_profiles
-        == canonical_credential_profiles(&params.credential_profiles)
+    let matches = grant.env_id == env_resolution.env_id().map(str::to_string)
+        && grant.allowed_cwd == env_resolution.cwd().map(std::path::PathBuf::from)
+        && grant.unmanaged_cwd_allowed
+            == matches!(
+                env_resolution,
+                crate::exec_env_ops::EnvResolution::Unmanaged { .. }
+            )
+        && grant.credential_profiles == canonical_credential_profiles(&params.credential_profiles)
         && grant.allowed_tools == params.allowed_tools
         && grant.permission_profile == params.permission_profile
         && grant.sandbox == params.sandbox
@@ -126,9 +133,20 @@ pub(super) fn assert_grant_legacy_projection(
                 })
         }
         None => {
-            params.inject_tachi_mcp.is_none()
-                && params.inject_hub_mcps.is_none()
+            !params.inject_tachi_mcp.unwrap_or(false)
+                && !params.inject_hub_mcps.unwrap_or(false)
                 && params.allowed_mcp_servers.is_empty()
+                && params.mcp_access.as_ref().is_none_or(|nested| {
+                    nested.inject_tachi_mcp.is_none()
+                        && nested.inject_hub_mcps.is_none()
+                        && nested.allowed_facades.is_empty()
+                        && nested.allowed_mcp_servers.is_empty()
+                        && nested.github_read.is_none()
+                        && nested.write_actions.is_none()
+                        && nested.issue_refs.is_empty()
+                        && nested.pr_refs.is_empty()
+                        && nested.fallback.is_none()
+                })
         }
     };
     if matches && mcp_matches {
