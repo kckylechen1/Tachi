@@ -300,6 +300,22 @@ mod tests {
         (params, resolved)
     }
 
+    macro_rules! compile_contract_from_legacy_projection {
+        ($params:expr, $agent:expr, $transport:expr, $profile:expr, $qualifications:expr, $version:expr $(,)?) => {{
+            let params = $params;
+            let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(&*params);
+            compile_dispatch_contract(
+                params,
+                &request,
+                $agent,
+                $transport,
+                $profile,
+                $qualifications,
+                $version,
+            )
+        }};
+    }
+
     /// #894 S2d discriminating test ④ (server half): a review-profile dispatch
     /// that omits `sandbox` must compile to read-only and hand the launcher an
     /// explicit `--sandbox read-only`. Before this slice, `params.sandbox` was
@@ -316,7 +332,7 @@ mod tests {
         }));
         assert_eq!(params.sandbox, None, "the caller omitted sandbox");
 
-        let contract = compile_dispatch_contract(
+        let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -390,7 +406,7 @@ mod tests {
             "profile": "codex_55_review",
             "sandbox": "workspace-write",
         }));
-        let err = compile_dispatch_contract(
+        let err = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -426,7 +442,7 @@ mod tests {
             "permission_profile": "full",
         }));
 
-        let err = compile_dispatch_contract(
+        let err = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -471,7 +487,7 @@ mod tests {
             ],
         }));
 
-        let contract = compile_dispatch_contract(
+        let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -511,7 +527,7 @@ mod tests {
                 "skill:waza-write",
             ],
         }));
-        let exec_contract = compile_dispatch_contract(
+        let exec_contract = compile_contract_from_legacy_projection!(
             &mut exec_params,
             "custom",
             "cli",
@@ -544,7 +560,7 @@ mod tests {
             "staffing_reason": "explicit_user_request",
             "profile": "deepseek_explore",
         }));
-        let err = compile_dispatch_contract(
+        let err = compile_contract_from_legacy_projection!(
             &mut params,
             "custom",
             "cli",
@@ -587,7 +603,7 @@ mod tests {
                 "staffing_reason": "explicit_user_request",
                 "profile": "codex_55_review",
             }));
-            let err = compile_dispatch_contract(
+            let err = compile_contract_from_legacy_projection!(
                 &mut params,
                 "codex",
                 "cli",
@@ -620,7 +636,7 @@ mod tests {
             "staffing_reason": "explicit_user_request",
             "profile": "opencode_builder",
         }));
-        let contract = compile_dispatch_contract(
+        let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "custom",
             "cli",

@@ -175,7 +175,7 @@ pub(super) fn render_dispatch_profile_overlay(
     server: &MemoryServer,
     request: &StaffAssignmentRequest,
     assignment: &ResolvedStaffAssignment,
-    grant: &ExecutionGrant,
+    _grant: &ExecutionGrant,
     profile: &ResolvedDispatchProfile,
     allowed_mcp_servers: &[String],
 ) -> String {
@@ -307,10 +307,8 @@ pub(super) fn render_dispatch_profile_overlay(
     if let Some(pr_ref) = request.pr_ref.as_deref().filter(|s| !s.trim().is_empty()) {
         lines.push(format!("- pr_ref: {pr_ref}"));
     }
-    if let Some(access) = grant.mcp_access.as_ref() {
-        if let Ok(compact) = serde_json::to_string(access) {
-            lines.push(format!("- tool_access: {compact}"));
-        }
+    if let Ok(compact) = serde_json::to_string(&profile.mcp_access) {
+        lines.push(format!("- tool_access: {compact}"));
     }
     if !allowed_mcp_servers.is_empty() {
         lines.push(format!(

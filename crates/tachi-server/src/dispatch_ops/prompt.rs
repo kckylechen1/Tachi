@@ -145,7 +145,9 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
         resolve_assignment_skills(input.request, input.skills);
 
     let capability_requested = input.profile.auto_capability_bundle;
-    let capability_source = "resolved_profile";
+    // The decision is resolved in the private profile context, but this trace
+    // field is a frozen legacy receipt label consumed by existing artifacts.
+    let capability_source = "params";
     let mut capability_bundle = json!({
         "status": if capability_requested { "requested" } else { "disabled" },
         "requested": capability_requested,
@@ -574,10 +576,27 @@ pub(crate) async fn assemble_prompt_with_trace(
 ) -> PromptAssembly {
     let request = StaffAssignmentRequest::from_dispatch_params(params);
     let mut resolved_params = params.clone();
+    let raw_profile = resolved_params.profile.clone();
     let profile = crate::dispatch_profile::resolve_and_apply_dispatch_profile_for_server(
         server,
         &mut resolved_params,
     )
+    .or_else(|_| {
+        // Historical prompt-only tests use raw lane-card seats (for example
+        // `glm-5.2`) that are deliberately not dispatch-profile aliases.
+        // Keep that compatibility entirely inside this cfg(test) adapter:
+        // resolve the backend without a named profile, then restore the raw
+        // seat only for the typed prompt context consumed by those tests.
+        resolved_params.profile = None;
+        crate::dispatch_profile::resolve_and_apply_dispatch_profile_for_server(
+            server,
+            &mut resolved_params,
+        )
+        .map(|mut resolved| {
+            resolved.selected_profile = raw_profile;
+            resolved
+        })
+    })
     .expect("legacy test prompt params must resolve to a dispatch profile");
     let backend = params
         .agent
@@ -607,7 +626,11 @@ pub(crate) async fn assemble_prompt_with_trace(
         inject_card: params.inject_card != Some(false),
         allowed_mcp_servers: &params.allowed_mcp_servers,
     };
-    assemble_resolved_prompt_with_trace(server, &input).await
+    let mut assembly = assemble_resolved_prompt_with_trace(server, &input).await;
+    if let Some(trace) = assembly.capability_bundle.as_object_mut() {
+        trace.insert("source".to_string(), Value::String("params".to_string()));
+    }
+    assembly
 }
 
 #[cfg(test)]
@@ -966,6 +989,9 @@ mod tests {
 
     #[test]
     fn no_matching_card_leaves_prompt_byte_identical_regardless_of_inject_card_flag() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
         // No /cards/* mirror row seeded at all.

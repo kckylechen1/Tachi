@@ -43,6 +43,7 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
     }
 }
 
+mod prompt_lifecycle;
 mod resolution_grants;
 
 fn spawn_auth_gated_opencode_doc_server() -> (String, std::thread::JoinHandle<()>) {

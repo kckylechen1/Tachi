@@ -127,7 +127,7 @@ pub(super) async fn write_dispatch_artifacts(
         "stage": ctx.request.stage,
         "profile": ctx.request.profile,
         "tool_profile": ctx.profile.tool_profile,
-        "mcp_access": ctx.grant.mcp_access,
+        "mcp_access": ctx.profile.mcp_access,
         "allowed_mcp_servers": ctx.grant.mcp_access.as_ref().map(|access| &access.allowed_mcp_servers),
         "issue_ref": ctx.request.issue_ref,
         "pr_ref": ctx.request.pr_ref,

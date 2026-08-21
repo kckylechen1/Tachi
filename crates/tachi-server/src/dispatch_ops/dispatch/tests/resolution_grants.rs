@@ -684,7 +684,8 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
         native_acp_enabled: false,
         v2: false,
         plan_duration_ms: None,
-        params: &params,
+        request: &start.request,
+        verbose: false,
         plan_path: std::path::Path::new("plan.md"),
         prompt_md_path: std::path::Path::new("prompt.md"),
         context_md_path: std::path::Path::new("context.md"),
@@ -1152,6 +1153,7 @@ fn compiled_permission_projection_preserves_verify_headless_spelling() {
     .expect("omitted permission profile resolves");
     compile_dispatch_contract(
         &mut omitted,
+        &omitted_start.request,
         &omitted_start.agent_norm,
         "cli",
         &omitted_start.resolved_profile,
@@ -1172,6 +1174,7 @@ fn compiled_permission_projection_preserves_verify_headless_spelling() {
     .expect("verify permission profile resolves");
     compile_dispatch_contract(
         &mut verify,
+        &verify_start.request,
         &verify_start.agent_norm,
         "cli",
         &verify_start.resolved_profile,

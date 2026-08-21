@@ -29,7 +29,7 @@ pub(super) async fn init_kanban_task(
         "agent": agent,
         "profile": request.profile,
         "tool_profile": profile.tool_profile,
-        "mcp_access": grant.mcp_access,
+        "mcp_access": profile.mcp_access,
         "allowed_mcp_servers": grant.mcp_access.as_ref().map(|access| &access.allowed_mcp_servers),
         "issue_ref": request.issue_ref,
         "pr_ref": request.pr_ref,
