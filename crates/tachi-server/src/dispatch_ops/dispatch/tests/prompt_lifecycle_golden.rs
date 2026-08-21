@@ -46,6 +46,7 @@ Bullet list: done / blocked / next.
 ## Dispatch profile
 - profile: typed-profile
 - backend: codex
+- role: implementer
 - stage: implementation
 - tachi_tool_profile: typed-tool-profile
 - flow_id: missing-flow
@@ -102,6 +103,7 @@ async fn real_handler_is_receipt_then_board_then_planner_and_pending_response_is
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
     let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _flow_root = EnvRestore::set_path("TACHI_RUN_ROOT", &temp_home.path().join("flow-runs"));
     let _review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "true");
     struct PlannerReset;
     impl Drop for PlannerReset {
@@ -132,8 +134,9 @@ async fn real_handler_is_receipt_then_board_then_planner_and_pending_response_is
     let response: Value = serde_json::from_str(&raw).expect("response JSON");
     let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
     let run_dir = response["run_dir"].as_str().expect("run dir");
-    let trajectory = std::fs::read_to_string(std::path::Path::new(run_dir).join("trajectory.jsonl"))
-        .expect("trajectory bytes");
+    let trajectory =
+        std::fs::read_to_string(std::path::Path::new(run_dir).join("trajectory.jsonl"))
+            .expect("trajectory bytes");
     let events = trajectory
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("event JSON"))
@@ -152,7 +155,9 @@ async fn real_handler_is_receipt_then_board_then_planner_and_pending_response_is
         .expect("plan_generated");
     assert!(received < started && started < planned, "{trajectory}");
     assert_eq!(
-        crate::dispatch_ops::get_kanban_state(&server, dispatch_id).await.as_deref(),
+        crate::dispatch_ops::get_kanban_state(&server, dispatch_id)
+            .await
+            .as_deref(),
         Some("TASK_STATE_INPUT_REQUIRED"),
         "the real handler creates the board row before invoking the planner"
     );
@@ -192,5 +197,28 @@ async fn real_handler_is_receipt_then_board_then_planner_and_pending_response_is
         include_str!("prompt_lifecycle_kanban_metadata.golden"),
         "exact successful flow kanban metadata bytes"
     );
-    assert_eq!(response["task"]["status"]["state"], json!("TASK_STATE_INPUT_REQUIRED"));
+    let flow_run_dir =
+        crate::task_lifecycle::run_dir_for_flow_id("flow_20260822T000000Z_prompt_golden")
+            .expect("flow marker run directory");
+    let mut flow_status: Value = serde_json::from_str(
+        &std::fs::read_to_string(flow_run_dir.join("status.json")).expect("flow status bytes"),
+    )
+    .expect("flow status JSON");
+    flow_status["created_at"] = json!("<TIMESTAMP>");
+    flow_status["updated_at"] = json!("<TIMESTAMP>");
+    let flow_status_bytes = normalize_dynamic_bytes(
+        serde_json::to_string(&flow_status).expect("flow status bytes"),
+        run_dir,
+        dispatch_id,
+    )
+    .replace(flow_run_dir.to_string_lossy().as_ref(), "<FLOW_RUN>");
+    assert_eq!(
+        flow_status_bytes,
+        r#"{"artifacts":{"dispatches":{"<DISPATCH_ID>":"<FLOW_RUN>/artifacts/dispatch-<DISPATCH_ID>.json"}},"created_at":"<TIMESTAMP>","dispatch_cards":["<FLOW_RUN>/artifacts/dispatch-<DISPATCH_ID>.json"],"dispatch_ids":["<DISPATCH_ID>"],"last_dispatch_id":"<DISPATCH_ID>","stage":"dispatch","state":"dispatched","updated_at":"<TIMESTAMP>"}"#,
+        "exact successful flow status payload bytes and metadata"
+    );
+    assert_eq!(
+        response["task"]["status"]["state"],
+        json!("TASK_STATE_INPUT_REQUIRED")
+    );
 }

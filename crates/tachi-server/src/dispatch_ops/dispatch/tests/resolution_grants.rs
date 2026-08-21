@@ -406,12 +406,32 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
     params.cwd = Some(cwd.path().to_string_lossy().to_string());
     params.unmanaged_cwd = Some(true);
+    params.verbose = Some(true);
+
+    let mut resolved_params = params.clone();
+    let start = resolve_dispatch_start(
+        &server,
+        &mut resolved_params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    )
+    .expect("raw alias resolves before the compatibility projection");
+    assert_eq!(start.request.profile.as_deref(), Some("glm_51_impl"));
+    assert_eq!(
+        start.resolved_assignment.selected_profile.as_deref(),
+        Some("glm_impl")
+    );
+    assert_eq!(resolved_params.profile.as_deref(), Some("glm_impl"));
 
     let raw = handle_tachi_dispatch(&server, params)
         .await
         .expect("alias dispatch starts");
     let response: Value = serde_json::from_str(&raw).expect("response JSON");
-    assert_eq!(response["selected_profile"], json!("glm_impl"), "{response}");
+    assert_eq!(
+        response["selected_profile"],
+        json!("glm_impl"),
+        "{response}"
+    );
     let run_dir = std::path::Path::new(response["run_dir"].as_str().expect("run dir"));
     let started: Value = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
         .expect("trajectory")
@@ -422,6 +442,11 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
     assert_eq!(started["profile"], json!("glm_51_impl"), "{started}");
     let completion = &response["suggested_complete_command"]["arguments"];
     assert_eq!(completion["profile"], json!("glm_51_impl"), "{completion}");
+    assert_eq!(
+        response["profile"]["identity_receipt"]["requested"]["profile"],
+        json!("glm_51_impl"),
+        "verbose raw diagnostics must retain the caller spelling: {response}"
+    );
 }
 
 #[test]

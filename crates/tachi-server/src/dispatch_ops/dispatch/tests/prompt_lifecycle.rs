@@ -366,8 +366,8 @@ async fn p2_admitted_empty_skills_and_raw_bundle_ingress_stay_distinct() {
     assert_eq!(empty_mount.capability_bundle["requested_raw"], Value::Null);
     assert_eq!(empty_mount.capability_bundle["requested"], json!(false));
 
-    // An explicit ingress value changes only the raw diagnostic projection;
-    // the private profile remains the effective bundle decision.
+    // The typed carrier records whether it received an effective capability
+    // decision without serializing a second raw diagnostic projection.
     let explicit_false = crate::dispatch_ops::assemble_resolved_prompt_with_trace(
         &server,
         &request,
@@ -382,10 +382,6 @@ async fn p2_admitted_empty_skills_and_raw_bundle_ingress_stay_distinct() {
     )
     .await;
     assert_eq!(explicit_false.capability_bundle["source"], json!("params"));
-    assert_eq!(
-        explicit_false.capability_bundle["requested_raw"],
-        json!(false)
-    );
     assert_eq!(explicit_false.capability_bundle["requested"], json!(false));
 }
 
@@ -759,19 +755,44 @@ async fn p2_grant_and_private_profile_prompt_matrix_is_one_owner() {
     .await;
     assert!(!filtered.prompt.contains("typed-skill"));
     assert_eq!(filtered.capability_bundle["requested"], json!(false));
-    assert_eq!(filtered.capability_bundle["source"], json!("unset"));
+    assert_eq!(filtered.capability_bundle["source"], json!("params"));
 
     let mut private = profile.clone();
     private.tool_profile = Some("private-tool-only".into());
     private.mcp_access = mcp_access(&["private-profile-mcp-only"], false);
     private.profile_card = Some(json!({"card": "private-card-only"}));
+    private.role = Some("private-profile-role-only".into());
     private.auto_capability_bundle = false;
-    let private_prompt =
-        typed_prompt(&server, &request, &assignment, &grant, &private, &skills).await;
+    let mut request_stage_only = request.clone();
+    request_stage_only.stage = Some("request-stage-only".into());
+    let mut selected_model_only = assignment.clone();
+    selected_model_only.selected_model = Some("selected-model-only".into());
+    let private_prompt = typed_prompt(
+        &server,
+        &request_stage_only,
+        &selected_model_only,
+        &grant,
+        &private,
+        &skills,
+    )
+    .await;
     assert_ne!(private_prompt.prompt, baseline.prompt);
     assert!(private_prompt.prompt.contains("private-tool-only"));
     assert!(private_prompt.prompt.contains("private-profile-mcp-only"));
     assert!(!private_prompt.prompt.contains("typed-tool-profile"));
+    assert!(
+        private_prompt
+            .prompt
+            .contains("- role: private-profile-role-only"),
+        "the role clause must come from the private resolved profile: {}",
+        private_prompt.prompt
+    );
+    assert!(
+        !private_prompt.prompt.contains("- role: request-stage-only\\n")
+            && !private_prompt.prompt.contains("- role: selected-model-only"),
+        "request.stage and assignment.selected_model are semantically distinct from profile.role: {}",
+        private_prompt.prompt
+    );
     assert_eq!(private_prompt.capability_bundle["requested"], json!(false));
 
     let private_response: Value =
@@ -863,7 +884,7 @@ async fn p2_artifact_flow_and_kanban_metadata_are_exact_after_named_normalizatio
   "reason": "auto_capability_bundle=false",
   "requested": false,
   "section": null,
-  "source": "unset",
+  "source": "params",
   "status": "disabled",
   "supporting_capabilities": []
 }"#
@@ -916,7 +937,7 @@ async fn p2_artifact_flow_and_kanban_metadata_are_exact_after_named_normalizatio
     assert_eq!(
         events,
         r##"{"dispatch_id":"typed-dispatch","event":"dispatch_received","timestamp":"FIXED"}
-{"agent":"codex","allowed_mcp_servers":["launch-mcp"],"auto_capability_bundle":false,"capability_bundle":{"artifact_file":"<RUN>/capability_bundle.json","disabled":true,"error":null,"host":"codex","host_tools_count":0,"injected":false,"packs_count":0,"primary_skill":null,"query":"typed prompt lifecycle task","reason":"auto_capability_bundle=false","requested":false,"source":"unset","status":"disabled","supporting_capabilities_count":0},"dispatch_id":"typed-dispatch","event":"dispatch_started","feedback_rules":{"count":0,"rules":[],"status":"none"},"flow_id":"missing-flow","issue_ref":"#1817","mcp_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"pr_ref":"#1817","profile":"typed-profile","stage":"implementation","timestamp":"<TIMESTAMP>","tool_profile":"typed-tool-profile","v2":false}
+{"agent":"codex","allowed_mcp_servers":["launch-mcp"],"auto_capability_bundle":false,"capability_bundle":{"artifact_file":"<RUN>/capability_bundle.json","disabled":true,"error":null,"host":"codex","host_tools_count":0,"injected":false,"packs_count":0,"primary_skill":null,"query":"typed prompt lifecycle task","reason":"auto_capability_bundle=false","requested":false,"source":"params","status":"disabled","supporting_capabilities_count":0},"dispatch_id":"typed-dispatch","event":"dispatch_started","feedback_rules":{"count":0,"rules":[],"status":"none"},"flow_id":"missing-flow","issue_ref":"#1817","mcp_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"pr_ref":"#1817","profile":"typed-profile","stage":"implementation","timestamp":"<TIMESTAMP>","tool_profile":"typed-tool-profile","v2":false}
 {"dispatch_id":"typed-dispatch","error":"Invalid flow_id: 'missing-flow'. Expected a safe id starting with 'flow_' and containing only ASCII letters, numbers, '_' or '-'. Example: flow_20260609T014037Z_tachi_dispatch_ux_smoke","event":"flow_dispatch_marker_failed","flow_id":"missing-flow","timestamp":"<TIMESTAMP>"}"##
     );
 }
