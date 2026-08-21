@@ -498,6 +498,41 @@ fn invalid_profile_is_refused_before_typed_assignment_or_launch() {
 }
 
 #[test]
+fn canonical_ingress_refuses_cross_lineage_model_without_partial_legacy_projection() {
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(Some("claude"), "cross-lineage profile refusal");
+    params.profile = Some("glm_impl".to_string());
+    params.model = Some("openai/gpt-5.6".to_string());
+    let legacy_before = format!("{params:?}");
+
+    let err = match resolve_dispatch_start(
+        &server,
+        &mut params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    ) {
+        Ok(_) => {
+            panic!("cross-lineage caller model must be refused before assignment or projection")
+        }
+        Err(err) => err,
+    };
+
+    assert!(
+        err.contains("model override 'openai/gpt-5.6' crosses profile 'glm_impl' lineage"),
+        "{err}"
+    );
+    assert!(
+        err.contains("without explicit profile authorization"),
+        "{err}"
+    );
+    assert_eq!(
+        format!("{params:?}"),
+        legacy_before,
+        "canonical ingress must not partially apply profile resolution to the legacy projection"
+    );
+}
+
+#[test]
 fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
     let mut params = test_dispatch_params(Some("custom"), "mint populated MCP grant");
     params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
@@ -804,7 +839,12 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     // Capture all real-handler evidence before releasing the fake subprocess;
     // this is also the explicit cleanup assertion, while Drop covers panic.
     cleanup.release_and_wait().await;
+    let worker_result = wait_for_result(&run_dir).await;
 
+    assert!(
+        !worker_result.trim().is_empty(),
+        "fake Claude must reach a terminal result before the test returns"
+    );
     assert!(
         config["mcpServers"].get("tachi").is_some(),
         "generated launch config must use top-level inject_tachi=true: {config}"
