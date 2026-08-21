@@ -63,7 +63,12 @@ pub(super) fn resolve_dispatch_start(
         identity_receipt: serde_json::to_value(&resolved_profile.identity_receipt)
             .unwrap_or(serde_json::Value::Null),
     };
-    apply_assignment_legacy_projection(params, legacy_projection, &resolved_assignment)?;
+    apply_assignment_legacy_projection(
+        params,
+        legacy_projection,
+        &resolved_assignment,
+        &resolved_profile,
+    )?;
 
     let profile_payload =
         serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
@@ -118,6 +123,7 @@ pub(super) fn resolve_dispatch_start(
 pub(super) fn assert_assignment_legacy_projection(
     params: &TachiDispatchParams,
     assignment: &tachi_params::ResolvedStaffAssignment,
+    resolved_profile: &ResolvedDispatchProfile,
 ) -> Result<(), String> {
     let matches = assignment.staffing_reason == params.staffing_reason
         && params.agent.as_deref() == Some(assignment.selected_backend.as_str())
@@ -131,7 +137,14 @@ pub(super) fn assert_assignment_legacy_projection(
                 .map(str::to_string)
         && assignment.selected_model == params.model
         && assignment.execution_level == params.execution_level
-        && assignment.recommendation_ref.is_none();
+        && assignment.recommendation_ref.is_none()
+        && assignment.host_adapter == resolved_profile.host_adapter
+        && assignment.evidence_required == resolved_profile.evidence_required
+        && assignment.fallback_chain == resolved_profile.fallback_chain
+        && assignment.route_explanation == resolved_profile.route_explanation
+        && assignment.identity_receipt
+            == serde_json::to_value(&resolved_profile.identity_receipt)
+                .unwrap_or(serde_json::Value::Null);
     if matches {
         Ok(())
     } else {
@@ -156,6 +169,7 @@ fn apply_assignment_legacy_projection(
     params: &mut TachiDispatchParams,
     mut legacy_projection: TachiDispatchParams,
     assignment: &tachi_params::ResolvedStaffAssignment,
+    resolved_profile: &ResolvedDispatchProfile,
 ) -> Result<(), String> {
     // This is the sole temporary P1 write-back. The selected values come from
     // the typed assignment; the remaining fields were resolved by the private
@@ -164,7 +178,7 @@ fn apply_assignment_legacy_projection(
     legacy_projection.model = assignment.selected_model.clone();
     legacy_projection.execution_level = assignment.execution_level;
     *params = legacy_projection;
-    assert_assignment_legacy_projection(params, assignment)
+    assert_assignment_legacy_projection(params, assignment, resolved_profile)
 }
 
 /// Preserve the resolver's nested MCP profile context for profile-facing

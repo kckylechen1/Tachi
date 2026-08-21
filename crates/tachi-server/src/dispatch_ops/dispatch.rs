@@ -459,7 +459,7 @@ pub(crate) async fn handle_tachi_dispatch(
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
-            "cwd": execution_grant.allowed_cwd.clone(),
+            "cwd": params.cwd.clone(),
             "completion_predicate":
                 serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
             // #774 round 3: stamp the dispatch's named project (if any) into
@@ -556,7 +556,7 @@ pub(crate) async fn handle_tachi_dispatch(
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
-            "cwd": execution_grant.allowed_cwd.clone(),
+            "cwd": params.cwd.clone(),
             // #894 S1: record how the working directory was bound so the ledger
             // distinguishes managed (leased) envs from opted-in unmanaged cwds
             // and the daemon default.

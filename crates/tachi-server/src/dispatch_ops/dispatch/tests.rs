@@ -76,12 +76,17 @@ fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
         start.resolved_assignment.execution_level,
         Some(tachi_params::ExecutionLevel::L2)
     );
-    assert_assignment_legacy_projection(&params, &start.resolved_assignment)
-        .expect("typed assignment and temporary legacy projection agree");
+    assert_assignment_legacy_projection(
+        &params,
+        &start.resolved_assignment,
+        &start.resolved_profile,
+    )
+    .expect("typed assignment and temporary legacy projection agree");
     let mut profile_mutant = start.resolved_assignment.clone();
     profile_mutant.selected_profile = Some("mutant".to_string());
     assert!(
-        assert_assignment_legacy_projection(&params, &profile_mutant).is_err(),
+        assert_assignment_legacy_projection(&params, &profile_mutant, &start.resolved_profile)
+            .is_err(),
         "one-sided selected-profile mutation must be observable"
     );
 }
@@ -165,7 +170,12 @@ fn projection_guards_reject_each_owned_field_family_mutant() {
             let mut mutant = assignment.clone();
             $body(&mut mutant);
             assert!(
-                assert_assignment_legacy_projection(&assignment_params, &mutant).is_err(),
+                assert_assignment_legacy_projection(
+                    &assignment_params,
+                    &mutant,
+                    &start.resolved_profile
+                )
+                .is_err(),
                 "assignment mutant must fail: {}",
                 $name
             );
@@ -193,6 +203,30 @@ fn projection_guards_reject_each_owned_field_family_mutant() {
         "recommendation",
         |m: &mut tachi_params::ResolvedStaffAssignment| m.recommendation_ref =
             Some("mutant".to_string())
+    );
+    assignment_mutant!(
+        "host_adapter",
+        |m: &mut tachi_params::ResolvedStaffAssignment| m.host_adapter = Some("mutant".to_string())
+    );
+    assignment_mutant!(
+        "evidence_required",
+        |m: &mut tachi_params::ResolvedStaffAssignment| m
+            .evidence_required
+            .push("mutant".to_string())
+    );
+    assignment_mutant!(
+        "fallback_chain",
+        |m: &mut tachi_params::ResolvedStaffAssignment| m.fallback_chain.push("mutant".to_string())
+    );
+    assignment_mutant!(
+        "route_explanation",
+        |m: &mut tachi_params::ResolvedStaffAssignment| m.route_explanation =
+            Some("mutant".to_string())
+    );
+    assignment_mutant!(
+        "identity_receipt",
+        |m: &mut tachi_params::ResolvedStaffAssignment| m.identity_receipt =
+            json!({"mutant": true})
     );
 
     let mut params = test_dispatch_params(Some("custom"), "grant mutant matrix");
@@ -234,6 +268,10 @@ fn projection_guards_reject_each_owned_field_family_mutant() {
     }
     grant_mutant!("env_id", |m: &mut tachi_params::ExecutionGrant| m.env_id =
         Some("mutant".to_string()));
+    grant_mutant!(
+        "credential_profiles",
+        |m: &mut tachi_params::ExecutionGrant| m.credential_profiles.clear()
+    );
     grant_mutant!("tools", |m: &mut tachi_params::ExecutionGrant| m
         .allowed_tools
         .push("Write".to_string()));
@@ -823,6 +861,7 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
     let server = crate::tests::make_server();
     let mut params = test_dispatch_params(Some("custom"), "preserve whitespace profile spelling");
     params.profile = Some("   ".to_string());
+    params.cwd = Some("   ".to_string());
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
 
     let raw = handle_tachi_dispatch(&server, params)
@@ -842,6 +881,15 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
         response["run_dir"]
             .as_str()
             .expect("response carries run directory"),
+    );
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status receipt exists"),
+    )
+    .expect("status receipt JSON");
+    assert_eq!(
+        status["cwd"],
+        json!("   "),
+        "status receipt retains base raw whitespace cwd while grant stays canonical: {status}"
     );
     let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
         .expect("trajectory artifact exists");
