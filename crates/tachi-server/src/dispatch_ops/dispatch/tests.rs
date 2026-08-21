@@ -159,7 +159,7 @@ fn projection_guards_reject_each_owned_field_family_mutant() {
         tachi_params::ExecutionLevel::L1,
     )
     .expect("assignment baseline");
-    let assignment = start.resolved_assignment;
+    let assignment = start.resolved_assignment.clone();
     macro_rules! assignment_mutant {
         ($name:literal, $body:expr) => {{
             let mut mutant = assignment.clone();
@@ -254,9 +254,9 @@ fn projection_guards_reject_each_owned_field_family_mutant() {
     assert!(assert_grant_legacy_projection(&top_hub, &grant, &env).is_err());
     macro_rules! nested_mutant {
         ($body:expr) => {{
-            let mut p = params.clone();
+            let mut p = assignment_params.clone();
             $body(p.mcp_access.as_mut().unwrap());
-            assert!(assert_grant_legacy_projection(&p, &grant, &env).is_err());
+            assert!(assert_nested_mcp_profile_projection(&p, &start.resolved_profile).is_err());
         }};
     }
     nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m.inject_tachi_mcp = Some(true));
