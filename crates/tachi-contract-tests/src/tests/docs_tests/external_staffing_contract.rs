@@ -439,15 +439,19 @@ fn external_staffing_typed_adopter_rejects_flat_facade_mutants() {
 
 #[test]
 fn external_staffing_observer_rejects_independent_staff_lifecycle_mutant() {
-    let observed = observe_sources([(
-        "crates/tachi-server/src/staffing_ops/mod.rs",
-        r#"
-            async fn staff_start() {
-                launch_staff_assignment(server, request).await;
-                tokio::spawn(async {});
-            }
-        "#,
-    )]);
+    let root = repo_root();
+    let relative = "crates/tachi-server/src/staffing_ops/mod.rs";
+    let staff = std::fs::read_to_string(root.join(relative)).expect("read production Staff source");
+    let staff_start = functions_in_source(relative, &staff)
+        .into_iter()
+        .find(|function| function.name == "staff_start")
+        .expect("attribute the real production staff_start body");
+    let mutated_start =
+        staff_start
+            .source
+            .replacen('{', "{ tokio::spawn(async {}); write_status_json();", 1);
+    let mutant = staff.replacen(&staff_start.source, &mutated_start, 1);
+    let observed = observe_sources([(relative, mutant.as_str())]);
     assert_eq!(
         observed["independent_staff_lifecycles"],
         json!(["crates/tachi-server/src/staffing_ops/mod.rs::staff_start"]),

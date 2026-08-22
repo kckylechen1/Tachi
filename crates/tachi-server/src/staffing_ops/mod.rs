@@ -348,6 +348,48 @@ pub(crate) mod tests {
         panic!("Staff background cleanup did not finish for {dispatch_id}");
     }
 
+    /// Keep the process-global fake-worker environment alive if assertions
+    /// panic after acceptance. The E2Es use a two-thread runtime, so this
+    /// bounded blocking Drop wait cannot starve the background dispatch.
+    struct StaffCleanupGuard {
+        accepted_response: String,
+        armed: bool,
+    }
+
+    impl StaffCleanupGuard {
+        fn arm(accepted_response: &str) -> Self {
+            Self {
+                accepted_response: accepted_response.to_string(),
+                armed: true,
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for StaffCleanupGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            let dispatch_id = serde_json::from_str::<Value>(&self.accepted_response)
+                .ok()
+                .and_then(|response| response["dispatch_id"].as_str().map(str::to_string));
+            let Some(dispatch_id) = dispatch_id else {
+                return;
+            };
+            for _ in 0..360 {
+                if crate::dispatch_ops::background_dispatch_cleanup_complete(&dispatch_id) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            eprintln!("Staff cleanup guard timed out for {dispatch_id}");
+        }
+    }
+
     fn terminal_staff_state(status: &Value) -> &str {
         status
             .get("status")
@@ -420,11 +462,13 @@ pub(crate) mod tests {
         let raw = staff_start(&server, request)
             .await
             .expect("Staff start should be accepted before background execution");
+        let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
         let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
         wait_for_staff_cleanup(dispatch_id).await;
+        cleanup_guard.disarm();
 
         assert_eq!(
             terminal_staff_state(&status),
@@ -531,11 +575,13 @@ pub(crate) mod tests {
         let raw = staff_start(&server, staff_request("tachi"))
             .await
             .expect("spawn failure remains asynchronously accepted");
+        let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
         let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
         wait_for_staff_cleanup(dispatch_id).await;
+        cleanup_guard.disarm();
 
         assert_eq!(
             terminal_staff_state(&status),
