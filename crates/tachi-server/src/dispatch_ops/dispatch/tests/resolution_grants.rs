@@ -190,6 +190,25 @@ impl TerminalWorkerCleanup {
                     )
             })
     }
+
+    async fn wait_for_terminal(&self) -> Value {
+        for _ in 0..120 {
+            if let Ok(raw) = tokio::fs::read_to_string(self.run_dir.join("status.json")).await {
+                if let Ok(status) = serde_json::from_str::<Value>(&raw) {
+                    if status["result_written"] == json!(true)
+                        && matches!(
+                            status["state"].as_str(),
+                            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")
+                        )
+                    {
+                        return status;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("custom worker must write a terminal status receipt");
+    }
 }
 
 impl Drop for TerminalWorkerCleanup {
@@ -298,7 +317,11 @@ async fn opencode_builder_profile_default_reaches_credential_failure_evidence() 
     let server = crate::tests::make_server();
     let mut params = test_dispatch_params(None, "profile-only credential evidence");
     params.profile = Some("opencode_builder".to_string());
-    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import os; open('launcher-cwd', 'w').write(os.getcwd())".to_string(),
+    ];
 
     let err = handle_tachi_dispatch(&server, params)
         .await
@@ -575,12 +598,8 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
         json!("glm_51_impl"),
         "verbose raw diagnostics must retain the caller spelling: {response}"
     );
-    let worker_result = wait_for_result(&run_dir).await;
-    assert!(
-        !worker_result.trim().is_empty(),
-        "custom worker reaches terminal result"
-    );
-    assert!(cleanup.terminal(), "custom worker reaches terminal status");
+    let terminal_status = cleanup.wait_for_terminal().await;
+    assert_eq!(terminal_status["state"], json!("TASK_STATE_COMPLETED"));
     assert_eq!(
         std::fs::canonicalize(
             std::fs::read_to_string(cwd.path().join("launcher-cwd"))
@@ -1200,12 +1219,8 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
         "{}",
         kanban.metadata
     );
-    let worker_result = wait_for_result(&run_dir).await;
-    assert!(
-        !worker_result.trim().is_empty(),
-        "custom worker reaches terminal result"
-    );
-    assert!(cleanup.terminal(), "custom worker reaches terminal status");
+    let terminal_status = cleanup.wait_for_terminal().await;
+    assert_eq!(terminal_status["state"], json!("TASK_STATE_COMPLETED"));
     let launched_cwd =
         std::fs::read_to_string(&observed_cwd).expect("whitespace launcher cwd record");
     assert_eq!(
