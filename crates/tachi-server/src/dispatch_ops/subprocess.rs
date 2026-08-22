@@ -18,17 +18,148 @@ pub(super) async fn run_agent_subprocess(
     run_agent_subprocess_inner(&mut cmd, timeout, None).await
 }
 
-pub(super) async fn run_managed_custom_subprocess(mut cmd: Command, timeout: Duration, mut cancellations: mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>) -> Result<DispatchResult, String> {
-    #[cfg(not(unix))] { let _ = cancellations; return Err("cancellation_unavailable: unsupported_platform".to_string()); }
-    #[cfg(unix)] {
-        cmd.stdin(std::process::Stdio::null()); cmd.stdout(std::process::Stdio::piped()); cmd.stderr(std::process::Stdio::piped()); cmd.kill_on_drop(true); configure_process_group(&mut cmd);
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn agent process: {e}"))?; let pid = child.id(); let stdout = child.stdout.take(); let stderr = child.stderr.take(); let stdout_task = tokio::spawn(read_pipe(stdout)); let stderr_task = tokio::spawn(read_pipe(stderr));
-        let status = tokio::select! { result = tokio::time::timeout(timeout, child.wait()) => match result { Ok(Ok(status)) => status, Ok(Err(error)) => return Err(format!("Agent process error: {error}")), Err(_) => { reap_timed_out_child(&mut child, pid).await; return Err(format!("Agent process timed out after {}s (process group killed)", timeout.as_secs())); } }, command = cancellations.recv() => { let Some(command) = command else { return Err("managed cancellation channel closed".to_string()); }; let _receipt_revisions = (command.expected_status_revision, command.observed_status_revision); if child.try_wait().map_err(|e| format!("managed cancellation child probe failed: {e}"))?.is_some() { return Err("cancellation_unavailable: completion_winner".to_string()); } reap_timed_out_child(&mut child, pid).await; if !process_group_absent(pid) { let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unconfirmed); return Err("termination_unconfirmed".to_string()); } let _ = command.response.send(crate::managed_run_control::CancelCompletion::Confirmed); return Err("managed_cancelled".to_string()); } };
-        let stdout = collect_pipe(stdout_task).await?; let stderr = collect_pipe(stderr_task).await?; let output = if stdout.is_empty() && !stderr.is_empty() { stderr } else if !stderr.is_empty() { format!("{stdout}\n\n--- stderr ---\n{stderr}") } else { stdout }; Ok(DispatchResult { output, exit_code: status.code(), observed_model: None })
+pub(super) async fn run_managed_custom_subprocess(
+    mut cmd: Command,
+    timeout: Duration,
+    mut cancellations: mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
+    run_dir: &std::path::Path,
+) -> Result<DispatchResult, String> {
+    #[cfg(not(unix))]
+    {
+        let _ = cancellations;
+        let _ = run_dir;
+        return Err("cancellation_unavailable: unsupported_platform".to_string());
+    }
+    #[cfg(unix)]
+    {
+        if let Ok(command) = cancellations.try_recv() {
+            return finish_pre_spawn_cancellation(command, run_dir);
+        }
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
+        configure_process_group(&mut cmd);
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn agent process: {e}"))?;
+        let pid = child.id();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_task = tokio::spawn(read_pipe(stdout));
+        let stderr_task = tokio::spawn(read_pipe(stderr));
+        let status = tokio::select! {
+            result = tokio::time::timeout(timeout, child.wait()) => match result {
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) => return Err(format!("Agent process error: {error}")),
+                Err(_) => {
+                    reap_timed_out_child(&mut child, pid).await;
+                    return Err(format!("Agent process timed out after {}s (process group killed)", timeout.as_secs()));
+                }
+            },
+            command = cancellations.recv() => {
+                let Some(command) = command else {
+                    return Err("managed cancellation channel closed".to_string());
+                };
+                if let Some(status) = child.try_wait().map_err(|error| format!("managed cancellation child probe failed: {error}"))? {
+                    let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unavailable("completion_winner"));
+                    return finish_managed_output(status, stdout_task, stderr_task).await;
+                }
+                reap_timed_out_child(&mut child, pid).await;
+                if !wait_for_process_group_absence(pid).await {
+                    let _ = crate::managed_run_control::record_termination_unconfirmed(run_dir, command.expected_status_revision);
+                    let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unconfirmed);
+                    return Err("termination_unconfirmed".to_string());
+                }
+                match crate::managed_run_control::confirm_managed_custom_cancellation(run_dir, command.expected_status_revision, "unix_process_group_absent") {
+                    Ok(status_revision) => {
+                        let _ = command.response.send(crate::managed_run_control::CancelCompletion::Confirmed {
+                            termination_proof: "unix_process_group_absent",
+                            status_revision,
+                        });
+                        return Err("managed_cancelled".to_string());
+                    }
+                    Err(_) => {
+                        let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unconfirmed);
+                        return Err("termination_unconfirmed".to_string());
+                    }
+                }
+            }
+        };
+        finish_managed_output(status, stdout_task, stderr_task).await
     }
 }
 
-#[cfg(unix)] fn process_group_absent(pid: Option<u32>) -> bool { let Some(pid) = pid else { return true; }; unsafe { libc::kill(-(pid as libc::pid_t), 0) != 0 } }
+#[cfg(unix)]
+fn process_group_absent(pid: Option<u32>) -> bool {
+    let Some(pid) = pid else {
+        return true;
+    };
+    let rc = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+async fn wait_for_process_group_absence(pid: Option<u32>) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if process_group_absent(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    process_group_absent(pid)
+}
+
+#[cfg(unix)]
+fn finish_pre_spawn_cancellation(
+    command: crate::managed_run_control::ManagedCancelCommand,
+    run_dir: &std::path::Path,
+) -> Result<DispatchResult, String> {
+    match crate::managed_run_control::confirm_managed_custom_cancellation(
+        run_dir,
+        command.expected_status_revision,
+        "spawn_suppressed",
+    ) {
+        Ok(status_revision) => {
+            let _ =
+                command
+                    .response
+                    .send(crate::managed_run_control::CancelCompletion::Confirmed {
+                        termination_proof: "spawn_suppressed",
+                        status_revision,
+                    });
+            Err("managed_cancelled".to_string())
+        }
+        Err(_) => {
+            let _ = command
+                .response
+                .send(crate::managed_run_control::CancelCompletion::Unconfirmed);
+            Err("termination_unconfirmed".to_string())
+        }
+    }
+}
+
+async fn finish_managed_output(
+    status: std::process::ExitStatus,
+    stdout_task: tokio::task::JoinHandle<Vec<u8>>,
+    stderr_task: tokio::task::JoinHandle<Vec<u8>>,
+) -> Result<DispatchResult, String> {
+    let stdout = collect_pipe(stdout_task).await?;
+    let stderr = collect_pipe(stderr_task).await?;
+    let output = if stdout.is_empty() && !stderr.is_empty() {
+        stderr
+    } else if !stderr.is_empty() {
+        format!("{stdout}\n\n--- stderr ---\n{stderr}")
+    } else {
+        stdout
+    };
+    Ok(DispatchResult {
+        output,
+        exit_code: status.code(),
+        observed_model: None,
+    })
+}
 
 pub(super) async fn run_opencode_sop_subprocess(
     mut cmd: Command,
@@ -332,19 +463,38 @@ mod tests {
         let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script, permissions).expect("chmod");
+        let run_dir = temp.path().join("run");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({
+                "dispatch_id": "20260823T010100Z-custom-deadbeef",
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 1,
+                "execution_classification": "managed_custom",
+                "cancellation": {"receipt": "cancellation_requested"},
+            })
+            .to_string(),
+        )
+        .expect("status");
 
         let (sender, receiver) = mpsc::channel(1);
         let (reply, confirmed) = tokio::sync::oneshot::channel();
-        let run = tokio::spawn(run_managed_custom_subprocess(
-            Command::new(&script),
-            Duration::from_secs(20),
-            receiver,
-        ));
+        let command = Command::new(&script);
+        let run_dir_for_task = run_dir.clone();
+        let run = tokio::spawn(async move {
+            run_managed_custom_subprocess(
+                command,
+                Duration::from_secs(20),
+                receiver,
+                &run_dir_for_task,
+            )
+            .await
+        });
         wait_for_file(&descendant).await;
         sender
             .send(crate::managed_run_control::ManagedCancelCommand {
                 expected_status_revision: 1,
-                observed_status_revision: 1,
                 response: reply,
             })
             .await
@@ -356,7 +506,10 @@ mod tests {
         }
         assert!(matches!(
             confirmed.await.expect("cancellation outcome"),
-            crate::managed_run_control::CancelCompletion::Confirmed
+            crate::managed_run_control::CancelCompletion::Confirmed {
+                termination_proof: "unix_process_group_absent",
+                ..
+            }
         ));
         let pid: libc::pid_t = std::fs::read_to_string(&descendant)
             .expect("descendant pid")
@@ -366,6 +519,70 @@ mod tests {
         assert!(
             wait_for_process_exit(pid).await,
             "descendant must be absent before cancellation confirmation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod issue_1825_cancel_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_custom_cancel_does_not_kill_unrelated_process() {
+        let mut unrelated = Command::new("/bin/sh");
+        unrelated.arg("-c").arg("sleep 30");
+        let mut unrelated = unrelated.spawn().expect("start unrelated fixture");
+        let unrelated_pid = unrelated.id().expect("unrelated pid");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({
+                "dispatch_id": "20260823T010101Z-custom-deadbeef",
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 1,
+                "execution_classification": "managed_custom",
+                "cancellation": {"receipt": "cancellation_requested"},
+            })
+            .to_string(),
+        )
+        .expect("status");
+        let (sender, receiver) = mpsc::channel(1);
+        let (reply, outcome) = tokio::sync::oneshot::channel();
+        sender
+            .send(crate::managed_run_control::ManagedCancelCommand {
+                expected_status_revision: 1,
+                response: reply,
+            })
+            .await
+            .expect("queue pre-spawn cancellation");
+        let result = run_managed_custom_subprocess(
+            Command::new("/bin/true"),
+            Duration::from_secs(5),
+            receiver,
+            &run_dir,
+        )
+        .await;
+        match result {
+            Err(error) => assert_eq!(error, "managed_cancelled"),
+            Ok(_) => panic!("pre-spawn cancellation interrupts run"),
+        }
+        assert!(matches!(
+            outcome.await.expect("outcome"),
+            crate::managed_run_control::CancelCompletion::Confirmed {
+                termination_proof: "spawn_suppressed",
+                ..
+            }
+        ));
+        let alive = unsafe { libc::kill(unrelated_pid as libc::pid_t, 0) } == 0;
+        let _ = unrelated.kill().await;
+        let _ = unrelated.wait().await;
+        assert!(
+            alive,
+            "managed cancellation must not target an unrelated PID"
         );
     }
 }

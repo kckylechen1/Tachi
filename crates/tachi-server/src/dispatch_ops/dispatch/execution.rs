@@ -6,7 +6,9 @@ use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
 use super::super::dispatch_v2::stamp_route_decision_id;
 use super::super::dispatch_v2::{append_trajectory_event, status_json_lock_for, write_status_json};
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
-use super::super::subprocess::{run_agent_subprocess, run_managed_custom_subprocess, run_opencode_sop_subprocess, tail_chars};
+use super::super::subprocess::{
+    run_agent_subprocess, run_managed_custom_subprocess, run_opencode_sop_subprocess, tail_chars,
+};
 use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
 use crate::{MemoryServer, SaveMemoryParams};
@@ -30,7 +32,10 @@ const WATCHDOG_STATUS_MAX_BYTES: usize = 1024 * 1024;
 
 pub(super) enum DispatchExecution {
     Subprocess(Command),
-    ManagedCustom(Command, tokio::sync::mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>),
+    ManagedCustom(
+        Command,
+        tokio::sync::mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
+    ),
     NativeAcp(NativeAcpRunSpec),
 }
 
@@ -123,7 +128,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 .await
             }
             DispatchExecution::Subprocess(cmd) => run_agent_subprocess(cmd, timeout).await,
-            DispatchExecution::ManagedCustom(cmd, receiver) => run_managed_custom_subprocess(cmd, timeout, receiver).await,
+            DispatchExecution::ManagedCustom(cmd, receiver) => {
+                run_managed_custom_subprocess(cmd, timeout, receiver, &workspace_dir_for_spawn)
+                    .await
+            }
             DispatchExecution::NativeAcp(spec) => {
                 run_native_acp_dispatch(
                     spec,
@@ -308,6 +316,22 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         let polled_terminal_state = canonical_terminal_state(kanban_state.as_deref());
         let is_closed = !pending_completion_recovery
             && (receipt_terminal_state.is_some() || polled_terminal_state.is_some());
+        if receipt_terminal_state == Some("TASK_STATE_CANCELED") {
+            if let Err(error) = update_kanban_state(
+                &server_clone,
+                &d_id,
+                "TASK_STATE_CANCELED",
+                None,
+                Some(false),
+            )
+            .await
+            {
+                eprintln!(
+                    "[watchdog] failed to mark cancelled dispatch {}: {}",
+                    d_id, error
+                );
+            }
+        }
         // #1250: terminal accounting in the final `status.json` rewrite must
         // reflect the resolved predicate verdict, NOT the raw process exit
         // code. The watchdog branch below is the only path that actually
@@ -499,6 +523,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         }
 
         let should_cleanup = match &result {
+            Err(error) if error == "managed_cancelled" => true,
             Ok(r) if !pending_completion_recovery => {
                 should_cleanup_run(r.exit_code, kanban_state.as_deref())
             }
@@ -821,6 +846,7 @@ fn persist_acp_model_acknowledgement(
         serde_json::to_value(receipt)
             .map_err(|error| format!("serialize ACP identity receipt: {error}"))?,
     );
+    super::super::dispatch_v2::advance_status_revision(status_object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|error| format!("serialize {}: {error}", status_path.display()))?;
     crate::utils::write_owner_only_file_atomic(&status_path, &body)
@@ -934,6 +960,19 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
     })?;
     if status.get("completion_recovery").is_some() {
         return Ok(CompletionReceiptState::PendingRecovery);
+    }
+    if status
+        .get("cancellation")
+        .and_then(Value::as_object)
+        .is_some_and(|receipt| {
+            receipt.get("receipt").and_then(Value::as_str) == Some("cancellation_confirmed")
+                && matches!(
+                    receipt.get("termination_proof").and_then(Value::as_str),
+                    Some("spawn_suppressed" | "unix_process_group_absent")
+                )
+        })
+    {
+        return Ok(CompletionReceiptState::Terminal("TASK_STATE_CANCELED"));
     }
     let Some(receipt) = status.get("resolved_completion").and_then(Value::as_object) else {
         return Ok(CompletionReceiptState::Open);

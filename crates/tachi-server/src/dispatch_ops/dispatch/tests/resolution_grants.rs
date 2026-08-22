@@ -144,6 +144,60 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
     }
 }
 
+#[test]
+fn status_revision_advances_across_every_canonical_writer() {
+    let writers = [
+        ("base status write", include_str!("../../dispatch_v2.rs")),
+        ("route decision stamp", include_str!("../../dispatch_v2.rs")),
+        (
+            "ACP identity acknowledgement",
+            include_str!("../execution.rs"),
+        ),
+        (
+            "resolved completion",
+            include_str!("../../../complete_ops/handler.rs"),
+        ),
+        (
+            "pending recovery",
+            include_str!("../../../complete_ops/handler.rs"),
+        ),
+        (
+            "managed cancellation",
+            include_str!("../../../managed_run_control.rs"),
+        ),
+    ];
+    for (writer, source) in writers {
+        assert!(
+            source.contains("advance_status_revision"),
+            "{writer} must advance the checked canonical status_revision"
+        );
+        assert!(
+            !source
+                .replace("advance_status_revision", "revision_removed")
+                .contains("advance_status_revision"),
+            "{writer} source discriminator must fail when its increment is removed"
+        );
+    }
+}
+
+#[test]
+fn managed_custom_control_receipts_do_not_expose_process_or_secret_fields() {
+    let source = include_str!("../../../managed_run_control.rs");
+    for forbidden in [
+        "\"pid\"",
+        "\"pgid\"",
+        "\"command\"",
+        "\"env\"",
+        "\"credential\"",
+        "\"signal\"",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "managed cancellation receipt surface must not expose {forbidden}"
+        );
+    }
+}
+
 /// Releases the fake Claude subprocess even when an assertion panics. The
 /// real handler owns generated MCP-config cleanup, so the explicit path
 /// asserts cleanup while Drop only performs the bounded best-effort wait.

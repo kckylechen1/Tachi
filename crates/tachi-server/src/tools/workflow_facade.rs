@@ -53,7 +53,7 @@ impl MemoryServer {
     // ─── Tachi Staff: external staffing facade ──────────────────────────────
 
     #[tool(
-        description = "External staffing: start a worker via the canonical dispatch kernel, or read a worker's canonical status receipt. start requires a typed staffing_reason (native-first exception); execution detail is resolved by profile/policy, not the caller."
+        description = "External staffing: start a worker via the canonical dispatch kernel, read a worker's canonical status receipt, or request same-daemon managed-custom cancellation with a dispatch_id and expected_status_revision. start requires a typed staffing_reason (native-first exception); execution detail is resolved by profile/policy, not the caller."
     )]
     pub(crate) async fn tachi_staff(
         &self,
@@ -72,6 +72,9 @@ impl MemoryServer {
         let format = params.format.clone();
         let raw = match action.as_str() {
             "start" => {
+                if params.expected_status_revision.is_some() {
+                    return Err("tachi_staff: action='start' rejects cancel-only field `expected_status_revision`".to_string());
+                }
                 let request = params.to_assignment_request().map_err(|e| {
                     if e.contains("staffing_reason") {
                         "tachi_staff: action='start' requires a typed staffing_reason (the native-first exception); use the host harness's native subagent for ordinary delegation, or set staffing_reason to explicit_user_request / durable_cross_session / cross_device_remote / native_subagent_unavailable for an admitted exception; zero staffing or dispatch artifacts were created.".to_string()
@@ -96,10 +99,15 @@ impl MemoryServer {
                 .await?
             }
             "cancel" => {
-                let dispatch_id = params.dispatch_id.clone().ok_or_else(|| "tachi_staff: action='cancel' requires a `dispatch_id`".to_string())?;
-                let expected_status_revision = params.expected_status_revision.ok_or_else(|| "tachi_staff: action='cancel' requires `expected_status_revision`".to_string())?;
-                for (name, present) in [("task", params.task.is_some()), ("staffing_reason", params.staffing_reason.is_some()), ("profile", params.profile.is_some()), ("worker", params.worker.is_some()), ("project", params.project.is_some()), ("stage", params.stage.is_some()), ("issue_ref", params.issue_ref.is_some()), ("pr_ref", params.pr_ref.is_some()), ("flow_id", params.flow_id.is_some()), ("recommendation_ref", params.recommendation_ref.is_some())] { if present { return Err(format!("tachi_staff: action='cancel' rejects start-only field `{name}`")); } }
-                crate::staffing_ops::staff_cancel(self, crate::staffing_ops::StaffCancelRequest { dispatch_id, expected_status_revision }).await?
+                let (dispatch_id, expected_status_revision) = params.cancel_request()?;
+                crate::staffing_ops::staff_cancel(
+                    self,
+                    crate::staffing_ops::StaffCancelRequest {
+                        dispatch_id,
+                        expected_status_revision,
+                    },
+                )
+                .await?
             }
             other => {
                 return Err(format!(

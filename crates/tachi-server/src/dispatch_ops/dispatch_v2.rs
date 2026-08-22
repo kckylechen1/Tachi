@@ -329,7 +329,21 @@ pub(crate) fn stamp_route_decision_id(
 /// Every `status.json` read-modify-write must take this lock, including ACP
 /// identity acknowledgement, lifecycle terminalization, and route evidence.
 /// Weak retention avoids keeping a lock entry for every historical run.
-pub(crate) fn advance_status_revision(status: &mut serde_json::Map<String, Value>) -> Result<u64, String> { let next = match status.get("status_revision") { Some(Value::Number(value)) => value.as_u64().ok_or_else(|| "status_revision is not a u64".to_string())?.checked_add(1).ok_or_else(|| "status_revision overflow".to_string())?, Some(_) => return Err("status_revision is not a u64".to_string()), None => 1 }; status.insert("status_revision".to_string(), Value::Number(next.into())); Ok(next) }
+pub(crate) fn advance_status_revision(
+    status: &mut serde_json::Map<String, Value>,
+) -> Result<u64, String> {
+    let next = match status.get("status_revision") {
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .ok_or_else(|| "status_revision is not a u64".to_string())?
+            .checked_add(1)
+            .ok_or_else(|| "status_revision overflow".to_string())?,
+        Some(_) => return Err("status_revision is not a u64".to_string()),
+        None => 1,
+    };
+    status.insert("status_revision".to_string(), Value::Number(next.into()));
+    Ok(next)
+}
 
 pub(crate) fn status_json_lock_for(run_dir: &std::path::Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
@@ -437,6 +451,9 @@ pub(crate) fn write_status_json(
                 // skipped — design D2 / codex finding 2.
                 "route_decision_id",
                 "status_revision",
+                "execution_classification",
+                "lifecycle_owner",
+                "cancellation",
             ] {
                 if !obj.contains_key(key) {
                     if let Some(value) = previous.get(key) {
@@ -472,16 +489,10 @@ pub(crate) fn write_status_json(
             }
         }
     }
-    let next_revision = obj
-        .get("status_revision")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .checked_add(1)
-        .unwrap_or(u64::MAX);
-    obj.insert(
-        "status_revision".to_string(),
-        Value::Number(next_revision.into()),
-    );
+    if let Err(error) = advance_status_revision(&mut obj) {
+        eprintln!("[dispatch-v2] refusing status write: {error}");
+        return;
+    }
     let body =
         serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_else(|_| "{}".to_string());
     if let Err(e) = crate::utils::write_owner_only_file_atomic(&path, body.as_bytes()) {

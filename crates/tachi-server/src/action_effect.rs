@@ -656,3 +656,16 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod issue_1825_cancel_effect_tests {
+    use super::*;
+
+    #[test]
+    fn tachi_staff_cancel_schema_and_effect_contract() {
+        let metadata = facade_action_effect("tachi_staff", Some("cancel"))
+            .expect("cancel has explicit action-effect metadata");
+        assert_eq!(metadata.effect, ActionEffect::Mutating);
+        assert_eq!(metadata.replay, ReplaySafety::Unsafe);
+    }
+}

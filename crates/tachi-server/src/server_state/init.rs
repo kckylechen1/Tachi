@@ -311,7 +311,9 @@ impl MemoryServer {
         };
 
         let server = Self {
-            managed_run_controls: Arc::new(crate::managed_run_control::ManagedRunControlRegistry::default()),
+            managed_run_controls: Arc::new(
+                crate::managed_run_control::ManagedRunControlRegistry::default(),
+            ),
             db,
             llm,
             llm_recorder,
