@@ -77,7 +77,7 @@ pub(super) async fn run_managed_custom_subprocess(
                     }
                 };
                 if let Some(status) = status {
-                    let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unavailable("completion_winner"));
+                    let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unavailable("completion_or_timeout_winner"));
                     return finish_managed_output(status, stdout_task, stderr_task).await;
                 }
                 reap_timed_out_child(&mut child, pid).await;

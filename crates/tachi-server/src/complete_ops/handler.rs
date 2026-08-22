@@ -173,6 +173,10 @@ fn persist_resolved_completion_receipt_at(
     if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
         return Err("cannot overwrite a managed cancellation".to_string());
     }
+    crate::managed_run_control::reconcile_pending_cancellation_unavailable(
+        status_object,
+        "completion_winner",
+    );
     status_object.insert(
         "resolved_completion".to_string(),
         json!({
@@ -277,6 +281,10 @@ fn persist_pending_completion_recovery_receipt_at(
     if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
         return Err("cannot overwrite a managed cancellation".to_string());
     }
+    crate::managed_run_control::reconcile_pending_cancellation_unavailable(
+        status_object,
+        "completion_winner",
+    );
     let recovery = json!({
         "status": "pending_canonical_outcome",
         "state": new_state,

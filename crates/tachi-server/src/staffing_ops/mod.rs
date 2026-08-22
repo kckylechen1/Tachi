@@ -570,13 +570,12 @@ pub(crate) mod tests {
         let raw = staff_start(&server, request)
             .await
             .expect("Staff start should be accepted before background execution");
-        let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
+        let _cleanup_guard = StaffCleanupGuard::arm(&raw);
         let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
         wait_for_staff_cleanup(dispatch_id).await;
-        cleanup_guard.disarm();
 
         assert_eq!(
             terminal_staff_state(&status),
@@ -800,6 +799,7 @@ pub(crate) mod tests {
             wait_for_test_process_exit(descendant).await,
             "managed descendant must be absent"
         );
+        cleanup_guard.disarm();
     }
 
     /// A child spawn failure is asynchronous: Staff receives the canonical

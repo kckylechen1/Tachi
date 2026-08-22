@@ -42,8 +42,44 @@ pub(crate) fn cancellation_blocks_terminal_writer(object: &serde_json::Map<Strin
             .and_then(Value::as_object)
             .and_then(|receipt| receipt.get("receipt"))
             .and_then(Value::as_str),
-        Some("cancellation_requested" | "cancellation_confirmed" | "termination_unconfirmed")
+        Some("cancellation_confirmed" | "termination_unconfirmed")
     )
+}
+
+pub(crate) fn reconcile_pending_cancellation_unavailable(
+    object: &mut serde_json::Map<String, Value>,
+    reason: &str,
+) -> bool {
+    let Some(receipt) = object.get("cancellation").and_then(Value::as_object) else {
+        return false;
+    };
+    if receipt.get("receipt").and_then(Value::as_str) != Some("cancellation_requested") {
+        return false;
+    }
+    let dispatch_id = object
+        .get("dispatch_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let expected = receipt
+        .get("expected_status_revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let observed = object
+        .get("status_revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(expected);
+    object.insert(
+        "cancellation".to_string(),
+        cancellation_receipt(
+            "cancellation_unavailable",
+            dispatch_id,
+            expected,
+            observed,
+            Some(reason),
+            None,
+        ),
+    );
+    true
 }
 
 pub(crate) struct ManagedRunGuard {
@@ -647,8 +683,10 @@ mod issue_1825_tests {
             (
                 "completion",
                 "TASK_STATE_COMPLETED",
-                Some(CancelCompletion::Unavailable("completion_winner")),
-                "completion_winner",
+                Some(CancelCompletion::Unavailable(
+                    "completion_or_timeout_winner",
+                )),
+                "completion_or_timeout_winner",
             ),
             (
                 "timeout",
@@ -703,12 +741,12 @@ mod issue_1825_tests {
             )
             .expect("winner terminal JSON");
             assert_eq!(
-                after_suppressed_terminal["state"], "TASK_STATE_WORKING",
-                "{winner} terminal writer must lose to cancellation_requested"
+                after_suppressed_terminal["state"], terminal_state,
+                "{winner} terminal writer must persist the real winner state"
             );
             assert_eq!(
-                after_suppressed_terminal["cancellation"]["receipt"], "cancellation_requested",
-                "{winner} cannot replace the linearized cancellation receipt"
+                after_suppressed_terminal["cancellation"]["receipt"], "cancellation_unavailable",
+                "{winner} must reconcile the pending cancellation request"
             );
             if let Some(completion) = completion {
                 assert!(
@@ -731,12 +769,12 @@ mod issue_1825_tests {
             )
             .expect("winner final JSON");
             assert_eq!(
-                terminal_after_reply["state"], "TASK_STATE_WORKING",
-                "{winner} cannot commit a terminal state after cancellation linearizes"
+                terminal_after_reply["state"], terminal_state,
+                "{winner} must retain the real terminal winner"
             );
             assert_eq!(
                 terminal_after_reply["cancellation"]["receipt"], "cancellation_unavailable",
-                "{winner} must reconcile the pending request without terminal regression"
+                "{winner} must retain the reconciled cancellation receipt"
             );
             assert!(
                 receiver.try_recv().is_err(),

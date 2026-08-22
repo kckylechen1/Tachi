@@ -426,9 +426,6 @@ pub(crate) fn write_status_json(
             if crate::managed_run_control::cancellation_blocks_terminal_writer(&previous)
                 && proposed_terminal
             {
-                // `cancellation_requested` is the linearization point. A
-                // late watchdog/completion/timeout write must reconcile via
-                // the cancellation owner, not overwrite its pending receipt.
                 return;
             }
             for key in [
@@ -461,6 +458,12 @@ pub(crate) fn write_status_json(
                         obj.insert(key.to_string(), value.clone());
                     }
                 }
+            }
+            if proposed_terminal {
+                let _ = crate::managed_run_control::reconcile_pending_cancellation_unavailable(
+                    &mut obj,
+                    "completion_or_timeout_winner",
+                );
             }
             // A bounded local lock exhaustion has durable eval evidence but
             // no canonical dispatch outcome yet. Keep the run observably
