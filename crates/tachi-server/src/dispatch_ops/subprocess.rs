@@ -16,6 +16,10 @@ static MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR: OnceLock<
     std::sync::Mutex<Option<std::path::PathBuf>>,
 > = OnceLock::new();
 
+#[cfg(test)]
+static MANAGED_CANCEL_CHILD_PID: OnceLock<std::sync::Mutex<Option<(std::path::PathBuf, u32)>>> =
+    OnceLock::new();
+
 pub(super) async fn run_agent_subprocess(
     mut cmd: Command,
     timeout: Duration,
@@ -51,6 +55,8 @@ pub(super) async fn run_managed_custom_subprocess(
             .spawn()
             .map_err(|e| format!("Failed to spawn agent process: {e}"))?;
         let pid = child.id();
+        #[cfg(test)]
+        record_managed_cancel_child_pid(run_dir, pid);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let stdout_task = tokio::spawn(read_pipe(stdout));
@@ -245,6 +251,150 @@ fn inject_managed_cancel_probe_failure(
         "managed cancellation probe failure already configured"
     );
     ManagedCancelProbeFailureGuard
+}
+
+#[cfg(test)]
+fn record_managed_cancel_child_pid(run_dir: &std::path::Path, pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    let mut observed = MANAGED_CANCEL_CHILD_PID
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        observed.replace((run_dir.to_path_buf(), pid)).is_none(),
+        "managed child pid already recorded"
+    );
+}
+
+#[cfg(test)]
+fn take_managed_cancel_child_pid(run_dir: &std::path::Path) -> Option<u32> {
+    let mut observed = MANAGED_CANCEL_CHILD_PID
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (recorded_run_dir, pid) = observed.take()?;
+    assert_eq!(recorded_run_dir, run_dir);
+    Some(pid)
+}
+
+#[cfg(all(test, unix))]
+mod issue_1825_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn write_managed_status(run_dir: &std::path::Path, dispatch_id: &str) {
+        std::fs::create_dir_all(run_dir).expect("run directory");
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 1,
+                "execution_classification": "managed_custom",
+            })
+            .to_string(),
+        )
+        .expect("managed status");
+    }
+
+    async fn wait_for_file(path: &std::path::Path) {
+        for _ in 0..120 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("worker did not reach {}", path.display());
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn request_cancel_reconciles_injected_child_probe_failure_through_the_real_runner() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("home");
+        let runs = tempfile::tempdir().expect("runs");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
+        let dispatch_id = "20260823T182500Z-custom-deadbeef";
+        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
+        write_managed_status(&run_dir, dispatch_id);
+        let server =
+            crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+        let (receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed control registration");
+        let started = run_dir.join("started");
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &format!("touch '{}' && sleep 30", started.display())]);
+        let runner_run_dir = run_dir.clone();
+        let runner = tokio::spawn(async move {
+            run_managed_custom_subprocess(
+                command,
+                Duration::from_secs(60),
+                receiver,
+                &runner_run_dir,
+            )
+            .await
+        });
+        wait_for_file(&started).await;
+        let pid = take_managed_cancel_child_pid(&run_dir).expect("managed child pid");
+        let _failure = inject_managed_cancel_probe_failure(&run_dir);
+        let response =
+            crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, 1)
+                .await
+                .expect("cancellation response");
+        let runner_error = match runner.await.expect("runner task") {
+            Ok(_) => panic!(
+                "injected child probe failure must leave the production runner loudly failed"
+            ),
+            Err(error) => error,
+        };
+        assert!(runner_error.contains("managed cancellation child probe failed"));
+        let response: Value = serde_json::from_str(&response).expect("cancellation JSON");
+        assert_eq!(response["receipt"], "cancellation_unavailable");
+        assert_eq!(response["reason"], "child_probe_failed");
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(run_dir.join("status.json")).expect("canonical status"),
+        )
+        .expect("canonical JSON");
+        assert_eq!(status["state"], "TASK_STATE_WORKING");
+        assert_eq!(status["status_revision"], 3);
+        assert_eq!(
+            status["cancellation"]["receipt"],
+            "cancellation_unavailable"
+        );
+        assert_eq!(status["cancellation"]["reason"], "child_probe_failed");
+        assert!(
+            process_group_absent(Some(pid)),
+            "probe failure must reap the production child process group"
+        );
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod issue_1825_non_unix_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn managed_custom_wrapper_runs_the_ordinary_command_when_cancel_is_unavailable() {
+        let (_sender, receiver) = mpsc::channel(1);
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit 0"]);
+        let result = run_managed_custom_subprocess(
+            command,
+            Duration::from_secs(5),
+            receiver,
+            std::path::Path::new("."),
+        )
+        .await
+        .expect("non-Unix managed wrapper must preserve ordinary custom execution");
+        assert_eq!(result.exit_code, Some(0));
+    }
 }
 
 pub(super) async fn run_opencode_sop_subprocess(
