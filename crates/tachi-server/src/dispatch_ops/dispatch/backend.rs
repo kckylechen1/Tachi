@@ -330,6 +330,22 @@ mod tests {
             custom_launch_spec.timeout_secs, custom_grant.timeout_secs,
             "the adapter spec must bind the canonical grant timeout before backend preparation"
         );
+        super::super::validate_custom_launch_spec_timeout(
+            &custom_launch_spec,
+            custom_grant.timeout_secs,
+        )
+        .expect("production boundary accepts the canonical grant timeout");
+        let mut timeout_mutant = custom_launch_spec.clone();
+        timeout_mutant.timeout_secs += 1;
+        let timeout_err = super::super::validate_custom_launch_spec_timeout(
+            &timeout_mutant,
+            custom_grant.timeout_secs,
+        )
+        .expect_err("one-sided spec timeout mutation must fail before backend preparation");
+        assert!(
+            timeout_err.contains("timeout diverged"),
+            "timeout mismatch must have a stable fail-closed receipt: {timeout_err}"
+        );
         let missing_spec = prepared_command(
             &custom_assignment,
             &grant("/legacy-bootstrap-poison"),

@@ -3,6 +3,17 @@ use crate::test_support::EnvRestore;
 use chrono::Utc;
 use serde_json::{json, Value};
 
+fn custom_adapter_source_is_flat_free(source: &str) -> bool {
+    ![
+        "ctx.request",
+        "ctx.grant",
+        "ctx.command",
+        "TachiDispatchParams",
+    ]
+    .iter()
+    .any(|forbidden| source.contains(forbidden))
+}
+
 #[test]
 fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() {
     let rejects_flat_params = |source: &str| source.contains("TachiDispatchParams");
@@ -116,6 +127,10 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         .split_once("\"opencode\" =>")
         .expect("backend contains the following opencode arm")
         .0;
+    assert!(
+        custom_adapter_source_is_flat_free(custom_arm),
+        "custom adapter must consume only LaunchSpec"
+    );
     for forbidden in [
         "ctx.request",
         "ctx.grant",
@@ -123,12 +138,8 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         "TachiDispatchParams",
     ] {
         assert!(
-            !custom_arm.contains(forbidden),
-            "custom adapter must consume only LaunchSpec, never {forbidden}"
-        );
-        assert!(
-            format!("{custom_arm}\n{forbidden};").contains(forbidden),
-            "custom-adapter source checker must reject a deliberate {forbidden} mutant"
+            !custom_adapter_source_is_flat_free(&format!("{custom_arm}\n{forbidden};")),
+            "custom-adapter source guard must reject a deliberate {forbidden} mutant"
         );
     }
 }
@@ -252,6 +263,61 @@ impl Drop for TerminalWorkerCleanup {
     }
 }
 
+struct AcceptedRunCleanup {
+    run_root: std::path::PathBuf,
+    existing_run_dirs: Vec<std::path::PathBuf>,
+    worker: Option<TerminalWorkerCleanup>,
+}
+
+impl AcceptedRunCleanup {
+    fn new(run_root: &std::path::Path) -> Self {
+        Self {
+            run_root: run_root.to_path_buf(),
+            existing_run_dirs: dispatch_run_dirs(run_root),
+            worker: None,
+        }
+    }
+
+    fn arm(&mut self) -> std::path::PathBuf {
+        let run_dir = self
+            .new_run_dir()
+            .expect("accepted custom dispatch must create one new run directory");
+        self.worker = Some(TerminalWorkerCleanup::new(run_dir.clone()));
+        run_dir
+    }
+
+    fn new_run_dir(&self) -> Option<std::path::PathBuf> {
+        dispatch_run_dirs(&self.run_root)
+            .into_iter()
+            .find(|path| !self.existing_run_dirs.contains(path))
+    }
+}
+
+impl Drop for AcceptedRunCleanup {
+    fn drop(&mut self) {
+        if self.worker.is_none() {
+            self.worker = self.new_run_dir().map(TerminalWorkerCleanup::new);
+        }
+    }
+}
+
+fn dispatch_run_dirs(run_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(run_root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| !name.starts_with('.'))
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn assert_custom_launch_spec_handler_case(
     server: &MemoryServer,
@@ -268,23 +334,28 @@ async fn assert_custom_launch_spec_handler_case(
     params.unmanaged_cwd = Some(true);
     params.timeout_secs = timeout_secs;
 
+    // Arm a run-root owner before the handler can spawn. Once the accepted
+    // call returns, adopt the new run before parsing or asserting response
+    // bytes so a panic cannot strand a custom worker.
+    let mut cleanup = AcceptedRunCleanup::new(run_root);
     let raw = handle_tachi_dispatch(server, params)
         .await
         .expect("custom dispatch starts through the canonical handler");
+    let run_dir = cleanup.arm();
     let response: Value = serde_json::from_str(&raw).expect("start response JSON");
     let dispatch_id = response["dispatch_id"]
         .as_str()
         .filter(|id| !id.is_empty())
         .expect("non-empty dispatch_id");
     assert_eq!(response["state"], json!("TASK_STATE_WORKING"));
-    let run_dir = std::path::PathBuf::from(
+    let response_run_dir = std::path::PathBuf::from(
         response["run_dir"]
             .as_str()
             .filter(|path| !path.is_empty())
             .expect("non-empty canonical run_dir"),
     );
+    assert_eq!(response_run_dir, run_dir);
     assert_eq!(run_dir, run_root.join(dispatch_id));
-    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
 
     let accepted_status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json"))
@@ -299,7 +370,12 @@ async fn assert_custom_launch_spec_handler_case(
     if let Some(expected) = expected_result_fragment {
         assert!(result.contains(expected), "result={result}");
     }
-    let terminal_status = cleanup.wait_for_terminal().await;
+    let terminal_status = cleanup
+        .worker
+        .as_ref()
+        .expect("accepted run owner remains armed")
+        .wait_for_terminal()
+        .await;
     assert_eq!(terminal_status["dispatch_id"], json!(dispatch_id));
     assert_eq!(terminal_status["run_dir"], response["run_dir"]);
     assert_eq!(terminal_status["state"], json!(expected_state));
@@ -313,7 +389,7 @@ async fn assert_custom_launch_spec_handler_case(
 
 /// #1823: the custom subprocess consumes the server-minted LaunchSpec while
 /// retaining the canonical receipt, terminal-result, trajectory, and cleanup spine.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn custom_launch_spec_preserves_success_failure_timeout_and_cleanup_lifecycle() {
     let _guard = crate::utils::global_test_lock()

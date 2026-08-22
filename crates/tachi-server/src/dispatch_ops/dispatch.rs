@@ -232,6 +232,19 @@ fn mint_custom_launch_spec(
     Ok(spec)
 }
 
+fn validate_custom_launch_spec_timeout(
+    spec: &tachi_params::LaunchSpec,
+    canonical_timeout_secs: u64,
+) -> Result<(), String> {
+    if spec.timeout_secs != canonical_timeout_secs {
+        return Err(
+            "server-minted custom LaunchSpec timeout diverged from the canonical execution grant"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// #971 review-fix (F3): output of the guarded post-BOARD-FIRST-init
 /// section in `handle_tachi_dispatch`. Either the plan stage's own
 /// pending-review early-response fires (`EarlyResponse`), or every fallible
@@ -757,6 +770,9 @@ async fn launch_canonical_dispatch(
                 )
             })
             .transpose()?;
+        if let Some(spec) = custom_launch_spec.as_ref() {
+            validate_custom_launch_spec_timeout(spec, timeout_secs_for_status)?;
+        }
 
         // 5. Build execution backend
         let PreparedDispatchBackend {
