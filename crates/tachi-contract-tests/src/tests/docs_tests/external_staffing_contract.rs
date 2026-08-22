@@ -321,7 +321,6 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
             }
         }
         if function.symbol.contains("/staffing_ops/")
-            && function.name != "staff_start"
             && (function.source.contains("tokio::spawn(")
                 || function.source.contains("write_status_json("))
         {
@@ -443,14 +442,16 @@ fn external_staffing_observer_rejects_independent_staff_lifecycle_mutant() {
     let observed = observe_sources([(
         "crates/tachi-server/src/staffing_ops/mod.rs",
         r#"
-            async fn staff_start() { launch_staff_assignment(server, request).await; }
-            async fn rogue_staff_lifecycle() { tokio::spawn(async {}); }
+            async fn staff_start() {
+                launch_staff_assignment(server, request).await;
+                tokio::spawn(async {});
+            }
         "#,
     )]);
     assert_eq!(
         observed["independent_staff_lifecycles"],
-        json!(["crates/tachi-server/src/staffing_ops/mod.rs::rogue_staff_lifecycle"]),
-        "a Staff-owned spawn is a second lifecycle and must exceed the zero budget"
+        json!(["crates/tachi-server/src/staffing_ops/mod.rs::staff_start"]),
+        "a spawn inserted into real staff_start is a second lifecycle and must exceed the zero budget"
     );
     assert!(
         budget_violations(

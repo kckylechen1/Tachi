@@ -19,6 +19,8 @@ pub(crate) use acpx::run_acpx_control_from_status;
 pub(crate) use board::{collect_run_task_for_server, handle_tachi_board, runs_dir_for_server};
 #[cfg(test)]
 pub(crate) use dispatch::apply_unlocked_vault_env;
+#[cfg(test)]
+pub(crate) use dispatch::background_dispatch_cleanup_complete;
 pub(crate) use dispatch::dispatch_runs_root;
 pub(crate) use dispatch::handle_tachi_dispatch;
 pub(crate) use dispatch::launch_staff_assignment;

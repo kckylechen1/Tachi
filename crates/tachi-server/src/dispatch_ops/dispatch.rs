@@ -128,6 +128,8 @@ mod credential_apply;
 mod credentials;
 mod dedupe;
 mod execution;
+#[cfg(test)]
+pub(crate) use execution::background_dispatch_cleanup_complete;
 mod flow_setup;
 mod harness_preflight;
 mod plan_stage;

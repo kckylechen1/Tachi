@@ -338,6 +338,16 @@ pub(crate) mod tests {
         );
     }
 
+    async fn wait_for_staff_cleanup(dispatch_id: &str) {
+        for _ in 0..360 {
+            if crate::dispatch_ops::background_dispatch_cleanup_complete(dispatch_id) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("Staff background cleanup did not finish for {dispatch_id}");
+    }
+
     fn terminal_staff_state(status: &Value) -> &str {
         status
             .get("status")
@@ -414,6 +424,7 @@ pub(crate) mod tests {
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
+        wait_for_staff_cleanup(dispatch_id).await;
 
         assert_eq!(
             terminal_staff_state(&status),
@@ -524,6 +535,7 @@ pub(crate) mod tests {
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
+        wait_for_staff_cleanup(dispatch_id).await;
 
         assert_eq!(
             terminal_staff_state(&status),
