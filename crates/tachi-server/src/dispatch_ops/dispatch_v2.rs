@@ -361,6 +361,7 @@ pub(super) fn write_status_json(
                 "identity_receipt",
                 "resolved_completion",
                 "completion_recovery",
+                "project",
                 // tachi#1675 PR1 Seam B: `route_decision_id` is stamped ONCE,
                 // as a best-effort convenience copy of the `route_decisions`
                 // row's id, by `staffing_ops::staff_start` shortly after

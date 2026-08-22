@@ -337,15 +337,20 @@ pub struct ResolvedDispatchProfile {
     pub agent: String,
     /// Model selected by the profile resolver. This is resolution-owned rather
     /// than a Staff caller input.
+    #[serde(skip_serializing)]
     pub selected_model: Option<String>,
     /// Profile-owned launch defaults. Staff never supplies these fields.
+    #[serde(skip_serializing)]
     pub launch_command: Vec<String>,
+    #[serde(skip_serializing)]
     pub harness_transport: Option<String>,
+    #[serde(skip_serializing)]
     pub harness_server_url: Option<String>,
     pub role: Option<String>,
     pub tool_profile: Option<String>,
     pub auto_capability_bundle: bool,
     pub mcp_access: DispatchMcpAccessParams,
+    #[serde(skip_serializing)]
     pub required_skills: Vec<String>,
     pub evidence_required: Vec<String>,
     pub fallback_chain: Vec<String>,
@@ -853,12 +858,6 @@ where
             .iter()
             .map(|value| (*value).to_string())
             .collect::<Vec<_>>();
-        if !credentials.is_empty() {
-            route_explanation.push(format!(
-                "profile requires credential profile(s): {}",
-                credentials.join(", ")
-            ));
-        }
         if profile_uses_opencode_adapter(profile) {
             let model = selected_model.clone().ok_or_else(|| {
                 format!("profile '{}' uses OpenCode but has no model", profile.name)
@@ -918,6 +917,12 @@ where
                 ));
             }
         }
+        if !credentials.is_empty() {
+            route_explanation.push(format!(
+                "profile requires credential profile(s): {}",
+                credentials.join(", ")
+            ));
+        }
         (
             access,
             profile_required_skills(profile)?,
@@ -955,6 +960,18 @@ where
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "agent or profile is required for dispatch".to_string())?;
     let agent = crate::normalize_dispatch_agent_name(&worker).unwrap_or(worker);
+    let auto_capability_bundle = if matches!(
+        request.stage.as_deref(),
+        Some("review" | "review_light")
+    ) {
+        route_explanation.push(
+            "auto_capability_bundle disabled by default for review-stage dispatch (#457); pass auto_capability_bundle=true to override"
+                .to_string(),
+        );
+        false
+    } else {
+        profile.is_some_and(|profile| profile.auto_capability_bundle)
+    };
     let fallback_chain = crate::fallback_chain(&agent)
         .iter()
         .map(|value| (*value).to_string())
@@ -997,7 +1014,7 @@ where
         harness_server_url,
         role: profile.map(|profile| profile.role.to_string()),
         tool_profile: profile.map(|profile| profile.tool_profile.to_string()),
-        auto_capability_bundle: profile.is_some_and(|profile| profile.auto_capability_bundle),
+        auto_capability_bundle,
         mcp_access,
         required_skills,
         evidence_required,

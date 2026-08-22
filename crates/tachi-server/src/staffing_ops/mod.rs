@@ -329,9 +329,250 @@ async fn staff_status_impl(request: &StaffStatusRequest) -> Result<String, Strin
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::tool_params::TachiDispatchReason;
+    use std::sync::{Mutex, OnceLock};
+
+    fn staff_launch_environment_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn write_fake_worker(bin_dir: &std::path::Path, exit_code: i32) {
+        let worker = bin_dir.join("codex");
+        std::fs::write(
+            &worker,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'codex-cli 0.144.1\\n'\n  exit 0\nfi\nprintf 'staff fake worker\\n'\nexit {exit_code}\n"
+            ),
+        )
+        .expect("write fake codex worker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&worker)
+                .expect("fake worker metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&worker, permissions).expect("make fake worker executable");
+        }
+    }
+
+    async fn wait_for_staff_terminal(run_dir: &std::path::Path) -> (Value, String) {
+        for _ in 0..360 {
+            let status = std::fs::read_to_string(run_dir.join("status.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+            let result = std::fs::read_to_string(run_dir.join("result.md")).ok();
+            if let (Some(status), Some(result)) = (status, result) {
+                if status
+                    .get("status")
+                    .or_else(|| status.get("state"))
+                    .or_else(|| status.get("task_state"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|state| {
+                        matches!(
+                            state,
+                            "completed"
+                                | "failed"
+                                | "timed_out"
+                                | "cancelled"
+                                | "TASK_STATE_COMPLETED"
+                                | "TASK_STATE_FAILED"
+                                | "TASK_STATE_CANCELED"
+                        )
+                    })
+                {
+                    return (status, result);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!(
+            "staff launch did not reach a terminal canonical receipt: {}",
+            run_dir.display()
+        );
+    }
+
+    fn terminal_staff_state(status: &Value) -> &str {
+        status
+            .get("status")
+            .or_else(|| status.get("state"))
+            .or_else(|| status.get("task_state"))
+            .and_then(Value::as_str)
+            .expect("terminal canonical receipt state")
+    }
+
+    fn staff_request(project: &str) -> StaffStartRequest {
+        StaffStartRequest {
+            task: "prove the canonical Staff launch lifecycle".to_string(),
+            staffing_reason: TachiDispatchReason::DurableCrossSession,
+            profile: Some("codex_55_review".to_string()),
+            worker: Some("codex".to_string()),
+            project: Some(project.to_string()),
+            stage: None,
+            execution_level: None,
+            issue_ref: Some("kckylechen1/tachi#1814".to_string()),
+            pr_ref: None,
+            flow_id: Some("flow_1814_staff_e2e".to_string()),
+            completion_predicate: None,
+            recommendation_ref: None,
+        }
+    }
+
+    /// End-to-end discriminator for #1814: Staff must reach the one canonical
+    /// background launcher, rather than returning a pending-only receipt.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
+    async fn staff_start_launches_fake_worker_through_canonical_receipt_lifecycle() {
+        let _environment = staff_launch_environment_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
+        write_fake_worker(temp_bin.path(), 0);
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join fake-worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let server = test_server();
+
+        let raw = staff_start(&server, staff_request("tachi"))
+            .await
+            .expect("Staff start should be accepted before background execution");
+        let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
+        let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+        let run_dir = dispatch_runs_root().join(dispatch_id);
+        let (status, result) = wait_for_staff_terminal(&run_dir).await;
+
+        assert_eq!(
+            terminal_staff_state(&status),
+            "TASK_STATE_COMPLETED",
+            "fake worker terminal receipt"
+        );
+        assert_eq!(
+            status["project"], "tachi",
+            "Staff project linkage survives launch"
+        );
+        assert_eq!(
+            status["result_written"], true,
+            "terminal outcome retains result receipt"
+        );
+        assert_eq!(
+            status["run_dir"],
+            run_dir.to_string_lossy().as_ref(),
+            "recovery retains the canonical run directory"
+        );
+        assert!(
+            result.contains("staff fake worker"),
+            "canonical result.md: {result}"
+        );
+
+        let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+            .expect("canonical trajectory");
+        let events = trajectory
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("trajectory JSON"))
+            .map(|event| event["event"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        let received = events
+            .iter()
+            .position(|event| event == "dispatch_received")
+            .expect("receipt-first event");
+        let started = events
+            .iter()
+            .position(|event| event == "execute_started")
+            .expect("real execution event");
+        let finished = events
+            .iter()
+            .position(|event| event == "subprocess_finished")
+            .expect("subprocess terminal event");
+        assert!(
+            received < started && started < finished,
+            "canonical trajectory ordering: {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| *event == "dispatch_received")
+                .count(),
+            1,
+            "no second lifecycle"
+        );
+    }
+
+    /// A child spawn failure is asynchronous: Staff receives the canonical
+    /// acceptance first, then the sole run transitions to failed with its
+    /// canonical result and cleanup-owned terminal receipt.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
+    async fn staff_start_child_failure_is_asynchronous_and_uses_one_lifecycle() {
+        let _environment = staff_launch_environment_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
+        write_fake_worker(temp_bin.path(), 17);
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join fake-worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let server = test_server();
+
+        let raw = staff_start(&server, staff_request("tachi"))
+            .await
+            .expect("spawn failure remains asynchronously accepted");
+        let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
+        let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+        let run_dir = dispatch_runs_root().join(dispatch_id);
+        let (status, result) = wait_for_staff_terminal(&run_dir).await;
+
+        assert_eq!(
+            terminal_staff_state(&status),
+            "TASK_STATE_FAILED",
+            "failed child updates canonical receipt"
+        );
+        assert!(
+            result.contains("staff fake worker"),
+            "failed canonical result.md: {result}"
+        );
+        let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+            .expect("canonical trajectory");
+        assert_eq!(
+            trajectory
+                .matches("\"event\":\"dispatch_received\"")
+                .count(),
+            1,
+            "no second receipt lifecycle"
+        );
+        assert_eq!(
+            trajectory
+                .matches("\"event\":\"subprocess_finished\"")
+                .count(),
+            1,
+            "one terminal child record"
+        );
+        assert_eq!(
+            std::fs::read_dir(dispatch_runs_root())
+                .expect("run root")
+                .count(),
+            1,
+            "cleanup remains owned by the one canonical run"
+        );
+    }
 
     /// Discrimination test: a `StaffStartRequest` JSON that OMITS
     /// `staffing_reason` is REJECTED at deserialization — the field is
@@ -591,7 +832,7 @@ mod tests {
 
     // ─── tachi#1675 PR1 Seam B: record_route_decision_best_effort ──────────
 
-    fn test_server() -> MemoryServer {
+    pub(crate) fn test_server() -> MemoryServer {
         let db_path = crate::utils::test_fixture_path(format!(
             "staffing-seam-b-{}.sqlite",
             uuid::Uuid::new_v4()
