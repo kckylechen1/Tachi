@@ -219,7 +219,7 @@ fn staffing_ledger_root_variables(source: &str) -> Vec<&str> {
 fn observe_functions(functions: &[RustFunction]) -> Value {
     let mut definitions = functions
         .iter()
-        .filter(|function| function.name == "handle_tachi_dispatch")
+        .filter(|function| function.name == "launch_canonical_dispatch")
         .map(|function| function.symbol.clone())
         .collect::<Vec<_>>();
     let mut production_adopters = functions
@@ -260,6 +260,7 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
     let mut ledger_roots = Vec::new();
     let mut ledger_writers = Vec::new();
     let mut linked_result_copies = Vec::new();
+    let mut independent_staff_lifecycles = Vec::new();
     for function in functions {
         // Legacy secondary-ledger ownership is bounded to the retired Shell and
         // Arena run-time modules (both deleted: Shell in [1319-B7], Arena in
@@ -319,6 +320,13 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
                 linked_result_copies.extend(numbered_sites(function, call, "linked-result-copy"));
             }
         }
+        if function.symbol.contains("/staffing_ops/")
+            && function.name != "staff_start"
+            && (function.source.contains("tokio::spawn(")
+                || function.source.contains("write_status_json("))
+        {
+            independent_staff_lifecycles.push(function.symbol.clone());
+        }
     }
     definitions.sort();
     production_adopters.sort();
@@ -327,6 +335,7 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
     ledger_roots.sort();
     ledger_writers.sort();
     linked_result_copies.sort();
+    independent_staff_lifecycles.sort();
 
     json!({
         "adoption_entrypoint_definitions": definitions,
@@ -336,6 +345,7 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
         "legacy_secondary_ledger_roots": ledger_roots,
         "legacy_staffing_projection_writer_sites": ledger_writers,
         "linked_result_copies": linked_result_copies,
+        "independent_staff_lifecycles": independent_staff_lifecycles,
     })
 }
 
@@ -384,6 +394,10 @@ fn budget_violations(observed: &Value, budgets: &Value) -> Vec<String> {
             "legacy_staffing_projection_writer_sites",
         ),
         ("linked_result_copies", "linked_result_copies"),
+        (
+            "independent_staff_lifecycles",
+            "independent_staff_lifecycles",
+        ),
     ] {
         let actual = observed[key].as_array().expect("observed inventory").len() as u64;
         let frozen = budgets[budget_key].as_u64().expect("contraction budget");
@@ -425,6 +439,40 @@ fn external_staffing_typed_adopter_rejects_flat_facade_mutants() {
 }
 
 #[test]
+fn external_staffing_observer_rejects_independent_staff_lifecycle_mutant() {
+    let observed = observe_sources([(
+        "crates/tachi-server/src/staffing_ops/mod.rs",
+        r#"
+            async fn staff_start() { launch_staff_assignment(server, request).await; }
+            async fn rogue_staff_lifecycle() { tokio::spawn(async {}); }
+        "#,
+    )]);
+    assert_eq!(
+        observed["independent_staff_lifecycles"],
+        json!(["crates/tachi-server/src/staffing_ops/mod.rs::rogue_staff_lifecycle"]),
+        "a Staff-owned spawn is a second lifecycle and must exceed the zero budget"
+    );
+    assert!(
+        budget_violations(
+            &observed,
+            &json!({
+                "launch_kernels": 1,
+                "production_adopters": 1,
+                "request_builders": 0,
+                "launch_advertising_facades": 0,
+                "legacy_secondary_ledger_roots": 0,
+                "legacy_staffing_projection_writer_sites": 0,
+                "linked_result_copies": 0,
+                "independent_staff_lifecycles": 0,
+            }),
+        )
+        .iter()
+        .any(|violation| violation.contains("independent_staff_lifecycles")),
+        "the lifecycle mutant must be rejected by the ratcheted budget"
+    );
+}
+
+#[test]
 fn external_staffing_budgets_discriminate_every_growth_axis() {
     let fixture: Value = serde_json::from_str(FIXTURE).expect("staffing fixture parses");
     assert!(budget_violations(
@@ -446,6 +494,10 @@ fn external_staffing_budgets_discriminate_every_growth_axis() {
             "legacy_staffing_projection_writer_sites",
         ),
         ("linked_result_copies", "linked_result_copies"),
+        (
+            "independent_staff_lifecycles",
+            "independent_staff_lifecycles",
+        ),
     ] {
         let mut grown = fixture["observed_topology"].clone();
         grown[key]

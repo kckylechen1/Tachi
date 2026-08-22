@@ -281,12 +281,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::tool_params::TachiDispatchReason;
     use serde_json::Value;
-    use std::sync::{Mutex, OnceLock};
-
-    fn staff_launch_environment_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn write_fake_worker(bin_dir: &std::path::Path, exit_code: i32) {
         let worker = bin_dir.join("codex");
@@ -376,7 +370,7 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
     async fn staff_start_launches_fake_worker_through_canonical_receipt_lifecycle() {
-        let _environment = staff_launch_environment_lock()
+        let _environment = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp_home = tempfile::tempdir().expect("temp tachi home");
@@ -506,7 +500,7 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
     async fn staff_start_child_failure_is_asynchronous_and_uses_one_lifecycle() {
-        let _environment = staff_launch_environment_lock()
+        let _environment = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp_home = tempfile::tempdir().expect("temp tachi home");
@@ -1213,9 +1207,11 @@ pub(crate) mod tests {
         request.worker = Some("custom".to_string());
         request.issue_ref = Some("kckylechen1/tachi#1814-authority".to_string());
         request.flow_id = Some("flow_1814_authority_refusal".to_string());
-        let _ = staff_start(&server, request).await.expect_err(
+        let error = staff_start(&server, request).await.expect_err(
             "uncertified shell-capable read-only authority must refuse before acceptance",
         );
+        assert!(error.contains("not kill-test certified"), "{error}");
+        assert!(error.contains("fail-closed"), "{error}");
 
         let after_claims: i64 = server
             .with_global_store_read(|store| {

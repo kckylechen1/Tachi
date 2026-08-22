@@ -30,7 +30,8 @@
 //!     and status.json.
 
 use serde_json::Value;
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 /// System prompt prepended to the Stage-1 task body. Kept verbatim so the
@@ -305,9 +306,8 @@ pub(crate) fn stamp_route_decision_id(
     run_dir: &std::path::Path,
     route_decision_id: &str,
 ) -> Result<(), String> {
-    let _guard = status_json_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock = status_json_lock_for(run_dir);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = run_dir.join("status.json");
     let Some(Value::Object(mut status)) = crate::task_lifecycle::read_json_file(&path)
         .map_err(|error| format!("read {}: {error}", path.display()))?
@@ -324,9 +324,23 @@ pub(crate) fn stamp_route_decision_id(
         .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
-fn status_json_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+/// Return the shared, weakly retained mutex for one canonical run receipt.
+/// Every `status.json` read-modify-write must take this lock, including ACP
+/// identity acknowledgement, lifecycle terminalization, and route evidence.
+/// Weak retention avoids keeping a lock entry for every historical run.
+pub(crate) fn status_json_lock_for(run_dir: &std::path::Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(run_dir).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(run_dir.to_path_buf(), Arc::downgrade(&lock));
+    lock
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -343,9 +357,8 @@ pub(super) fn write_status_json(
     total_duration_ms: Option<u64>,
     extra: Option<Value>,
 ) {
-    let _guard = status_json_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock = status_json_lock_for(run_dir);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut obj = serde_json::Map::new();
     obj.insert("dispatch_id".into(), Value::String(dispatch_id.to_string()));
     obj.insert("v2".into(), Value::Bool(v2));

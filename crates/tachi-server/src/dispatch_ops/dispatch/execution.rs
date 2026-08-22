@@ -2,7 +2,9 @@ use super::super::acp_native::{
     is_native_acp_transport, run_native_acp_dispatch, NativeAcpRunSpec,
 };
 use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
-use super::super::dispatch_v2::{append_trajectory_event, write_status_json};
+#[cfg(test)]
+use super::super::dispatch_v2::stamp_route_decision_id;
+use super::super::dispatch_v2::{append_trajectory_event, status_json_lock_for, write_status_json};
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
 use super::super::subprocess::{run_agent_subprocess, run_opencode_sop_subprocess, tail_chars};
 use super::dedupe::release_flow_dispatch_slot;
@@ -673,6 +675,10 @@ fn persist_acp_model_acknowledgement(
     else {
         return Ok(false);
     };
+    let status_lock = status_json_lock_for(run_dir);
+    let _status_guard = status_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status_path = run_dir.join("status.json");
     let mut status = crate::task_lifecycle::read_json_file(&status_path)?
         .ok_or_else(|| format!("ACP acknowledgement requires {}", status_path.display()))?;
@@ -969,6 +975,53 @@ mod tests {
         )
         .expect("parse status");
         serde_json::from_value(status["identity_receipt"].clone()).expect("parse receipt")
+    }
+
+    /// Native ACP acknowledgement is a receipt merge, not a second lifecycle:
+    /// terminal state and post-acceptance route evidence must survive its
+    /// identity update even when the child finishes before acknowledgement.
+    #[test]
+    fn native_acp_acknowledgement_preserves_terminal_route_evidence() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        write_planned_receipt(temp.path(), "gpt-5.5");
+        write_status_json(
+            temp.path(),
+            "20260822T000001Z-acp-terminal",
+            false,
+            None,
+            None,
+            "n/a",
+            Some(0),
+            None,
+            Some(1),
+            Some(1),
+            Some(json!({
+                "state": "TASK_STATE_COMPLETED",
+                "result_written": true,
+            })),
+        );
+        stamp_route_decision_id(temp.path(), "route-fast-terminal").expect("stamp route evidence");
+
+        assert!(
+            persist_acp_model_acknowledgement(temp.path(), Some("gpt-5.5"))
+                .expect("merge ACP acknowledgement")
+        );
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("status.json")).expect("read merged receipt"),
+        )
+        .expect("parse merged receipt");
+        assert_eq!(status["state"], "TASK_STATE_COMPLETED");
+        assert_eq!(status["result_written"], true);
+        assert_eq!(status["route_decision_id"], "route-fast-terminal");
+        assert_eq!(
+            read_receipt(temp.path())
+                .observed
+                .effective
+                .model
+                .as_deref(),
+            Some("gpt-5.5"),
+            "ACP update must merge only identity receipt"
+        );
     }
 
     #[test]
