@@ -12,6 +12,57 @@ use super::lessons::run_lesson_post_complete_hook;
 
 const COMPLETION_RECEIPT_STATUS_MAX_BYTES: usize = 1024 * 1024;
 
+#[cfg(test)]
+#[derive(Clone)]
+struct CompletionStatusReadBarrier {
+    read: std::sync::Arc<std::sync::Barrier>,
+    resume: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+fn completion_status_read_barrier() -> &'static std::sync::Mutex<Option<CompletionStatusReadBarrier>>
+{
+    static BARRIER: std::sync::OnceLock<std::sync::Mutex<Option<CompletionStatusReadBarrier>>> =
+        std::sync::OnceLock::new();
+    BARRIER.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+struct CompletionStatusReadBarrierGuard;
+
+#[cfg(test)]
+impl Drop for CompletionStatusReadBarrierGuard {
+    fn drop(&mut self) {
+        *completion_status_read_barrier()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+fn install_completion_status_read_barrier(
+    read: std::sync::Arc<std::sync::Barrier>,
+    resume: std::sync::Arc<std::sync::Barrier>,
+) -> CompletionStatusReadBarrierGuard {
+    *completion_status_read_barrier()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(CompletionStatusReadBarrier { read, resume });
+    CompletionStatusReadBarrierGuard
+}
+
+#[cfg(test)]
+fn pause_completion_after_status_read() {
+    let barrier = completion_status_read_barrier()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(barrier) = barrier {
+        barrier.read.wait();
+        barrier.resume.wait();
+    }
+}
+
 /// The #878-A completion-predicate verdict, resolved ONCE per completion so the
 /// canonical outcome row and the kanban row agree on the same machine verdict
 /// (#773 Layer-2 ②). `verdict_tag` is the short predicate tag
@@ -85,6 +136,10 @@ fn persist_resolved_completion_receipt_at(
     eval_memory_id: &str,
     reviewed: bool,
 ) -> Result<(), String> {
+    let status_lock = crate::dispatch_ops::status_json_lock_for(run_dir);
+    let _status_guard = status_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status_path = run_dir.join("status.json");
     let mut status = match crate::dispatch_ops::read_text_file_within(
         run_dir,
@@ -106,6 +161,8 @@ fn persist_resolved_completion_receipt_at(
         })?,
         None => json!({ "dispatch_id": dispatch_id }),
     };
+    #[cfg(test)]
+    pause_completion_after_status_read();
     let status_object = status.as_object_mut().ok_or_else(|| {
         format!(
             "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
@@ -182,6 +239,10 @@ fn persist_pending_completion_recovery_receipt_at(
     reviewed: bool,
     dispatch_outcome: &Value,
 ) -> Result<(), String> {
+    let status_lock = crate::dispatch_ops::status_json_lock_for(run_dir);
+    let _status_guard = status_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status_path = run_dir.join("status.json");
     let mut status = match crate::dispatch_ops::read_text_file_within(
         run_dir,
@@ -200,6 +261,8 @@ fn persist_pending_completion_recovery_receipt_at(
         })?,
         None => json!({ "dispatch_id": dispatch_id }),
     };
+    #[cfg(test)]
+    pause_completion_after_status_read();
     let status_object = status.as_object_mut().ok_or_else(|| {
         format!(
             "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
@@ -1015,6 +1078,8 @@ pub(crate) async fn handle_tachi_complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
 
     #[test]
     fn completion_without_dispatch_id_does_not_require_descriptor_platform_support() {
@@ -1037,6 +1102,9 @@ mod tests {
     /// silently turn a partial + exit 0 into COMPLETED.
     #[test]
     fn resolved_completion_receipt_write_failure_is_loud() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temporary receipt parent");
         let non_directory = temp.path().join("not-a-run-directory");
         std::fs::write(&non_directory, "not a directory").expect("seed blocking file");
@@ -1081,6 +1149,9 @@ mod tests {
 
     #[test]
     fn pending_completion_recovery_receipt_is_idempotent_and_not_terminal() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temporary receipt parent");
         let dispatch_id = "20260719T000003Z-recovery-receipt";
         let run_dir = temp.path().join(dispatch_id);
@@ -1152,6 +1223,160 @@ mod tests {
         assert_eq!(
             resolved["resolved_completion"]["eval_ledger_id"],
             json!("eval-recovery")
+        );
+    }
+
+    /// Completion receipts pause after their stale read while holding the same
+    /// per-run mutex as route evidence. Removing either completion lock lets
+    /// the route stamp finish before the stale receipt replace and lose it.
+    #[test]
+    fn completion_receipt_writers_cannot_lose_route_or_project_fields() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let resolved_temp = tempfile::tempdir().expect("temporary resolved receipt parent");
+        let resolved_dispatch_id = "20260822T000004Z-resolved-overlap";
+        let resolved_dir = resolved_temp.path().join(resolved_dispatch_id);
+        std::fs::create_dir_all(&resolved_dir).expect("create resolved run directory");
+        std::fs::write(
+            resolved_dir.join("status.json"),
+            json!({
+                "dispatch_id": resolved_dispatch_id,
+                "project": "completion-overlap",
+                "completion_recovery": {"status": "pending_canonical_outcome"}
+            })
+            .to_string(),
+        )
+        .expect("seed resolved receipt");
+
+        let read = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let _barrier =
+            install_completion_status_read_barrier(Arc::clone(&read), Arc::clone(&resume));
+        let writer_dir = resolved_dir.clone();
+        let resolved_writer = std::thread::spawn(move || {
+            persist_resolved_completion_receipt_at(
+                &writer_dir,
+                resolved_dispatch_id,
+                "TASK_STATE_COMPLETED",
+                "eval-resolved-overlap",
+                true,
+            )
+        });
+        read.wait();
+        let route_dir = resolved_dir.clone();
+        let (route_done, route_result) = std::sync::mpsc::sync_channel(1);
+        let route_writer = std::thread::spawn(move || {
+            route_done
+                .send(crate::dispatch_ops::stamp_route_decision_id(
+                    &route_dir,
+                    "route-resolved-overlap",
+                ))
+                .expect("report resolved route stamp");
+        });
+        assert!(
+            route_result
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "route evidence must wait behind the resolved completion stale-read lock"
+        );
+        resume.wait();
+        resolved_writer
+            .join()
+            .expect("join resolved receipt writer")
+            .expect("persist resolved receipt");
+        route_writer.join().expect("join resolved route writer");
+        route_result
+            .recv_timeout(Duration::from_secs(1))
+            .expect("resolved route result after receipt release")
+            .expect("stamp resolved route evidence");
+        let resolved: Value = serde_json::from_slice(
+            &std::fs::read(resolved_dir.join("status.json")).expect("read resolved overlap"),
+        )
+        .expect("parse resolved overlap");
+        assert_eq!(resolved["project"], "completion-overlap");
+        assert_eq!(resolved["route_decision_id"], "route-resolved-overlap");
+        assert_eq!(
+            resolved["resolved_completion"]["eval_ledger_id"],
+            "eval-resolved-overlap"
+        );
+        assert!(resolved.get("completion_recovery").is_none());
+
+        let recovery_temp = tempfile::tempdir().expect("temporary recovery receipt parent");
+        let recovery_dispatch_id = "20260822T000005Z-recovery-overlap";
+        let recovery_dir = recovery_temp.path().join(recovery_dispatch_id);
+        std::fs::create_dir_all(&recovery_dir).expect("create recovery run directory");
+        std::fs::write(
+            recovery_dir.join("status.json"),
+            json!({
+                "dispatch_id": recovery_dispatch_id,
+                "project": "completion-overlap",
+                "resolved_completion": {"state": "TASK_STATE_COMPLETED"}
+            })
+            .to_string(),
+        )
+        .expect("seed recovery receipt");
+
+        let read = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let _barrier =
+            install_completion_status_read_barrier(Arc::clone(&read), Arc::clone(&resume));
+        let writer_dir = recovery_dir.clone();
+        let recovery_writer = std::thread::spawn(move || {
+            persist_pending_completion_recovery_receipt_at(
+                &writer_dir,
+                recovery_dispatch_id,
+                "TASK_STATE_COMPLETED",
+                "eval-recovery-overlap",
+                false,
+                &json!({"recorded": false}),
+            )
+        });
+        read.wait();
+        let route_dir = recovery_dir.clone();
+        let (route_done, route_result) = std::sync::mpsc::sync_channel(1);
+        let route_writer = std::thread::spawn(move || {
+            route_done
+                .send(crate::dispatch_ops::stamp_route_decision_id(
+                    &route_dir,
+                    "route-recovery-overlap",
+                ))
+                .expect("report recovery route stamp");
+        });
+        assert!(
+            route_result
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "route evidence must wait behind the recovery receipt stale-read lock"
+        );
+        resume.wait();
+        recovery_writer
+            .join()
+            .expect("join recovery receipt writer")
+            .expect("persist recovery receipt");
+        route_writer.join().expect("join recovery route writer");
+        route_result
+            .recv_timeout(Duration::from_secs(1))
+            .expect("recovery route result after receipt release")
+            .expect("stamp recovery route evidence");
+        let recovery: Value = serde_json::from_slice(
+            &std::fs::read(recovery_dir.join("status.json")).expect("read recovery overlap"),
+        )
+        .expect("parse recovery overlap");
+        assert_eq!(recovery["project"], "completion-overlap");
+        assert_eq!(recovery["route_decision_id"], "route-recovery-overlap");
+        assert_eq!(
+            recovery["completion_recovery"]["eval_ledger_id"],
+            "eval-recovery-overlap"
+        );
+        assert!(recovery.get("resolved_completion").is_none());
+
+        let source = include_str!("handler.rs");
+        let shared_lock_call = ["status_json_lock_for", "(run_dir)"].concat();
+        assert_eq!(
+            source.matches(&shared_lock_call).count(),
+            2,
+            "every tachi_complete status read-modify-replace must take the shared per-run lock"
         );
     }
 }

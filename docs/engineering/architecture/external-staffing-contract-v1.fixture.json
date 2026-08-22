@@ -2,12 +2,17 @@
   "schema_version": "external_staffing.v1",
   "issue": 1324,
   "canonical_request": {
-    "rust_type": "tachi_params::TachiDispatchParams",
-    "adoption_entrypoint": "crate::dispatch_ops::handle_tachi_dispatch",
+    "rust_type": "tachi_params::StaffAssignmentRequest",
+    "adoption_entrypoint": "crate::dispatch_ops::launch_staff_assignment",
     "operations": [
       "start",
       "status"
     ]
+  },
+  "bootstrap_diagnostic_flat_route": {
+    "rust_type": "tachi_params::TachiDispatchParams",
+    "adoption_entrypoint": "crate::dispatch_ops::handle_tachi_dispatch",
+    "scope": "sole diagnostic bootstrap route; never a Staff adoption path"
   },
   "accepted_start": {
     "required_fields": [

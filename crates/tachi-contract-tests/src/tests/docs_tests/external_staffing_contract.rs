@@ -409,9 +409,46 @@ fn budget_violations(observed: &Value, budgets: &Value) -> Vec<String> {
     violations
 }
 
+fn fixture_metadata_violations(fixture: &Value) -> Vec<String> {
+    let mut violations = Vec::new();
+    let canonical = &fixture["canonical_request"];
+    if canonical["rust_type"] != json!("tachi_params::StaffAssignmentRequest") {
+        violations.push("canonical_request.rust_type must name StaffAssignmentRequest".to_string());
+    }
+    if canonical["adoption_entrypoint"] != json!("crate::dispatch_ops::launch_staff_assignment") {
+        violations.push(
+            "canonical_request.adoption_entrypoint must name the typed Staff launch".to_string(),
+        );
+    }
+    let bootstrap = &fixture["bootstrap_diagnostic_flat_route"];
+    if bootstrap["rust_type"] != json!("tachi_params::TachiDispatchParams") {
+        violations.push(
+            "bootstrap_diagnostic_flat_route.rust_type must retain the flat diagnostic type"
+                .to_string(),
+        );
+    }
+    if bootstrap["adoption_entrypoint"] != json!("crate::dispatch_ops::handle_tachi_dispatch") {
+        violations.push(
+            "bootstrap_diagnostic_flat_route.adoption_entrypoint must retain bootstrap dispatch"
+                .to_string(),
+        );
+    }
+    if bootstrap["scope"] != json!("sole diagnostic bootstrap route; never a Staff adoption path") {
+        violations
+            .push("bootstrap_diagnostic_flat_route.scope must exclude Staff adoption".to_string());
+    }
+    violations
+}
+
 #[test]
 fn external_staffing_topology_matches_the_single_kernel_contract() {
     let fixture: Value = serde_json::from_str(FIXTURE).expect("staffing fixture parses");
+    let metadata_violations = fixture_metadata_violations(&fixture);
+    assert!(
+        metadata_violations.is_empty(),
+        "{}",
+        metadata_violations.join("\n")
+    );
     let observed = observed_topology();
     assert_eq!(
         observed, fixture["observed_topology"],
@@ -419,6 +456,30 @@ fn external_staffing_topology_matches_the_single_kernel_contract() {
     );
     let violations = budget_violations(&observed, &fixture["contraction_budgets"]);
     assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[test]
+fn external_staffing_fixture_rejects_stale_flat_canonical_metadata() {
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("staffing fixture parses");
+    assert!(fixture_metadata_violations(&fixture).is_empty());
+
+    let mut stale = fixture.clone();
+    stale["canonical_request"]["rust_type"] = json!("tachi_params::TachiDispatchParams");
+    stale["canonical_request"]["adoption_entrypoint"] =
+        json!("crate::dispatch_ops::handle_tachi_dispatch");
+    let violations = fixture_metadata_violations(&stale);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("canonical_request.rust_type")),
+        "stale flat canonical request metadata must fail the contract"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("canonical_request.adoption_entrypoint")),
+        "stale flat canonical entrypoint metadata must fail the contract"
+    );
 }
 
 #[test]
