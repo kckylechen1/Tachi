@@ -712,6 +712,7 @@ mod tests {
             ("credential_profiles", serde_json::json!(["admin"])),
             ("allowed_tools", serde_json::json!(["Bash"])),
             ("tools", serde_json::json!(["Bash"])),
+            ("sandbox", serde_json::json!("danger-full-access")),
             ("harness_transport", serde_json::json!("cli")),
             (
                 "harness_server_url",

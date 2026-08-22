@@ -219,11 +219,11 @@ impl TerminalWorkerCleanup {
         Self { run_dir }
     }
 
-    fn terminal(&self) -> bool {
+    fn terminal_status(&self) -> Option<Value> {
         std::fs::read_to_string(self.run_dir.join("status.json"))
             .ok()
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .is_some_and(|status| {
+            .filter(|status| {
                 status["result_written"] == json!(true)
                     && matches!(
                         status["state"].as_str(),
@@ -232,30 +232,34 @@ impl TerminalWorkerCleanup {
             })
     }
 
+    fn terminal_and_cleanup_complete(&self) -> bool {
+        self.terminal_status().is_some_and(|status| {
+            status["dispatch_id"]
+                .as_str()
+                .is_some_and(background_dispatch_cleanup_complete)
+        })
+    }
+
     async fn wait_for_terminal(&self) -> Value {
         for _ in 0..120 {
-            if let Ok(raw) = tokio::fs::read_to_string(self.run_dir.join("status.json")).await {
-                if let Ok(status) = serde_json::from_str::<Value>(&raw) {
-                    if status["result_written"] == json!(true)
-                        && matches!(
-                            status["state"].as_str(),
-                            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")
-                        )
-                    {
-                        return status;
-                    }
+            if let Some(status) = self.terminal_status() {
+                if status["dispatch_id"]
+                    .as_str()
+                    .is_some_and(background_dispatch_cleanup_complete)
+                {
+                    return status;
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        panic!("custom worker must write a terminal status receipt");
+        panic!("custom worker must finish terminal receipt and background cleanup");
     }
 }
 
 impl Drop for TerminalWorkerCleanup {
     fn drop(&mut self) {
         for _ in 0..480 {
-            if self.terminal() {
+            if self.terminal_and_cleanup_complete() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
@@ -376,6 +380,10 @@ async fn assert_custom_launch_spec_handler_case(
         .expect("accepted run owner remains armed")
         .wait_for_terminal()
         .await;
+    assert!(
+        background_dispatch_cleanup_complete(dispatch_id),
+        "terminal custom dispatch must finish background credential cleanup: {dispatch_id}"
+    );
     assert_eq!(terminal_status["dispatch_id"], json!(dispatch_id));
     assert_eq!(terminal_status["run_dir"], response["run_dir"]);
     assert_eq!(terminal_status["state"], json!(expected_state));
