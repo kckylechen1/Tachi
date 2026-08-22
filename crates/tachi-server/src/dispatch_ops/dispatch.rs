@@ -8,8 +8,8 @@ use super::dispatch_v2::{
 };
 use super::kanban_helpers::{close_kanban_row_on_early_exit, init_kanban_task};
 use super::launcher::{
-    build_claude_command, build_codex_command, build_custom_command, build_grok_command,
-    build_kimi_command, build_opencode_command,
+    build_claude_command, build_codex_command, build_grok_command, build_kimi_command,
+    build_opencode_command,
 };
 use super::mcp_config::generate_mcp_config;
 use super::prompt::{assemble_resolved_prompt_with_trace, resolve_assignment_skills};
@@ -193,6 +193,43 @@ fn effective_harness_transport(
             "cli".to_string()
         }
     })
+}
+
+/// Mints the adapter-only custom subprocess contract after the server has
+/// admitted the resolved assignment and execution grant. Bootstrap mechanics
+/// may reach this owner, but the backend receives only the resulting spec.
+fn mint_custom_launch_spec(
+    assignment: &tachi_params::ResolvedStaffAssignment,
+    grant: &tachi_params::ExecutionGrant,
+    command: &[String],
+    prompt: &str,
+    harness_transport: &str,
+    harness_server_url: &Option<String>,
+) -> Result<tachi_params::LaunchSpec, String> {
+    let launch = tachi_dispatch::build_custom_launch(
+        &tachi_dispatch::DispatchLaunchParams {
+            cwd: grant
+                .allowed_cwd
+                .as_ref()
+                .map(|cwd| cwd.to_string_lossy().into_owned()),
+            model: assignment.selected_model.clone(),
+            permission_profile: grant.permission_profile.clone(),
+            allowed_tools: grant.allowed_tools.clone(),
+            max_turns: grant.max_turns,
+            sandbox: grant.sandbox.clone(),
+            command: command.to_vec(),
+        },
+        prompt,
+    )?;
+    let mut spec = launch.into_launch_spec(
+        assignment.selected_backend.clone(),
+        prompt,
+        grant.timeout_secs,
+        HashMap::new(),
+    );
+    spec.harness_transport = Some(harness_transport.to_string());
+    spec.harness_server_url = harness_server_url.clone();
+    Ok(spec)
 }
 
 /// #971 review-fix (F3): output of the guarded post-BOARD-FIRST-init
@@ -708,6 +745,18 @@ async fn launch_canonical_dispatch(
         let prompt = plan_stage_outcome.prompt;
         let plan_duration_ms = plan_stage_outcome.plan_duration_ms;
         let plan_generated_at = plan_stage_outcome.plan_generated_at;
+        let custom_launch_spec = (resolved_assignment.selected_backend == "custom")
+            .then(|| {
+                mint_custom_launch_spec(
+                    &resolved_assignment,
+                    &execution_grant,
+                    &command,
+                    &prompt,
+                    &harness_transport,
+                    &harness_server_url,
+                )
+            })
+            .transpose()?;
 
         // 5. Build execution backend
         let PreparedDispatchBackend {
@@ -726,6 +775,7 @@ async fn launch_canonical_dispatch(
             grant: &execution_grant,
             command: &command,
             prompt: &prompt,
+            custom_launch_spec: custom_launch_spec.as_ref(),
             prompt_md_path: &prompt_md_path,
             mcp_config_path: mcp_config_path.as_ref(),
             v2,

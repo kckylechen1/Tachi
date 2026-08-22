@@ -583,16 +583,32 @@ impl ExecutionGrant {
 
 /// Backend adapter execution mechanics (Issue #1692 C5).
 /// Consumed strictly by execution backends/adapters; has no public schema and does not accept arbitrary caller fields.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 pub struct LaunchSpec {
     pub backend: String,
     pub command: Vec<String>,
     pub cwd: std::path::PathBuf,
+    #[serde(skip_serializing)]
     pub env_vars: std::collections::HashMap<String, String>,
     pub prompt: String,
     pub timeout_secs: u64,
     pub harness_transport: Option<String>,
     pub harness_server_url: Option<String>,
+}
+
+impl std::fmt::Debug for LaunchSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LaunchSpec")
+            .field("backend", &self.backend)
+            .field("command_len", &self.command.len())
+            .field("cwd", &self.cwd)
+            .field("env_var_count", &self.env_vars.len())
+            .field("timeout_secs", &self.timeout_secs)
+            .field("harness_transport", &self.harness_transport)
+            .field("harness_server_url", &self.harness_server_url)
+            .finish()
+    }
 }
 
 impl LaunchSpec {
@@ -1432,6 +1448,15 @@ mod tests {
         let serialized = serde_json::to_value(&spec).expect("serializes");
         assert_eq!(serialized["backend"], "codex_exec");
         assert_eq!(serialized["prompt"], "Execute review");
+        assert!(
+            serialized.get("env_vars").is_none(),
+            "adapter diagnostics must not serialize environment material: {serialized}"
+        );
+        let debug = format!("{spec:?}");
+        assert!(
+            !debug.contains("RUST_LOG") && !debug.contains("info"),
+            "adapter diagnostics must not expose environment material: {debug}"
+        );
     }
 
     #[test]
