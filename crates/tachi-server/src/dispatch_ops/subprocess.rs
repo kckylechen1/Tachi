@@ -51,14 +51,20 @@ pub(super) async fn run_managed_custom_subprocess(
         let status = tokio::select! {
             result = tokio::time::timeout(timeout, child.wait()) => match result {
                 Ok(Ok(status)) => status,
-                Ok(Err(error)) => return Err(format!("Agent process error: {error}")),
+                Ok(Err(error)) => {
+                    drain_managed_output(stdout_task, stderr_task).await;
+                    return Err(format!("Agent process error: {error}"));
+                }
                 Err(_) => {
                     reap_timed_out_child(&mut child, pid).await;
+                    drain_managed_output(stdout_task, stderr_task).await;
                     return Err(format!("Agent process timed out after {}s (process group killed)", timeout.as_secs()));
                 }
             },
             command = cancellations.recv() => {
                 let Some(command) = command else {
+                    reap_timed_out_child(&mut child, pid).await;
+                    drain_managed_output(stdout_task, stderr_task).await;
                     return Err("managed cancellation channel closed".to_string());
                 };
                 if let Some(status) = child.try_wait().map_err(|error| format!("managed cancellation child probe failed: {error}"))? {
@@ -66,6 +72,7 @@ pub(super) async fn run_managed_custom_subprocess(
                     return finish_managed_output(status, stdout_task, stderr_task).await;
                 }
                 reap_timed_out_child(&mut child, pid).await;
+                drain_managed_output(stdout_task, stderr_task).await;
                 if !wait_for_process_group_absence(pid).await {
                     let _ = crate::managed_run_control::record_termination_unconfirmed(run_dir, command.expected_status_revision);
                     let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unconfirmed);
@@ -159,6 +166,16 @@ async fn finish_managed_output(
         exit_code: status.code(),
         observed_model: None,
     })
+}
+
+/// Managed cancellation owns the child process group and both pipe readers.
+/// After reaping the group, await the readers before publishing an outcome so a
+/// confirmed cancellation cannot leave detached reader tasks behind.
+async fn drain_managed_output(
+    stdout_task: tokio::task::JoinHandle<Vec<u8>>,
+    stderr_task: tokio::task::JoinHandle<Vec<u8>>,
+) {
+    let _ = tokio::join!(collect_pipe(stdout_task), collect_pipe(stderr_task));
 }
 
 pub(super) async fn run_opencode_sop_subprocess(

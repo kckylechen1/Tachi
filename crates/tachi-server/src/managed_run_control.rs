@@ -113,7 +113,7 @@ pub(crate) fn mark_managed_custom_start(
         "lifecycle_owner".to_string(),
         Value::String("memory_server_managed_custom".to_string()),
     );
-    advance_status_revision(object)?;
+    crate::managed_run_control::advance_status_revision(object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|e| format!("serialize managed custom status: {e}"))?;
     crate::utils::write_owner_only_file_atomic(&path, &body)
@@ -240,7 +240,7 @@ pub(crate) async fn request_managed_custom_cancel(
                     None,
                 ),
             );
-            advance_status_revision(object)?;
+            crate::managed_run_control::advance_status_revision(object)?;
             let body = serde_json::to_vec_pretty(&status)
                 .map_err(|e| format!("serialize cancellation_requested: {e}"))?;
             crate::utils::write_owner_only_file_atomic(&path, &body)
@@ -337,7 +337,7 @@ pub(crate) fn confirm_managed_custom_cancellation(
         "state".to_string(),
         Value::String("TASK_STATE_CANCELED".to_string()),
     );
-    let revision = advance_status_revision(object)?;
+    let revision = crate::managed_run_control::advance_status_revision(object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|e| format!("serialize cancellation_confirmed: {e}"))?;
     crate::utils::write_owner_only_file_atomic(&path, &body)
@@ -378,7 +378,7 @@ pub(crate) fn record_termination_unconfirmed(
             None,
         ),
     );
-    advance_status_revision(object)?;
+    crate::managed_run_control::advance_status_revision(object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|e| format!("serialize termination_unconfirmed: {e}"))?;
     crate::utils::write_owner_only_file_atomic(&path, &body)
@@ -434,7 +434,7 @@ fn record_unavailable_if_pending(
                 None,
             ),
         );
-        advance_status_revision(object)?;
+        crate::managed_run_control::advance_status_revision(object)?;
         let body = serde_json::to_vec_pretty(&status)
             .map_err(|e| format!("serialize cancellation_unavailable: {e}"))?;
         crate::utils::write_owner_only_file_atomic(&path, &body)
@@ -470,7 +470,9 @@ fn unavailable(dispatch_id: &str, expected: u64, observed: Option<u64>, reason: 
     .to_string()
 }
 
-fn advance_status_revision(status: &mut serde_json::Map<String, Value>) -> Result<u64, String> {
+pub(crate) fn advance_status_revision(
+    status: &mut serde_json::Map<String, Value>,
+) -> Result<u64, String> {
     let next = match status.get("status_revision") {
         Some(Value::Number(value)) => value
             .as_u64()
@@ -605,5 +607,94 @@ mod issue_1825_tests {
             "cancellation_unavailable"
         );
         assert_eq!(canonical["state"], "TASK_STATE_WORKING");
+
+        for (winner, terminal_state, completion, reason) in [
+            (
+                "completion",
+                "TASK_STATE_COMPLETED",
+                Some(CancelCompletion::Unavailable("completion_winner")),
+                "completion_winner",
+            ),
+            (
+                "timeout",
+                "TASK_STATE_FAILED",
+                None,
+                "completion_or_timeout_winner",
+            ),
+        ] {
+            let suffix = if winner == "completion" { 3 } else { 4 };
+            let dispatch_id = format!("20260823T01010{suffix}Z-custom-deadbeef");
+            let run_dir = crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
+            std::fs::create_dir_all(&run_dir).expect("winner run dir");
+            std::fs::write(
+                run_dir.join("status.json"),
+                status(&dispatch_id, 1).to_string(),
+            )
+            .expect("winner status");
+            let server = MemoryServer::new(home.path().join(format!("{winner}.sqlite")), None)
+                .expect("winner server");
+            let (mut receiver, _run_guard) = server
+                .managed_run_controls
+                .register(&dispatch_id)
+                .expect("winner registry");
+            let request_server = server.clone();
+            let request_id = dispatch_id.clone();
+            let request = tokio::spawn(async move {
+                request_managed_custom_cancel(&request_server, &request_id, 1)
+                    .await
+                    .expect("winner cancellation response")
+            });
+            let command = receiver.recv().await.expect("winner control command");
+
+            crate::dispatch_ops::write_status_json(
+                &run_dir,
+                &dispatch_id,
+                false,
+                None,
+                None,
+                "n/a",
+                Some(1),
+                None,
+                None,
+                None,
+                Some(json!({
+                    "state": terminal_state,
+                    "result_written": true,
+                    "result": format!("{winner} won the lifecycle race"),
+                })),
+            );
+            let terminal_before_reply: Value = serde_json::from_slice(
+                &std::fs::read(run_dir.join("status.json")).expect("winner terminal status"),
+            )
+            .expect("winner terminal JSON");
+            if let Some(completion) = completion {
+                assert!(
+                    command.response.send(completion).is_ok(),
+                    "completion winner reply"
+                );
+            } else {
+                drop(command);
+            }
+            let response: Value =
+                serde_json::from_str(&request.await.expect("winner request task"))
+                    .expect("winner response JSON");
+            assert_eq!(
+                response["receipt"], "cancellation_unavailable",
+                "{winner} response"
+            );
+            assert_eq!(response["reason"], reason, "{winner} reason");
+            let terminal_after_reply: Value = serde_json::from_slice(
+                &std::fs::read(run_dir.join("status.json")).expect("winner final status"),
+            )
+            .expect("winner final JSON");
+            assert_eq!(
+                terminal_after_reply, terminal_before_reply,
+                "{winner} winner must not regress or rewrite terminal status"
+            );
+            assert!(
+                receiver.try_recv().is_err(),
+                "{winner} winner must not request a second child cleanup"
+            );
+        }
     }
 }

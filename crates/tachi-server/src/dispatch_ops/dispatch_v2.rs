@@ -318,7 +318,7 @@ pub(crate) fn stamp_route_decision_id(
         "route_decision_id".to_string(),
         Value::String(route_decision_id.to_string()),
     );
-    advance_status_revision(&mut status)?;
+    crate::managed_run_control::advance_status_revision(&mut status)?;
     let body = serde_json::to_vec_pretty(&Value::Object(status))
         .map_err(|error| format!("serialize {}: {error}", path.display()))?;
     crate::utils::write_owner_only_file_atomic(&path, &body)
@@ -329,22 +329,6 @@ pub(crate) fn stamp_route_decision_id(
 /// Every `status.json` read-modify-write must take this lock, including ACP
 /// identity acknowledgement, lifecycle terminalization, and route evidence.
 /// Weak retention avoids keeping a lock entry for every historical run.
-pub(crate) fn advance_status_revision(
-    status: &mut serde_json::Map<String, Value>,
-) -> Result<u64, String> {
-    let next = match status.get("status_revision") {
-        Some(Value::Number(value)) => value
-            .as_u64()
-            .ok_or_else(|| "status_revision is not a u64".to_string())?
-            .checked_add(1)
-            .ok_or_else(|| "status_revision overflow".to_string())?,
-        Some(_) => return Err("status_revision is not a u64".to_string()),
-        None => 1,
-    };
-    status.insert("status_revision".to_string(), Value::Number(next.into()));
-    Ok(next)
-}
-
 pub(crate) fn status_json_lock_for(run_dir: &std::path::Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
     // Run directories exist before any status writer can legitimately update
@@ -489,7 +473,7 @@ pub(crate) fn write_status_json(
             }
         }
     }
-    if let Err(error) = advance_status_revision(&mut obj) {
+    if let Err(error) = crate::managed_run_control::advance_status_revision(&mut obj) {
         eprintln!("[dispatch-v2] refusing status write: {error}");
         return;
     }
@@ -643,6 +627,43 @@ mod tests {
             serde_json::json!("partial"),
             "terminal rewrite must not erase the handler's authoritative receipt"
         );
+    }
+
+    #[test]
+    fn base_and_route_status_writers_advance_the_shared_revision() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        std::fs::write(
+            temp.path().join("status.json"),
+            serde_json::json!({ "status_revision": 7 }).to_string(),
+        )
+        .expect("seed status revision");
+
+        write_status_json(
+            temp.path(),
+            "20260823T010105Z-revision-writers",
+            false,
+            None,
+            None,
+            "n/a",
+            Some(0),
+            None,
+            None,
+            None,
+            Some(serde_json::json!({ "state": "TASK_STATE_WORKING" })),
+        );
+        let after_base: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("status.json")).expect("read base status"),
+        )
+        .expect("parse base status");
+        assert_eq!(after_base["status_revision"], 8);
+
+        stamp_route_decision_id(temp.path(), "route-revision-writers")
+            .expect("stamp route decision");
+        let after_route: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("status.json")).expect("read route status"),
+        )
+        .expect("parse route status");
+        assert_eq!(after_route["status_revision"], 9);
     }
 
     /// A completion whose canonical outcome write exhausted its bounded local

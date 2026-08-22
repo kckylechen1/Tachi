@@ -146,38 +146,126 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
 
 #[test]
 fn status_revision_advances_across_every_canonical_writer() {
+    const SHARED_INCREMENT: &str = "crate::managed_run_control::advance_status_revision(";
+    fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("missing {signature}"));
+        let source = &source[start..];
+        let end = source
+            .find("\n}\n\n")
+            .unwrap_or_else(|| panic!("unterminated {signature}"));
+        &source[..end + 3]
+    }
+    fn advances_checked_revision(body: &str) -> bool {
+        body.contains(SHARED_INCREMENT)
+    }
     let writers = [
-        ("base status write", include_str!("../../dispatch_v2.rs")),
-        ("route decision stamp", include_str!("../../dispatch_v2.rs")),
+        (
+            "base status write",
+            include_str!("../../dispatch_v2.rs"),
+            "pub(crate) fn write_status_json(",
+        ),
+        (
+            "route decision stamp",
+            include_str!("../../dispatch_v2.rs"),
+            "pub(crate) fn stamp_route_decision_id(",
+        ),
         (
             "ACP identity acknowledgement",
             include_str!("../execution.rs"),
+            "fn persist_acp_model_acknowledgement(",
         ),
         (
             "resolved completion",
             include_str!("../../../complete_ops/handler.rs"),
+            "fn persist_resolved_completion_receipt_at(",
         ),
         (
             "pending recovery",
             include_str!("../../../complete_ops/handler.rs"),
+            "fn persist_pending_completion_recovery_receipt_at(",
         ),
         (
-            "managed cancellation",
+            "managed custom classification",
             include_str!("../../../managed_run_control.rs"),
+            "pub(crate) fn mark_managed_custom_start(",
+        ),
+        (
+            "cancellation request",
+            include_str!("../../../managed_run_control.rs"),
+            "pub(crate) async fn request_managed_custom_cancel(",
+        ),
+        (
+            "cancellation confirmation",
+            include_str!("../../../managed_run_control.rs"),
+            "pub(crate) fn confirm_managed_custom_cancellation(",
+        ),
+        (
+            "unconfirmed cancellation",
+            include_str!("../../../managed_run_control.rs"),
+            "pub(crate) fn record_termination_unconfirmed(",
+        ),
+        (
+            "unavailable cancellation",
+            include_str!("../../../managed_run_control.rs"),
+            "fn record_unavailable_if_pending(",
         ),
     ];
-    for (writer, source) in writers {
+    for (writer, source, signature) in writers {
+        let body = function_body(source, signature);
         assert!(
-            source.contains("advance_status_revision"),
+            advances_checked_revision(body),
             "{writer} must advance the checked canonical status_revision"
         );
+        let mutant = body.replacen(SHARED_INCREMENT, "revision_increment_removed(", 1);
         assert!(
-            !source
-                .replace("advance_status_revision", "revision_removed")
-                .contains("advance_status_revision"),
-            "{writer} source discriminator must fail when its increment is removed"
+            !advances_checked_revision(&mutant),
+            "{writer} writer-local discriminator must fail when its increment is removed"
         );
     }
+}
+
+#[test]
+fn shared_status_revision_increment_rejects_invalid_and_overflowed_receipts() {
+    let mut status = serde_json::Map::new();
+    status.insert("status_revision".to_string(), serde_json::json!(41));
+    assert_eq!(
+        crate::managed_run_control::advance_status_revision(&mut status)
+            .expect("valid revision increments"),
+        42
+    );
+    status.insert("status_revision".to_string(), serde_json::json!(u64::MAX));
+    assert!(
+        crate::managed_run_control::advance_status_revision(&mut status).is_err(),
+        "overflow must fail before a writer can wrap the monotonic revision"
+    );
+}
+
+#[test]
+fn managed_custom_registration_uses_the_resolved_assignment_not_response_metadata() {
+    let source = include_str!("../../dispatch.rs");
+    let start = source
+        .find("// Register managed-custom control before task scheduling.")
+        .expect("managed custom registration comment");
+    let registration = &source[start..]
+        .split_once("// 8. Spawn background task with Watchdog")
+        .expect("managed custom registration body")
+        .0;
+    const AUTHORITATIVE_PREDICATE: &str = "resolved_assignment.selected_backend == \"custom\"";
+    assert!(
+        registration.contains(AUTHORITATIVE_PREDICATE),
+        "managed control registration must use the resolved assignment backend"
+    );
+    let mutant = registration.replacen(AUTHORITATIVE_PREDICATE, "false", 1);
+    assert!(
+        !mutant.contains(AUTHORITATIVE_PREDICATE),
+        "the registration discriminator must fail if the authoritative custom predicate is removed"
+    );
+    assert!(
+        !registration.contains("execution_backend_name == Some(\"custom\")"),
+        "response metadata must not decide whether a custom process receives cancellation control"
+    );
 }
 
 #[test]

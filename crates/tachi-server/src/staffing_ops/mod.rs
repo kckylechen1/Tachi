@@ -320,6 +320,75 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn write_hanging_managed_custom_worker(
+        bin_dir: &std::path::Path,
+        root_pid: &std::path::Path,
+        descendant_pid: &std::path::Path,
+    ) {
+        let worker = bin_dir.join("opencode");
+        std::fs::write(
+            &worker,
+            format!(
+                "#!/bin/sh\ntrap '' TERM\nprintf '%s\\n' \"$$\" > '{}'\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+                root_pid.display(),
+                descendant_pid.display(),
+            ),
+        )
+        .expect("write hanging managed custom worker");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&worker)
+            .expect("managed custom worker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions)
+            .expect("make managed custom worker executable");
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_managed_custom_processes(
+        run_dir: &std::path::Path,
+        root_pid: &std::path::Path,
+        descendant_pid: &std::path::Path,
+    ) {
+        for _ in 0..360 {
+            if root_pid.is_file() && descendant_pid.is_file() {
+                return;
+            }
+            if let Some(status) = std::fs::read_to_string(run_dir.join("status.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            {
+                if terminal_staff_state(&status) != "TASK_STATE_WORKING" {
+                    let result = std::fs::read_to_string(run_dir.join("result.md"))
+                        .unwrap_or_else(|error| format!("<result unavailable: {error}>"));
+                    panic!(
+                        "managed custom launch terminalized before its root fixture: status={status} result={result}"
+                    );
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!(
+            "managed custom fixture did not write root={} descendant={}",
+            root_pid.display(),
+            descendant_pid.display()
+        );
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_test_process_exit(pid: libc::pid_t) -> bool {
+        for _ in 0..360 {
+            let absent = unsafe { libc::kill(pid, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if absent {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        false
+    }
+
     async fn wait_for_staff_terminal(run_dir: &std::path::Path) -> (Value, String) {
         for _ in 0..360 {
             let status = std::fs::read_to_string(run_dir.join("status.json"))
@@ -563,6 +632,147 @@ pub(crate) mod tests {
             status["route_decision_id"].as_str(),
             Some(decision.route_decision_id.as_str()),
             "the evidence stamp must retain the fast child's terminal receipt"
+        );
+    }
+
+    /// The facade must install the in-memory cancellation owner before its
+    /// accepted custom launch reaches the hanging root. This drives the real
+    /// `tachi_staff start -> status -> cancel` handlers and proves confirmation
+    /// follows process-group reaping, not merely a request acknowledgement.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
+    async fn staff_cancel_managed_custom_start_status_cancel_e2e() {
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
+        let root_pid = temp_bin.path().join("root.pid");
+        let descendant_pid = temp_bin.path().join("descendant.pid");
+        write_hanging_managed_custom_worker(temp_bin.path(), &root_pid, &descendant_pid);
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join fake-worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _transport = crate::test_support::EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "cli");
+        let _v2 = crate::test_support::EnvRestore::set("DISPATCH_V2_ENABLED", "false");
+        let _review = crate::test_support::EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+        let server = test_server();
+        let mut request = staff_request("tachi");
+        request.profile = Some("glm_impl".to_string());
+        request.worker = Some("custom".to_string());
+        request.issue_ref = Some("kckylechen1/tachi#1825".to_string());
+        request.flow_id = Some("flow_1825_managed_cancel_e2e".to_string());
+
+        let raw = staff_start(&server, request)
+            .await
+            .expect("managed custom Staff start is accepted");
+        let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
+        let accepted: Value = serde_json::from_str(&raw).expect("accepted response JSON");
+        let dispatch_id = accepted["dispatch_id"].as_str().expect("dispatch id");
+        let run_dir = dispatch_runs_root().join(dispatch_id);
+        wait_for_managed_custom_processes(&run_dir, &root_pid, &descendant_pid).await;
+
+        let accepted_status: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: dispatch_id.to_string(),
+                },
+            )
+            .await
+            .expect("actual Staff status after accepted start"),
+        )
+        .expect("accepted canonical status JSON");
+        let accepted_revision = accepted_status["status_revision"]
+            .as_u64()
+            .expect("accepted managed custom status revision");
+        assert_eq!(accepted_status["state"], "TASK_STATE_WORKING");
+        assert_eq!(
+            accepted_status["execution_classification"],
+            "managed_custom"
+        );
+
+        let cancel: Value = serde_json::from_str(
+            &staff_cancel(
+                &server,
+                StaffCancelRequest {
+                    dispatch_id: dispatch_id.to_string(),
+                    expected_status_revision: accepted_revision,
+                },
+            )
+            .await
+            .expect("actual Staff cancel response"),
+        )
+        .expect("cancel response JSON");
+        assert_eq!(cancel["receipt"], "cancellation_confirmed");
+        assert_eq!(cancel["expected_status_revision"], accepted_revision);
+        assert_eq!(cancel["termination_proof"], "unix_process_group_absent");
+
+        let (terminal, _result) = wait_for_staff_terminal(&run_dir).await;
+        wait_for_staff_cleanup(dispatch_id).await;
+        cleanup_guard.disarm();
+        assert_eq!(terminal_staff_state(&terminal), "TASK_STATE_CANCELED");
+        assert_eq!(
+            terminal["cancellation"]["receipt"],
+            "cancellation_confirmed"
+        );
+        assert_eq!(
+            terminal["cancellation"]["expected_status_revision"], accepted_revision,
+            "request receipt precedes the confirmation written from the same checked revision"
+        );
+        assert_eq!(
+            terminal["cancellation"]["observed_status_revision"],
+            accepted_revision + 1,
+            "the requested receipt must advance before cancellation is confirmed"
+        );
+        assert_eq!(
+            cancel["observed_status_revision"],
+            accepted_revision + 2,
+            "the confirmation receipt must advance after the requested receipt"
+        );
+        assert!(
+            terminal["status_revision"]
+                .as_u64()
+                .expect("terminal revision")
+                >= accepted_revision + 2,
+            "terminal persistence must not regress the confirmed revision"
+        );
+        let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+            .expect("canonical trajectory");
+        for event in [
+            "dispatch_received",
+            "execute_started",
+            "subprocess_finished",
+        ] {
+            assert!(
+                trajectory.contains(&format!(r#""event":"{event}""#)),
+                "trajectory missing {event}: {trajectory}"
+            );
+        }
+        let root: libc::pid_t = std::fs::read_to_string(&root_pid)
+            .expect("root pid")
+            .trim()
+            .parse()
+            .expect("numeric root pid");
+        let descendant: libc::pid_t = std::fs::read_to_string(&descendant_pid)
+            .expect("descendant pid")
+            .trim()
+            .parse()
+            .expect("numeric descendant pid");
+        assert!(
+            wait_for_test_process_exit(root).await,
+            "managed root must be absent"
+        );
+        assert!(
+            wait_for_test_process_exit(descendant).await,
+            "managed descendant must be absent"
         );
     }
 

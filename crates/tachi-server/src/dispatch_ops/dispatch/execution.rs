@@ -93,9 +93,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let execution_for_spawn = ctx.execution;
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
     let mcp_config_path = ctx.mcp_config_path;
-    let _managed_run_guard = ctx.managed_run_guard;
+    let managed_run_guard = ctx.managed_run_guard;
 
     tokio::task::spawn(async move {
+        // Keep the registry entry and its sender alive for the entire
+        // background lifecycle. Binding this outside the async move drops the
+        // guard as soon as scheduling returns and makes the child observe a
+        // closed cancellation receiver before it can spawn.
+        let _managed_run_guard = managed_run_guard;
         let _mcp_cleanup = McpCleanup(mcp_config_path);
 
         // execute_started — Stage 2 (or, in V1, the only stage).
@@ -846,7 +851,7 @@ fn persist_acp_model_acknowledgement(
         serde_json::to_value(receipt)
             .map_err(|error| format!("serialize ACP identity receipt: {error}"))?,
     );
-    super::super::dispatch_v2::advance_status_revision(status_object)?;
+    crate::managed_run_control::advance_status_revision(status_object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|error| format!("serialize {}: {error}", status_path.display()))?;
     crate::utils::write_owner_only_file_atomic(&status_path, &body)
@@ -1147,6 +1152,10 @@ mod tests {
         assert_eq!(status["state"], "TASK_STATE_COMPLETED");
         assert_eq!(status["result_written"], true);
         assert_eq!(status["route_decision_id"], "route-fast-terminal");
+        assert_eq!(
+            status["status_revision"], 3,
+            "base status, route evidence, and ACP acknowledgement each advance the shared revision"
+        );
         assert_eq!(
             read_receipt(temp.path())
                 .observed

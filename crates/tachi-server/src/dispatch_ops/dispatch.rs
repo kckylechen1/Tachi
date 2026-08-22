@@ -907,7 +907,7 @@ async fn launch_canonical_dispatch(
     };
 
     // Register managed-custom control before task scheduling.
-    let (execution, managed_run_guard) = if execution_backend_name == Some("custom") {
+    let (execution, managed_run_guard) = if resolved_assignment.selected_backend == "custom" {
         let (receiver, guard) = server.managed_run_controls.register(&dispatch_id)?;
         crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)?;
         let execution = match execution {

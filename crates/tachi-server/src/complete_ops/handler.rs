@@ -197,7 +197,7 @@ fn persist_resolved_completion_receipt_at(
     // claiming final completion. The canonical row is durable now, so replace
     // that marker in the same atomic status write.
     status_object.remove("completion_recovery");
-    advance_status_revision(status_object)?;
+    crate::managed_run_control::advance_status_revision(status_object)?;
     let body = serde_json::to_string_pretty(&status).map_err(|error| {
         format!(
             "cannot serialize resolved completion receipt for dispatch_id={dispatch_id}: {error}"
@@ -308,7 +308,7 @@ fn persist_pending_completion_recovery_receipt_at(
     }
     status_object.remove("resolved_completion");
     status_object.insert("completion_recovery".to_string(), recovery);
-    advance_status_revision(status_object)?;
+    crate::managed_run_control::advance_status_revision(status_object)?;
     let body = serde_json::to_string_pretty(&status).map_err(|error| {
         format!(
             "cannot serialize completion recovery receipt for dispatch_id={dispatch_id}: {error}"
@@ -1093,20 +1093,6 @@ pub(crate) async fn handle_tachi_complete(
     let response = shape_complete_response(review_bundle, params.format.as_deref());
     serde_json::to_string(&response)
         .map_err(|e| format!("Failed to serialize review bundle: {}", e))
-}
-
-fn advance_status_revision(status: &mut serde_json::Map<String, Value>) -> Result<u64, String> {
-    let next = match status.get("status_revision") {
-        Some(Value::Number(value)) => value
-            .as_u64()
-            .ok_or_else(|| "status_revision is not a u64".to_string())?
-            .checked_add(1)
-            .ok_or_else(|| "status_revision overflow".to_string())?,
-        Some(_) => return Err("status_revision is not a u64".to_string()),
-        None => 1,
-    };
-    status.insert("status_revision".to_string(), Value::Number(next.into()));
-    Ok(next)
 }
 
 #[cfg(test)]
