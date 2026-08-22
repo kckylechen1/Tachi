@@ -116,7 +116,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn p3_typed_assignment_and_private_inputs_drive_preflight_bypass() {
+    fn p3_typed_assignment_and_private_inputs_drive_preflight_failure() {
         let server = crate::tests::make_server();
         let workspace = tempfile::tempdir().expect("preflight workspace");
         let assignment = tachi_params::ResolvedStaffAssignment {
@@ -138,9 +138,9 @@ mod tests {
         let private_env = HashMap::new();
         let private_metadata = None;
         let private_bundle = Value::Null;
-        run_harness_preflight(HarnessPreflightInputs {
+        let err = run_harness_preflight(HarnessPreflightInputs {
             server: &server,
-            harness_transport: "custom",
+            harness_transport: "opencode_serve",
             harness_server_url: &private_url,
             credential_env: &private_env,
             dispatch_id: "p3-preflight",
@@ -160,6 +160,23 @@ mod tests {
             capability_bundle_card: &private_bundle,
             timeout_secs_for_status: 5,
         })
-        .expect("non-opencode typed assignment bypasses harness probe");
+        .expect_err("missing private harness URL must fail the typed preflight branch");
+        let status: Value = serde_json::from_str(
+            &std::fs::read_to_string(workspace.path().join("status.json"))
+                .expect("typed preflight failure writes status"),
+        )
+        .expect("typed preflight status JSON");
+        assert_eq!(status["state"], Value::String("TASK_STATE_FAILED".to_string()));
+        assert_eq!(status["agent"], Value::String("custom".to_string()));
+        assert_eq!(
+            status["harness_transport"],
+            Value::String("opencode_serve".to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("result.md"))
+                .expect("typed preflight failure writes result"),
+            err,
+            "private missing URL failure must be the observable terminal result"
+        );
     }
 }

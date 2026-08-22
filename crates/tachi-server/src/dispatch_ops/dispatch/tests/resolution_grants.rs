@@ -67,7 +67,7 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
     let authority = include_str!("../authority.rs");
     for deleted_projection in [
         "assert_grant_legacy_projection",
-        "apply_assignment_legacy_projection",
+        "apply_grant_legacy_projection",
     ] {
         assert!(
             !authority.contains(deleted_projection),

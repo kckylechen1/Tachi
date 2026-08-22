@@ -213,15 +213,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn p3_typed_grant_drives_credential_materialization_without_flat_dispatch_params() {
+    fn p3_typed_grant_rejects_missing_credential_selector_without_flat_dispatch_params() {
         let server = crate::tests::make_server();
         let run_dir = tempfile::tempdir().expect("credential run dir");
+        let missing_selector = "p3-typed-missing-credential-selector";
         let grant = tachi_params::ExecutionGrant {
             grant_id: "p3-credential-grant".to_string(),
             env_id: None,
             unmanaged_cwd_allowed: false,
             allowed_cwd: None,
-            credential_profiles: Vec::new(),
+            credential_profiles: vec![missing_selector.to_string()],
             mcp_access: None,
             allowed_tools: Vec::new(),
             permission_profile: None,
@@ -229,15 +230,17 @@ mod tests {
             max_turns: None,
             timeout_secs: 5,
         };
-        let materialized = materialize_dispatch_credentials(
+        let err = materialize_dispatch_credentials(
             &server,
             &grant,
             "custom",
             Some("typed-profile"),
             run_dir.path(),
         )
-        .expect("empty typed credential authority materializes without ingress DTO");
-        assert!(materialized.reports.is_empty());
-        assert!(materialized.env.is_empty());
+        .expect_err("typed missing selector must fail in the production credential consumer");
+        assert!(
+            err.contains(missing_selector),
+            "production materializer must report the independently minted selector: {err}"
+        );
     }
 }
