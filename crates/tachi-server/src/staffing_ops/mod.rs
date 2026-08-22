@@ -878,4 +878,58 @@ mod tests {
         assert_eq!(before_claims, count_of("session_claims"));
         assert_eq!(before_identities, count_of("agent_identities"));
     }
+
+    /// Typed Staff resolution validates recommendation ownership before the
+    /// canonical receipt/evidence lifecycle. A stale reference must therefore
+    /// leave neither a run artifact nor a route_decisions projection behind.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn staff_start_refuses_unknown_recommendation_before_artifacts_or_evidence() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = test_server();
+        let before_runs = std::fs::read_dir(dispatch_runs_root())
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+
+        let err = staff_start(
+            &server,
+            StaffStartRequest {
+                task: "refuse stale recommendation".to_string(),
+                staffing_reason: TachiDispatchReason::ExplicitUserRequest,
+                profile: None,
+                worker: Some("codex".to_string()),
+                project: Some("named-project".to_string()),
+                stage: None,
+                execution_level: None,
+                issue_ref: None,
+                pr_ref: None,
+                flow_id: None,
+                completion_predicate: None,
+                recommendation_ref: Some("missing-recommendation".to_string()),
+            },
+        )
+        .await
+        .expect_err("unknown recommendation must fail before acceptance");
+        assert!(err.contains("Unknown or stale recommendation_ref"));
+        assert_eq!(
+            std::fs::read_dir(dispatch_runs_root())
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            before_runs,
+            "refusal must create zero canonical run artifacts"
+        );
+        let route_rows: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM route_decisions", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count route evidence");
+        assert_eq!(route_rows, 0, "refusal must write zero route evidence rows");
+    }
 }
