@@ -1227,8 +1227,10 @@ mod tests {
     }
 
     /// Completion receipts pause after their stale read while holding the same
-    /// per-run mutex as route evidence. Removing either completion lock lets
-    /// the route stamp finish before the stale receipt replace and lose it.
+    /// canonical per-run mutex as lifecycle and route writers. The lifecycle
+    /// writer uses an existing `run/../run` spelling: a raw-path registry or a
+    /// removed completion lock lets it finish before the stale replacement and
+    /// loses terminal, identity, or route evidence.
     #[test]
     fn completion_receipt_writers_cannot_lose_route_or_project_fields() {
         let _guard = crate::utils::global_test_lock()
@@ -1238,6 +1240,13 @@ mod tests {
         let resolved_dispatch_id = "20260822T000004Z-resolved-overlap";
         let resolved_dir = resolved_temp.path().join(resolved_dispatch_id);
         std::fs::create_dir_all(&resolved_dir).expect("create resolved run directory");
+        let resolved_alias = resolved_dir.join("..").join(resolved_dispatch_id);
+        let resolved_lock = crate::dispatch_ops::status_json_lock_for(&resolved_dir);
+        let resolved_alias_lock = crate::dispatch_ops::status_json_lock_for(&resolved_alias);
+        assert!(
+            Arc::ptr_eq(&resolved_lock, &resolved_alias_lock),
+            "existing lexical aliases must resolve to one status receipt lock"
+        );
         std::fs::write(
             resolved_dir.join("status.json"),
             json!({
@@ -1264,37 +1273,61 @@ mod tests {
             )
         });
         read.wait();
-        let route_dir = resolved_dir.clone();
-        let (route_done, route_result) = std::sync::mpsc::sync_channel(1);
-        let route_writer = std::thread::spawn(move || {
-            route_done
+        let terminal_dir = resolved_alias;
+        let (terminal_done, terminal_result) = std::sync::mpsc::sync_channel(1);
+        let terminal_writer = std::thread::spawn(move || {
+            crate::dispatch_ops::write_status_json(
+                &terminal_dir,
+                resolved_dispatch_id,
+                false,
+                None,
+                None,
+                "n/a",
+                Some(0),
+                None,
+                Some(1),
+                Some(1),
+                Some(json!({
+                    "state": "TASK_STATE_COMPLETED",
+                    "result_written": true,
+                    "result": "resolved terminal result",
+                    "identity_receipt": {"model": "resolved-terminal"}
+                })),
+            );
+            terminal_done
                 .send(crate::dispatch_ops::stamp_route_decision_id(
-                    &route_dir,
+                    &terminal_dir,
                     "route-resolved-overlap",
                 ))
-                .expect("report resolved route stamp");
+                .expect("report resolved terminal route stamp");
         });
         assert!(
-            route_result
+            terminal_result
                 .recv_timeout(Duration::from_millis(100))
                 .is_err(),
-            "route evidence must wait behind the resolved completion stale-read lock"
+            "terminal lifecycle plus route evidence must wait behind the resolved completion lock"
         );
         resume.wait();
         resolved_writer
             .join()
             .expect("join resolved receipt writer")
             .expect("persist resolved receipt");
-        route_writer.join().expect("join resolved route writer");
-        route_result
+        terminal_writer
+            .join()
+            .expect("join resolved terminal writer");
+        terminal_result
             .recv_timeout(Duration::from_secs(1))
-            .expect("resolved route result after receipt release")
-            .expect("stamp resolved route evidence");
+            .expect("resolved terminal result after receipt release")
+            .expect("stamp resolved terminal route evidence");
         let resolved: Value = serde_json::from_slice(
             &std::fs::read(resolved_dir.join("status.json")).expect("read resolved overlap"),
         )
         .expect("parse resolved overlap");
         assert_eq!(resolved["project"], "completion-overlap");
+        assert_eq!(resolved["state"], "TASK_STATE_COMPLETED");
+        assert_eq!(resolved["result_written"], true);
+        assert_eq!(resolved["result"], "resolved terminal result");
+        assert_eq!(resolved["identity_receipt"]["model"], "resolved-terminal");
         assert_eq!(resolved["route_decision_id"], "route-resolved-overlap");
         assert_eq!(
             resolved["resolved_completion"]["eval_ledger_id"],
@@ -1306,6 +1339,13 @@ mod tests {
         let recovery_dispatch_id = "20260822T000005Z-recovery-overlap";
         let recovery_dir = recovery_temp.path().join(recovery_dispatch_id);
         std::fs::create_dir_all(&recovery_dir).expect("create recovery run directory");
+        let recovery_alias = recovery_dir.join("..").join(recovery_dispatch_id);
+        let recovery_lock = crate::dispatch_ops::status_json_lock_for(&recovery_dir);
+        let recovery_alias_lock = crate::dispatch_ops::status_json_lock_for(&recovery_alias);
+        assert!(
+            Arc::ptr_eq(&recovery_lock, &recovery_alias_lock),
+            "existing lexical aliases must resolve to one status receipt lock"
+        );
         std::fs::write(
             recovery_dir.join("status.json"),
             json!({
@@ -1333,37 +1373,61 @@ mod tests {
             )
         });
         read.wait();
-        let route_dir = recovery_dir.clone();
-        let (route_done, route_result) = std::sync::mpsc::sync_channel(1);
-        let route_writer = std::thread::spawn(move || {
-            route_done
+        let terminal_dir = recovery_alias;
+        let (terminal_done, terminal_result) = std::sync::mpsc::sync_channel(1);
+        let terminal_writer = std::thread::spawn(move || {
+            crate::dispatch_ops::write_status_json(
+                &terminal_dir,
+                recovery_dispatch_id,
+                false,
+                None,
+                None,
+                "n/a",
+                Some(0),
+                None,
+                Some(1),
+                Some(1),
+                Some(json!({
+                    "state": "TASK_STATE_FAILED",
+                    "result_written": true,
+                    "result": "recovery terminal result",
+                    "identity_receipt": {"model": "recovery-terminal"}
+                })),
+            );
+            terminal_done
                 .send(crate::dispatch_ops::stamp_route_decision_id(
-                    &route_dir,
+                    &terminal_dir,
                     "route-recovery-overlap",
                 ))
-                .expect("report recovery route stamp");
+                .expect("report recovery terminal route stamp");
         });
         assert!(
-            route_result
+            terminal_result
                 .recv_timeout(Duration::from_millis(100))
                 .is_err(),
-            "route evidence must wait behind the recovery receipt stale-read lock"
+            "terminal lifecycle plus route evidence must wait behind the recovery completion lock"
         );
         resume.wait();
         recovery_writer
             .join()
             .expect("join recovery receipt writer")
             .expect("persist recovery receipt");
-        route_writer.join().expect("join recovery route writer");
-        route_result
+        terminal_writer
+            .join()
+            .expect("join recovery terminal writer");
+        terminal_result
             .recv_timeout(Duration::from_secs(1))
-            .expect("recovery route result after receipt release")
-            .expect("stamp recovery route evidence");
+            .expect("recovery terminal result after receipt release")
+            .expect("stamp recovery terminal route evidence");
         let recovery: Value = serde_json::from_slice(
             &std::fs::read(recovery_dir.join("status.json")).expect("read recovery overlap"),
         )
         .expect("parse recovery overlap");
         assert_eq!(recovery["project"], "completion-overlap");
+        assert_eq!(recovery["state"], "TASK_STATE_FAILED");
+        assert_eq!(recovery["result_written"], true);
+        assert_eq!(recovery["result"], "recovery terminal result");
+        assert_eq!(recovery["identity_receipt"]["model"], "recovery-terminal");
         assert_eq!(recovery["route_decision_id"], "route-recovery-overlap");
         assert_eq!(
             recovery["completion_recovery"]["eval_ledger_id"],

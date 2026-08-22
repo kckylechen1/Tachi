@@ -694,6 +694,7 @@ pub(crate) fn background_dispatch_cleanup_complete(dispatch_id: &str) -> bool {
 #[cfg(test)]
 #[derive(Clone)]
 struct AcpStatusReadBarrier {
+    run_dir: std::path::PathBuf,
     read: Arc<Barrier>,
     resume: Arc<Barrier>,
 }
@@ -718,22 +719,32 @@ impl Drop for AcpStatusReadBarrierGuard {
 
 #[cfg(test)]
 fn install_acp_status_read_barrier(
+    run_dir: std::path::PathBuf,
     read: Arc<Barrier>,
     resume: Arc<Barrier>,
 ) -> AcpStatusReadBarrierGuard {
     *acp_status_read_barrier()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-        Some(AcpStatusReadBarrier { read, resume });
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(AcpStatusReadBarrier {
+        run_dir,
+        read,
+        resume,
+    });
     AcpStatusReadBarrierGuard
 }
 
 #[cfg(test)]
-fn pause_acp_after_status_read() {
-    let barrier = acp_status_read_barrier()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
+fn pause_acp_after_status_read(run_dir: &Path) {
+    let barrier = {
+        let mut barrier = acp_status_read_barrier()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        barrier
+            .as_ref()
+            .is_some_and(|configured| configured.run_dir == run_dir)
+            .then(|| barrier.take())
+            .flatten()
+    };
     if let Some(barrier) = barrier {
         barrier.read.wait();
         barrier.resume.wait();
@@ -761,7 +772,7 @@ fn persist_acp_model_acknowledgement(
     let mut status = crate::task_lifecycle::read_json_file(&status_path)?
         .ok_or_else(|| format!("ACP acknowledgement requires {}", status_path.display()))?;
     #[cfg(test)]
-    pause_acp_after_status_read();
+    pause_acp_after_status_read(run_dir);
     let receipt_value = status.get("identity_receipt").cloned().ok_or_else(|| {
         format!(
             "ACP acknowledgement requires identity_receipt in {}",
@@ -1114,8 +1125,12 @@ mod tests {
         write_planned_receipt(temp.path(), "gpt-5.5");
         let read = Arc::new(Barrier::new(2));
         let resume = Arc::new(Barrier::new(2));
-        let _barrier = install_acp_status_read_barrier(Arc::clone(&read), Arc::clone(&resume));
         let run_dir = temp.path().to_path_buf();
+        let _barrier = install_acp_status_read_barrier(
+            run_dir.clone(),
+            Arc::clone(&read),
+            Arc::clone(&resume),
+        );
         let acp = std::thread::spawn(move || {
             persist_acp_model_acknowledgement(&run_dir, Some("gpt-5.5"))
         });

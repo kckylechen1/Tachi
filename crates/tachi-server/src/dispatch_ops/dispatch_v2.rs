@@ -330,21 +330,34 @@ pub(crate) fn stamp_route_decision_id(
 /// Weak retention avoids keeping a lock entry for every historical run.
 pub(crate) fn status_json_lock_for(run_dir: &std::path::Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    // Run directories exist before any status writer can legitimately update
+    // them, so their canonical path gives every relative, `..`, or symlink
+    // spelling the same receipt mutex. Keep a non-panicking absolute fallback
+    // for defensive callers that are still assembling a new run directory.
+    let lock_key = run_dir.canonicalize().unwrap_or_else(|_| {
+        if run_dir.is_absolute() {
+            run_dir.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current_dir| current_dir.join(run_dir))
+                .unwrap_or_else(|_| run_dir.to_path_buf())
+        }
+    });
     let mut locks = LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(run_dir).and_then(Weak::upgrade) {
+    if let Some(lock) = locks.get(&lock_key).and_then(Weak::upgrade) {
         return lock;
     }
     let lock = Arc::new(Mutex::new(()));
-    locks.insert(run_dir.to_path_buf(), Arc::downgrade(&lock));
+    locks.insert(lock_key, Arc::downgrade(&lock));
     lock
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn write_status_json(
+pub(crate) fn write_status_json(
     run_dir: &std::path::Path,
     dispatch_id: &str,
     v2: bool,
@@ -428,11 +441,23 @@ pub(super) fn write_status_json(
                 }
             }
             // A bounded local lock exhaustion has durable eval evidence but
-            // no canonical dispatch outcome yet. Keep the run observably
-            // non-terminal until a later completion call reconciles that
-            // outcome and clears this marker itself.
+            // no canonical dispatch outcome yet. Keep an otherwise
+            // non-terminal lifecycle rewrite observably non-terminal until a
+            // later completion call reconciles that outcome and clears this
+            // marker itself. A real child terminal write must retain its
+            // terminal state and result alongside the recovery evidence.
+            let writes_terminal_state =
+                obj.get("state")
+                    .and_then(Value::as_str)
+                    .is_some_and(|state| {
+                        matches!(
+                            state,
+                            "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
+                        )
+                    });
             if previous.get("completion_recovery").is_some()
                 && !obj.contains_key("resolved_completion")
+                && !writes_terminal_state
             {
                 let non_terminal_state = previous
                     .get("state")
