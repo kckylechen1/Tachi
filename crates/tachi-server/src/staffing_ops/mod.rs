@@ -3,8 +3,7 @@
 //!
 //! This is NOT a public MCP tool, NOT a new facade, and NOT a parallel
 //! lifecycle. It maps a small model-decidable request into
-//! [`TachiDispatchParams`](crate::tool_params::TachiDispatchParams) and delegates
-//! to the single canonical choke-point [`crate::dispatch_ops::handle_tachi_dispatch`];
+//! a resolved typed assignment and enters the single canonical launch kernel;
 //! it creates no second result/status store.
 //!
 //! # Boundary contract
@@ -39,7 +38,7 @@
 //! handler or creating any artifacts.
 
 use crate::dispatch_ops::{
-    canonical_dir_is_within, dispatch_runs_root, handle_tachi_dispatch, is_valid_dispatch_id,
+    canonical_dir_is_within, dispatch_runs_root, is_valid_dispatch_id, launch_staff_assignment,
 };
 use crate::MemoryServer;
 use rmcp::schemars::JsonSchema;
@@ -72,9 +71,8 @@ pub(crate) struct StaffStatusRequest {
 
 /// Start a worker via the canonical dispatch kernel.
 ///
-/// Maps the semantic [`StaffAssignmentRequest`] into [`TachiDispatchParams`] and
-/// delegates to the single canonical choke-point
-/// [`handle_tachi_dispatch`]. The `staffing_reason` field is required on the
+/// Resolves the semantic [`StaffAssignmentRequest`] and enters the single
+/// canonical launch kernel. The `staffing_reason` field is required on the
 /// request struct, so a caller that omits it is rejected at deserialization
 /// (the field has no `#[serde(default)]`). This is the facade-level admission
 /// gate; the kernel additionally fail-closes inside `handle_tachi_dispatch`
@@ -105,8 +103,7 @@ pub(crate) async fn staff_start(
     // kernel-side defense-in-depth check inside handle_tachi_dispatch catches
     // any future caller that reaches it without going through this struct.
     let recommendation_ref = request.recommendation_ref.clone();
-    let params = request.into_dispatch_params();
-    let raw = handle_tachi_dispatch(server, params).await?;
+    let raw = launch_staff_assignment(server, request).await?;
 
     record_route_decision_best_effort(server, &raw, recommendation_ref.as_deref());
 
@@ -345,7 +342,8 @@ mod tests {
     ///
     /// RED-before-fix proof: before `staffing_reason` was added as a required
     /// field, this deserialization SUCCEEDED (all fields were optional and the
-    /// reason was a free-string marker that into_params dropped). After the
+    /// reason was a free-string marker that the retired compatibility bridge
+    /// dropped. After the
     /// fix, it fails — the gate is structural.
     #[test]
     fn staff_start_request_without_reason_is_rejected_at_deserialize() {
@@ -389,12 +387,10 @@ mod tests {
         );
     }
 
-    /// Discrimination test: `into_params()` carries `staffing_reason` THROUGH
-    /// to `TachiDispatchParams.staffing_reason` (it is NOT dropped like the
-    /// retired free-string markers were). This is the contract that makes the
-    /// reason reach the kernel gate and the receipt stamp.
+    /// The typed request retains its required admission reason without a
+    /// Staff-facing projection into launch mechanics.
     #[test]
-    fn into_params_carries_staffing_reason_through() {
+    fn typed_request_carries_staffing_reason_without_flat_projection() {
         let request = StaffStartRequest {
             task: "prove reason is carried through".to_string(),
             staffing_reason: TachiDispatchReason::CrossDeviceRemote,
@@ -409,21 +405,38 @@ mod tests {
             completion_predicate: None,
             recommendation_ref: Some("rec-xyz".to_string()),
         };
-        let params = request.into_params();
         assert_eq!(
-            params.staffing_reason,
+            request.staffing_reason,
             TachiDispatchReason::CrossDeviceRemote,
-            "into_params must carry staffing_reason through to the kernel, not drop it"
+            "the typed request must retain its required admission reason"
         );
-        // Semantic fields still map through.
-        assert_eq!(params.task, "prove reason is carried through");
-        assert_eq!(params.agent.as_deref(), Some("codex"));
-        assert_eq!(params.profile.as_deref(), Some("codex_55_review"));
-        assert_eq!(params.project.as_deref(), Some("tachi"));
-        assert_eq!(params.stage.as_deref(), Some("execute"));
-        assert_eq!(params.issue_ref.as_deref(), Some("o/r#42"));
-        assert_eq!(params.pr_ref.as_deref(), Some("o/r#43"));
-        assert_eq!(params.flow_id.as_deref(), Some("flow_xyz"));
+        assert_eq!(request.task, "prove reason is carried through");
+        assert_eq!(request.worker.as_deref(), Some("codex"));
+        assert_eq!(request.profile.as_deref(), Some("codex_55_review"));
+        assert_eq!(request.project.as_deref(), Some("tachi"));
+        assert_eq!(request.stage.as_deref(), Some("execute"));
+        assert_eq!(request.issue_ref.as_deref(), Some("o/r#42"));
+        assert_eq!(request.pr_ref.as_deref(), Some("o/r#43"));
+        assert_eq!(request.flow_id.as_deref(), Some("flow_xyz"));
+    }
+
+    #[test]
+    fn staff_production_surface_rejects_flat_dispatch_facade_mutants() {
+        let source = include_str!("mod.rs");
+        for forbidden in [
+            ["TachiDispatch", "Params"].concat(),
+            ["into_dispatch", "_params"].concat(),
+            ["into_", "params"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "Staff production code must not mention {forbidden}"
+            );
+            assert!(
+                format!("{source}\n{forbidden}").contains(&forbidden),
+                "the Staff flat-facade detector must reject a deliberate mutant"
+            );
+        }
     }
 
     /// Boundary test: a `StaffStartRequest` JSON that attempts to set
@@ -465,33 +478,18 @@ mod tests {
             "flow_id": "flow-123",
         });
         let request: StaffStartRequest = serde_json::from_value(valid).expect("parses");
-        let params = request.into_params();
 
-        // Intent fields + reason DO map through.
-        assert_eq!(params.task, "prove the boundary");
-        assert_eq!(params.agent.as_deref(), Some("claude"));
-        assert_eq!(params.profile.as_deref(), Some("codex_55_review"));
-        assert_eq!(params.project.as_deref(), Some("tachi"));
-        assert_eq!(params.stage.as_deref(), Some("execute"));
-        assert_eq!(params.flow_id.as_deref(), Some("flow-123"));
+        // Semantic intent stays in the typed request.
+        assert_eq!(request.task, "prove the boundary");
+        assert_eq!(request.worker.as_deref(), Some("claude"));
+        assert_eq!(request.profile.as_deref(), Some("codex_55_review"));
+        assert_eq!(request.project.as_deref(), Some("tachi"));
+        assert_eq!(request.stage.as_deref(), Some("execute"));
+        assert_eq!(request.flow_id.as_deref(), Some("flow-123"));
         assert_eq!(
-            params.staffing_reason,
+            request.staffing_reason,
             TachiDispatchReason::NativeSubagentUnavailable
         );
-
-        // ── Execution fields MUST all be at kernel defaults ─────────────────
-        assert_eq!(params.cwd, None, "Staff must never set cwd");
-        assert_eq!(params.command, Vec::<String>::new(), "no command smuggle");
-        assert_eq!(params.harness_transport, None, "no transport override");
-        assert_eq!(params.sandbox, None, "no sandbox smuggle");
-        assert_eq!(params.allowed_tools, Vec::<String>::new());
-        assert_eq!(params.credential_profiles, Vec::<String>::new());
-        assert_eq!(params.allowed_mcp_servers, Vec::<String>::new());
-        assert_eq!(params.inject_tachi_mcp, None);
-        assert_eq!(params.permission_profile, None);
-        assert_eq!(params.env_id, None);
-        assert_eq!(params.unmanaged_cwd, None);
-        assert_eq!(params.timeout_secs, 600);
     }
 
     /// Discrimination test: the v1 schema does NOT expose `dispatch_id` on a

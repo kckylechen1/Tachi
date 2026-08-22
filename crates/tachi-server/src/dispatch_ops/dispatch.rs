@@ -18,7 +18,8 @@ use crate::agent_registry::{
     resolve_dispatch_agent,
 };
 use crate::dispatch_profile::{
-    resolve_and_apply_dispatch_profile_for_server, ResolvedDispatchProfile,
+    resolve_and_apply_dispatch_profile_for_server,
+    resolve_and_apply_staff_assignment_profile_for_server, ResolvedDispatchProfile,
 };
 use crate::tool_params::TachiDispatchParams;
 use crate::vault_ops::read_unlocked_vault_secret;
@@ -352,7 +353,6 @@ pub(crate) async fn handle_tachi_dispatch(
     );
     let effective_contract = compile_dispatch_contract(
         &mut params,
-        &request,
         &agent_norm,
         &harness_transport,
         &resolved_profile,
@@ -881,4 +881,78 @@ pub(crate) async fn handle_tachi_dispatch(
         trajectory_path: &trajectory_path,
         workspace_dir: &workspace_dir_for_response,
     })
+}
+
+/// Typed Staff ingress. Admission and recommendation validation happen before
+/// the canonical kernel can create a receipt or any artifact. The legacy
+/// bootstrap handler remains the sole compatibility entry for its flat probe
+/// payload; Staff itself only supplies semantic request data.
+pub(crate) async fn launch_staff_assignment(
+    server: &MemoryServer,
+    mut request: tachi_params::StaffAssignmentRequest,
+) -> Result<String, String> {
+    if let Some(recommendation_ref) = request.recommendation_ref.as_deref() {
+        let exists = server.with_global_store_read(|store| {
+            memcore::get_route_recommendation(store.connection(), recommendation_ref)
+                .map(|row| row.is_some())
+                .map_err(|error| error.to_string())
+        })?;
+        if !exists {
+            return Err(format!(
+                "Unknown or stale recommendation_ref '{recommendation_ref}'"
+            ));
+        }
+    }
+
+    // Resolve typed profile semantics before any canonical receipt/artifact is
+    // created. This preserves alias, worker-override, model, MCP, credential,
+    // and OpenCode defaults at the server boundary.
+    let resolved = resolve_and_apply_staff_assignment_profile_for_server(server, &mut request)?;
+    let params = normalize_staff_bootstrap_input(&request, &resolved);
+    handle_tachi_dispatch(server, params).await
+}
+
+/// Private compatibility normalizer for the existing bootstrap kernel. It is
+/// deliberately kept at the dispatch boundary so model-facing Staff code never
+/// constructs or transports the flat facade.
+fn normalize_staff_bootstrap_input(
+    request: &tachi_params::StaffAssignmentRequest,
+    resolved: &ResolvedDispatchProfile,
+) -> TachiDispatchParams {
+    TachiDispatchParams {
+        staffing_reason: request.staffing_reason,
+        agent: Some(resolved.agent.clone()),
+        profile: request.profile.clone(),
+        task: request.task.clone(),
+        execution_level: request.execution_level,
+        cwd: None,
+        env_id: None,
+        unmanaged_cwd: None,
+        skills: resolved.required_skills.clone(),
+        context_query: None,
+        model: resolved.selected_model.clone(),
+        timeout_secs: 600,
+        permission_profile: None,
+        allowed_tools: Vec::new(),
+        completion_predicate: request.completion_predicate.clone(),
+        max_turns: None,
+        sandbox: None,
+        inject_tachi_mcp: None,
+        inject_hub_mcps: None,
+        command: resolved.launch_command.clone(),
+        harness_transport: resolved.harness_transport.clone(),
+        harness_server_url: resolved.harness_server_url.clone(),
+        project: request.project.clone(),
+        stage: request.stage.clone(),
+        credential_profiles: resolved.credential_profiles.clone(),
+        issue_ref: request.issue_ref.clone(),
+        pr_ref: request.pr_ref.clone(),
+        flow_id: request.flow_id.clone(),
+        tool_profile: resolved.tool_profile.clone(),
+        auto_capability_bundle: Some(resolved.auto_capability_bundle),
+        mcp_access: Some(resolved.mcp_access.clone()),
+        allowed_mcp_servers: Vec::new(),
+        verbose: None,
+        inject_card: None,
+    }
 }

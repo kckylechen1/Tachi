@@ -1541,7 +1541,6 @@ fn compiled_permission_projection_preserves_verify_headless_spelling() {
     .expect("omitted permission profile resolves");
     compile_dispatch_contract(
         &mut omitted,
-        &omitted_start.request,
         &omitted_start.agent_norm,
         "cli",
         &omitted_start.resolved_profile,
@@ -1562,7 +1561,6 @@ fn compiled_permission_projection_preserves_verify_headless_spelling() {
     .expect("verify permission profile resolves");
     compile_dispatch_contract(
         &mut verify,
-        &verify_start.request,
         &verify_start.agent_norm,
         "cli",
         &verify_start.resolved_profile,

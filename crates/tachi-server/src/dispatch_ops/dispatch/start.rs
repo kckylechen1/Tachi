@@ -46,9 +46,20 @@ pub(super) fn resolve_dispatch_start(
     // deduplicates it so profile-added defaults and caller spelling are both
     // visible if materialization fails.
     let raw_credential_profiles = legacy_projection.credential_profiles.clone();
-    let mut request =
-        tachi_params::StaffAssignmentRequest::from_dispatch_params(&legacy_projection);
-    request.profile = raw_request_profile;
+    let request = tachi_params::StaffAssignmentRequest {
+        staffing_reason: legacy_projection.staffing_reason,
+        task: legacy_projection.task.clone(),
+        profile: raw_request_profile,
+        worker: legacy_projection.agent.clone(),
+        stage: legacy_projection.stage.clone(),
+        execution_level: legacy_projection.execution_level,
+        issue_ref: legacy_projection.issue_ref.clone(),
+        pr_ref: legacy_projection.pr_ref.clone(),
+        flow_id: legacy_projection.flow_id.clone(),
+        project: legacy_projection.project.clone(),
+        completion_predicate: legacy_projection.completion_predicate.clone(),
+        recommendation_ref: None,
+    };
     let legacy_auto_capability_bundle = legacy_projection.auto_capability_bundle;
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);

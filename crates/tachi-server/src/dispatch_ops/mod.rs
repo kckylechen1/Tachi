@@ -21,6 +21,7 @@ pub(crate) use board::{collect_run_task_for_server, handle_tachi_board, runs_dir
 pub(crate) use dispatch::apply_unlocked_vault_env;
 pub(crate) use dispatch::dispatch_runs_root;
 pub(crate) use dispatch::handle_tachi_dispatch;
+pub(crate) use dispatch::launch_staff_assignment;
 #[cfg(test)]
 pub(crate) use dispatch::new_dispatch_id;
 pub(crate) use dispatch::recover_orphaned_dispatch_runs;

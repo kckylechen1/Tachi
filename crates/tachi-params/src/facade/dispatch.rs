@@ -405,66 +405,6 @@ impl StaffAssignmentRequest {
         self.recommendation_ref = Some(recommendation_ref.into());
         self
     }
-
-    pub fn from_dispatch_params(params: &TachiDispatchParams) -> Self {
-        Self {
-            staffing_reason: params.staffing_reason,
-            task: params.task.clone(),
-            profile: params.profile.clone(),
-            worker: params.agent.clone(),
-            stage: params.stage.clone(),
-            execution_level: params.execution_level,
-            issue_ref: params.issue_ref.clone(),
-            pr_ref: params.pr_ref.clone(),
-            flow_id: params.flow_id.clone(),
-            project: params.project.clone(),
-            completion_predicate: params.completion_predicate.clone(),
-            recommendation_ref: None,
-        }
-    }
-
-    pub fn into_dispatch_params(self) -> TachiDispatchParams {
-        TachiDispatchParams {
-            task: self.task,
-            staffing_reason: self.staffing_reason,
-            agent: self.worker,
-            profile: self.profile,
-            project: self.project,
-            stage: self.stage,
-            issue_ref: self.issue_ref,
-            pr_ref: self.pr_ref,
-            flow_id: self.flow_id,
-            execution_level: self.execution_level,
-            completion_predicate: self.completion_predicate,
-            cwd: None,
-            env_id: None,
-            unmanaged_cwd: None,
-            command: Vec::new(),
-            harness_transport: None,
-            harness_server_url: None,
-            sandbox: None,
-            allowed_tools: Vec::new(),
-            permission_profile: None,
-            inject_tachi_mcp: None,
-            inject_hub_mcps: None,
-            allowed_mcp_servers: Vec::new(),
-            tool_profile: None,
-            mcp_access: None,
-            credential_profiles: Vec::new(),
-            skills: Vec::new(),
-            context_query: None,
-            model: None,
-            max_turns: None,
-            timeout_secs: default_dispatch_timeout(),
-            auto_capability_bundle: None,
-            verbose: None,
-            inject_card: None,
-        }
-    }
-
-    pub fn into_params(self) -> TachiDispatchParams {
-        self.into_dispatch_params()
-    }
 }
 
 /// Server-produced admission and policy resolution result (Issue #1692 C5).
@@ -1314,17 +1254,6 @@ mod tests {
             TachiDispatchReason::DurableCrossSession
         );
         assert_eq!(req.execution_level, Some(ExecutionLevel::L1));
-
-        let params = req.into_dispatch_params();
-        assert_eq!(params.task, "Refactor staffing types");
-        assert_eq!(
-            params.staffing_reason,
-            TachiDispatchReason::DurableCrossSession
-        );
-        assert_eq!(params.profile.as_deref(), Some("claude_plan"));
-        assert_eq!(params.agent.as_deref(), Some("claude"));
-        assert_eq!(params.execution_level, Some(ExecutionLevel::L1));
-        assert_eq!(params.timeout_secs, 600);
     }
 
     #[test]

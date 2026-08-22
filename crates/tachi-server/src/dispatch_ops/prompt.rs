@@ -549,7 +549,20 @@ pub(crate) async fn assemble_prompt_with_trace(
     server: &MemoryServer,
     params: &crate::tool_params::TachiDispatchParams,
 ) -> PromptAssembly {
-    let request = StaffAssignmentRequest::from_dispatch_params(params);
+    let request = StaffAssignmentRequest {
+        staffing_reason: params.staffing_reason,
+        task: params.task.clone(),
+        profile: params.profile.clone(),
+        worker: params.agent.clone(),
+        stage: params.stage.clone(),
+        execution_level: params.execution_level,
+        issue_ref: params.issue_ref.clone(),
+        pr_ref: params.pr_ref.clone(),
+        flow_id: params.flow_id.clone(),
+        project: params.project.clone(),
+        completion_predicate: params.completion_predicate.clone(),
+        recommendation_ref: None,
+    };
     let mut resolved_params = params.clone();
     let raw_profile = resolved_params.profile.clone();
     let profile = crate::dispatch_profile::resolve_and_apply_dispatch_profile_for_server(

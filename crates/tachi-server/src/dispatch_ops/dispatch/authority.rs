@@ -109,7 +109,6 @@ fn canonical_credential_profiles(raw: &[String]) -> Vec<String> {
 /// the evidence stops describing the thing you are about to run.
 pub(super) fn compile_dispatch_contract(
     params: &mut TachiDispatchParams,
-    _request: &tachi_params::StaffAssignmentRequest,
     agent_norm: &str,
     harness_transport: &str,
     resolved_profile: &ResolvedDispatchProfile,
@@ -263,10 +262,8 @@ mod tests {
     macro_rules! compile_contract_from_legacy_projection {
         ($params:expr, $agent:expr, $transport:expr, $profile:expr, $qualifications:expr, $version:expr $(,)?) => {{
             let params = $params;
-            let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(&*params);
             compile_dispatch_contract(
                 params,
-                &request,
                 $agent,
                 $transport,
                 $profile,
