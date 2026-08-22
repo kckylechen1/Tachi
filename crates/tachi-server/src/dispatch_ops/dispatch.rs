@@ -265,7 +265,6 @@ pub(crate) async fn handle_tachi_dispatch(
         resolved_assignment,
         profile_payload,
         workspace_dir,
-        host_adapter,
         inject_card,
         verbose,
     } = resolve_dispatch_start(server, &mut params, now, execution_level)?;
@@ -478,7 +477,8 @@ pub(crate) async fn handle_tachi_dispatch(
             "harness_server_url": harness_server_url.clone(),
             "host_adapter": resolved_assignment.host_adapter.clone(),
             "host_profile": host_profile.name(),
-            "execution_level": execution_level.as_str(),
+            "execution_level": serde_json::to_value(resolved_assignment.execution_level)
+                .unwrap_or(Value::Null),
             "capability_bundle": Value::Null,
             "feedback_rules": Value::Null,
             "timeout_secs": timeout_secs_for_status,
@@ -591,7 +591,8 @@ pub(crate) async fn handle_tachi_dispatch(
             "harness_server_url": harness_server_url.clone(),
             "host_adapter": resolved_assignment.host_adapter.clone(),
             "host_profile": host_profile.name(),
-            "execution_level": execution_level.as_str(),
+            "execution_level": serde_json::to_value(resolved_assignment.execution_level)
+                .unwrap_or(Value::Null),
             "capability_bundle": capability_bundle_card.clone(),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,
@@ -747,7 +748,6 @@ pub(crate) async fn handle_tachi_dispatch(
                 plan_duration_ms,
                 harness_transport: &harness_transport,
                 harness_server_url: &harness_server_url,
-                host_adapter: &host_adapter,
                 execution_backend_name,
                 execution_backend_metadata: &execution_backend_metadata,
                 acpx_enabled,
@@ -831,7 +831,7 @@ pub(crate) async fn handle_tachi_dispatch(
     spawn_background_dispatch(BackgroundDispatchContext {
         server: server.clone(),
         dispatch_id: dispatch_id.clone(),
-        worker: resolved_assignment.selected_worker.clone(),
+        agent: resolved_assignment.selected_worker.clone(),
         project: request.project.clone(),
         stage: request.stage.clone(),
         trajectory_path: trajectory_path.clone(),

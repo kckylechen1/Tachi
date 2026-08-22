@@ -17,7 +17,6 @@ pub(super) struct DispatchStart {
     pub(super) resolved_assignment: tachi_params::ResolvedStaffAssignment,
     pub(super) profile_payload: Value,
     pub(super) workspace_dir: PathBuf,
-    pub(super) host_adapter: Option<String>,
     pub(super) inject_card: bool,
     pub(super) verbose: bool,
 }
@@ -122,8 +121,6 @@ pub(super) fn resolve_dispatch_start(
     }
 
     let workspace_dir = dispatch_runs_root().join(&dispatch_id);
-    let host_adapter = resolved_profile.host_adapter.clone();
-
     Ok(DispatchStart {
         dispatch_id,
         request,
@@ -141,7 +138,6 @@ pub(super) fn resolve_dispatch_start(
         resolved_assignment,
         profile_payload,
         workspace_dir,
-        host_adapter,
         inject_card,
         verbose,
     })

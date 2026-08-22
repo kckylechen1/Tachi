@@ -5,19 +5,81 @@ use serde_json::{json, Value};
 
 #[test]
 fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() {
+    let rejects_flat_params = |source: &str| source.contains("TachiDispatchParams");
     let flat_fixture_free_helpers = [
         ("backend", include_str!("../backend.rs")),
         ("backend_failure", include_str!("../backend_failure.rs")),
         ("credential_apply", include_str!("../credential_apply.rs")),
         ("credentials", include_str!("../credentials.rs")),
         ("harness_preflight", include_str!("../harness_preflight.rs")),
+        ("acpx_spec", include_str!("../../acpx/spec.rs")),
+        (
+            "acp_native_session",
+            include_str!("../../acp_native/session.rs"),
+        ),
     ];
     for (name, source) in flat_fixture_free_helpers {
         assert!(
-            !source.contains("TachiDispatchParams"),
+            !rejects_flat_params(source),
             "{name} must consume request, assignment, grant, or private adapter mechanics, never TachiDispatchParams"
         );
+        assert!(
+            rejects_flat_params(&format!("{source}\nTachiDispatchParams deliberate_mutant;")),
+            "{name} checker must reject a deliberate forbidden-type mutant"
+        );
     }
+
+    let production_adapter = |name: &str, source: &str, start: &str, end: &str| {
+        let source = source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("{name} source must contain production start {start:?}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("{name} source must contain production end {end:?}"))
+            .0;
+        assert!(
+            !rejects_flat_params(source),
+            "{name} production adapter must consume typed request/assignment/grant, never flat params"
+        );
+        assert!(
+            rejects_flat_params(&format!("{source}\nTachiDispatchParams deliberate_mutant;")),
+            "{name} production-adapter checker must reject a deliberate forbidden-type mutant"
+        );
+    };
+    production_adapter(
+        "launcher",
+        include_str!("../../launcher.rs"),
+        "pub(super) fn build_claude_command",
+        "#[cfg(test)]\nmod tests",
+    );
+    production_adapter(
+        "acp_native_spec",
+        include_str!("../../acp_native/spec.rs"),
+        "pub(in crate::dispatch_ops) fn build_native_acp_run_spec",
+        "#[cfg(test)]\nmod tests",
+    );
+    let authority_production = include_str!("../authority.rs")
+        .split_once("pub(super) fn mint_execution_grant")
+        .expect("authority source contains the P2 grant-mint boundary")
+        .1
+        .split_once("#[cfg(test)]\nmod tests")
+        .expect("authority source contains the P2 test boundary")
+        .0;
+    assert!(
+        !authority_production.contains("assert_grant_legacy_projection"),
+        "authority must not restore the removed P3 flat-projection helper"
+    );
+    assert!(
+        format!("{authority_production}\nassert_grant_legacy_projection();")
+            .contains("assert_grant_legacy_projection"),
+        "authority helper checker must reject a deliberate P3 projection mutant"
+    );
+    production_adapter(
+        "prompt_production_assembly",
+        include_str!("../../prompt.rs"),
+        "pub(crate) async fn assemble_resolved_prompt_with_trace",
+        "#[cfg(test)]\npub(crate) async fn assemble_prompt_with_trace",
+    );
 
     let dispatch = include_str!("../../dispatch.rs");
     let handler = dispatch
@@ -28,14 +90,18 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         .split_once("let execution_grant = mint_execution_grant(")
         .expect("handler contains the grant mint marker")
         .1;
+    let post_grant_handler = after_grant
+        .split_once("// 8. Spawn background task with Watchdog")
+        .expect("handler contains post-grant terminal boundary")
+        .0;
     let has_post_grant_params =
-        |source: &str| source.contains("params.") || source.contains("TachiDispatchParams");
+        |source: &str| source.contains("params.") || rejects_flat_params(source);
     assert!(
-        !has_post_grant_params(after_grant),
+        !has_post_grant_params(post_grant_handler),
         "post-grant handler code must read assignment/grant, never TachiDispatchParams"
     );
     assert!(
-        has_post_grant_params(&format!("{after_grant}\nparams.deliberate_mutant")),
+        has_post_grant_params(&format!("{post_grant_handler}\nparams.deliberate_mutant")),
         "source gate itself must fail when a post-grant params read is introduced"
     );
 }
@@ -213,6 +279,11 @@ async fn opencode_builder_profile_default_reaches_credential_failure_evidence() 
         event["credential_profiles"],
         json!(["opencode_shared"]),
         "{event}"
+    );
+    assert_eq!(
+        event["host_adapter"],
+        json!("opencode"),
+        "credential failure must report the admitted assignment host adapter: {event}"
     );
 }
 
@@ -1101,7 +1172,11 @@ async fn managed_env_status_cwd_uses_the_authoritative_lease_path() {
         .expect("seed managed execution environment");
     let mut params = test_dispatch_params(Some("custom"), "managed status cwd");
     params.env_id = Some("env-status-cwd".to_string());
-    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.command = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "pwd > launcher-cwd".to_string(),
+    ];
 
     let raw = handle_tachi_dispatch(&server, params)
         .await
@@ -1119,6 +1194,27 @@ async fn managed_env_status_cwd_uses_the_authoritative_lease_path() {
         status["cwd"],
         json!(managed_cwd.path().to_string_lossy()),
         "managed lease path, not raw caller spelling, is receipt authority: {status}"
+    );
+    let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run dir"));
+    let _worker_result = wait_for_result(&run_dir).await;
+    let terminal_status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("terminal status receipt"),
+    )
+    .expect("terminal status JSON");
+    assert!(
+        terminal_status["result_written"] == json!(true)
+            && matches!(
+                terminal_status["state"].as_str(),
+                Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")
+            ),
+        "managed dispatch must reach a terminal worker/watchdog status before temp cleanup: {terminal_status}"
+    );
+    let launched_cwd = std::fs::read_to_string(managed_cwd.path().join("launcher-cwd"))
+        .expect("launcher records its actual working directory");
+    assert_eq!(
+        std::fs::canonicalize(launched_cwd.trim()).expect("launched cwd canonicalizes"),
+        std::fs::canonicalize(managed_cwd.path()).expect("managed cwd canonicalizes"),
+        "the launched process must run in the managed lease cwd"
     );
 }
 

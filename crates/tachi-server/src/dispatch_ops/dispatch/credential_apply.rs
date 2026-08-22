@@ -55,7 +55,6 @@ pub(super) struct CredentialApplyInputs<'a> {
     pub(super) plan_duration_ms: Option<u64>,
     pub(super) harness_transport: &'a str,
     pub(super) harness_server_url: &'a Option<String>,
-    pub(super) host_adapter: &'a Option<String>,
     pub(super) execution_backend_name: Option<&'static str>,
     pub(super) execution_backend_metadata: &'a Option<Value>,
     pub(super) acpx_enabled: bool,
@@ -91,6 +90,7 @@ pub(super) fn apply_materialized_credentials(
                     "event": "credentials_materialization_failed",
                     "dispatch_id": inputs.dispatch_id,
                     "agent": inputs.assignment.selected_worker,
+                    "host_adapter": inputs.assignment.host_adapter,
                     "credential_profiles": inputs.raw_credential_profiles,
                     "error": err.clone(),
                     "timestamp": Utc::now().to_rfc3339(),
@@ -116,7 +116,7 @@ pub(super) fn apply_materialized_credentials(
                     "result_written": false,
                     "harness_transport": inputs.harness_transport,
                     "harness_server_url": inputs.harness_server_url,
-                    "host_adapter": inputs.host_adapter,
+                    "host_adapter": inputs.assignment.host_adapter,
                     "execution_backend": inputs.execution_backend_name,
                     "acpx": if inputs.acpx_enabled { inputs.execution_backend_metadata.clone() } else { None },
                     "acp_native": if inputs.native_acp_enabled { inputs.execution_backend_metadata.clone() } else { None },
@@ -145,6 +145,7 @@ pub(super) fn apply_materialized_credentials(
                 "event": "credentials_materialized",
                 "dispatch_id": inputs.dispatch_id,
                 "agent": inputs.assignment.selected_worker,
+                "host_adapter": inputs.assignment.host_adapter,
                 "credential_profiles": inputs.raw_credential_profiles,
                 "reports": dispatch_credentials
                     .reports
