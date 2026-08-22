@@ -321,6 +321,23 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
+    fn write_completed_managed_custom_worker(bin_dir: &std::path::Path) {
+        let worker = bin_dir.join("opencode");
+        std::fs::write(
+            &worker,
+            "#!/bin/sh\nprintf 'staff managed custom worker\\n'\nexit 0\n",
+        )
+        .expect("write completed managed custom worker");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&worker)
+            .expect("managed custom worker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions)
+            .expect("make completed managed custom worker executable");
+    }
+
+    #[cfg(unix)]
     fn write_hanging_managed_custom_worker(
         bin_dir: &std::path::Path,
         root_pid: &std::path::Path,
@@ -799,6 +816,95 @@ pub(crate) mod tests {
             wait_for_test_process_exit(descendant).await,
             "managed descendant must be absent"
         );
+        cleanup_guard.disarm();
+    }
+
+    /// Completion wins before the facade is asked to cancel: the post-cleanup
+    /// cancellation probe must not replace the terminal receipt or result.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
+    async fn staff_cancel_after_managed_custom_completion_preserves_terminal_receipt() {
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
+        write_completed_managed_custom_worker(temp_bin.path());
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join fake-worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _transport = crate::test_support::EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "cli");
+        let _v2 = crate::test_support::EnvRestore::set("DISPATCH_V2_ENABLED", "false");
+        let _review = crate::test_support::EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+        let server = test_server();
+        let mut request = staff_request("tachi");
+        request.profile = Some("glm_impl".to_string());
+        request.worker = Some("custom".to_string());
+        request.issue_ref = Some("kckylechen1/tachi#1825".to_string());
+        request.flow_id = Some("flow_1825_managed_completion_winner".to_string());
+
+        let raw = staff_start(&server, request)
+            .await
+            .expect("managed custom Staff start is accepted");
+        let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
+        let accepted: Value = serde_json::from_str(&raw).expect("accepted response JSON");
+        let dispatch_id = accepted["dispatch_id"].as_str().expect("dispatch id");
+        let run_dir = dispatch_runs_root().join(dispatch_id);
+        let (terminal, terminal_result) = wait_for_staff_terminal(&run_dir).await;
+        wait_for_staff_cleanup(dispatch_id).await;
+        assert_eq!(terminal_staff_state(&terminal), "TASK_STATE_COMPLETED");
+        assert!(terminal_result.contains("staff managed custom worker"));
+        assert!(
+            !server.managed_run_controls.contains(dispatch_id),
+            "terminal cleanup must remove managed cancellation authority"
+        );
+        let terminal_revision = terminal["status_revision"]
+            .as_u64()
+            .expect("completed terminal revision");
+
+        let cancel: Value = serde_json::from_str(
+            &staff_cancel(
+                &server,
+                StaffCancelRequest {
+                    dispatch_id: dispatch_id.to_string(),
+                    expected_status_revision: terminal_revision,
+                },
+            )
+            .await
+            .expect("post-completion Staff cancel response"),
+        )
+        .expect("post-completion cancellation JSON");
+        assert_eq!(cancel["receipt"], "cancellation_unavailable");
+
+        let after: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: dispatch_id.to_string(),
+                },
+            )
+            .await
+            .expect("post-completion Staff status"),
+        )
+        .expect("post-completion canonical status JSON");
+        let after_result = std::fs::read_to_string(run_dir.join("result.md"))
+            .expect("post-completion canonical result");
+        assert_eq!(
+            after, terminal,
+            "cancel must not replace a completed receipt"
+        );
+        assert_eq!(
+            after_result, terminal_result,
+            "cancel must not replace result.md"
+        );
+        assert_eq!(after["status_revision"], terminal_revision);
         cleanup_guard.disarm();
     }
 

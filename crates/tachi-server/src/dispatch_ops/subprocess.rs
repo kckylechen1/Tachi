@@ -851,6 +851,73 @@ mod issue_1825_cancel_tests {
     use super::*;
 
     #[cfg(unix)]
+    struct ManagedProcessGroupCleanup {
+        root_pid: std::path::PathBuf,
+        armed: bool,
+    }
+
+    #[cfg(unix)]
+    impl ManagedProcessGroupCleanup {
+        fn arm(root_pid: &std::path::Path) -> Self {
+            Self {
+                root_pid: root_pid.to_path_buf(),
+                armed: true,
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ManagedProcessGroupCleanup {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            let Ok(pid) = std::fs::read_to_string(&self.root_pid)
+                .ok()
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .parse::<libc::pid_t>()
+            else {
+                return;
+            };
+            // SAFETY: the fixture records its own process-group leader; the
+            // negative pid cannot target an unrelated process outside it.
+            let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_timeout_fixture_file(path: &std::path::Path) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timeout fixture did not write {}", path.display());
+    }
+
+    #[cfg(unix)]
+    async fn timeout_fixture_process_is_absent(pid: libc::pid_t) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            // SAFETY: signal 0 is an existence probe and does not alter the
+            // fixture process or pass memory across the FFI boundary.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn managed_custom_cancel_does_not_kill_unrelated_process() {
         let mut unrelated = Command::new("/bin/sh");
@@ -907,5 +974,146 @@ mod issue_1825_cancel_tests {
             alive,
             "managed cancellation must not target an unrelated PID"
         );
+    }
+
+    /// Timeout wins in the real managed runner before a later cancellation
+    /// request. The production terminal writer must retain that winner while
+    /// the registry cleanup makes cancellation explicitly unavailable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_custom_timeout_wins_over_late_cancellation_without_receipt_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("managed-custom");
+        let root = temp.path().join("root.pid");
+        let descendant = temp.path().join("descendant.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntrap '' TERM\nprintf '%s\\n' \"$$\" > '{}'\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+                root.display(),
+                descendant.display(),
+            ),
+        )
+        .expect("write fixture");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+        let dispatch_id = "20260823T010106Z-custom-timeout-winner";
+        let run_dir = temp.path().join("run");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 1,
+                "execution_classification": "managed_custom",
+            })
+            .to_string(),
+        )
+        .expect("working status");
+        let server = crate::MemoryServer::new(temp.path().join("server.sqlite"), None)
+            .expect("managed control server");
+        let (receiver, run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed control registry");
+        let mut cleanup_guard = ManagedProcessGroupCleanup::arm(&root);
+        let command = Command::new(&script);
+        let run_dir_for_task = run_dir.clone();
+        let run = tokio::spawn(async move {
+            run_managed_custom_subprocess(
+                command,
+                Duration::from_secs(4),
+                receiver,
+                &run_dir_for_task,
+            )
+            .await
+        });
+        wait_for_timeout_fixture_file(&root).await;
+        wait_for_timeout_fixture_file(&descendant).await;
+        let result = run.await.expect("runner task does not panic");
+        assert!(matches!(result, Err(ref error) if error.contains("timed out")));
+
+        let root_pid: libc::pid_t = std::fs::read_to_string(&root)
+            .expect("root pid")
+            .trim()
+            .parse()
+            .expect("numeric root pid");
+        let descendant_pid: libc::pid_t = std::fs::read_to_string(&descendant)
+            .expect("descendant pid")
+            .trim()
+            .parse()
+            .expect("numeric descendant pid");
+        assert!(
+            timeout_fixture_process_is_absent(root_pid).await,
+            "timed-out root process group must be absent"
+        );
+        assert!(
+            timeout_fixture_process_is_absent(descendant_pid).await,
+            "timed-out descendant process group must be absent"
+        );
+
+        let terminal_result = "managed custom worker timed out";
+        std::fs::write(run_dir.join("result.md"), terminal_result).expect("terminal result");
+        crate::dispatch_ops::write_status_json(
+            &run_dir,
+            dispatch_id,
+            false,
+            None,
+            None,
+            "n/a",
+            Some(1),
+            None,
+            None,
+            None,
+            Some(serde_json::json!({
+                "state": "TASK_STATE_FAILED",
+                "result_written": true,
+                "result": terminal_result,
+            })),
+        );
+        let terminal: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(run_dir.join("status.json")).expect("terminal status"),
+        )
+        .expect("terminal status JSON");
+        assert_eq!(terminal["state"], "TASK_STATE_FAILED");
+        let terminal_revision = terminal["status_revision"]
+            .as_u64()
+            .expect("terminal revision");
+        drop(run_guard);
+        assert!(
+            !server.managed_run_controls.contains(dispatch_id),
+            "terminal cleanup must remove managed cancellation authority"
+        );
+
+        let cancellation: serde_json::Value = serde_json::from_str(
+            &crate::managed_run_control::request_managed_custom_cancel(
+                &server,
+                dispatch_id,
+                terminal_revision,
+            )
+            .await
+            .expect("late cancellation response"),
+        )
+        .expect("late cancellation JSON");
+        assert_eq!(cancellation["receipt"], "cancellation_unavailable");
+        let after: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(run_dir.join("status.json")).expect("post-cancel status"),
+        )
+        .expect("post-cancel status JSON");
+        assert_eq!(
+            after, terminal,
+            "late cancel must not replace timeout winner"
+        );
+        assert_eq!(after["status_revision"], terminal_revision);
+        assert_eq!(
+            std::fs::read_to_string(run_dir.join("result.md")).expect("post-cancel result"),
+            terminal_result,
+            "late cancel must not replace result.md"
+        );
+        cleanup_guard.disarm();
     }
 }

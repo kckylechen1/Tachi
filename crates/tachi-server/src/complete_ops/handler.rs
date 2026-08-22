@@ -1207,6 +1207,11 @@ mod tests {
             first_json["completion_recovery"]["dispatch_outcome"]["recorded"],
             json!(false)
         );
+        assert_eq!(
+            first_json["status_revision"],
+            json!(1),
+            "the recovery writer advances the shared revision"
+        );
 
         persist_pending_completion_recovery_receipt_at(
             &run_dir,
@@ -1239,6 +1244,11 @@ mod tests {
         assert_eq!(
             resolved["resolved_completion"]["eval_ledger_id"],
             json!("eval-recovery")
+        );
+        assert_eq!(
+            resolved["status_revision"],
+            json!(2),
+            "the resolved-completion writer advances after the recovery writer"
         );
     }
 
