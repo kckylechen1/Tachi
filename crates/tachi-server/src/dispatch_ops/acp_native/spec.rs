@@ -224,8 +224,6 @@ mod tests {
         let request = serde_json::from_value(serde_json::json!({
             "task": "noop",
             "staffing_reason": "explicit_user_request",
-            "agent": "custom",
-            "harness_transport": "acp-native",
         }))
         .expect("explicit native ACP request");
         let assignment = tachi_params::ResolvedStaffAssignment {
