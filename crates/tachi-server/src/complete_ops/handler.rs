@@ -1230,7 +1230,8 @@ mod tests {
     /// canonical per-run mutex as lifecycle and route writers. The lifecycle
     /// writer uses an existing `run/../run` spelling: a raw-path registry or a
     /// removed completion lock lets it finish before the stale replacement and
-    /// loses terminal, identity, or route evidence.
+    /// loses terminal result, identity, or route evidence. Pending canonical
+    /// outcomes deliberately retain their nonterminal status barrier.
     #[test]
     fn completion_receipt_writers_cannot_lose_route_or_project_fields() {
         let _guard = crate::utils::global_test_lock()
@@ -1424,7 +1425,7 @@ mod tests {
         )
         .expect("parse recovery overlap");
         assert_eq!(recovery["project"], "completion-overlap");
-        assert_eq!(recovery["state"], "TASK_STATE_FAILED");
+        assert_eq!(recovery["state"], "TASK_STATE_WORKING");
         assert_eq!(recovery["result_written"], true);
         assert_eq!(recovery["result"], "recovery terminal result");
         assert_eq!(recovery["identity_receipt"]["model"], "recovery-terminal");

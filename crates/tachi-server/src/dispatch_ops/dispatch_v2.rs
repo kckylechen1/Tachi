@@ -441,23 +441,11 @@ pub(crate) fn write_status_json(
                 }
             }
             // A bounded local lock exhaustion has durable eval evidence but
-            // no canonical dispatch outcome yet. Keep an otherwise
-            // non-terminal lifecycle rewrite observably non-terminal until a
-            // later completion call reconciles that outcome and clears this
-            // marker itself. A real child terminal write must retain its
-            // terminal state and result alongside the recovery evidence.
-            let writes_terminal_state =
-                obj.get("state")
-                    .and_then(Value::as_str)
-                    .is_some_and(|state| {
-                        matches!(
-                            state,
-                            "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
-                        )
-                    });
+            // no canonical dispatch outcome yet. Keep the run observably
+            // non-terminal until a later completion call reconciles that
+            // outcome and clears this marker itself.
             if previous.get("completion_recovery").is_some()
                 && !obj.contains_key("resolved_completion")
-                && !writes_terminal_state
             {
                 let non_terminal_state = previous
                     .get("state")
