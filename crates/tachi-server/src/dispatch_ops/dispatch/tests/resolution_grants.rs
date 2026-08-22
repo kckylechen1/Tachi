@@ -243,7 +243,7 @@ fn shared_status_revision_increment_rejects_invalid_and_overflowed_receipts() {
 }
 
 #[test]
-fn managed_custom_registration_uses_the_resolved_assignment_not_response_metadata() {
+fn managed_custom_registration_uses_prepared_execution_eligibility() {
     let source = include_str!("../../dispatch.rs");
     let start = source
         .find("// Register managed-custom control before task scheduling.")
@@ -252,20 +252,32 @@ fn managed_custom_registration_uses_the_resolved_assignment_not_response_metadat
         .split_once("// 8. Spawn background task with Watchdog")
         .expect("managed custom registration body")
         .0;
-    const AUTHORITATIVE_PREDICATE: &str = "resolved_assignment.selected_backend == \"custom\"";
+    const AUTHORITATIVE_PREDICATE: &str = "if managed_custom_eligible";
     assert!(
         registration.contains(AUTHORITATIVE_PREDICATE),
-        "managed control registration must use the resolved assignment backend"
+        "managed control registration must use prepared execution eligibility"
     );
     let mutant = registration.replacen(AUTHORITATIVE_PREDICATE, "false", 1);
     assert!(
         !mutant.contains(AUTHORITATIVE_PREDICATE),
-        "the registration discriminator must fail if the authoritative custom predicate is removed"
+        "the registration discriminator must fail if the prepared eligibility predicate is removed"
     );
     assert!(
-        !registration.contains("execution_backend_name == Some(\"custom\")"),
-        "response metadata must not decide whether a custom process receives cancellation control"
+        !registration.contains("selected_backend == \"custom\""),
+        "a backend-name string must not decide whether a process receives cancellation control"
     );
+    let backend = include_str!("../backend.rs");
+    for concrete_branch_guard in [
+        "matches!(&execution, DispatchExecution::Subprocess(_))",
+        "ctx.custom_launch_spec.is_some()",
+        "!acpx_enabled",
+        "!native_acp_enabled",
+    ] {
+        assert!(
+            backend.contains(concrete_branch_guard),
+            "prepared eligibility is missing {concrete_branch_guard}"
+        );
+    }
 }
 
 #[test]

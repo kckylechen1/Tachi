@@ -35,6 +35,17 @@ pub(crate) enum CancelCompletion {
     Unavailable(&'static str),
 }
 
+pub(crate) fn cancellation_blocks_terminal_writer(object: &serde_json::Map<String, Value>) -> bool {
+    matches!(
+        object
+            .get("cancellation")
+            .and_then(Value::as_object)
+            .and_then(|receipt| receipt.get("receipt"))
+            .and_then(Value::as_str),
+        Some("cancellation_requested" | "cancellation_confirmed" | "termination_unconfirmed")
+    )
+}
+
 pub(crate) struct ManagedRunGuard {
     registry: Arc<ManagedRunControlRegistry>,
     dispatch_id: String,
@@ -86,6 +97,14 @@ impl ManagedRunControlRegistry {
                 generation: *next,
             },
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, dispatch_id: &str) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(dispatch_id)
     }
 }
 
@@ -306,6 +325,8 @@ pub(crate) fn confirm_managed_custom_cancellation(
             .get("execution_classification")
             .and_then(Value::as_str)
             != Some("managed_custom")
+        || object.contains_key("resolved_completion")
+        || object.contains_key("completion_recovery")
     {
         return Err("managed cancellation lost lifecycle ownership".to_string());
     }
@@ -367,6 +388,20 @@ pub(crate) fn record_termination_unconfirmed(
         .get("status_revision")
         .and_then(Value::as_u64)
         .ok_or_else(|| "managed cancellation status_revision is absent".to_string())?;
+    if object.get("state").and_then(Value::as_str) != Some("TASK_STATE_WORKING")
+        || object.contains_key("resolved_completion")
+        || object.contains_key("completion_recovery")
+        || !matches!(
+            object
+                .get("cancellation")
+                .and_then(Value::as_object)
+                .and_then(|receipt| receipt.get("receipt"))
+                .and_then(Value::as_str),
+            Some("cancellation_requested")
+        )
+    {
+        return Err("managed cancellation lost lifecycle ownership".to_string());
+    }
     object.insert(
         "cancellation".to_string(),
         cancellation_receipt(
@@ -663,10 +698,18 @@ mod issue_1825_tests {
                     "result": format!("{winner} won the lifecycle race"),
                 })),
             );
-            let terminal_before_reply: Value = serde_json::from_slice(
-                &std::fs::read(run_dir.join("status.json")).expect("winner terminal status"),
+            let after_suppressed_terminal: Value = serde_json::from_slice(
+                &std::fs::read(run_dir.join("status.json")).expect("winner status"),
             )
             .expect("winner terminal JSON");
+            assert_eq!(
+                after_suppressed_terminal["state"], "TASK_STATE_WORKING",
+                "{winner} terminal writer must lose to cancellation_requested"
+            );
+            assert_eq!(
+                after_suppressed_terminal["cancellation"]["receipt"], "cancellation_requested",
+                "{winner} cannot replace the linearized cancellation receipt"
+            );
             if let Some(completion) = completion {
                 assert!(
                     command.response.send(completion).is_ok(),
@@ -688,8 +731,12 @@ mod issue_1825_tests {
             )
             .expect("winner final JSON");
             assert_eq!(
-                terminal_after_reply, terminal_before_reply,
-                "{winner} winner must not regress or rewrite terminal status"
+                terminal_after_reply["state"], "TASK_STATE_WORKING",
+                "{winner} cannot commit a terminal state after cancellation linearizes"
+            );
+            assert_eq!(
+                terminal_after_reply["cancellation"]["receipt"], "cancellation_unavailable",
+                "{winner} must reconcile the pending request without terminal regression"
             );
             assert!(
                 receiver.try_recv().is_err(),

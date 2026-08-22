@@ -440,6 +440,7 @@ pub(crate) mod tests {
     /// bounded blocking Drop wait cannot starve the background dispatch.
     struct StaffCleanupGuard {
         accepted_response: String,
+        process_group_root: Option<std::path::PathBuf>,
         armed: bool,
     }
 
@@ -447,8 +448,13 @@ pub(crate) mod tests {
         fn arm(accepted_response: &str) -> Self {
             Self {
                 accepted_response: accepted_response.to_string(),
+                process_group_root: None,
                 armed: true,
             }
+        }
+
+        fn track_process_group(&mut self, root_pid: &std::path::Path) {
+            self.process_group_root = Some(root_pid.to_path_buf());
         }
 
         fn disarm(&mut self) {
@@ -468,6 +474,21 @@ pub(crate) mod tests {
                 return;
             };
             for _ in 0..360 {
+                #[cfg(unix)]
+                if let Some(root_pid) = self.process_group_root.as_ref() {
+                    if let Ok(pid) = std::fs::read_to_string(root_pid)
+                        .ok()
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .parse::<libc::pid_t>()
+                    {
+                        // SAFETY: the fixture records its own process-group
+                        // leader; the negative pid cannot target an unrelated
+                        // process outside that group.
+                        let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+                    }
+                }
                 if crate::dispatch_ops::background_dispatch_cleanup_complete(&dispatch_id) {
                     return;
                 }
@@ -674,6 +695,7 @@ pub(crate) mod tests {
             .await
             .expect("managed custom Staff start is accepted");
         let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
+        cleanup_guard.track_process_group(&root_pid);
         let accepted: Value = serde_json::from_str(&raw).expect("accepted response JSON");
         let dispatch_id = accepted["dispatch_id"].as_str().expect("dispatch id");
         let run_dir = dispatch_runs_root().join(dispatch_id);
@@ -717,6 +739,10 @@ pub(crate) mod tests {
 
         let (terminal, _result) = wait_for_staff_terminal(&run_dir).await;
         wait_for_staff_cleanup(dispatch_id).await;
+        assert!(
+            !server.managed_run_controls.contains(dispatch_id),
+            "background cleanup must remove managed cancellation authority"
+        );
         cleanup_guard.disarm();
         assert_eq!(terminal_staff_state(&terminal), "TASK_STATE_CANCELED");
         assert_eq!(

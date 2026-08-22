@@ -30,9 +30,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tachi_credential_profile::{
-    apply_credential_materialization, credential_materialize_report_json, default_credentials_dir,
-    find_credential_profile, plan_credential_materialization_with_run_dir, profile_secret_names,
-    CredentialApplyOptions, CredentialMaterializeReport,
+    apply_credential_materialization, cleanup_ephemeral_credential_materializations,
+    credential_materialize_report_json, default_credentials_dir, find_credential_profile,
+    plan_credential_materialization_with_run_dir, profile_secret_names, CredentialApplyOptions,
+    CredentialMaterializeReport,
 };
 use tachi_params::StaffAssignmentRequest;
 
@@ -258,6 +259,7 @@ enum PostInitDispatchOutcome {
 /// carried out of the guarded `async` block in one bundle.
 struct ReadyDispatch {
     execution: DispatchExecution,
+    managed_custom_eligible: bool,
     execution_backend_name: Option<&'static str>,
     execution_backend_metadata: Option<Value>,
     acpx_enabled: bool,
@@ -777,6 +779,7 @@ async fn launch_canonical_dispatch(
         // 5. Build execution backend
         let PreparedDispatchBackend {
             mut execution,
+            managed_custom_eligible,
             execution_backend_name,
             execution_backend_metadata,
             acpx_enabled,
@@ -867,6 +870,7 @@ async fn launch_canonical_dispatch(
 
         Ok(PostInitDispatchOutcome::Ready(Box::new(ReadyDispatch {
             execution,
+            managed_custom_eligible,
             execution_backend_name,
             execution_backend_metadata,
             acpx_enabled,
@@ -881,6 +885,7 @@ async fn launch_canonical_dispatch(
 
     let ReadyDispatch {
         execution,
+        managed_custom_eligible,
         execution_backend_name,
         execution_backend_metadata,
         acpx_enabled,
@@ -907,14 +912,46 @@ async fn launch_canonical_dispatch(
     };
 
     // Register managed-custom control before task scheduling.
-    let (execution, managed_run_guard) = if resolved_assignment.selected_backend == "custom" {
-        let (receiver, guard) = server.managed_run_controls.register(&dispatch_id)?;
-        crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)?;
+    let (execution, managed_run_guard) = if managed_custom_eligible {
+        let (receiver, guard) = match server.managed_run_controls.register(&dispatch_id) {
+            Ok(registration) => registration,
+            Err(error) => {
+                let _ = server.with_global_store(|store| {
+                    cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                });
+                release_flow_dispatch_slot(flow_dispatch_slot);
+                close_kanban_row_on_early_exit(
+                    server,
+                    &dispatch_id,
+                    "managed-custom control registration",
+                    request.project.as_deref(),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
+        {
+            drop(guard);
+            let _ = server.with_global_store(|store| {
+                cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+            });
+            release_flow_dispatch_slot(flow_dispatch_slot);
+            close_kanban_row_on_early_exit(
+                server,
+                &dispatch_id,
+                "managed-custom control classification",
+                request.project.as_deref(),
+            )
+            .await;
+            return Err(error);
+        }
         let execution = match execution {
             DispatchExecution::Subprocess(command) => {
                 DispatchExecution::ManagedCustom(command, receiver)
             }
-            other => other,
+            _ => unreachable!("managed custom eligibility requires a subprocess execution"),
         };
         (execution, Some(guard))
     } else {

@@ -33,7 +33,9 @@ pub(super) async fn run_managed_custom_subprocess(
     {
         let _ = cancellations;
         let _ = run_dir;
-        return Err("cancellation_unavailable: unsupported_platform".to_string());
+        // A platform without process-group control still runs an ordinary
+        // custom LaunchSpec. Only the cancellation control plane is absent.
+        return run_agent_subprocess(cmd, timeout).await;
     }
     #[cfg(unix)]
     {
@@ -54,18 +56,7 @@ pub(super) async fn run_managed_custom_subprocess(
         let stdout_task = tokio::spawn(read_pipe(stdout));
         let stderr_task = tokio::spawn(read_pipe(stderr));
         let status = tokio::select! {
-            result = tokio::time::timeout(timeout, child.wait()) => match result {
-                Ok(Ok(status)) => status,
-                Ok(Err(error)) => {
-                    drain_managed_output(stdout_task, stderr_task).await;
-                    return Err(format!("Agent process error: {error}"));
-                }
-                Err(_) => {
-                    reap_timed_out_child(&mut child, pid).await;
-                    drain_managed_output(stdout_task, stderr_task).await;
-                    return Err(format!("Agent process timed out after {}s (process group killed)", timeout.as_secs()));
-                }
-            },
+            biased;
             command = cancellations.recv() => {
                 let Some(command) = command else {
                     reap_timed_out_child(&mut child, pid).await;
@@ -108,6 +99,18 @@ pub(super) async fn run_managed_custom_subprocess(
                         let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unconfirmed);
                         return Err("termination_unconfirmed".to_string());
                     }
+                }
+            },
+            result = tokio::time::timeout(timeout, child.wait()) => match result {
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) => {
+                    drain_managed_output(stdout_task, stderr_task).await;
+                    return Err(format!("Agent process error: {error}"));
+                }
+                Err(_) => {
+                    reap_timed_out_child(&mut child, pid).await;
+                    drain_managed_output(stdout_task, stderr_task).await;
+                    return Err(format!("Agent process timed out after {}s (process group killed)", timeout.as_secs()));
                 }
             }
         };

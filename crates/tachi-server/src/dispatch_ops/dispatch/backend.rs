@@ -45,6 +45,10 @@ fn build_custom_command_from_launch_spec(
 
 pub(super) struct PreparedDispatchBackend {
     pub(super) execution: DispatchExecution,
+    /// Control eligibility derives from the concrete prepared branch, not the
+    /// assignment label. ACpx and native ACP can route a custom assignment but
+    /// own their own lifecycle and must never receive a subprocess control slot.
+    pub(super) managed_custom_eligible: bool,
     pub(super) execution_backend_name: Option<&'static str>,
     pub(super) execution_backend_metadata: Option<serde_json::Value>,
     pub(super) acpx_enabled: bool,
@@ -200,6 +204,10 @@ pub(super) fn prepare_dispatch_backend(
     };
 
     Ok(PreparedDispatchBackend {
+        managed_custom_eligible: matches!(&execution, DispatchExecution::Subprocess(_))
+            && ctx.custom_launch_spec.is_some()
+            && !acpx_enabled
+            && !native_acp_enabled,
         execution,
         execution_backend_name,
         execution_backend_metadata,

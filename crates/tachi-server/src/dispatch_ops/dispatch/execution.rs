@@ -69,6 +69,48 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) managed_run_guard: Option<crate::managed_run_control::ManagedRunGuard>,
 }
 
+/// Covers an unwind before the ordinary background terminal path reaches its
+/// explicit cleanup. It is declared after the managed authority guard so this
+/// Drop releases credentials and the dispatch slot before authority vanishes.
+struct BackgroundEarlyExitCleanup {
+    server: MemoryServer,
+    workspace_dir: PathBuf,
+    flow_dispatch_slot: Option<PathBuf>,
+    armed: bool,
+}
+
+impl BackgroundEarlyExitCleanup {
+    fn new(
+        server: MemoryServer,
+        workspace_dir: PathBuf,
+        flow_dispatch_slot: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            server,
+            workspace_dir,
+            flow_dispatch_slot,
+            armed: true,
+        }
+    }
+
+    fn complete(&mut self) {
+        release_flow_dispatch_slot(self.flow_dispatch_slot.take());
+        self.armed = false;
+    }
+}
+
+impl Drop for BackgroundEarlyExitCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self.server.with_global_store(|store| {
+            cleanup_ephemeral_credential_materializations(store, &self.workspace_dir, false)
+        });
+        release_flow_dispatch_slot(self.flow_dispatch_slot.take());
+    }
+}
+
 pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let server_clone = ctx.server;
     let d_id = ctx.dispatch_id;
@@ -102,6 +144,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // closed cancellation receiver before it can spawn.
         let _managed_run_guard = managed_run_guard;
         let _mcp_cleanup = McpCleanup(mcp_config_path);
+        let mut early_exit_cleanup = BackgroundEarlyExitCleanup::new(
+            server_clone.clone(),
+            workspace_dir_for_spawn.clone(),
+            flow_dispatch_slot_for_spawn,
+        );
 
         // execute_started — Stage 2 (or, in V1, the only stage).
         let execute_started_at = Utc::now();
@@ -697,7 +744,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 }),
             );
         }
-        release_flow_dispatch_slot(flow_dispatch_slot_for_spawn);
+        early_exit_cleanup.complete();
         #[cfg(test)]
         mark_background_dispatch_cleanup_complete(&d_id);
     });

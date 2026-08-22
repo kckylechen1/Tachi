@@ -170,14 +170,8 @@ fn persist_resolved_completion_receipt_at(
             status_path.display()
         )
     })?;
-    if status_object
-        .get("cancellation")
-        .and_then(Value::as_object)
-        .and_then(|receipt| receipt.get("receipt"))
-        .and_then(Value::as_str)
-        == Some("cancellation_confirmed")
-    {
-        return Err("cannot overwrite a confirmed managed cancellation".to_string());
+    if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
+        return Err("cannot overwrite a managed cancellation".to_string());
     }
     status_object.insert(
         "resolved_completion".to_string(),
@@ -280,14 +274,8 @@ fn persist_pending_completion_recovery_receipt_at(
             status_path.display()
         )
     })?;
-    if status_object
-        .get("cancellation")
-        .and_then(Value::as_object)
-        .and_then(|receipt| receipt.get("receipt"))
-        .and_then(Value::as_str)
-        == Some("cancellation_confirmed")
-    {
-        return Err("cannot overwrite a confirmed managed cancellation".to_string());
+    if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
+        return Err("cannot overwrite a managed cancellation".to_string());
     }
     let recovery = json!({
         "status": "pending_canonical_outcome",

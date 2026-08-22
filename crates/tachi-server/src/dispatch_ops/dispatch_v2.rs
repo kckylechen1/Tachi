@@ -414,6 +414,23 @@ pub(crate) fn write_status_json(
     // state but must not erase that admission decision from the receipt.
     if let Ok(previous) = std::fs::read_to_string(&path) {
         if let Ok(Value::Object(previous)) = serde_json::from_str::<Value>(&previous) {
+            let proposed_terminal = obj
+                .get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| {
+                    matches!(
+                        state,
+                        "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
+                    )
+                });
+            if crate::managed_run_control::cancellation_blocks_terminal_writer(&previous)
+                && proposed_terminal
+            {
+                // `cancellation_requested` is the linearization point. A
+                // late watchdog/completion/timeout write must reconcile via
+                // the cancellation owner, not overwrite its pending receipt.
+                return;
+            }
             for key in [
                 "host_profile",
                 "execution_level",
