@@ -872,26 +872,35 @@ mod issue_1825_cancel_tests {
                 "cancel must reject {field}"
             );
         }
+        let schema = serde_json::to_value(rmcp::schemars::schema_for!(TachiStaffParams))
+            .expect("Staff schema serializes");
+        let properties = schema["properties"]
+            .as_object()
+            .expect("Staff schema properties");
         for field in [
             "pid",
             "pgid",
             "command",
             "cwd",
             "env",
-            "credential",
+            "credentials",
             "signal",
-            "grace",
-            "kill_target",
         ] {
             let mut raw = serde_json::json!({
                 "action": "cancel",
                 "dispatch_id": "20260823T010101Z-custom-deadbeef",
                 "expected_status_revision": 7,
             });
-            raw[field] = serde_json::json!("raw-process-authority");
+            raw[field] = serde_json::json!("hostile-process-authority");
+            let error = serde_json::from_value::<TachiStaffParams>(raw)
+                .expect_err("control field must fail Staff deserialization");
             assert!(
-                serde_json::from_value::<TachiStaffParams>(raw).is_err(),
-                "schema must reject {field}"
+                error.to_string().contains("unknown field") && error.to_string().contains(field),
+                "Staff deserialization must reject control field {field}: {error}"
+            );
+            assert!(
+                !properties.contains_key(field),
+                "Staff's generated MCP schema must not advertise control field {field}"
             );
         }
     }

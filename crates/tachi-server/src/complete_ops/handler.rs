@@ -1152,6 +1152,165 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
+    fn managed_completion_params(dispatch_id: &str) -> TachiCompleteParams {
+        TachiCompleteParams {
+            task_id: None,
+            task: "complete managed dispatch".to_string(),
+            agent: "codex".to_string(),
+            outcome: "success".to_string(),
+            task_type: None,
+            profile: None,
+            risk: None,
+            duration_ms: None,
+            skills_used: Vec::new(),
+            cost_tokens: None,
+            cost_usd: None,
+            quality_score: None,
+            notes: None,
+            trajectory: None,
+            diff: None,
+            worktree: None,
+            subagents: Vec::new(),
+            eval_run_ids: Vec::new(),
+            feedback_rules_applied: Vec::new(),
+            dispatch_id: Some(dispatch_id.to_string()),
+            flow_id: None,
+            issue_ref: None,
+            pr_ref: None,
+            evidence_refs: Vec::new(),
+            tests_run: Vec::new(),
+            diff_present: None,
+            scope: None,
+            project: None,
+            format: None,
+            signatures: Vec::new(),
+            rulings: Vec::new(),
+            adjudication: None,
+        }
+    }
+
+    fn seed_managed_working_status(
+        server: &MemoryServer,
+        dispatch_id: &str,
+        cancellation: Option<Value>,
+    ) {
+        let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("managed run directory");
+        let mut status = json!({
+            "dispatch_id": dispatch_id,
+            "state": "TASK_STATE_WORKING",
+            "status_revision": 7,
+            "execution_classification": "managed_custom",
+        });
+        if let Some(cancellation) = cancellation {
+            status["cancellation"] = cancellation;
+        }
+        std::fs::write(run_dir.join("status.json"), status.to_string()).expect("managed status");
+    }
+
+    fn dispatch_outcome_count(server: &MemoryServer, dispatch_id: &str) -> i64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("query dispatch outcome count")
+    }
+
+    #[tokio::test]
+    async fn managed_cancellation_rejects_real_completion_before_outcome_or_receipt_writes() {
+        for receipt in ["cancellation_requested", "cancellation_confirmed"] {
+            let (server, _home) = crate::tests::make_server_with_temp_home();
+            let dispatch_id = format!(
+                "20260823T18251{}Z-custom-deadbeef",
+                if receipt.ends_with("requested") { 1 } else { 2 }
+            );
+            seed_managed_working_status(&server, &dispatch_id, Some(json!({ "receipt": receipt })));
+
+            let error =
+                handle_tachi_complete(&server, managed_completion_params(&dispatch_id), false)
+                    .await
+                    .expect_err("managed cancellation owns completion before durable writes");
+            assert_eq!(error, "managed cancellation owns terminal completion");
+            assert_eq!(
+                dispatch_outcome_count(&server, &dispatch_id),
+                0,
+                "{receipt} must reject before dispatch_outcomes/adjudication can be derived"
+            );
+            let status: Value = serde_json::from_slice(
+                &std::fs::read(
+                    server
+                        .tachi_home_dir()
+                        .join("runs")
+                        .join(&dispatch_id)
+                        .join("status.json"),
+                )
+                .expect("status remains readable"),
+            )
+            .expect("status JSON");
+            assert!(
+                status.get("resolved_completion").is_none(),
+                "{receipt} must not resolve completion"
+            );
+            assert!(
+                status.get("completion_recovery").is_none(),
+                "{receipt} must not admit completion"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn committed_completion_admission_makes_cancel_unavailable_without_signaling_and_can_finalize(
+    ) {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182513Z-custom-deadbeef";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let (mut receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
+
+        admit_managed_completion(&server, Some(dispatch_id), true)
+            .expect("commit admission marker");
+        let cancellation: Value = serde_json::from_str(
+            &crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, 8)
+                .await
+                .expect("cancel after completion admission"),
+        )
+        .expect("cancellation JSON");
+        assert_eq!(cancellation["receipt"], "cancellation_unavailable");
+        assert_eq!(cancellation["reason"], "terminal_or_recovery_state");
+        assert!(
+            receiver.try_recv().is_err(),
+            "admitted completion must not signal the child"
+        );
+
+        handle_tachi_complete(&server, managed_completion_params(dispatch_id), false)
+            .await
+            .expect("admitted completion can finalize");
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(
+                server
+                    .tachi_home_dir()
+                    .join("runs")
+                    .join(dispatch_id)
+                    .join("status.json"),
+            )
+            .expect("final status"),
+        )
+        .expect("final status JSON");
+        assert_eq!(
+            status["resolved_completion"]["state"],
+            "TASK_STATE_COMPLETED"
+        );
+    }
+
     #[test]
     fn completion_without_dispatch_id_does_not_require_descriptor_platform_support() {
         ensure_completion_artifact_read_support(None).expect("manual completion has no run read");

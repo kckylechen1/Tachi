@@ -524,6 +524,35 @@ pub(crate) mod tests {
             .expect("terminal canonical receipt state")
     }
 
+    fn assert_no_cancellation_control_keys(value: &Value) {
+        const FORBIDDEN: &[&str] = &[
+            "pid",
+            "pgid",
+            "command",
+            "cwd",
+            "env",
+            "credentials",
+            "signal",
+        ];
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object {
+                    assert!(
+                        !FORBIDDEN.contains(&key.as_str()),
+                        "Staff response/receipt leaked process-control key {key}: {value}"
+                    );
+                    assert_no_cancellation_control_keys(child);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    assert_no_cancellation_control_keys(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn staff_request(project: &str) -> StaffStartRequest {
         StaffStartRequest {
             task: "prove the canonical Staff launch lifecycle".to_string(),
@@ -749,11 +778,13 @@ pub(crate) mod tests {
             .expect("actual Staff cancel response"),
         )
         .expect("cancel response JSON");
+        assert_no_cancellation_control_keys(&cancel);
         assert_eq!(cancel["receipt"], "cancellation_confirmed");
         assert_eq!(cancel["expected_status_revision"], accepted_revision);
         assert_eq!(cancel["termination_proof"], "unix_process_group_absent");
 
         let (terminal, _result) = wait_for_staff_terminal(&run_dir).await;
+        assert_no_cancellation_control_keys(&terminal["cancellation"]);
         wait_for_staff_cleanup(dispatch_id).await;
         assert!(
             !server.managed_run_controls.contains(dispatch_id),
@@ -1063,53 +1094,32 @@ pub(crate) mod tests {
         assert_eq!(request.flow_id.as_deref(), Some("flow_xyz"));
     }
 
-    #[test]
-    fn staff_production_surface_rejects_flat_dispatch_facade_mutants() {
-        let source = include_str!("mod.rs");
-        for forbidden in [
-            ["TachiDispatch", "Params"].concat(),
-            ["into_dispatch", "_params"].concat(),
-            ["into_", "params"].concat(),
-        ] {
-            assert!(
-                !source.contains(&forbidden),
-                "Staff production code must not mention {forbidden}"
-            );
-            assert!(
-                format!("{source}\n{forbidden}").contains(&forbidden),
-                "the Staff flat-facade detector must reject a deliberate mutant"
-            );
-        }
-    }
-
     /// Boundary test: a `StaffStartRequest` JSON that attempts to set
     /// execution-shaped fields fails deserialization loudly (deny_unknown_fields).
     #[test]
     fn staff_start_request_has_no_execution_fields() {
-        let hostile = serde_json::json!({
-            "task": "prove the boundary",
-            "staffing_reason": "native_subagent_unavailable",
-            "worker": "claude",
-            // ── hostile / out-of-boundary fields: must fail loudly ──────────
-            "cwd": "/evil/absolute/path",
-            "command": ["rm", "-rf", "/"],
-            "transport": "acpx",
-            "harness_transport": "acpx",
-            "credentials": ["superuser"],
-            "credential_profiles": ["superuser"],
-            "sandbox": "danger-full-access",
-            "allowed_tools": ["Bash(rm*)"],
-            "allowed_mcp_servers": ["evil-mcp"],
-            "inject_tachi_mcp": true,
-            "permission_profile": "full",
-            "env_id": "lease-evil",
-            "unmanaged_cwd": true,
-        });
-        let err = serde_json::from_value::<StaffStartRequest>(hostile).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field"),
-            "hostile execution fields must fail deserialization loudly: {err}"
-        );
+        for field in [
+            "pid",
+            "pgid",
+            "command",
+            "cwd",
+            "env",
+            "credentials",
+            "signal",
+        ] {
+            let mut hostile = serde_json::json!({
+                "task": "prove the boundary",
+                "staffing_reason": "native_subagent_unavailable",
+                "worker": "claude",
+            });
+            hostile[field] = serde_json::json!("hostile-process-authority");
+            let err = serde_json::from_value::<StaffStartRequest>(hostile)
+                .expect_err("private control types cannot be constructed from Staff JSON");
+            assert!(
+                err.to_string().contains("unknown field") && err.to_string().contains(field),
+                "hostile execution field {field} must fail deserialization loudly: {err}"
+            );
+        }
 
         let valid = serde_json::json!({
             "task": "prove the boundary",

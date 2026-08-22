@@ -374,9 +374,16 @@ pub(crate) async fn request_managed_custom_cancel(
                 termination_proof,
                 status_revision,
             }) => {
-                let _ = (termination_proof, status_revision);
-                canonical_cancellation_receipt(&run_dir).ok_or_else(|| {
+                let _ = termination_proof;
+                let canonical = canonical_cancellation_receipt(&run_dir).ok_or_else(|| {
                     "managed cancellation committed without a canonical receipt".to_string()
+                })?;
+                let mut response: Value = serde_json::from_str(&canonical).map_err(|error| {
+                    format!("parse committed managed cancellation receipt: {error}")
+                })?;
+                response["observed_status_revision"] = Value::from(status_revision);
+                serde_json::to_string(&response).map_err(|error| {
+                    format!("serialize committed managed cancellation response: {error}")
                 })
             }
             Ok(CancelCompletion::Unconfirmed) => canonical_cancellation_receipt(&run_dir)
@@ -867,6 +874,21 @@ mod issue_1825_tests {
             assert_eq!(
                 terminal_after_reply["cancellation"]["receipt"], "cancellation_unavailable",
                 "{winner} must retain the reconciled cancellation receipt"
+            );
+            for key in [
+                "receipt",
+                "dispatch_id",
+                "expected_status_revision",
+                "reason",
+            ] {
+                assert_eq!(
+                    response[key], terminal_after_reply["cancellation"][key],
+                    "a cancellation dequeued after the natural terminal winner must retain canonical {key}"
+                );
+            }
+            assert!(
+                matches!(terminal_after_reply["state"].as_str(), Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")),
+                "the natural terminal winner must remain truthful, never CANCELED: {terminal_after_reply}"
             );
             assert!(
                 receiver.try_recv().is_err(),
