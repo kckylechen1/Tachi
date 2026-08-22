@@ -26,6 +26,7 @@ pub(crate) use dispatch::launch_staff_assignment;
 pub(crate) use dispatch::new_dispatch_id;
 pub(crate) use dispatch::recover_orphaned_dispatch_runs;
 pub(crate) use dispatch::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
+pub(crate) use dispatch_v2::stamp_route_decision_id;
 pub(crate) use harness::{
     harness_server_attach_ready, probe_harness_server_status, probe_harness_server_status_with_env,
 };

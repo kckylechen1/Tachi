@@ -15,6 +15,7 @@ pub(super) struct DispatchStart {
     pub(super) agent_norm: String,
     pub(super) resolved_profile: ResolvedDispatchProfile,
     pub(super) resolved_assignment: tachi_params::ResolvedStaffAssignment,
+    pub(super) resolved_recommendation: Option<memcore::RouteRecommendationRow>,
     pub(super) profile_payload: Value,
     pub(super) workspace_dir: PathBuf,
     pub(super) inject_card: bool,
@@ -170,6 +171,7 @@ pub(super) fn resolve_dispatch_start(
         agent_norm,
         resolved_profile,
         resolved_assignment,
+        resolved_recommendation: None,
         profile_payload,
         workspace_dir,
         inject_card,
@@ -201,18 +203,19 @@ pub(super) fn resolve_staff_dispatch_start(
     now: chrono::DateTime<Utc>,
     execution_level: tachi_params::ExecutionLevel,
 ) -> Result<DispatchStart, String> {
-    if let Some(recommendation_ref) = request.recommendation_ref.as_deref() {
-        let exists = server.with_global_store_read(|store| {
-            memcore::get_route_recommendation(store.connection(), recommendation_ref)
-                .map(|row| row.is_some())
-                .map_err(|error| error.to_string())
-        })?;
-        if !exists {
-            return Err(format!(
-                "Unknown or stale recommendation_ref '{recommendation_ref}'"
-            ));
-        }
-    }
+    let resolved_recommendation = if let Some(recommendation_ref) =
+        request.recommendation_ref.as_deref()
+    {
+        server
+            .with_global_store_read(|store| {
+                memcore::get_route_recommendation(store.connection(), recommendation_ref)
+                    .map_err(|error| error.to_string())
+            })?
+            .ok_or_else(|| format!("Unknown or stale recommendation_ref '{recommendation_ref}'"))
+            .map(Some)?
+    } else {
+        None
+    };
     let resolved_profile =
         resolve_and_apply_staff_assignment_profile_for_server(server, &mut request)?;
     let agent_norm = normalize_dispatch_agent_name(&resolved_profile.agent).ok_or_else(|| {
@@ -277,6 +280,7 @@ pub(super) fn resolve_staff_dispatch_start(
         verbose: false,
         resolved_profile,
         resolved_assignment,
+        resolved_recommendation,
         mechanics,
     })
 }

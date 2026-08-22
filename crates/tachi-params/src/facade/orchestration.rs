@@ -215,9 +215,9 @@ pub struct TachiStaffParams {
     /// `tachi_dispatch(action='recommend')` call returned, when this start
     /// was placed on that advice. Optional and start-only — absence is
     /// itself evidence (`assignment_mode` records `unadvised`, never a
-    /// fabricated advisory). Not validated against a live
-    /// `route_recommendations` row here; the acceptance-time writer treats
-    /// a stale/unknown ref the same as any other reference id.
+    /// fabricated advisory). Typed Staff resolution validates it before
+    /// acceptance: an unknown or stale reference is refused with zero claim,
+    /// workspace artifact, or route-decision evidence.
     #[serde(default)]
     pub recommendation_ref: Option<String>,
 }

@@ -30,6 +30,7 @@
 //!     and status.json.
 
 use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 /// System prompt prepended to the Stage-1 task body. Kept verbatim so the
@@ -300,6 +301,34 @@ pub(super) fn append_trajectory_event(trajectory_path: &std::path::Path, event: 
 }
 
 /// Write (or overwrite) `<run_dir>/status.json` with the V2 audit fields.
+pub(crate) fn stamp_route_decision_id(
+    run_dir: &std::path::Path,
+    route_decision_id: &str,
+) -> Result<(), String> {
+    let _guard = status_json_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = run_dir.join("status.json");
+    let Some(Value::Object(mut status)) = crate::task_lifecycle::read_json_file(&path)
+        .map_err(|error| format!("read {}: {error}", path.display()))?
+    else {
+        return Err(format!("missing or malformed {}", path.display()));
+    };
+    status.insert(
+        "route_decision_id".to_string(),
+        Value::String(route_decision_id.to_string()),
+    );
+    let body = serde_json::to_vec_pretty(&Value::Object(status))
+        .map_err(|error| format!("serialize {}: {error}", path.display()))?;
+    crate::utils::write_owner_only_file_atomic(&path, &body)
+        .map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+fn status_json_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn write_status_json(
     run_dir: &std::path::Path,
@@ -314,6 +343,9 @@ pub(super) fn write_status_json(
     total_duration_ms: Option<u64>,
     extra: Option<Value>,
 ) {
+    let _guard = status_json_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut obj = serde_json::Map::new();
     obj.insert("dispatch_id".into(), Value::String(dispatch_id.to_string()));
     obj.insert("v2".into(), Value::Bool(v2));

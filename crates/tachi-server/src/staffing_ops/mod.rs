@@ -45,7 +45,6 @@ use rmcp::schemars::JsonSchema;
 // The `#[derive(JsonSchema)]` macro expands to reference `schemars::...`, so
 // the crate must be in scope under that name.
 use rmcp::schemars;
-use serde_json::Value;
 
 /// Minimal semantic request for externally staffing a worker. The model may
 /// only set intent fields here; execution fields (cwd, command, transport,
@@ -102,9 +101,9 @@ pub(crate) async fn staff_start(
     // runtime check is needed here — the struct's type IS the gate. The
     // kernel-side defense-in-depth check inside handle_tachi_dispatch catches
     // any future caller that reaches it without going through this struct.
-    let (raw, assignment) = launch_staff_assignment(server, request).await?;
+    let (raw, _assignment, recommendation) = launch_staff_assignment(server, request).await?;
 
-    record_route_decision_best_effort(server, &raw, assignment.recommendation_ref.as_deref());
+    record_route_decision_best_effort(server, &raw, recommendation.as_ref());
 
     Ok(raw)
 }
@@ -120,7 +119,7 @@ pub(crate) async fn staff_start(
 fn record_route_decision_best_effort(
     server: &MemoryServer,
     raw_response: &str,
-    recommendation_ref: Option<&str>,
+    resolved_recommendation: Option<&memcore::RouteRecommendationRow>,
 ) {
     let response: serde_json::Value = match serde_json::from_str(raw_response) {
         Ok(v) => v,
@@ -169,43 +168,10 @@ fn record_route_decision_best_effort(
         .get("authority")
         .map(crate::tune_ops::route_policy::content_digest_hex);
 
-    // tachi#1675 BUG-10: `assignment_mode` and `recommendation_id` must
-    // reflect a recommendation the DB actually resolved, never the mere
-    // presence of a caller-supplied ref. A caller can pass any string
-    // (stale, typo'd, forged) as `recommendation_ref`; recording 'advised'
-    // for a ref that doesn't resolve would be the ledger fabricating advice
-    // that was never given. `resolved_recommendation` is the ONE lookup
-    // whose outcome both `assignment_mode` and `override_flag` are derived
-    // from — a miss (not found OR a query error) degrades to the honest
-    // 'unadvised' floor with `recommendation_id` stored NULL, exactly the
-    // same shape as no ref ever being supplied.
-    let resolved_recommendation = recommendation_ref.and_then(|rec_id| {
-        match server.with_global_store_read(|store| {
-            memcore::get_route_recommendation(store.connection(), rec_id)
-                .map_err(|e| e.to_string())
-        }) {
-            Ok(Some(row)) => Some(row),
-            Ok(None) => {
-                tracing::warn!(
-                    dispatch_id,
-                    recommendation_ref = rec_id,
-                    "tachi#1675 Seam B: recommendation_ref does not resolve to a route_recommendations \
-                     row; recording assignment_mode='unadvised' rather than fabricating advice"
-                );
-                None
-            }
-            Err(err) => {
-                tracing::warn!(
-                    dispatch_id,
-                    recommendation_ref = rec_id,
-                    error = %err,
-                    "tachi#1675 Seam B: recommendation lookup failed; recording assignment_mode='unadvised' \
-                     rather than fabricating advice"
-                );
-                None
-            }
-        }
-    });
+    // Typed resolution validates this fact before acceptance and carries the
+    // exact row here. Do not re-query a caller spelling after acceptance: a
+    // delete or read failure in that interval cannot turn accepted advice into
+    // an unadvised ledger row.
     let assignment_mode = if resolved_recommendation.is_some() {
         "advised"
     } else {
@@ -215,7 +181,7 @@ fn record_route_decision_best_effort(
         .as_ref()
         .map(|row| row.recommended_profile != selected_profile)
         .unwrap_or(false);
-    let recommendation_id = resolved_recommendation.map(|row| row.recommendation_id);
+    let recommendation_id = resolved_recommendation.map(|row| row.recommendation_id.clone());
 
     let route_decision_id = uuid::Uuid::new_v4().to_string();
     let new_decision = memcore::NewRouteDecision {
@@ -246,31 +212,13 @@ fn record_route_decision_best_effort(
         }
     };
 
-    // Stamp the (possibly pre-existing, on an idempotent replay)
-    // `route_decision_id` back into status.json — convenience only, the DB
-    // row above is the queryable authority. This is a ONE-TIME explicit
-    // patch, not a `write_status_json` call: no later writer may emit this
-    // key at all (see the `write_status_json` preserve-list in
-    // `dispatch_ops::dispatch_v2`, which carries it forward automatically
-    // once present — emitting `route_decision_id: null` there would erase
-    // it).
-    if let Ok(Value::Object(mut obj)) =
-        crate::task_lifecycle::read_json_file(&run_dir.join("status.json"))
-            .map(|v| v.unwrap_or(Value::Null))
+    // The shared status lock serializes this read/merge/write with terminal
+    // status writers, so a fast child cannot be replaced by an older working
+    // snapshot while evidence is stamped.
+    if let Err(err) =
+        crate::dispatch_ops::stamp_route_decision_id(&run_dir, &inserted.route_decision_id)
     {
-        obj.insert(
-            "route_decision_id".to_string(),
-            Value::String(inserted.route_decision_id),
-        );
-        let body = serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_default();
-        if !body.is_empty() {
-            if let Err(err) = crate::utils::write_owner_only_file_atomic(
-                &run_dir.join("status.json"),
-                body.as_bytes(),
-            ) {
-                tracing::warn!(dispatch_id, error = %err, "tachi#1675 Seam B: failed to stamp route_decision_id into status.json");
-            }
-        }
+        tracing::warn!(dispatch_id, error = %err, "tachi#1675 Seam B: failed to stamp route_decision_id into status.json");
     }
 }
 
@@ -332,6 +280,7 @@ async fn staff_status_impl(request: &StaffStatusRequest) -> Result<String, Strin
 pub(crate) mod tests {
     use super::*;
     use crate::tool_params::TachiDispatchReason;
+    use serde_json::Value;
     use std::sync::{Mutex, OnceLock};
 
     fn staff_launch_environment_lock() -> &'static Mutex<()> {
@@ -443,8 +392,28 @@ pub(crate) mod tests {
         let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
         let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
         let server = test_server();
+        let recommendation = server
+            .with_global_store(|store| {
+                memcore::insert_route_recommendation(
+                    store.connection(),
+                    &memcore::NewRouteRecommendation {
+                        recommendation_id: "rec-staff-e2e".to_string(),
+                        task_type: Some("implementation".to_string()),
+                        risk: "low".to_string(),
+                        candidates: serde_json::json!([{"profile": "codex_55_review"}]),
+                        recommended_profile: Some("codex_55_review".to_string()),
+                        policy_source_revision: Some("staff-e2e".to_string()),
+                        rows_considered: 1,
+                        occurred_at: memcore::now_utc_iso(),
+                    },
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("seed recommendation fact");
+        let mut request = staff_request("tachi");
+        request.recommendation_ref = Some(recommendation.recommendation_id.clone());
 
-        let raw = staff_start(&server, staff_request("tachi"))
+        let raw = staff_start(&server, request)
             .await
             .expect("Staff start should be accepted before background execution");
         let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
@@ -505,6 +474,28 @@ pub(crate) mod tests {
                 .count(),
             1,
             "no second lifecycle"
+        );
+        let decision = server
+            .with_global_store_read(|store| {
+                memcore::get_route_decision_by_dispatch_id(store.connection(), dispatch_id)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read route decision")
+            .expect("exactly one route decision for accepted Staff start");
+        assert_eq!(
+            route_decisions_count(&server),
+            1,
+            "one acceptance creates one decision"
+        );
+        assert_eq!(decision.assignment_mode, "advised");
+        assert_eq!(
+            decision.recommendation_id.as_deref(),
+            Some(recommendation.recommendation_id.as_str())
+        );
+        assert_eq!(
+            status["route_decision_id"].as_str(),
+            Some(decision.route_decision_id.as_str()),
+            "the evidence stamp must retain the fast child's terminal receipt"
         );
     }
 
@@ -954,13 +945,12 @@ pub(crate) mod tests {
 
         // Seed a recommendation row whose recommended_profile MATCHES the
         // eventual selection -> override_flag must be false.
-        let recommendation_id = "rec-match".to_string();
-        server
+        let recommendation = server
             .with_global_store(|store| {
                 memcore::insert_route_recommendation(
                     store.connection(),
                     &memcore::NewRouteRecommendation {
-                        recommendation_id: recommendation_id.clone(),
+                        recommendation_id: "rec-match".to_string(),
                         task_type: Some("fix_request".to_string()),
                         risk: "low".to_string(),
                         candidates: serde_json::json!([{"profile": "wizard_sonnet"}]),
@@ -978,7 +968,7 @@ pub(crate) mod tests {
         seed_status_json(dispatch_id, "env-1", "dev", "claude-sonnet-5");
         let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
 
-        record_route_decision_best_effort(&server, &raw, Some(&recommendation_id));
+        record_route_decision_best_effort(&server, &raw, Some(&recommendation));
 
         let row = server
             .with_global_store_read(|store| {
@@ -995,15 +985,12 @@ pub(crate) mod tests {
         );
     }
 
-    /// BUG-10: a `recommendation_ref` that does NOT resolve to any
-    /// `route_recommendations` row (stale, typo'd, forged — no row is ever
-    /// seeded here) must NOT be recorded as 'advised'. The ledger must never
-    /// fabricate advice that was never actually given: the honest floor for
-    /// an unresolved ref is identical to no ref at all — 'unadvised' with
-    /// `recommendation_id` stored NULL.
+    /// #1814: route evidence consumes the pre-acceptance recommendation fact.
+    /// Deleting its source row after resolution must not cause a second query
+    /// to downgrade a valid accepted decision to `unadvised`.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn record_route_decision_unadvised_when_recommendation_ref_does_not_resolve() {
+    async fn record_route_decision_uses_carried_recommendation_after_source_delete() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1011,12 +998,40 @@ pub(crate) mod tests {
         let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let server = test_server();
 
-        // Deliberately NO route_recommendations row seeded for this id.
+        let recommendation = server
+            .with_global_store(|store| {
+                memcore::insert_route_recommendation(
+                    store.connection(),
+                    &memcore::NewRouteRecommendation {
+                        recommendation_id: "rec-carried-after-delete".to_string(),
+                        task_type: Some("fix_request".to_string()),
+                        risk: "low".to_string(),
+                        candidates: serde_json::json!([{"profile": "wizard_sonnet"}]),
+                        recommended_profile: Some("wizard_sonnet".to_string()),
+                        policy_source_revision: Some("rev-carried".to_string()),
+                        rows_considered: 1,
+                        occurred_at: memcore::now_utc_iso(),
+                    },
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("seed carried recommendation");
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute(
+                        "DELETE FROM route_recommendations WHERE recommendation_id = ?1",
+                        [&recommendation.recommendation_id],
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("delete recommendation after typed resolution");
         let dispatch_id = "20260810T000006Z-claude-ffffffff";
         seed_status_json(dispatch_id, "env-1", "dev", "claude-sonnet-5");
         let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
 
-        record_route_decision_best_effort(&server, &raw, Some("rec-does-not-exist"));
+        record_route_decision_best_effort(&server, &raw, Some(&recommendation));
 
         let row = server
             .with_global_store_read(|store| {
@@ -1024,14 +1039,11 @@ pub(crate) mod tests {
                     .map_err(|e| e.to_string())
             })
             .unwrap()
-            .expect("route_decisions row still lands even when the ref is unresolved");
+            .expect("route decision lands from carried fact");
+        assert_eq!(row.assignment_mode, "advised");
         assert_eq!(
-            row.assignment_mode, "unadvised",
-            "an unresolved recommendation_ref must never be recorded as advised"
-        );
-        assert!(
-            row.recommendation_id.is_none(),
-            "recommendation_id must be NULL, not the unresolved ref string"
+            row.recommendation_id.as_deref(),
+            Some(recommendation.recommendation_id.as_str())
         );
         assert!(!row.override_flag);
     }
@@ -1046,13 +1058,12 @@ pub(crate) mod tests {
         let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let server = test_server();
 
-        let recommendation_id = "rec-diverge".to_string();
-        server
+        let recommendation = server
             .with_global_store(|store| {
                 memcore::insert_route_recommendation(
                     store.connection(),
                     &memcore::NewRouteRecommendation {
-                        recommendation_id: recommendation_id.clone(),
+                        recommendation_id: "rec-diverge".to_string(),
                         task_type: Some("fix_request".to_string()),
                         risk: "low".to_string(),
                         candidates: serde_json::json!([{"profile": "codex_55_review"}]),
@@ -1071,7 +1082,7 @@ pub(crate) mod tests {
         // Caller actually got routed to a DIFFERENT profile than advised.
         let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
 
-        record_route_decision_best_effort(&server, &raw, Some(&recommendation_id));
+        record_route_decision_best_effort(&server, &raw, Some(&recommendation));
 
         let row = server
             .with_global_store_read(|store| {
@@ -1172,5 +1183,63 @@ pub(crate) mod tests {
             })
             .expect("count route evidence");
         assert_eq!(route_rows, 0, "refusal must write zero route evidence rows");
+    }
+
+    /// Authority refusal is before claim persistence as well as before the
+    /// canonical receipt lifecycle. The linked issue/flow must not become an
+    /// active claim when the selected provider cannot honor the contract.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn staff_start_authority_refusal_leaves_zero_claim_workspace_or_evidence() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let server = test_server();
+        let before_claims: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM session_claims", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count claims before refusal");
+
+        let mut request = staff_request("tachi");
+        request.profile = Some("deepseek_explore".to_string());
+        request.worker = Some("custom".to_string());
+        request.issue_ref = Some("kckylechen1/tachi#1814-authority".to_string());
+        request.flow_id = Some("flow_1814_authority_refusal".to_string());
+        let _ = staff_start(&server, request).await.expect_err(
+            "uncertified shell-capable read-only authority must refuse before acceptance",
+        );
+
+        let after_claims: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM session_claims", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count claims after refusal");
+        assert_eq!(
+            after_claims, before_claims,
+            "authority refusal creates zero claims"
+        );
+        assert_eq!(
+            std::fs::read_dir(temp_runs.path())
+                .expect("read isolated run root")
+                .count(),
+            0,
+            "authority refusal creates zero workspaces/artifacts"
+        );
+        assert_eq!(
+            route_decisions_count(&server),
+            0,
+            "authority refusal creates zero evidence"
+        );
     }
 }

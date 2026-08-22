@@ -55,6 +55,7 @@ fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
             "{name}: profile"
         );
         assert_eq!(typed.agent, flat_resolved.agent, "{name}: worker/backend");
+        assert_eq!(staff.stage, flat.stage, "{name}: stage defaults");
         assert_eq!(
             typed.selected_model, flat_resolved.selected_model,
             "{name}: model/stage defaults"
@@ -67,6 +68,14 @@ fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
         assert_eq!(
             typed.credential_profiles, flat_resolved.credential_profiles,
             "{name}: credentials"
+        );
+        assert_eq!(
+            typed.required_skills, flat_resolved.required_skills,
+            "{name}: required skills"
+        );
+        assert_eq!(
+            typed.tool_profile, flat_resolved.tool_profile,
+            "{name}: tool profile"
         );
         assert_eq!(
             typed.launch_command, flat_resolved.launch_command,

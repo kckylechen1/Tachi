@@ -278,6 +278,7 @@ async fn launch_canonical_dispatch(
         agent_norm,
         resolved_profile,
         resolved_assignment,
+        resolved_recommendation: _,
         profile_payload,
         workspace_dir,
         inject_card,
@@ -304,25 +305,6 @@ async fn launch_canonical_dispatch(
         mechanics.cwd = Some(resolved_cwd.to_string());
     }
     let env_stamp = env_resolution.stamp();
-
-    // #1001: zero-ceremony presence claim — auto-register/heartbeat so a
-    // briefing read from another session sees this dispatch is in flight.
-    // Degrades to no-op on any storage error; never fails dispatch.
-    crate::claims_ops::auto_register_or_heartbeat_claim(
-        server,
-        &crate::claims_ops::ClaimHookInput {
-            issue_ref: request.issue_ref.clone(),
-            flow_id: request.flow_id.clone(),
-            dispatch_id: Some(dispatch_id.clone()),
-            // TachiDispatchParams has no bare `branch` field (branch naming is
-            // an internal detail of workspace/env provisioning, not a
-            // dispatch param); env_resolution's cwd is the closest available
-            // identity and is not branch-shaped, so this hook leaves branch
-            // unset rather than guessing.
-            branch: None,
-            declared_file_scope: None,
-        },
-    );
 
     // 0b. Compile the effective-authority contract before ANY stage/preflight/
     // spawn work (#894 S2d). This is the single choke-point every dispatch
@@ -381,6 +363,20 @@ async fn launch_canonical_dispatch(
         format!("{dispatch_id}:authority"),
         &env_resolution,
     )?;
+    // #1001: zero-ceremony presence claim — auto-register/heartbeat only after
+    // authority compilation and grant minting have admitted this dispatch. A
+    // refusal must leave no active claim for an execution that cannot start.
+    // Storage errors remain a no-op and never fail an admitted dispatch.
+    crate::claims_ops::auto_register_or_heartbeat_claim(
+        server,
+        &crate::claims_ops::ClaimHookInput {
+            issue_ref: request.issue_ref.clone(),
+            flow_id: request.flow_id.clone(),
+            dispatch_id: Some(dispatch_id.clone()),
+            branch: None,
+            declared_file_scope: None,
+        },
+    );
     let mcp_access = execution_grant.mcp_access.as_ref();
     let inject_tachi = mcp_access
         .and_then(|access| access.inject_tachi_mcp)
@@ -905,11 +901,19 @@ async fn launch_canonical_dispatch(
 pub(crate) async fn launch_staff_assignment(
     server: &MemoryServer,
     request: tachi_params::StaffAssignmentRequest,
-) -> Result<(String, tachi_params::ResolvedStaffAssignment), String> {
+) -> Result<
+    (
+        String,
+        tachi_params::ResolvedStaffAssignment,
+        Option<memcore::RouteRecommendationRow>,
+    ),
+    String,
+> {
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
     let start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
     let assignment = start.resolved_assignment.clone();
+    let recommendation = start.resolved_recommendation.clone();
     let raw = launch_canonical_dispatch(server, start).await?;
-    Ok((raw, assignment))
+    Ok((raw, assignment, recommendation))
 }
