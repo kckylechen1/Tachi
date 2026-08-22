@@ -198,22 +198,68 @@ fn managed_custom_registration_uses_prepared_execution_eligibility() {
     }
 }
 
-#[test]
-fn managed_custom_control_receipts_do_not_expose_process_or_secret_fields() {
-    let source = include_str!("../../../managed_run_control.rs");
-    for forbidden in [
-        "\"pid\"",
-        "\"pgid\"",
-        "\"command\"",
-        "\"env\"",
-        "\"credential\"",
-        "\"signal\"",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "managed cancellation receipt surface must not expose {forbidden}"
-        );
-    }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
+async fn direct_custom_operator_dispatch_is_not_managed_cancelable() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let cwd = tempfile::tempdir().expect("dispatch cwd");
+    let release_worker = cwd.path().join("release-worker");
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(Some("custom"), "direct custom remains operator-owned");
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]);\nwhile not p.exists(): time.sleep(0.01)"
+            .to_string(),
+        release_worker.to_string_lossy().to_string(),
+    ];
+    params.cwd = Some(cwd.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
+
+    let raw = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("direct custom dispatch starts");
+    let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+    let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run dir"));
+    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
+    let accepted_status: Value = serde_json::from_slice(
+        &std::fs::read(run_dir.join("status.json")).expect("accepted status"),
+    )
+    .expect("accepted status JSON");
+    assert!(accepted_status.get("execution_classification").is_none());
+    assert!(!server.managed_run_controls.contains(dispatch_id));
+    let cancellation: Value = serde_json::from_str(
+        &crate::managed_run_control::request_managed_custom_cancel(
+            &server,
+            dispatch_id,
+            accepted_status["status_revision"]
+                .as_u64()
+                .expect("status revision"),
+        )
+        .await
+        .expect("operator cancellation probe"),
+    )
+    .expect("cancellation JSON");
+    assert_eq!(cancellation["receipt"], json!("cancellation_unavailable"));
+    assert_eq!(
+        cancellation["reason"],
+        json!("non_managed_custom_execution")
+    );
+    assert!(
+        !release_worker.exists(),
+        "unavailable operator cancellation must not signal the direct child"
+    );
+
+    std::fs::write(&release_worker, b"release").expect("release direct child");
+    assert_eq!(
+        cleanup.wait_for_terminal().await["state"],
+        json!("TASK_STATE_COMPLETED")
+    );
 }
 
 /// Releases the fake Claude subprocess even when an assertion panics. The

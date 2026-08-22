@@ -1077,32 +1077,6 @@ async fn canonical_external_staffing_start_and_terminal_receipt_share_one_run_di
     assert_eq!(accepted_status["dispatch_id"], json!(dispatch_id));
     assert_eq!(accepted_status["state"], response["state"]);
     assert_eq!(accepted_status["run_dir"], response["run_dir"]);
-    assert!(
-        accepted_status.get("execution_classification").is_none(),
-        "a direct/operator custom launch must not claim managed-custom cancellation ownership: {accepted_status}"
-    );
-    assert!(
-        !server.managed_run_controls.contains(dispatch_id),
-        "a direct/operator custom launch must not register a managed cancellation handle"
-    );
-    let unavailable: Value = serde_json::from_str(
-        &crate::managed_run_control::request_managed_custom_cancel(
-            &server,
-            dispatch_id,
-            accepted_status["status_revision"]
-                .as_u64()
-                .expect("accepted status revision"),
-        )
-        .await
-        .expect("direct custom cancellation probe"),
-    )
-    .expect("direct custom cancellation JSON");
-    assert_eq!(unavailable["receipt"], json!("cancellation_unavailable"));
-    assert_eq!(unavailable["reason"], json!("non_managed_custom_execution"));
-    assert!(
-        !release_worker.exists(),
-        "the unavailable cancellation probe must not signal the direct custom child"
-    );
 
     std::fs::write(&release_worker, b"release").expect("release custom worker");
     let result = wait_for_result(&run_dir).await;
