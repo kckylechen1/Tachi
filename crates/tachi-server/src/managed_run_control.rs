@@ -596,7 +596,11 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
         .and_then(|receipt| receipt.get("receipt"))
         .and_then(Value::as_str)
         == Some("cancellation_requested");
-    if !requested {
+    if !requested
+        || object.get("state").and_then(Value::as_str) != Some("TASK_STATE_WORKING")
+        || object.contains_key("resolved_completion")
+        || object.contains_key("completion_recovery")
+    {
         return ManagedTerminalCancellation::Unavailable;
     }
     match runner_error {
