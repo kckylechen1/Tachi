@@ -130,8 +130,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 136004,
-        "total_tool_definition_bytes": 166505,
+        "total_input_schema_bytes": 136012,
+        "total_tool_definition_bytes": 166513,
         "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",
@@ -219,8 +219,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 90867,
-        "total_tool_definition_bytes": 103925,
+        "total_input_schema_bytes": 90875,
+        "total_tool_definition_bytes": 103933,
         "visible_tool_count": 29,
         "visible_tools": [
           "extract_facts",
@@ -459,7 +459,7 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3447,
+            "input_schema_bytes": 3455,
             "property_count": 13,
             "property_names": [
               "action",
@@ -580,7 +580,7 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3447,
+            "input_schema_bytes": 3455,
             "property_count": 13,
             "property_names": [
               "action",

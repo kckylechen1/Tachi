@@ -82,10 +82,15 @@ pub(super) fn typed_context() -> (
     let profile = crate::dispatch_profile::ResolvedDispatchProfile {
         selected_profile: Some("typed-profile".to_string()),
         agent: "codex".to_string(),
+        selected_model: Some("gpt-5.6-terra".to_string()),
+        launch_command: Vec::new(),
+        harness_transport: None,
+        harness_server_url: None,
         role: Some("implementer".to_string()),
         tool_profile: Some("typed-tool-profile".to_string()),
         auto_capability_bundle: true,
         mcp_access: mcp_access(&["profile-mcp"], false),
+        required_skills: vec!["typed-skill".to_string()],
         evidence_required: vec!["profile evidence".to_string()],
         fallback_chain: vec!["profile fallback".to_string()],
         credential_profiles: Vec::new(),
@@ -131,7 +136,20 @@ async fn typed_prompt_from_pre_projection_snapshot(
     server: &MemoryServer,
     params: &crate::tool_params::TachiDispatchParams,
 ) -> crate::dispatch_ops::prompt::PromptAssembly {
-    let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
+    let request = tachi_params::StaffAssignmentRequest {
+        staffing_reason: params.staffing_reason,
+        task: params.task.clone(),
+        profile: params.profile.clone(),
+        worker: params.agent.clone(),
+        stage: params.stage.clone(),
+        execution_level: params.execution_level,
+        issue_ref: params.issue_ref.clone(),
+        pr_ref: params.pr_ref.clone(),
+        flow_id: params.flow_id.clone(),
+        project: params.project.clone(),
+        completion_predicate: params.completion_predicate.clone(),
+        recommendation_ref: None,
+    };
     let mut resolved_params = params.clone();
     let raw_profile = resolved_params.profile.clone();
     let profile = crate::dispatch_profile::resolve_and_apply_dispatch_profile_for_server(

@@ -42,8 +42,8 @@ use tachi_dispatch::{
 };
 
 /// Authority issuance records the admitted values in the server-owned grant.
-pub(super) fn mint_execution_grant(
-    params: &mut TachiDispatchParams,
+pub(super) fn mint_execution_grant_from_mechanics(
+    params: &mut DispatchLaunchMechanics,
     grant_id: impl Into<String>,
     env_resolution: &crate::exec_env_ops::EnvResolution,
 ) -> Result<tachi_params::ExecutionGrant, String> {
@@ -107,9 +107,8 @@ fn canonical_credential_profiles(raw: &[String]) -> Vec<String> {
 /// refuses to hand it back for any other version — including an unknown one.
 /// That is the whole point of an evidence-based certification: it expires when
 /// the evidence stops describing the thing you are about to run.
-pub(super) fn compile_dispatch_contract(
-    params: &mut TachiDispatchParams,
-    _request: &tachi_params::StaffAssignmentRequest,
+pub(super) fn compile_dispatch_contract_from_mechanics(
+    params: &mut DispatchLaunchMechanics,
     agent_norm: &str,
     harness_transport: &str,
     resolved_profile: &ResolvedDispatchProfile,
@@ -164,6 +163,61 @@ pub(super) fn compile_dispatch_contract(
     // as `full`. Omitted input projects to the explicit default spelling.
     params.permission_profile =
         admitted_permission_spelling.or_else(|| Some(permission_profile.as_str().to_string()));
+    Ok(contract)
+}
+
+#[cfg(test)]
+fn test_mechanics(params: &TachiDispatchParams) -> DispatchLaunchMechanics {
+    DispatchLaunchMechanics {
+        cwd: params.cwd.clone(),
+        env_id: params.env_id.clone(),
+        unmanaged_cwd: params.unmanaged_cwd.unwrap_or(false),
+        skills: params.skills.clone(),
+        model: params.model.clone(),
+        permission_profile: params.permission_profile.clone(),
+        allowed_tools: params.allowed_tools.clone(),
+        max_turns: params.max_turns,
+        sandbox: params.sandbox.clone(),
+        command: params.command.clone(),
+        credential_profiles: params.credential_profiles.clone(),
+        mcp_access: params.mcp_access.clone(),
+        inject_tachi_mcp: params.inject_tachi_mcp,
+        inject_hub_mcps: params.inject_hub_mcps,
+        allowed_mcp_servers: params.allowed_mcp_servers.clone(),
+        timeout_secs: params.timeout_secs,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn mint_execution_grant(
+    params: &mut TachiDispatchParams,
+    grant_id: impl Into<String>,
+    env_resolution: &crate::exec_env_ops::EnvResolution,
+) -> Result<tachi_params::ExecutionGrant, String> {
+    mint_execution_grant_from_mechanics(&mut test_mechanics(params), grant_id, env_resolution)
+}
+
+#[cfg(test)]
+pub(super) fn compile_dispatch_contract(
+    params: &mut TachiDispatchParams,
+    agent_norm: &str,
+    harness_transport: &str,
+    resolved_profile: &ResolvedDispatchProfile,
+    qualifications: &[ProviderQualification],
+    backend_version: Option<&str>,
+) -> Result<EffectiveContract, String> {
+    let mut mechanics = test_mechanics(params);
+    let contract = compile_dispatch_contract_from_mechanics(
+        &mut mechanics,
+        agent_norm,
+        harness_transport,
+        resolved_profile,
+        qualifications,
+        backend_version,
+    )?;
+    params.sandbox = mechanics.sandbox;
+    params.skills = mechanics.skills;
+    params.permission_profile = mechanics.permission_profile;
     Ok(contract)
 }
 
@@ -263,10 +317,8 @@ mod tests {
     macro_rules! compile_contract_from_legacy_projection {
         ($params:expr, $agent:expr, $transport:expr, $profile:expr, $qualifications:expr, $version:expr $(,)?) => {{
             let params = $params;
-            let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(&*params);
             compile_dispatch_contract(
                 params,
-                &request,
                 $agent,
                 $transport,
                 $profile,

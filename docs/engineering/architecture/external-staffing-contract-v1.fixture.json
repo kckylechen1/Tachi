@@ -2,12 +2,17 @@
   "schema_version": "external_staffing.v1",
   "issue": 1324,
   "canonical_request": {
-    "rust_type": "tachi_params::TachiDispatchParams",
-    "adoption_entrypoint": "crate::dispatch_ops::handle_tachi_dispatch",
+    "rust_type": "tachi_params::StaffAssignmentRequest",
+    "adoption_entrypoint": "crate::dispatch_ops::launch_staff_assignment",
     "operations": [
       "start",
       "status"
     ]
+  },
+  "bootstrap_diagnostic_flat_route": {
+    "rust_type": "tachi_params::TachiDispatchParams",
+    "adoption_entrypoint": "crate::dispatch_ops::handle_tachi_dispatch",
+    "scope": "sole diagnostic bootstrap route; never a Staff adoption path"
   },
   "accepted_start": {
     "required_fields": [
@@ -40,11 +45,11 @@
   },
   "observed_topology": {
     "adoption_entrypoint_definitions": [
-      "crates/tachi-server/src/dispatch_ops/dispatch.rs::handle_tachi_dispatch"
+      "crates/tachi-server/src/dispatch_ops/dispatch.rs::launch_canonical_dispatch"
     ],
     "production_adopters": [
       "crates/tachi-server/src/bootstrap/poke_cli/probes/dispatch.rs::probe_dispatch_mock::dispatch-kernel-call#1",
-      "crates/tachi-server/src/staffing_ops/mod.rs::staff_start::dispatch-kernel-call#1"
+      "crates/tachi-server/src/staffing_ops/mod.rs::staff_start::typed-staff-launch-call#1"
     ],
     "request_builders": [
       "crates/tachi-server/src/bootstrap/poke_cli/probes/dispatch.rs::probe_dispatch_mock::request-literal#1"
@@ -59,7 +64,8 @@
       "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch_completion::write_json_atomic#1",
       "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch_completion::write_json_atomic#2"
     ],
-    "linked_result_copies": []
+    "linked_result_copies": [],
+    "independent_staff_lifecycles": []
   },
   "contraction_budgets": {
     "launch_kernels": 1,
@@ -69,6 +75,7 @@
     "legacy_secondary_ledger_roots": 0,
     "legacy_staffing_projection_writer_sites": 6,
     "linked_result_copies": 0,
+    "independent_staff_lifecycles": 0,
     "direction": "budgets may only decrease as deletion leaves land; [1319-B7] retired the Shell runtime (shell_ops/, tachi_shell facade, TachiShellParams) and replaced it with the minimal tachi_staff facade delegating to the canonical staffing_ops contract (E1). [1319-C2] removed the tachi_task Dispatch arm (and its TachiDispatchParams rebuild), the dispatch_reason + inject_card fields, and the wait/cancel actions — dropping the Task dispatch adopter/builder and removing tachi_task from launch_advertising_facades. [1319-D1] removed the no-real-authority Arena actions (open/abort/close/reap) and collect's linked-result COPY (now returns a canonical result.md reference without copying), and stopped Arena's standalone board.json write — board now reads canonical state. [1319-D2] deleted the Arena facade entirely (tachi_arena route, TachiArenaParams, arena_ops/, the arena probe, the arena-root env guard, and all mission prompt/status/result copies): the canonical replacements already existed (tachi_staff(start) for spawn, tachi_task(board) for board, Task submit / canonical result ref for collect). launch_advertising_facades dropped 1→0 (tachi_arena was the last launcher); production_adopters 3→2; request_builders 4→3 then 3→1 in [1692-C5] (StaffAssignmentRequest ownership boundary); legacy_secondary_ledger_roots 2→1 (arena_root removed) then 1→0 in [1319-E2] (shell_runs_root renamed flow_runs_root — the canonical runs root is no longer Shell-owned, so the census path rule no longer miscounts it as a legacy owner); legacy_staffing_projection_writer_sites 11→6 (all arena sites gone); the tachi_arena and tachi_shell legacy_debt entries retired (the shell_runs_root rename in [1319-E2] retires the last Shell-name debt: the canonical runs root is now named flow_runs_root)."
   },
   "legacy_debt": [],

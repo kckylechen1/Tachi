@@ -19,12 +19,19 @@ pub(crate) use acpx::run_acpx_control_from_status;
 pub(crate) use board::{collect_run_task_for_server, handle_tachi_board, runs_dir_for_server};
 #[cfg(test)]
 pub(crate) use dispatch::apply_unlocked_vault_env;
+#[cfg(test)]
+pub(crate) use dispatch::background_dispatch_cleanup_complete;
 pub(crate) use dispatch::dispatch_runs_root;
 pub(crate) use dispatch::handle_tachi_dispatch;
+pub(crate) use dispatch::launch_staff_assignment;
 #[cfg(test)]
 pub(crate) use dispatch::new_dispatch_id;
 pub(crate) use dispatch::recover_orphaned_dispatch_runs;
 pub(crate) use dispatch::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
+pub(crate) use dispatch_v2::stamp_route_decision_id;
+pub(crate) use dispatch_v2::status_json_lock_for;
+#[cfg(test)]
+pub(crate) use dispatch_v2::write_status_json;
 pub(crate) use harness::{
     harness_server_attach_ready, probe_harness_server_status, probe_harness_server_status_with_env,
 };

@@ -18,7 +18,8 @@ use crate::agent_registry::{
     resolve_dispatch_agent,
 };
 use crate::dispatch_profile::{
-    resolve_and_apply_dispatch_profile_for_server, ResolvedDispatchProfile,
+    resolve_and_apply_dispatch_profile_for_server,
+    resolve_and_apply_staff_assignment_profile_for_server, ResolvedDispatchProfile,
 };
 use crate::tool_params::TachiDispatchParams;
 use crate::vault_ops::read_unlocked_vault_secret;
@@ -127,6 +128,8 @@ mod credential_apply;
 mod credentials;
 mod dedupe;
 mod execution;
+#[cfg(test)]
+pub(crate) use execution::background_dispatch_cleanup_complete;
 mod flow_setup;
 mod harness_preflight;
 mod plan_stage;
@@ -139,7 +142,11 @@ mod workspace_setup;
 mod tests;
 
 use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
-use self::authority::{compile_dispatch_contract, contract_receipt, mint_execution_grant};
+#[cfg(test)]
+use self::authority::{compile_dispatch_contract, mint_execution_grant};
+use self::authority::{
+    compile_dispatch_contract_from_mechanics, contract_receipt, mint_execution_grant_from_mechanics,
+};
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{
@@ -153,7 +160,7 @@ use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
 use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
 use self::plan_stage::{run_v2_plan_stage, PlanStageInputs};
 use self::response_helpers::*;
-use self::start::assert_nested_mcp_profile_projection;
+use self::start::assert_nested_mcp_profile_mechanics;
 use self::start::*;
 use self::workspace_setup::prepare_workspace_and_mcp;
 
@@ -215,6 +222,13 @@ pub(crate) async fn handle_tachi_dispatch(
     server: &MemoryServer,
     mut params: TachiDispatchParams,
 ) -> Result<String, String> {
+    enforce_dispatch_depth(server)?;
+    let (_, execution_level) = crate::host_profile::authorize_dispatch(params.execution_level)?;
+    let start = resolve_dispatch_start(server, &mut params, Utc::now(), execution_level)?;
+    launch_canonical_dispatch(server, start).await
+}
+
+fn enforce_dispatch_depth(server: &MemoryServer) -> Result<(), String> {
     // #1251: fail-closed recursive-dispatch depth gate — BEFORE any run
     // directory, workspace, prompt, credential, or child process. The depth is
     // read from the SESSION identity (populated from the per-call
@@ -242,12 +256,15 @@ pub(crate) async fn handle_tachi_dispatch(
         crate::session_identity::MAX_DISPATCH_DEPTH,
     )?;
 
-    // Fail before ANY run directory, workspace, prompt, or child process is
-    // created. This is the machine boundary; confirmation for a permitted L3
-    // action remains the responsibility of that action's existing gate.
-    let (host_profile, execution_level) =
-        crate::host_profile::authorize_dispatch(params.execution_level)?;
-    let now = Utc::now();
+    Ok(())
+}
+
+async fn launch_canonical_dispatch(
+    server: &MemoryServer,
+    start: DispatchStart,
+) -> Result<String, String> {
+    let (host_profile, _) =
+        crate::host_profile::authorize_dispatch(start.resolved_assignment.execution_level)?;
     let DispatchStart {
         dispatch_id,
         request,
@@ -263,11 +280,13 @@ pub(crate) async fn handle_tachi_dispatch(
         agent_norm,
         resolved_profile,
         resolved_assignment,
+        resolved_recommendation: _,
         profile_payload,
         workspace_dir,
         inject_card,
         verbose,
-    } = resolve_dispatch_start(server, &mut params, now, execution_level)?;
+        mut mechanics,
+    } = start;
 
     // 0a. Resolve the execution-environment binding through the fail-safe gate
     // (#894 S1) before ANY workspace/preflight/spawn work. env_id → cwd from the
@@ -276,37 +295,18 @@ pub(crate) async fn handle_tachi_dispatch(
     // (status ledger, completion predicate, launcher), and the resolution is
     // stamped into status.json so the ledger records managed/unmanaged/default.
     let env_resolution = server.resolve_dispatch_env_binding(
-        params.env_id.as_deref(),
+        mechanics.env_id.as_deref(),
         raw_cwd.as_deref(),
-        params.unmanaged_cwd.unwrap_or(false),
+        mechanics.unmanaged_cwd,
     )?;
     let status_cwd = env_resolution
         .cwd()
         .map(|cwd| cwd.to_string())
         .or_else(|| raw_cwd.clone());
     if let Some(resolved_cwd) = env_resolution.cwd() {
-        params.cwd = Some(resolved_cwd.to_string());
+        mechanics.cwd = Some(resolved_cwd.to_string());
     }
     let env_stamp = env_resolution.stamp();
-
-    // #1001: zero-ceremony presence claim — auto-register/heartbeat so a
-    // briefing read from another session sees this dispatch is in flight.
-    // Degrades to no-op on any storage error; never fails dispatch.
-    crate::claims_ops::auto_register_or_heartbeat_claim(
-        server,
-        &crate::claims_ops::ClaimHookInput {
-            issue_ref: request.issue_ref.clone(),
-            flow_id: request.flow_id.clone(),
-            dispatch_id: Some(dispatch_id.clone()),
-            // TachiDispatchParams has no bare `branch` field (branch naming is
-            // an internal detail of workspace/env provisioning, not a
-            // dispatch param); env_resolution's cwd is the closest available
-            // identity and is not branch-shaped, so this hook leaves branch
-            // unset rather than guessing.
-            branch: None,
-            declared_file_scope: None,
-        },
-    );
 
     // 0b. Compile the effective-authority contract before ANY stage/preflight/
     // spawn work (#894 S2d). This is the single choke-point every dispatch
@@ -345,14 +345,13 @@ pub(crate) async fn handle_tachi_dispatch(
     // narrow this list; its mounted output is the sole downstream skill list.
     let (requested_skills, stage_instruction) =
         resolve_assignment_skills(&request, &requested_skills);
-    params.skills = requested_skills;
+    mechanics.skills = requested_skills;
     let backend_version = tachi_dispatch::probe_provider_version(
         &agent_norm,
         tachi_dispatch::transport_kind(&harness_transport),
     );
-    let effective_contract = compile_dispatch_contract(
-        &mut params,
-        &request,
+    let effective_contract = compile_dispatch_contract_from_mechanics(
+        &mut mechanics,
         &agent_norm,
         &harness_transport,
         &resolved_profile,
@@ -360,12 +359,26 @@ pub(crate) async fn handle_tachi_dispatch(
         backend_version.as_deref(),
     )?;
     let authority_receipt = contract_receipt(&effective_contract);
-    assert_nested_mcp_profile_projection(&params, &resolved_profile)?;
-    let execution_grant = mint_execution_grant(
-        &mut params,
+    assert_nested_mcp_profile_mechanics(&mechanics, &resolved_profile)?;
+    let execution_grant = mint_execution_grant_from_mechanics(
+        &mut mechanics,
         format!("{dispatch_id}:authority"),
         &env_resolution,
     )?;
+    // #1001: zero-ceremony presence claim — auto-register/heartbeat only after
+    // authority compilation and grant minting have admitted this dispatch. A
+    // refusal must leave no active claim for an execution that cannot start.
+    // Storage errors remain a no-op and never fail an admitted dispatch.
+    crate::claims_ops::auto_register_or_heartbeat_claim(
+        server,
+        &crate::claims_ops::ClaimHookInput {
+            issue_ref: request.issue_ref.clone(),
+            flow_id: request.flow_id.clone(),
+            dispatch_id: Some(dispatch_id.clone()),
+            branch: None,
+            declared_file_scope: None,
+        },
+    );
     let mcp_access = execution_grant.mcp_access.as_ref();
     let inject_tachi = mcp_access
         .and_then(|access| access.inject_tachi_mcp)
@@ -881,4 +894,28 @@ pub(crate) async fn handle_tachi_dispatch(
         trajectory_path: &trajectory_path,
         workspace_dir: &workspace_dir_for_response,
     })
+}
+
+/// Typed Staff ingress. Admission and recommendation validation happen before
+/// the canonical kernel can create a receipt or any artifact. The legacy
+/// bootstrap handler remains the sole compatibility entry for its flat probe
+/// payload; Staff itself only supplies semantic request data.
+pub(crate) async fn launch_staff_assignment(
+    server: &MemoryServer,
+    request: tachi_params::StaffAssignmentRequest,
+) -> Result<
+    (
+        String,
+        tachi_params::ResolvedStaffAssignment,
+        Option<memcore::RouteRecommendationRow>,
+    ),
+    String,
+> {
+    enforce_dispatch_depth(server)?;
+    let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
+    let start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    let assignment = start.resolved_assignment.clone();
+    let recommendation = start.resolved_recommendation.clone();
+    let raw = launch_canonical_dispatch(server, start).await?;
+    Ok((raw, assignment, recommendation))
 }
