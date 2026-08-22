@@ -95,9 +95,8 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         .expect("handler contains the grant mint marker")
         .1;
     let post_grant_handler = after_grant;
-    let has_post_grant_params = |source: &str| {
-        contains_identifier(source, "params") || rejects_flat_params(source)
-    };
+    let has_post_grant_params =
+        |source: &str| contains_identifier(source, "params") || rejects_flat_params(source);
     assert!(
         !has_post_grant_params(post_grant_handler),
         "post-grant handler code must read assignment/grant, never TachiDispatchParams"
@@ -383,7 +382,10 @@ fn execution_grant_records_admitted_owner_fields_independently_of_raw_ingress() 
         max_turns: Some(7),
         timeout_secs: 42,
     };
-    assert_eq!(grant, expected, "P1/P2 grant baseline is literal typed authority");
+    assert_eq!(
+        grant, expected,
+        "P1/P2 grant baseline is literal typed authority"
+    );
     assert_eq!(grant.env_id, None, "unmanaged authority has no lease id");
     assert!(grant.unmanaged_cwd_allowed);
     assert_eq!(
@@ -407,12 +409,17 @@ fn execution_grant_records_admitted_owner_fields_independently_of_raw_ingress() 
     grant_mutant!("env_id", |m: &mut tachi_params::ExecutionGrant| m.env_id =
         Some("mutant".to_string()));
     grant_mutant!("unmanaged_cwd", |m: &mut tachi_params::ExecutionGrant| m
-        .unmanaged_cwd_allowed = false);
-    grant_mutant!("allowed_cwd", |m: &mut tachi_params::ExecutionGrant| m.allowed_cwd = None);
-    grant_mutant!("credential_profiles", |m: &mut tachi_params::ExecutionGrant| m
-        .credential_profiles
-        .clear());
-    grant_mutant!("mcp_access", |m: &mut tachi_params::ExecutionGrant| m.mcp_access =
+        .unmanaged_cwd_allowed =
+        false);
+    grant_mutant!("allowed_cwd", |m: &mut tachi_params::ExecutionGrant| m
+        .allowed_cwd =
+        None);
+    grant_mutant!(
+        "credential_profiles",
+        |m: &mut tachi_params::ExecutionGrant| m.credential_profiles.clear()
+    );
+    grant_mutant!("mcp_access", |m: &mut tachi_params::ExecutionGrant| m
+        .mcp_access =
         Some(tachi_params::DispatchMcpAccessParams {
             inject_tachi_mcp: None,
             inject_hub_mcps: None,
@@ -427,12 +434,19 @@ fn execution_grant_records_admitted_owner_fields_independently_of_raw_ingress() 
     grant_mutant!("allowed_tools", |m: &mut tachi_params::ExecutionGrant| m
         .allowed_tools
         .push("Execute".to_string()));
-    grant_mutant!("permission_profile", |m: &mut tachi_params::ExecutionGrant| m
-        .permission_profile = Some("default".to_string()));
-    grant_mutant!("sandbox", |m: &mut tachi_params::ExecutionGrant| m.sandbox =
+    grant_mutant!(
+        "permission_profile",
+        |m: &mut tachi_params::ExecutionGrant| m.permission_profile = Some("default".to_string())
+    );
+    grant_mutant!("sandbox", |m: &mut tachi_params::ExecutionGrant| m
+        .sandbox =
         Some("read-only".to_string()));
-    grant_mutant!("max_turns", |m: &mut tachi_params::ExecutionGrant| m.max_turns = Some(8));
-    grant_mutant!("timeout_secs", |m: &mut tachi_params::ExecutionGrant| m.timeout_secs = 43);
+    grant_mutant!("max_turns", |m: &mut tachi_params::ExecutionGrant| m
+        .max_turns =
+        Some(8));
+    grant_mutant!("timeout_secs", |m: &mut tachi_params::ExecutionGrant| m
+        .timeout_secs =
+        43);
 }
 
 #[test]

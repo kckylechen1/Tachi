@@ -166,7 +166,10 @@ mod tests {
                 .expect("typed preflight failure writes status"),
         )
         .expect("typed preflight status JSON");
-        assert_eq!(status["state"], Value::String("TASK_STATE_FAILED".to_string()));
+        assert_eq!(
+            status["state"],
+            Value::String("TASK_STATE_FAILED".to_string())
+        );
         assert_eq!(status["agent"], Value::String("custom".to_string()));
         assert_eq!(
             status["harness_transport"],
