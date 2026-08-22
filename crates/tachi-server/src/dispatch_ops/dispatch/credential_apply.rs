@@ -11,7 +11,7 @@ pub(super) fn inject_legacy_vault_env(
     execution: &mut DispatchExecution,
     trajectory_path: &Path,
     dispatch_id: &str,
-    agent_norm: &str,
+    assignment: &tachi_params::ResolvedStaffAssignment,
 ) {
     let legacy_vault_env = unlocked_vault_child_env_map(server, cwd);
     let legacy_vault_env_count = legacy_vault_env.len();
@@ -33,7 +33,7 @@ pub(super) fn inject_legacy_vault_env(
             json!({
                 "event": "legacy_vault_env_injected",
                 "dispatch_id": dispatch_id,
-                "agent": agent_norm,
+                "agent": assignment.selected_worker,
                 "count": legacy_vault_env_count,
                 "timestamp": Utc::now().to_rfc3339(),
             }),
@@ -46,8 +46,7 @@ pub(super) struct CredentialApplyInputs<'a> {
     pub(super) request: &'a tachi_params::StaffAssignmentRequest,
     pub(super) grant: &'a tachi_params::ExecutionGrant,
     pub(super) raw_credential_profiles: &'a [String],
-    pub(super) agent_norm: &'a str,
-    pub(super) selected_profile: Option<&'a str>,
+    pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
     pub(super) workspace_dir: &'a Path,
     pub(super) trajectory_path: &'a Path,
     pub(super) dispatch_id: &'a str,
@@ -80,8 +79,8 @@ pub(super) fn apply_materialized_credentials(
     let dispatch_credentials = match materialize_dispatch_credentials(
         inputs.server,
         inputs.grant,
-        inputs.agent_norm,
-        inputs.selected_profile,
+        &inputs.assignment.selected_worker,
+        inputs.assignment.selected_profile.as_deref(),
         inputs.workspace_dir,
     ) {
         Ok(materialized) => materialized,
@@ -91,7 +90,7 @@ pub(super) fn apply_materialized_credentials(
                 json!({
                     "event": "credentials_materialization_failed",
                     "dispatch_id": inputs.dispatch_id,
-                    "agent": inputs.agent_norm,
+                    "agent": inputs.assignment.selected_worker,
                     "credential_profiles": inputs.raw_credential_profiles,
                     "error": err.clone(),
                     "timestamp": Utc::now().to_rfc3339(),
@@ -109,7 +108,7 @@ pub(super) fn apply_materialized_credentials(
                 None,
                 inputs.plan_duration_ms,
                 Some(json!({
-                    "agent": inputs.agent_norm,
+                    "agent": inputs.assignment.selected_worker,
                     "task": inputs.request.task.clone(),
                     "state": "TASK_STATE_FAILED",
                     "updated_at": Utc::now().to_rfc3339(),
@@ -145,7 +144,7 @@ pub(super) fn apply_materialized_credentials(
             json!({
                 "event": "credentials_materialized",
                 "dispatch_id": inputs.dispatch_id,
-                "agent": inputs.agent_norm,
+                "agent": inputs.assignment.selected_worker,
                 "credential_profiles": inputs.raw_credential_profiles,
                 "reports": dispatch_credentials
                     .reports

@@ -35,7 +35,6 @@ pub(super) fn resolve_dispatch_start(
     // stage and other profile defaults reach every typed consumer.
     let raw_request_profile = params.profile.clone();
     let raw_cwd = params.cwd.clone();
-    let raw_credential_profiles = params.credential_profiles.clone();
     // #1815 P1: resolve into the acknowledged compatibility projection first.
     // The canonical outputs below are minted before that projection reaches the
     // remaining P2/P3 consumers; final #1814 deletes this bridge entirely.
@@ -43,6 +42,11 @@ pub(super) fn resolve_dispatch_start(
     let resolved_profile =
         resolve_and_apply_dispatch_profile_for_server(server, &mut legacy_projection)?;
     reconcile_resolved_profile_compatibility(&mut legacy_projection, &resolved_profile);
+    // Credential failure receipts are forensic evidence, not launch authority.
+    // Capture the resolved compatibility projection before the grant trims and
+    // deduplicates it so profile-added defaults and caller spelling are both
+    // visible if materialization fails.
+    let raw_credential_profiles = legacy_projection.credential_profiles.clone();
     let mut request =
         tachi_params::StaffAssignmentRequest::from_dispatch_params(&legacy_projection);
     request.profile = raw_request_profile;

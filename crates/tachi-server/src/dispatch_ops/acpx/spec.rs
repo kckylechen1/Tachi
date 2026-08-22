@@ -30,7 +30,6 @@ pub(in crate::dispatch_ops) fn build_acpx_command_spec(
     request: &StaffAssignmentRequest,
     assignment: &ResolvedStaffAssignment,
     grant: &ExecutionGrant,
-    agent: &str,
     prompt_file: &Path,
 ) -> Result<AcpxCommandSpec, String> {
     // Defense-in-depth (#894 S0 round 2): this must run BEFORE any preflight
@@ -68,7 +67,7 @@ pub(in crate::dispatch_ops) fn build_acpx_command_spec(
         .as_ref()
         .map(|cwd| cwd.to_string_lossy().to_string())
         .unwrap_or_else(|| current_dir_string().unwrap_or_else(|| ".".to_string()));
-    let acpx_agent = resolve_acpx_agent(agent)?;
+    let acpx_agent = resolve_acpx_agent(&assignment.selected_backend)?;
     let run_mode = resolve_acpx_run_mode()?;
     let session = if run_mode == AcpxRunMode::Session {
         Some(resolve_acpx_session(request, assignment)?)

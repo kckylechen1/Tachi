@@ -20,7 +20,6 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
     assignment: &ResolvedStaffAssignment,
     grant: &ExecutionGrant,
     command: &[String],
-    agent: &str,
     prompt: &str,
 ) -> Result<NativeAcpRunSpec, String> {
     // Defense-in-depth (#894 S0 round 2): runs BEFORE command resolution/
@@ -31,6 +30,7 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
     // reaches this function through a path that bypassed the entry check.
     tachi_dispatch::reject_unsupported_sandbox("acp-native", grant.sandbox.as_deref())?;
 
+    let agent = assignment.selected_backend.as_str();
     let (command, args, command_source) = resolve_native_acp_command(command, agent)?;
     if !crate::utils::is_trusted_command(&command) {
         return Err(format!(
@@ -215,11 +215,7 @@ mod tests {
     use super::*;
     use crate::tool_params::TachiDispatchParams;
 
-    fn build_spec(
-        params: &TachiDispatchParams,
-        agent: &str,
-        prompt: &str,
-    ) -> Result<NativeAcpRunSpec, String> {
+    fn build_spec(params: &TachiDispatchParams, prompt: &str) -> Result<NativeAcpRunSpec, String> {
         let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
         let backend = params.agent.clone().unwrap_or_else(|| "custom".to_string());
         let assignment = tachi_params::ResolvedStaffAssignment {
@@ -256,7 +252,6 @@ mod tests {
             &assignment,
             &grant,
             &params.command,
-            agent,
             prompt,
         )
     }
@@ -308,7 +303,7 @@ mod tests {
         let mut params = params();
         params.sandbox = Some("workspace-write".to_string());
 
-        let err = build_spec(&params, "custom", "hello")
+        let err = build_spec(&params, "hello")
             .expect_err("native ACP has no sandbox concept and must fail closed");
         assert!(
             err.contains("acp-native") && err.contains("workspace-write"),
@@ -320,8 +315,7 @@ mod tests {
     #[test]
     fn native_acp_builds_spec_without_sandbox() {
         let params = params();
-        let spec = build_spec(&params, "custom", "hello")
-            .expect("no sandbox requested should build cleanly");
+        let spec = build_spec(&params, "hello").expect("no sandbox requested should build cleanly");
         assert_eq!(spec.command, "python3");
     }
 }

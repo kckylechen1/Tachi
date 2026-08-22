@@ -5,7 +5,6 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) trajectory_path: &'a Path,
     pub(super) workspace_dir: &'a Path,
     pub(super) dispatch_id: &'a str,
-    pub(super) agent_norm: &'a str,
     pub(super) request: &'a tachi_params::StaffAssignmentRequest,
     pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
     pub(super) grant: &'a tachi_params::ExecutionGrant,
@@ -49,7 +48,7 @@ pub(super) fn prepare_dispatch_backend(
             trajectory_path: ctx.trajectory_path,
             workspace_dir: ctx.workspace_dir,
             dispatch_id: ctx.dispatch_id,
-            agent_norm: ctx.agent_norm,
+            assignment: ctx.assignment,
             request: ctx.request,
             backend,
             error: err,
@@ -69,7 +68,7 @@ pub(super) fn prepare_dispatch_backend(
             ctx.server,
             ctx.dispatch_id,
             "backend",
-            Some(ctx.agent_norm),
+            Some(&ctx.assignment.selected_backend),
             ctx.request.project.as_deref(),
         );
     };
@@ -86,7 +85,6 @@ pub(super) fn prepare_dispatch_backend(
             ctx.request,
             ctx.assignment,
             ctx.grant,
-            ctx.agent_norm,
             &acpx_prompt_path,
         ) {
             Ok(spec) => spec,
@@ -100,7 +98,7 @@ pub(super) fn prepare_dispatch_backend(
             json!({
                 "event": "execution_backend_prepared",
                 "dispatch_id": ctx.dispatch_id,
-                "agent": ctx.agent_norm,
+                "agent": ctx.assignment.selected_backend,
                 "execution_backend": "acpx",
                 "acpx": acpx_spec.metadata.clone(),
                 "timestamp": Utc::now().to_rfc3339(),
@@ -115,7 +113,6 @@ pub(super) fn prepare_dispatch_backend(
             ctx.assignment,
             ctx.grant,
             ctx.command,
-            ctx.agent_norm,
             ctx.prompt,
         ) {
             Ok(spec) => spec,
@@ -129,7 +126,7 @@ pub(super) fn prepare_dispatch_backend(
             json!({
                 "event": "execution_backend_prepared",
                 "dispatch_id": ctx.dispatch_id,
-                "agent": ctx.agent_norm,
+                "agent": ctx.assignment.selected_backend,
                 "execution_backend": "acp_native",
                 "acp_native": native_spec.metadata.clone(),
                 "timestamp": Utc::now().to_rfc3339(),
@@ -138,7 +135,7 @@ pub(super) fn prepare_dispatch_backend(
         execution_backend_metadata = Some(native_spec.metadata.clone());
         DispatchExecution::NativeAcp(native_spec)
     } else {
-        let cmd = match ctx.agent_norm {
+        let cmd = match ctx.assignment.selected_backend.as_str() {
             "claude" => build_claude_command(
                 ctx.assignment,
                 ctx.grant,
@@ -183,4 +180,129 @@ pub(super) fn prepare_dispatch_backend(
         acpx_enabled,
         native_acp_enabled,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assignment(
+        worker: &str,
+        backend: &str,
+        model: Option<&str>,
+    ) -> tachi_params::ResolvedStaffAssignment {
+        let mut assignment = tachi_params::ResolvedStaffAssignment::new(
+            "assignment-only-selector",
+            tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            worker,
+            backend,
+        );
+        if let Some(model) = model {
+            assignment = assignment.with_model(model);
+        }
+        assignment
+    }
+
+    fn grant(cwd: &str) -> tachi_params::ExecutionGrant {
+        tachi_params::ExecutionGrant {
+            grant_id: "backend-selector-grant".to_string(),
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: Some(cwd.into()),
+            credential_profiles: Vec::new(),
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: Some("default".to_string()),
+            sandbox: None,
+            max_turns: None,
+            timeout_secs: 5,
+        }
+    }
+
+    fn prepared_command(
+        assignment: &tachi_params::ResolvedStaffAssignment,
+        grant: &tachi_params::ExecutionGrant,
+        command: &[String],
+    ) -> tokio::process::Command {
+        let temp = tempfile::tempdir().expect("backend selector tempdir");
+        let request = tachi_params::StaffAssignmentRequest::new(
+            tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            "select from assignment",
+        );
+        let prepared = prepare_dispatch_backend(DispatchBackendContext {
+            server: &crate::tests::make_server(),
+            trajectory_path: &temp.path().join("trajectory.jsonl"),
+            workspace_dir: temp.path(),
+            dispatch_id: "assignment-only-selector",
+            request: &request,
+            assignment,
+            grant,
+            command,
+            prompt: "task",
+            prompt_md_path: &temp.path().join("prompt.md"),
+            mcp_config_path: None,
+            v2: false,
+            plan_generated_at: None,
+            plan_duration_ms: None,
+            harness_transport: "cli",
+            harness_server_url: &None,
+            capability_bundle_card: &Value::Null,
+            timeout_secs_for_status: 5,
+        })
+        .expect("assignment-only backend selection prepares");
+        match prepared.execution {
+            DispatchExecution::Subprocess(command) => command,
+            DispatchExecution::NativeAcp(_) => panic!("cli transport must prepare a subprocess"),
+        }
+    }
+
+    #[test]
+    fn assignment_only_backend_selector_controls_claude_and_custom_launch_values() {
+        // Deliberately disagree: production selection must follow
+        // `selected_backend`, never a stale normalized ingress agent or worker.
+        let claude_assignment = assignment("custom", "claude", Some("typed-claude"));
+        let claude_grant = grant("/typed/claude-cwd");
+        let claude = prepared_command(
+            &claude_assignment,
+            &claude_grant,
+            &["poisoned-command".to_string()],
+        );
+        assert_eq!(claude.as_std().get_program(), "claude");
+        assert_eq!(
+            claude.as_std().get_current_dir(),
+            Some(Path::new("/typed/claude-cwd"))
+        );
+        assert!(claude
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair == ["--model", "typed-claude"]));
+
+        let custom_assignment = assignment("claude", "custom", None);
+        let custom_grant = grant("/typed/custom-cwd");
+        let custom = prepared_command(
+            &custom_assignment,
+            &custom_grant,
+            &[
+                "python3".to_string(),
+                "-m".to_string(),
+                "typed_worker".to_string(),
+            ],
+        );
+        assert_eq!(custom.as_std().get_program(), "python3");
+        assert_eq!(
+            custom.as_std().get_current_dir(),
+            Some(Path::new("/typed/custom-cwd"))
+        );
+        assert_eq!(
+            custom
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            vec!["-m", "typed_worker", "task"],
+        );
+    }
 }

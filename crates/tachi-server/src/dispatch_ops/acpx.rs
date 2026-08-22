@@ -20,7 +20,6 @@ mod tests {
 
     fn build_spec(
         params: &TachiDispatchParams,
-        agent: &str,
         prompt_path: &Path,
     ) -> Result<super::types::AcpxCommandSpec, String> {
         let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
@@ -53,7 +52,7 @@ mod tests {
             max_turns: params.max_turns,
             timeout_secs: params.timeout_secs,
         };
-        build_acpx_command_spec(&request, &assignment, &grant, agent, prompt_path)
+        build_acpx_command_spec(&request, &assignment, &grant, prompt_path)
     }
 
     fn params() -> TachiDispatchParams {
@@ -107,8 +106,7 @@ mod tests {
         let _legacy_mode = EnvRestore::remove("TACHI_ACPX_SESSION_MODE");
         let _session = EnvRestore::remove("TACHI_ACPX_SESSION");
         let params = params();
-        let spec = build_spec(&params, "codex", Path::new("/tmp/run/prompt.md"))
-            .expect("spec should build");
+        let spec = build_spec(&params, Path::new("/tmp/run/prompt.md")).expect("spec should build");
 
         assert_eq!(spec.command, "python3");
         assert!(spec.args.windows(2).any(|pair| pair == ["-m", "acpx"]));
@@ -150,8 +148,7 @@ mod tests {
         let _session = EnvRestore::remove("TACHI_ACPX_SESSION");
         let mut params = params();
         params.stage = Some("review".to_string());
-        let spec = build_spec(&params, "codex", Path::new("/tmp/run/prompt.md"))
-            .expect("spec should build");
+        let spec = build_spec(&params, Path::new("/tmp/run/prompt.md")).expect("spec should build");
 
         assert!(spec.args.windows(2).any(|pair| pair == ["-s", "raven"]));
         assert!(!spec.args.windows(2).any(|pair| pair == ["codex", "exec"]));
@@ -198,8 +195,7 @@ mod tests {
         let _session = EnvRestore::remove("TACHI_ACPX_SESSION");
         let mut params = params();
         params.profile = Some("codex_55_review".to_string());
-        let spec = build_spec(&params, "codex", Path::new("/tmp/run/prompt.md"))
-            .expect("spec should build");
+        let spec = build_spec(&params, Path::new("/tmp/run/prompt.md")).expect("spec should build");
 
         assert!(spec.args.windows(2).any(|pair| pair == ["-s", "raven"]));
         assert_eq!(spec.metadata["session"], json!("raven"));
@@ -218,7 +214,7 @@ mod tests {
         let mut params = params();
         params.permission_profile = Some("full".to_string());
         let _allow = EnvRestore::set("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE", "true");
-        let err = build_spec(&params, "codex", Path::new("/tmp/run/prompt.md"))
+        let err = build_spec(&params, Path::new("/tmp/run/prompt.md"))
             .expect_err("full should not map to acpx approve-all");
         assert!(err.contains("never maps acpx to --approve-all"), "{err}");
     }
@@ -240,7 +236,7 @@ mod tests {
         let mut params = params();
         params.sandbox = Some("workspace-write".to_string());
 
-        let err = build_spec(&params, "codex", Path::new("/tmp/run/prompt.md"))
+        let err = build_spec(&params, Path::new("/tmp/run/prompt.md"))
             .expect_err("acpx has no sandbox concept and must fail closed");
         assert!(
             err.contains("acpx") && err.contains("workspace-write"),
@@ -296,7 +292,7 @@ mod tests {
         let mut params = params();
         params.sandbox = Some("workspace-write".to_string());
 
-        let err = build_spec(&params, "codex", Path::new("/tmp/run/prompt.md"))
+        let err = build_spec(&params, Path::new("/tmp/run/prompt.md"))
             .expect_err("acpx has no sandbox concept and must fail closed");
 
         assert!(
@@ -323,7 +319,7 @@ mod tests {
         let _legacy_mode = EnvRestore::remove("TACHI_ACPX_SESSION_MODE");
         let _session = EnvRestore::remove("TACHI_ACPX_SESSION");
 
-        let err = build_spec(&params(), "codex", Path::new("/tmp/run/prompt.md"))
+        let err = build_spec(&params(), Path::new("/tmp/run/prompt.md"))
             .expect_err("missing acpx command should fail before dispatch");
 
         assert!(
@@ -363,7 +359,7 @@ mod tests {
         let _legacy_mode = EnvRestore::remove("TACHI_ACPX_SESSION_MODE");
         let _session = EnvRestore::remove("TACHI_ACPX_SESSION");
 
-        let err = build_spec(&params(), "codex", Path::new("/tmp/run/prompt.md"))
+        let err = build_spec(&params(), Path::new("/tmp/run/prompt.md"))
             .expect_err("unsupported Node should fail before dispatch");
 
         assert!(err.contains("requires Node >=22.13.0"), "{err}");

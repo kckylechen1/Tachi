@@ -4,7 +4,7 @@ pub(super) struct ExecutionBackendPrepareFailure<'a> {
     pub(super) trajectory_path: &'a Path,
     pub(super) workspace_dir: &'a Path,
     pub(super) dispatch_id: &'a str,
-    pub(super) agent_norm: &'a str,
+    pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
     pub(super) request: &'a tachi_params::StaffAssignmentRequest,
     pub(super) backend: &'a str,
     pub(super) error: &'a str,
@@ -23,7 +23,7 @@ pub(super) fn record_execution_backend_prepare_failure(ctx: ExecutionBackendPrep
         json!({
             "event": "execution_backend_prepare_failed",
             "dispatch_id": ctx.dispatch_id,
-            "agent": ctx.agent_norm,
+            "agent": ctx.assignment.selected_backend,
             "execution_backend": ctx.backend,
             "error": ctx.error,
             "timestamp": Utc::now().to_rfc3339(),
@@ -41,7 +41,7 @@ pub(super) fn record_execution_backend_prepare_failure(ctx: ExecutionBackendPrep
         None,
         ctx.plan_duration_ms,
         Some(json!({
-            "agent": ctx.agent_norm,
+            "agent": ctx.assignment.selected_backend,
             "task": ctx.request.task.clone(),
             "state": "TASK_STATE_FAILED",
             "updated_at": Utc::now().to_rfc3339(),

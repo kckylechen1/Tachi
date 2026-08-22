@@ -281,6 +281,10 @@ pub(crate) async fn handle_tachi_dispatch(
         raw_cwd.as_deref(),
         params.unmanaged_cwd.unwrap_or(false),
     )?;
+    let status_cwd = env_resolution
+        .cwd()
+        .map(|cwd| cwd.to_string())
+        .or_else(|| raw_cwd.clone());
     if let Some(resolved_cwd) = env_resolution.cwd() {
         params.cwd = Some(resolved_cwd.to_string());
     }
@@ -357,12 +361,12 @@ pub(crate) async fn handle_tachi_dispatch(
         backend_version.as_deref(),
     )?;
     let authority_receipt = contract_receipt(&effective_contract);
+    assert_nested_mcp_profile_projection(&params, &resolved_profile)?;
     let execution_grant = mint_execution_grant(
         &mut params,
         format!("{dispatch_id}:authority"),
         &env_resolution,
     )?;
-    assert_nested_mcp_profile_projection(&params, &resolved_profile)?;
     let mcp_access = execution_grant.mcp_access.as_ref();
     let inject_tachi = mcp_access
         .and_then(|access| access.inject_tachi_mcp)
@@ -374,7 +378,7 @@ pub(crate) async fn handle_tachi_dispatch(
     let timeout = Duration::from_secs(timeout_secs_for_status);
 
     // #1319-E1 defense-in-depth staffing-reason gate. `staffing_reason` is
-    // non-optional on `TachiDispatchParams`, so every well-typed caller carries
+    // non-optional in the typed ingress contract, so every well-typed caller carries
     // a typed reason. This is a RELEASE-ACTIVE check (not debug_assert, which
     // vanishes in release builds) so the kernel-side backstop claim holds in
     // production: a caller that somehow reached here with an out-of-variant
@@ -389,7 +393,7 @@ pub(crate) async fn handle_tachi_dispatch(
     // check can only trip a memory-safety violation or an ABI-break, both of
     // which must fail closed rather than stamp a bogus receipt.)
     if !matches!(
-        params.staffing_reason,
+        resolved_assignment.staffing_reason,
         tachi_params::TachiDispatchReason::ExplicitUserRequest
             | tachi_params::TachiDispatchReason::DurableCrossSession
             | tachi_params::TachiDispatchReason::CrossDeviceRemote
@@ -405,7 +409,7 @@ pub(crate) async fn handle_tachi_dispatch(
     // 1. Create isolated workspace directory + MCP config
     //
     // `agent_seat` is the lane identity written to `TACHI_AGENT_SEAT`, distinct
-    // from `params.tool_profile` (a shared capability selector). Use the
+    // from the shared capability selector. Use the
     // already lane-unique dispatch id so claims and runtime receipts cannot
     // collide merely because two workers share a profile.
     //
@@ -441,7 +445,7 @@ pub(crate) async fn handle_tachi_dispatch(
     // instant a dispatch is accepted, not only after the plan stage
     // succeeds. Every field serialized here is available straight off
     // `params` + `DispatchStart` — no prompt/artifact/plan dependency.
-    // `v2` is not yet decided (that needs `params.stage`, which IS already
+    // `v2` is not yet decided (that needs the resolved request stage, which IS already
     // resolved) so compute it early too; capability_bundle/feedback_rules
     // are not known yet (they come from `assemble_prompt_with_trace` /
     // `write_dispatch_artifacts` below) and are seeded as neutral
@@ -492,13 +496,13 @@ pub(crate) async fn handle_tachi_dispatch(
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
-            "cwd": raw_cwd.clone(),
+            "cwd": status_cwd.clone(),
             "completion_predicate":
                 serde_json::to_value(&request.completion_predicate).unwrap_or(Value::Null),
             // #774 round 3: stamp the dispatch's named project (if any) into
             // the receipt itself. Daemon-restart orphan recovery
             // (`recover_orphaned_dispatch_runs`) only has this on-disk
-            // status.json to read from — it has no live `TachiDispatchParams`
+            // status.json to read from — it has no live dispatch input
             // — so unless `project` rides along in the receipt, a crash
             // mid-flight silently drops a named-project dispatch's terminal
             // outcome row into the default store instead of the named one,
@@ -603,7 +607,7 @@ pub(crate) async fn handle_tachi_dispatch(
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
-            "cwd": raw_cwd.clone(),
+            "cwd": status_cwd.clone(),
             // #894 S1: record how the working directory was bound so the ledger
             // distinguishes managed (leased) envs from opted-in unmanaged cwds
             // and the daemon default.
@@ -702,7 +706,6 @@ pub(crate) async fn handle_tachi_dispatch(
             trajectory_path: &trajectory_path,
             workspace_dir: &workspace_dir,
             dispatch_id: &dispatch_id,
-            agent_norm: &agent_norm,
             request: &request,
             assignment: &resolved_assignment,
             grant: &execution_grant,
@@ -726,7 +729,7 @@ pub(crate) async fn handle_tachi_dispatch(
             &mut execution,
             &trajectory_path,
             &dispatch_id,
-            &agent_norm,
+            &resolved_assignment,
         );
 
         let credentials = apply_materialized_credentials(
@@ -735,8 +738,7 @@ pub(crate) async fn handle_tachi_dispatch(
                 request: &request,
                 grant: &execution_grant,
                 raw_credential_profiles: &raw_credential_profiles,
-                agent_norm: &agent_norm,
-                selected_profile: resolved_assignment.selected_profile.as_deref(),
+                assignment: &resolved_assignment,
                 workspace_dir: &workspace_dir,
                 trajectory_path: &trajectory_path,
                 dispatch_id: &dispatch_id,
@@ -763,14 +765,14 @@ pub(crate) async fn handle_tachi_dispatch(
             harness_server_url: &harness_server_url,
             credential_env: &credentials.env,
             dispatch_id: &dispatch_id,
-            agent_norm: &agent_norm,
+            assignment: &resolved_assignment,
             task: &request.task,
             trajectory_path: &trajectory_path,
             workspace_dir: &workspace_dir,
             v2,
             plan_generated_at: plan_generated_at.as_deref(),
             plan_duration_ms,
-            host_adapter: &host_adapter,
+            host_adapter: &resolved_assignment.host_adapter,
             execution_backend_name,
             execution_backend_metadata: &execution_backend_metadata,
             acpx_enabled,
@@ -829,7 +831,7 @@ pub(crate) async fn handle_tachi_dispatch(
     spawn_background_dispatch(BackgroundDispatchContext {
         server: server.clone(),
         dispatch_id: dispatch_id.clone(),
-        agent: agent_norm.clone(),
+        worker: resolved_assignment.selected_worker.clone(),
         project: request.project.clone(),
         stage: request.stage.clone(),
         trajectory_path: trajectory_path.clone(),
@@ -843,8 +845,8 @@ pub(crate) async fn handle_tachi_dispatch(
         feedback_rules_trace: feedback_rules_trace.clone(),
         harness_transport: harness_transport.clone(),
         harness_server_url: harness_server_url.clone(),
-        host_adapter: host_adapter.clone(),
-        opencode_sop_label: opencode_sop_label(&agent_norm, &request),
+        host_adapter: resolved_assignment.host_adapter.clone(),
+        opencode_sop_label: opencode_sop_label(&resolved_assignment.selected_worker, &request),
         execution_backend_metadata: execution_backend_metadata.clone(),
         execution,
         flow_dispatch_slot,

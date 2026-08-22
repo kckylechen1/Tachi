@@ -29,7 +29,9 @@ pub(super) enum DispatchExecution {
 pub(super) struct BackgroundDispatchContext {
     pub(super) server: MemoryServer,
     pub(super) dispatch_id: String,
-    pub(super) agent: String,
+    /// The admitted assignment's selected worker. Receipt fields retain the
+    /// historical `agent` spelling, but execution never reselects it.
+    pub(super) worker: String,
     pub(super) stage: Option<String>,
     /// The dispatch's `TachiDispatchParams::project`, threaded through so a
     /// watchdog-recorded terminal outcome row lands in the same DB a
@@ -58,7 +60,7 @@ pub(super) struct BackgroundDispatchContext {
 pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let server_clone = ctx.server;
     let d_id = ctx.dispatch_id;
-    let agent_for_watchdog = ctx.agent;
+    let worker_for_watchdog = ctx.worker;
     let project_for_watchdog = ctx.project;
     let stage_for_traj = ctx.stage;
     let traj_path_for_spawn = ctx.trajectory_path;
@@ -91,7 +93,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             json!({
                 "event": "execute_started",
                 "dispatch_id": d_id,
-                "agent": agent_for_watchdog,
+                "agent": worker_for_watchdog,
                 "stage": stage_for_traj,
                 "v2": v2_for_spawn,
                 "harness_transport": harness_transport_for_spawn.clone(),
@@ -102,7 +104,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         );
 
         let result = match execution_for_spawn {
-            DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => {
+            DispatchExecution::Subprocess(cmd) if worker_for_watchdog == "opencode" => {
                 run_opencode_sop_subprocess(
                     cmd,
                     timeout,
@@ -119,7 +121,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     &workspace_dir_for_spawn,
                     &traj_path_for_spawn,
                     &d_id,
-                    &agent_for_watchdog,
+                    &worker_for_watchdog,
                     timeout,
                 )
                 .await
@@ -143,7 +145,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     json!({
                         "event": "acp_identity_acknowledgement_persist_failed",
                         "dispatch_id": d_id,
-                        "agent": agent_for_watchdog,
+                        "agent": worker_for_watchdog,
                         "error": error,
                         "timestamp": Utc::now().to_rfc3339(),
                     }),
@@ -162,7 +164,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 &workspace_dir_for_spawn,
                 &traj_path_for_spawn,
                 &d_id,
-                &agent_for_watchdog,
+                &worker_for_watchdog,
                 &full_output,
             ) {
                 Ok(summary) => {
@@ -181,7 +183,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         json!({
                             "event": "acpx_events_persist_failed",
                             "dispatch_id": d_id,
-                            "agent": agent_for_watchdog.clone(),
+                            "agent": worker_for_watchdog.clone(),
                             "timestamp": Utc::now().to_rfc3339(),
                             "error": err,
                         }),
@@ -197,7 +199,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             let finished_event = json!({
                 "event": "subprocess_finished",
                 "dispatch_id": d_id,
-                "agent": agent_for_watchdog,
+                "agent": worker_for_watchdog,
                 "stage": stage_for_traj,
                 "exit_code": exit_code,
                 "timestamp": Utc::now().to_rfc3339(),
@@ -384,7 +386,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         &server_clone,
                         &d_id,
                         "watchdog",
-                        Some(agent_for_watchdog.as_str()),
+                        Some(worker_for_watchdog.as_str()),
                         project_for_watchdog.as_deref(),
                     );
                 }
@@ -412,7 +414,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 );
                 let metadata = json!({
                     "task_id": eval_id,
-                    "agent": format!("watchdog/{}", agent_for_watchdog),
+                    "agent": format!("watchdog/{}", worker_for_watchdog),
                     "outcome": "failure",
                     "dispatch_id": d_id,
                     // Nightly routing analysis must exclude these so "fake"
@@ -481,7 +483,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     &server_clone,
                     &d_id,
                     "watchdog",
-                    Some(agent_for_watchdog.as_str()),
+                    Some(worker_for_watchdog.as_str()),
                     project_for_watchdog.as_deref(),
                 );
             }
@@ -507,7 +509,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             json!({
                 "event": "dispatch_finished",
                 "dispatch_id": d_id,
-                "agent": agent_for_watchdog,
+                "agent": worker_for_watchdog,
                 "stage": stage_for_traj,
                 "v2": v2_for_spawn,
                 "exit_code": final_exit_code,
@@ -588,7 +590,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             Some(execute_duration_ms),
             Some(total_duration_ms),
             Some(json!({
-                "agent": agent_for_watchdog.clone(),
+                "agent": worker_for_watchdog.clone(),
                 "state": final_status_state,
                 "closure_kind": terminal_closure_kind(final_status_state),
                 "updated_at": Utc::now().to_rfc3339(),
@@ -637,7 +639,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 json!({
                     "event": "credentials_cleanup",
                     "dispatch_id": d_id,
-                    "agent": agent_for_watchdog,
+                    "agent": worker_for_watchdog,
                     "report": credential_cleanup
                         .as_ref()
                         .map(|report| serde_json::to_value(report).unwrap_or_else(|_| json!({"error": "serialize cleanup report"})))
