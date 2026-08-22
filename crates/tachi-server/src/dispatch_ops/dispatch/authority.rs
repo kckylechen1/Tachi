@@ -41,9 +41,7 @@ use tachi_dispatch::{
     ProviderQualification, SkillRequest,
 };
 
-/// #1815 P1 authority issuance. The compiled contract first applies the
-/// existing narrowing to the temporary legacy ingress; this established typed
-/// grant then records the exact values P3/#1814 will consume directly.
+/// Authority issuance records the admitted values in the server-owned grant.
 pub(super) fn mint_execution_grant(
     params: &mut TachiDispatchParams,
     grant_id: impl Into<String>,
@@ -74,76 +72,7 @@ pub(super) fn mint_execution_grant(
         max_turns: params.max_turns,
         timeout_secs: params.timeout_secs,
     };
-    apply_grant_legacy_projection(params, &grant);
-    assert_grant_legacy_projection(params, &grant, env_resolution)?;
     Ok(grant)
-}
-
-fn apply_grant_legacy_projection(
-    params: &mut TachiDispatchParams,
-    grant: &tachi_params::ExecutionGrant,
-) {
-    // #1815 P1 temporary projection, deleted by P3/#1814 once backend,
-    // credential, and launch consumers take ExecutionGrant directly.
-    if let Some(access) = grant.mcp_access.as_ref() {
-        params.inject_tachi_mcp = access.inject_tachi_mcp;
-        params.inject_hub_mcps = access.inject_hub_mcps;
-        params.allowed_mcp_servers = access.allowed_mcp_servers.clone();
-    }
-    params.allowed_tools = grant.allowed_tools.clone();
-    params.permission_profile = grant.permission_profile.clone();
-    params.sandbox = grant.sandbox.clone();
-    params.max_turns = grant.max_turns;
-    params.timeout_secs = grant.timeout_secs;
-}
-
-/// The temporary flat projection is permitted only through P2/P3 and final
-/// #1814. Reject a one-sided update rather than silently letting the launch
-/// path and the server-owned grant describe different authority.
-pub(super) fn assert_grant_legacy_projection(
-    params: &TachiDispatchParams,
-    grant: &tachi_params::ExecutionGrant,
-    env_resolution: &crate::exec_env_ops::EnvResolution,
-) -> Result<(), String> {
-    let matches = grant.env_id == env_resolution.env_id().map(str::to_string)
-        && grant.allowed_cwd == env_resolution.cwd().map(std::path::PathBuf::from)
-        && grant.unmanaged_cwd_allowed
-            == matches!(
-                env_resolution,
-                crate::exec_env_ops::EnvResolution::Unmanaged { .. }
-            )
-        && grant.credential_profiles == canonical_credential_profiles(&params.credential_profiles)
-        && grant.allowed_tools == params.allowed_tools
-        && grant.permission_profile == params.permission_profile
-        && grant.sandbox == params.sandbox
-        && grant.max_turns == params.max_turns
-        && grant.timeout_secs == params.timeout_secs;
-    let mcp_matches = match grant.mcp_access.as_ref() {
-        Some(access) => {
-            access.inject_tachi_mcp == params.inject_tachi_mcp
-                && access.inject_hub_mcps == params.inject_hub_mcps
-                && access.allowed_mcp_servers == params.allowed_mcp_servers
-                && params.mcp_access.as_ref().is_some_and(|nested| {
-                    access.allowed_facades == nested.allowed_facades
-                        && access.github_read == nested.github_read
-                        && access.write_actions == nested.write_actions
-                        && access.issue_refs == nested.issue_refs
-                        && access.pr_refs == nested.pr_refs
-                        && access.fallback == nested.fallback
-                })
-        }
-        None => {
-            !params.inject_tachi_mcp.unwrap_or(false)
-                && !params.inject_hub_mcps.unwrap_or(false)
-                && params.allowed_mcp_servers.is_empty()
-                && params.mcp_access.is_none()
-        }
-    };
-    if matches && mcp_matches {
-        Ok(())
-    } else {
-        Err("execution grant and legacy compatibility projection diverged".to_string())
-    }
 }
 
 fn canonical_credential_profiles(raw: &[String]) -> Vec<String> {
@@ -247,6 +176,44 @@ pub(super) fn contract_receipt(contract: &EffectiveContract) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_assignment(
+        backend: &str,
+        model: Option<&str>,
+    ) -> tachi_params::ResolvedStaffAssignment {
+        let backend = backend.to_string();
+        tachi_params::ResolvedStaffAssignment {
+            assignment_id: "test-assignment".to_string(),
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            selected_worker: backend.clone(),
+            selected_profile: Some("codex_55_review".to_string()),
+            selected_backend: backend,
+            selected_model: model.map(str::to_string),
+            execution_level: None,
+            recommendation_ref: None,
+            host_adapter: None,
+            evidence_required: Vec::new(),
+            fallback_chain: Vec::new(),
+            route_explanation: Vec::new(),
+            identity_receipt: Value::Null,
+        }
+    }
+
+    fn test_grant(sandbox: Option<&str>) -> tachi_params::ExecutionGrant {
+        tachi_params::ExecutionGrant {
+            grant_id: "test-grant".to_string(),
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: None,
+            credential_profiles: Vec::new(),
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            sandbox: sandbox.map(str::to_string),
+            max_turns: None,
+            timeout_secs: 5,
+        }
+    }
     use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
     use serde_json::json;
     use tachi_dispatch::{CODEX_CLI_RECEIPT, PROVIDER_QUALIFICATIONS};
@@ -349,7 +316,10 @@ mod tests {
             tachi_dispatch::Enforcement::Enforced { .. }
         ));
 
-        let cmd = build_codex_command(&params, "review", None).expect("codex command");
+        let assignment = test_assignment("codex", None);
+        let grant = test_grant(Some("read-only"));
+        let cmd = build_codex_command(&assignment, &grant, &params.command, "review", None)
+            .expect("codex command");
         let args = cmd
             .as_std()
             .get_args()

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 use crate::dispatch_ops::launcher::resolve_permission_profile;
-use crate::tool_params::TachiDispatchParams;
+use tachi_params::{ExecutionGrant, ResolvedStaffAssignment, StaffAssignmentRequest};
 
 use super::types::{
     AcpxCommandSpec, AcpxRunMode, AcpxSession, ACPX_NODE_MIN_VERSION, ACPX_NODE_REQUIREMENT,
@@ -27,8 +27,9 @@ pub(in crate::dispatch_ops) fn prepare_acpx_prompt(
 }
 
 pub(in crate::dispatch_ops) fn build_acpx_command_spec(
-    params: &TachiDispatchParams,
-    agent: &str,
+    request: &StaffAssignmentRequest,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
     prompt_file: &Path,
 ) -> Result<AcpxCommandSpec, String> {
     // Defense-in-depth (#894 S0 round 2): this must run BEFORE any preflight
@@ -38,7 +39,7 @@ pub(in crate::dispatch_ops) fn build_acpx_command_spec(
     // before Stage 1/ClaudePool and before any builder runs at all); this
     // builder-local copy stays as a second, independent gate in case a caller
     // reaches this function through a path that bypassed the entry check.
-    tachi_dispatch::reject_unsupported_sandbox("acpx", params.sandbox.as_deref())?;
+    tachi_dispatch::reject_unsupported_sandbox("acpx", grant.sandbox.as_deref())?;
 
     let command = std::env::var("TACHI_ACPX_COMMAND")
         .ok()
@@ -59,16 +60,17 @@ pub(in crate::dispatch_ops) fn build_acpx_command_spec(
     }
     let node_readiness = acpx_node_readiness(&command)?;
 
-    let profile = resolve_permission_profile(params)?;
+    let profile = resolve_permission_profile(grant)?;
     let (permission_args, permission_label) = acpx_permission_args(profile)?;
-    let cwd = params
-        .cwd
-        .clone()
+    let cwd = grant
+        .allowed_cwd
+        .as_ref()
+        .map(|cwd| cwd.to_string_lossy().to_string())
         .unwrap_or_else(|| current_dir_string().unwrap_or_else(|| ".".to_string()));
-    let acpx_agent = resolve_acpx_agent(agent)?;
+    let acpx_agent = resolve_acpx_agent(&assignment.selected_backend)?;
     let run_mode = resolve_acpx_run_mode()?;
     let session = if run_mode == AcpxRunMode::Session {
-        Some(resolve_acpx_session(params)?)
+        Some(resolve_acpx_session(request, assignment)?)
     } else {
         None
     };
@@ -187,7 +189,10 @@ fn resolve_acpx_run_mode() -> Result<AcpxRunMode, String> {
     }
 }
 
-fn resolve_acpx_session(params: &TachiDispatchParams) -> Result<AcpxSession, String> {
+fn resolve_acpx_session(
+    request: &StaffAssignmentRequest,
+    assignment: &ResolvedStaffAssignment,
+) -> Result<AcpxSession, String> {
     if let Ok(explicit) = std::env::var("TACHI_ACPX_SESSION") {
         let explicit = explicit.trim();
         if !explicit.is_empty() {
@@ -199,8 +204,8 @@ fn resolve_acpx_session(params: &TachiDispatchParams) -> Result<AcpxSession, Str
     }
 
     for (value, source) in [
-        (params.profile.as_deref(), "dispatch_profile"),
-        (params.stage.as_deref(), "stage"),
+        (assignment.selected_profile.as_deref(), "dispatch_profile"),
+        (request.stage.as_deref(), "stage"),
     ] {
         if let Some(session) = value.and_then(derive_acpx_session_from_card_hint) {
             return Ok(AcpxSession {

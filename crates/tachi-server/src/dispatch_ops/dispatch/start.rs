@@ -4,15 +4,19 @@ pub(super) struct DispatchStart {
     pub(super) dispatch_id: String,
     pub(super) request: tachi_params::StaffAssignmentRequest,
     pub(super) legacy_auto_capability_bundle: Option<bool>,
+    pub(super) requested_skills: Vec<String>,
+    pub(super) context_query: Option<String>,
+    pub(super) tool_profile: Option<String>,
+    pub(super) command: Vec<String>,
+    pub(super) harness_transport: Option<String>,
+    pub(super) harness_server_url: Option<String>,
+    pub(super) raw_cwd: Option<String>,
+    pub(super) raw_credential_profiles: Vec<String>,
     pub(super) agent_norm: String,
     pub(super) resolved_profile: ResolvedDispatchProfile,
     pub(super) resolved_assignment: tachi_params::ResolvedStaffAssignment,
     pub(super) profile_payload: Value,
-    pub(super) timeout: Duration,
-    pub(super) inject_tachi: bool,
-    pub(super) inject_hub: bool,
     pub(super) workspace_dir: PathBuf,
-    pub(super) host_adapter: Option<String>,
     pub(super) inject_card: bool,
     pub(super) verbose: bool,
 }
@@ -29,6 +33,7 @@ pub(super) fn resolve_dispatch_start(
     // typed request itself must be minted after profile resolution so omitted
     // stage and other profile defaults reach every typed consumer.
     let raw_request_profile = params.profile.clone();
+    let raw_cwd = params.cwd.clone();
     // #1815 P1: resolve into the acknowledged compatibility projection first.
     // The canonical outputs below are minted before that projection reaches the
     // remaining P2/P3 consumers; final #1814 deletes this bridge entirely.
@@ -36,6 +41,11 @@ pub(super) fn resolve_dispatch_start(
     let resolved_profile =
         resolve_and_apply_dispatch_profile_for_server(server, &mut legacy_projection)?;
     reconcile_resolved_profile_compatibility(&mut legacy_projection, &resolved_profile);
+    // Credential failure receipts are forensic evidence, not launch authority.
+    // Capture the resolved compatibility projection before the grant trims and
+    // deduplicates it so profile-added defaults and caller spelling are both
+    // visible if materialization fails.
+    let raw_credential_profiles = legacy_projection.credential_profiles.clone();
     let mut request =
         tachi_params::StaffAssignmentRequest::from_dispatch_params(&legacy_projection);
     request.profile = raw_request_profile;
@@ -84,15 +94,12 @@ pub(super) fn resolve_dispatch_start(
 
     let profile_payload =
         serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
-    let timeout = Duration::from_secs(params.timeout_secs);
-    let inject_tachi = params.inject_tachi_mcp.unwrap_or(false);
-    let inject_hub = params.inject_hub_mcps.unwrap_or(false);
     let inject_card = params.inject_card.unwrap_or(true);
     let verbose = params.verbose.unwrap_or(false);
 
     // Validate backend/MCP compatibility before creating the run ledger. A
     // rejected dispatch should not leave an empty run directory with no status.
-    if inject_tachi || inject_hub {
+    if params.inject_tachi_mcp.unwrap_or(false) || params.inject_hub_mcps.unwrap_or(false) {
         if matches!(agent_norm.as_str(), "custom" | "opencode") {
             return Err(
                 "inject_tachi_mcp / inject_hub_mcps are not supported for custom/opencode subprocess backends."
@@ -114,21 +121,23 @@ pub(super) fn resolve_dispatch_start(
     }
 
     let workspace_dir = dispatch_runs_root().join(&dispatch_id);
-    let host_adapter = resolved_profile.host_adapter.clone();
-
     Ok(DispatchStart {
         dispatch_id,
         request,
         legacy_auto_capability_bundle,
+        requested_skills: params.skills.clone(),
+        context_query: params.context_query.clone(),
+        tool_profile: params.tool_profile.clone(),
+        command: params.command.clone(),
+        harness_transport: params.harness_transport.clone(),
+        harness_server_url: params.harness_server_url.clone(),
+        raw_cwd,
+        raw_credential_profiles,
         agent_norm,
         resolved_profile,
         resolved_assignment,
         profile_payload,
-        timeout,
-        inject_tachi,
-        inject_hub,
         workspace_dir,
-        host_adapter,
         inject_card,
         verbose,
     })

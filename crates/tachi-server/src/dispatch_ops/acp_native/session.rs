@@ -4,10 +4,11 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use super::{NativeAcpPromptOutcome, NativeAcpRunSpec, NativeAcpSession, ACP_SESSION_SCHEMA};
-use crate::tool_params::TachiDispatchParams;
+use tachi_params::{ResolvedStaffAssignment, StaffAssignmentRequest};
 
 pub(super) fn resolve_native_acp_session(
-    params: &TachiDispatchParams,
+    request: &StaffAssignmentRequest,
+    assignment: &ResolvedStaffAssignment,
 ) -> Result<NativeAcpSession, String> {
     if let Ok(explicit) = std::env::var("TACHI_ACP_NATIVE_SESSION") {
         let explicit = explicit.trim();
@@ -29,8 +30,8 @@ pub(super) fn resolve_native_acp_session(
     }
 
     for (value, source) in [
-        (params.profile.as_deref(), "dispatch_profile"),
-        (params.stage.as_deref(), "stage"),
+        (assignment.selected_profile.as_deref(), "dispatch_profile"),
+        (request.stage.as_deref(), "stage"),
     ] {
         if let Some(session) = value.and_then(derive_session_from_card_hint) {
             return Ok(NativeAcpSession {

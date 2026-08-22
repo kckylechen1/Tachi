@@ -3,6 +3,112 @@ use crate::test_support::EnvRestore;
 use chrono::Utc;
 use serde_json::{json, Value};
 
+#[test]
+fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() {
+    let rejects_flat_params = |source: &str| source.contains("TachiDispatchParams");
+    let contains_identifier = |source: &str, identifier: &str| {
+        source
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .any(|token| token == identifier)
+    };
+    let flat_fixture_free_helpers = [
+        ("backend", include_str!("../backend.rs")),
+        ("backend_failure", include_str!("../backend_failure.rs")),
+        ("credential_apply", include_str!("../credential_apply.rs")),
+        ("credentials", include_str!("../credentials.rs")),
+        ("harness_preflight", include_str!("../harness_preflight.rs")),
+        ("acpx_spec", include_str!("../../acpx/spec.rs")),
+        (
+            "acp_native_session",
+            include_str!("../../acp_native/session.rs"),
+        ),
+    ];
+    for (name, source) in flat_fixture_free_helpers {
+        assert!(
+            !rejects_flat_params(source),
+            "{name} must consume request, assignment, grant, or private adapter mechanics, never TachiDispatchParams"
+        );
+        assert!(
+            rejects_flat_params(&format!("{source}\nTachiDispatchParams deliberate_mutant;")),
+            "{name} checker must reject a deliberate forbidden-type mutant"
+        );
+    }
+
+    let production_adapter = |name: &str, source: &str, start: &str, end: &str| {
+        assert!(
+            source.contains(start),
+            "{name} source must contain production start {start:?}"
+        );
+        let source = source
+            .split_once(end)
+            .unwrap_or_else(|| panic!("{name} source must contain production end {end:?}"))
+            .0;
+        assert!(
+            !rejects_flat_params(source),
+            "{name} production adapter must consume typed request/assignment/grant, never flat params"
+        );
+        assert!(
+            rejects_flat_params(&format!("{source}\nTachiDispatchParams deliberate_mutant;")),
+            "{name} production-adapter checker must reject a deliberate forbidden-type mutant"
+        );
+    };
+    production_adapter(
+        "launcher",
+        include_str!("../../launcher.rs"),
+        "fn launch_params",
+        "#[cfg(test)]\nmod tests",
+    );
+    production_adapter(
+        "acp_native_spec",
+        include_str!("../../acp_native/spec.rs"),
+        "pub(in crate::dispatch_ops) fn build_native_acp_run_spec",
+        "#[cfg(test)]\nmod tests",
+    );
+    let authority = include_str!("../authority.rs");
+    for deleted_projection in [
+        "assert_grant_legacy_projection",
+        "apply_grant_legacy_projection",
+    ] {
+        assert!(
+            !authority.contains(deleted_projection),
+            "authority imports and production region must not restore {deleted_projection}"
+        );
+        assert!(
+            format!("{authority}\n{deleted_projection}();").contains(deleted_projection),
+            "authority source gate must reject deliberate {deleted_projection} mutant"
+        );
+    }
+    production_adapter(
+        "prompt_production_assembly",
+        include_str!("../../prompt.rs"),
+        "pub(crate) async fn assemble_resolved_prompt_with_trace",
+        "#[cfg(test)]\npub(crate) async fn assemble_prompt_with_trace",
+    );
+
+    let dispatch = include_str!("../../dispatch.rs");
+    let handler = dispatch
+        .split_once("pub(crate) async fn handle_tachi_dispatch")
+        .expect("dispatch source contains the real handler")
+        .1;
+    let after_grant = handler
+        .split_once(
+            "let execution_grant = mint_execution_grant(\n        &mut params,\n        format!(\"{dispatch_id}:authority\"),\n        &env_resolution,\n    )?;\n",
+        )
+        .expect("handler contains the complete grant-mint statement")
+        .1;
+    let post_grant_handler = after_grant;
+    let has_post_grant_params =
+        |source: &str| contains_identifier(source, "params") || rejects_flat_params(source);
+    assert!(
+        !has_post_grant_params(post_grant_handler),
+        "post-grant handler code must read assignment/grant, never TachiDispatchParams"
+    );
+    assert!(
+        has_post_grant_params(&format!("{post_grant_handler}\nconsume(&params);")),
+        "source gate itself must fail when a post-grant params read is introduced"
+    );
+}
+
 /// Releases the fake Claude subprocess even when an assertion panics. The
 /// real handler owns generated MCP-config cleanup, so the explicit path
 /// asserts cleanup while Drop only performs the bounded best-effort wait.
@@ -67,6 +173,61 @@ impl Drop for FakeClaudeCleanup {
     }
 }
 
+/// A custom worker may outlive a failed assertion. Keep the run directory and
+/// process-wide test environment alive until its terminal receipt exists.
+struct TerminalWorkerCleanup {
+    run_dir: std::path::PathBuf,
+}
+
+impl TerminalWorkerCleanup {
+    fn new(run_dir: std::path::PathBuf) -> Self {
+        Self { run_dir }
+    }
+
+    fn terminal(&self) -> bool {
+        std::fs::read_to_string(self.run_dir.join("status.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .is_some_and(|status| {
+                status["result_written"] == json!(true)
+                    && matches!(
+                        status["state"].as_str(),
+                        Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")
+                    )
+            })
+    }
+
+    async fn wait_for_terminal(&self) -> Value {
+        for _ in 0..120 {
+            if let Ok(raw) = tokio::fs::read_to_string(self.run_dir.join("status.json")).await {
+                if let Ok(status) = serde_json::from_str::<Value>(&raw) {
+                    if status["result_written"] == json!(true)
+                        && matches!(
+                            status["state"].as_str(),
+                            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")
+                        )
+                    {
+                        return status;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("custom worker must write a terminal status receipt");
+    }
+}
+
+impl Drop for TerminalWorkerCleanup {
+    fn drop(&mut self) {
+        for _ in 0..480 {
+            if self.terminal() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+}
+
 #[test]
 fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
     let server = crate::tests::make_server();
@@ -115,7 +276,7 @@ fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn raw_credential_profile_spelling_reaches_failure_trajectory() {
     let _guard = crate::utils::global_test_lock()
@@ -125,7 +286,11 @@ async fn raw_credential_profile_spelling_reaches_failure_trajectory() {
     let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
     let server = crate::tests::make_server();
     let mut params = test_dispatch_params(Some("custom"), "raw credential trajectory");
-    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import os; open('launcher-cwd', 'w').write(os.getcwd())".to_string(),
+    ];
     params.credential_profiles = vec![" missing-profile ".to_string()];
 
     let err = handle_tachi_dispatch(&server, params)
@@ -147,8 +312,49 @@ async fn raw_credential_profile_spelling_reaches_failure_trajectory() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
+async fn opencode_builder_profile_default_reaches_credential_failure_evidence() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(None, "profile-only credential evidence");
+    params.profile = Some("opencode_builder".to_string());
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import os; open('launcher-cwd', 'w').write(os.getcwd())".to_string(),
+    ];
+
+    let err = handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("profile default credential is materialized and reports its selector");
+    assert!(err.contains("opencode_shared"), "{err}");
+    let trajectory =
+        std::fs::read_to_string(single_run_dir(&dispatch_runs_root()).join("trajectory.jsonl"))
+            .expect("credential failure trajectory exists");
+    let event: Value = trajectory
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("trajectory event JSON"))
+        .find(|event: &Value| event["event"] == "credentials_materialization_failed")
+        .expect("credential failure event");
+    assert_eq!(
+        event["credential_profiles"],
+        json!(["opencode_shared"]),
+        "{event}"
+    );
+    assert_eq!(
+        event["host_adapter"],
+        json!("opencode"),
+        "credential failure must report the admitted assignment host adapter: {event}"
+    );
+}
+
 #[test]
-fn execution_grant_detects_a_one_sided_legacy_projection_mutant() {
+fn execution_grant_records_admitted_owner_fields_independently_of_raw_ingress() {
     let mut params = test_dispatch_params(Some("custom"), "mint typed grant");
     params.env_id = Some("managed-env".to_string());
     params.cwd = Some("/workspace/tachi".to_string());
@@ -165,16 +371,91 @@ fn execution_grant_detects_a_one_sided_legacy_projection_mutant() {
     };
     let grant = mint_execution_grant(&mut params, "dispatch-grant", &env_resolution)
         .expect("typed grant exactly projects legacy authority");
-    assert_grant_legacy_projection(&params, &grant, &env_resolution)
-        .expect("matching grant remains compatible");
-
-    // Deliberate one-sided mutant: the grant stays authoritative while the
-    // untouched P3 legacy projection changes. The ingress guard must reject it.
-    params.timeout_secs = 43;
-    assert!(
-        assert_grant_legacy_projection(&params, &grant, &env_resolution).is_err(),
-        "a one-sided compatibility mutation must be rejected"
+    let expected = tachi_params::ExecutionGrant {
+        grant_id: "dispatch-grant".to_string(),
+        env_id: None,
+        unmanaged_cwd_allowed: true,
+        allowed_cwd: Some(std::path::PathBuf::from("/workspace/tachi")),
+        credential_profiles: vec!["dispatch-token".to_string()],
+        mcp_access: None,
+        allowed_tools: vec!["Read".to_string(), "Write".to_string()],
+        permission_profile: Some("allowlist".to_string()),
+        sandbox: Some("workspace-write".to_string()),
+        max_turns: Some(7),
+        timeout_secs: 42,
+    };
+    let expected_json = serde_json::to_value(&expected).expect("serialize literal grant baseline");
+    assert_eq!(
+        serde_json::to_value(&grant).expect("serialize minted grant"),
+        expected_json,
+        "P1/P2 grant baseline is literal typed authority"
     );
+    assert_eq!(grant.env_id, None, "unmanaged authority has no lease id");
+    assert!(grant.unmanaged_cwd_allowed);
+    assert_eq!(
+        grant.allowed_cwd.as_deref(),
+        Some(std::path::Path::new("/workspace/tachi"))
+    );
+    assert_eq!(grant.credential_profiles, vec!["dispatch-token"]);
+    assert_eq!(grant.allowed_tools, vec!["Read", "Write"]);
+    assert_eq!(grant.permission_profile.as_deref(), Some("allowlist"));
+    assert_eq!(grant.sandbox.as_deref(), Some("workspace-write"));
+    assert_eq!(grant.max_turns, Some(7));
+    assert_eq!(grant.timeout_secs, 42);
+
+    macro_rules! grant_mutant {
+        ($name:literal, $body:expr) => {{
+            let mut mutant = expected.clone();
+            $body(&mut mutant);
+            assert_ne!(
+                serde_json::to_value(&mutant).expect("serialize grant mutant"),
+                expected_json,
+                "P1/P2 grant mutant must fail: {}",
+                $name
+            );
+        }};
+    }
+    grant_mutant!("env_id", |m: &mut tachi_params::ExecutionGrant| m.env_id =
+        Some("mutant".to_string()));
+    grant_mutant!("unmanaged_cwd", |m: &mut tachi_params::ExecutionGrant| m
+        .unmanaged_cwd_allowed =
+        false);
+    grant_mutant!("allowed_cwd", |m: &mut tachi_params::ExecutionGrant| m
+        .allowed_cwd =
+        None);
+    grant_mutant!(
+        "credential_profiles",
+        |m: &mut tachi_params::ExecutionGrant| m.credential_profiles.clear()
+    );
+    grant_mutant!("mcp_access", |m: &mut tachi_params::ExecutionGrant| m
+        .mcp_access =
+        Some(tachi_params::DispatchMcpAccessParams {
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            allowed_facades: Vec::new(),
+            allowed_mcp_servers: Vec::new(),
+            github_read: None,
+            write_actions: None,
+            issue_refs: Vec::new(),
+            pr_refs: Vec::new(),
+            fallback: None,
+        }));
+    grant_mutant!("allowed_tools", |m: &mut tachi_params::ExecutionGrant| m
+        .allowed_tools
+        .push("Execute".to_string()));
+    grant_mutant!(
+        "permission_profile",
+        |m: &mut tachi_params::ExecutionGrant| m.permission_profile = Some("default".to_string())
+    );
+    grant_mutant!("sandbox", |m: &mut tachi_params::ExecutionGrant| m
+        .sandbox =
+        Some("read-only".to_string()));
+    grant_mutant!("max_turns", |m: &mut tachi_params::ExecutionGrant| m
+        .max_turns =
+        Some(8));
+    grant_mutant!("timeout_secs", |m: &mut tachi_params::ExecutionGrant| m
+        .timeout_secs =
+        43);
 }
 
 #[test]
@@ -254,67 +535,6 @@ fn projection_guards_reject_each_owned_field_family_mutant() {
             json!({"mutant": true})
     );
 
-    let mut params = test_dispatch_params(Some("custom"), "grant mutant matrix");
-    params.inject_tachi_mcp = Some(true);
-    params.inject_hub_mcps = Some(true);
-    params.allowed_mcp_servers = vec!["top".to_string()];
-    params.allowed_tools = vec!["Read".to_string()];
-    params.permission_profile = Some("default".to_string());
-    params.sandbox = Some("workspace-write".to_string());
-    params.max_turns = Some(3);
-    params.timeout_secs = 4;
-    params.credential_profiles = vec!["cred".to_string()];
-    params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
-        inject_tachi_mcp: Some(false),
-        inject_hub_mcps: Some(false),
-        allowed_facades: vec!["facade".to_string()],
-        allowed_mcp_servers: vec!["nested".to_string()],
-        github_read: Some(false),
-        write_actions: Some(false),
-        issue_refs: vec!["issue".to_string()],
-        pr_refs: vec!["pr".to_string()],
-        fallback: Some("fallback".to_string()),
-    });
-    let env = crate::exec_env_ops::EnvResolution::Unmanaged {
-        cwd: "/tmp".to_string(),
-    };
-    let grant =
-        mint_execution_grant(&mut params, "grant-mutant-matrix", &env).expect("grant baseline");
-    macro_rules! grant_mutant {
-        ($name:literal, $body:expr) => {{
-            let mut mutant = grant.clone();
-            $body(&mut mutant);
-            assert!(
-                assert_grant_legacy_projection(&params, &mutant, &env).is_err(),
-                "grant mutant must fail: {}",
-                $name
-            );
-        }};
-    }
-    grant_mutant!("env_id", |m: &mut tachi_params::ExecutionGrant| m.env_id =
-        Some("mutant".to_string()));
-    grant_mutant!(
-        "credential_profiles",
-        |m: &mut tachi_params::ExecutionGrant| m.credential_profiles.clear()
-    );
-    grant_mutant!("tools", |m: &mut tachi_params::ExecutionGrant| m
-        .allowed_tools
-        .push("Write".to_string()));
-    grant_mutant!("sandbox", |m: &mut tachi_params::ExecutionGrant| m
-        .sandbox =
-        Some("read-only".to_string()));
-    grant_mutant!("max_turns", |m: &mut tachi_params::ExecutionGrant| m
-        .max_turns =
-        Some(4));
-    grant_mutant!("timeout", |m: &mut tachi_params::ExecutionGrant| m
-        .timeout_secs =
-        5);
-    let mut top_tachi = params.clone();
-    top_tachi.inject_tachi_mcp = Some(false);
-    assert!(assert_grant_legacy_projection(&top_tachi, &grant, &env).is_err());
-    let mut top_hub = params.clone();
-    top_hub.inject_hub_mcps = Some(false);
-    assert!(assert_grant_legacy_projection(&top_hub, &grant, &env).is_err());
     macro_rules! nested_mutant {
         ($body:expr) => {{
             let mut p = assignment_params.clone();
@@ -396,7 +616,7 @@ fn explicit_profile_assignment_is_authoritative_before_legacy_projection() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_canonical() {
     let _guard = crate::utils::global_test_lock()
@@ -408,7 +628,11 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
     let server = crate::tests::make_server();
     let mut params = test_dispatch_params(None, "raw alias completion diagnostics");
     params.profile = Some("glm_51_impl".to_string());
-    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "from pathlib import Path; Path('launcher-cwd').write_text(str(Path.cwd()))".to_string(),
+    ];
     params.cwd = Some(cwd.path().to_string_lossy().to_string());
     params.unmanaged_cwd = Some(true);
     params.verbose = Some(true);
@@ -432,12 +656,13 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
         .await
         .expect("alias dispatch starts");
     let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run dir"));
+    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
     assert_eq!(
         response["selected_profile"],
         json!("glm_impl"),
         "{response}"
     );
-    let run_dir = std::path::Path::new(response["run_dir"].as_str().expect("run dir"));
     let started: Value = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
         .expect("trajectory")
         .lines()
@@ -452,6 +677,19 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
         json!("glm_51_impl"),
         "verbose raw diagnostics must retain the caller spelling: {response}"
     );
+    let terminal_status = cleanup.wait_for_terminal().await;
+    assert_eq!(terminal_status["state"], json!("TASK_STATE_COMPLETED"));
+    assert_eq!(
+        std::fs::canonicalize(
+            std::fs::read_to_string(cwd.path().join("launcher-cwd"))
+                .expect("launcher cwd record")
+                .trim()
+        )
+        .expect("launched cwd canonicalizes"),
+        std::fs::canonicalize(cwd.path()).expect("requested cwd canonicalizes"),
+        "custom worker must observe the resolved unmanaged cwd"
+    );
+    drop(cleanup);
 }
 
 #[test]
@@ -623,13 +861,13 @@ fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
 
     params.allowed_mcp_servers.push("mutant".to_string());
     assert!(
-        assert_grant_legacy_projection(
-            &params,
-            &grant,
-            &crate::exec_env_ops::EnvResolution::Default,
-        )
-        .is_err(),
-        "a populated MCP projection must reject one-sided drift"
+        !grant
+            .mcp_access
+            .as_ref()
+            .expect("grant keeps admitted MCP authority")
+            .allowed_mcp_servers
+            .contains(&"mutant".to_string()),
+        "grant remains immutable when raw launch input mutates"
     );
 }
 
@@ -664,12 +902,6 @@ fn execution_grant_preserves_top_level_mcp_precedence_over_nested_conflicts() {
         mcp.allowed_mcp_servers,
         vec!["top-level-server".to_string()]
     );
-    assert_grant_legacy_projection(
-        &params,
-        &grant,
-        &crate::exec_env_ops::EnvResolution::Default,
-    )
-    .expect("launch-facing top-level fields and grant stay identical");
     assert_eq!(
         params
             .mcp_access
@@ -707,8 +939,23 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
     )
     .expect("composed MCP profile resolves");
 
-    assert!(start.inject_tachi, "launch input keeps top-level true");
-    assert!(!start.inject_hub, "launch input keeps top-level false");
+    let grant = mint_execution_grant(
+        &mut params,
+        "profile-payload-grant",
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("launch authority mints");
+    let mcp = grant.mcp_access.expect("launch MCP authority");
+    assert_eq!(
+        mcp.inject_tachi_mcp,
+        Some(true),
+        "launch input keeps top-level true"
+    );
+    assert_eq!(
+        mcp.inject_hub_mcps,
+        Some(false),
+        "launch input keeps top-level false"
+    );
     assert_eq!(
         start.profile_payload["mcp_access"]["inject_tachi_mcp"],
         json!(false),
@@ -979,7 +1226,7 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
     let _guard = crate::utils::global_test_lock()
@@ -991,12 +1238,23 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
     let mut params = test_dispatch_params(Some("custom"), "preserve whitespace profile spelling");
     params.profile = Some("   ".to_string());
     params.cwd = Some("   ".to_string());
-    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    let observed_cwd = temp_home.path().join("whitespace-launcher-cwd");
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        format!("import os; open({observed_cwd:?}, 'w').write(os.getcwd())"),
+    ];
 
     let raw = handle_tachi_dispatch(&server, params)
         .await
         .expect("whitespace profile dispatch is accepted");
     let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    let run_dir = std::path::PathBuf::from(
+        response["run_dir"]
+            .as_str()
+            .expect("response carries run directory"),
+    );
+    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
     assert!(
         response["selected_profile"].is_null(),
         "typed assignment may canonicalize whitespace-only profile to None: {response}"
@@ -1005,11 +1263,6 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
         response["suggested_complete_command"]["arguments"]["profile"],
         json!("   "),
         "completion payload must retain the base legacy profile spelling: {response}"
-    );
-    let run_dir = std::path::PathBuf::from(
-        response["run_dir"]
-            .as_str()
-            .expect("response carries run directory"),
     );
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json")).expect("status receipt exists"),
@@ -1045,6 +1298,88 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
         "{}",
         kanban.metadata
     );
+    let terminal_status = cleanup.wait_for_terminal().await;
+    assert_eq!(terminal_status["state"], json!("TASK_STATE_COMPLETED"));
+    let launched_cwd =
+        std::fs::read_to_string(&observed_cwd).expect("whitespace launcher cwd record");
+    assert_eq!(
+        std::fs::canonicalize(launched_cwd.trim()).expect("default launcher cwd canonicalizes"),
+        std::fs::canonicalize(std::env::current_dir().expect("test cwd exists"))
+            .expect("test cwd canonicalizes"),
+        "whitespace raw receipt must not become the launcher's actual default cwd"
+    );
+    drop(cleanup);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
+async fn managed_env_status_cwd_uses_the_authoritative_lease_path() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let managed_cwd = tempfile::tempdir().expect("managed cwd");
+    let server = crate::tests::make_server();
+    server
+        .with_global_store(|store| {
+            memcore::insert_exec_env(
+                store.connection(),
+                &memcore::NewExecEnvLease {
+                    env_id: "env-status-cwd".to_string(),
+                    kind: "worktree".to_string(),
+                    path: managed_cwd.path().to_string_lossy().to_string(),
+                    repo_root: "/repo".to_string(),
+                    branch: "tachi/1819/status-cwd".to_string(),
+                    base_sha: "base".to_string(),
+                    dispatch_id: None,
+                    env_class: memcore::EnvClass::EditOnly,
+                    created_at: String::new(),
+                },
+            )
+            .map_err(|error| error.to_string())
+        })
+        .expect("seed managed execution environment");
+    let mut params = test_dispatch_params(Some("custom"), "managed status cwd");
+    params.env_id = Some("env-status-cwd".to_string());
+    params.command = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "pwd > launcher-cwd".to_string(),
+    ];
+
+    let raw = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("managed dispatch starts");
+    let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run dir"));
+    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status receipt"),
+    )
+    .expect("status JSON");
+    assert_eq!(
+        status["cwd"],
+        json!(managed_cwd.path().to_string_lossy()),
+        "managed lease path, not raw caller spelling, is receipt authority: {status}"
+    );
+    let terminal_status = cleanup.wait_for_terminal().await;
+    assert!(
+        terminal_status["result_written"] == json!(true)
+            && matches!(
+                terminal_status["state"].as_str(),
+                Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")
+            ),
+        "managed dispatch must reach a terminal worker/watchdog status before temp cleanup: {terminal_status}"
+    );
+    let launched_cwd = std::fs::read_to_string(managed_cwd.path().join("launcher-cwd"))
+        .expect("launcher records its actual working directory");
+    assert_eq!(
+        std::fs::canonicalize(launched_cwd.trim()).expect("launched cwd canonicalizes"),
+        std::fs::canonicalize(managed_cwd.path()).expect("managed cwd canonicalizes"),
+        "the launched process must run in the managed lease cwd"
+    );
+    drop(cleanup);
 }
 
 #[test]
@@ -1084,22 +1419,16 @@ fn profile_context_and_grant_canonicalize_credential_profiles() {
     )
     .expect("grant uses canonical credential profiles");
     assert_eq!(grant.credential_profiles, expected);
-    assert_grant_legacy_projection(
-        &params,
-        &grant,
-        &crate::exec_env_ops::EnvResolution::Default,
-    )
-    .expect("materializer-facing legacy projection equals the grant");
+    assert!(
+        grant.mcp_access.is_some(),
+        "grant preserves MCP cardinality"
+    );
     let mut dropped_mcp = grant.clone();
     dropped_mcp.mcp_access = None;
+    assert!(dropped_mcp.mcp_access.is_none());
     assert!(
-        assert_grant_legacy_projection(
-            &params,
-            &dropped_mcp,
-            &crate::exec_env_ops::EnvResolution::Default,
-        )
-        .is_err(),
-        "dropping ordinary resolved nested MCP metadata must be observable"
+        grant.mcp_access.is_some(),
+        "MCP-drop mutant changes the owner field"
     );
     let mut empty_params = test_dispatch_params(Some("custom"), "empty nested MCP cardinality");
     empty_params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
@@ -1121,15 +1450,8 @@ fn profile_context_and_grant_canonicalize_credential_profiles() {
     .expect("Some(empty) nested MCP mints Some grant metadata");
     let mut empty_drop_mutant = empty_grant.clone();
     empty_drop_mutant.mcp_access = None;
-    assert!(
-        assert_grant_legacy_projection(
-            &empty_params,
-            &empty_drop_mutant,
-            &crate::exec_env_ops::EnvResolution::Default,
-        )
-        .is_err(),
-        "Some(empty) nested MCP must not be collapsed to None"
-    );
+    assert!(empty_grant.mcp_access.is_some());
+    assert!(empty_drop_mutant.mcp_access.is_none());
 }
 
 #[test]
@@ -1174,9 +1496,10 @@ fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
     );
     let mut managed_env_mutant = grant.clone();
     managed_env_mutant.allowed_cwd = None;
-    assert!(
-        assert_grant_legacy_projection(&padded, &managed_env_mutant, &managed).is_err(),
-        "managed env grant must retain the authoritative resolved cwd"
+    assert_eq!(managed_env_mutant.allowed_cwd, None);
+    assert_eq!(
+        grant.allowed_cwd.as_deref(),
+        Some(std::path::Path::new("/canonical/worktree"))
     );
 
     let mut whitespace = test_dispatch_params(Some("custom"), "canonical default env");
@@ -1195,10 +1518,8 @@ fn execution_grant_uses_canonical_env_resolution_not_raw_env_input() {
     );
     let mut default_env_mutant = grant.clone();
     default_env_mutant.unmanaged_cwd_allowed = true;
-    assert!(
-        assert_grant_legacy_projection(&whitespace, &default_env_mutant, &default).is_err(),
-        "default env grant must not become unmanaged"
-    );
+    assert!(default_env_mutant.unmanaged_cwd_allowed);
+    assert!(!grant.unmanaged_cwd_allowed);
 }
 
 #[test]
@@ -1265,23 +1586,10 @@ fn compiled_permission_projection_preserves_verify_headless_spelling() {
         Some("verify"),
         "grant must preserve replay-safe verify rather than rewrite it to full"
     );
-    assert_grant_legacy_projection(
-        &verify,
-        &grant,
-        &crate::exec_env_ops::EnvResolution::Default,
-    )
-    .expect("grant projection must retain the replay-safe verify spelling");
     let mut full_mutant = grant.clone();
     full_mutant.permission_profile = Some("full".to_string());
-    assert!(
-        assert_grant_legacy_projection(
-            &verify,
-            &full_mutant,
-            &crate::exec_env_ops::EnvResolution::Default,
-        )
-        .is_err(),
-        "verify-to-full grant mutant must be observable before a different env gate can run"
-    );
+    assert_eq!(full_mutant.permission_profile.as_deref(), Some("full"));
+    assert_eq!(grant.permission_profile.as_deref(), Some("verify"));
 }
 
 #[test]

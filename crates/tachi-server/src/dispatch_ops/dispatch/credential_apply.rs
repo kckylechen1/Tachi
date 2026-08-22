@@ -11,7 +11,7 @@ pub(super) fn inject_legacy_vault_env(
     execution: &mut DispatchExecution,
     trajectory_path: &Path,
     dispatch_id: &str,
-    agent_norm: &str,
+    assignment: &tachi_params::ResolvedStaffAssignment,
 ) {
     let legacy_vault_env = unlocked_vault_child_env_map(server, cwd);
     let legacy_vault_env_count = legacy_vault_env.len();
@@ -33,7 +33,7 @@ pub(super) fn inject_legacy_vault_env(
             json!({
                 "event": "legacy_vault_env_injected",
                 "dispatch_id": dispatch_id,
-                "agent": agent_norm,
+                "agent": assignment.selected_worker,
                 "count": legacy_vault_env_count,
                 "timestamp": Utc::now().to_rfc3339(),
             }),
@@ -43,9 +43,10 @@ pub(super) fn inject_legacy_vault_env(
 
 pub(super) struct CredentialApplyInputs<'a> {
     pub(super) server: &'a MemoryServer,
-    pub(super) params: &'a TachiDispatchParams,
-    pub(super) agent_norm: &'a str,
-    pub(super) selected_profile: Option<&'a str>,
+    pub(super) request: &'a tachi_params::StaffAssignmentRequest,
+    pub(super) grant: &'a tachi_params::ExecutionGrant,
+    pub(super) raw_credential_profiles: &'a [String],
+    pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
     pub(super) workspace_dir: &'a Path,
     pub(super) trajectory_path: &'a Path,
     pub(super) dispatch_id: &'a str,
@@ -54,7 +55,6 @@ pub(super) struct CredentialApplyInputs<'a> {
     pub(super) plan_duration_ms: Option<u64>,
     pub(super) harness_transport: &'a str,
     pub(super) harness_server_url: &'a Option<String>,
-    pub(super) host_adapter: &'a Option<String>,
     pub(super) execution_backend_name: Option<&'static str>,
     pub(super) execution_backend_metadata: &'a Option<Value>,
     pub(super) acpx_enabled: bool,
@@ -77,9 +77,9 @@ pub(super) fn apply_materialized_credentials(
 ) -> Result<CredentialApplyOutcome, String> {
     let dispatch_credentials = match materialize_dispatch_credentials(
         inputs.server,
-        inputs.params,
-        inputs.agent_norm,
-        inputs.selected_profile,
+        inputs.grant,
+        &inputs.assignment.selected_worker,
+        inputs.assignment.selected_profile.as_deref(),
         inputs.workspace_dir,
     ) {
         Ok(materialized) => materialized,
@@ -89,8 +89,9 @@ pub(super) fn apply_materialized_credentials(
                 json!({
                     "event": "credentials_materialization_failed",
                     "dispatch_id": inputs.dispatch_id,
-                    "agent": inputs.agent_norm,
-                    "credential_profiles": inputs.params.credential_profiles.clone(),
+                    "agent": inputs.assignment.selected_worker,
+                    "host_adapter": inputs.assignment.host_adapter,
+                    "credential_profiles": inputs.raw_credential_profiles,
                     "error": err.clone(),
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
@@ -107,15 +108,15 @@ pub(super) fn apply_materialized_credentials(
                 None,
                 inputs.plan_duration_ms,
                 Some(json!({
-                    "agent": inputs.agent_norm,
-                    "task": inputs.params.task.clone(),
+                    "agent": inputs.assignment.selected_worker,
+                    "task": inputs.request.task.clone(),
                     "state": "TASK_STATE_FAILED",
                     "updated_at": Utc::now().to_rfc3339(),
                     "run_dir": inputs.workspace_dir.to_string_lossy(),
                     "result_written": false,
                     "harness_transport": inputs.harness_transport,
                     "harness_server_url": inputs.harness_server_url,
-                    "host_adapter": inputs.host_adapter,
+                    "host_adapter": inputs.assignment.host_adapter,
                     "execution_backend": inputs.execution_backend_name,
                     "acpx": if inputs.acpx_enabled { inputs.execution_backend_metadata.clone() } else { None },
                     "acp_native": if inputs.native_acp_enabled { inputs.execution_backend_metadata.clone() } else { None },
@@ -143,8 +144,9 @@ pub(super) fn apply_materialized_credentials(
             json!({
                 "event": "credentials_materialized",
                 "dispatch_id": inputs.dispatch_id,
-                "agent": inputs.agent_norm,
-                "credential_profiles": inputs.params.credential_profiles.clone(),
+                "agent": inputs.assignment.selected_worker,
+                "host_adapter": inputs.assignment.host_adapter,
+                "credential_profiles": inputs.raw_credential_profiles,
                 "reports": dispatch_credentials
                     .reports
                     .iter()
