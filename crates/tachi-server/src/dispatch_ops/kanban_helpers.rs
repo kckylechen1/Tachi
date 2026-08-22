@@ -1,4 +1,4 @@
-use crate::tool_params::{SaveMemoryParams, TachiDispatchParams};
+use crate::tool_params::SaveMemoryParams;
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::json;
@@ -9,14 +9,18 @@ use serde_json::json;
 pub(super) async fn init_kanban_task(
     server: &MemoryServer,
     dispatch_id: &str,
-    params: &TachiDispatchParams,
+    request: &tachi_params::StaffAssignmentRequest,
+    assignment: &tachi_params::ResolvedStaffAssignment,
+    grant: &tachi_params::ExecutionGrant,
+    profile: &crate::dispatch_profile::ResolvedDispatchProfile,
+    auto_capability_bundle: Option<bool>,
     plan_path: Option<&str>,
 ) -> Result<(), String> {
-    let agent = params.agent.as_deref().unwrap_or("unknown");
+    let agent = assignment.selected_backend.as_str();
     let text = format!(
         "Dispatch Task\nAgent: {}\nTask: {}\nPlan: {}",
         agent,
-        params.task,
+        request.task,
         plan_path.unwrap_or("inline"),
     );
     let metadata = json!({
@@ -24,14 +28,14 @@ pub(super) async fn init_kanban_task(
         "dispatch_id": dispatch_id,
         "a2a_state": "TASK_STATE_WORKING",
         "agent": agent,
-        "profile": params.profile,
-        "tool_profile": params.tool_profile,
-        "mcp_access": params.mcp_access,
-        "allowed_mcp_servers": params.allowed_mcp_servers,
-        "issue_ref": params.issue_ref,
-        "pr_ref": params.pr_ref,
-        "flow_id": params.flow_id,
-        "auto_capability_bundle": params.auto_capability_bundle,
+        "profile": request.profile,
+        "tool_profile": profile.tool_profile,
+        "mcp_access": profile.mcp_access,
+        "allowed_mcp_servers": grant.mcp_access.as_ref().map(|access| &access.allowed_mcp_servers),
+        "issue_ref": request.issue_ref,
+        "pr_ref": request.pr_ref,
+        "flow_id": request.flow_id,
+        "auto_capability_bundle": auto_capability_bundle,
         "plan_file": plan_path,
         "eval_ledger_id": null,
     });
@@ -42,7 +46,7 @@ pub(super) async fn init_kanban_task(
             text,
             summary: format!(
                 "Kanban: {} via {}",
-                params.task.chars().take(80).collect::<String>(),
+                request.task.chars().take(80).collect::<String>(),
                 agent
             ),
             path: format!("/kanban/tasks/{}", dispatch_id),

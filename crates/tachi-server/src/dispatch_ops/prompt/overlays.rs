@@ -1,8 +1,10 @@
 use chrono::Utc;
 
-use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
 use tachi_dispatch::{SignatureEvidenceRow, COUNTER_CLAUSE_TOP_N};
+use tachi_params::{ExecutionGrant, ResolvedStaffAssignment, StaffAssignmentRequest};
+
+use crate::dispatch_profile::ResolvedDispatchProfile;
 
 pub(super) fn render_task_route_overlay(route: &crate::copilot_ops::TaskBriefRouting) -> String {
     let intent = route.intent;
@@ -56,39 +58,40 @@ pub(super) fn render_task_route_overlay(route: &crate::copilot_ops::TaskBriefRou
 /// never receives projection). Shared by [`resolve_vaccination_lane`] (#735)
 /// and the lane-card seat-matching overlay (#1202/#993) so both projection
 /// paths agree on exactly the same vendor for the same dispatch.
-pub(super) fn resolve_dispatch_vendor(params: &TachiDispatchParams) -> Option<String> {
-    let profile_def = params
-        .profile
+pub(super) fn resolve_dispatch_vendor(
+    assignment: &ResolvedStaffAssignment,
+    profile: &ResolvedDispatchProfile,
+) -> Option<String> {
+    let profile_def = assignment
+        .selected_profile
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .and_then(crate::dispatch_profile::resolve_dispatch_profile);
-    let backend = params
-        .agent
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| profile_def.map(|p| p.backend.to_string()))?;
-    let model = params
-        .model
+    let backend = if !assignment.selected_backend.trim().is_empty() {
+        assignment.selected_backend.as_str()
+    } else {
+        profile.agent.as_str()
+    };
+    let model = assignment
+        .selected_model
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
         .or_else(|| profile_def.and_then(tachi_dispatch::profile_resolved_model));
-    let vendor = tachi_dispatch::normalize_vendor(&backend, model.as_deref());
+    let vendor = tachi_dispatch::normalize_vendor(backend, model.as_deref());
     (vendor != "unknown").then_some(vendor)
 }
 
 /// Resolve the `(role_class, vendor)` lane for a dispatch, or `None` when it is
 /// not derivable or the vendor is `unknown` (which never receives projection).
-fn resolve_vaccination_lane(params: &TachiDispatchParams) -> Option<(String, String)> {
-    let profile_def = params
-        .profile
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .and_then(crate::dispatch_profile::resolve_dispatch_profile);
-    let vendor = resolve_dispatch_vendor(params)?;
-    let role_source = profile_def.map(|p| p.role.to_string()).or_else(|| {
-        params
+fn resolve_vaccination_lane(
+    request: &StaffAssignmentRequest,
+    assignment: &ResolvedStaffAssignment,
+    profile: &ResolvedDispatchProfile,
+) -> Option<(String, String)> {
+    let vendor = resolve_dispatch_vendor(assignment, profile)?;
+    let role_source = profile.role.clone().or_else(|| {
+        request
             .stage
             .as_deref()
             .filter(|s| !s.trim().is_empty())
@@ -155,9 +158,11 @@ fn vaccination_overlay_lines(
 /// (frozen decision 3): the packet always assembles.
 pub(super) fn render_vendor_vaccination_overlay(
     server: &MemoryServer,
-    params: &TachiDispatchParams,
+    request: &StaffAssignmentRequest,
+    assignment: &ResolvedStaffAssignment,
+    profile: &ResolvedDispatchProfile,
 ) -> Option<String> {
-    let (role, vendor) = resolve_vaccination_lane(params)?;
+    let (role, vendor) = resolve_vaccination_lane(request, assignment, profile)?;
     let rows = crate::signature_evidence::rows_for_lane(server, &role, &vendor);
     let trust = crate::signature_evidence::self_report_trust_for_vendor(server, &vendor);
     let lines = vaccination_overlay_lines(rows, trust, Utc::now().timestamp(), &role, &vendor);
@@ -170,12 +175,19 @@ pub(super) fn render_vendor_vaccination_overlay(
 
 pub(super) fn render_dispatch_profile_overlay(
     server: &MemoryServer,
-    params: &TachiDispatchParams,
+    request: &StaffAssignmentRequest,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    profile: &ResolvedDispatchProfile,
 ) -> String {
     let mut lines = vec!["## Dispatch profile".to_string()];
-    if let Some(profile) = params.profile.as_deref().filter(|s| !s.trim().is_empty()) {
-        lines.push(format!("- profile: {profile}"));
-        if let Some(profile_def) = crate::dispatch_profile::resolve_dispatch_profile(profile) {
+    if let Some(profile_name) = assignment
+        .selected_profile
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        lines.push(format!("- profile: {profile_name}"));
+        if let Some(profile_def) = crate::dispatch_profile::resolve_dispatch_profile(profile_name) {
             lines.push("- skill_loadout:".to_string());
             match crate::dispatch_profile::profile_skill_loadout_json_for_server(
                 server,
@@ -270,37 +282,44 @@ pub(super) fn render_dispatch_profile_overlay(
             }
         }
     }
-    if let Some(agent) = params.agent.as_deref().filter(|s| !s.trim().is_empty()) {
-        lines.push(format!("- backend: {agent}"));
+    if !assignment.selected_backend.trim().is_empty() {
+        lines.push(format!("- backend: {}", assignment.selected_backend));
     }
-    if let Some(stage) = params.stage.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(stage) = request.stage.as_deref().filter(|s| !s.trim().is_empty()) {
         lines.push(format!("- stage: {stage}"));
     }
-    if let Some(tool_profile) = params
+    if let Some(tool_profile) = profile
         .tool_profile
         .as_deref()
         .filter(|s| !s.trim().is_empty())
     {
         lines.push(format!("- tachi_tool_profile: {tool_profile}"));
     }
-    if let Some(flow_id) = params.flow_id.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(flow_id) = request.flow_id.as_deref().filter(|s| !s.trim().is_empty()) {
         lines.push(format!("- flow_id: {flow_id}"));
     }
-    if let Some(issue_ref) = params.issue_ref.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(issue_ref) = request
+        .issue_ref
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         lines.push(format!("- issue_ref: {issue_ref}"));
     }
-    if let Some(pr_ref) = params.pr_ref.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(pr_ref) = request.pr_ref.as_deref().filter(|s| !s.trim().is_empty()) {
         lines.push(format!("- pr_ref: {pr_ref}"));
     }
-    if let Some(access) = params.mcp_access.as_ref() {
-        if let Ok(compact) = serde_json::to_string(access) {
-            lines.push(format!("- tool_access: {compact}"));
-        }
+    if let Ok(compact) = serde_json::to_string(&profile.mcp_access) {
+        lines.push(format!("- tool_access: {compact}"));
     }
-    if !params.allowed_mcp_servers.is_empty() {
+    let allowed_mcp_servers = grant
+        .mcp_access
+        .as_ref()
+        .map(|access| access.allowed_mcp_servers.as_slice())
+        .unwrap_or_default();
+    if !allowed_mcp_servers.is_empty() {
         lines.push(format!(
             "- allowed_mcp_servers: {}",
-            params.allowed_mcp_servers.join(", ")
+            allowed_mcp_servers.join(", ")
         ));
     }
     lines.push("- completion_report: report files changed, tests run, blockers, and any unavailable MCP/GitHub context explicitly.".to_string());

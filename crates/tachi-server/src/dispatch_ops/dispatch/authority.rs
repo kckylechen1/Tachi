@@ -180,6 +180,7 @@ fn canonical_credential_profiles(raw: &[String]) -> Vec<String> {
 /// the evidence stops describing the thing you are about to run.
 pub(super) fn compile_dispatch_contract(
     params: &mut TachiDispatchParams,
+    _request: &tachi_params::StaffAssignmentRequest,
     agent_norm: &str,
     harness_transport: &str,
     resolved_profile: &ResolvedDispatchProfile,
@@ -197,16 +198,9 @@ pub(super) fn compile_dispatch_contract(
         command: params.command.clone(),
     })?;
 
-    // Materialize the skill mount BEFORE compiling, so the compiler sees the
-    // list the agent would actually get (profile skills, or the stage defaults
-    // that `resolve_effective_skills` would have derived later). Writing them
-    // back into `params.skills` is behavior-preserving: `resolve_effective_skills`
-    // returns `params.skills` verbatim when it is non-empty, and computes the
-    // same `auto_instruction` either way.
-    if params.skills.is_empty() {
-        let (effective_skills, _) = resolve_effective_skills(params);
-        params.skills = effective_skills;
-    }
+    // The coordinator resolves the semantic candidate once before this
+    // authority compiler. This boundary only filters that candidate and mints
+    // the admitted mount; defaults must not reappear after a filter empties it.
     let skills = params
         .skills
         .iter()
@@ -299,6 +293,22 @@ mod tests {
         (params, resolved)
     }
 
+    macro_rules! compile_contract_from_legacy_projection {
+        ($params:expr, $agent:expr, $transport:expr, $profile:expr, $qualifications:expr, $version:expr $(,)?) => {{
+            let params = $params;
+            let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(&*params);
+            compile_dispatch_contract(
+                params,
+                &request,
+                $agent,
+                $transport,
+                $profile,
+                $qualifications,
+                $version,
+            )
+        }};
+    }
+
     /// #894 S2d discriminating test ④ (server half): a review-profile dispatch
     /// that omits `sandbox` must compile to read-only and hand the launcher an
     /// explicit `--sandbox read-only`. Before this slice, `params.sandbox` was
@@ -315,7 +325,7 @@ mod tests {
         }));
         assert_eq!(params.sandbox, None, "the caller omitted sandbox");
 
-        let contract = compile_dispatch_contract(
+        let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -389,7 +399,7 @@ mod tests {
             "profile": "codex_55_review",
             "sandbox": "workspace-write",
         }));
-        let err = compile_dispatch_contract(
+        let err = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -425,7 +435,7 @@ mod tests {
             "permission_profile": "full",
         }));
 
-        let err = compile_dispatch_contract(
+        let err = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -470,7 +480,7 @@ mod tests {
             ],
         }));
 
-        let contract = compile_dispatch_contract(
+        let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -510,7 +520,7 @@ mod tests {
                 "skill:waza-write",
             ],
         }));
-        let exec_contract = compile_dispatch_contract(
+        let exec_contract = compile_contract_from_legacy_projection!(
             &mut exec_params,
             "custom",
             "cli",
@@ -543,7 +553,7 @@ mod tests {
             "staffing_reason": "explicit_user_request",
             "profile": "deepseek_explore",
         }));
-        let err = compile_dispatch_contract(
+        let err = compile_contract_from_legacy_projection!(
             &mut params,
             "custom",
             "cli",
@@ -586,7 +596,7 @@ mod tests {
                 "staffing_reason": "explicit_user_request",
                 "profile": "codex_55_review",
             }));
-            let err = compile_dispatch_contract(
+            let err = compile_contract_from_legacy_projection!(
                 &mut params,
                 "codex",
                 "cli",
@@ -619,7 +629,7 @@ mod tests {
             "staffing_reason": "explicit_user_request",
             "profile": "opencode_builder",
         }));
-        let contract = compile_dispatch_contract(
+        let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "custom",
             "cli",

@@ -12,7 +12,7 @@ use super::launcher::{
     build_kimi_command, build_opencode_command,
 };
 use super::mcp_config::generate_mcp_config;
-use super::prompt::{assemble_prompt_with_trace, resolve_effective_skills};
+use super::prompt::{assemble_resolved_prompt_with_trace, resolve_assignment_skills};
 use crate::agent_registry::{
     dispatch_agent_help_list, mcp_inject_supported, normalize_dispatch_agent_name,
     resolve_dispatch_agent,
@@ -33,6 +33,7 @@ use tachi_credential_profile::{
     find_credential_profile, plan_credential_materialization_with_run_dir, profile_secret_names,
     CredentialApplyOptions, CredentialMaterializeReport,
 };
+use tachi_params::StaffAssignmentRequest;
 
 const DISPATCH_DEDUPE_STALE_LOCK_SECS: i64 = 300;
 
@@ -91,11 +92,11 @@ fn opencode_serve_preflight_error(status: &Value, server_url: Option<&str>) -> S
     )
 }
 
-fn opencode_sop_label(agent_norm: &str, params: &TachiDispatchParams) -> Option<String> {
+fn opencode_sop_label(agent_norm: &str, request: &StaffAssignmentRequest) -> Option<String> {
     if agent_norm != "opencode" {
         return None;
     }
-    let route = crate::copilot_ops::build_task_brief_routing(&params.task, &[]);
+    let route = crate::copilot_ops::build_task_brief_routing(&request.task, &[]);
     let selected = route
         .selected_sops
         .iter()
@@ -247,6 +248,8 @@ pub(crate) async fn handle_tachi_dispatch(
     let now = Utc::now();
     let DispatchStart {
         dispatch_id,
+        request,
+        legacy_auto_capability_bundle,
         agent_norm,
         resolved_profile,
         resolved_assignment,
@@ -256,6 +259,8 @@ pub(crate) async fn handle_tachi_dispatch(
         inject_hub,
         workspace_dir,
         host_adapter,
+        inject_card,
+        verbose,
     } = resolve_dispatch_start(server, &mut params, now, execution_level)?;
 
     // 0a. Resolve the execution-environment binding through the fail-safe gate
@@ -322,12 +327,17 @@ pub(crate) async fn handle_tachi_dispatch(
     // pre-spawn: no primitive, no receipt, no isolation (see
     // `tachi_dispatch::authority` invariants 4 and 5).
     let harness_transport = effective_harness_transport(&params, &agent_norm);
+    // Resolve default skills and their stage instruction once. Authority may
+    // narrow this list; its mounted output is the sole downstream skill list.
+    let (requested_skills, stage_instruction) = resolve_assignment_skills(&request, &params.skills);
+    params.skills = requested_skills;
     let backend_version = tachi_dispatch::probe_provider_version(
         &agent_norm,
         tachi_dispatch::transport_kind(&harness_transport),
     );
     let effective_contract = compile_dispatch_contract(
         &mut params,
+        &request,
         &agent_norm,
         &harness_transport,
         &resolved_profile,
@@ -491,9 +501,21 @@ pub(crate) async fn handle_tachi_dispatch(
     );
 
     // 2. Assemble prompt & write audit files to workspace
-    let prompt_assembly = assemble_prompt_with_trace(server, &params).await;
+    let effective_skills_for_files = effective_contract.mounted_skills.clone();
+    let prompt_assembly = assemble_resolved_prompt_with_trace(
+        server,
+        &request,
+        &resolved_assignment,
+        &execution_grant,
+        &resolved_profile,
+        &effective_skills_for_files,
+        stage_instruction.as_deref(),
+        legacy_auto_capability_bundle,
+        params.context_query.as_deref(),
+        inject_card,
+    )
+    .await;
     let base_prompt = prompt_assembly.prompt.clone();
-    let (effective_skills_for_files, _) = resolve_effective_skills(&params);
 
     let DispatchArtifacts {
         plan_path,
@@ -506,8 +528,10 @@ pub(crate) async fn handle_tachi_dispatch(
     } = write_dispatch_artifacts(DispatchArtifactInputs {
         workspace_dir: &workspace_dir,
         dispatch_id: &dispatch_id,
-        agent_norm: &agent_norm,
-        params: &params,
+        request: &request,
+        assignment: &resolved_assignment,
+        grant: &execution_grant,
+        profile: &resolved_profile,
         base_prompt: &base_prompt,
         prompt_assembly: &prompt_assembly,
         effective_skills_for_files: &effective_skills_for_files,
@@ -584,8 +608,10 @@ pub(crate) async fn handle_tachi_dispatch(
     init_kanban_and_flow(FlowSetupInputs {
         server,
         dispatch_id: &dispatch_id,
-        params: &params,
-        agent_norm: &agent_norm,
+        request: &request,
+        assignment: &resolved_assignment,
+        grant: &execution_grant,
+        resolved_profile: &resolved_profile,
         plan_path: &plan_path,
         workspace_dir: &workspace_dir,
         prompt_md_path: &prompt_md_path,
@@ -593,9 +619,6 @@ pub(crate) async fn handle_tachi_dispatch(
         trajectory_path: &trajectory_path,
         capability_bundle_card: &capability_bundle_card,
         capability_bundle_file: &capability_bundle_file,
-        evidence_required: &resolved_assignment.evidence_required,
-        route_explanation: &resolved_assignment.route_explanation,
-        identity_receipt: &resolved_profile.identity_receipt,
     })
     .await?;
 
@@ -620,9 +643,9 @@ pub(crate) async fn handle_tachi_dispatch(
         // it directly (see plan_stage.rs) ahead of this guard ever seeing them.
         let plan_stage_outcome = run_v2_plan_stage(PlanStageInputs {
             server,
-            params: &params,
+            request: &request,
             dispatch_id: &dispatch_id,
-            agent_norm: &agent_norm,
+            assignment: &resolved_assignment,
             resolved_profile: &resolved_profile,
             profile_payload: &profile_payload,
             base_prompt: &base_prompt,
@@ -793,7 +816,7 @@ pub(crate) async fn handle_tachi_dispatch(
         harness_transport: harness_transport.clone(),
         harness_server_url: harness_server_url.clone(),
         host_adapter: host_adapter.clone(),
-        opencode_sop_label: opencode_sop_label(&agent_norm, &params),
+        opencode_sop_label: opencode_sop_label(&agent_norm, &request),
         execution_backend_metadata: execution_backend_metadata.clone(),
         execution,
         flow_dispatch_slot,
@@ -803,7 +826,7 @@ pub(crate) async fn handle_tachi_dispatch(
     // 9. Immediately return — main agent is unblocked!
     build_dispatch_response(DispatchResponseInputs {
         dispatch_id: &dispatch_id,
-        agent_norm: &agent_norm,
+        assignment: &resolved_assignment,
         profile_payload: &profile_payload,
         resolved_profile: &resolved_profile,
         authority: &authority_receipt,
@@ -813,14 +836,14 @@ pub(crate) async fn handle_tachi_dispatch(
         feedback_rules_trace: &feedback_rules_trace,
         harness_transport: &harness_transport,
         harness_server_url: &harness_server_url,
-        host_adapter: &host_adapter,
         execution_backend_name,
         execution_backend_metadata: &execution_backend_metadata,
         acpx_enabled,
         native_acp_enabled,
         v2,
         plan_duration_ms,
-        params: &params,
+        request: &request,
+        verbose,
         plan_path: &plan_path,
         prompt_md_path: &prompt_md_path,
         context_md_path: &context_md_path,
