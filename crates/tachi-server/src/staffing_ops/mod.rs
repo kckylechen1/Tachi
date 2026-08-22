@@ -102,10 +102,9 @@ pub(crate) async fn staff_start(
     // runtime check is needed here — the struct's type IS the gate. The
     // kernel-side defense-in-depth check inside handle_tachi_dispatch catches
     // any future caller that reaches it without going through this struct.
-    let recommendation_ref = request.recommendation_ref.clone();
-    let raw = launch_staff_assignment(server, request).await?;
+    let (raw, assignment) = launch_staff_assignment(server, request).await?;
 
-    record_route_decision_best_effort(server, &raw, recommendation_ref.as_deref());
+    record_route_decision_best_effort(server, &raw, assignment.recommendation_ref.as_deref());
 
     Ok(raw)
 }

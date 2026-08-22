@@ -19,6 +19,29 @@ pub(super) struct DispatchStart {
     pub(super) workspace_dir: PathBuf,
     pub(super) inject_card: bool,
     pub(super) verbose: bool,
+    pub(super) mechanics: DispatchLaunchMechanics,
+}
+
+/// Server-owned launch mechanics. This is not a facade carrier: bootstrap
+/// normalizes it once from flat input, while Staff receives it only from typed
+/// profile resolution.
+pub(super) struct DispatchLaunchMechanics {
+    pub(super) cwd: Option<String>,
+    pub(super) env_id: Option<String>,
+    pub(super) unmanaged_cwd: bool,
+    pub(super) skills: Vec<String>,
+    pub(super) model: Option<String>,
+    pub(super) permission_profile: Option<String>,
+    pub(super) allowed_tools: Vec<String>,
+    pub(super) max_turns: Option<u32>,
+    pub(super) sandbox: Option<String>,
+    pub(super) command: Vec<String>,
+    pub(super) credential_profiles: Vec<String>,
+    pub(super) mcp_access: Option<tachi_params::DispatchMcpAccessParams>,
+    pub(super) inject_tachi_mcp: Option<bool>,
+    pub(super) inject_hub_mcps: Option<bool>,
+    pub(super) allowed_mcp_servers: Vec<String>,
+    pub(super) timeout_secs: u64,
 }
 
 // ─── Dispatch start resolution ───────────────────────────────────────────────
@@ -151,6 +174,110 @@ pub(super) fn resolve_dispatch_start(
         workspace_dir,
         inject_card,
         verbose,
+        mechanics: DispatchLaunchMechanics {
+            cwd: params.cwd.clone(),
+            env_id: params.env_id.clone(),
+            unmanaged_cwd: params.unmanaged_cwd.unwrap_or(false),
+            skills: params.skills.clone(),
+            model: params.model.clone(),
+            permission_profile: params.permission_profile.clone(),
+            allowed_tools: params.allowed_tools.clone(),
+            max_turns: params.max_turns,
+            sandbox: params.sandbox.clone(),
+            command: params.command.clone(),
+            credential_profiles: params.credential_profiles.clone(),
+            mcp_access: params.mcp_access.clone(),
+            inject_tachi_mcp: params.inject_tachi_mcp,
+            inject_hub_mcps: params.inject_hub_mcps,
+            allowed_mcp_servers: params.allowed_mcp_servers.clone(),
+            timeout_secs: params.timeout_secs,
+        },
+    })
+}
+
+pub(super) fn resolve_staff_dispatch_start(
+    server: &MemoryServer,
+    mut request: tachi_params::StaffAssignmentRequest,
+    now: chrono::DateTime<Utc>,
+    execution_level: tachi_params::ExecutionLevel,
+) -> Result<DispatchStart, String> {
+    if let Some(recommendation_ref) = request.recommendation_ref.as_deref() {
+        let exists = server.with_global_store_read(|store| {
+            memcore::get_route_recommendation(store.connection(), recommendation_ref)
+                .map(|row| row.is_some())
+                .map_err(|error| error.to_string())
+        })?;
+        if !exists {
+            return Err(format!(
+                "Unknown or stale recommendation_ref '{recommendation_ref}'"
+            ));
+        }
+    }
+    let resolved_profile =
+        resolve_and_apply_staff_assignment_profile_for_server(server, &mut request)?;
+    let agent_norm = normalize_dispatch_agent_name(&resolved_profile.agent).ok_or_else(|| {
+        format!(
+            "Unknown agent '{}'. Supported: {}",
+            resolved_profile.agent.trim(),
+            dispatch_agent_help_list()
+        )
+    })?;
+    let dispatch_id = new_dispatch_id(now, &agent_norm);
+    let resolved_assignment = tachi_params::ResolvedStaffAssignment {
+        assignment_id: dispatch_id.clone(),
+        staffing_reason: request.staffing_reason,
+        selected_worker: agent_norm.clone(),
+        selected_profile: resolved_profile.selected_profile.clone(),
+        selected_backend: agent_norm.clone(),
+        selected_model: resolved_profile.selected_model.clone(),
+        execution_level: Some(execution_level),
+        recommendation_ref: request.recommendation_ref.clone(),
+        host_adapter: resolved_profile.host_adapter.clone(),
+        evidence_required: resolved_profile.evidence_required.clone(),
+        fallback_chain: resolved_profile.fallback_chain.clone(),
+        route_explanation: resolved_profile.route_explanation.clone(),
+        identity_receipt: serde_json::to_value(&resolved_profile.identity_receipt)
+            .unwrap_or(serde_json::Value::Null),
+    };
+    let mcp_access = resolved_profile.mcp_access.clone();
+    let mechanics = DispatchLaunchMechanics {
+        cwd: None,
+        env_id: None,
+        unmanaged_cwd: false,
+        skills: resolved_profile.required_skills.clone(),
+        model: resolved_profile.selected_model.clone(),
+        permission_profile: None,
+        allowed_tools: Vec::new(),
+        max_turns: None,
+        sandbox: None,
+        command: resolved_profile.launch_command.clone(),
+        credential_profiles: resolved_profile.credential_profiles.clone(),
+        inject_tachi_mcp: mcp_access.inject_tachi_mcp,
+        inject_hub_mcps: mcp_access.inject_hub_mcps,
+        allowed_mcp_servers: mcp_access.allowed_mcp_servers.clone(),
+        mcp_access: Some(mcp_access),
+        timeout_secs: 600,
+    };
+    Ok(DispatchStart {
+        dispatch_id: dispatch_id.clone(),
+        request,
+        legacy_auto_capability_bundle: Some(resolved_profile.auto_capability_bundle),
+        requested_skills: mechanics.skills.clone(),
+        context_query: None,
+        tool_profile: resolved_profile.tool_profile.clone(),
+        command: resolved_profile.launch_command.clone(),
+        harness_transport: resolved_profile.harness_transport.clone(),
+        harness_server_url: resolved_profile.harness_server_url.clone(),
+        raw_cwd: None,
+        raw_credential_profiles: resolved_profile.credential_profiles.clone(),
+        agent_norm,
+        profile_payload: serde_json::to_value(&resolved_profile).unwrap_or(serde_json::Value::Null),
+        workspace_dir: dispatch_runs_root().join(&dispatch_id),
+        inject_card: true,
+        verbose: false,
+        resolved_profile,
+        resolved_assignment,
+        mechanics,
     })
 }
 
@@ -190,6 +317,20 @@ pub(super) fn assert_assignment_legacy_projection(
     }
 }
 
+pub(super) fn assert_nested_mcp_profile_mechanics(
+    params: &DispatchLaunchMechanics,
+    resolved_profile: &ResolvedDispatchProfile,
+) -> Result<(), String> {
+    if serde_json::to_value(&params.mcp_access).ok()
+        == serde_json::to_value(Some(&resolved_profile.mcp_access)).ok()
+    {
+        Ok(())
+    } else {
+        Err("nested MCP profile projection diverged from resolved profile".to_string())
+    }
+}
+
+#[cfg(test)]
 pub(super) fn assert_nested_mcp_profile_projection(
     params: &TachiDispatchParams,
     resolved_profile: &ResolvedDispatchProfile,

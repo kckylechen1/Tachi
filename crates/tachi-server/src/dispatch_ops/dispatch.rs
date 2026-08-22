@@ -140,7 +140,11 @@ mod workspace_setup;
 mod tests;
 
 use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
-use self::authority::{compile_dispatch_contract, contract_receipt, mint_execution_grant};
+#[cfg(test)]
+use self::authority::{compile_dispatch_contract, mint_execution_grant};
+use self::authority::{
+    compile_dispatch_contract_from_mechanics, contract_receipt, mint_execution_grant_from_mechanics,
+};
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{
@@ -154,7 +158,7 @@ use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
 use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
 use self::plan_stage::{run_v2_plan_stage, PlanStageInputs};
 use self::response_helpers::*;
-use self::start::assert_nested_mcp_profile_projection;
+use self::start::assert_nested_mcp_profile_mechanics;
 use self::start::*;
 use self::workspace_setup::prepare_workspace_and_mcp;
 
@@ -216,6 +220,13 @@ pub(crate) async fn handle_tachi_dispatch(
     server: &MemoryServer,
     mut params: TachiDispatchParams,
 ) -> Result<String, String> {
+    enforce_dispatch_depth(server)?;
+    let (_, execution_level) = crate::host_profile::authorize_dispatch(params.execution_level)?;
+    let start = resolve_dispatch_start(server, &mut params, Utc::now(), execution_level)?;
+    launch_canonical_dispatch(server, start).await
+}
+
+fn enforce_dispatch_depth(server: &MemoryServer) -> Result<(), String> {
     // #1251: fail-closed recursive-dispatch depth gate — BEFORE any run
     // directory, workspace, prompt, credential, or child process. The depth is
     // read from the SESSION identity (populated from the per-call
@@ -243,12 +254,15 @@ pub(crate) async fn handle_tachi_dispatch(
         crate::session_identity::MAX_DISPATCH_DEPTH,
     )?;
 
-    // Fail before ANY run directory, workspace, prompt, or child process is
-    // created. This is the machine boundary; confirmation for a permitted L3
-    // action remains the responsibility of that action's existing gate.
-    let (host_profile, execution_level) =
-        crate::host_profile::authorize_dispatch(params.execution_level)?;
-    let now = Utc::now();
+    Ok(())
+}
+
+async fn launch_canonical_dispatch(
+    server: &MemoryServer,
+    start: DispatchStart,
+) -> Result<String, String> {
+    let (host_profile, _) =
+        crate::host_profile::authorize_dispatch(start.resolved_assignment.execution_level)?;
     let DispatchStart {
         dispatch_id,
         request,
@@ -268,7 +282,8 @@ pub(crate) async fn handle_tachi_dispatch(
         workspace_dir,
         inject_card,
         verbose,
-    } = resolve_dispatch_start(server, &mut params, now, execution_level)?;
+        mut mechanics,
+    } = start;
 
     // 0a. Resolve the execution-environment binding through the fail-safe gate
     // (#894 S1) before ANY workspace/preflight/spawn work. env_id → cwd from the
@@ -277,16 +292,16 @@ pub(crate) async fn handle_tachi_dispatch(
     // (status ledger, completion predicate, launcher), and the resolution is
     // stamped into status.json so the ledger records managed/unmanaged/default.
     let env_resolution = server.resolve_dispatch_env_binding(
-        params.env_id.as_deref(),
+        mechanics.env_id.as_deref(),
         raw_cwd.as_deref(),
-        params.unmanaged_cwd.unwrap_or(false),
+        mechanics.unmanaged_cwd,
     )?;
     let status_cwd = env_resolution
         .cwd()
         .map(|cwd| cwd.to_string())
         .or_else(|| raw_cwd.clone());
     if let Some(resolved_cwd) = env_resolution.cwd() {
-        params.cwd = Some(resolved_cwd.to_string());
+        mechanics.cwd = Some(resolved_cwd.to_string());
     }
     let env_stamp = env_resolution.stamp();
 
@@ -346,13 +361,13 @@ pub(crate) async fn handle_tachi_dispatch(
     // narrow this list; its mounted output is the sole downstream skill list.
     let (requested_skills, stage_instruction) =
         resolve_assignment_skills(&request, &requested_skills);
-    params.skills = requested_skills;
+    mechanics.skills = requested_skills;
     let backend_version = tachi_dispatch::probe_provider_version(
         &agent_norm,
         tachi_dispatch::transport_kind(&harness_transport),
     );
-    let effective_contract = compile_dispatch_contract(
-        &mut params,
+    let effective_contract = compile_dispatch_contract_from_mechanics(
+        &mut mechanics,
         &agent_norm,
         &harness_transport,
         &resolved_profile,
@@ -360,9 +375,9 @@ pub(crate) async fn handle_tachi_dispatch(
         backend_version.as_deref(),
     )?;
     let authority_receipt = contract_receipt(&effective_contract);
-    assert_nested_mcp_profile_projection(&params, &resolved_profile)?;
-    let execution_grant = mint_execution_grant(
-        &mut params,
+    assert_nested_mcp_profile_mechanics(&mechanics, &resolved_profile)?;
+    let execution_grant = mint_execution_grant_from_mechanics(
+        &mut mechanics,
         format!("{dispatch_id}:authority"),
         &env_resolution,
     )?;
@@ -889,70 +904,12 @@ pub(crate) async fn handle_tachi_dispatch(
 /// payload; Staff itself only supplies semantic request data.
 pub(crate) async fn launch_staff_assignment(
     server: &MemoryServer,
-    mut request: tachi_params::StaffAssignmentRequest,
-) -> Result<String, String> {
-    if let Some(recommendation_ref) = request.recommendation_ref.as_deref() {
-        let exists = server.with_global_store_read(|store| {
-            memcore::get_route_recommendation(store.connection(), recommendation_ref)
-                .map(|row| row.is_some())
-                .map_err(|error| error.to_string())
-        })?;
-        if !exists {
-            return Err(format!(
-                "Unknown or stale recommendation_ref '{recommendation_ref}'"
-            ));
-        }
-    }
-
-    // Resolve typed profile semantics before any canonical receipt/artifact is
-    // created. This preserves alias, worker-override, model, MCP, credential,
-    // and OpenCode defaults at the server boundary.
-    let resolved = resolve_and_apply_staff_assignment_profile_for_server(server, &mut request)?;
-    let params = normalize_staff_bootstrap_input(&request, &resolved);
-    handle_tachi_dispatch(server, params).await
-}
-
-/// Private compatibility normalizer for the existing bootstrap kernel. It is
-/// deliberately kept at the dispatch boundary so model-facing Staff code never
-/// constructs or transports the flat facade.
-fn normalize_staff_bootstrap_input(
-    request: &tachi_params::StaffAssignmentRequest,
-    resolved: &ResolvedDispatchProfile,
-) -> TachiDispatchParams {
-    TachiDispatchParams {
-        staffing_reason: request.staffing_reason,
-        agent: Some(resolved.agent.clone()),
-        profile: request.profile.clone(),
-        task: request.task.clone(),
-        execution_level: request.execution_level,
-        cwd: None,
-        env_id: None,
-        unmanaged_cwd: None,
-        skills: resolved.required_skills.clone(),
-        context_query: None,
-        model: resolved.selected_model.clone(),
-        timeout_secs: 600,
-        permission_profile: None,
-        allowed_tools: Vec::new(),
-        completion_predicate: request.completion_predicate.clone(),
-        max_turns: None,
-        sandbox: None,
-        inject_tachi_mcp: None,
-        inject_hub_mcps: None,
-        command: resolved.launch_command.clone(),
-        harness_transport: resolved.harness_transport.clone(),
-        harness_server_url: resolved.harness_server_url.clone(),
-        project: request.project.clone(),
-        stage: request.stage.clone(),
-        credential_profiles: resolved.credential_profiles.clone(),
-        issue_ref: request.issue_ref.clone(),
-        pr_ref: request.pr_ref.clone(),
-        flow_id: request.flow_id.clone(),
-        tool_profile: resolved.tool_profile.clone(),
-        auto_capability_bundle: Some(resolved.auto_capability_bundle),
-        mcp_access: Some(resolved.mcp_access.clone()),
-        allowed_mcp_servers: Vec::new(),
-        verbose: None,
-        inject_card: None,
-    }
+    request: tachi_params::StaffAssignmentRequest,
+) -> Result<(String, tachi_params::ResolvedStaffAssignment), String> {
+    enforce_dispatch_depth(server)?;
+    let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
+    let start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    let assignment = start.resolved_assignment.clone();
+    let raw = launch_canonical_dispatch(server, start).await?;
+    Ok((raw, assignment))
 }

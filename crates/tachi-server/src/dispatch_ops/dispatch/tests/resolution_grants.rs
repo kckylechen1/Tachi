@@ -87,12 +87,12 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
 
     let dispatch = include_str!("../../dispatch.rs");
     let handler = dispatch
-        .split_once("pub(crate) async fn handle_tachi_dispatch")
-        .expect("dispatch source contains the real handler")
+        .split_once("async fn launch_canonical_dispatch")
+        .expect("dispatch source contains the canonical lifecycle")
         .1;
     let after_grant = handler
         .split_once(
-            "let execution_grant = mint_execution_grant(\n        &mut params,\n        format!(\"{dispatch_id}:authority\"),\n        &env_resolution,\n    )?;\n",
+            "let execution_grant = mint_execution_grant_from_mechanics(\n        &mut mechanics,\n        format!(\"{dispatch_id}:authority\"),\n        &env_resolution,\n    )?;\n",
         )
         .expect("handler contains the complete grant-mint statement")
         .1;

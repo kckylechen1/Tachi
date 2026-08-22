@@ -44,7 +44,7 @@
     ],
     "production_adopters": [
       "crates/tachi-server/src/bootstrap/poke_cli/probes/dispatch.rs::probe_dispatch_mock::dispatch-kernel-call#1",
-      "crates/tachi-server/src/staffing_ops/mod.rs::staff_start::dispatch-kernel-call#1"
+      "crates/tachi-server/src/staffing_ops/mod.rs::staff_start::typed-staff-launch-call#1"
     ],
     "request_builders": [
       "crates/tachi-server/src/bootstrap/poke_cli/probes/dispatch.rs::probe_dispatch_mock::request-literal#1"

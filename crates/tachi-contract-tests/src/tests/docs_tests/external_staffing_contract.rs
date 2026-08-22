@@ -226,10 +226,20 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
         .iter()
         .filter(|function| {
             function.name != "handle_tachi_dispatch"
-                && occurrence_count(&function.source, "handle_tachi_dispatch(") > 0
+                && function.name != "launch_staff_assignment"
+                && (occurrence_count(&function.source, "handle_tachi_dispatch(") > 0
+                    || occurrence_count(&function.source, "launch_staff_assignment(") > 0)
         })
         .flat_map(|function| {
-            numbered_sites(function, "handle_tachi_dispatch(", "dispatch-kernel-call")
+            if occurrence_count(&function.source, "handle_tachi_dispatch(") > 0 {
+                numbered_sites(function, "handle_tachi_dispatch(", "dispatch-kernel-call")
+            } else {
+                numbered_sites(
+                    function,
+                    "launch_staff_assignment(",
+                    "typed-staff-launch-call",
+                )
+            }
         })
         .collect::<Vec<_>>();
     let mut request_builders = functions
@@ -396,6 +406,22 @@ fn external_staffing_topology_matches_the_single_kernel_contract() {
     );
     let violations = budget_violations(&observed, &fixture["contraction_budgets"]);
     assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[test]
+fn external_staffing_typed_adopter_rejects_flat_facade_mutants() {
+    let root = repo_root();
+    let staff = std::fs::read_to_string(root.join("crates/tachi-server/src/staffing_ops/mod.rs"))
+        .expect("read Staff source");
+    let flat = ["TachiDispatch", "Params"].concat();
+    assert!(
+        !staff.contains(&flat),
+        "the actual Staff adopter must not mention the flat bootstrap facade"
+    );
+    assert!(
+        format!("{staff}\n{flat} deliberate_mutant").contains(&flat),
+        "the Staff flat-facade detector must reject a deliberate mutant"
+    );
 }
 
 #[test]
