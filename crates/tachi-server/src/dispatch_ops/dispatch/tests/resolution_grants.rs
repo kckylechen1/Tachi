@@ -226,7 +226,7 @@ async fn direct_custom_operator_dispatch_is_not_managed_cancelable() {
     let response: Value = serde_json::from_str(&raw).expect("response JSON");
     let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
     let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run dir"));
-    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
+    let mut cleanup = ReleaseWorkerCleanup::arm(&release_worker, run_dir.clone());
     let accepted_status: Value = serde_json::from_slice(
         &std::fs::read(run_dir.join("status.json")).expect("accepted status"),
     )
@@ -257,9 +257,10 @@ async fn direct_custom_operator_dispatch_is_not_managed_cancelable() {
 
     std::fs::write(&release_worker, b"release").expect("release direct child");
     assert_eq!(
-        cleanup.wait_for_terminal().await["state"],
+        cleanup.worker.wait_for_terminal().await["state"],
         json!("TASK_STATE_COMPLETED")
     );
+    cleanup.disarm();
 }
 
 /// Releases the fake Claude subprocess even when an assertion panics. The
@@ -330,6 +331,34 @@ impl Drop for FakeClaudeCleanup {
 /// process-wide test environment alive until its terminal receipt exists.
 struct TerminalWorkerCleanup {
     run_dir: std::path::PathBuf,
+}
+
+struct ReleaseWorkerCleanup {
+    release: std::path::PathBuf,
+    worker: TerminalWorkerCleanup,
+    armed: bool,
+}
+
+impl ReleaseWorkerCleanup {
+    fn arm(release: &std::path::Path, run_dir: std::path::PathBuf) -> Self {
+        Self {
+            release: release.to_path_buf(),
+            worker: TerminalWorkerCleanup::new(run_dir),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReleaseWorkerCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::write(&self.release, b"release");
+        }
+    }
 }
 
 impl TerminalWorkerCleanup {

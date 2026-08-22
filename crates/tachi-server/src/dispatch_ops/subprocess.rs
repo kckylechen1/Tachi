@@ -20,6 +20,17 @@ static MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR: OnceLock<
 static MANAGED_CANCEL_CHILD_PID: OnceLock<std::sync::Mutex<Option<(std::path::PathBuf, u32)>>> =
     OnceLock::new();
 
+#[cfg(test)]
+struct ManagedCancelDequeueBarrier {
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static MANAGED_CANCEL_DEQUEUE_BARRIER: OnceLock<
+    std::sync::Mutex<Option<ManagedCancelDequeueBarrier>>,
+> = OnceLock::new();
+
 pub(super) async fn run_agent_subprocess(
     mut cmd: Command,
     timeout: Duration,
@@ -69,6 +80,8 @@ pub(super) async fn run_managed_custom_subprocess(
                     drain_managed_output(stdout_task, stderr_task).await;
                     return Err("managed cancellation channel closed".to_string());
                 };
+                #[cfg(test)]
+                pause_managed_cancel_after_dequeue();
                 let status = match try_wait_for_managed_cancellation(&mut child, run_dir) {
                     Ok(status) => status,
                     Err(error) => {
@@ -136,6 +149,37 @@ pub(super) async fn run_managed_custom_subprocess(
         };
         finish_managed_output(status, stdout_task, stderr_task).await
     }
+}
+
+#[cfg(test)]
+fn install_managed_cancel_dequeue_barrier() -> (
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let barrier = MANAGED_CANCEL_DEQUEUE_BARRIER.get_or_init(|| std::sync::Mutex::new(None));
+    *barrier
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ManagedCancelDequeueBarrier {
+        entered: entered_tx,
+        release: release_rx,
+    });
+    (entered_rx, release_tx)
+}
+
+#[cfg(test)]
+fn pause_managed_cancel_after_dequeue() {
+    let Some(barrier) = MANAGED_CANCEL_DEQUEUE_BARRIER.get().and_then(|barrier| {
+        barrier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }) else {
+        return;
+    };
+    let _ = barrier.entered.send(());
+    let _ = barrier.release.recv();
 }
 
 #[cfg(unix)]
@@ -321,6 +365,87 @@ mod issue_1825_tests {
     }
 
     #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn natural_child_exit_after_cancel_dequeue_keeps_terminal_truthful() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().expect("home");
+        let runs = tempfile::tempdir().expect("runs");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
+        let dispatch_id = "20260823T182514Z-custom-deadbeef";
+        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
+        write_managed_status(&run_dir, dispatch_id);
+        let release = run_dir.join("release");
+        let exited = run_dir.join("exited");
+        let server =
+            crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+        let (receiver, run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("registry");
+        let (entered, continue_cancel) = install_managed_cancel_dequeue_barrier();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!(
+                "while [ ! -f '{}' ]; do :; done; touch '{}'",
+                release.display(),
+                exited.display()
+            ),
+        ]);
+        let runner_dir = run_dir.clone();
+        let runner = tokio::spawn(async move {
+            run_managed_custom_subprocess(command, Duration::from_secs(20), receiver, &runner_dir)
+                .await
+        });
+        let cancel_server = server.clone();
+        let cancel = tokio::spawn(async move {
+            crate::managed_run_control::request_managed_custom_cancel(
+                &cancel_server,
+                dispatch_id,
+                1,
+            )
+            .await
+            .expect("cancel")
+        });
+        tokio::task::spawn_blocking(move || entered.recv().expect("dequeued"))
+            .await
+            .expect("barrier join");
+        std::fs::write(&release, b"release").expect("release child");
+        wait_for_file(&exited).await;
+        crate::dispatch_ops::write_status_json(
+            &run_dir,
+            dispatch_id,
+            false,
+            None,
+            None,
+            "n/a",
+            Some(1),
+            None,
+            None,
+            None,
+            Some(
+                serde_json::json!({"state":"TASK_STATE_COMPLETED", "result_written":true, "result":"natural exit"}),
+            ),
+        );
+        continue_cancel.send(()).expect("continue cancel");
+        assert!(runner.await.expect("runner").is_ok());
+        let response: Value =
+            serde_json::from_str(&cancel.await.expect("cancel task")).expect("response");
+        let status: Value =
+            serde_json::from_slice(&std::fs::read(run_dir.join("status.json")).expect("status"))
+                .expect("JSON");
+        assert_eq!(status["state"], "TASK_STATE_COMPLETED");
+        assert_ne!(status["state"], "TASK_STATE_CANCELED");
+        assert_eq!(response["receipt"], status["cancellation"]["receipt"]);
+        assert_eq!(response["reason"], status["cancellation"]["reason"]);
+        drop(run_guard);
+        assert!(!server.managed_run_controls.contains(dispatch_id));
+    }
+
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn request_cancel_reconciles_injected_child_probe_failure_through_the_real_runner() {
         let _serial = crate::utils::global_test_lock()
@@ -335,7 +460,7 @@ mod issue_1825_tests {
         write_managed_status(&run_dir, dispatch_id);
         let server =
             crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
-        let (receiver, _run_guard) = server
+        let (receiver, run_guard) = server
             .managed_run_controls
             .register(dispatch_id)
             .expect("managed control registration");
@@ -376,6 +501,11 @@ mod issue_1825_tests {
         assert_eq!(status["status_revision"], 3);
         assert_eq!(status["cancellation"]["receipt"], "termination_unconfirmed");
         assert_ne!(status["state"], "TASK_STATE_CANCELED");
+        drop(run_guard);
+        assert!(
+            !server.managed_run_controls.contains(dispatch_id),
+            "failed termination proof must release the managed cancellation registry"
+        );
         assert!(
             process_group_absent(Some(pid)),
             "probe failure must reap the production child process group"

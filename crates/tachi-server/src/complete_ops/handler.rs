@@ -1223,6 +1223,23 @@ mod tests {
             .expect("query dispatch outcome count")
     }
 
+    fn dispatch_adjudication_count(server: &MemoryServer, dispatch_id: &str) -> i64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_adjudications AS adjudication \
+                         JOIN dispatch_outcomes AS outcome ON outcome.outcome_id = adjudication.outcome_id \
+                         WHERE outcome.dispatch_id = ?1",
+                        [dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("query dispatch adjudication count")
+    }
+
     #[tokio::test]
     async fn managed_cancellation_rejects_real_completion_before_outcome_or_receipt_writes() {
         for receipt in ["cancellation_requested", "cancellation_confirmed"] {
@@ -1242,6 +1259,11 @@ mod tests {
                 dispatch_outcome_count(&server, &dispatch_id),
                 0,
                 "{receipt} must reject before dispatch_outcomes/adjudication can be derived"
+            );
+            assert_eq!(
+                dispatch_adjudication_count(&server, &dispatch_id),
+                0,
+                "{receipt} must reject before dispatch_adjudications can be derived"
             );
             let status: Value = serde_json::from_slice(
                 &std::fs::read(
