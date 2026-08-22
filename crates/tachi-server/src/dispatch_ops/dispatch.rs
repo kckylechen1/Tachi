@@ -443,7 +443,8 @@ pub(crate) async fn handle_tachi_dispatch(
     // (up to 180s) LLM call. External pollers must see *something* the
     // instant a dispatch is accepted, not only after the plan stage
     // succeeds. Every field serialized here is available straight off
-    // `params` + `DispatchStart` — no prompt/artifact/plan dependency.
+    // the request, resolved assignment, execution grant, and private start
+    // owners — no prompt/artifact/plan dependency.
     // `v2` is not yet decided (that needs the resolved request stage, which IS already
     // resolved) so compute it early too; capability_bundle/feedback_rules
     // are not known yet (they come from `assemble_prompt_with_trace` /

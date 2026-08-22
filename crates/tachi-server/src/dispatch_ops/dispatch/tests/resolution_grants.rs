@@ -91,8 +91,8 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         .expect("dispatch source contains the real handler")
         .1;
     let after_grant = handler
-        .split_once("let execution_grant = mint_execution_grant(")
-        .expect("handler contains the grant mint marker")
+        .split_once("let mcp_access = execution_grant.mcp_access.as_ref();")
+        .expect("handler contains the post-grant marker")
         .1;
     let post_grant_handler = after_grant;
     let has_post_grant_params =
