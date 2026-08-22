@@ -553,7 +553,11 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
     let server = crate::tests::make_server();
     let mut params = test_dispatch_params(None, "raw alias completion diagnostics");
     params.profile = Some("glm_51_impl".to_string());
-    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "from pathlib import Path; Path('launcher-cwd').write_text(str(Path.cwd()))".to_string(),
+    ];
     params.cwd = Some(cwd.path().to_string_lossy().to_string());
     params.unmanaged_cwd = Some(true);
     params.verbose = Some(true);
