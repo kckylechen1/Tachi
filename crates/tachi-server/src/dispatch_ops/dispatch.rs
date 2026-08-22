@@ -121,6 +121,12 @@ pub(crate) struct DispatchResult {
     pub observed_model: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManagedControlOrigin {
+    DirectHandle,
+    StaffFacade,
+}
+
 mod artifacts;
 mod authority;
 mod backend;
@@ -277,7 +283,7 @@ pub(crate) async fn handle_tachi_dispatch(
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(params.execution_level)?;
     let start = resolve_dispatch_start(server, &mut params, Utc::now(), execution_level)?;
-    launch_canonical_dispatch(server, start).await
+    launch_canonical_dispatch(server, start, ManagedControlOrigin::DirectHandle).await
 }
 
 fn enforce_dispatch_depth(server: &MemoryServer) -> Result<(), String> {
@@ -314,6 +320,7 @@ fn enforce_dispatch_depth(server: &MemoryServer) -> Result<(), String> {
 async fn launch_canonical_dispatch(
     server: &MemoryServer,
     start: DispatchStart,
+    managed_control_origin: ManagedControlOrigin,
 ) -> Result<String, String> {
     let (host_profile, _) =
         crate::host_profile::authorize_dispatch(start.resolved_assignment.execution_level)?;
@@ -912,10 +919,29 @@ async fn launch_canonical_dispatch(
     };
 
     // Register managed-custom control before task scheduling.
-    let (execution, managed_run_guard) = if managed_custom_eligible {
-        let (receiver, guard) = match server.managed_run_controls.register(&dispatch_id) {
-            Ok(registration) => registration,
-            Err(error) => {
+    let (execution, managed_run_guard) =
+        if managed_control_origin == ManagedControlOrigin::StaffFacade && managed_custom_eligible {
+            let (receiver, guard) = match server.managed_run_controls.register(&dispatch_id) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    let _ = server.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                    });
+                    release_flow_dispatch_slot(flow_dispatch_slot);
+                    close_kanban_row_on_early_exit(
+                        server,
+                        &dispatch_id,
+                        "managed-custom control registration",
+                        request.project.as_deref(),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+            if let Err(error) =
+                crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
+            {
+                drop(guard);
                 let _ = server.with_global_store(|store| {
                     cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
                 });
@@ -923,40 +949,22 @@ async fn launch_canonical_dispatch(
                 close_kanban_row_on_early_exit(
                     server,
                     &dispatch_id,
-                    "managed-custom control registration",
+                    "managed-custom control classification",
                     request.project.as_deref(),
                 )
                 .await;
                 return Err(error);
             }
+            let execution = match execution {
+                DispatchExecution::Subprocess(command) => {
+                    DispatchExecution::ManagedCustom(command, receiver)
+                }
+                _ => unreachable!("managed custom eligibility requires a subprocess execution"),
+            };
+            (execution, Some(guard))
+        } else {
+            (execution, None)
         };
-        if let Err(error) =
-            crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
-        {
-            drop(guard);
-            let _ = server.with_global_store(|store| {
-                cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
-            });
-            release_flow_dispatch_slot(flow_dispatch_slot);
-            close_kanban_row_on_early_exit(
-                server,
-                &dispatch_id,
-                "managed-custom control classification",
-                request.project.as_deref(),
-            )
-            .await;
-            return Err(error);
-        }
-        let execution = match execution {
-            DispatchExecution::Subprocess(command) => {
-                DispatchExecution::ManagedCustom(command, receiver)
-            }
-            _ => unreachable!("managed custom eligibility requires a subprocess execution"),
-        };
-        (execution, Some(guard))
-    } else {
-        (execution, None)
-    };
 
     // 8. Spawn background task with Watchdog
     let workspace_dir_for_response = workspace_dir.clone();
@@ -1035,6 +1043,6 @@ pub(crate) async fn launch_staff_assignment(
     let start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
     let assignment = start.resolved_assignment.clone();
     let recommendation = start.resolved_recommendation.clone();
-    let raw = launch_canonical_dispatch(server, start).await?;
+    let raw = launch_canonical_dispatch(server, start, ManagedControlOrigin::StaffFacade).await?;
     Ok((raw, assignment, recommendation))
 }

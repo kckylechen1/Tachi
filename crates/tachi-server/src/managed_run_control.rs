@@ -42,7 +42,7 @@ pub(crate) fn cancellation_blocks_terminal_writer(object: &serde_json::Map<Strin
             .and_then(Value::as_object)
             .and_then(|receipt| receipt.get("receipt"))
             .and_then(Value::as_str),
-        Some("cancellation_confirmed" | "termination_unconfirmed")
+        Some("cancellation_requested" | "cancellation_confirmed" | "termination_unconfirmed")
     )
 }
 
@@ -319,20 +319,29 @@ pub(crate) async fn request_managed_custom_cancel(
             );
         }
         match receiver.await {
-            Ok(CancelCompletion::Confirmed { termination_proof, status_revision }) => Ok(json!({
-                "receipt": "cancellation_confirmed", "dispatch_id": dispatch_id,
-                "expected_status_revision": expected, "observed_status_revision": status_revision,
-                "termination_proof": termination_proof, "lifecycle_owner": "memory_server_managed_custom",
-                "backend": "custom", "timestamp": Utc::now().to_rfc3339(),
-            }).to_string()),
-            Ok(CancelCompletion::Unconfirmed) => Ok(json!({
-                "receipt": "termination_unconfirmed", "dispatch_id": dispatch_id,
-                "expected_status_revision": expected, "observed_status_revision": observed,
-                "lifecycle_owner": "memory_server_managed_custom", "backend": "custom",
-                "timestamp": Utc::now().to_rfc3339(),
-            }).to_string()),
-            Ok(CancelCompletion::Unavailable(reason)) => record_unavailable_if_pending(&run_dir, dispatch_id, expected, observed, reason),
-            Err(_) => record_unavailable_if_pending(&run_dir, dispatch_id, expected, observed, "completion_or_timeout_winner"),
+            Ok(CancelCompletion::Confirmed {
+                termination_proof,
+                status_revision,
+            }) => {
+                let _ = (termination_proof, status_revision);
+                canonical_cancellation_receipt(&run_dir).ok_or_else(|| {
+                    "managed cancellation committed without a canonical receipt".to_string()
+                })
+            }
+            Ok(CancelCompletion::Unconfirmed) => canonical_cancellation_receipt(&run_dir)
+                .ok_or_else(|| {
+                    "managed cancellation committed without a canonical receipt".to_string()
+                }),
+            Ok(CancelCompletion::Unavailable(reason)) => {
+                record_unavailable_if_pending(&run_dir, dispatch_id, expected, observed, reason)
+            }
+            Err(_) => record_unavailable_if_pending(
+                &run_dir,
+                dispatch_id,
+                expected,
+                observed,
+                "completion_or_timeout_winner",
+            ),
         }
     }
 }
@@ -449,6 +458,10 @@ pub(crate) fn record_termination_unconfirmed(
             None,
         ),
     );
+    object.insert(
+        "state".to_string(),
+        Value::String("TASK_STATE_FAILED".to_string()),
+    );
     crate::managed_run_control::advance_status_revision(object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|e| format!("serialize termination_unconfirmed: {e}"))?;
@@ -510,8 +523,17 @@ fn record_unavailable_if_pending(
             .map_err(|e| format!("serialize cancellation_unavailable: {e}"))?;
         crate::utils::write_owner_only_file_atomic(&path, &body)
             .map_err(|e| format!("persist cancellation_unavailable: {e}"))?;
+        return canonical_cancellation_receipt(run_dir)
+            .ok_or_else(|| "cancellation unavailable receipt was not committed".to_string());
     }
     Ok(unavailable(dispatch_id, expected, Some(observed), reason))
+}
+
+fn canonical_cancellation_receipt(run_dir: &std::path::Path) -> Option<String> {
+    let lock = crate::dispatch_ops::status_json_lock_for(run_dir);
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let status = crate::task_lifecycle::read_json_file(&run_dir.join("status.json")).ok()??;
+    serde_json::to_string(status.get("cancellation")?).ok()
 }
 
 fn cancellation_receipt(

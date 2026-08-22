@@ -84,6 +84,55 @@ fn ensure_completion_artifact_read_support(dispatch_id: Option<&str>) -> Result<
     Ok(())
 }
 
+fn admit_managed_completion(
+    server: &MemoryServer,
+    dispatch_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(dispatch_id) = dispatch_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(());
+    };
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
+        return Ok(());
+    }
+    let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
+    let status_lock = crate::dispatch_ops::status_json_lock_for(&run_dir);
+    let _status_guard = status_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let status_path = run_dir.join("status.json");
+    let Some(mut status) = crate::task_lifecycle::read_json_file(&status_path)? else {
+        return Ok(());
+    };
+    let object = status.as_object_mut().ok_or_else(|| {
+        format!(
+            "managed completion status is not an object: {}",
+            status_path.display()
+        )
+    })?;
+    if object
+        .get("execution_classification")
+        .and_then(Value::as_str)
+        != Some("managed_custom")
+    {
+        return Ok(());
+    }
+    if crate::managed_run_control::cancellation_blocks_terminal_writer(object) {
+        return Err("managed cancellation owns terminal completion".to_string());
+    }
+    if object.contains_key("completion_recovery") || object.contains_key("resolved_completion") {
+        return Ok(());
+    }
+    object.insert(
+        "completion_recovery".to_string(),
+        json!({ "status": "completion_admitted" }),
+    );
+    crate::managed_run_control::advance_status_revision(object)?;
+    let body = serde_json::to_vec_pretty(&status)
+        .map_err(|error| format!("serialize managed completion admission: {error}"))?;
+    crate::utils::write_owner_only_file_atomic(&status_path, &body)
+        .map_err(|error| format!("persist managed completion admission: {error}"))
+}
+
 /// Persist the resolved close in the dispatch's own run receipt before
 /// projecting it to kanban. Kanban is a derived view and may be missing or
 /// temporarily unreadable; the watchdog therefore needs this durable source
@@ -343,6 +392,7 @@ pub(crate) async fn handle_tachi_complete(
     // the first executable action so an unsupported platform refuses before
     // eval/outcome/claim/receipt/kanban/continuity state can be mutated.
     ensure_completion_artifact_read_support(params.dispatch_id.as_deref())?;
+    admit_managed_completion(server, params.dispatch_id.as_deref())?;
     let resolved_flow_id = params
         .dispatch_id
         .as_deref()

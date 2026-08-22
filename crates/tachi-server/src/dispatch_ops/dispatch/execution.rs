@@ -384,6 +384,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 );
             }
         }
+        if receipt_terminal_state == Some("TASK_STATE_FAILED") {
+            crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                &server_clone,
+                &d_id,
+                "termination_unconfirmed",
+                Some(agent_for_watchdog.as_str()),
+                project_for_watchdog.as_deref(),
+            );
+        }
         // #1250: terminal accounting in the final `status.json` rewrite must
         // reflect the resolved predicate verdict, NOT the raw process exit
         // code. The watchdog branch below is the only path that actually
@@ -1017,14 +1026,23 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
         .get("cancellation")
         .and_then(Value::as_object)
         .is_some_and(|receipt| {
-            receipt.get("receipt").and_then(Value::as_str) == Some("cancellation_confirmed")
+            matches!(
+                receipt.get("receipt").and_then(Value::as_str),
+                Some("termination_unconfirmed")
+            ) || (receipt.get("receipt").and_then(Value::as_str) == Some("cancellation_confirmed")
                 && matches!(
                     receipt.get("termination_proof").and_then(Value::as_str),
                     Some("spawn_suppressed" | "unix_process_group_absent")
-                )
+                ))
         })
     {
-        return Ok(CompletionReceiptState::Terminal("TASK_STATE_CANCELED"));
+        return Ok(CompletionReceiptState::Terminal(
+            if status["cancellation"]["receipt"] == "termination_unconfirmed" {
+                "TASK_STATE_FAILED"
+            } else {
+                "TASK_STATE_CANCELED"
+            },
+        ));
     }
     let Some(receipt) = status.get("resolved_completion").and_then(Value::as_object) else {
         return Ok(CompletionReceiptState::Open);

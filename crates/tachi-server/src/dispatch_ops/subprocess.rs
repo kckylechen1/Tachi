@@ -74,16 +74,30 @@ pub(super) async fn run_managed_custom_subprocess(
                     Err(error) => {
                         reap_timed_out_child(&mut child, pid).await;
                         drain_managed_output(stdout_task, stderr_task).await;
-                        let _ = command.response.send(
-                            crate::managed_run_control::CancelCompletion::Unavailable(
-                                "child_probe_failed",
-                            ),
+                        let _ = crate::managed_run_control::record_termination_unconfirmed(
+                            run_dir,
+                            command.expected_status_revision,
                         );
+                        let _ = command
+                            .response
+                            .send(crate::managed_run_control::CancelCompletion::Unconfirmed);
                         return Err(format!("managed cancellation child probe failed: {error}"));
                     }
                 };
                 if let Some(status) = status {
                     let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unavailable("completion_or_timeout_winner"));
+                    return finish_managed_output(status, stdout_task, stderr_task).await;
+                }
+                if matches!(signal_process_group(pid, libc::SIGTERM), ProcessGroupSignal::Absent) {
+                    let status = child
+                        .wait()
+                        .await
+                        .map_err(|error| format!("Agent process error: {error}"))?;
+                    let _ = command.response.send(
+                        crate::managed_run_control::CancelCompletion::Unavailable(
+                            "completion_or_timeout_winner",
+                        ),
+                    );
                     return finish_managed_output(status, stdout_task, stderr_task).await;
                 }
                 reap_timed_out_child(&mut child, pid).await;
@@ -356,19 +370,15 @@ mod issue_1825_tests {
         };
         assert!(runner_error.contains("managed cancellation child probe failed"));
         let response: Value = serde_json::from_str(&response).expect("cancellation JSON");
-        assert_eq!(response["receipt"], "cancellation_unavailable");
-        assert_eq!(response["reason"], "child_probe_failed");
+        assert_eq!(response["receipt"], "termination_unconfirmed");
         let status: Value = serde_json::from_slice(
             &std::fs::read(run_dir.join("status.json")).expect("canonical status"),
         )
         .expect("canonical JSON");
-        assert_eq!(status["state"], "TASK_STATE_WORKING");
+        assert_eq!(status["state"], "TASK_STATE_FAILED");
         assert_eq!(status["status_revision"], 3);
-        assert_eq!(
-            status["cancellation"]["receipt"],
-            "cancellation_unavailable"
-        );
-        assert_eq!(status["cancellation"]["reason"], "child_probe_failed");
+        assert_eq!(status["cancellation"]["receipt"], "termination_unconfirmed");
+        assert_ne!(status["state"], "TASK_STATE_CANCELED");
         assert!(
             process_group_absent(Some(pid)),
             "probe failure must reap the production child process group"
@@ -534,9 +544,16 @@ fn configure_process_group(cmd: &mut Command) {
 fn configure_process_group(_cmd: &mut Command) {}
 
 #[cfg(unix)]
-fn terminate_process_group(child_pid: Option<u32>, signal: libc::c_int) {
+enum ProcessGroupSignal {
+    Delivered,
+    Absent,
+    Failed,
+}
+
+#[cfg(unix)]
+fn signal_process_group(child_pid: Option<u32>, signal: libc::c_int) -> ProcessGroupSignal {
     let Some(pid) = child_pid else {
-        return;
+        return ProcessGroupSignal::Absent;
     };
     let pgid = -(pid as libc::pid_t);
     // SAFETY: `kill(pgid, signal)` sends a signal to an OS process group; it
@@ -544,12 +561,22 @@ fn terminate_process_group(child_pid: Option<u32>, signal: libc::c_int) {
     // `pgid` is a negative pid_t derived from the child pid; an invalid group
     // yields ESRCH and is tolerated below.
     let rc = unsafe { libc::kill(pgid, signal) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.kind() != std::io::ErrorKind::NotFound {
-            tracing::debug!(pid, signal, error = %err, "process group signal failed");
-        }
+    if rc == 0 {
+        return ProcessGroupSignal::Delivered;
     }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        return ProcessGroupSignal::Absent;
+    }
+    if err.kind() != std::io::ErrorKind::NotFound {
+        tracing::debug!(pid, signal, error = %err, "process group signal failed");
+    }
+    ProcessGroupSignal::Failed
+}
+
+#[cfg(unix)]
+fn terminate_process_group(child_pid: Option<u32>, signal: libc::c_int) {
+    let _ = signal_process_group(child_pid, signal);
 }
 
 #[cfg(not(unix))]
