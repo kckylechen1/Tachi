@@ -166,7 +166,19 @@ async fn typed_prompt_from_pre_projection_snapshot(
     if let Some(model) = params.model.clone() {
         assignment = assignment.with_model(model);
     }
-    let mut grant = tachi_params::ExecutionGrant::from_dispatch_params(params, "test-grant");
+    let mut grant = tachi_params::ExecutionGrant {
+        grant_id: "test-grant".to_string(),
+        env_id: params.env_id.clone(),
+        unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
+        allowed_cwd: params.cwd.as_ref().map(Into::into),
+        credential_profiles: params.credential_profiles.clone(),
+        mcp_access: params.mcp_access.clone(),
+        allowed_tools: params.allowed_tools.clone(),
+        permission_profile: params.permission_profile.clone(),
+        sandbox: params.sandbox.clone(),
+        max_turns: params.max_turns,
+        timeout_secs: params.timeout_secs,
+    };
     if let (Some(inject_tachi_mcp), Some(access)) =
         (params.inject_tachi_mcp, grant.mcp_access.as_mut())
     {

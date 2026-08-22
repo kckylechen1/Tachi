@@ -213,6 +213,53 @@ fn absolutize_cwd(cwd: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_params::TachiDispatchParams;
+
+    fn build_spec(
+        params: &TachiDispatchParams,
+        agent: &str,
+        prompt: &str,
+    ) -> Result<NativeAcpRunSpec, String> {
+        let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
+        let backend = params.agent.clone().unwrap_or_else(|| "custom".to_string());
+        let assignment = tachi_params::ResolvedStaffAssignment {
+            assignment_id: "test-assignment".to_string(),
+            staffing_reason: params.staffing_reason,
+            selected_worker: backend.clone(),
+            selected_profile: params.profile.clone(),
+            selected_backend: backend,
+            selected_model: params.model.clone(),
+            execution_level: params.execution_level,
+            recommendation_ref: None,
+            host_adapter: None,
+            evidence_required: Vec::new(),
+            fallback_chain: Vec::new(),
+            route_explanation: Vec::new(),
+            identity_receipt: serde_json::Value::Null,
+        };
+        let grant = tachi_params::ExecutionGrant {
+            grant_id: "test-grant".to_string(),
+            env_id: params.env_id.clone(),
+            unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
+            allowed_cwd: params.cwd.as_ref().map(Into::into),
+            credential_profiles: params.credential_profiles.clone(),
+            mcp_access: params.mcp_access.clone(),
+            allowed_tools: params.allowed_tools.clone(),
+            permission_profile: params.permission_profile.clone(),
+            sandbox: params.sandbox.clone(),
+            max_turns: params.max_turns,
+            timeout_secs: params.timeout_secs,
+        };
+        build_native_acp_run_spec(
+            Path::new("/tmp/tachi-home-test"),
+            &request,
+            &assignment,
+            &grant,
+            &params.command,
+            agent,
+            prompt,
+        )
+    }
 
     fn params() -> TachiDispatchParams {
         TachiDispatchParams {
@@ -261,13 +308,8 @@ mod tests {
         let mut params = params();
         params.sandbox = Some("workspace-write".to_string());
 
-        let err = build_native_acp_run_spec(
-            Path::new("/tmp/tachi-home-test"),
-            &params,
-            "custom",
-            "hello",
-        )
-        .expect_err("native ACP has no sandbox concept and must fail closed");
+        let err = build_spec(&params, "custom", "hello")
+            .expect_err("native ACP has no sandbox concept and must fail closed");
         assert!(
             err.contains("acp-native") && err.contains("workspace-write"),
             "receipt must name backend + requested level: {err}"
@@ -278,13 +320,8 @@ mod tests {
     #[test]
     fn native_acp_builds_spec_without_sandbox() {
         let params = params();
-        let spec = build_native_acp_run_spec(
-            Path::new("/tmp/tachi-home-test"),
-            &params,
-            "custom",
-            "hello",
-        )
-        .expect("no sandbox requested should build cleanly");
+        let spec = build_spec(&params, "custom", "hello")
+            .expect("no sandbox requested should build cleanly");
         assert_eq!(spec.command, "python3");
     }
 }

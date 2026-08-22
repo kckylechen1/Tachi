@@ -3,6 +3,78 @@ use crate::test_support::EnvRestore;
 use chrono::Utc;
 use serde_json::{json, Value};
 
+fn assert_grant_legacy_projection(
+    params: &TachiDispatchParams,
+    grant: &tachi_params::ExecutionGrant,
+    env_resolution: &crate::exec_env_ops::EnvResolution,
+) -> Result<(), String> {
+    let mut expected_params = params.clone();
+    let mut expected =
+        mint_execution_grant(&mut expected_params, "test-expected-grant", env_resolution)?;
+    expected.grant_id = grant.grant_id.clone();
+    for (field, matches) in [
+        ("env_id", expected.env_id == grant.env_id),
+        (
+            "unmanaged_cwd_allowed",
+            expected.unmanaged_cwd_allowed == grant.unmanaged_cwd_allowed,
+        ),
+        ("allowed_cwd", expected.allowed_cwd == grant.allowed_cwd),
+        (
+            "credential_profiles",
+            expected.credential_profiles == grant.credential_profiles,
+        ),
+        (
+            "mcp_access",
+            format!("{:?}", expected.mcp_access) == format!("{:?}", grant.mcp_access),
+        ),
+        (
+            "allowed_tools",
+            expected.allowed_tools == grant.allowed_tools,
+        ),
+        (
+            "permission_profile",
+            expected.permission_profile == grant.permission_profile,
+        ),
+        ("sandbox", expected.sandbox == grant.sandbox),
+        ("max_turns", expected.max_turns == grant.max_turns),
+        ("timeout_secs", expected.timeout_secs == grant.timeout_secs),
+    ] {
+        if !matches {
+            return Err(format!(
+                "typed grant field {field} diverged from the frozen ingress projection: expected {expected:?}, got {grant:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() {
+    let sources = [
+        ("backend", include_str!("../backend.rs")),
+        ("backend_failure", include_str!("../backend_failure.rs")),
+        ("credential_apply", include_str!("../credential_apply.rs")),
+        ("credentials", include_str!("../credentials.rs")),
+        ("harness_preflight", include_str!("../harness_preflight.rs")),
+        ("launcher", include_str!("../../launcher.rs")),
+        (
+            "native_session",
+            include_str!("../../acp_native/session.rs"),
+        ),
+        ("native_spec", include_str!("../../acp_native/spec.rs")),
+        ("acpx_spec", include_str!("../../acpx/spec.rs")),
+        ("acpx", include_str!("../../acpx.rs")),
+        ("prompt", include_str!("../../prompt.rs")),
+    ];
+    for (name, source) in sources {
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !production.contains("TachiDispatchParams"),
+            "{name} must consume request, assignment, grant, or private adapter mechanics, never TachiDispatchParams"
+        );
+    }
+}
+
 /// Releases the fake Claude subprocess even when an assertion panics. The
 /// real handler owns generated MCP-config cleanup, so the explicit path
 /// asserts cleanup while Drop only performs the bounded best-effort wait.
@@ -707,8 +779,23 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
     )
     .expect("composed MCP profile resolves");
 
-    assert!(start.inject_tachi, "launch input keeps top-level true");
-    assert!(!start.inject_hub, "launch input keeps top-level false");
+    let grant = mint_execution_grant(
+        &mut params,
+        "profile-payload-grant",
+        &crate::exec_env_ops::EnvResolution::Default,
+    )
+    .expect("launch authority mints");
+    let mcp = grant.mcp_access.expect("launch MCP authority");
+    assert_eq!(
+        mcp.inject_tachi_mcp,
+        Some(true),
+        "launch input keeps top-level true"
+    );
+    assert_eq!(
+        mcp.inject_hub_mcps,
+        Some(false),
+        "launch input keeps top-level false"
+    );
     assert_eq!(
         start.profile_payload["mcp_access"]["inject_tachi_mcp"],
         json!(false),

@@ -146,6 +146,46 @@ fn opencode_missing_command_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_params::TachiDispatchParams;
+
+    fn owners(
+        params: &TachiDispatchParams,
+    ) -> (
+        tachi_params::ResolvedStaffAssignment,
+        tachi_params::ExecutionGrant,
+    ) {
+        let backend = params.agent.clone().unwrap_or_else(|| "custom".to_string());
+        (
+            tachi_params::ResolvedStaffAssignment {
+                assignment_id: "test-assignment".to_string(),
+                staffing_reason: params.staffing_reason,
+                selected_worker: backend.clone(),
+                selected_profile: params.profile.clone(),
+                selected_backend: backend,
+                selected_model: params.model.clone(),
+                execution_level: params.execution_level,
+                recommendation_ref: None,
+                host_adapter: None,
+                evidence_required: Vec::new(),
+                fallback_chain: Vec::new(),
+                route_explanation: Vec::new(),
+                identity_receipt: serde_json::Value::Null,
+            },
+            tachi_params::ExecutionGrant {
+                grant_id: "test-grant".to_string(),
+                env_id: params.env_id.clone(),
+                unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
+                allowed_cwd: params.cwd.as_ref().map(Into::into),
+                credential_profiles: params.credential_profiles.clone(),
+                mcp_access: params.mcp_access.clone(),
+                allowed_tools: params.allowed_tools.clone(),
+                permission_profile: params.permission_profile.clone(),
+                sandbox: params.sandbox.clone(),
+                max_turns: params.max_turns,
+                timeout_secs: params.timeout_secs,
+            },
+        )
+    }
 
     fn dispatch_params(agent: &str) -> TachiDispatchParams {
         TachiDispatchParams {
@@ -203,8 +243,15 @@ mod tests {
         params.cwd = Some("/work/repo".to_string());
         let mcp_path = PathBuf::from("/tmp/tachi-mcp.json");
 
-        let cmd =
-            build_claude_command(&params, "inspect", Some(&mcp_path)).expect("claude command");
+        let (assignment, grant) = owners(&params);
+        let cmd = build_claude_command(
+            &assignment,
+            &grant,
+            &params.command,
+            "inspect",
+            Some(&mcp_path),
+        )
+        .expect("claude command");
         let args = command_args(&cmd);
 
         assert!(args
@@ -235,7 +282,9 @@ mod tests {
         params.max_turns = Some(4);
         params.model = Some("gpt-5-codex".to_string());
 
-        let cmd = build_codex_command(&params, "fix it", None).expect("codex command");
+        let (assignment, grant) = owners(&params);
+        let cmd = build_codex_command(&assignment, &grant, &params.command, "fix it", None)
+            .expect("codex command");
         let args = command_args(&cmd);
 
         assert!(args
@@ -255,12 +304,15 @@ mod tests {
             "worker".to_string(),
         ];
 
-        let cmd = build_custom_command(&params, "run task").expect("custom command");
+        let (assignment, grant) = owners(&params);
+        let cmd = build_custom_command(&assignment, &grant, &params.command, "run task")
+            .expect("custom command");
         assert_eq!(command_args(&cmd), vec!["-m", "worker", "run task"]);
 
         params.command = vec!["/tmp/python3".to_string()];
+        let (assignment, grant) = owners(&params);
         assert!(
-            build_custom_command(&params, "run task").is_err(),
+            build_custom_command(&assignment, &grant, &params.command, "run task").is_err(),
             "trusted basenames should not bless untrusted paths"
         );
     }
@@ -273,7 +325,8 @@ mod tests {
     #[test]
     fn opencode_agent_missing_command_keeps_user_vocabulary_and_points_at_profiles() {
         let params = dispatch_params("opencode");
-        let err = build_opencode_command(&params, "run task")
+        let (assignment, grant) = owners(&params);
+        let err = build_opencode_command(&assignment, &grant, &params.command, "run task")
             .expect_err("agent='opencode' with no command must fail");
 
         assert!(
@@ -313,7 +366,90 @@ mod tests {
         let mut params = dispatch_params("opencode");
         params.command = vec!["opencode".to_string(), "run".to_string()];
 
-        let cmd = build_opencode_command(&params, "run task").expect("opencode command");
+        let (assignment, grant) = owners(&params);
+        let cmd = build_opencode_command(&assignment, &grant, &params.command, "run task")
+            .expect("opencode command");
         assert_eq!(command_args(&cmd), vec!["run", "run task"]);
+    }
+
+    #[test]
+    fn p3_cross_backend_launchers_use_frozen_typed_owners_not_poisoned_legacy_params() {
+        let mut claude = dispatch_params("claude");
+        claude.model = Some("typed-claude".to_string());
+        claude.cwd = Some("/typed/claude".to_string());
+        claude.permission_profile = Some("allowlist".to_string());
+        claude.allowed_tools = vec!["Read".to_string()];
+        let (claude_assignment, claude_grant) = owners(&claude);
+        claude.model = Some("poisoned-model".to_string());
+        claude.cwd = Some("/poisoned/cwd".to_string());
+        claude.allowed_tools = vec!["Write".to_string()];
+        let claude_args = command_args(
+            &build_claude_command(
+                &claude_assignment,
+                &claude_grant,
+                &claude.command,
+                "task",
+                None,
+            )
+            .expect("typed claude launch"),
+        );
+        assert!(claude_args
+            .windows(2)
+            .any(|pair| pair == ["--model", "typed-claude"]));
+        assert!(claude_args
+            .windows(2)
+            .any(|pair| pair == ["--allowedTools", "Read"]));
+
+        let mut codex = dispatch_params("codex");
+        codex.model = Some("typed-codex".to_string());
+        codex.cwd = Some("/typed/codex".to_string());
+        codex.sandbox = Some("read-only".to_string());
+        codex.max_turns = Some(3);
+        let (codex_assignment, codex_grant) = owners(&codex);
+        codex.model = Some("poisoned-model".to_string());
+        codex.cwd = Some("/poisoned/cwd".to_string());
+        codex.sandbox = Some("workspace-write".to_string());
+        codex.max_turns = Some(99);
+        let codex_args = command_args(
+            &build_codex_command(
+                &codex_assignment,
+                &codex_grant,
+                &codex.command,
+                "task",
+                None,
+            )
+            .expect("typed codex launch"),
+        );
+        assert!(codex_args
+            .windows(2)
+            .any(|pair| pair == ["-m", "typed-codex"]));
+        assert!(codex_args
+            .windows(2)
+            .any(|pair| pair == ["-C", "/typed/codex"]));
+        assert!(codex_args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]));
+        assert!(codex_args
+            .windows(2)
+            .any(|pair| pair == ["-c", "max_turns=3"]));
+
+        let mut custom = dispatch_params("custom");
+        custom.command = vec![
+            "python3".to_string(),
+            "-m".to_string(),
+            "typed_worker".to_string(),
+        ];
+        let (custom_assignment, custom_grant) = owners(&custom);
+        let private_command = custom.command.clone();
+        custom.command = vec![
+            "python3".to_string(),
+            "-m".to_string(),
+            "poisoned_worker".to_string(),
+        ];
+        let custom_args = command_args(
+            &build_custom_command(&custom_assignment, &custom_grant, &private_command, "task")
+                .expect("private adapter command remains authoritative"),
+        );
+        assert_eq!(custom_args, vec!["-m", "typed_worker", "task"]);
     }
 }

@@ -176,6 +176,41 @@ pub(super) fn contract_receipt(contract: &EffectiveContract) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_assignment(params: &TachiDispatchParams) -> tachi_params::ResolvedStaffAssignment {
+        let backend = params.agent.clone().unwrap_or_else(|| "custom".to_string());
+        tachi_params::ResolvedStaffAssignment {
+            assignment_id: "test-assignment".to_string(),
+            staffing_reason: params.staffing_reason,
+            selected_worker: backend.clone(),
+            selected_profile: params.profile.clone(),
+            selected_backend: backend,
+            selected_model: params.model.clone(),
+            execution_level: params.execution_level,
+            recommendation_ref: None,
+            host_adapter: None,
+            evidence_required: Vec::new(),
+            fallback_chain: Vec::new(),
+            route_explanation: Vec::new(),
+            identity_receipt: Value::Null,
+        }
+    }
+
+    fn test_grant(params: &TachiDispatchParams) -> tachi_params::ExecutionGrant {
+        tachi_params::ExecutionGrant {
+            grant_id: "test-grant".to_string(),
+            env_id: params.env_id.clone(),
+            unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
+            allowed_cwd: params.cwd.as_ref().map(Into::into),
+            credential_profiles: params.credential_profiles.clone(),
+            mcp_access: params.mcp_access.clone(),
+            allowed_tools: params.allowed_tools.clone(),
+            permission_profile: params.permission_profile.clone(),
+            sandbox: params.sandbox.clone(),
+            max_turns: params.max_turns,
+            timeout_secs: params.timeout_secs,
+        }
+    }
     use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
     use serde_json::json;
     use tachi_dispatch::{CODEX_CLI_RECEIPT, PROVIDER_QUALIFICATIONS};
@@ -278,7 +313,10 @@ mod tests {
             tachi_dispatch::Enforcement::Enforced { .. }
         ));
 
-        let cmd = build_codex_command(&params, "review", None).expect("codex command");
+        let assignment = test_assignment(&params);
+        let grant = test_grant(&params);
+        let cmd = build_codex_command(&assignment, &grant, &params.command, "review", None)
+            .expect("codex command");
         let args = cmd
             .as_std()
             .get_args()

@@ -1328,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_grant_from_dispatch_params_extracts_authorities() {
+    fn execution_grant_owner_mint_extracts_authorities() {
         let raw = serde_json::json!({
             "task": "Test grant",
             "staffing_reason": "explicit_user_request",
@@ -1342,7 +1342,19 @@ mod tests {
         });
 
         let params: TachiDispatchParams = serde_json::from_value(raw).expect("deserializes");
-        let grant = ExecutionGrant::from_dispatch_params(&params, "grant-123");
+        let grant = ExecutionGrant {
+            grant_id: "grant-123".to_string(),
+            env_id: params.env_id.clone(),
+            unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
+            allowed_cwd: params.cwd.as_ref().map(Into::into),
+            credential_profiles: params.credential_profiles.clone(),
+            mcp_access: params.mcp_access.clone(),
+            allowed_tools: params.allowed_tools.clone(),
+            permission_profile: params.permission_profile.clone(),
+            sandbox: params.sandbox.clone(),
+            max_turns: params.max_turns,
+            timeout_secs: params.timeout_secs,
+        };
         assert_eq!(grant.grant_id, "grant-123");
         assert!(grant.unmanaged_cwd_allowed);
         assert_eq!(
