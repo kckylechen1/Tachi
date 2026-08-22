@@ -91,8 +91,10 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         .expect("dispatch source contains the real handler")
         .1;
     let after_grant = handler
-        .split_once("let mcp_access = execution_grant.mcp_access.as_ref();")
-        .expect("handler contains the post-grant marker")
+        .split_once(
+            "let execution_grant = mint_execution_grant(\n        &mut params,\n        format!(\"{dispatch_id}:authority\"),\n        &env_resolution,\n    )?;\n",
+        )
+        .expect("handler contains the complete grant-mint statement")
         .1;
     let post_grant_handler = after_grant;
     let has_post_grant_params =
@@ -274,7 +276,7 @@ fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn raw_credential_profile_spelling_reaches_failure_trajectory() {
     let _guard = crate::utils::global_test_lock()
@@ -310,7 +312,7 @@ async fn raw_credential_profile_spelling_reaches_failure_trajectory() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn opencode_builder_profile_default_reaches_credential_failure_evidence() {
     let _guard = crate::utils::global_test_lock()
@@ -1247,6 +1249,12 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
         .await
         .expect("whitespace profile dispatch is accepted");
     let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    let run_dir = std::path::PathBuf::from(
+        response["run_dir"]
+            .as_str()
+            .expect("response carries run directory"),
+    );
+    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
     assert!(
         response["selected_profile"].is_null(),
         "typed assignment may canonicalize whitespace-only profile to None: {response}"
@@ -1256,12 +1264,6 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
         json!("   "),
         "completion payload must retain the base legacy profile spelling: {response}"
     );
-    let run_dir = std::path::PathBuf::from(
-        response["run_dir"]
-            .as_str()
-            .expect("response carries run directory"),
-    );
-    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json")).expect("status receipt exists"),
     )
@@ -1309,7 +1311,7 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
     drop(cleanup);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn managed_env_status_cwd_uses_the_authoritative_lease_path() {
     let _guard = crate::utils::global_test_lock()
@@ -1350,12 +1352,10 @@ async fn managed_env_status_cwd_uses_the_authoritative_lease_path() {
         .await
         .expect("managed dispatch starts");
     let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run dir"));
+    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
     let status: Value = serde_json::from_str(
-        &std::fs::read_to_string(
-            std::path::Path::new(response["run_dir"].as_str().expect("run dir"))
-                .join("status.json"),
-        )
-        .expect("status receipt"),
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status receipt"),
     )
     .expect("status JSON");
     assert_eq!(
@@ -1363,12 +1363,7 @@ async fn managed_env_status_cwd_uses_the_authoritative_lease_path() {
         json!(managed_cwd.path().to_string_lossy()),
         "managed lease path, not raw caller spelling, is receipt authority: {status}"
     );
-    let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run dir"));
-    let _worker_result = wait_for_result(&run_dir).await;
-    let terminal_status: Value = serde_json::from_str(
-        &std::fs::read_to_string(run_dir.join("status.json")).expect("terminal status receipt"),
-    )
-    .expect("terminal status JSON");
+    let terminal_status = cleanup.wait_for_terminal().await;
     assert!(
         terminal_status["result_written"] == json!(true)
             && matches!(
@@ -1384,6 +1379,7 @@ async fn managed_env_status_cwd_uses_the_authoritative_lease_path() {
         std::fs::canonicalize(managed_cwd.path()).expect("managed cwd canonicalizes"),
         "the launched process must run in the managed lease cwd"
     );
+    drop(cleanup);
 }
 
 #[test]
