@@ -1,20 +1,27 @@
-use crate::tool_params::TachiDispatchParams;
 use std::path::PathBuf;
 use tachi_dispatch::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
     build_kimi_launch, DispatchLaunchParams, LaunchCommand,
 };
+use tachi_params::{ExecutionGrant, ResolvedStaffAssignment};
 use tokio::process::Command;
 
-fn launch_params(params: &TachiDispatchParams) -> DispatchLaunchParams {
+fn launch_params(
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
+) -> DispatchLaunchParams {
     DispatchLaunchParams {
-        cwd: params.cwd.clone(),
-        model: params.model.clone(),
-        permission_profile: params.permission_profile.clone(),
-        allowed_tools: params.allowed_tools.clone(),
-        max_turns: params.max_turns,
-        sandbox: params.sandbox.clone(),
-        command: params.command.clone(),
+        cwd: grant
+            .allowed_cwd
+            .as_ref()
+            .map(|cwd| cwd.to_string_lossy().to_string()),
+        model: assignment.selected_model.clone(),
+        permission_profile: grant.permission_profile.clone(),
+        allowed_tools: grant.allowed_tools.clone(),
+        max_turns: grant.max_turns,
+        sandbox: grant.sandbox.clone(),
+        command: command.to_vec(),
     }
 }
 
@@ -27,18 +34,28 @@ fn command_from_launch(spec: LaunchCommand) -> Command {
     cmd
 }
 
-pub(super) fn resolve_permission_profile(params: &TachiDispatchParams) -> Result<&str, String> {
-    let resolved = tachi_dispatch::resolve_permission_profile(&launch_params(params))?;
+pub(super) fn resolve_permission_profile(grant: &ExecutionGrant) -> Result<&str, String> {
+    let resolved = tachi_dispatch::resolve_permission_profile(&DispatchLaunchParams {
+        cwd: None,
+        model: None,
+        permission_profile: grant.permission_profile.clone(),
+        allowed_tools: grant.allowed_tools.clone(),
+        max_turns: grant.max_turns,
+        sandbox: grant.sandbox.clone(),
+        command: Vec::new(),
+    })?;
     Ok(resolved.as_str())
 }
 
 pub(super) fn build_claude_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
     mcp_config_path: Option<&PathBuf>,
 ) -> Result<Command, String> {
     build_claude_launch(
-        &launch_params(params),
+        &launch_params(assignment, grant, command),
         prompt,
         mcp_config_path.map(PathBuf::as_path),
     )
@@ -46,12 +63,14 @@ pub(super) fn build_claude_command(
 }
 
 pub(super) fn build_codex_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
     mcp_config_path: Option<&PathBuf>,
 ) -> Result<Command, String> {
     build_codex_launch(
-        &launch_params(params),
+        &launch_params(assignment, grant, command),
         prompt,
         mcp_config_path.map(PathBuf::as_path),
     )
@@ -59,12 +78,14 @@ pub(super) fn build_codex_command(
 }
 
 pub(super) fn build_grok_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
     mcp_config_path: Option<&PathBuf>,
 ) -> Result<Command, String> {
     build_grok_launch(
-        &launch_params(params),
+        &launch_params(assignment, grant, command),
         prompt,
         mcp_config_path.map(PathBuf::as_path),
     )
@@ -72,17 +93,21 @@ pub(super) fn build_grok_command(
 }
 
 pub(super) fn build_kimi_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
 ) -> Result<Command, String> {
-    build_kimi_launch(&launch_params(params), prompt).map(command_from_launch)
+    build_kimi_launch(&launch_params(assignment, grant, command), prompt).map(command_from_launch)
 }
 
 pub(super) fn build_custom_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
 ) -> Result<Command, String> {
-    build_custom_launch(&launch_params(params), prompt).map(command_from_launch)
+    build_custom_launch(&launch_params(assignment, grant, command), prompt).map(command_from_launch)
 }
 
 /// `agent='opencode'` shares its launch mechanics with `agent='custom'` (both
@@ -95,13 +120,15 @@ pub(super) fn build_custom_command(
 /// typed. Check the one precondition that trips this in practice (missing
 /// `command`) before delegating, so the error stays in the caller's own words.
 pub(super) fn build_opencode_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
 ) -> Result<Command, String> {
-    if params.command.is_empty() {
+    if command.is_empty() {
         return Err(opencode_missing_command_error());
     }
-    build_custom_command(params, prompt)
+    build_custom_command(assignment, grant, command, prompt)
 }
 
 fn opencode_missing_command_error() -> String {

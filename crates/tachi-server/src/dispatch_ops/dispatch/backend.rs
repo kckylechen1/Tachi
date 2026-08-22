@@ -6,7 +6,10 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) workspace_dir: &'a Path,
     pub(super) dispatch_id: &'a str,
     pub(super) agent_norm: &'a str,
-    pub(super) params: &'a TachiDispatchParams,
+    pub(super) request: &'a tachi_params::StaffAssignmentRequest,
+    pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
+    pub(super) grant: &'a tachi_params::ExecutionGrant,
+    pub(super) command: &'a [String],
     pub(super) prompt: &'a str,
     pub(super) prompt_md_path: &'a Path,
     pub(super) mcp_config_path: Option<&'a PathBuf>,
@@ -47,7 +50,7 @@ pub(super) fn prepare_dispatch_backend(
             workspace_dir: ctx.workspace_dir,
             dispatch_id: ctx.dispatch_id,
             agent_norm: ctx.agent_norm,
-            params: ctx.params,
+            request: ctx.request,
             backend,
             error: err,
             v2: ctx.v2,
@@ -67,7 +70,7 @@ pub(super) fn prepare_dispatch_backend(
             ctx.dispatch_id,
             "backend",
             Some(ctx.agent_norm),
-            ctx.params.project.as_deref(),
+            ctx.request.project.as_deref(),
         );
     };
 
@@ -79,8 +82,13 @@ pub(super) fn prepare_dispatch_backend(
                 return Err(err);
             }
         };
-        let acpx_spec = match build_acpx_command_spec(ctx.params, ctx.agent_norm, &acpx_prompt_path)
-        {
+        let acpx_spec = match build_acpx_command_spec(
+            ctx.request,
+            ctx.assignment,
+            ctx.grant,
+            ctx.agent_norm,
+            &acpx_prompt_path,
+        ) {
             Ok(spec) => spec,
             Err(err) => {
                 record_backend_prepare_failure("acpx", &err);
@@ -103,7 +111,10 @@ pub(super) fn prepare_dispatch_backend(
     } else if native_acp_enabled {
         let native_spec = match build_native_acp_run_spec(
             &ctx.server.tachi_home_dir(),
-            ctx.params,
+            ctx.request,
+            ctx.assignment,
+            ctx.grant,
+            ctx.command,
             ctx.agent_norm,
             ctx.prompt,
         ) {
@@ -128,12 +139,32 @@ pub(super) fn prepare_dispatch_backend(
         DispatchExecution::NativeAcp(native_spec)
     } else {
         let cmd = match ctx.agent_norm {
-            "claude" => build_claude_command(ctx.params, ctx.prompt, ctx.mcp_config_path)?,
-            "codex" => build_codex_command(ctx.params, ctx.prompt, ctx.mcp_config_path)?,
-            "grok" => build_grok_command(ctx.params, ctx.prompt, ctx.mcp_config_path)?,
-            "kimi" => build_kimi_command(ctx.params, ctx.prompt)?,
-            "custom" => build_custom_command(ctx.params, ctx.prompt)?,
-            "opencode" => build_opencode_command(ctx.params, ctx.prompt)?,
+            "claude" => build_claude_command(
+                ctx.assignment,
+                ctx.grant,
+                ctx.command,
+                ctx.prompt,
+                ctx.mcp_config_path,
+            )?,
+            "codex" => build_codex_command(
+                ctx.assignment,
+                ctx.grant,
+                ctx.command,
+                ctx.prompt,
+                ctx.mcp_config_path,
+            )?,
+            "grok" => build_grok_command(
+                ctx.assignment,
+                ctx.grant,
+                ctx.command,
+                ctx.prompt,
+                ctx.mcp_config_path,
+            )?,
+            "kimi" => build_kimi_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
+            "custom" => build_custom_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
+            "opencode" => {
+                build_opencode_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?
+            }
             other => {
                 return Err(format!(
                     "Internal error: unhandled dispatch agent '{}'. {}",

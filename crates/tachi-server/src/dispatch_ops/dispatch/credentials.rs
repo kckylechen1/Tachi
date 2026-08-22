@@ -131,20 +131,20 @@ pub(super) fn credential_report_ready(report: &CredentialMaterializeReport) -> b
 
 pub(super) fn materialize_dispatch_credentials(
     server: &MemoryServer,
-    params: &TachiDispatchParams,
+    grant: &tachi_params::ExecutionGrant,
     agent_norm: &str,
     selected_profile: Option<&str>,
     run_dir: &Path,
 ) -> Result<DispatchCredentialMaterialization, String> {
-    if params.credential_profiles.is_empty() {
+    if grant.credential_profiles.is_empty() {
         return Ok(DispatchCredentialMaterialization {
             reports: Vec::new(),
             env: HashMap::new(),
         });
     }
 
-    let cwd = params.cwd.as_deref().map(Path::new);
-    let mut profile_names = params
+    let cwd = grant.allowed_cwd.as_deref();
+    let mut profile_names = grant
         .credential_profiles
         .iter()
         .map(|profile| profile.trim().to_string())

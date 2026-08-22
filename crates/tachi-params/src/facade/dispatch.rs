@@ -639,22 +639,6 @@ impl ExecutionGrant {
         self.timeout_secs = timeout_secs;
         self
     }
-
-    pub fn from_dispatch_params(params: &TachiDispatchParams, grant_id: impl Into<String>) -> Self {
-        Self {
-            grant_id: grant_id.into(),
-            env_id: params.env_id.clone(),
-            unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
-            allowed_cwd: params.cwd.as_ref().map(std::path::PathBuf::from),
-            credential_profiles: params.credential_profiles.clone(),
-            mcp_access: params.mcp_access.clone(),
-            allowed_tools: params.allowed_tools.clone(),
-            permission_profile: params.permission_profile.clone(),
-            sandbox: params.sandbox.clone(),
-            max_turns: params.max_turns,
-            timeout_secs: params.timeout_secs,
-        }
-    }
 }
 
 /// Backend adapter execution mechanics (Issue #1692 C5).

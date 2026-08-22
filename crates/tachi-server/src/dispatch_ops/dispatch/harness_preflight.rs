@@ -10,7 +10,7 @@ pub(super) struct HarnessPreflightInputs<'a> {
     pub(super) dispatch_id: &'a str,
     pub(super) agent_norm: &'a str,
     pub(super) task: &'a str,
-    /// The dispatch's `TachiDispatchParams::project`, threaded through so a
+    /// The semantic request's `project`, threaded through so a
     /// preflight-failure terminal outcome row lands in the same DB a later
     /// `tachi_complete` for this dispatch would resolve to (scope symmetry,
     /// #774 round 2).

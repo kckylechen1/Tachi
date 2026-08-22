@@ -6,7 +6,7 @@ use serde_json::json;
 use super::super::launcher::resolve_permission_profile;
 use super::session::{native_acp_session_key, resolve_native_acp_session};
 use super::{NativeAcpRunMode, NativeAcpRunSpec, ACP_STREAM_FILE};
-use crate::tool_params::TachiDispatchParams;
+use tachi_params::{ExecutionGrant, ResolvedStaffAssignment, StaffAssignmentRequest};
 
 /// Single-sourced from `tachi_dispatch::transport_kind` (#894 S2d) — same
 /// rationale as `is_acpx_transport`.
@@ -16,7 +16,10 @@ pub(in crate::dispatch_ops) fn is_native_acp_transport(transport: &str) -> bool 
 
 pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
     home: &Path,
-    params: &TachiDispatchParams,
+    request: &StaffAssignmentRequest,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     agent: &str,
     prompt: &str,
 ) -> Result<NativeAcpRunSpec, String> {
@@ -26,9 +29,9 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
     // before Stage 1/ClaudePool and before any builder runs at all); this
     // builder-local copy stays as a second, independent gate in case a caller
     // reaches this function through a path that bypassed the entry check.
-    tachi_dispatch::reject_unsupported_sandbox("acp-native", params.sandbox.as_deref())?;
+    tachi_dispatch::reject_unsupported_sandbox("acp-native", grant.sandbox.as_deref())?;
 
-    let (command, args, command_source) = resolve_native_acp_command(params, agent)?;
+    let (command, args, command_source) = resolve_native_acp_command(command, agent)?;
     if !crate::utils::is_trusted_command(&command) {
         return Err(format!(
             "native ACP command '{}' is not trusted. Use agent='custom' with a trusted command, or set TACHI_ACP_NATIVE_COMMAND to a trusted binary.",
@@ -42,16 +45,15 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
         ));
     }
 
-    let cwd = params
-        .cwd
-        .as_deref()
-        .map(PathBuf::from)
+    let cwd = grant
+        .allowed_cwd
+        .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let cwd = absolutize_cwd(&cwd);
     let mode = resolve_native_acp_run_mode()?;
-    let permission_label = native_acp_permission_label(resolve_permission_profile(params)?)?;
+    let permission_label = native_acp_permission_label(resolve_permission_profile(grant)?)?;
     let session = if mode == NativeAcpRunMode::Session {
-        Some(resolve_native_acp_session(params)?)
+        Some(resolve_native_acp_session(request, assignment)?)
     } else {
         None
     };
@@ -121,16 +123,16 @@ impl NativeAcpRunMode {
 }
 
 fn resolve_native_acp_command(
-    params: &TachiDispatchParams,
+    command: &[String],
     agent: &str,
 ) -> Result<(String, Vec<String>, &'static str), String> {
-    if agent == "custom" && !params.command.is_empty() {
-        let command = params.command[0].trim().to_string();
-        let args = params.command[1..].to_vec();
-        if command.is_empty() {
+    if agent == "custom" && !command.is_empty() {
+        let adapter_command = command[0].trim().to_string();
+        let args = command[1..].to_vec();
+        if adapter_command.is_empty() {
             return Err("agent='custom' native ACP command cannot be empty".to_string());
         }
-        return Ok((command, args, "dispatch.command"));
+        return Ok((adapter_command, args, "dispatch.command"));
     }
 
     let command = std::env::var("TACHI_ACP_NATIVE_COMMAND")

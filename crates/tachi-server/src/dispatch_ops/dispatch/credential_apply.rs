@@ -43,7 +43,9 @@ pub(super) fn inject_legacy_vault_env(
 
 pub(super) struct CredentialApplyInputs<'a> {
     pub(super) server: &'a MemoryServer,
-    pub(super) params: &'a TachiDispatchParams,
+    pub(super) request: &'a tachi_params::StaffAssignmentRequest,
+    pub(super) grant: &'a tachi_params::ExecutionGrant,
+    pub(super) raw_credential_profiles: &'a [String],
     pub(super) agent_norm: &'a str,
     pub(super) selected_profile: Option<&'a str>,
     pub(super) workspace_dir: &'a Path,
@@ -77,7 +79,7 @@ pub(super) fn apply_materialized_credentials(
 ) -> Result<CredentialApplyOutcome, String> {
     let dispatch_credentials = match materialize_dispatch_credentials(
         inputs.server,
-        inputs.params,
+        inputs.grant,
         inputs.agent_norm,
         inputs.selected_profile,
         inputs.workspace_dir,
@@ -90,7 +92,7 @@ pub(super) fn apply_materialized_credentials(
                     "event": "credentials_materialization_failed",
                     "dispatch_id": inputs.dispatch_id,
                     "agent": inputs.agent_norm,
-                    "credential_profiles": inputs.params.credential_profiles.clone(),
+                    "credential_profiles": inputs.raw_credential_profiles,
                     "error": err.clone(),
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
@@ -108,7 +110,7 @@ pub(super) fn apply_materialized_credentials(
                 inputs.plan_duration_ms,
                 Some(json!({
                     "agent": inputs.agent_norm,
-                    "task": inputs.params.task.clone(),
+                    "task": inputs.request.task.clone(),
                     "state": "TASK_STATE_FAILED",
                     "updated_at": Utc::now().to_rfc3339(),
                     "run_dir": inputs.workspace_dir.to_string_lossy(),
@@ -144,7 +146,7 @@ pub(super) fn apply_materialized_credentials(
                 "event": "credentials_materialized",
                 "dispatch_id": inputs.dispatch_id,
                 "agent": inputs.agent_norm,
-                "credential_profiles": inputs.params.credential_profiles.clone(),
+                "credential_profiles": inputs.raw_credential_profiles,
                 "reports": dispatch_credentials
                     .reports
                     .iter()
