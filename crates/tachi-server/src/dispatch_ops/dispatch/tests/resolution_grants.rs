@@ -616,7 +616,7 @@ fn explicit_profile_assignment_is_authoritative_before_legacy_projection() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_canonical() {
     let _guard = crate::utils::global_test_lock()
@@ -1226,7 +1226,7 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
     let _guard = crate::utils::global_test_lock()
