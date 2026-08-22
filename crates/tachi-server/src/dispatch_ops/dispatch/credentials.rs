@@ -230,14 +230,18 @@ mod tests {
             max_turns: None,
             timeout_secs: 5,
         };
-        let err = materialize_dispatch_credentials(
+        let err = match materialize_dispatch_credentials(
             &server,
             &grant,
             "custom",
             Some("typed-profile"),
             run_dir.path(),
-        )
-        .expect_err("typed missing selector must fail in the production credential consumer");
+        ) {
+            Err(err) => err,
+            Ok(_) => {
+                panic!("typed missing selector must fail in the production credential consumer")
+            }
+        };
         assert!(
             err.contains(missing_selector),
             "production materializer must report the independently minted selector: {err}"

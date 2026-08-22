@@ -382,8 +382,10 @@ fn execution_grant_records_admitted_owner_fields_independently_of_raw_ingress() 
         max_turns: Some(7),
         timeout_secs: 42,
     };
+    let expected_json = serde_json::to_value(&expected).expect("serialize literal grant baseline");
     assert_eq!(
-        grant, expected,
+        serde_json::to_value(&grant).expect("serialize minted grant"),
+        expected_json,
         "P1/P2 grant baseline is literal typed authority"
     );
     assert_eq!(grant.env_id, None, "unmanaged authority has no lease id");
@@ -403,7 +405,12 @@ fn execution_grant_records_admitted_owner_fields_independently_of_raw_ingress() 
         ($name:literal, $body:expr) => {{
             let mut mutant = expected.clone();
             $body(&mut mutant);
-            assert_ne!(mutant, expected, "P1/P2 grant mutant must fail: {}", $name);
+            assert_ne!(
+                serde_json::to_value(&mutant).expect("serialize grant mutant"),
+                expected_json,
+                "P1/P2 grant mutant must fail: {}",
+                $name
+            );
         }};
     }
     grant_mutant!("env_id", |m: &mut tachi_params::ExecutionGrant| m.env_id =
