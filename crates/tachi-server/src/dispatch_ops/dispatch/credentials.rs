@@ -207,3 +207,37 @@ pub(super) fn materialize_dispatch_credentials(
 
     Ok(DispatchCredentialMaterialization { reports, env })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn p3_typed_grant_drives_credential_materialization_without_flat_dispatch_params() {
+        let server = crate::tests::make_server();
+        let run_dir = tempfile::tempdir().expect("credential run dir");
+        let grant = tachi_params::ExecutionGrant {
+            grant_id: "p3-credential-grant".to_string(),
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: None,
+            credential_profiles: Vec::new(),
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            sandbox: None,
+            max_turns: None,
+            timeout_secs: 5,
+        };
+        let materialized = materialize_dispatch_credentials(
+            &server,
+            &grant,
+            "custom",
+            Some("typed-profile"),
+            run_dir.path(),
+        )
+        .expect("empty typed credential authority materializes without ingress DTO");
+        assert!(materialized.reports.is_empty());
+        assert!(materialized.env.is_empty());
+    }
+}

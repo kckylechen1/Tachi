@@ -110,3 +110,56 @@ pub(super) fn run_harness_preflight(inputs: HarnessPreflightInputs<'_>) -> Resul
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn p3_typed_assignment_and_private_inputs_drive_preflight_bypass() {
+        let server = crate::tests::make_server();
+        let workspace = tempfile::tempdir().expect("preflight workspace");
+        let assignment = tachi_params::ResolvedStaffAssignment {
+            assignment_id: "p3-preflight-assignment".to_string(),
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            selected_worker: "custom".to_string(),
+            selected_profile: Some("typed-profile".to_string()),
+            selected_backend: "custom".to_string(),
+            selected_model: None,
+            execution_level: None,
+            recommendation_ref: None,
+            host_adapter: None,
+            evidence_required: Vec::new(),
+            fallback_chain: Vec::new(),
+            route_explanation: Vec::new(),
+            identity_receipt: Value::Null,
+        };
+        let private_url = None;
+        let private_env = HashMap::new();
+        let private_metadata = None;
+        let private_bundle = Value::Null;
+        run_harness_preflight(HarnessPreflightInputs {
+            server: &server,
+            harness_transport: "custom",
+            harness_server_url: &private_url,
+            credential_env: &private_env,
+            dispatch_id: "p3-preflight",
+            assignment: &assignment,
+            task: "typed preflight",
+            project: None,
+            trajectory_path: &workspace.path().join("trajectory.jsonl"),
+            workspace_dir: workspace.path(),
+            v2: false,
+            plan_generated_at: None,
+            plan_duration_ms: None,
+            host_adapter: &assignment.host_adapter,
+            execution_backend_name: Some("custom"),
+            execution_backend_metadata: &private_metadata,
+            acpx_enabled: false,
+            native_acp_enabled: false,
+            capability_bundle_card: &private_bundle,
+            timeout_secs_for_status: 5,
+        })
+        .expect("non-opencode typed assignment bypasses harness probe");
+    }
+}

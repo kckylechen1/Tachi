@@ -6,6 +6,11 @@ use serde_json::{json, Value};
 #[test]
 fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() {
     let rejects_flat_params = |source: &str| source.contains("TachiDispatchParams");
+    let contains_identifier = |source: &str, identifier: &str| {
+        source
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .any(|token| token == identifier)
+    };
     let flat_fixture_free_helpers = [
         ("backend", include_str!("../backend.rs")),
         ("backend_failure", include_str!("../backend_failure.rs")),
@@ -30,10 +35,11 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
     }
 
     let production_adapter = |name: &str, source: &str, start: &str, end: &str| {
+        assert!(
+            source.contains(start),
+            "{name} source must contain production start {start:?}"
+        );
         let source = source
-            .split_once(start)
-            .unwrap_or_else(|| panic!("{name} source must contain production start {start:?}"))
-            .1
             .split_once(end)
             .unwrap_or_else(|| panic!("{name} source must contain production end {end:?}"))
             .0;
@@ -58,22 +64,20 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         "pub(in crate::dispatch_ops) fn build_native_acp_run_spec",
         "#[cfg(test)]\nmod tests",
     );
-    let authority_production = include_str!("../authority.rs")
-        .split_once("pub(super) fn mint_execution_grant")
-        .expect("authority source contains the P2 grant-mint boundary")
-        .1
-        .split_once("#[cfg(test)]\nmod tests")
-        .expect("authority source contains the P2 test boundary")
-        .0;
-    assert!(
-        !authority_production.contains("assert_grant_legacy_projection"),
-        "authority must not restore the removed P3 flat-projection helper"
-    );
-    assert!(
-        format!("{authority_production}\nassert_grant_legacy_projection();")
-            .contains("assert_grant_legacy_projection"),
-        "authority helper checker must reject a deliberate P3 projection mutant"
-    );
+    let authority = include_str!("../authority.rs");
+    for deleted_projection in [
+        "assert_grant_legacy_projection",
+        "apply_assignment_legacy_projection",
+    ] {
+        assert!(
+            !authority.contains(deleted_projection),
+            "authority imports and production region must not restore {deleted_projection}"
+        );
+        assert!(
+            format!("{authority}\n{deleted_projection}();").contains(deleted_projection),
+            "authority source gate must reject deliberate {deleted_projection} mutant"
+        );
+    }
     production_adapter(
         "prompt_production_assembly",
         include_str!("../../prompt.rs"),
@@ -91,14 +95,15 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         .expect("handler contains the grant mint marker")
         .1;
     let post_grant_handler = after_grant;
-    let has_post_grant_params =
-        |source: &str| source.contains("params.") || rejects_flat_params(source);
+    let has_post_grant_params = |source: &str| {
+        contains_identifier(source, "params") || rejects_flat_params(source)
+    };
     assert!(
         !has_post_grant_params(post_grant_handler),
         "post-grant handler code must read assignment/grant, never TachiDispatchParams"
     );
     assert!(
-        has_post_grant_params(&format!("{post_grant_handler}\nparams.deliberate_mutant")),
+        has_post_grant_params(&format!("{post_grant_handler}\nconsume(&params);")),
         "source gate itself must fail when a post-grant params read is introduced"
     );
 }
@@ -365,6 +370,20 @@ fn execution_grant_records_admitted_owner_fields_independently_of_raw_ingress() 
     };
     let grant = mint_execution_grant(&mut params, "dispatch-grant", &env_resolution)
         .expect("typed grant exactly projects legacy authority");
+    let expected = tachi_params::ExecutionGrant {
+        grant_id: "dispatch-grant".to_string(),
+        env_id: None,
+        unmanaged_cwd_allowed: true,
+        allowed_cwd: Some(std::path::PathBuf::from("/workspace/tachi")),
+        credential_profiles: vec!["dispatch-token".to_string()],
+        mcp_access: None,
+        allowed_tools: vec!["Read".to_string(), "Write".to_string()],
+        permission_profile: Some("allowlist".to_string()),
+        sandbox: Some("workspace-write".to_string()),
+        max_turns: Some(7),
+        timeout_secs: 42,
+    };
+    assert_eq!(grant, expected, "P1/P2 grant baseline is literal typed authority");
     assert_eq!(grant.env_id, None, "unmanaged authority has no lease id");
     assert!(grant.unmanaged_cwd_allowed);
     assert_eq!(
@@ -378,9 +397,42 @@ fn execution_grant_records_admitted_owner_fields_independently_of_raw_ingress() 
     assert_eq!(grant.max_turns, Some(7));
     assert_eq!(grant.timeout_secs, 42);
 
-    let mut timeout_mutant = grant.clone();
-    timeout_mutant.timeout_secs = 43;
-    assert_ne!(timeout_mutant.timeout_secs, grant.timeout_secs);
+    macro_rules! grant_mutant {
+        ($name:literal, $body:expr) => {{
+            let mut mutant = expected.clone();
+            $body(&mut mutant);
+            assert_ne!(mutant, expected, "P1/P2 grant mutant must fail: {}", $name);
+        }};
+    }
+    grant_mutant!("env_id", |m: &mut tachi_params::ExecutionGrant| m.env_id =
+        Some("mutant".to_string()));
+    grant_mutant!("unmanaged_cwd", |m: &mut tachi_params::ExecutionGrant| m
+        .unmanaged_cwd_allowed = false);
+    grant_mutant!("allowed_cwd", |m: &mut tachi_params::ExecutionGrant| m.allowed_cwd = None);
+    grant_mutant!("credential_profiles", |m: &mut tachi_params::ExecutionGrant| m
+        .credential_profiles
+        .clear());
+    grant_mutant!("mcp_access", |m: &mut tachi_params::ExecutionGrant| m.mcp_access =
+        Some(tachi_params::DispatchMcpAccessParams {
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            allowed_facades: Vec::new(),
+            allowed_mcp_servers: Vec::new(),
+            github_read: None,
+            write_actions: None,
+            issue_refs: Vec::new(),
+            pr_refs: Vec::new(),
+            fallback: None,
+        }));
+    grant_mutant!("allowed_tools", |m: &mut tachi_params::ExecutionGrant| m
+        .allowed_tools
+        .push("Execute".to_string()));
+    grant_mutant!("permission_profile", |m: &mut tachi_params::ExecutionGrant| m
+        .permission_profile = Some("default".to_string()));
+    grant_mutant!("sandbox", |m: &mut tachi_params::ExecutionGrant| m.sandbox =
+        Some("read-only".to_string()));
+    grant_mutant!("max_turns", |m: &mut tachi_params::ExecutionGrant| m.max_turns = Some(8));
+    grant_mutant!("timeout_secs", |m: &mut tachi_params::ExecutionGrant| m.timeout_secs = 43);
 }
 
 #[test]
