@@ -370,7 +370,7 @@ pub(crate) fn write_status_json(
     duration_ms_execute: Option<u64>,
     total_duration_ms: Option<u64>,
     extra: Option<Value>,
-) {
+) -> Option<crate::managed_run_control::CancelCompletion> {
     let lock = status_json_lock_for(run_dir);
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut obj = serde_json::Map::new();
@@ -407,6 +407,8 @@ pub(crate) fn write_status_json(
             obj.insert(k, v);
         }
     }
+    let managed_finalization = obj.remove("managed_cancellation_finalization");
+    let mut managed_terminal = None;
 
     let path = run_dir.join("status.json");
     // Host-profile routing is fixed at dispatch acceptance. Later lifecycle
@@ -423,16 +425,17 @@ pub(crate) fn write_status_json(
                         "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
                     )
                 });
-            if proposed_terminal {
+            if proposed_terminal && managed_finalization.is_none() {
                 let _ = crate::managed_run_control::reconcile_pending_cancellation_unavailable(
                     &mut previous,
                     "completion_or_timeout_winner",
                 );
             }
-            if crate::managed_run_control::cancellation_blocks_terminal_writer(&previous)
+            if managed_finalization.is_none()
+                && crate::managed_run_control::cancellation_blocks_terminal_writer(&previous)
                 && proposed_terminal
             {
-                return;
+                return None;
             }
             for key in [
                 "host_profile",
@@ -465,10 +468,33 @@ pub(crate) fn write_status_json(
                     }
                 }
             }
-            if proposed_terminal {
+            if proposed_terminal && managed_finalization.is_none() {
                 let _ = crate::managed_run_control::reconcile_pending_cancellation_unavailable(
                     &mut obj,
                     "completion_or_timeout_winner",
+                );
+            }
+            if let Some(finalization) = managed_finalization.as_ref() {
+                let expected = finalization
+                    .get("expected_status_revision")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let runner_error = finalization.get("runner_error").and_then(Value::as_str);
+                let proof = finalization
+                    .get("termination_proof")
+                    .and_then(Value::as_str);
+                let proof = match proof {
+                    Some("spawn_suppressed") => Some("spawn_suppressed"),
+                    Some("unix_process_group_absent") => Some("unix_process_group_absent"),
+                    _ => None,
+                };
+                managed_terminal = Some(
+                    crate::managed_run_control::apply_dequeued_cancellation_to_terminal_status(
+                        &mut obj,
+                        expected,
+                        runner_error,
+                        proof,
+                    ),
                 );
             }
             // A bounded local lock exhaustion has durable eval evidence but
@@ -501,13 +527,33 @@ pub(crate) fn write_status_json(
     }
     if let Err(error) = crate::managed_run_control::advance_status_revision(&mut obj) {
         eprintln!("[dispatch-v2] refusing status write: {error}");
-        return;
+        return None;
     }
+    let completion = managed_terminal.map(|terminal| match terminal {
+        crate::managed_run_control::ManagedTerminalCancellation::Confirmed {
+            termination_proof,
+        } => crate::managed_run_control::CancelCompletion::Confirmed {
+            termination_proof,
+            status_revision: obj
+                .get("status_revision")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        },
+        crate::managed_run_control::ManagedTerminalCancellation::Unconfirmed => {
+            crate::managed_run_control::CancelCompletion::Unconfirmed
+        }
+        crate::managed_run_control::ManagedTerminalCancellation::Unavailable => {
+            crate::managed_run_control::CancelCompletion::Unavailable(
+                "completion_or_timeout_winner",
+            )
+        }
+    });
     let body =
         serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_else(|_| "{}".to_string());
     if let Err(e) = crate::utils::write_owner_only_file_atomic(&path, body.as_bytes()) {
         eprintln!("[dispatch-v2] failed to write {}: {e}", path.display());
     }
+    completion
 }
 
 /// Build the Stage-2 execution prompt — wraps the original task with the plan

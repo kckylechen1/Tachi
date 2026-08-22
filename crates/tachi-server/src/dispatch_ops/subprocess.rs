@@ -1145,8 +1145,14 @@ mod tests {
         ));
         assert!(matches!(
             outcome.await.expect("explicit cancellation outcome"),
-            crate::managed_run_control::CancelCompletion::Unavailable("child_probe_failed")
+            crate::managed_run_control::CancelCompletion::Unconfirmed
         ));
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(run_dir.join("status.json")).expect("canonical status"),
+        )
+        .expect("canonical JSON");
+        assert_eq!(status["state"], "TASK_STATE_FAILED");
+        assert_eq!(status["cancellation"]["receipt"], "termination_unconfirmed");
     }
 }
 
@@ -1224,12 +1230,29 @@ mod issue_1825_cancel_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn managed_custom_cancel_does_not_kill_unrelated_process() {
+        use std::os::unix::fs::PermissionsExt;
+
         let mut unrelated = Command::new("/bin/sh");
         unrelated.arg("-c").arg("sleep 30");
         let mut unrelated = unrelated.spawn().expect("start unrelated fixture");
         let unrelated_pid = unrelated.id().expect("unrelated pid");
 
         let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("managed-live-cancel.sh");
+        let root = temp.path().join("managed-root.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\ntrap '' TERM\nsleep 60\n",
+                root.display(),
+            ),
+        )
+        .expect("write managed fixture");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("managed fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("managed fixture chmod");
         let run_dir = temp.path().join("run");
         std::fs::create_dir_all(&run_dir).expect("run dir");
         std::fs::write(
@@ -1246,20 +1269,25 @@ mod issue_1825_cancel_tests {
         .expect("status");
         let (sender, receiver) = mpsc::channel(1);
         let (reply, outcome) = tokio::sync::oneshot::channel();
+        let run_dir_for_task = run_dir.clone();
+        let run = tokio::spawn(async move {
+            run_managed_custom_subprocess(
+                Command::new(script),
+                Duration::from_secs(20),
+                receiver,
+                &run_dir_for_task,
+            )
+            .await
+        });
+        wait_for_timeout_fixture_file(&root).await;
         sender
             .send(crate::managed_run_control::ManagedCancelCommand {
                 expected_status_revision: 1,
                 response: reply,
             })
             .await
-            .expect("queue pre-spawn cancellation");
-        let result = run_managed_custom_subprocess(
-            Command::new("/bin/true"),
-            Duration::from_secs(5),
-            receiver,
-            &run_dir,
-        )
-        .await;
+            .expect("queue live cancellation");
+        let result = run.await.expect("runner task does not panic");
         match result {
             Err(error) => assert_eq!(error, "managed_cancelled"),
             Ok(_) => panic!("pre-spawn cancellation interrupts run"),
@@ -1267,10 +1295,19 @@ mod issue_1825_cancel_tests {
         assert!(matches!(
             outcome.await.expect("outcome"),
             crate::managed_run_control::CancelCompletion::Confirmed {
-                termination_proof: "spawn_suppressed",
+                termination_proof: "unix_process_group_absent",
                 ..
             }
         ));
+        let managed_pid: libc::pid_t = std::fs::read_to_string(&root)
+            .expect("managed root pid")
+            .trim()
+            .parse()
+            .expect("numeric managed root pid");
+        assert!(
+            timeout_fixture_process_is_absent(managed_pid).await,
+            "the live managed process group must be absent"
+        );
         let alive = unsafe { libc::kill(unrelated_pid as libc::pid_t, 0) } == 0;
         let _ = unrelated.kill().await;
         let _ = unrelated.wait().await;

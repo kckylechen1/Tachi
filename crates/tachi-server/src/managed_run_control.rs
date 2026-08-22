@@ -404,6 +404,7 @@ pub(crate) async fn request_managed_custom_cancel(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn confirm_managed_custom_cancellation(
     run_dir: &std::path::Path,
     expected: u64,
@@ -469,6 +470,7 @@ pub(crate) fn confirm_managed_custom_cancellation(
     Ok(revision)
 }
 
+#[cfg(test)]
 pub(crate) fn record_termination_unconfirmed(
     run_dir: &std::path::Path,
     expected: u64,
@@ -530,6 +532,7 @@ pub(crate) fn record_termination_unconfirmed(
 /// Finalize a command that the managed subprocess dequeued. This is called by
 /// the sole background terminal writer after result persistence, never by the
 /// runner, so the waiter can observe only a canonical receipt.
+#[cfg(test)]
 pub(crate) fn finalize_dequeued_managed_cancellation(
     run_dir: &std::path::Path,
     expected: u64,
@@ -561,6 +564,89 @@ pub(crate) fn finalize_dequeued_managed_cancellation(
             }
         }
         _ => CancelCompletion::Unavailable("completion_or_timeout_winner"),
+    }
+}
+
+pub(crate) enum ManagedTerminalCancellation {
+    Confirmed { termination_proof: &'static str },
+    Unconfirmed,
+    Unavailable,
+}
+
+/// Apply a dequeued cancellation to the status object that the terminal writer
+/// already owns. The caller advances the revision and persists exactly once.
+pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
+    object: &mut serde_json::Map<String, Value>,
+    expected: u64,
+    runner_error: Option<&str>,
+    termination_proof: Option<&'static str>,
+) -> ManagedTerminalCancellation {
+    let dispatch_id = object
+        .get("dispatch_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let observed = object
+        .get("status_revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(expected);
+    let requested = object
+        .get("cancellation")
+        .and_then(Value::as_object)
+        .and_then(|receipt| receipt.get("receipt"))
+        .and_then(Value::as_str)
+        == Some("cancellation_requested");
+    if !requested {
+        return ManagedTerminalCancellation::Unavailable;
+    }
+    match runner_error {
+        Some("managed_cancelled") => {
+            let proof = termination_proof.unwrap_or("unix_process_group_absent");
+            object.insert(
+                "cancellation".to_string(),
+                cancellation_receipt(
+                    "cancellation_confirmed",
+                    &dispatch_id,
+                    expected,
+                    observed,
+                    None,
+                    Some(proof),
+                ),
+            );
+            object.insert(
+                "state".to_string(),
+                Value::String("TASK_STATE_CANCELED".to_string()),
+            );
+            ManagedTerminalCancellation::Confirmed {
+                termination_proof: proof,
+            }
+        }
+        Some(error)
+            if error == "termination_unconfirmed"
+                || error.starts_with("managed cancellation child probe failed") =>
+        {
+            object.insert(
+                "cancellation".to_string(),
+                cancellation_receipt(
+                    "termination_unconfirmed",
+                    &dispatch_id,
+                    expected,
+                    observed,
+                    Some("termination_unconfirmed"),
+                    None,
+                ),
+            );
+            object.insert(
+                "state".to_string(),
+                Value::String("TASK_STATE_FAILED".to_string()),
+            );
+            ManagedTerminalCancellation::Unconfirmed
+        }
+        _ => {
+            let _ =
+                reconcile_pending_cancellation_unavailable(object, "completion_or_timeout_winner");
+            ManagedTerminalCancellation::Unavailable
+        }
     }
 }
 
@@ -944,6 +1030,32 @@ mod issue_1825_tests {
             assert!(
                 receiver.try_recv().is_err(),
                 "{winner} winner must not request a second child cleanup"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod status_revision_writer_regression_tests {
+    fn body_after<'a>(source: &'a str, marker: &str) -> &'a str {
+        &source[source.find(marker).expect("canonical writer marker")..]
+    }
+
+    #[test]
+    fn status_revision_advances_across_every_canonical_writer() {
+        let control = include_str!("managed_run_control.rs");
+        let status_writer = include_str!("dispatch_ops/dispatch_v2.rs");
+        for (source, writer) in [
+            (control, "pub(crate) fn mark_managed_custom_start"),
+            (control, "pub(crate) async fn request_managed_custom_cancel"),
+            (control, "pub(crate) fn confirm_managed_custom_cancellation"),
+            (control, "pub(crate) fn record_termination_unconfirmed"),
+            (control, "fn record_unavailable_if_pending"),
+            (status_writer, "pub(crate) fn write_status_json"),
+        ] {
+            assert!(
+                body_after(source, writer).contains("advance_status_revision"),
+                "{writer} must advance the canonical status revision"
             );
         }
     }

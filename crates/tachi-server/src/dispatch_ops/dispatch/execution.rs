@@ -700,16 +700,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // owner, after the result artifact and all terminal accounting have
         // been chosen. The runner only owns process lifetime; it never wakes
         // the caller with a speculative receipt.
-        let managed_cancel_completion = managed_cancellation.as_ref().map(|command| {
-            crate::managed_run_control::finalize_dequeued_managed_cancellation(
-                &workspace_dir_for_spawn,
-                command.expected_status_revision,
-                result.as_ref().err().map(String::as_str),
-                managed_termination_proof,
-            )
+        let managed_finalization = managed_cancellation.as_ref().map(|command| {
+            json!({
+                "expected_status_revision": command.expected_status_revision,
+                "runner_error": result.as_ref().err(),
+                "termination_proof": managed_termination_proof,
+            })
         });
 
-        write_status_json(
+        let managed_cancel_completion = write_status_json(
             &workspace_dir_for_spawn,
             &d_id,
             v2_for_spawn,
@@ -754,14 +753,9 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "capability_bundle": capability_bundle_card_for_spawn,
                 "feedback_rules": feedback_rules_trace_for_spawn,
                 "timeout_secs": timeout_secs_for_spawn,
+                "managed_cancellation_finalization": managed_finalization,
             })),
         );
-
-        if let (Some(command), Some(completion)) =
-            (managed_cancellation.take(), managed_cancel_completion)
-        {
-            let _ = command.response.send(completion);
-        }
 
         if should_cleanup {
             let credential_cleanup = server_clone.with_global_store(|store| {
@@ -796,6 +790,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             );
         }
         early_exit_cleanup.complete();
+        // The response itself is a lifecycle receipt: it is released only
+        // once credential cleanup, slot release, and registry removal are all
+        // complete. No detached responder can outlive this owner.
+        drop(_managed_run_guard);
+        if let (Some(command), Some(completion)) =
+            (managed_cancellation.take(), managed_cancel_completion)
+        {
+            let _ = command.response.send(completion);
+        }
         #[cfg(test)]
         mark_background_dispatch_cleanup_complete(&d_id);
     });

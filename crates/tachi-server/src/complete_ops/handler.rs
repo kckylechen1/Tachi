@@ -568,12 +568,30 @@ pub(crate) async fn handle_tachi_complete(
     let save_json: serde_json::Value = serde_json::from_str(&save_result)
         .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
 
-    // Extract the eval memory ID for the kanban hook
-    let eval_memory_id = save_json
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&task_id)
-        .to_string();
+    // A successful transport result is not proof of a durable eval. Save
+    // validation and dedup refusals are represented as JSON `saved:false`;
+    // never manufacture an id and let that phantom proceed into outcomes.
+    let eval_memory_id = match save_json
+        .get("saved")
+        .and_then(Value::as_bool)
+        .is_some_and(|saved| !saved)
+    {
+        true => {
+            let _ = revoke_managed_completion_admission(server, params.dispatch_id.as_deref());
+            return Err("completion eval was not durably recorded".to_string());
+        }
+        false => match save_json
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                let _ = revoke_managed_completion_admission(server, params.dispatch_id.as_deref());
+                return Err("completion eval response omitted its durable id".to_string());
+            }
+        },
+    };
 
     // #773 Layer-2 ②: resolve the #878-A completion predicate BEFORE writing
     // the canonical outcome row, so `execution_outcome` records the MACHINE
