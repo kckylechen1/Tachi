@@ -11,6 +11,11 @@ const PROCESS_GROUP_TERM_GRACE: Duration = Duration::from_millis(1500);
 
 static OPENCODE_SOP_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 
+#[cfg(test)]
+static MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR: OnceLock<
+    std::sync::Mutex<Option<std::path::PathBuf>>,
+> = OnceLock::new();
+
 pub(super) async fn run_agent_subprocess(
     mut cmd: Command,
     timeout: Duration,
@@ -67,7 +72,20 @@ pub(super) async fn run_managed_custom_subprocess(
                     drain_managed_output(stdout_task, stderr_task).await;
                     return Err("managed cancellation channel closed".to_string());
                 };
-                if let Some(status) = child.try_wait().map_err(|error| format!("managed cancellation child probe failed: {error}"))? {
+                let status = match try_wait_for_managed_cancellation(&mut child, run_dir) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        reap_timed_out_child(&mut child, pid).await;
+                        drain_managed_output(stdout_task, stderr_task).await;
+                        let _ = command.response.send(
+                            crate::managed_run_control::CancelCompletion::Unavailable(
+                                "child_probe_failed",
+                            ),
+                        );
+                        return Err(format!("managed cancellation child probe failed: {error}"));
+                    }
+                };
+                if let Some(status) = status {
                     let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unavailable("completion_winner"));
                     return finish_managed_output(status, stdout_task, stderr_task).await;
                 }
@@ -176,6 +194,54 @@ async fn drain_managed_output(
     stderr_task: tokio::task::JoinHandle<Vec<u8>>,
 ) {
     let _ = tokio::join!(collect_pipe(stdout_task), collect_pipe(stderr_task));
+}
+
+fn try_wait_for_managed_cancellation(
+    child: &mut tokio::process::Child,
+    _run_dir: &std::path::Path,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    #[cfg(test)]
+    {
+        let configured_run_dir = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if configured_run_dir.as_deref() == Some(_run_dir) {
+            return Err(std::io::Error::other(
+                "injected managed cancellation probe failure",
+            ));
+        }
+    }
+    child.try_wait()
+}
+
+#[cfg(test)]
+struct ManagedCancelProbeFailureGuard;
+
+#[cfg(test)]
+impl Drop for ManagedCancelProbeFailureGuard {
+    fn drop(&mut self) {
+        let mut configured_run_dir = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *configured_run_dir = None;
+    }
+}
+
+#[cfg(test)]
+fn inject_managed_cancel_probe_failure(
+    run_dir: &std::path::Path,
+) -> ManagedCancelProbeFailureGuard {
+    let mut configured_run_dir = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        configured_run_dir.replace(run_dir.to_path_buf()).is_none(),
+        "managed cancellation probe failure already configured"
+    );
+    ManagedCancelProbeFailureGuard
 }
 
 pub(super) async fn run_opencode_sop_subprocess(
@@ -537,6 +603,93 @@ mod tests {
             wait_for_process_exit(pid).await,
             "descendant must be absent before cancellation confirmation"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_custom_probe_failure_reaps_group_and_reports_unavailable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("managed-custom");
+        let root = temp.path().join("root.pid");
+        let descendant = temp.path().join("descendant.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntrap '' TERM\nprintf '%s\\n' \"$$\" > '{}'\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+                root.display(),
+                descendant.display()
+            ),
+        )
+        .expect("write fixture");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+        let run_dir = temp.path().join("run");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({
+                "dispatch_id": "20260823T010102Z-custom-deadbeef",
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 1,
+                "execution_classification": "managed_custom",
+                "cancellation": {"receipt": "cancellation_requested"},
+            })
+            .to_string(),
+        )
+        .expect("status");
+
+        let _probe_failure = inject_managed_cancel_probe_failure(&run_dir);
+        let (sender, receiver) = mpsc::channel(1);
+        let (reply, outcome) = tokio::sync::oneshot::channel();
+        let command = Command::new(&script);
+        let run_dir_for_task = run_dir.clone();
+        let run = tokio::spawn(async move {
+            run_managed_custom_subprocess(
+                command,
+                Duration::from_secs(20),
+                receiver,
+                &run_dir_for_task,
+            )
+            .await
+        });
+        wait_for_file(&root).await;
+        wait_for_file(&descendant).await;
+        sender
+            .send(crate::managed_run_control::ManagedCancelCommand {
+                expected_status_revision: 1,
+                response: reply,
+            })
+            .await
+            .expect("private cancellation channel is open");
+
+        let result = run.await.expect("runner task does not panic");
+        let descendant_pid: libc::pid_t = std::fs::read_to_string(&descendant)
+            .expect("descendant pid")
+            .trim()
+            .parse()
+            .expect("numeric descendant pid");
+        let descendant_reaped = wait_for_process_exit(descendant_pid).await;
+        if !descendant_reaped {
+            let root_pid: u32 = std::fs::read_to_string(&root)
+                .expect("root pid")
+                .trim()
+                .parse()
+                .expect("numeric root pid");
+            terminate_process_group(Some(root_pid), libc::SIGKILL);
+        }
+        assert!(
+            descendant_reaped,
+            "probe failure must still reap the managed descendant process group"
+        );
+        assert!(matches!(
+            result,
+            Err(ref error) if error.contains("managed cancellation child probe failed")
+        ));
+        assert!(matches!(
+            outcome.await.expect("explicit cancellation outcome"),
+            crate::managed_run_control::CancelCompletion::Unavailable("child_probe_failed")
+        ));
     }
 }
 
