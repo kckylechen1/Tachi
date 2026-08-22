@@ -409,14 +409,8 @@ mod tests {
             None,
         );
         let claude_args = command_args(
-            &build_claude_command(
-                &claude_assignment,
-                &claude_grant,
-                &[],
-                "task",
-                None,
-            )
-            .expect("typed claude launch"),
+            &build_claude_command(&claude_assignment, &claude_grant, &[], "task", None)
+                .expect("typed claude launch"),
         );
         assert!(claude_args
             .windows(2)
@@ -435,14 +429,8 @@ mod tests {
             Some(3),
         );
         let codex_args = command_args(
-            &build_codex_command(
-                &codex_assignment,
-                &codex_grant,
-                &[],
-                "task",
-                None,
-            )
-            .expect("typed codex launch"),
+            &build_codex_command(&codex_assignment, &codex_grant, &[], "task", None)
+                .expect("typed codex launch"),
         );
         assert!(codex_args
             .windows(2)
