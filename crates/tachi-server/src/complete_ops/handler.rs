@@ -178,6 +178,22 @@ fn revoke_managed_completion_admission(
     Ok(())
 }
 
+fn durable_eval_memory_id(save_json: &Value) -> Result<String, &'static str> {
+    if save_json
+        .get("saved")
+        .and_then(Value::as_bool)
+        .is_some_and(|saved| !saved)
+    {
+        return Err("completion eval was not durably recorded");
+    }
+    save_json
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .ok_or("completion eval response omitted its durable id")
+}
+
 /// Persist the resolved close in the dispatch's own run receipt before
 /// projecting it to kanban. Kanban is a derived view and may be missing or
 /// temporarily unreadable; the watchdog therefore needs this durable source
@@ -571,26 +587,12 @@ pub(crate) async fn handle_tachi_complete(
     // A successful transport result is not proof of a durable eval. Save
     // validation and dedup refusals are represented as JSON `saved:false`;
     // never manufacture an id and let that phantom proceed into outcomes.
-    let eval_memory_id = match save_json
-        .get("saved")
-        .and_then(Value::as_bool)
-        .is_some_and(|saved| !saved)
-    {
-        true => {
+    let eval_memory_id = match durable_eval_memory_id(&save_json) {
+        Ok(id) => id,
+        Err(error) => {
             let _ = revoke_managed_completion_admission(server, params.dispatch_id.as_deref());
-            return Err("completion eval was not durably recorded".to_string());
+            return Err(error.to_string());
         }
-        false => match save_json
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-        {
-            Some(id) => id.to_string(),
-            None => {
-                let _ = revoke_managed_completion_admission(server, params.dispatch_id.as_deref());
-                return Err("completion eval response omitted its durable id".to_string());
-            }
-        },
     };
 
     // #773 Layer-2 ②: resolve the #878-A completion predicate BEFORE writing
@@ -1772,6 +1774,32 @@ mod tests {
             source.matches(&shared_lock_call).count(),
             2,
             "every tachi_complete status read-modify-replace must take the shared per-run lock"
+        );
+    }
+}
+
+#[cfg(test)]
+mod issue_1825_durable_eval_tests {
+    use super::durable_eval_memory_id;
+    use serde_json::json;
+
+    #[test]
+    fn ok_but_nonrecorded_eval_never_fabricates_a_completion_id() {
+        assert_eq!(
+            durable_eval_memory_id(&json!({"saved": false, "id": "stale"})),
+            Err("completion eval was not durably recorded")
+        );
+        assert_eq!(
+            durable_eval_memory_id(&json!({"saved": false, "rejected_by": "capture_gate"})),
+            Err("completion eval was not durably recorded")
+        );
+        assert_eq!(
+            durable_eval_memory_id(&json!({"status": "saved"})),
+            Err("completion eval response omitted its durable id")
+        );
+        assert_eq!(
+            durable_eval_memory_id(&json!({"status": "saved", "id": "eval-1825"})),
+            Ok("eval-1825".to_string())
         );
     }
 }
