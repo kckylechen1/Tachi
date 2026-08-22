@@ -36,8 +36,6 @@ mod tests {
         let request = serde_json::from_value(json!({
             "task": "noop",
             "staffing_reason": "explicit_user_request",
-            "agent": "codex",
-            "harness_transport": "acpx",
         }))
         .expect("explicit ACPX request");
         let assignment = tachi_params::ResolvedStaffAssignment {
