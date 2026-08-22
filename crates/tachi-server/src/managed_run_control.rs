@@ -527,6 +527,43 @@ pub(crate) fn record_termination_unconfirmed(
         .map_err(|e| format!("persist termination_unconfirmed: {e}"))
 }
 
+/// Finalize a command that the managed subprocess dequeued. This is called by
+/// the sole background terminal writer after result persistence, never by the
+/// runner, so the waiter can observe only a canonical receipt.
+pub(crate) fn finalize_dequeued_managed_cancellation(
+    run_dir: &std::path::Path,
+    expected: u64,
+    runner_error: Option<&str>,
+    termination_proof: Option<&'static str>,
+) -> CancelCompletion {
+    match runner_error {
+        Some("managed_cancelled") => match confirm_managed_custom_cancellation(
+            run_dir,
+            expected,
+            termination_proof.unwrap_or("unix_process_group_absent"),
+        ) {
+            Ok(status_revision) => CancelCompletion::Confirmed {
+                termination_proof: termination_proof.unwrap_or("unix_process_group_absent"),
+                status_revision,
+            },
+            Err(_) => match record_termination_unconfirmed(run_dir, expected) {
+                Ok(()) => CancelCompletion::Unconfirmed,
+                Err(_) => CancelCompletion::Unavailable("completion_or_timeout_winner"),
+            },
+        },
+        Some(error)
+            if error == "termination_unconfirmed"
+                || error.starts_with("managed cancellation child probe failed") =>
+        {
+            match record_termination_unconfirmed(run_dir, expected) {
+                Ok(()) => CancelCompletion::Unconfirmed,
+                Err(_) => CancelCompletion::Unavailable("completion_or_timeout_winner"),
+            }
+        }
+        _ => CancelCompletion::Unavailable("completion_or_timeout_winner"),
+    }
+}
+
 fn record_unavailable_if_pending(
     run_dir: &std::path::Path,
     dispatch_id: &str,
@@ -624,6 +661,12 @@ fn cancellation_receipt(
     json!({
         "receipt": receipt, "dispatch_id": dispatch_id,
         "expected_status_revision": expected, "observed_status_revision": observed,
+        "state": match receipt {
+            "cancellation_requested" => Value::String("TASK_STATE_WORKING".to_string()),
+            "cancellation_confirmed" => Value::String("TASK_STATE_CANCELED".to_string()),
+            "termination_unconfirmed" => Value::String("TASK_STATE_FAILED".to_string()),
+            _ => Value::Null,
+        },
         "lifecycle_owner": "memory_server_managed_custom", "backend": "custom",
         "reason": reason, "termination_proof": termination_proof,
         "timestamp": Utc::now().to_rfc3339(),
@@ -635,7 +678,8 @@ fn unavailable(dispatch_id: &str, expected: u64, observed: Option<u64>, reason: 
         "receipt": "cancellation_unavailable", "dispatch_id": dispatch_id,
         "expected_status_revision": expected, "observed_status_revision": observed,
         "reason": reason, "lifecycle_owner": "unknown_or_unavailable",
-        "backend": "unknown_or_unavailable", "timestamp": Utc::now().to_rfc3339(),
+        "backend": "unknown_or_unavailable", "state": Value::Null,
+        "timestamp": Utc::now().to_rfc3339(),
     })
     .to_string()
 }
@@ -643,6 +687,13 @@ fn unavailable(dispatch_id: &str, expected: u64, observed: Option<u64>, reason: 
 pub(crate) fn advance_status_revision(
     status: &mut serde_json::Map<String, Value>,
 ) -> Result<u64, String> {
+    let canonical_state = status.get("state").cloned().unwrap_or(Value::Null);
+    if let Some(receipt) = status
+        .get_mut("cancellation")
+        .and_then(Value::as_object_mut)
+    {
+        receipt.insert("state".to_string(), canonical_state);
+    }
     let next = match status.get("status_revision") {
         Some(Value::Number(value)) => value
             .as_u64()

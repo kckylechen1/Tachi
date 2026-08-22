@@ -7,7 +7,8 @@ use super::super::dispatch_v2::stamp_route_decision_id;
 use super::super::dispatch_v2::{append_trajectory_event, status_json_lock_for, write_status_json};
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
 use super::super::subprocess::{
-    run_agent_subprocess, run_managed_custom_subprocess, run_opencode_sop_subprocess, tail_chars,
+    run_agent_subprocess, run_managed_custom_subprocess_outcome, run_opencode_sop_subprocess,
+    tail_chars,
 };
 use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
@@ -168,34 +169,51 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }),
         );
 
-        let result = match execution_for_spawn {
-            DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => {
-                run_opencode_sop_subprocess(
-                    cmd,
-                    timeout,
-                    opencode_sop_label_for_spawn
-                        .as_deref()
-                        .unwrap_or("opencode_sop"),
-                )
-                .await
-            }
-            DispatchExecution::Subprocess(cmd) => run_agent_subprocess(cmd, timeout).await,
-            DispatchExecution::ManagedCustom(cmd, receiver) => {
-                run_managed_custom_subprocess(cmd, timeout, receiver, &workspace_dir_for_spawn)
-                    .await
-            }
-            DispatchExecution::NativeAcp(spec) => {
-                run_native_acp_dispatch(
-                    spec,
-                    &workspace_dir_for_spawn,
-                    &traj_path_for_spawn,
-                    &d_id,
-                    &agent_for_watchdog,
-                    timeout,
-                )
-                .await
-            }
-        };
+        let (result, mut managed_cancellation, managed_termination_proof) =
+            match execution_for_spawn {
+                DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => (
+                    run_opencode_sop_subprocess(
+                        cmd,
+                        timeout,
+                        opencode_sop_label_for_spawn
+                            .as_deref()
+                            .unwrap_or("opencode_sop"),
+                    )
+                    .await,
+                    None,
+                    None,
+                ),
+                DispatchExecution::Subprocess(cmd) => {
+                    (run_agent_subprocess(cmd, timeout).await, None, None)
+                }
+                DispatchExecution::ManagedCustom(cmd, receiver) => {
+                    let outcome = run_managed_custom_subprocess_outcome(
+                        cmd,
+                        timeout,
+                        receiver,
+                        &workspace_dir_for_spawn,
+                    )
+                    .await;
+                    (
+                        outcome.result,
+                        outcome.cancellation,
+                        outcome.termination_proof,
+                    )
+                }
+                DispatchExecution::NativeAcp(spec) => (
+                    run_native_acp_dispatch(
+                        spec,
+                        &workspace_dir_for_spawn,
+                        &traj_path_for_spawn,
+                        &d_id,
+                        &agent_for_watchdog,
+                        timeout,
+                    )
+                    .await,
+                    None,
+                    None,
+                ),
+            };
         let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
         // CLI subprocesses intentionally never acknowledge a receipt: they
@@ -584,7 +602,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         }
 
         let should_cleanup = match &result {
-            Err(error) if error == "managed_cancelled" => true,
+            Err(error) if managed_terminal_requires_credential_cleanup(error) => true,
             Ok(r) if !pending_completion_recovery => {
                 should_cleanup_run(r.exit_code, kanban_state.as_deref())
             }
@@ -661,7 +679,12 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 d_id, error
             );
         }
-        let final_status_state = if pending_completion_recovery {
+        let final_status_state = if matches!(&result, Err(error) if error == "managed_cancelled") {
+            "TASK_STATE_CANCELED"
+        } else if matches!(&result, Err(error) if error == "termination_unconfirmed" || error.starts_with("managed cancellation child probe failed"))
+        {
+            "TASK_STATE_FAILED"
+        } else if pending_completion_recovery {
             pending_recovery_status_state(prev_status.as_ref())
         } else if artifact_read_error.is_some() {
             "TASK_STATE_FAILED"
@@ -673,6 +696,19 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 final_exit_code,
             )
         };
+        // A dequeued managed cancellation is finalized by this background
+        // owner, after the result artifact and all terminal accounting have
+        // been chosen. The runner only owns process lifetime; it never wakes
+        // the caller with a speculative receipt.
+        let managed_cancel_completion = managed_cancellation.as_ref().map(|command| {
+            crate::managed_run_control::finalize_dequeued_managed_cancellation(
+                &workspace_dir_for_spawn,
+                command.expected_status_revision,
+                result.as_ref().err().map(String::as_str),
+                managed_termination_proof,
+            )
+        });
+
         write_status_json(
             &workspace_dir_for_spawn,
             &d_id,
@@ -721,6 +757,12 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             })),
         );
 
+        if let (Some(command), Some(completion)) =
+            (managed_cancellation.take(), managed_cancel_completion)
+        {
+            let _ = command.response.send(completion);
+        }
+
         if should_cleanup {
             let credential_cleanup = server_clone.with_global_store(|store| {
                 cleanup_ephemeral_credential_materializations(
@@ -757,6 +799,12 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         #[cfg(test)]
         mark_background_dispatch_cleanup_complete(&d_id);
     });
+}
+
+fn managed_terminal_requires_credential_cleanup(error: &str) -> bool {
+    error == "managed_cancelled"
+        || error == "termination_unconfirmed"
+        || error.starts_with("managed cancellation child probe failed")
 }
 
 #[cfg(test)]
@@ -1805,5 +1853,26 @@ mod tests {
             "TASK_STATE_WORKING",
             "the finalizer must retain a non-terminal state while recovery is pending"
         );
+    }
+}
+
+#[cfg(test)]
+mod issue_1825_credential_cleanup_tests {
+    use super::managed_terminal_requires_credential_cleanup;
+
+    #[test]
+    fn managed_terminal_failures_always_select_ephemeral_credential_cleanup() {
+        assert!(managed_terminal_requires_credential_cleanup(
+            "managed_cancelled"
+        ));
+        assert!(managed_terminal_requires_credential_cleanup(
+            "termination_unconfirmed"
+        ));
+        assert!(managed_terminal_requires_credential_cleanup(
+            "managed cancellation child probe failed: injected"
+        ));
+        assert!(!managed_terminal_requires_credential_cleanup(
+            "Agent process timed out after 1s"
+        ));
     }
 }

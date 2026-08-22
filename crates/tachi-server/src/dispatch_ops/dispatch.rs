@@ -920,7 +920,7 @@ async fn launch_canonical_dispatch(
 
     // Register managed-custom control before task scheduling.
     let (execution, managed_run_guard) =
-        if managed_control_origin == ManagedControlOrigin::StaffFacade && managed_custom_eligible {
+        if managed_custom_eligible && managed_control_origin == ManagedControlOrigin::StaffFacade {
             let (receiver, guard) = match server.managed_run_controls.register(&dispatch_id) {
                 Ok(registration) => registration,
                 Err(error) => {

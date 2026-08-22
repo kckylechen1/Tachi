@@ -137,6 +137,47 @@ fn admit_managed_completion(
         .map_err(|error| format!("persist managed completion admission: {error}"))
 }
 
+/// The admission marker is a narrow cancellation fence, not evidence. If the
+/// eval write never starts, remove it so a retry or cancellation is not
+/// stranded behind a phantom completion owner.
+fn revoke_managed_completion_admission(
+    server: &MemoryServer,
+    dispatch_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(dispatch_id) = dispatch_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(());
+    };
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
+        return Ok(());
+    }
+    let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
+    let status_lock = crate::dispatch_ops::status_json_lock_for(&run_dir);
+    let _status_guard = status_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let status_path = run_dir.join("status.json");
+    let Some(mut status) = crate::task_lifecycle::read_json_file(&status_path)? else {
+        return Ok(());
+    };
+    let object = status.as_object_mut().ok_or_else(|| {
+        format!(
+            "managed completion status is not an object: {}",
+            status_path.display()
+        )
+    })?;
+    if object.get("completion_recovery") == Some(&json!({ "status": "completion_admitted" }))
+        && !object.contains_key("resolved_completion")
+    {
+        object.remove("completion_recovery");
+        crate::managed_run_control::advance_status_revision(object)?;
+        let body = serde_json::to_vec_pretty(&status)
+            .map_err(|error| format!("serialize managed completion admission rollback: {error}"))?;
+        crate::utils::write_owner_only_file_atomic(&status_path, &body)
+            .map_err(|error| format!("persist managed completion admission rollback: {error}"))?;
+    }
+    Ok(())
+}
+
 /// Persist the resolved close in the dispatch's own run receipt before
 /// projecting it to kanban. Kanban is a derived view and may be missing or
 /// temporarily unreadable; the watchdog therefore needs this durable source
@@ -513,7 +554,17 @@ pub(crate) async fn handle_tachi_complete(
     // detection / "single project on disk"): that silently reroutes eval rows
     // away from the server's own stores. Callers must pass `project` (or the
     // server must have a bound project DB) for project-scoped persistence.
-    let save_result = save_eval_memory(server, mem_params).await?;
+    // Recheck and persist immediately before the first side effect. The
+    // earlier read-only check keeps invalid inputs cheap; this fence prevents
+    // cancellation from winning between validation and eval/outcome writes.
+    admit_managed_completion(server, params.dispatch_id.as_deref(), true)?;
+    let save_result = match save_eval_memory(server, mem_params).await {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = revoke_managed_completion_admission(server, params.dispatch_id.as_deref());
+            return Err(error);
+        }
+    };
     let save_json: serde_json::Value = serde_json::from_str(&save_result)
         .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
 
@@ -577,7 +628,6 @@ pub(crate) async fn handle_tachi_complete(
     // `outcome_norm` here silently rewrote "Complete " -> "complete" in the
     // row the module doc promises is verbatim.
     let reported_outcome_verbatim = params.outcome.trim();
-    admit_managed_completion(server, params.dispatch_id.as_deref(), true)?;
     let dispatch_outcome_status = super::dispatch_outcome::record_complete_outcome(
         server,
         &params,
