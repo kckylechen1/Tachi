@@ -49,7 +49,7 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
     production_adapter(
         "launcher",
         include_str!("../../launcher.rs"),
-        "pub(super) fn build_claude_command",
+        "fn launch_params",
         "#[cfg(test)]\nmod tests",
     );
     production_adapter(
@@ -90,10 +90,7 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         .split_once("let execution_grant = mint_execution_grant(")
         .expect("handler contains the grant mint marker")
         .1;
-    let post_grant_handler = after_grant
-        .split_once("// 8. Spawn background task with Watchdog")
-        .expect("handler contains post-grant terminal boundary")
-        .0;
+    let post_grant_handler = after_grant;
     let has_post_grant_params =
         |source: &str| source.contains("params.") || rejects_flat_params(source);
     assert!(
@@ -170,6 +167,42 @@ impl Drop for FakeClaudeCleanup {
     }
 }
 
+/// A custom worker may outlive a failed assertion. Keep the run directory and
+/// process-wide test environment alive until its terminal receipt exists.
+struct TerminalWorkerCleanup {
+    run_dir: std::path::PathBuf,
+}
+
+impl TerminalWorkerCleanup {
+    fn new(run_dir: std::path::PathBuf) -> Self {
+        Self { run_dir }
+    }
+
+    fn terminal(&self) -> bool {
+        std::fs::read_to_string(self.run_dir.join("status.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .is_some_and(|status| {
+                status["result_written"] == json!(true)
+                    && matches!(
+                        status["state"].as_str(),
+                        Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")
+                    )
+            })
+    }
+}
+
+impl Drop for TerminalWorkerCleanup {
+    fn drop(&mut self) {
+        for _ in 0..480 {
+            if self.terminal() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+}
+
 #[test]
 fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
     let server = crate::tests::make_server();
@@ -228,7 +261,11 @@ async fn raw_credential_profile_spelling_reaches_failure_trajectory() {
     let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
     let server = crate::tests::make_server();
     let mut params = test_dispatch_params(Some("custom"), "raw credential trajectory");
-    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import os; open('launcher-cwd', 'w').write(os.getcwd())".to_string(),
+    ];
     params.credential_profiles = vec![" missing-profile ".to_string()];
 
     let err = handle_tachi_dispatch(&server, params)
@@ -517,12 +554,13 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
         .await
         .expect("alias dispatch starts");
     let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run dir"));
+    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
     assert_eq!(
         response["selected_profile"],
         json!("glm_impl"),
         "{response}"
     );
-    let run_dir = std::path::Path::new(response["run_dir"].as_str().expect("run dir"));
     let started: Value = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
         .expect("trajectory")
         .lines()
@@ -537,6 +575,23 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
         json!("glm_51_impl"),
         "verbose raw diagnostics must retain the caller spelling: {response}"
     );
+    let worker_result = wait_for_result(&run_dir).await;
+    assert!(
+        !worker_result.trim().is_empty(),
+        "custom worker reaches terminal result"
+    );
+    assert!(cleanup.terminal(), "custom worker reaches terminal status");
+    assert_eq!(
+        std::fs::canonicalize(
+            std::fs::read_to_string(cwd.path().join("launcher-cwd"))
+                .expect("launcher cwd record")
+                .trim()
+        )
+        .expect("launched cwd canonicalizes"),
+        std::fs::canonicalize(cwd.path()).expect("requested cwd canonicalizes"),
+        "custom worker must observe the resolved unmanaged cwd"
+    );
+    drop(cleanup);
 }
 
 #[test]
@@ -1085,7 +1140,12 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
     let mut params = test_dispatch_params(Some("custom"), "preserve whitespace profile spelling");
     params.profile = Some("   ".to_string());
     params.cwd = Some("   ".to_string());
-    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    let observed_cwd = temp_home.path().join("whitespace-launcher-cwd");
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        format!("import os; open({observed_cwd:?}, 'w').write(os.getcwd())"),
+    ];
 
     let raw = handle_tachi_dispatch(&server, params)
         .await
@@ -1105,6 +1165,7 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
             .as_str()
             .expect("response carries run directory"),
     );
+    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json")).expect("status receipt exists"),
     )
@@ -1139,6 +1200,21 @@ async fn whitespace_profile_preserves_legacy_response_and_artifact_spelling() {
         "{}",
         kanban.metadata
     );
+    let worker_result = wait_for_result(&run_dir).await;
+    assert!(
+        !worker_result.trim().is_empty(),
+        "custom worker reaches terminal result"
+    );
+    assert!(cleanup.terminal(), "custom worker reaches terminal status");
+    let launched_cwd =
+        std::fs::read_to_string(&observed_cwd).expect("whitespace launcher cwd record");
+    assert_eq!(
+        std::fs::canonicalize(launched_cwd.trim()).expect("default launcher cwd canonicalizes"),
+        std::fs::canonicalize(std::env::current_dir().expect("test cwd exists"))
+            .expect("test cwd canonicalizes"),
+        "whitespace raw receipt must not become the launcher's actual default cwd"
+    );
+    drop(cleanup);
 }
 
 #[tokio::test]

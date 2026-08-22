@@ -213,19 +213,29 @@ fn absolutize_cwd(cwd: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_params::TachiDispatchParams;
-
-    fn build_spec(params: &TachiDispatchParams, prompt: &str) -> Result<NativeAcpRunSpec, String> {
-        let request = tachi_params::StaffAssignmentRequest::from_dispatch_params(params);
-        let backend = params.agent.clone().unwrap_or_else(|| "custom".to_string());
+    fn test_owners(
+        sandbox: Option<&str>,
+    ) -> (
+        tachi_params::StaffAssignmentRequest,
+        tachi_params::ResolvedStaffAssignment,
+        tachi_params::ExecutionGrant,
+        Vec<String>,
+    ) {
+        let request = serde_json::from_value(serde_json::json!({
+            "task": "noop",
+            "staffing_reason": "explicit_user_request",
+            "agent": "custom",
+            "harness_transport": "acp-native",
+        }))
+        .expect("explicit native ACP request");
         let assignment = tachi_params::ResolvedStaffAssignment {
             assignment_id: "test-assignment".to_string(),
-            staffing_reason: params.staffing_reason,
-            selected_worker: backend.clone(),
-            selected_profile: params.profile.clone(),
-            selected_backend: backend,
-            selected_model: params.model.clone(),
-            execution_level: params.execution_level,
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            selected_worker: "custom".to_string(),
+            selected_profile: None,
+            selected_backend: "custom".to_string(),
+            selected_model: None,
+            execution_level: None,
             recommendation_ref: None,
             host_adapter: None,
             evidence_required: Vec::new(),
@@ -235,64 +245,35 @@ mod tests {
         };
         let grant = tachi_params::ExecutionGrant {
             grant_id: "test-grant".to_string(),
-            env_id: params.env_id.clone(),
-            unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
-            allowed_cwd: params.cwd.as_ref().map(Into::into),
-            credential_profiles: params.credential_profiles.clone(),
-            mcp_access: params.mcp_access.clone(),
-            allowed_tools: params.allowed_tools.clone(),
-            permission_profile: params.permission_profile.clone(),
-            sandbox: params.sandbox.clone(),
-            max_turns: params.max_turns,
-            timeout_secs: params.timeout_secs,
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: Some("/tmp/project".into()),
+            credential_profiles: Vec::new(),
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            sandbox: sandbox.map(str::to_string),
+            max_turns: None,
+            timeout_secs: 5,
         };
-        build_native_acp_run_spec(
-            Path::new("/tmp/tachi-home-test"),
-            &request,
-            &assignment,
-            &grant,
-            &params.command,
-            prompt,
-        )
+        (request, assignment, grant, vec!["python3".to_string()])
     }
 
-    fn params() -> TachiDispatchParams {
-        TachiDispatchParams {
-            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
-            agent: Some("custom".to_string()),
-            profile: None,
-            task: "noop".to_string(),
-            execution_level: None,
-            cwd: Some("/tmp/project".to_string()),
-            env_id: None,
-            unmanaged_cwd: None,
-            skills: Vec::new(),
-            context_query: None,
-            model: None,
-            timeout_secs: 5,
-            permission_profile: None,
-            allowed_tools: Vec::new(),
-            completion_predicate: None,
-            max_turns: None,
-            sandbox: None,
-            inject_tachi_mcp: None,
-            inject_hub_mcps: None,
-            command: vec!["python3".to_string()],
-            harness_transport: Some("acp-native".to_string()),
-            harness_server_url: None,
-            project: None,
-            stage: None,
-            credential_profiles: Vec::new(),
-            issue_ref: None,
-            pr_ref: None,
-            flow_id: None,
-            tool_profile: None,
-            auto_capability_bundle: None,
-            mcp_access: None,
-            allowed_mcp_servers: Vec::new(),
-            verbose: None,
-            inject_card: None,
-        }
+    fn build_spec(
+        request: &tachi_params::StaffAssignmentRequest,
+        assignment: &tachi_params::ResolvedStaffAssignment,
+        grant: &tachi_params::ExecutionGrant,
+        command: &[String],
+        prompt: &str,
+    ) -> Result<NativeAcpRunSpec, String> {
+        build_native_acp_run_spec(
+            Path::new("/tmp/tachi-home-test"),
+            request,
+            assignment,
+            grant,
+            command,
+            prompt,
+        )
     }
 
     #[test]
@@ -300,10 +281,9 @@ mod tests {
         // Native ACP has no `--sandbox`-equivalent knob; a caller-supplied
         // sandbox request must fail closed with a receipt naming the backend
         // and requested level, never be silently dropped (#894 S0).
-        let mut params = params();
-        params.sandbox = Some("workspace-write".to_string());
+        let (request, assignment, grant, command) = test_owners(Some("workspace-write"));
 
-        let err = build_spec(&params, "hello")
+        let err = build_spec(&request, &assignment, &grant, &command, "hello")
             .expect_err("native ACP has no sandbox concept and must fail closed");
         assert!(
             err.contains("acp-native") && err.contains("workspace-write"),
@@ -314,8 +294,9 @@ mod tests {
 
     #[test]
     fn native_acp_builds_spec_without_sandbox() {
-        let params = params();
-        let spec = build_spec(&params, "hello").expect("no sandbox requested should build cleanly");
+        let (request, assignment, grant, command) = test_owners(None);
+        let spec = build_spec(&request, &assignment, &grant, &command, "hello")
+            .expect("no sandbox requested should build cleanly");
         assert_eq!(spec.command, "python3");
     }
 }

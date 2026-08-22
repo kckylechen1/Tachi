@@ -177,16 +177,19 @@ pub(super) fn contract_receipt(contract: &EffectiveContract) -> Value {
 mod tests {
     use super::*;
 
-    fn test_assignment(params: &TachiDispatchParams) -> tachi_params::ResolvedStaffAssignment {
-        let backend = params.agent.clone().unwrap_or_else(|| "custom".to_string());
+    fn test_assignment(
+        backend: &str,
+        model: Option<&str>,
+    ) -> tachi_params::ResolvedStaffAssignment {
+        let backend = backend.to_string();
         tachi_params::ResolvedStaffAssignment {
             assignment_id: "test-assignment".to_string(),
-            staffing_reason: params.staffing_reason,
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
             selected_worker: backend.clone(),
-            selected_profile: params.profile.clone(),
+            selected_profile: Some("codex_55_review".to_string()),
             selected_backend: backend,
-            selected_model: params.model.clone(),
-            execution_level: params.execution_level,
+            selected_model: model.map(str::to_string),
+            execution_level: None,
             recommendation_ref: None,
             host_adapter: None,
             evidence_required: Vec::new(),
@@ -196,19 +199,19 @@ mod tests {
         }
     }
 
-    fn test_grant(params: &TachiDispatchParams) -> tachi_params::ExecutionGrant {
+    fn test_grant(sandbox: Option<&str>) -> tachi_params::ExecutionGrant {
         tachi_params::ExecutionGrant {
             grant_id: "test-grant".to_string(),
-            env_id: params.env_id.clone(),
-            unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
-            allowed_cwd: params.cwd.as_ref().map(Into::into),
-            credential_profiles: params.credential_profiles.clone(),
-            mcp_access: params.mcp_access.clone(),
-            allowed_tools: params.allowed_tools.clone(),
-            permission_profile: params.permission_profile.clone(),
-            sandbox: params.sandbox.clone(),
-            max_turns: params.max_turns,
-            timeout_secs: params.timeout_secs,
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: None,
+            credential_profiles: Vec::new(),
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            sandbox: sandbox.map(str::to_string),
+            max_turns: None,
+            timeout_secs: 5,
         }
     }
     use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
@@ -313,8 +316,8 @@ mod tests {
             tachi_dispatch::Enforcement::Enforced { .. }
         ));
 
-        let assignment = test_assignment(&params);
-        let grant = test_grant(&params);
+        let assignment = test_assignment("codex", None);
+        let grant = test_grant(Some("read-only"));
         let cmd = build_codex_command(&assignment, &grant, &params.command, "review", None)
             .expect("codex command");
         let args = cmd
