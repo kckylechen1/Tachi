@@ -167,6 +167,10 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub dispatch_id: Option<String>,
 
+    // Canonical receipt revision required by action=cancel.
+    #[serde(default)]
+    pub expected_status_revision: Option<u64>,
+
     /// Task description / prompt for the worker. Required for `start`
     /// (the route validates non-empty); ignored for `status`.
     #[serde(default)]

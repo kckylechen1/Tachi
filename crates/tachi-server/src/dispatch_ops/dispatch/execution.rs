@@ -6,7 +6,7 @@ use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
 use super::super::dispatch_v2::stamp_route_decision_id;
 use super::super::dispatch_v2::{append_trajectory_event, status_json_lock_for, write_status_json};
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
-use super::super::subprocess::{run_agent_subprocess, run_opencode_sop_subprocess, tail_chars};
+use super::super::subprocess::{run_agent_subprocess, run_managed_custom_subprocess, run_opencode_sop_subprocess, tail_chars};
 use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
 use crate::{MemoryServer, SaveMemoryParams};
@@ -30,6 +30,7 @@ const WATCHDOG_STATUS_MAX_BYTES: usize = 1024 * 1024;
 
 pub(super) enum DispatchExecution {
     Subprocess(Command),
+    ManagedCustom(Command, tokio::sync::mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>),
     NativeAcp(NativeAcpRunSpec),
 }
 
@@ -60,6 +61,7 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) execution: DispatchExecution,
     pub(super) flow_dispatch_slot: Option<PathBuf>,
     pub(super) mcp_config_path: Option<PathBuf>,
+    pub(super) managed_run_guard: Option<crate::managed_run_control::ManagedRunGuard>,
 }
 
 pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
@@ -86,6 +88,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let execution_for_spawn = ctx.execution;
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
     let mcp_config_path = ctx.mcp_config_path;
+    let _managed_run_guard = ctx.managed_run_guard;
 
     tokio::task::spawn(async move {
         let _mcp_cleanup = McpCleanup(mcp_config_path);
@@ -120,6 +123,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 .await
             }
             DispatchExecution::Subprocess(cmd) => run_agent_subprocess(cmd, timeout).await,
+            DispatchExecution::ManagedCustom(cmd, receiver) => run_managed_custom_subprocess(cmd, timeout, receiver).await,
             DispatchExecution::NativeAcp(spec) => {
                 run_native_acp_dispatch(
                     spec,

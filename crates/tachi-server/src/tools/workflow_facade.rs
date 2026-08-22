@@ -95,9 +95,15 @@ impl MemoryServer {
                 )
                 .await?
             }
+            "cancel" => {
+                let dispatch_id = params.dispatch_id.clone().ok_or_else(|| "tachi_staff: action='cancel' requires a `dispatch_id`".to_string())?;
+                let expected_status_revision = params.expected_status_revision.ok_or_else(|| "tachi_staff: action='cancel' requires `expected_status_revision`".to_string())?;
+                for (name, present) in [("task", params.task.is_some()), ("staffing_reason", params.staffing_reason.is_some()), ("profile", params.profile.is_some()), ("worker", params.worker.is_some()), ("project", params.project.is_some()), ("stage", params.stage.is_some()), ("issue_ref", params.issue_ref.is_some()), ("pr_ref", params.pr_ref.is_some()), ("flow_id", params.flow_id.is_some()), ("recommendation_ref", params.recommendation_ref.is_some())] { if present { return Err(format!("tachi_staff: action='cancel' rejects start-only field `{name}`")); } }
+                crate::staffing_ops::staff_cancel(self, crate::staffing_ops::StaffCancelRequest { dispatch_id, expected_status_revision }).await?
+            }
             other => {
                 return Err(format!(
-                    "tachi_staff: unknown action '{other}' (start|status)"
+                    "tachi_staff: unknown action '{other}' (start|status|cancel)"
                 ))
             }
         };

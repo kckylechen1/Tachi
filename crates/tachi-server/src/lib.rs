@@ -140,6 +140,7 @@ mod kanban;
 pub mod kernel_policy_adapter;
 pub mod lesson_forge_ops;
 mod manifest;
+mod managed_run_control;
 mod mcp_connection;
 mod mcp_pool;
 mod mcp_proxy;

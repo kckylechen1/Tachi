@@ -284,7 +284,7 @@ pub(crate) fn facade_action_effect(
                 "close_loop",
             ],
         ),
-        "tachi_staff" => (&["status"], &[], &["start"]),
+        "tachi_staff" => (&["status"], &[], &["start", "cancel"]),
         "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
         // Preserve the existing conservative treatment of these facades while
         // making the set exhaustive. Unknown actions receive no metadata.
@@ -499,6 +499,7 @@ mod tests {
             ("tachi_wiki", "write"),
             ("tachi_task", "complete"),
             ("tachi_staff", "start"),
+            ("tachi_staff", "cancel"),
         ] {
             assert!(
                 dlq_unsafe(tool, Some(action)),

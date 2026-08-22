@@ -906,6 +906,13 @@ async fn launch_canonical_dispatch(
         }
     };
 
+    // Register managed-custom control before task scheduling.
+    let (execution, managed_run_guard) = if execution_backend_name == Some("custom") {
+        let (receiver, guard) = server.managed_run_controls.register(&dispatch_id)?;
+        let execution = match execution { DispatchExecution::Subprocess(command) => DispatchExecution::ManagedCustom(command, receiver), other => other };
+        (execution, Some(guard))
+    } else { (execution, None) };
+
     // 8. Spawn background task with Watchdog
     let workspace_dir_for_response = workspace_dir.clone();
     spawn_background_dispatch(BackgroundDispatchContext {
@@ -931,6 +938,7 @@ async fn launch_canonical_dispatch(
         execution,
         flow_dispatch_slot,
         mcp_config_path,
+        managed_run_guard,
     });
 
     // 9. Immediately return — main agent is unblocked!

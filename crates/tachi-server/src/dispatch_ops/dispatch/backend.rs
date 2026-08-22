@@ -279,7 +279,7 @@ mod tests {
         })?;
         match prepared.execution {
             DispatchExecution::Subprocess(command) => Ok(command),
-            DispatchExecution::NativeAcp(_) => {
+            DispatchExecution::NativeAcp(_) | DispatchExecution::ManagedCustom(_, _) => {
                 Err("cli transport must prepare a subprocess".to_string())
             }
         }

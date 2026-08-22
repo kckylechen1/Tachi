@@ -68,6 +68,11 @@ pub(crate) struct StaffStatusRequest {
     pub dispatch_id: String,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
+pub(crate) struct StaffCancelRequest { pub dispatch_id: String, pub expected_status_revision: u64 }
+
+pub(crate) async fn staff_cancel(server: &MemoryServer, request: StaffCancelRequest) -> Result<String, String> { crate::managed_run_control::request_managed_custom_cancel(server, &request.dispatch_id, request.expected_status_revision).await }
+
 /// Start a worker via the canonical dispatch kernel.
 ///
 /// Resolves the semantic [`StaffAssignmentRequest`] and enters the single

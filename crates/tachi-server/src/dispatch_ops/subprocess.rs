@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 
 const DEFAULT_OPENCODE_SOP_MAX_CONCURRENCY: usize = 2;
 const MAX_OPENCODE_SOP_CONCURRENCY: usize = 32;
@@ -17,6 +17,18 @@ pub(super) async fn run_agent_subprocess(
 ) -> Result<DispatchResult, String> {
     run_agent_subprocess_inner(&mut cmd, timeout, None).await
 }
+
+pub(super) async fn run_managed_custom_subprocess(mut cmd: Command, timeout: Duration, mut cancellations: mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>) -> Result<DispatchResult, String> {
+    #[cfg(not(unix))] { let _ = cancellations; return Err("cancellation_unavailable: unsupported_platform".to_string()); }
+    #[cfg(unix)] {
+        cmd.stdin(std::process::Stdio::null()); cmd.stdout(std::process::Stdio::piped()); cmd.stderr(std::process::Stdio::piped()); cmd.kill_on_drop(true); configure_process_group(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn agent process: {e}"))?; let pid = child.id(); let stdout = child.stdout.take(); let stderr = child.stderr.take(); let stdout_task = tokio::spawn(read_pipe(stdout)); let stderr_task = tokio::spawn(read_pipe(stderr));
+        let status = tokio::select! { result = tokio::time::timeout(timeout, child.wait()) => match result { Ok(Ok(status)) => status, Ok(Err(error)) => return Err(format!("Agent process error: {error}")), Err(_) => { reap_timed_out_child(&mut child, pid).await; return Err(format!("Agent process timed out after {}s (process group killed)", timeout.as_secs())); } }, command = cancellations.recv() => { let Some(command) = command else { return Err("managed cancellation channel closed".to_string()); }; let _receipt_revisions = (command.expected_status_revision, command.observed_status_revision); if child.try_wait().map_err(|e| format!("managed cancellation child probe failed: {e}"))?.is_some() { return Err("cancellation_unavailable: completion_winner".to_string()); } reap_timed_out_child(&mut child, pid).await; if !process_group_absent(pid) { let _ = command.response.send(crate::managed_run_control::CancelCompletion::Unconfirmed); return Err("termination_unconfirmed".to_string()); } let _ = command.response.send(crate::managed_run_control::CancelCompletion::Confirmed); return Err("managed_cancelled".to_string()); } };
+        let stdout = collect_pipe(stdout_task).await?; let stderr = collect_pipe(stderr_task).await?; let output = if stdout.is_empty() && !stderr.is_empty() { stderr } else if !stderr.is_empty() { format!("{stdout}\n\n--- stderr ---\n{stderr}") } else { stdout }; Ok(DispatchResult { output, exit_code: status.code(), observed_model: None })
+    }
+}
+
+#[cfg(unix)] fn process_group_absent(pid: Option<u32>) -> bool { let Some(pid) = pid else { return true; }; unsafe { libc::kill(-(pid as libc::pid_t), 0) != 0 } }
 
 pub(super) async fn run_opencode_sop_subprocess(
     mut cmd: Command,
@@ -301,5 +313,59 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         false
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staff_cancel_managed_custom_process_confirms_group_termination() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("managed-custom");
+        let descendant = temp.path().join("descendant.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntrap '' TERM\nsh -c 'trap \"\" TERM; sleep 60' &\necho $! > '{}'\nwait\n",
+                descendant.display()
+            ),
+        )
+        .expect("write fixture");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+
+        let (sender, receiver) = mpsc::channel(1);
+        let (reply, confirmed) = tokio::sync::oneshot::channel();
+        let run = tokio::spawn(run_managed_custom_subprocess(
+            Command::new(&script),
+            Duration::from_secs(20),
+            receiver,
+        ));
+        wait_for_file(&descendant).await;
+        sender
+            .send(crate::managed_run_control::ManagedCancelCommand {
+                expected_status_revision: 1,
+                observed_status_revision: 1,
+                response: reply,
+            })
+            .await
+            .expect("private cancellation channel is open");
+        let result = run.await.expect("runner task does not panic");
+        match result {
+            Err(error) => assert_eq!(error, "managed_cancelled"),
+            Ok(_) => panic!("cancellation must interrupt the managed root"),
+        }
+        assert!(matches!(
+            confirmed.await.expect("cancellation outcome"),
+            crate::managed_run_control::CancelCompletion::Confirmed
+        ));
+        let pid: libc::pid_t = std::fs::read_to_string(&descendant)
+            .expect("descendant pid")
+            .trim()
+            .parse()
+            .expect("numeric descendant pid");
+        assert!(
+            wait_for_process_exit(pid).await,
+            "descendant must be absent before cancellation confirmation"
+        );
     }
 }

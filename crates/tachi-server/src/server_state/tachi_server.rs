@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 #[derive(Clone)]
 pub(crate) struct MemoryServer {
+    // Daemon-local managed-custom cancellation authority.
+    pub(crate) managed_run_controls: Arc<crate::managed_run_control::ManagedRunControlRegistry>,
     pub(crate) db: DbRuntime,
     pub(crate) llm: Arc<tachi_llm::LlmClient>,
     /// Bounded LLM-call recorder for foundry runs. Writes the `prompt.md` /
