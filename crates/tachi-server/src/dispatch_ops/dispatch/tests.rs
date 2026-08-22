@@ -97,6 +97,28 @@ async fn wait_for_result(run_dir: &std::path::Path) -> String {
     panic!("dispatch result was not written: {}", result_path.display());
 }
 
+async fn wait_for_terminal_status(run_dir: &std::path::Path) -> Value {
+    for _ in 0..120 {
+        let status: Value = serde_json::from_str(
+            &tokio::fs::read_to_string(run_dir.join("status.json"))
+                .await
+                .expect("terminal status remains readable"),
+        )
+        .expect("terminal status JSON");
+        if matches!(
+            status["state"].as_str(),
+            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
+        ) {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!(
+        "dispatch did not reach a terminal receipt: {}",
+        run_dir.display()
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn generate_mcp_config_sets_owner_only_permissions() {
@@ -466,7 +488,7 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
         .vault_set(rmcp::handler::server::wrapper::Parameters(
             crate::vault_ops::VaultSetParams {
                 name: "OPENCODE_SERVER_PASSWORD_TEST".to_string(),
-                value: "test123".to_string(),
+                value: "launchspec-post-spec-sentinel".to_string(),
                 agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "dispatch opencode serve password".to_string(),
@@ -488,7 +510,7 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
     params.command = vec![
         "python3".to_string(),
         "-c".to_string(),
-        "print('credential-ok')".to_string(),
+        "import os; assert os.environ['OPENCODE_SERVER_PASSWORD'] == 'launchspec-post-spec-sentinel'; print('credential-ok')".to_string(),
     ];
 
     let raw = handle_tachi_dispatch(&server, params)
@@ -496,13 +518,29 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
         .expect("dispatch should start with per-dispatch opencode serve auth");
     probe_server.join().expect("probe server thread");
     assert!(
-        !raw.contains("test123"),
+        !raw.contains("launchspec-post-spec-sentinel"),
         "dispatch response must not leak credential values: {raw}"
     );
     let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
     let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run_dir"));
     let result = wait_for_result(&run_dir).await;
     assert!(result.contains("credential-ok"), "result={result}");
+    let terminal_status = wait_for_terminal_status(&run_dir).await;
+    let trajectory = tokio::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+        .await
+        .expect("trajectory exists");
+    let terminal_status_text = terminal_status.to_string();
+    for (surface, content) in [
+        ("response", raw.as_str()),
+        ("status", terminal_status_text.as_str()),
+        ("trajectory", trajectory.as_str()),
+        ("result", result.as_str()),
+    ] {
+        assert!(
+            !content.contains("launchspec-post-spec-sentinel"),
+            "post-spec credential must not leak through {surface}: {content}"
+        );
+    }
 }
 
 /// #1174 (codex review round): `build_opencode_command`'s unit tests

@@ -3,6 +3,17 @@ use crate::test_support::EnvRestore;
 use chrono::Utc;
 use serde_json::{json, Value};
 
+fn custom_adapter_source_is_flat_free(source: &str) -> bool {
+    ![
+        "ctx.request",
+        "ctx.grant",
+        "ctx.command",
+        "TachiDispatchParams",
+    ]
+    .iter()
+    .any(|forbidden| source.contains(forbidden))
+}
+
 #[test]
 fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() {
     let rejects_flat_params = |source: &str| source.contains("TachiDispatchParams");
@@ -107,6 +118,30 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         has_post_grant_params(&format!("{post_grant_handler}\nconsume(&params);")),
         "source gate itself must fail when a post-grant params read is introduced"
     );
+
+    let backend = include_str!("../backend.rs");
+    let custom_arm = backend
+        .split_once("\"custom\" =>")
+        .expect("backend contains the custom adapter arm")
+        .1
+        .split_once("\"opencode\" =>")
+        .expect("backend contains the following opencode arm")
+        .0;
+    assert!(
+        custom_adapter_source_is_flat_free(custom_arm),
+        "custom adapter must consume only LaunchSpec"
+    );
+    for forbidden in [
+        "ctx.request",
+        "ctx.grant",
+        "ctx.command",
+        "TachiDispatchParams",
+    ] {
+        assert!(
+            !custom_adapter_source_is_flat_free(&format!("{custom_arm}\n{forbidden};")),
+            "custom-adapter source guard must reject a deliberate {forbidden} mutant"
+        );
+    }
 }
 
 /// Releases the fake Claude subprocess even when an assertion panics. The
@@ -184,11 +219,11 @@ impl TerminalWorkerCleanup {
         Self { run_dir }
     }
 
-    fn terminal(&self) -> bool {
+    fn terminal_status(&self) -> Option<Value> {
         std::fs::read_to_string(self.run_dir.join("status.json"))
             .ok()
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .is_some_and(|status| {
+            .filter(|status| {
                 status["result_written"] == json!(true)
                     && matches!(
                         status["state"].as_str(),
@@ -197,35 +232,225 @@ impl TerminalWorkerCleanup {
             })
     }
 
+    fn terminal_and_cleanup_complete(&self) -> bool {
+        self.terminal_status().is_some_and(|status| {
+            status["dispatch_id"]
+                .as_str()
+                .is_some_and(background_dispatch_cleanup_complete)
+        })
+    }
+
     async fn wait_for_terminal(&self) -> Value {
         for _ in 0..120 {
-            if let Ok(raw) = tokio::fs::read_to_string(self.run_dir.join("status.json")).await {
-                if let Ok(status) = serde_json::from_str::<Value>(&raw) {
-                    if status["result_written"] == json!(true)
-                        && matches!(
-                            status["state"].as_str(),
-                            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")
-                        )
-                    {
-                        return status;
-                    }
+            if let Some(status) = self.terminal_status() {
+                if status["dispatch_id"]
+                    .as_str()
+                    .is_some_and(background_dispatch_cleanup_complete)
+                {
+                    return status;
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        panic!("custom worker must write a terminal status receipt");
+        panic!("custom worker must finish terminal receipt and background cleanup");
     }
 }
 
 impl Drop for TerminalWorkerCleanup {
     fn drop(&mut self) {
         for _ in 0..480 {
-            if self.terminal() {
+            if self.terminal_and_cleanup_complete() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
+}
+
+struct AcceptedRunCleanup {
+    run_root: std::path::PathBuf,
+    existing_run_dirs: Vec<std::path::PathBuf>,
+    worker: Option<TerminalWorkerCleanup>,
+}
+
+impl AcceptedRunCleanup {
+    fn new(run_root: &std::path::Path) -> Self {
+        Self {
+            run_root: run_root.to_path_buf(),
+            existing_run_dirs: dispatch_run_dirs(run_root),
+            worker: None,
+        }
+    }
+
+    fn arm(&mut self) -> std::path::PathBuf {
+        let run_dir = self
+            .new_run_dir()
+            .expect("accepted custom dispatch must create one new run directory");
+        self.worker = Some(TerminalWorkerCleanup::new(run_dir.clone()));
+        run_dir
+    }
+
+    fn new_run_dir(&self) -> Option<std::path::PathBuf> {
+        dispatch_run_dirs(&self.run_root)
+            .into_iter()
+            .find(|path| !self.existing_run_dirs.contains(path))
+    }
+}
+
+impl Drop for AcceptedRunCleanup {
+    fn drop(&mut self) {
+        if self.worker.is_none() {
+            self.worker = self.new_run_dir().map(TerminalWorkerCleanup::new);
+        }
+    }
+}
+
+fn dispatch_run_dirs(run_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(run_root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| !name.starts_with('.'))
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn assert_custom_launch_spec_handler_case(
+    server: &MemoryServer,
+    run_root: &std::path::Path,
+    cwd: &std::path::Path,
+    command: Vec<String>,
+    timeout_secs: u64,
+    expected_state: &str,
+    expected_result_fragment: Option<&str>,
+) {
+    let mut params = test_dispatch_params(Some("custom"), "prove LaunchSpec lifecycle parity");
+    params.command = command;
+    params.cwd = Some(cwd.to_string_lossy().into_owned());
+    params.unmanaged_cwd = Some(true);
+    params.timeout_secs = timeout_secs;
+
+    // Arm a run-root owner before the handler can spawn. Once the accepted
+    // call returns, adopt the new run before parsing or asserting response
+    // bytes so a panic cannot strand a custom worker.
+    let mut cleanup = AcceptedRunCleanup::new(run_root);
+    let raw = handle_tachi_dispatch(server, params)
+        .await
+        .expect("custom dispatch starts through the canonical handler");
+    let run_dir = cleanup.arm();
+    let response: Value = serde_json::from_str(&raw).expect("start response JSON");
+    let dispatch_id = response["dispatch_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .expect("non-empty dispatch_id");
+    assert_eq!(response["state"], json!("TASK_STATE_WORKING"));
+    let response_run_dir = std::path::PathBuf::from(
+        response["run_dir"]
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .expect("non-empty canonical run_dir"),
+    );
+    assert_eq!(response_run_dir, run_dir);
+    assert_eq!(run_dir, run_root.join(dispatch_id));
+
+    let accepted_status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json"))
+            .expect("status exists before start returns"),
+    )
+    .expect("accepted status JSON");
+    assert_eq!(accepted_status["dispatch_id"], json!(dispatch_id));
+    assert_eq!(accepted_status["state"], response["state"]);
+
+    let result = wait_for_result(&run_dir).await;
+    assert!(!result.trim().is_empty(), "terminal result must be written");
+    if let Some(expected) = expected_result_fragment {
+        assert!(result.contains(expected), "result={result}");
+    }
+    let terminal_status = cleanup
+        .worker
+        .as_ref()
+        .expect("accepted run owner remains armed")
+        .wait_for_terminal()
+        .await;
+    assert!(
+        background_dispatch_cleanup_complete(dispatch_id),
+        "terminal custom dispatch must finish background credential cleanup: {dispatch_id}"
+    );
+    assert_eq!(terminal_status["dispatch_id"], json!(dispatch_id));
+    assert_eq!(terminal_status["run_dir"], response["run_dir"]);
+    assert_eq!(terminal_status["state"], json!(expected_state));
+
+    let trajectory = tokio::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+        .await
+        .expect("canonical trajectory exists");
+    assert!(trajectory.contains("dispatch_received"), "{trajectory}");
+    assert!(trajectory.contains("dispatch_finished"), "{trajectory}");
+}
+
+/// #1823: the custom subprocess consumes the server-minted LaunchSpec while
+/// retaining the canonical receipt, terminal-result, trajectory, and cleanup spine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
+async fn custom_launch_spec_preserves_success_failure_timeout_and_cleanup_lifecycle() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let cwd = tempfile::tempdir().expect("dispatch cwd");
+    let run_root = dispatch_runs_root();
+    let server = crate::tests::make_server();
+
+    assert_custom_launch_spec_handler_case(
+        &server,
+        &run_root,
+        cwd.path(),
+        vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "print('custom LaunchSpec success')".to_string(),
+        ],
+        5,
+        "TASK_STATE_COMPLETED",
+        Some("custom LaunchSpec success"),
+    )
+    .await;
+    assert_custom_launch_spec_handler_case(
+        &server,
+        &run_root,
+        cwd.path(),
+        vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import sys; print('custom LaunchSpec nonzero'); sys.exit(7)".to_string(),
+        ],
+        5,
+        "TASK_STATE_FAILED",
+        Some("custom LaunchSpec nonzero"),
+    )
+    .await;
+    assert_custom_launch_spec_handler_case(
+        &server,
+        &run_root,
+        cwd.path(),
+        vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import time; time.sleep(60)".to_string(),
+        ],
+        1,
+        "TASK_STATE_FAILED",
+        None,
+    )
+    .await;
 }
 
 #[test]

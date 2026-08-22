@@ -10,6 +10,7 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) grant: &'a tachi_params::ExecutionGrant,
     pub(super) command: &'a [String],
     pub(super) prompt: &'a str,
+    pub(super) custom_launch_spec: Option<&'a tachi_params::LaunchSpec>,
     pub(super) prompt_md_path: &'a Path,
     pub(super) mcp_config_path: Option<&'a PathBuf>,
     pub(super) v2: bool,
@@ -19,6 +20,27 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) harness_server_url: &'a Option<String>,
     pub(super) capability_bundle_card: &'a Value,
     pub(super) timeout_secs_for_status: u64,
+}
+
+fn build_custom_command_from_launch_spec(
+    spec: &tachi_params::LaunchSpec,
+) -> Result<tokio::process::Command, String> {
+    if spec.backend != "custom" {
+        return Err("server-minted LaunchSpec does not authorize the custom backend".to_string());
+    }
+    let (program, args) = spec
+        .command
+        .split_first()
+        .ok_or_else(|| "server-minted custom LaunchSpec has no command".to_string())?;
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    if let Some(cwd) = &spec.cwd {
+        command.current_dir(cwd);
+    }
+    for (key, value) in &spec.env_vars {
+        command.env(key, value);
+    }
+    Ok(command)
 }
 
 pub(super) struct PreparedDispatchBackend {
@@ -158,7 +180,11 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.mcp_config_path,
             )?,
             "kimi" => build_kimi_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
-            "custom" => build_custom_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
+            "custom" => {
+                build_custom_command_from_launch_spec(ctx.custom_launch_spec.ok_or_else(|| {
+                    "custom backend requires a server-minted LaunchSpec".to_string()
+                })?)?
+            }
             "opencode" => {
                 build_opencode_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?
             }
@@ -222,8 +248,9 @@ mod tests {
     fn prepared_command(
         assignment: &tachi_params::ResolvedStaffAssignment,
         grant: &tachi_params::ExecutionGrant,
+        custom_launch_spec: Option<&tachi_params::LaunchSpec>,
         command: &[String],
-    ) -> tokio::process::Command {
+    ) -> Result<tokio::process::Command, String> {
         let temp = tempfile::tempdir().expect("backend selector tempdir");
         let request = tachi_params::StaffAssignmentRequest::new(
             tachi_params::TachiDispatchReason::ExplicitUserRequest,
@@ -239,6 +266,7 @@ mod tests {
             grant,
             command,
             prompt: "task",
+            custom_launch_spec,
             prompt_md_path: &temp.path().join("prompt.md"),
             mcp_config_path: None,
             v2: false,
@@ -248,11 +276,12 @@ mod tests {
             harness_server_url: &None,
             capability_bundle_card: &Value::Null,
             timeout_secs_for_status: 5,
-        })
-        .expect("assignment-only backend selection prepares");
+        })?;
         match prepared.execution {
-            DispatchExecution::Subprocess(command) => command,
-            DispatchExecution::NativeAcp(_) => panic!("cli transport must prepare a subprocess"),
+            DispatchExecution::Subprocess(command) => Ok(command),
+            DispatchExecution::NativeAcp(_) => {
+                Err("cli transport must prepare a subprocess".to_string())
+            }
         }
     }
 
@@ -265,8 +294,10 @@ mod tests {
         let claude = prepared_command(
             &claude_assignment,
             &claude_grant,
+            None,
             &["poisoned-command".to_string()],
-        );
+        )
+        .expect("claude backend prepares without a custom spec");
         assert_eq!(claude.as_std().get_program(), "claude");
         assert_eq!(
             claude.as_std().get_current_dir(),
@@ -282,7 +313,7 @@ mod tests {
 
         let custom_assignment = assignment("claude", "custom", None);
         let custom_grant = grant("/typed/custom-cwd");
-        let custom = prepared_command(
+        let custom_launch_spec = super::super::mint_custom_launch_spec(
             &custom_assignment,
             &custom_grant,
             &[
@@ -290,7 +321,52 @@ mod tests {
                 "-m".to_string(),
                 "typed_worker".to_string(),
             ],
+            "typed task",
+            "cli",
+            &None,
+        )
+        .expect("server mints the custom launch spec after admission");
+        assert_eq!(
+            custom_launch_spec.timeout_secs, custom_grant.timeout_secs,
+            "the adapter spec must bind the canonical grant timeout before backend preparation"
         );
+        super::super::validate_custom_launch_spec_timeout(
+            &custom_launch_spec,
+            custom_grant.timeout_secs,
+        )
+        .expect("production boundary accepts the canonical grant timeout");
+        let mut timeout_mutant = custom_launch_spec.clone();
+        timeout_mutant.timeout_secs += 1;
+        let timeout_err = super::super::validate_custom_launch_spec_timeout(
+            &timeout_mutant,
+            custom_grant.timeout_secs,
+        )
+        .expect_err("one-sided spec timeout mutation must fail before backend preparation");
+        assert!(
+            timeout_err.contains("timeout diverged"),
+            "timeout mismatch must have a stable fail-closed receipt: {timeout_err}"
+        );
+        let missing_spec = prepared_command(
+            &custom_assignment,
+            &grant("/legacy-bootstrap-poison"),
+            None,
+            &["poisoned-command".to_string()],
+        )
+        .expect_err("custom backend must not fall back to a flat carrier");
+        assert!(
+            missing_spec.contains("server-minted LaunchSpec"),
+            "custom backend bypass must fail structurally: {missing_spec}"
+        );
+        let custom = prepared_command(
+            &custom_assignment,
+            &grant("/legacy-bootstrap-poison"),
+            Some(&custom_launch_spec),
+            &[
+                "poisoned-command".to_string(),
+                "--legacy-bootstrap-poison".to_string(),
+            ],
+        )
+        .expect("custom backend consumes only the server-minted spec");
         assert_eq!(custom.as_std().get_program(), "python3");
         assert_eq!(
             custom.as_std().get_current_dir(),
@@ -302,7 +378,35 @@ mod tests {
                 .get_args()
                 .map(|arg| arg.to_string_lossy().to_string())
                 .collect::<Vec<_>>(),
-            vec!["-m", "typed_worker", "task"],
+            vec!["-m", "typed_worker", "typed task"],
+        );
+
+        let mut no_cwd_grant = custom_grant.clone();
+        no_cwd_grant.allowed_cwd = None;
+        let no_cwd_spec = super::super::mint_custom_launch_spec(
+            &custom_assignment,
+            &no_cwd_grant,
+            &["python3".to_string(), "-c".to_string(), "pass".to_string()],
+            "typed task without cwd",
+            "cli",
+            &None,
+        )
+        .expect("server preserves an absent grant cwd in the custom spec");
+        assert!(
+            no_cwd_spec.cwd.is_none(),
+            "an absent grant cwd must not be collapsed to the process cwd"
+        );
+        let no_cwd = prepared_command(
+            &custom_assignment,
+            &grant("/legacy-bootstrap-poison"),
+            Some(&no_cwd_spec),
+            &["poisoned-command".to_string()],
+        )
+        .expect("custom backend preserves the absent server-minted cwd");
+        assert_eq!(
+            no_cwd.as_std().get_current_dir(),
+            None,
+            "the adapter must not turn an absent cwd into '.'"
         );
     }
 }
