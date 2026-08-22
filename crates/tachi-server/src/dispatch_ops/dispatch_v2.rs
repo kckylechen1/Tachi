@@ -413,7 +413,7 @@ pub(crate) fn write_status_json(
     // writers (preflight failure, watchdog, completion) describe a changing
     // state but must not erase that admission decision from the receipt.
     if let Ok(previous) = std::fs::read_to_string(&path) {
-        if let Ok(Value::Object(previous)) = serde_json::from_str::<Value>(&previous) {
+        if let Ok(Value::Object(mut previous)) = serde_json::from_str::<Value>(&previous) {
             let proposed_terminal = obj
                 .get("state")
                 .and_then(Value::as_str)
@@ -423,6 +423,12 @@ pub(crate) fn write_status_json(
                         "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
                     )
                 });
+            if proposed_terminal {
+                let _ = crate::managed_run_control::reconcile_pending_cancellation_unavailable(
+                    &mut previous,
+                    "completion_or_timeout_winner",
+                );
+            }
             if crate::managed_run_control::cancellation_blocks_terminal_writer(&previous)
                 && proposed_terminal
             {

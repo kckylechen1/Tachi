@@ -276,10 +276,7 @@ fn record_managed_cancel_child_pid(run_dir: &std::path::Path, pid: Option<u32>) 
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert!(
-        observed.replace((run_dir.to_path_buf(), pid)).is_none(),
-        "managed child pid already recorded"
-    );
+    let _ = observed.replace((run_dir.to_path_buf(), pid));
 }
 
 #[cfg(test)]

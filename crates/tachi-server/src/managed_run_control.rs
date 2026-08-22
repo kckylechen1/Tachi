@@ -16,6 +16,57 @@ pub(crate) struct ManagedRunControlRegistry {
     next: Mutex<u64>,
 }
 
+#[cfg(test)]
+mod cancellation_receipt_regression_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn closed_control_channel_returns_the_committed_unavailable_receipt_without_relocking() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("home");
+        let runs = tempfile::tempdir().expect("runs");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
+        let dispatch_id = "20260823T182501Z-closed-channel";
+        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("run directory");
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 1,
+                "execution_classification": "managed_custom",
+            })
+            .to_string(),
+        )
+        .expect("status");
+        let server = MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+        let (receiver, _guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("register control");
+        drop(receiver);
+
+        let response = request_managed_custom_cancel(&server, dispatch_id, 1)
+            .await
+            .expect("closed channel returns an unavailable receipt");
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(run_dir.join("status.json")).expect("canonical status"),
+        )
+        .expect("canonical JSON");
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).expect("response JSON"),
+            status["cancellation"],
+            "response must be the committed canonical cancellation receipt"
+        );
+    }
+}
+
 struct Entry {
     generation: u64,
     sender: mpsc::Sender<ManagedCancelCommand>,
@@ -519,12 +570,31 @@ fn record_unavailable_if_pending(
             ),
         );
         crate::managed_run_control::advance_status_revision(object)?;
+        let committed_receipt = object
+            .get("cancellation")
+            .cloned()
+            .expect("cancellation receipt was inserted before persistence");
         let body = serde_json::to_vec_pretty(&status)
             .map_err(|e| format!("serialize cancellation_unavailable: {e}"))?;
         crate::utils::write_owner_only_file_atomic(&path, &body)
             .map_err(|e| format!("persist cancellation_unavailable: {e}"))?;
-        return canonical_cancellation_receipt(run_dir)
-            .ok_or_else(|| "cancellation unavailable receipt was not committed".to_string());
+        return serde_json::to_string(&committed_receipt)
+            .map_err(|error| format!("serialize committed cancellation receipt: {error}"));
+    }
+    if matches!(
+        object
+            .get("cancellation")
+            .and_then(Value::as_object)
+            .and_then(|receipt| receipt.get("receipt"))
+            .and_then(Value::as_str),
+        Some("cancellation_unavailable" | "cancellation_confirmed" | "termination_unconfirmed")
+    ) {
+        return serde_json::to_string(
+            object
+                .get("cancellation")
+                .expect("canonical cancellation receipt was observed"),
+        )
+        .map_err(|error| format!("serialize canonical cancellation receipt: {error}"));
     }
     Ok(unavailable(dispatch_id, expected, Some(observed), reason))
 }

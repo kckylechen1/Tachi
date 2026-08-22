@@ -87,6 +87,7 @@ fn ensure_completion_artifact_read_support(dispatch_id: Option<&str>) -> Result<
 fn admit_managed_completion(
     server: &MemoryServer,
     dispatch_id: Option<&str>,
+    persist_admission: bool,
 ) -> Result<(), String> {
     let Some(dispatch_id) = dispatch_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(());
@@ -118,6 +119,9 @@ fn admit_managed_completion(
     }
     if crate::managed_run_control::cancellation_blocks_terminal_writer(object) {
         return Err("managed cancellation owns terminal completion".to_string());
+    }
+    if !persist_admission {
+        return Ok(());
     }
     if object.contains_key("completion_recovery") || object.contains_key("resolved_completion") {
         return Ok(());
@@ -219,13 +223,13 @@ fn persist_resolved_completion_receipt_at(
             status_path.display()
         )
     })?;
-    if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
-        return Err("cannot overwrite a managed cancellation".to_string());
-    }
     crate::managed_run_control::reconcile_pending_cancellation_unavailable(
         status_object,
         "completion_winner",
     );
+    if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
+        return Err("cannot overwrite a managed cancellation".to_string());
+    }
     status_object.insert(
         "resolved_completion".to_string(),
         json!({
@@ -327,13 +331,13 @@ fn persist_pending_completion_recovery_receipt_at(
             status_path.display()
         )
     })?;
-    if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
-        return Err("cannot overwrite a managed cancellation".to_string());
-    }
     crate::managed_run_control::reconcile_pending_cancellation_unavailable(
         status_object,
         "completion_winner",
     );
+    if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
+        return Err("cannot overwrite a managed cancellation".to_string());
+    }
     let recovery = json!({
         "status": "pending_canonical_outcome",
         "state": new_state,
@@ -392,7 +396,7 @@ pub(crate) async fn handle_tachi_complete(
     // the first executable action so an unsupported platform refuses before
     // eval/outcome/claim/receipt/kanban/continuity state can be mutated.
     ensure_completion_artifact_read_support(params.dispatch_id.as_deref())?;
-    admit_managed_completion(server, params.dispatch_id.as_deref())?;
+    admit_managed_completion(server, params.dispatch_id.as_deref(), false)?;
     let resolved_flow_id = params
         .dispatch_id
         .as_deref()
@@ -573,6 +577,7 @@ pub(crate) async fn handle_tachi_complete(
     // `outcome_norm` here silently rewrote "Complete " -> "complete" in the
     // row the module doc promises is verbatim.
     let reported_outcome_verbatim = params.outcome.trim();
+    admit_managed_completion(server, params.dispatch_id.as_deref(), true)?;
     let dispatch_outcome_status = super::dispatch_outcome::record_complete_outcome(
         server,
         &params,
