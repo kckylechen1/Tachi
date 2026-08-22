@@ -33,7 +33,10 @@ fn build_custom_command_from_launch_spec(
         .split_first()
         .ok_or_else(|| "server-minted custom LaunchSpec has no command".to_string())?;
     let mut command = tokio::process::Command::new(program);
-    command.args(args).current_dir(&spec.cwd);
+    command.args(args);
+    if let Some(cwd) = &spec.cwd {
+        command.current_dir(cwd);
+    }
     for (key, value) in &spec.env_vars {
         command.env(key, value);
     }
@@ -360,6 +363,34 @@ mod tests {
                 .map(|arg| arg.to_string_lossy().to_string())
                 .collect::<Vec<_>>(),
             vec!["-m", "typed_worker", "typed task"],
+        );
+
+        let mut no_cwd_grant = custom_grant.clone();
+        no_cwd_grant.allowed_cwd = None;
+        let no_cwd_spec = super::super::mint_custom_launch_spec(
+            &custom_assignment,
+            &no_cwd_grant,
+            &["python3".to_string(), "-c".to_string(), "pass".to_string()],
+            "typed task without cwd",
+            "cli",
+            &None,
+        )
+        .expect("server preserves an absent grant cwd in the custom spec");
+        assert!(
+            no_cwd_spec.cwd.is_none(),
+            "an absent grant cwd must not be collapsed to the process cwd"
+        );
+        let no_cwd = prepared_command(
+            &custom_assignment,
+            &grant("/legacy-bootstrap-poison"),
+            Some(&no_cwd_spec),
+            &["poisoned-command".to_string()],
+        )
+        .expect("custom backend preserves the absent server-minted cwd");
+        assert_eq!(
+            no_cwd.as_std().get_current_dir(),
+            None,
+            "the adapter must not turn an absent cwd into '.'"
         );
     }
 }

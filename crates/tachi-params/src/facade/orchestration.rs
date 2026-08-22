@@ -701,21 +701,41 @@ mod tests {
 
     #[test]
     fn tachi_staff_params_rejects_hostile_execution_fields() {
-        let hostile = serde_json::json!({
-            "action": "start",
-            "task": "Do work",
-            "staffing_reason": "explicit_user_request",
-            "cwd": "/etc",
-            "command": ["rm", "-rf", "/"],
-            "sandbox": "danger-full-access",
-            "allowed_tools": ["Bash"],
-            "credentials": ["admin"],
-        });
-        let err = serde_json::from_value::<TachiStaffParams>(hostile).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field"),
-            "tachi_staff params must reject hostile execution fields: {err}"
-        );
+        // Check each model-facing execution field separately. A combined
+        // payload may stop at its first unknown key and mask a widened schema.
+        for (field, value) in [
+            ("command", serde_json::json!(["sh", "-c", "echo pwned"])),
+            ("cwd", serde_json::json!("/etc")),
+            ("env", serde_json::json!({"SECRET": "pwned"})),
+            ("env_vars", serde_json::json!({"SECRET": "pwned"})),
+            ("credentials", serde_json::json!(["admin"])),
+            ("credential_profiles", serde_json::json!(["admin"])),
+            ("allowed_tools", serde_json::json!(["Bash"])),
+            ("tools", serde_json::json!(["Bash"])),
+            ("harness_transport", serde_json::json!("cli")),
+            (
+                "harness_server_url",
+                serde_json::json!("http://127.0.0.1:4321"),
+            ),
+            ("timeout_secs", serde_json::json!(1)),
+            ("pid", serde_json::json!(1234)),
+            ("process_id", serde_json::json!("forged-process")),
+            ("exit_code", serde_json::json!(0)),
+            ("result", serde_json::json!("forged result")),
+            ("result_written", serde_json::json!(true)),
+        ] {
+            let mut hostile = serde_json::json!({
+                "action": "start",
+                "task": "Do work",
+                "staffing_reason": "explicit_user_request",
+            });
+            hostile[field] = value;
+            let err = serde_json::from_value::<TachiStaffParams>(hostile).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field") && err.to_string().contains(field),
+                "tachi_staff must reject model-facing '{field}' before any artifact: {err}"
+            );
+        }
     }
 
     #[test]

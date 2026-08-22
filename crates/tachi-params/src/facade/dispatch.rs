@@ -587,7 +587,7 @@ impl ExecutionGrant {
 pub struct LaunchSpec {
     pub backend: String,
     pub command: Vec<String>,
-    pub cwd: std::path::PathBuf,
+    pub cwd: Option<std::path::PathBuf>,
     #[serde(skip_serializing)]
     pub env_vars: std::collections::HashMap<String, String>,
     pub prompt: String,
@@ -602,7 +602,7 @@ impl std::fmt::Debug for LaunchSpec {
             .debug_struct("LaunchSpec")
             .field("backend", &self.backend)
             .field("command_len", &self.command.len())
-            .field("cwd", &self.cwd)
+            .field("cwd_set", &self.cwd.is_some())
             .field("env_var_count", &self.env_vars.len())
             .field("timeout_secs", &self.timeout_secs)
             .field("harness_transport", &self.harness_transport)
@@ -622,7 +622,7 @@ impl LaunchSpec {
         Self {
             backend: backend.into(),
             command,
-            cwd: cwd.into(),
+            cwd: Some(cwd.into()),
             env_vars: std::collections::HashMap::new(),
             prompt: prompt.into(),
             timeout_secs,
@@ -1426,18 +1426,20 @@ mod tests {
             "Execute review",
             900,
         )
-        .with_env_var("RUST_LOG", "info")
+        .with_env_var("TACHI_LAUNCHSPEC_SECRET", "launchspec-post-spec-sentinel")
         .with_harness_transport("subprocess")
         .with_harness_server_url("http://127.0.0.1:4321");
 
         assert_eq!(spec.backend, "codex_exec");
         assert_eq!(spec.command, vec!["codex", "exec"]);
-        assert_eq!(spec.cwd, std::path::PathBuf::from("/workspace/tachi"));
+        assert_eq!(spec.cwd, Some(std::path::PathBuf::from("/workspace/tachi")));
         assert_eq!(spec.prompt, "Execute review");
         assert_eq!(spec.timeout_secs, 900);
         assert_eq!(
-            spec.env_vars.get("RUST_LOG").map(String::as_str),
-            Some("info")
+            spec.env_vars
+                .get("TACHI_LAUNCHSPEC_SECRET")
+                .map(String::as_str),
+            Some("launchspec-post-spec-sentinel")
         );
         assert_eq!(spec.harness_transport.as_deref(), Some("subprocess"));
         assert_eq!(
@@ -1454,28 +1456,43 @@ mod tests {
         );
         let debug = format!("{spec:?}");
         assert!(
-            !debug.contains("RUST_LOG") && !debug.contains("info"),
+            !debug.contains("TACHI_LAUNCHSPEC_SECRET")
+                && !debug.contains("launchspec-post-spec-sentinel"),
             "adapter diagnostics must not expose environment material: {debug}"
         );
     }
 
     #[test]
     fn staff_assignment_request_rejects_hostile_execution_fields() {
-        let hostile = serde_json::json!({
-            "task": "Reject hostile fields",
-            "staffing_reason": "durable_cross_session",
-            "cwd": "/root",
-            "command": ["sh", "-c", "echo pwned"],
-            "sandbox": "danger-full-access",
-            "allowed_tools": ["Bash"],
-            "credentials": ["admin"],
-            "env_id": "fake-env",
-        });
-        let err = serde_json::from_value::<StaffAssignmentRequest>(hostile).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field"),
-            "hostile execution fields must fail deserialization loudly: {err}"
-        );
+        // Each input is deserialized independently: a multi-field payload can
+        // stop at its first unknown key and leave a later forbidden family
+        // unexercised. Deserialization precedes any server/artifact operation.
+        for (field, value) in [
+            ("command", serde_json::json!(["sh", "-c", "echo pwned"])),
+            ("cwd", serde_json::json!("/root")),
+            ("env", serde_json::json!({"SECRET": "pwned"})),
+            ("env_id", serde_json::json!("fake-env")),
+            ("credentials", serde_json::json!(["admin"])),
+            ("credential_profiles", serde_json::json!(["admin"])),
+            ("allowed_tools", serde_json::json!(["Bash"])),
+            ("sandbox", serde_json::json!("danger-full-access")),
+            ("harness_transport", serde_json::json!("cli")),
+            (
+                "harness_server_url",
+                serde_json::json!("http://127.0.0.1:4321"),
+            ),
+        ] {
+            let mut hostile = serde_json::json!({
+                "task": "Reject hostile execution field",
+                "staffing_reason": "durable_cross_session",
+            });
+            hostile[field] = value;
+            let err = serde_json::from_value::<StaffAssignmentRequest>(hostile).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field") && err.to_string().contains(field),
+                "hostile '{field}' must fail before server artifacts: {err}"
+            );
+        }
     }
 
     #[test]

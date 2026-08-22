@@ -107,6 +107,30 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
         has_post_grant_params(&format!("{post_grant_handler}\nconsume(&params);")),
         "source gate itself must fail when a post-grant params read is introduced"
     );
+
+    let backend = include_str!("../backend.rs");
+    let custom_arm = backend
+        .split_once("\"custom\" =>")
+        .expect("backend contains the custom adapter arm")
+        .1
+        .split_once("\"opencode\" =>")
+        .expect("backend contains the following opencode arm")
+        .0;
+    for forbidden in [
+        "ctx.request",
+        "ctx.grant",
+        "ctx.command",
+        "TachiDispatchParams",
+    ] {
+        assert!(
+            !custom_arm.contains(forbidden),
+            "custom adapter must consume only LaunchSpec, never {forbidden}"
+        );
+        assert!(
+            format!("{custom_arm}\n{forbidden};").contains(forbidden),
+            "custom-adapter source checker must reject a deliberate {forbidden} mutant"
+        );
+    }
 }
 
 /// Releases the fake Claude subprocess even when an assertion panics. The
@@ -226,6 +250,123 @@ impl Drop for TerminalWorkerCleanup {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn assert_custom_launch_spec_handler_case(
+    server: &MemoryServer,
+    run_root: &std::path::Path,
+    cwd: &std::path::Path,
+    command: Vec<String>,
+    timeout_secs: u64,
+    expected_state: &str,
+    expected_result_fragment: Option<&str>,
+) {
+    let mut params = test_dispatch_params(Some("custom"), "prove LaunchSpec lifecycle parity");
+    params.command = command;
+    params.cwd = Some(cwd.to_string_lossy().into_owned());
+    params.unmanaged_cwd = Some(true);
+    params.timeout_secs = timeout_secs;
+
+    let raw = handle_tachi_dispatch(server, params)
+        .await
+        .expect("custom dispatch starts through the canonical handler");
+    let response: Value = serde_json::from_str(&raw).expect("start response JSON");
+    let dispatch_id = response["dispatch_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .expect("non-empty dispatch_id");
+    assert_eq!(response["state"], json!("TASK_STATE_WORKING"));
+    let run_dir = std::path::PathBuf::from(
+        response["run_dir"]
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .expect("non-empty canonical run_dir"),
+    );
+    assert_eq!(run_dir, run_root.join(dispatch_id));
+    let cleanup = TerminalWorkerCleanup::new(run_dir.clone());
+
+    let accepted_status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json"))
+            .expect("status exists before start returns"),
+    )
+    .expect("accepted status JSON");
+    assert_eq!(accepted_status["dispatch_id"], json!(dispatch_id));
+    assert_eq!(accepted_status["state"], response["state"]);
+
+    let result = wait_for_result(&run_dir).await;
+    assert!(!result.trim().is_empty(), "terminal result must be written");
+    if let Some(expected) = expected_result_fragment {
+        assert!(result.contains(expected), "result={result}");
+    }
+    let terminal_status = cleanup.wait_for_terminal().await;
+    assert_eq!(terminal_status["dispatch_id"], json!(dispatch_id));
+    assert_eq!(terminal_status["run_dir"], response["run_dir"]);
+    assert_eq!(terminal_status["state"], json!(expected_state));
+
+    let trajectory = tokio::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+        .await
+        .expect("canonical trajectory exists");
+    assert!(trajectory.contains("dispatch_received"), "{trajectory}");
+    assert!(trajectory.contains("dispatch_finished"), "{trajectory}");
+}
+
+/// #1823: the custom subprocess consumes the server-minted LaunchSpec while
+/// retaining the canonical receipt, terminal-result, trajectory, and cleanup spine.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn custom_launch_spec_preserves_success_failure_timeout_and_cleanup_lifecycle() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let cwd = tempfile::tempdir().expect("dispatch cwd");
+    let run_root = dispatch_runs_root();
+    let server = crate::tests::make_server();
+
+    assert_custom_launch_spec_handler_case(
+        &server,
+        &run_root,
+        cwd.path(),
+        vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "print('custom LaunchSpec success')".to_string(),
+        ],
+        5,
+        "TASK_STATE_COMPLETED",
+        Some("custom LaunchSpec success"),
+    )
+    .await;
+    assert_custom_launch_spec_handler_case(
+        &server,
+        &run_root,
+        cwd.path(),
+        vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import sys; print('custom LaunchSpec nonzero'); sys.exit(7)".to_string(),
+        ],
+        5,
+        "TASK_STATE_FAILED",
+        Some("custom LaunchSpec nonzero"),
+    )
+    .await;
+    assert_custom_launch_spec_handler_case(
+        &server,
+        &run_root,
+        cwd.path(),
+        vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import time; time.sleep(60)".to_string(),
+        ],
+        1,
+        "TASK_STATE_FAILED",
+        None,
+    )
+    .await;
 }
 
 #[test]

@@ -70,7 +70,7 @@ impl LaunchCommand {
         tachi_params::LaunchSpec {
             backend: backend.into(),
             command,
-            cwd: self.current_dir.unwrap_or_else(|| PathBuf::from(".")),
+            cwd: self.current_dir,
             env_vars,
             prompt: prompt.into(),
             timeout_secs,
