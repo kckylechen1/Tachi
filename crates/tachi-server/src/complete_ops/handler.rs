@@ -1602,6 +1602,166 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn issue_1825_background_terminal_supersedes_failed_completion_admission() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temporary Tachi home");
+        let temp_runs = tempfile::tempdir().expect("temporary run root");
+        let temp_bin = tempfile::tempdir().expect("temporary worker bin");
+        let exit_trigger = temp_bin.path().join("exit-trigger");
+        let worker = temp_bin.path().join("opencode");
+        std::fs::write(
+            &worker,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile test ! -e '{}'; do sleep 0.01; done\nprintf 'background terminal after admitted completion\\n'\nexit 2\n",
+                exit_trigger.display()
+            ),
+        )
+        .expect("write controlled managed worker");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&worker)
+            .expect("controlled worker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).expect("make controlled worker executable");
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join controlled worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _transport = crate::test_support::EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "cli");
+        let _v2 = crate::test_support::EnvRestore::set("DISPATCH_V2_ENABLED", "false");
+        let _review = crate::test_support::EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+        let _capture_gate = CaptureGateEnforceGuard::new();
+        let server = crate::staffing_ops::tests::test_server();
+        let raw = crate::staffing_ops::staff_start(
+            &server,
+            crate::staffing_ops::StaffStartRequest {
+                task: "interleave real managed terminal with completion rollback".to_string(),
+                staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
+                profile: Some("glm_impl".to_string()),
+                worker: Some("custom".to_string()),
+                project: None,
+                stage: None,
+                execution_level: None,
+                issue_ref: Some("kckylechen1/tachi#1825".to_string()),
+                pr_ref: None,
+                flow_id: Some("flow_1825_admission_terminal_interleave".to_string()),
+                completion_predicate: None,
+                recommendation_ref: None,
+            },
+        )
+        .await
+        .expect("real Staff background launch");
+        let response: Value = serde_json::from_str(&raw).expect("Staff response JSON");
+        let dispatch_id = response["dispatch_id"]
+            .as_str()
+            .expect("managed dispatch id")
+            .to_string();
+        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
+        let status_path = run_dir.join("status.json");
+        let (_barrier_guard, entered, release) =
+            install_managed_completion_admission_barrier(&dispatch_id);
+        let handler_server = server.clone();
+        let handler_dispatch_id = dispatch_id.clone();
+        let completion = tokio::spawn(async move {
+            handle_tachi_complete(
+                &handler_server,
+                managed_completion_params(&handler_dispatch_id),
+                false,
+            )
+            .await
+        });
+        tokio::task::spawn_blocking(move || entered.recv().expect("handler admission barrier"))
+            .await
+            .expect("admission barrier join");
+        std::fs::write(&exit_trigger, b"release background terminal")
+            .expect("release controlled worker");
+        let terminal = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Ok(raw_status) = std::fs::read_to_string(&status_path) {
+                    if let Ok(status) = serde_json::from_str::<Value>(&raw_status) {
+                        if status["state"] == "TASK_STATE_FAILED"
+                            && std::fs::read_to_string(run_dir.join("result.md")).is_ok()
+                        {
+                            return status;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "real background finalizer must not remain WORKING: {}",
+                std::fs::read_to_string(&status_path)
+                    .unwrap_or_else(|error| format!("<status unavailable: {error}>"))
+            )
+        });
+        release.send(()).expect("release failed completion handler");
+        assert_eq!(
+            completion
+                .await
+                .expect("completion handler join")
+                .expect_err("capture gate rejects completion after terminalization"),
+            "completion eval was not durably recorded"
+        );
+        for _ in 0..360 {
+            if !server.managed_run_controls.contains(&dispatch_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let after: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read terminal status after rollback"),
+        )
+        .expect("parse terminal status after rollback");
+        assert_eq!(terminal["state"], "TASK_STATE_FAILED");
+        assert_eq!(after["state"], "TASK_STATE_FAILED");
+        assert!(after.get("completion_recovery").is_none());
+        assert!(std::fs::read_to_string(run_dir.join("result.md"))
+            .expect("terminal result")
+            .contains("background terminal after admitted completion"));
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, &dispatch_id).await,
+            Some("TASK_STATE_FAILED".to_string())
+        );
+        let outcomes: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [&dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count terminal failure outcomes");
+        assert_eq!(outcomes, 1);
+        assert!(!server.managed_run_controls.contains(&dispatch_id));
+        let flow_slot =
+            crate::task_lifecycle::run_dir_for_flow_id("flow_1825_admission_terminal_interleave")
+                .expect("flow run directory")
+                .join(".dispatch-dedupe");
+        assert!(
+            !flow_slot.exists()
+                || std::fs::read_dir(&flow_slot)
+                    .expect("flow slot directory")
+                    .next()
+                    .is_none(),
+            "terminal background owner must release the flow slot"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn issue_1825_concurrent_handlers_keep_one_volatile_admission_owner() {
         let (server, _home) = crate::tests::make_server_with_temp_home();

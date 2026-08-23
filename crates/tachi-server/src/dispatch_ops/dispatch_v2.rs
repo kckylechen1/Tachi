@@ -534,6 +534,12 @@ pub(crate) fn write_status_json(
                         "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
                     )
                 });
+            let completion_admitted = previous
+                .get("completion_recovery")
+                .and_then(Value::as_object)
+                .and_then(|recovery| recovery.get("status"))
+                .and_then(Value::as_str)
+                == Some("completion_admitted");
             if proposed_terminal && managed_finalization.is_none() {
                 let _ = crate::managed_run_control::reconcile_pending_cancellation_unavailable(
                     &mut previous,
@@ -571,6 +577,13 @@ pub(crate) fn write_status_json(
                 "lifecycle_owner",
                 "cancellation",
             ] {
+                if key == "completion_recovery" && proposed_terminal && completion_admitted {
+                    // A terminal background owner supersedes a short-lived
+                    // handler admission fence. Keeping it would make the
+                    // later handler rollback erase the only durable state
+                    // after this writer releases registry/slot ownership.
+                    continue;
+                }
                 if !obj.contains_key(key) {
                     if let Some(value) = previous.get(key) {
                         obj.insert(key.to_string(), value.clone());
@@ -615,7 +628,12 @@ pub(crate) fn write_status_json(
             // no canonical dispatch outcome yet. Keep the run observably
             // non-terminal until a later completion call reconciles that
             // outcome and clears this marker itself.
-            if previous.get("completion_recovery").is_some()
+            if previous
+                .get("completion_recovery")
+                .and_then(Value::as_object)
+                .and_then(|recovery| recovery.get("status"))
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "completion_admitted")
                 && !obj.contains_key("resolved_completion")
             {
                 let non_terminal_state = previous

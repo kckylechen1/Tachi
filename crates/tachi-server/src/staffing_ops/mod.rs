@@ -960,7 +960,7 @@ pub(crate) mod tests {
             std::time::Duration::from_millis(200),
         );
         let mut timeout_request = staff_request("tachi");
-        timeout_request.profile = Some("glm_impl".to_string());
+        timeout_request.profile = Some("opencode_builder".to_string());
         timeout_request.worker = Some("custom".to_string());
         timeout_request.flow_id = Some("flow_1825_timeout".to_string());
         let timeout_raw = staff_start(&server, timeout_request)
@@ -972,6 +972,10 @@ pub(crate) mod tests {
             .as_str()
             .expect("timeout dispatch id");
         let timeout_dir = dispatch_runs_root().join(timeout_id);
+        assert!(
+            timeout_dir.join("credentials/opencode.json").exists(),
+            "the managed OpenCode timeout must begin with a real credential materialization"
+        );
         let (timeout_status, _) = wait_for_staff_terminal(&timeout_dir).await;
         wait_for_staff_cleanup(timeout_id).await;
         assert_eq!(terminal_staff_state(&timeout_status), "TASK_STATE_FAILED");
@@ -996,7 +1000,26 @@ pub(crate) mod tests {
             "a watchdog timeout must not fabricate a completion outcome"
         );
         assert!(!server.managed_run_controls.contains(timeout_id));
-        assert!(!timeout_dir.join("credentials").exists());
+        assert!(
+            !timeout_dir.join("credentials/opencode.json").exists(),
+            "managed timeout cleanup must remove the real OpenCode materialization"
+        );
+        let timeout_project_outcomes: i64 = server
+            .with_named_project_store(cleanup_project, |store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [timeout_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count timeout project outcomes");
+        assert_eq!(
+            timeout_project_outcomes, 1,
+            "managed timeout must record one truthful project failure outcome"
+        );
         let timeout_flow_lock_dir = crate::task_lifecycle::run_dir_for_flow_id("flow_1825_timeout")
             .expect("valid timeout flow run directory")
             .join(".dispatch-dedupe");

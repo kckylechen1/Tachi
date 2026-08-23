@@ -253,6 +253,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
     let mcp_config_path = ctx.mcp_config_path;
     let managed_run_guard = ctx.managed_run_guard;
+    let managed_execution = managed_run_guard.is_some();
 
     tokio::task::spawn(async move {
         // Keep the registry entry and its sender alive for the entire
@@ -724,14 +725,18 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }
         }
 
-        let should_cleanup = match &result {
-            Err(error) if managed_terminal_requires_credential_cleanup(error) => true,
-            Ok(r) if !pending_completion_recovery => {
-                should_cleanup_run(r.exit_code, kanban_state.as_deref())
-            }
-            Err(_) => false,
-            Ok(_) => false,
-        };
+        let should_cleanup =
+            if managed_execution_requires_credential_cleanup(managed_execution, &result) {
+                true
+            } else {
+                match &result {
+                    Ok(r) if !pending_completion_recovery => {
+                        should_cleanup_run(r.exit_code, kanban_state.as_deref())
+                    }
+                    Err(_) => false,
+                    Ok(_) => false,
+                }
+            };
         // A managed cancellation is confirmed only if its ephemeral
         // credentials are already gone.  The cleanup result is therefore an
         // input to the one canonical terminal write below, never a later
@@ -1012,11 +1017,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     });
 }
 
-fn managed_terminal_requires_credential_cleanup(error: &str) -> bool {
-    error == "managed_cancelled"
-        || error == "termination_unconfirmed"
-        || error.starts_with("managed cancellation child probe failed")
-        || error.starts_with("managed subprocess panicked")
+fn managed_execution_requires_credential_cleanup<T>(
+    managed_execution: bool,
+    result: &Result<T, String>,
+) -> bool {
+    // A registry-owned managed execution has materialized credentials under
+    // its run root. Any terminal error belongs to that owner and must clean
+    // them before the background lifecycle releases its authority.
+    managed_execution && result.is_err()
 }
 
 #[cfg(test)]
@@ -1279,8 +1287,21 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
             run_dir.join("status.json").display()
         )
     })?;
-    if status.get("completion_recovery").is_some() {
-        return Ok(CompletionReceiptState::PendingRecovery);
+    if let Some(recovery_status) = status
+        .get("completion_recovery")
+        .and_then(Value::as_object)
+        .and_then(|recovery| recovery.get("status"))
+        .and_then(Value::as_str)
+    {
+        return Ok(if recovery_status == "completion_admitted" {
+            // This is only a volatile handler admission fence. A real
+            // background terminal owner must be allowed to supersede it;
+            // otherwise a later handler rollback can erase the sole marker
+            // and strand the run in WORKING.
+            CompletionReceiptState::Open
+        } else {
+            CompletionReceiptState::PendingRecovery
+        });
     }
     if status
         .get("cancellation")
@@ -2070,24 +2091,27 @@ mod tests {
 
 #[cfg(test)]
 mod issue_1825_credential_cleanup_tests {
-    use super::managed_terminal_requires_credential_cleanup;
+    use super::managed_execution_requires_credential_cleanup;
 
     #[test]
     fn managed_terminal_failures_always_select_ephemeral_credential_cleanup() {
-        assert!(managed_terminal_requires_credential_cleanup(
-            "managed_cancelled"
-        ));
-        assert!(managed_terminal_requires_credential_cleanup(
-            "termination_unconfirmed"
-        ));
-        assert!(managed_terminal_requires_credential_cleanup(
-            "managed cancellation child probe failed: injected"
-        ));
-        assert!(managed_terminal_requires_credential_cleanup(
-            "managed subprocess panicked: task 7 panicked"
-        ));
-        assert!(!managed_terminal_requires_credential_cleanup(
-            "Agent process timed out after 1s"
+        for error in [
+            "managed_cancelled",
+            "termination_unconfirmed",
+            "managed cancellation child probe failed: injected",
+            "managed subprocess panicked: task 7 panicked",
+            "Agent process timed out after 1s",
+            "managed subprocess channel closed",
+            "spawn custom worker failed",
+        ] {
+            assert!(managed_execution_requires_credential_cleanup::<()>(
+                true,
+                &Err(error.to_string())
+            ));
+        }
+        assert!(!managed_execution_requires_credential_cleanup::<()>(
+            false,
+            &Err("non-managed failure".to_string())
         ));
     }
 }
