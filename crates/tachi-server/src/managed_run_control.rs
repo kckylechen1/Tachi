@@ -81,7 +81,9 @@ pub(crate) struct ManagedCancelCommand {
 
 pub(crate) enum CancelCompletion {
     Confirmed {
+        #[allow(dead_code)]
         termination_proof: &'static str,
+        #[allow(dead_code)]
         status_revision: u64,
     },
     Unconfirmed,
@@ -389,22 +391,10 @@ pub(crate) async fn request_managed_custom_cancel(
             );
         }
         match receiver.await {
-            Ok(CancelCompletion::Confirmed {
-                termination_proof,
-                status_revision,
-            }) => {
-                let _ = termination_proof;
-                let canonical = canonical_cancellation_receipt(&run_dir).ok_or_else(|| {
+            Ok(CancelCompletion::Confirmed { .. }) => canonical_cancellation_receipt(&run_dir)
+                .ok_or_else(|| {
                     "managed cancellation committed without a canonical receipt".to_string()
-                })?;
-                let mut response: Value = serde_json::from_str(&canonical).map_err(|error| {
-                    format!("parse committed managed cancellation receipt: {error}")
-                })?;
-                response["observed_status_revision"] = Value::from(status_revision);
-                serde_json::to_string(&response).map_err(|error| {
-                    format!("serialize committed managed cancellation response: {error}")
-                })
-            }
+                }),
             Ok(CancelCompletion::Unconfirmed) => canonical_cancellation_receipt(&run_dir)
                 .ok_or_else(|| {
                     "managed cancellation committed without a canonical receipt".to_string()

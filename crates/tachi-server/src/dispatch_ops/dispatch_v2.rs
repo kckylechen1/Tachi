@@ -594,6 +594,12 @@ pub(crate) fn write_status_json(
         eprintln!("[dispatch-v2] refusing status write: {error}");
         return None;
     }
+    if managed_terminal.is_some() {
+        let committed_revision = obj.get("status_revision").cloned().unwrap_or(Value::Null);
+        if let Some(cancellation) = obj.get_mut("cancellation").and_then(Value::as_object_mut) {
+            cancellation.insert("observed_status_revision".to_string(), committed_revision);
+        }
+    }
     let completion = managed_terminal.map(|terminal| match terminal {
         crate::managed_run_control::ManagedTerminalCancellation::Confirmed {
             termination_proof,

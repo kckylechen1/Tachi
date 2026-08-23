@@ -859,6 +859,12 @@ pub(crate) mod tests {
             .expect("pre final status"),
         )
         .expect("pre final JSON");
+        assert_eq!(pre_cancel, pre_final["cancellation"]);
+        assert_eq!(
+            pre_cancel_raw,
+            serde_json::to_string(&pre_final["cancellation"])
+                .expect("serialize canonical pre-spawn cancellation receipt")
+        );
         assert_eq!(terminal_staff_state(&pre_final), "TASK_STATE_CANCELED");
         assert_eq!(
             crate::dispatch_ops::get_kanban_state(&server, pre_dispatch_id).await,
@@ -1002,6 +1008,11 @@ pub(crate) mod tests {
             "credential_cleanup_failed"
         );
         assert_eq!(
+            cleanup_final["cancellation"]["observed_status_revision"],
+            cleanup_final["status_revision"],
+            "the durable cleanup-failure receipt must carry the committed root revision"
+        );
+        assert_eq!(
             cleanup_cancel, cleanup_final["cancellation"],
             "cleanup-failure response must return the already committed canonical receipt"
         );
@@ -1127,15 +1138,17 @@ pub(crate) mod tests {
         let cancel_server = server.clone();
         let cancel_dispatch_id = dispatch_id.to_string();
         let cancel_task = tokio::spawn(async move {
-            staff_cancel(
-                &cancel_server,
-                StaffCancelRequest {
-                    dispatch_id: cancel_dispatch_id,
-                    expected_status_revision: accepted_revision,
-                },
-            )
-            .await
-            .expect("actual Staff cancel response")
+            cancel_server
+                .tachi_staff(rmcp::handler::server::wrapper::Parameters(
+                    serde_json::from_value::<tachi_params::TachiStaffParams>(serde_json::json!({
+                        "action": "cancel",
+                        "dispatch_id": cancel_dispatch_id,
+                        "expected_status_revision": accepted_revision,
+                    }))
+                    .expect("public cancellation parameters"),
+                ))
+                .await
+                .expect("public Staff cancel response")
         });
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -1209,8 +1222,8 @@ pub(crate) mod tests {
             observation.canonical_state.as_deref(),
             Some("TASK_STATE_CANCELED")
         );
-        let cancel: Value = serde_json::from_str(&cancel_task.await.expect("Staff cancel task"))
-            .expect("cancel response JSON");
+        let cancel_raw = cancel_task.await.expect("Staff cancel task");
+        let cancel: Value = serde_json::from_str(&cancel_raw).expect("cancel response JSON");
         assert_no_cancellation_control_keys(&cancel);
         assert_eq!(
             cancel["receipt"], "cancellation_confirmed",
@@ -1240,13 +1253,19 @@ pub(crate) mod tests {
         );
         assert_eq!(
             instant_status["cancellation"]["observed_status_revision"],
-            accepted_revision + 1,
-            "request receipt remains the frozen nested +1 revision"
+            instant_status["status_revision"],
+            "final canonical receipt must carry its committed root revision"
         );
         assert_eq!(
-            cancel["observed_status_revision"],
+            instant_status["cancellation"]["observed_status_revision"],
             accepted_revision + 2,
-            "response remains the frozen +2 confirmation revision"
+            "requested then confirmed cancellation advances exactly twice"
+        );
+        assert_eq!(cancel, instant_status["cancellation"]);
+        assert_eq!(
+            cancel_raw,
+            serde_json::to_string(&instant_status["cancellation"])
+                .expect("serialize canonical live cancellation receipt")
         );
         assert!(
             !run_dir.join("credentials").exists(),
@@ -1308,15 +1327,15 @@ pub(crate) mod tests {
             "request receipt precedes the confirmation written from the same checked revision"
         );
         assert_eq!(
-            terminal["cancellation"]["observed_status_revision"],
-            accepted_revision + 1,
-            "the requested receipt must advance before cancellation is confirmed"
+            terminal["cancellation"]["observed_status_revision"], terminal["status_revision"],
+            "the persisted receipt must carry the final committed root revision"
         );
         assert_eq!(
-            cancel["observed_status_revision"],
+            terminal["cancellation"]["observed_status_revision"],
             accepted_revision + 2,
-            "the confirmation receipt must advance after the requested receipt"
+            "the final receipt is written after requested then confirmed revisions"
         );
+        assert_eq!(cancel, terminal["cancellation"]);
         assert!(
             terminal["status_revision"]
                 .as_u64()

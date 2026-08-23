@@ -263,7 +263,9 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        cmd.kill_on_drop(true);
+        // This guard owns managed termination and synchronous reaping on
+        // unwind, so tokio must not later signal a recycled numeric PID.
+        cmd.kill_on_drop(false);
         configure_process_group(&mut cmd);
         let mut child = match cmd.spawn() {
             Ok(child) => child,
@@ -566,6 +568,20 @@ fn process_group_absent(pid: Option<u32>) -> bool {
 }
 
 #[cfg(unix)]
+fn wait_for_process_group_absence_after_reap(pid: Option<u32>) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if process_group_absent(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
 async fn wait_for_process_group_absence(pid: Option<u32>) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while tokio::time::Instant::now() < deadline {
@@ -743,6 +759,9 @@ impl Drop for ManagedProcessGroupGuard {
                 }
             }
             self.state = ManagedProcessGroupState::RootReaped(pid);
+            if !wait_for_process_group_absence_after_reap(pid) {
+                tracing::warn!(?pid, "managed process group remained after panic reaping");
+            }
         }
     }
 }
@@ -2002,6 +2021,10 @@ mod managed_process_group_regression_tests {
             .trim()
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
+        assert!(
+            process_group_absent(Some(root_pid as u32)),
+            "panic JoinError must be delayed until the owned process group is absent"
+        );
         assert!(
             process_absent(pid).await,
             "panic unwind left descendant alive"
