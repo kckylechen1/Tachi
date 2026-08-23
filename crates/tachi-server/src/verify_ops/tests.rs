@@ -641,8 +641,8 @@ fn f1691_verify_identity_spine_distinguishes_facts_evidence_verdicts() {
 
     // 1. Execution fact: executor self-reporting success does NOT produce
     // verification evidence — no ledger means no verdict at all.
-    let gate_before = evaluate_verification_gate(Some(flow_id), "candidate_sha", tmp.path())
-        .unwrap();
+    let gate_before =
+        evaluate_verification_gate(Some(flow_id), "candidate_sha", tmp.path()).unwrap();
     assert!(
         gate_before.is_none(),
         "no verification ledger must exist from mere execution self-report"
