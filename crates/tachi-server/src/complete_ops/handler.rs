@@ -936,33 +936,17 @@ pub(crate) async fn handle_tachi_complete(
                 )
                 .await,
             });
-            let response = shape_complete_response(
-                json!({
-                    "recorded": false,
-                    "reason": "completion eval not recorded",
-                    "task_id": task_id,
-                    "task": safe_task,
-                    "agent": safe_agent,
-                    "path": path,
-                    "outcome": outcome_norm,
-                    "dispatch_id": params.dispatch_id,
-                    "profile": params.profile,
-                    "risk": params.risk,
-                    "quality_score": params.quality_score,
-                    "flow_id": params.flow_id,
-                    "issue_ref": params.issue_ref,
-                    "pr_ref": params.pr_ref,
-                    "evidence_refs": safe_evidence_refs,
-                    "tests_run": safe_tests_run,
-                    "diff_present": diff_present,
-                    "subagent_count": params.subagents.len(),
-                    "subagents": safe_subagents,
-                    "eval_entry": save_json,
-                    "pipeline": pipeline_status,
-                    "secret_redactions": secret_redactions,
-                }),
-                params.format.as_deref(),
-            );
+            // This is a truthful rejection receipt, not a completion.  The
+            // compact completion formatter deliberately projects eval entries
+            // and would erase the capture-gate evidence; preserve the raw
+            // rejection for every requested format instead.
+            let response = json!({
+                "recorded": false,
+                "reason": "completion eval not recorded",
+                "eval_entry": save_json,
+                "pipeline": pipeline_status,
+                "secret_redactions": secret_redactions,
+            });
             return serde_json::to_string(&response).map_err(|error| {
                 format!("Failed to serialize nonrecorded completion bundle: {error}")
             });
@@ -1822,7 +1806,6 @@ mod tests {
         params.task_id = Some("unmanaged-capture-gate-reject".to_string());
         params.task = "x".to_string();
         params.agent = "x".to_string();
-        params.format = Some("full".to_string());
         let response: Value = serde_json::from_str(
             &handle_tachi_complete(&server, params, false)
                 .await
@@ -1832,6 +1815,15 @@ mod tests {
         assert_eq!(response["recorded"], false);
         assert_eq!(response["reason"], "completion eval not recorded");
         assert_eq!(response["eval_entry"]["saved"], false);
+        assert_eq!(response["eval_entry"]["rejected_by"], "capture_gate");
+        assert!(
+            response["eval_entry"]["violations"].is_array(),
+            "the default-format receipt must preserve capture-gate violations: {response:#}"
+        );
+        assert!(
+            response["eval_entry"].get("status").is_none(),
+            "the raw capture-gate entry must not gain a terminal status: {response:#}"
+        );
         for skipped in [
             "dispatch_outcome",
             "adjudication",
