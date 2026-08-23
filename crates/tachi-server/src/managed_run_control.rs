@@ -89,14 +89,20 @@ pub(crate) enum CancelCompletion {
 }
 
 pub(crate) fn cancellation_blocks_terminal_writer(object: &serde_json::Map<String, Value>) -> bool {
-    matches!(
-        object
-            .get("cancellation")
-            .and_then(Value::as_object)
-            .and_then(|receipt| receipt.get("receipt"))
-            .and_then(Value::as_str),
-        Some("cancellation_requested" | "cancellation_confirmed" | "termination_unconfirmed")
-    )
+    let Some(receipt) = object.get("cancellation").and_then(Value::as_object) else {
+        return false;
+    };
+    match receipt.get("receipt").and_then(Value::as_str) {
+        Some("cancellation_requested" | "cancellation_confirmed" | "termination_unconfirmed") => {
+            true
+        }
+        Some("cancellation_unavailable") => {
+            receipt.get("reason").and_then(Value::as_str) == Some("credential_cleanup_failed")
+                && receipt.get("state").and_then(Value::as_str) == Some("TASK_STATE_FAILED")
+                && object.get("state").and_then(Value::as_str) == Some("TASK_STATE_FAILED")
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn reconcile_pending_cancellation_unavailable(
@@ -310,6 +316,16 @@ pub(crate) async fn request_managed_custom_cancel(
                     expected,
                     Some(observed),
                     "non_managed_custom_execution",
+                ));
+            }
+            if object.get("lifecycle_owner").and_then(Value::as_str)
+                != Some("memory_server_managed_custom")
+            {
+                return Ok(unavailable(
+                    dispatch_id,
+                    expected,
+                    Some(observed),
+                    "non_managed_custom_owner",
                 ));
             }
             if object.get("cancellation").is_some() {
@@ -846,6 +862,7 @@ mod issue_1825_tests {
             "state": "TASK_STATE_WORKING",
             "status_revision": revision,
             "execution_classification": "managed_custom",
+            "lifecycle_owner": "memory_server_managed_custom",
         })
     }
 
@@ -887,6 +904,48 @@ mod issue_1825_tests {
             receiver.try_recv().is_err(),
             "stale revision must not signal the child"
         );
+
+        for owner in [None, Some("foreign_owner")] {
+            let mut owner_mutant = status(dispatch_id, 3);
+            match owner {
+                Some(owner) => {
+                    owner_mutant["lifecycle_owner"] = Value::String(owner.to_string());
+                }
+                None => {
+                    owner_mutant
+                        .as_object_mut()
+                        .expect("status object")
+                        .remove("lifecycle_owner");
+                }
+            }
+            std::fs::write(run_dir.join("status.json"), owner_mutant.to_string())
+                .expect("seed owner mutant");
+            let before = std::fs::read_to_string(run_dir.join("status.json"))
+                .expect("owner-mutant status before cancellation");
+            let unavailable = request_managed_custom_cancel(&first, dispatch_id, 3)
+                .await
+                .expect("owner-mutant cancellation response");
+            assert_eq!(
+                serde_json::from_str::<Value>(&unavailable).expect("owner-mutant response")
+                    ["reason"],
+                "non_managed_custom_owner"
+            );
+            assert_eq!(
+                std::fs::read_to_string(run_dir.join("status.json"))
+                    .expect("owner-mutant status after cancellation"),
+                before,
+                "missing or foreign owner must not mutate the canonical receipt"
+            );
+            assert!(
+                receiver.try_recv().is_err(),
+                "missing or foreign owner must not enqueue a cancellation command"
+            );
+        }
+        std::fs::write(
+            run_dir.join("status.json"),
+            status(dispatch_id, 3).to_string(),
+        )
+        .expect("restore managed owner for foreign-server probe");
 
         let foreign = request_managed_custom_cancel(&second, dispatch_id, 3)
             .await
@@ -1001,6 +1060,31 @@ mod issue_1825_tests {
             temp.path().join("status.json").is_dir(),
             "the failed atomic final write must not leave a CANCELED receipt"
         );
+    }
+
+    #[test]
+    fn issue_1825_only_cleanup_failure_unavailable_is_a_completion_fence() {
+        let mut unrelated = serde_json::Map::new();
+        unrelated.insert(
+            "state".to_string(),
+            Value::String("TASK_STATE_FAILED".to_string()),
+        );
+        unrelated.insert(
+            "cancellation".to_string(),
+            json!({
+                "receipt": "cancellation_unavailable",
+                "reason": "completion_or_timeout_winner",
+                "state": "TASK_STATE_FAILED",
+            }),
+        );
+        assert!(!cancellation_blocks_terminal_writer(&unrelated));
+
+        unrelated["cancellation"] = json!({
+            "receipt": "cancellation_unavailable",
+            "reason": "credential_cleanup_failed",
+            "state": "TASK_STATE_FAILED",
+        });
+        assert!(cancellation_blocks_terminal_writer(&unrelated));
     }
 }
 

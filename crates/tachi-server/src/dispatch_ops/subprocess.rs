@@ -798,6 +798,7 @@ mod issue_1825_tests {
                 "state": "TASK_STATE_WORKING",
                 "status_revision": 1,
                 "execution_classification": "managed_custom",
+                "lifecycle_owner": "memory_server_managed_custom",
             })
             .to_string(),
         )

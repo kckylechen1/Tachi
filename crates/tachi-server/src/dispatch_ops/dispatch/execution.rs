@@ -118,6 +118,59 @@ static MANAGED_TIMEOUT_OVERRIDES: OnceLock<
 > = OnceLock::new();
 
 #[cfg(test)]
+static MANAGED_CREDENTIAL_CLEANUP_FAILURES: OnceLock<Mutex<HashSet<(PathBuf, PathBuf)>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct ManagedCredentialCleanupFailureGuard {
+    key: (PathBuf, PathBuf),
+}
+
+#[cfg(test)]
+impl Drop for ManagedCredentialCleanupFailureGuard {
+    fn drop(&mut self) {
+        if let Some(failures) = MANAGED_CREDENTIAL_CLEANUP_FAILURES.get() {
+            failures
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_managed_credential_cleanup_failure(
+    home: &std::path::Path,
+    run_root: &std::path::Path,
+) -> ManagedCredentialCleanupFailureGuard {
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    assert!(MANAGED_CREDENTIAL_CLEANUP_FAILURES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.clone()));
+    ManagedCredentialCleanupFailureGuard { key }
+}
+
+#[cfg(test)]
+fn managed_credential_cleanup_failure_injected() -> bool {
+    let Some(home) = std::env::var_os("TACHI_HOME") else {
+        return false;
+    };
+    let Some(run_root) = std::env::var_os("TACHI_RUN_ROOT") else {
+        return false;
+    };
+    MANAGED_CREDENTIAL_CLEANUP_FAILURES
+        .get()
+        .is_some_and(|failures| {
+            failures
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&(PathBuf::from(home), PathBuf::from(run_root)))
+        })
+}
+
+#[cfg(test)]
 pub(crate) struct ManagedTimeoutOverrideGuard {
     key: (PathBuf, PathBuf),
 }
@@ -674,13 +727,30 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // input to the one canonical terminal write below, never a later
         // downgrade of a committed confirmation.
         let credential_cleanup_failed = if should_cleanup {
-            let credential_cleanup = server_clone.with_global_store(|store| {
-                cleanup_ephemeral_credential_materializations(
-                    store,
-                    &workspace_dir_for_spawn,
-                    false,
-                )
-            });
+            let credential_cleanup = {
+                #[cfg(test)]
+                if managed_credential_cleanup_failure_injected() {
+                    Err("injected managed credential cleanup failure".to_string())
+                } else {
+                    server_clone.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(
+                            store,
+                            &workspace_dir_for_spawn,
+                            false,
+                        )
+                    })
+                }
+                #[cfg(not(test))]
+                {
+                    server_clone.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(
+                            store,
+                            &workspace_dir_for_spawn,
+                            false,
+                        )
+                    })
+                }
+            };
             let failed = match &credential_cleanup {
                 Ok(report) => !report.errors.is_empty(),
                 Err(_) => true,

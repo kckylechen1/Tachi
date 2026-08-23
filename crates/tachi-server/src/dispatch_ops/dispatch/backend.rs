@@ -206,6 +206,7 @@ pub(super) fn prepare_dispatch_backend(
     Ok(PreparedDispatchBackend {
         managed_custom_eligible: matches!(&execution, DispatchExecution::Subprocess(_))
             && ctx.custom_launch_spec.is_some()
+            && !is_opencode_serve_transport(ctx.harness_transport)
             && !acpx_enabled
             && !native_acp_enabled,
         execution,
@@ -484,6 +485,15 @@ mod tests {
         assert!(cli.managed_custom_eligible);
         assert_eq!(cli.execution_backend_name, None);
         assert_eq!(cli.execution_backend_metadata, None);
+
+        let serve = prepare("serve");
+        assert!(matches!(serve.execution, DispatchExecution::Subprocess(_)));
+        assert!(
+            !serve.managed_custom_eligible,
+            "typed OpenCode serve transport owns an attached client lifecycle"
+        );
+        assert_eq!(serve.execution_backend_name, None);
+        assert_eq!(serve.execution_backend_metadata, None);
 
         let acpx = prepare("acpx");
         assert!(matches!(acpx.execution, DispatchExecution::Subprocess(_)));

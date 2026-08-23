@@ -1468,6 +1468,57 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn issue_1825_cleanup_failure_receipt_fences_completion_after_registry_drop() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182524Z-cleanup-failure-fence";
+        seed_managed_working_status(
+            &server,
+            dispatch_id,
+            Some(json!({
+                "receipt": "cancellation_unavailable",
+                "reason": "credential_cleanup_failed",
+                "state": "TASK_STATE_FAILED",
+            })),
+        );
+        let status_path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        let mut status: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read cleanup-failure status"),
+        )
+        .expect("parse cleanup-failure status");
+        status["state"] = Value::String("TASK_STATE_FAILED".to_string());
+        std::fs::write(&status_path, status.to_string()).expect("persist cleanup-failure status");
+        crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+            &server,
+            dispatch_id,
+            "credential_cleanup_failed",
+            Some("custom"),
+            None,
+        );
+
+        let error = handle_tachi_complete(&server, managed_completion_params(dispatch_id), false)
+            .await
+            .expect_err("cleanup failure owns the terminal receipt after registry drop");
+        assert_eq!(error, "managed cancellation owns terminal completion");
+        assert_eq!(
+            dispatch_outcome_count(&server, dispatch_id),
+            1,
+            "completion must preserve the one existing cleanup-failure outcome"
+        );
+        assert_eq!(dispatch_adjudication_count(&server, dispatch_id), 0);
+        assert_eq!(eval_memory_count(&server, dispatch_id), 0);
+        let after: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read fenced cleanup-failure status"),
+        )
+        .expect("parse fenced cleanup-failure status");
+        assert!(after.get("resolved_completion").is_none());
+        assert!(after.get("completion_recovery").is_none());
+    }
+
     #[test]
     fn issue_1825_managed_completion_admission_requires_the_persisted_managed_owner() {
         for owner in [None, Some("foreign_owner")] {

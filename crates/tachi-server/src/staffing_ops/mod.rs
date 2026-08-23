@@ -910,6 +910,117 @@ pub(crate) mod tests {
         );
         timeout_cleanup.disarm();
         drop(_timeout_override);
+
+        // Credential cleanup participates in the same real Staff ->
+        // background terminalization as process proof. Inject only this
+        // isolated run root's cleanup call so the final writer must choose a
+        // FAILED/unavailable receipt before the cancellation response exits.
+        let _cleanup_failure = crate::dispatch_ops::install_managed_credential_cleanup_failure(
+            temp_home.path(),
+            temp_runs.path(),
+        );
+        let mut cleanup_request = staff_request("tachi");
+        cleanup_request.profile = Some("glm_impl".to_string());
+        cleanup_request.worker = Some("custom".to_string());
+        cleanup_request.project = None;
+        cleanup_request.flow_id = Some("flow_1825_cleanup_failure".to_string());
+        let cleanup_raw = staff_start(&server, cleanup_request)
+            .await
+            .expect("cleanup-failure Staff start");
+        let mut cleanup_guard = StaffCleanupGuard::arm(&cleanup_raw);
+        cleanup_guard.track_process_group(&root_pid);
+        let cleanup_start: Value = serde_json::from_str(&cleanup_raw).expect("cleanup start JSON");
+        let cleanup_id = cleanup_start["dispatch_id"]
+            .as_str()
+            .expect("cleanup dispatch id");
+        let cleanup_dir = dispatch_runs_root().join(cleanup_id);
+        wait_for_managed_custom_processes(&cleanup_dir, &root_pid, &descendant_pid).await;
+        let cleanup_status: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: cleanup_id.to_string(),
+                },
+            )
+            .await
+            .expect("cleanup accepted status"),
+        )
+        .expect("cleanup accepted status JSON");
+        let cleanup_revision = cleanup_status["status_revision"]
+            .as_u64()
+            .expect("cleanup accepted revision");
+        let cleanup_cancel: Value = serde_json::from_str(
+            &staff_cancel(
+                &server,
+                StaffCancelRequest {
+                    dispatch_id: cleanup_id.to_string(),
+                    expected_status_revision: cleanup_revision,
+                },
+            )
+            .await
+            .expect("cleanup failure cancellation response"),
+        )
+        .expect("cleanup failure cancellation JSON");
+        assert_eq!(cleanup_cancel["receipt"], "cancellation_unavailable");
+        assert_eq!(cleanup_cancel["reason"], "credential_cleanup_failed");
+        let cleanup_final: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: cleanup_id.to_string(),
+                },
+            )
+            .await
+            .expect("cleanup terminal status"),
+        )
+        .expect("cleanup terminal status JSON");
+        assert_eq!(terminal_staff_state(&cleanup_final), "TASK_STATE_FAILED");
+        assert_eq!(
+            cleanup_final["cancellation"]["receipt"],
+            "cancellation_unavailable"
+        );
+        assert_eq!(
+            cleanup_final["cancellation"]["reason"],
+            "credential_cleanup_failed"
+        );
+        assert_ne!(
+            cleanup_final["cancellation"]["receipt"],
+            "cancellation_confirmed"
+        );
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, cleanup_id).await,
+            Some("TASK_STATE_FAILED".to_string())
+        );
+        let cleanup_outcomes: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [cleanup_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count cleanup failure outcomes");
+        assert_eq!(cleanup_outcomes, 1);
+        assert!(!server.managed_run_controls.contains(cleanup_id));
+        let cleanup_flow_lock_dir =
+            crate::task_lifecycle::run_dir_for_flow_id("flow_1825_cleanup_failure")
+                .expect("valid cleanup-failure flow run directory")
+                .join(".dispatch-dedupe");
+        assert!(
+            !cleanup_flow_lock_dir.exists()
+                || std::fs::read_dir(&cleanup_flow_lock_dir)
+                    .expect("cleanup flow lock directory")
+                    .next()
+                    .is_none(),
+            "cleanup failure must release the flow dispatch slot before responding"
+        );
+        wait_for_staff_cleanup(cleanup_id).await;
+        cleanup_guard.disarm();
+        drop(_cleanup_failure);
+
         let mut request = staff_request("tachi");
         request.profile = Some("glm_impl".to_string());
         request.worker = Some("custom".to_string());

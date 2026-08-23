@@ -138,6 +138,8 @@ mod execution;
 #[cfg(test)]
 pub(crate) use execution::background_dispatch_cleanup_complete;
 #[cfg(test)]
+pub(crate) use execution::install_managed_credential_cleanup_failure;
+#[cfg(test)]
 pub(crate) use execution::install_managed_timeout_override;
 mod flow_setup;
 mod harness_preflight;
