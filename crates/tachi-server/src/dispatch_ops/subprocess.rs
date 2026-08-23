@@ -728,7 +728,21 @@ impl ManagedProcessGroupGuard {
 impl Drop for ManagedProcessGroupGuard {
     fn drop(&mut self) {
         if let ManagedProcessGroupState::RootLive(pid) = self.state {
+            // The guard is declared after tokio's Child, so it drops first on
+            // unwind and retains reaping ownership until this returns.
             terminate_process_group(pid, libc::SIGKILL);
+            if let Some(pid) = pid {
+                let mut status = 0;
+                loop {
+                    let waited = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
+                    if waited >= 0
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                    {
+                        break;
+                    }
+                }
+            }
+            self.state = ManagedProcessGroupState::RootReaped(pid);
         }
     }
 }
@@ -1953,10 +1967,12 @@ mod managed_process_group_regression_tests {
         let run_dir = temp.path().join("run");
         std::fs::create_dir_all(&run_dir).expect("run directory");
         let (script, descendant) = descendant_fixture(&temp);
+        let root = temp.path().join("root.pid");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nsh -c 'sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\ntouch '{}'\nwait\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nsh -c 'sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\ntouch '{}'\nwait\n",
+                root.display(),
                 descendant.display(),
                 run_dir.join("panic-after-spawn.ready").display(),
             ),
@@ -1976,6 +1992,11 @@ mod managed_process_group_regression_tests {
         });
         assert!(matches!(task.await, Err(error) if error.is_panic()));
         wait_for_file(&descendant).await;
+        let root_pid = std::fs::read_to_string(root)
+            .expect("root pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric root pid");
         let pid = std::fs::read_to_string(descendant)
             .expect("descendant pid")
             .trim()
@@ -1984,6 +2005,14 @@ mod managed_process_group_regression_tests {
         assert!(
             process_absent(pid).await,
             "panic unwind left descendant alive"
+        );
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(root_pid, &mut status, libc::WNOHANG) };
+        assert_eq!(waited, -1, "panic guard must reap its owned root");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD),
+            "panic unwind must not leave a root zombie"
         );
     }
 }

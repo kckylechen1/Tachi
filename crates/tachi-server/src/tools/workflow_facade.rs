@@ -115,6 +115,11 @@ impl MemoryServer {
                 ))
             }
         };
+        if action == "cancel" {
+            // The cancel result is itself the committed canonical receipt.
+            // Do not wrap it in a facade action/status projection.
+            return Ok(raw);
+        }
         format_facade_response(
             &format!("Tachi staff {}", action),
             &action,

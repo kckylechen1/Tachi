@@ -185,6 +185,41 @@ fn revoke_managed_completion_admission(
     Ok(())
 }
 
+/// Admission is a temporary cancellation fence. Once it is persisted, every
+/// later error or unwind must remove it unless a durable terminal/recovery
+/// receipt has taken ownership of the completion.
+struct ManagedCompletionAdmissionGuard {
+    server: MemoryServer,
+    dispatch_id: Option<String>,
+    armed: bool,
+}
+
+impl ManagedCompletionAdmissionGuard {
+    fn arm(server: &MemoryServer, dispatch_id: Option<&str>) -> Self {
+        Self {
+            server: server.clone(),
+            dispatch_id: dispatch_id.map(str::to_string),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ManagedCompletionAdmissionGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) =
+                revoke_managed_completion_admission(&self.server, self.dispatch_id.as_deref())
+            {
+                tracing::error!(error = %error, "failed to revoke stranded managed completion admission");
+            }
+        }
+    }
+}
+
 fn durable_eval_memory_id(save_json: &Value) -> Result<String, &'static str> {
     if save_json
         .get("saved")
@@ -581,12 +616,11 @@ pub(crate) async fn handle_tachi_complete(
     // earlier read-only check keeps invalid inputs cheap; this fence prevents
     // cancellation from winning between validation and eval/outcome writes.
     admit_managed_completion(server, params.dispatch_id.as_deref(), true)?;
+    let mut managed_admission =
+        ManagedCompletionAdmissionGuard::arm(server, params.dispatch_id.as_deref());
     let save_result = match save_eval_memory(server, mem_params).await {
         Ok(result) => result,
-        Err(error) => {
-            let _ = revoke_managed_completion_admission(server, params.dispatch_id.as_deref());
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     let save_json: serde_json::Value = serde_json::from_str(&save_result)
         .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
@@ -596,10 +630,7 @@ pub(crate) async fn handle_tachi_complete(
     // never manufacture an id and let that phantom proceed into outcomes.
     let eval_memory_id = match durable_eval_memory_id(&save_json) {
         Ok(id) => id,
-        Err(error) => {
-            let _ = revoke_managed_completion_admission(server, params.dispatch_id.as_deref());
-            return Err(error.to_string());
-        }
+        Err(error) => return Err(error.to_string()),
     };
 
     // #773 Layer-2 ②: resolve the #878-A completion predicate BEFORE writing
@@ -688,13 +719,16 @@ pub(crate) async fn handle_tachi_complete(
                 verdict.reviewed_flag,
                 &dispatch_outcome_status,
             ) {
-                Ok(()) => json!({
-                    "status": "pending_canonical_outcome",
-                    "dispatch_id": dispatch_id,
-                    "state": verdict.new_state,
-                    "eval_memory_id": eval_memory_id,
-                    "reviewed": verdict.reviewed_flag,
-                }),
+                Ok(()) => {
+                    managed_admission.disarm();
+                    json!({
+                        "status": "pending_canonical_outcome",
+                        "dispatch_id": dispatch_id,
+                        "state": verdict.new_state,
+                        "eval_memory_id": eval_memory_id,
+                        "reviewed": verdict.reviewed_flag,
+                    })
+                }
                 Err(error) => json!({
                     "status": "recovery_receipt_failed",
                     "dispatch_id": dispatch_id,
@@ -962,6 +996,7 @@ pub(crate) async fn handle_tachi_complete(
             &eval_memory_id,
             reviewed_flag,
         )?;
+        managed_admission.disarm();
         pipeline_status["completion_receipt"] = json!({
             "status": "persisted",
             "dispatch_id": did,
@@ -1404,6 +1439,75 @@ mod tests {
             eval_memory_count(&server, dispatch_id),
             0,
             "capture-gate rejection must not leave an eval row"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_1825_post_save_predicate_error_revokes_managed_completion_admission() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182526Z-post-save-predicate-error";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+        let status_path = run_dir.join("status.json");
+        let mut status: Value =
+            serde_json::from_slice(&std::fs::read(&status_path).expect("read managed status"))
+                .expect("parse managed status");
+        status["completion_predicate"] = json!({ "type": "output_matches", "pattern": ".*" });
+        std::fs::write(&status_path, status.to_string()).expect("write predicate status");
+        std::fs::write(run_dir.join("result.md"), [0xff_u8])
+            .expect("write invalid UTF-8 result artifact");
+        let (mut receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed registry");
+
+        let error = handle_tachi_complete(&server, managed_completion_params(dispatch_id), false)
+            .await
+            .expect_err("invalid result artifact must fail after durable eval save");
+        assert!(
+            error.contains("UTF-8") || error.contains("utf-8"),
+            "{error}"
+        );
+        let after: Value =
+            serde_json::from_slice(&std::fs::read(&status_path).expect("read rolled-back status"))
+                .expect("parse rolled-back status");
+        assert!(
+            after.get("completion_recovery").is_none(),
+            "admission marker stranded: {after:#}"
+        );
+        assert!(after.get("resolved_completion").is_none());
+        assert_eq!(
+            eval_memory_count(&server, dispatch_id),
+            1,
+            "post-save predicate failure must preserve the durable eval"
+        );
+
+        let cancel_server = server.clone();
+        let cancel = tokio::spawn(async move {
+            crate::managed_run_control::request_managed_custom_cancel(
+                &cancel_server,
+                dispatch_id,
+                9,
+            )
+            .await
+        });
+        let command = receiver
+            .recv()
+            .await
+            .expect("revoked admission reopens cancellation");
+        assert!(
+            command
+                .response
+                .send(crate::managed_run_control::CancelCompletion::Unconfirmed)
+                .is_ok(),
+            "respond cancellation"
+        );
+        let cancellation: Value =
+            serde_json::from_str(&cancel.await.expect("cancel join").expect("cancel response"))
+                .expect("cancellation JSON");
+        assert_eq!(
+            cancellation["receipt"], "cancellation_requested",
+            "the restored control path can enqueue a real cancellation command"
         );
     }
 

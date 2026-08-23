@@ -807,14 +807,17 @@ pub(crate) mod tests {
         let pre_server = server.clone();
         let pre_id = pre_dispatch_id.to_string();
         let pre_cancel = tokio::spawn(async move {
-            staff_cancel(
-                &pre_server,
-                StaffCancelRequest {
-                    dispatch_id: pre_id,
-                    expected_status_revision: pre_revision,
-                },
-            )
-            .await
+            pre_server
+                .tachi_staff(rmcp::handler::server::wrapper::Parameters(
+                    serde_json::from_value::<tachi_params::TachiStaffParams>(serde_json::json!({
+                        "action": "cancel",
+                        "format": "markdown",
+                        "dispatch_id": pre_id,
+                        "expected_status_revision": pre_revision,
+                    }))
+                    .expect("markdown cancellation parameters"),
+                ))
+                .await
         });
         for _ in 0..100 {
             let status: Value = serde_json::from_str(
@@ -834,13 +837,15 @@ pub(crate) mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         pre_release.send(()).expect("release pre-spawn runner");
-        let pre_cancel: Value = serde_json::from_str(
-            &pre_cancel
-                .await
-                .expect("pre cancel join")
-                .expect("pre cancel response"),
-        )
-        .expect("pre cancel JSON");
+        let pre_cancel_raw = pre_cancel
+            .await
+            .expect("pre cancel join")
+            .expect("pre cancel response");
+        assert!(
+            !pre_cancel_raw.starts_with("## "),
+            "cancel must ignore markdown formatting and return canonical JSON"
+        );
+        let pre_cancel: Value = serde_json::from_str(&pre_cancel_raw).expect("pre cancel JSON");
         assert_eq!(pre_cancel["receipt"], "cancellation_confirmed");
         assert_eq!(pre_cancel["termination_proof"], "spawn_suppressed");
         let pre_final: Value = serde_json::from_str(
@@ -961,18 +966,19 @@ pub(crate) mod tests {
         let cleanup_revision = cleanup_status["status_revision"]
             .as_u64()
             .expect("cleanup accepted revision");
-        let cleanup_cancel: Value = serde_json::from_str(
-            &staff_cancel(
-                &server,
-                StaffCancelRequest {
-                    dispatch_id: cleanup_id.to_string(),
-                    expected_status_revision: cleanup_revision,
-                },
-            )
+        let cleanup_cancel_raw = server
+            .tachi_staff(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value::<tachi_params::TachiStaffParams>(serde_json::json!({
+                    "action": "cancel",
+                    "dispatch_id": cleanup_id,
+                    "expected_status_revision": cleanup_revision,
+                }))
+                .expect("public cancellation parameters"),
+            ))
             .await
-            .expect("cleanup failure cancellation response"),
-        )
-        .expect("cleanup failure cancellation JSON");
+            .expect("public cleanup failure cancellation response");
+        let cleanup_cancel: Value =
+            serde_json::from_str(&cleanup_cancel_raw).expect("cleanup failure cancellation JSON");
         assert_eq!(cleanup_cancel["receipt"], "cancellation_unavailable");
         assert_eq!(cleanup_cancel["reason"], "credential_cleanup_failed");
         let cleanup_final: Value = serde_json::from_str(
@@ -998,6 +1004,12 @@ pub(crate) mod tests {
         assert_eq!(
             cleanup_cancel, cleanup_final["cancellation"],
             "cleanup-failure response must return the already committed canonical receipt"
+        );
+        assert_eq!(
+            cleanup_cancel_raw,
+            serde_json::to_string(&cleanup_final["cancellation"])
+                .expect("serialize canonical cancellation receipt"),
+            "public cancel must return canonical JSON bytes without facade action/status injection"
         );
         assert_ne!(
             cleanup_final["cancellation"]["receipt"],
