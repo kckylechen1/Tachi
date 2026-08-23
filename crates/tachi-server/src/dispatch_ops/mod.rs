@@ -50,8 +50,8 @@ pub(crate) use prompt::seat_card::{
 };
 #[cfg(test)]
 pub(crate) use subprocess::{
-    install_managed_cancel_dequeue_barrier, install_managed_pre_spawn_barrier,
-    ManagedCancelTryWaitObservation,
+    install_managed_before_select_barrier, install_managed_cancel_dequeue_barrier,
+    install_managed_pre_spawn_barrier, ManagedCancelTryWaitObservation,
 };
 // tachi#1173 k2 fix: shared dispatch-id path-traversal gate (allowlist +
 // canonicalize-and-confine), consumed by `board::runs`, `dispatch::dedupe`,

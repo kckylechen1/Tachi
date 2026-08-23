@@ -209,6 +209,92 @@ pub(crate) fn install_managed_pre_spawn_barrier(
 }
 
 #[cfg(test)]
+type ManagedBeforeSelectKey = (std::path::PathBuf, std::path::PathBuf);
+
+#[cfg(test)]
+struct ManagedBeforeSelectBarrier {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct ManagedBeforeSelectBarrierGuard(ManagedBeforeSelectKey);
+
+#[cfg(test)]
+impl Drop for ManagedBeforeSelectBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(barriers) = MANAGED_BEFORE_SELECT_BARRIERS.get() {
+            barriers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+static MANAGED_BEFORE_SELECT_BARRIERS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<ManagedBeforeSelectKey, ManagedBeforeSelectBarrier>>,
+> = std::sync::OnceLock::new();
+
+/// Stops one runner immediately before its managed select loop. The key binds
+/// the fixture's isolated home and run root, so parallel tests cannot borrow a
+/// different run's deadline race.
+#[cfg(test)]
+pub(crate) fn install_managed_before_select_barrier(
+    home: &std::path::Path,
+    run_root: &std::path::Path,
+) -> (
+    ManagedBeforeSelectBarrierGuard,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    assert!(
+        MANAGED_BEFORE_SELECT_BARRIERS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                key.clone(),
+                ManagedBeforeSelectBarrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            )
+            .is_none(),
+        "managed before-select barrier already installed for isolated run root"
+    );
+    (ManagedBeforeSelectBarrierGuard(key), entered_rx, release_tx)
+}
+
+#[cfg(test)]
+fn pause_managed_before_select(_run_dir: &std::path::Path) {
+    let Some(home) = std::env::var_os("TACHI_HOME") else {
+        return;
+    };
+    let Some(run_root) = std::env::var_os("TACHI_RUN_ROOT") else {
+        return;
+    };
+    let key = (
+        std::path::PathBuf::from(home),
+        std::path::PathBuf::from(run_root),
+    );
+    let barrier = MANAGED_BEFORE_SELECT_BARRIERS.get().and_then(|barriers| {
+        barriers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key)
+    });
+    if let Some(barrier) = barrier {
+        let _ = barrier.entered.send(());
+        let _ = barrier.release.recv();
+    }
+}
+
+#[cfg(test)]
 fn pause_managed_pre_spawn() {
     let Some(home) = std::env::var_os("TACHI_HOME") else {
         return;
@@ -319,6 +405,25 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                         "managed child probe failed: {error}"
                     )));
                 }
+            }
+            #[cfg(test)]
+            pause_managed_before_select(run_dir);
+            // `biased` below otherwise gives a simultaneously-ready cancel
+            // precedence over the watchdog. Check before receiving a command
+            // so a request that arrives after the deadline cannot signal a
+            // process whose timeout already owns terminalization.
+            if tokio::time::Instant::now() >= deadline {
+                if matches!(
+                    observe_managed_root_exit_without_reap(pid, run_dir),
+                    Ok(true)
+                ) {
+                    continue;
+                }
+                let sigterm = process_group.signal(libc::SIGTERM);
+                process_group.prepare_group_for_root_reap(sigterm).await;
+                let _ = reap_managed_root(&mut child, &mut process_group).await;
+                drain_managed_output(stdout_task, stderr_task).await;
+                return ManagedSubprocessOutcome::plain(Err("process timed out".to_string()));
             }
             tokio::select! {
                 biased;
@@ -568,15 +673,8 @@ fn process_group_absent(pid: Option<u32>) -> bool {
 }
 
 #[cfg(unix)]
-fn wait_for_process_group_absence_after_reap(pid: Option<u32>) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        if process_group_absent(pid) {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
+fn wait_for_process_group_absence_after_reap(pid: Option<u32>) {
+    while !process_group_absent(pid) {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
@@ -759,9 +857,7 @@ impl Drop for ManagedProcessGroupGuard {
                 }
             }
             self.state = ManagedProcessGroupState::RootReaped(pid);
-            if !wait_for_process_group_absence_after_reap(pid) {
-                tracing::warn!(?pid, "managed process group remained after panic reaping");
-            }
+            wait_for_process_group_absence_after_reap(pid);
         }
     }
 }

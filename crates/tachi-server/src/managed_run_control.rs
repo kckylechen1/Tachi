@@ -41,6 +41,7 @@ mod cancellation_receipt_regression_tests {
                 "state": "TASK_STATE_WORKING",
                 "status_revision": 1,
                 "execution_classification": "managed_custom",
+                "lifecycle_owner": "memory_server_managed_custom",
             })
             .to_string(),
         )
@@ -63,6 +64,80 @@ mod cancellation_receipt_regression_tests {
             serde_json::from_str::<Value>(&response).expect("response JSON"),
             status["cancellation"],
             "response must be the committed canonical cancellation receipt"
+        );
+        assert_eq!(
+            status["cancellation"]["observed_status_revision"], status["status_revision"],
+            "fallback receipt must carry the revision committed by its one write"
+        );
+        assert_eq!(
+            response,
+            serde_json::to_string(&status["cancellation"])
+                .expect("serialize canonical fallback receipt")
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn full_control_channel_returns_the_committed_unavailable_receipt() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("home");
+        let runs = tempfile::tempdir().expect("runs");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
+        let dispatch_id = "20260823T182502Z-full-channel";
+        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("run directory");
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 1,
+                "execution_classification": "managed_custom",
+                "lifecycle_owner": "memory_server_managed_custom",
+            })
+            .to_string(),
+        )
+        .expect("status");
+        let server = MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+        let (_receiver, _guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("register control");
+        let sender = server
+            .managed_run_controls
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(dispatch_id)
+            .expect("registered sender")
+            .sender
+            .clone();
+        let (response_tx, _response_rx) = oneshot::channel();
+        sender
+            .try_send(ManagedCancelCommand {
+                expected_status_revision: 0,
+                response: response_tx,
+                #[cfg(test)]
+                test_observation: None,
+            })
+            .expect("fill bounded control channel");
+        let response = request_managed_custom_cancel(&server, dispatch_id, 1)
+            .await
+            .expect("full channel returns committed unavailable receipt");
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(run_dir.join("status.json")).expect("canonical status"),
+        )
+        .expect("canonical JSON");
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).expect("response JSON"),
+            status["cancellation"]
+        );
+        assert_eq!(
+            status["cancellation"]["observed_status_revision"],
+            status["status_revision"]
         );
     }
 }
@@ -407,13 +482,19 @@ pub(crate) async fn request_managed_custom_cancel(
             Ok(CancelCompletion::Unavailable(reason)) => {
                 record_unavailable_if_pending(&run_dir, dispatch_id, expected, observed, reason)
             }
-            Err(_) => record_unavailable_if_pending(
-                &run_dir,
-                dispatch_id,
-                expected,
-                observed,
-                "completion_or_timeout_winner",
-            ),
+            Err(_) => {
+                if let Some(canonical) = wait_for_terminal_cancellation_receipt(&run_dir).await {
+                    Ok(canonical)
+                } else {
+                    record_unavailable_if_pending(
+                        &run_dir,
+                        dispatch_id,
+                        expected,
+                        observed,
+                        "completion_or_timeout_winner",
+                    )
+                }
+            }
         }
     }
 }
@@ -716,6 +797,29 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
     }
 }
 
+/// A dropped responder can race the background terminal writer after a runner
+/// has selected timeout. Do not manufacture an intermediate unavailable
+/// receipt: wait briefly for the terminal writer's canonical receipt first.
+async fn wait_for_terminal_cancellation_receipt(run_dir: &std::path::Path) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let status_path = run_dir.join("status.json");
+        if let Ok(Some(status)) = crate::task_lifecycle::read_json_file(&status_path) {
+            let terminal = status
+                .get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| state != "TASK_STATE_WORKING");
+            if terminal {
+                if let Some(canonical) = canonical_cancellation_receipt(run_dir) {
+                    return Some(canonical);
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    None
+}
+
 fn record_unavailable_if_pending(
     run_dir: &std::path::Path,
     dispatch_id: &str,
@@ -771,7 +875,16 @@ fn record_unavailable_if_pending(
                 None,
             ),
         );
-        crate::managed_run_control::advance_status_revision(object)?;
+        let committed_revision = crate::managed_run_control::advance_status_revision(object)?;
+        if let Some(receipt) = object
+            .get_mut("cancellation")
+            .and_then(Value::as_object_mut)
+        {
+            receipt.insert(
+                "observed_status_revision".to_string(),
+                Value::from(committed_revision),
+            );
+        }
         let committed_receipt = object
             .get("cancellation")
             .cloned()

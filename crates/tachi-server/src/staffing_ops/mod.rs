@@ -935,6 +935,119 @@ pub(crate) mod tests {
         timeout_cleanup.disarm();
         drop(_timeout_override);
 
+        // Hold the real background runner immediately before its select loop,
+        // cross the real watchdog deadline, then enqueue a public cancellation.
+        // The runner must not receive or signal that late command.
+        let _late_timeout_override = crate::dispatch_ops::install_managed_timeout_override(
+            temp_home.path(),
+            temp_runs.path(),
+            std::time::Duration::from_millis(200),
+        );
+        let (_late_select_guard, late_select_entered, late_select_release) =
+            crate::dispatch_ops::install_managed_before_select_barrier(
+                temp_home.path(),
+                temp_runs.path(),
+            );
+        let mut late_timeout_request = staff_request("tachi");
+        late_timeout_request.profile = Some("glm_impl".to_string());
+        late_timeout_request.worker = Some("custom".to_string());
+        late_timeout_request.flow_id = Some("flow_1825_timeout_late_cancel".to_string());
+        let late_timeout_raw = staff_start(&server, late_timeout_request)
+            .await
+            .expect("late-timeout Staff start");
+        let mut late_timeout_cleanup = StaffCleanupGuard::arm(&late_timeout_raw);
+        let late_timeout_start: Value =
+            serde_json::from_str(&late_timeout_raw).expect("late-timeout response");
+        let late_timeout_id = late_timeout_start["dispatch_id"]
+            .as_str()
+            .expect("late-timeout dispatch id")
+            .to_string();
+        let late_timeout_dir = dispatch_runs_root().join(&late_timeout_id);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                late_select_entered
+                    .recv()
+                    .expect("runner reached managed select")
+            }),
+        )
+        .await
+        .expect("managed runner reaches select barrier")
+        .expect("select barrier join");
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let late_status: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: late_timeout_id.clone(),
+                },
+            )
+            .await
+            .expect("late-timeout accepted status"),
+        )
+        .expect("late-timeout accepted status JSON");
+        let late_revision = late_status["status_revision"]
+            .as_u64()
+            .expect("late-timeout accepted revision");
+        let late_cancel_server = server.clone();
+        let late_cancel_id = late_timeout_id.clone();
+        let late_cancel = tokio::spawn(async move {
+            late_cancel_server
+                .tachi_staff(rmcp::handler::server::wrapper::Parameters(
+                    serde_json::from_value::<tachi_params::TachiStaffParams>(serde_json::json!({
+                        "action": "cancel",
+                        "dispatch_id": late_cancel_id,
+                        "expected_status_revision": late_revision,
+                    }))
+                    .expect("late cancellation parameters"),
+                ))
+                .await
+                .expect("late cancellation response")
+        });
+        for _ in 0..100 {
+            let status: Value = serde_json::from_str(
+                &staff_status(
+                    &server,
+                    StaffStatusRequest {
+                        dispatch_id: late_timeout_id.clone(),
+                    },
+                )
+                .await
+                .expect("late cancellation requested status"),
+            )
+            .expect("late cancellation requested status JSON");
+            if status["cancellation"]["receipt"] == "cancellation_requested" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        late_select_release
+            .send(())
+            .expect("release late-timeout runner");
+        let (late_terminal, _) = wait_for_staff_terminal(&late_timeout_dir).await;
+        let late_cancel_raw = late_cancel.await.expect("late cancellation join");
+        let late_cancel: Value =
+            serde_json::from_str(&late_cancel_raw).expect("late cancellation JSON");
+        assert_eq!(terminal_staff_state(&late_terminal), "TASK_STATE_FAILED");
+        assert_ne!(late_terminal["state"], "TASK_STATE_CANCELED");
+        assert_eq!(late_cancel["receipt"], "cancellation_unavailable");
+        assert_eq!(late_cancel["reason"], "completion_or_timeout_winner");
+        assert_eq!(late_cancel, late_terminal["cancellation"]);
+        assert_eq!(
+            late_cancel_raw,
+            serde_json::to_string(&late_terminal["cancellation"])
+                .expect("serialize canonical late-timeout receipt")
+        );
+        assert_eq!(
+            late_terminal["cancellation"]["observed_status_revision"],
+            late_terminal["status_revision"]
+        );
+        wait_for_staff_cleanup(&late_timeout_id).await;
+        assert!(!server.managed_run_controls.contains(&late_timeout_id));
+        assert!(!late_timeout_dir.join("credentials").exists());
+        late_timeout_cleanup.disarm();
+        drop(_late_timeout_override);
+
         // Credential cleanup participates in the same real Staff ->
         // background terminalization as process proof. Inject only this
         // isolated run root's cleanup call so the final writer must choose a
