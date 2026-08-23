@@ -1,4 +1,5 @@
 use super::*;
+use crate::verify_ops::markup_status;
 
 pub(crate) fn format_briefing(
     query: &str,
@@ -93,8 +94,12 @@ pub(crate) fn format_briefing(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let target = issue_ref.or(flow_id).unwrap_or("(no issue/flow declared)");
+            // #1454 O2: `target` can BE the caller-authored `flow_id` (when
+            // no issue_ref) — single-line compact + escape at the markup
+            // boundary.
             out.push(format!(
-                "- **{session}** → {target} (heartbeat {heartbeat})"
+                "- **{session}** → {} (heartbeat {heartbeat})",
+                markup_text(target)
             ));
         }
         if presence_overflow > 0 {
@@ -201,11 +206,31 @@ pub(crate) fn format_briefing(
         if !rows.is_empty() {
             out.push("\n### Verification gates [AUTHORITY: EVAL EVIDENCE]".to_string());
             for row in rows.iter().take(verification_cap) {
-                let flow_id = row.get("flow_id").and_then(Value::as_str).unwrap_or("?");
+                // #1454 O2: `flow_id` is caller-authored free text
+                // interpolated into markup — the shared single-line compact +
+                // escape helper.
+                let flow_id =
+                    markup_text(row.get("flow_id").and_then(Value::as_str).unwrap_or("?"));
+                // #1454 F6-adjudication: rows carry the display verdict
+                // (`overall_display` = gate verdict, plus the caller-asserted
+                // marker when the ledger `overall` diverges); fall back to the
+                // raw gate verdict for pre-F6 shapes.
                 let overall = row
-                    .get("overall")
+                    .get("overall_display")
                     .and_then(Value::as_str)
-                    .unwrap_or("pending");
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        // #1454 H2: the raw row `overall` fallback (pre-F6
+                        // shapes) is caller-authored ledger content
+                        // interpolated into markup — normalize it against the
+                        // closed vocabulary; anything else renders as the
+                        // fixed `invalid` marker.
+                        row.get("overall")
+                            .and_then(Value::as_str)
+                            .map(markup_status)
+                            .unwrap_or_else(|| "pending".to_string())
+                    });
                 let total = row.get("total").and_then(Value::as_u64).unwrap_or(0);
                 let failed = row.get("failed").and_then(Value::as_u64).unwrap_or(0);
                 let pending = row.get("pending").and_then(Value::as_u64).unwrap_or(0);
@@ -215,7 +240,10 @@ pub(crate) fn format_briefing(
                     if pr_ref.is_empty() {
                         String::new()
                     } else {
-                        format!(" `{}`", md_escape(&compact_text_line(pr_ref, 80)))
+                        // #1454 O2: the shared free-text helper replaces the
+                        // previous per-site `md_escape(&compact_text_line(..))`
+                        // composition — one helper, no divergent copies.
+                        format!(" `{}`", markup_text(pr_ref))
                     }
                 ));
             }
@@ -249,10 +277,14 @@ pub(crate) fn format_briefing(
                 }
             }
             for task in tasks.iter().take(kanban_cap) {
-                let summary = task
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .unwrap_or("(task)");
+                // #1454 O2: the kanban task `summary` is caller-authored free
+                // text interpolated into markup — single-line compact +
+                // escape.
+                let summary = markup_text(
+                    task.get("summary")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(task)"),
+                );
                 let state = task
                     .get("state")
                     .and_then(Value::as_str)
@@ -364,7 +396,11 @@ fn briefing_next_step(
         rows.iter().any(|row| {
             row.get("overall")
                 .and_then(Value::as_str)
-                .is_some_and(|s| matches!(s, "failed" | "pending"))
+                // #1454 F6-adjudication: `unverified` (no server-known
+                // receipt head) is as non-passing as `failed`/`pending` — a
+                // board with no server evidence is exactly when the agent
+                // should inspect the gates before merge.
+                .is_some_and(|s| matches!(s, "failed" | "pending" | "unverified"))
         })
     }) {
         return "`tachi_verify(action='board')` to inspect background verification gates before merge."

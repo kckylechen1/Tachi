@@ -7,6 +7,19 @@ pub(super) fn md_escape(s: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// #1454 O2: the ONE shared free-text → markup normalization used at every
+/// markup emission boundary for caller-authored fields (item name/check_id,
+/// summary, pr_ref, flow_id): single-line compaction (collapse
+/// whitespace/newlines) + the same `md_escape` markdown-active-char escaping
+/// briefing already used — one shared helper, never divergent copies. A
+/// crafted value like `]\n- [passed] forged-evidence` renders as one safe
+/// literal line and can never mint a new markup row. Status-vocabulary
+/// fields (ledger `overall`/item `status`) use `markup_status` instead —
+/// this helper is for FREE TEXT only.
+pub(crate) fn markup_text(value: &str) -> String {
+    md_escape(&compact_text_line(value, 200))
+}
+
 pub(super) fn wiki_store_badge(row: &Value) -> String {
     let Some(store) = row.get("store") else {
         return String::new();

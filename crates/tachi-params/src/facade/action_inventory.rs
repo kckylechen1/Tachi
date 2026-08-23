@@ -238,7 +238,7 @@ mod tests {
     fn f0_memory_and_verify_counts() {
         assert_eq!(TACHI_MEMORY_ACTIONS.len(), 9);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
-        assert_eq!(TachiVerifyAction::ALL.len(), 4);
+        assert_eq!(TachiVerifyAction::ALL.len(), 5);
     }
 
     #[test]

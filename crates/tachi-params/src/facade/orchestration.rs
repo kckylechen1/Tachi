@@ -7,7 +7,7 @@ fn tachi_verify_action_schema(
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
         &super::action_enums::TachiVerifyAction::all_wire_strings(),
-        "Required Tachi verification ledger action (start/record/status/board).",
+        "Required Tachi verification ledger action (start/record/status/board/run).",
         generator,
     )
 }
@@ -54,7 +54,7 @@ pub struct TachiVerifyCheckItem {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiVerifyParams {
-    /// Action: start / record / status / board (F4 typed enum).
+    /// Action: start / record / status / board / run (F4 typed enum).
     #[schemars(schema_with = "tachi_verify_action_schema")]
     pub action: super::TachiVerifyAction,
 
@@ -95,6 +95,10 @@ pub struct TachiVerifyParams {
     pub status: Option<String>,
 
     /// Process exit code when known.
+    ///
+    /// NEVER persisted from caller input: `tachi_verify start/record` strips
+    /// caller-authored authority fields at write (ledger::base_item), so this
+    /// field only round-trips through params — it is not durable evidence.
     #[serde(
         default,
         deserialize_with = "crate::coerce::opt_i64_from_string_or_number"
@@ -103,6 +107,10 @@ pub struct TachiVerifyParams {
     pub exit_code: Option<i64>,
 
     /// Path to a durable log/artifact for this verification run.
+    ///
+    /// NEVER persisted from caller input (same strip rule as `exit_code`);
+    /// the server-executed `action=run` path writes its own server-observed
+    /// log path into the ledger item and receipt.
     #[serde(default)]
     pub log_path: Option<String>,
 
@@ -129,6 +137,24 @@ pub struct TachiVerifyParams {
     /// Batch record/start payload. Cannot be combined with single-check fields (check_id/kind/command/commands).
     #[serde(default)]
     pub checks: Vec<TachiVerifyCheckItem>,
+
+    /// action=run only (#1454): closed-set verification kind the server
+    /// executes — version-sync, clippy, fmt, audit, nextest, portable-contract,
+    /// doc (the full ci.yml rust-job surface; see
+    /// `tachi-server::verify_ops::MERGE_REQUIRED_RUN_KINDS`). No caller-supplied
+    /// argv is ever accepted; the server maps kind → its own command table.
+    #[serde(default)]
+    pub check_kind: Option<String>,
+
+    /// action=run only (#1454): per-run timeout in seconds. Default 1800;
+    /// capped at 3600 (provisional, dispatch clause 9). Server-enforced via
+    /// kill-on-timeout; never a caller-negotiated relaxation of the cap.
+    #[serde(
+        default,
+        deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
+    )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
+    pub timeout_secs: Option<u64>,
 }
 
 // ─── Facade: tachi_staff (external staffing via canonical dispatch kernel) ────

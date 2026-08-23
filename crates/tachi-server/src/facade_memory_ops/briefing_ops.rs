@@ -392,7 +392,10 @@ pub(crate) async fn handle_memory_briefing(
     let mut warnings: Vec<String> = Vec::new();
     let board = slim_kanban(parse_json_or_empty(board_res?));
     let checkpoints = json!(checkpoints_res);
-    let verification = crate::verify_ops::recent_verification_summaries(verification_cap);
+    let verification = crate::verify_ops::recent_verification_summaries(
+        &server.tachi_home_dir(),
+        verification_cap,
+    );
     let wiki_counts: Value = match wiki_counts_res {
         Ok(counts) => counts,
         Err(err) => {
