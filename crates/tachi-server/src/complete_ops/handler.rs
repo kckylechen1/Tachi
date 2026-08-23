@@ -468,20 +468,28 @@ fn pause_managed_completion_after_admission(dispatch_id: Option<&str>) {
     }
 }
 
-fn durable_eval_memory_id(save_json: &Value) -> Result<String, &'static str> {
+#[derive(Debug, PartialEq, Eq)]
+enum CompletionEvalSave {
+    Durable(String),
+    NotRecorded,
+}
+
+fn classify_completion_eval_save(save_json: &Value) -> Result<CompletionEvalSave, &'static str> {
+    if let Some(id) = save_json
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    {
+        return Ok(CompletionEvalSave::Durable(id.to_string()));
+    }
     if save_json
         .get("saved")
         .and_then(Value::as_bool)
         .is_some_and(|saved| !saved)
     {
-        return Err("completion eval was not durably recorded");
+        return Ok(CompletionEvalSave::NotRecorded);
     }
-    save_json
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_string)
-        .ok_or("completion eval response omitted its durable id")
+    Err("completion eval response omitted its durable id")
 }
 
 /// Persist the resolved close in the dispatch's own run receipt before
@@ -900,12 +908,65 @@ pub(crate) async fn handle_tachi_complete(
     let save_json: serde_json::Value = serde_json::from_str(&save_result)
         .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
 
-    // A successful transport result is not proof of a durable eval. Save
-    // validation and dedup refusals are represented as JSON `saved:false`;
-    // never manufacture an id and let that phantom proceed into outcomes.
-    let eval_memory_id = match durable_eval_memory_id(&save_json) {
-        Ok(id) => id,
-        Err(error) => return Err(error.to_string()),
+    // A duplicate save can truthfully return saved:false with the existing
+    // durable id. Validation/capture rejection has no id and must never be
+    // projected as an eval, outcome, receipt, or terminal completion.
+    let eval_memory_id = match classify_completion_eval_save(&save_json)? {
+        CompletionEvalSave::Durable(id) => id,
+        CompletionEvalSave::NotRecorded if admission_token.is_some() => {
+            return Err("completion eval was not durably recorded".to_string());
+        }
+        CompletionEvalSave::NotRecorded => {
+            let pipeline_status = json!({
+                "reason": "completion eval not recorded",
+                "dispatch_outcome": "skipped (completion eval not recorded)",
+                "adjudication": "skipped (completion eval not recorded)",
+                "completion_receipt": "skipped (completion eval not recorded)",
+                "kanban_update": "skipped (completion eval not recorded)",
+                "continuity_events": "skipped (completion eval not recorded)",
+                "pattern_feedback": "skipped (completion eval not recorded)",
+                "dispatch_completion_link": "skipped (completion eval not recorded)",
+                "post_complete_hooks": "skipped (completion eval not recorded)",
+                "signature_recording": crate::signature_evidence::record_complete_signatures(server, &params),
+                "precedent_recording": crate::precedent_ops::record_complete_rulings(server, &params, project_explicit).await,
+                "precedent_candidate_decomposition": crate::precedent_candidate_ops::record_complete_precedent_candidates(
+                    server,
+                    &params,
+                    project_explicit,
+                )
+                .await,
+            });
+            let response = shape_complete_response(
+                json!({
+                    "recorded": false,
+                    "reason": "completion eval not recorded",
+                    "task_id": task_id,
+                    "task": safe_task,
+                    "agent": safe_agent,
+                    "path": path,
+                    "outcome": outcome_norm,
+                    "dispatch_id": params.dispatch_id,
+                    "profile": params.profile,
+                    "risk": params.risk,
+                    "quality_score": params.quality_score,
+                    "flow_id": params.flow_id,
+                    "issue_ref": params.issue_ref,
+                    "pr_ref": params.pr_ref,
+                    "evidence_refs": safe_evidence_refs,
+                    "tests_run": safe_tests_run,
+                    "diff_present": diff_present,
+                    "subagent_count": params.subagents.len(),
+                    "subagents": safe_subagents,
+                    "eval_entry": save_json,
+                    "pipeline": pipeline_status,
+                    "secret_redactions": secret_redactions,
+                }),
+                params.format.as_deref(),
+            );
+            return serde_json::to_string(&response).map_err(|error| {
+                format!("Failed to serialize nonrecorded completion bundle: {error}")
+            });
+        }
     };
     managed_admission.verify()?;
 
@@ -1718,6 +1779,93 @@ mod tests {
             0,
             "capture-gate rejection must not leave an eval row"
         );
+    }
+
+    #[test]
+    fn completion_eval_save_classifies_duplicate_id_before_saved_flag() {
+        assert_eq!(
+            classify_completion_eval_save(&json!({
+                "saved": false,
+                "id": "existing-eval-memory",
+            }))
+            .expect("duplicate response classifies"),
+            CompletionEvalSave::Durable("existing-eval-memory".to_string())
+        );
+        assert_eq!(
+            classify_completion_eval_save(&json!({"saved": false}))
+                .expect("capture rejection classifies"),
+            CompletionEvalSave::NotRecorded
+        );
+    }
+
+    #[tokio::test]
+    async fn unmanaged_capture_gate_saved_false_returns_truthful_nonrecorded_bundle() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260824T000000Z-unmanaged-capture-reject";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let status_path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        let mut status: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read seeded unmanaged status"),
+        )
+        .expect("parse seeded unmanaged status");
+        let status_object = status.as_object_mut().expect("seeded status object");
+        status_object.remove("execution_classification");
+        status_object.remove("lifecycle_owner");
+        std::fs::write(&status_path, status.to_string()).expect("persist unmanaged status");
+        let _capture_gate = CaptureGateEnforceGuard::new();
+
+        let mut params = managed_completion_params(dispatch_id);
+        params.task_id = Some("unmanaged-capture-gate-reject".to_string());
+        params.task = "x".to_string();
+        params.agent = "x".to_string();
+        params.format = Some("full".to_string());
+        let response: Value = serde_json::from_str(
+            &handle_tachi_complete(&server, params, false)
+                .await
+                .expect("unmanaged capture rejection returns a truthful bundle"),
+        )
+        .expect("nonrecorded completion response JSON");
+        assert_eq!(response["recorded"], false);
+        assert_eq!(response["reason"], "completion eval not recorded");
+        assert_eq!(response["eval_entry"]["saved"], false);
+        for skipped in [
+            "dispatch_outcome",
+            "adjudication",
+            "completion_receipt",
+            "kanban_update",
+            "continuity_events",
+            "pattern_feedback",
+            "dispatch_completion_link",
+            "post_complete_hooks",
+        ] {
+            assert_eq!(
+                response["pipeline"][skipped], "skipped (completion eval not recorded)",
+                "{skipped} must not run without a durable eval id"
+            );
+        }
+        for sidecar in [
+            "signature_recording",
+            "precedent_recording",
+            "precedent_candidate_decomposition",
+        ] {
+            assert!(
+                response["pipeline"].get(sidecar).is_some(),
+                "{sidecar} remains a best-effort caller-supplied sidecar"
+            );
+        }
+        assert_eq!(dispatch_outcome_count(&server, dispatch_id), 0);
+        assert_eq!(dispatch_adjudication_count(&server, dispatch_id), 0);
+        assert_eq!(eval_memory_count(&server, dispatch_id), 0);
+        let after: Value =
+            serde_json::from_slice(&std::fs::read(&status_path).expect("read nonrecorded status"))
+                .expect("parse nonrecorded status");
+        assert!(after.get("completion_recovery").is_none());
+        assert!(after.get("resolved_completion").is_none());
+        assert_eq!(after["state"], "TASK_STATE_WORKING");
     }
 
     #[cfg(unix)]
