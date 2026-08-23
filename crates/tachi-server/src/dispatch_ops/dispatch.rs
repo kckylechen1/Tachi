@@ -136,6 +136,8 @@ mod credentials;
 mod dedupe;
 mod execution;
 #[cfg(test)]
+pub(crate) use self::managed_materialization_barrier::install_managed_credential_materialization_barrier;
+#[cfg(test)]
 pub(crate) use execution::background_dispatch_cleanup_complete;
 #[cfg(test)]
 pub(crate) use execution::install_managed_credential_cleanup_failure;
@@ -148,6 +150,73 @@ mod recovery;
 mod response_helpers;
 mod start;
 mod workspace_setup;
+
+#[cfg(test)]
+mod managed_materialization_barrier {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{mpsc, Mutex, OnceLock};
+
+    struct Barrier {
+        entered: mpsc::SyncSender<PathBuf>,
+        release: mpsc::Receiver<()>,
+    }
+
+    pub(crate) struct Guard(PathBuf);
+
+    static BARRIERS: OnceLock<Mutex<HashMap<PathBuf, Barrier>>> = OnceLock::new();
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Some(barriers) = BARRIERS.get() {
+                barriers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&self.0);
+            }
+        }
+    }
+
+    pub(crate) fn install_managed_credential_materialization_barrier(
+        run_root: &Path,
+    ) -> (Guard, mpsc::Receiver<PathBuf>, mpsc::SyncSender<()>) {
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let key = run_root.to_path_buf();
+        let previous = BARRIERS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                key.clone(),
+                Barrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            );
+        assert!(
+            previous.is_none(),
+            "materialization barrier already installed for run root"
+        );
+        (Guard(key), entered_rx, release_tx)
+    }
+
+    pub(crate) fn pause_after_managed_credential_materialization(workspace_dir: &Path) {
+        let Some(run_root) = workspace_dir.parent() else {
+            return;
+        };
+        let barrier = BARRIERS.get().and_then(|barriers| {
+            barriers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(run_root)
+        });
+        if let Some(barrier) = barrier {
+            let _ = barrier.entered.send(workspace_dir.to_path_buf());
+            let _ = barrier.release.recv();
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -922,6 +991,9 @@ async fn launch_canonical_dispatch(
         }
     };
 
+    #[cfg(test)]
+    managed_materialization_barrier::pause_after_managed_credential_materialization(&workspace_dir);
+
     // Register managed-custom control before task scheduling.
     let (execution, managed_run_guard) =
         if managed_custom_eligible && managed_control_origin == ManagedControlOrigin::StaffFacade {
@@ -945,7 +1017,30 @@ async fn launch_canonical_dispatch(
             if let Err(error) =
                 crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
             {
-                drop(guard);
+                let result = format!("managed custom classification failed: {error}");
+                let _ = crate::utils::write_owner_only_file_atomic(
+                    &workspace_dir.join("result.md"),
+                    result.as_bytes(),
+                );
+                let _ = write_status_json(
+                    &workspace_dir,
+                    &dispatch_id,
+                    v2,
+                    plan_generated_at.as_deref(),
+                    None,
+                    if v2 { "approved" } else { "n/a" },
+                    None,
+                    plan_duration_ms,
+                    None,
+                    plan_duration_ms,
+                    Some(json!({
+                        "agent": resolved_assignment.selected_worker,
+                        "state": "TASK_STATE_FAILED",
+                        "updated_at": Utc::now().to_rfc3339(),
+                        "result_written": true,
+                        "classification_error": error,
+                    })),
+                );
                 let _ = server.with_global_store(|store| {
                     cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
                 });
@@ -957,6 +1052,14 @@ async fn launch_canonical_dispatch(
                     request.project.as_deref(),
                 )
                 .await;
+                crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                    server,
+                    &dispatch_id,
+                    "managed_custom_classification",
+                    Some(resolved_assignment.selected_worker.as_str()),
+                    request.project.as_deref(),
+                );
+                drop(guard);
                 return Err(error);
             }
             let execution = match execution {

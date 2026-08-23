@@ -844,6 +844,103 @@ pub(crate) mod tests {
             .with_named_project_store(cleanup_project, |_| Ok(()))
             .expect("initialize named project store");
 
+        // Classification persistence fails only after the real OpenCode
+        // credential overlay exists. The keyed event gives this test the exact
+        // run directory without a timing probe, then injects one write failure
+        // for that run before the production registration branch continues.
+        let materialization_root = dispatch_runs_root();
+        let (_materialization_barrier, materialized, materialization_release) =
+            crate::dispatch_ops::install_managed_credential_materialization_barrier(
+                &materialization_root,
+            );
+        let mut classification_request = staff_request(cleanup_project);
+        classification_request.profile = Some("opencode_builder".to_string());
+        classification_request.worker = Some("custom".to_string());
+        classification_request.flow_id = Some("flow_1825_classification_failure".to_string());
+        let classification_server = server.clone();
+        let classification_start = tokio::spawn(async move {
+            staff_start(&classification_server, classification_request).await
+        });
+        let classification_dir = tokio::task::spawn_blocking(move || {
+            materialized
+                .recv()
+                .expect("credential materialization event")
+        })
+        .await
+        .expect("credential materialization event join");
+        let classification_id = classification_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("classified run dispatch id")
+            .to_string();
+        assert!(
+            classification_dir
+                .join("credentials/opencode.json")
+                .exists(),
+            "the keyed event proves the real OpenCode credential overlay exists before failure"
+        );
+        let _classification_failure =
+            crate::managed_run_control::fail_next_managed_custom_start_status_write(
+                &classification_dir,
+            );
+        materialization_release
+            .send(())
+            .expect("release classification after failure injection");
+        let classification_error = classification_start
+            .await
+            .expect("classification start join")
+            .expect_err("injected classification persistence must reject Staff launch");
+        assert!(classification_error
+            .contains("injected managed custom classification persistence failure"));
+        let classification_status: Value = serde_json::from_slice(
+            &std::fs::read(classification_dir.join("status.json"))
+                .expect("classification failure status"),
+        )
+        .expect("classification failure status JSON");
+        assert_eq!(
+            terminal_staff_state(&classification_status),
+            "TASK_STATE_FAILED"
+        );
+        assert!(
+            std::fs::read_to_string(classification_dir.join("result.md"))
+                .expect("classification failure result")
+                .contains("managed custom classification failed")
+        );
+        assert!(
+            !classification_dir.join("credentials/opencode.json").exists(),
+            "classification failure must clean the materialized OpenCode overlay before registry drop"
+        );
+        assert!(!server.managed_run_controls.contains(&classification_id));
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, &classification_id).await,
+            Some("TASK_STATE_FAILED".to_string())
+        );
+        let classification_outcomes: i64 = server
+            .with_named_project_store_read(cleanup_project, |store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [&classification_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count classification failure outcomes");
+        assert_eq!(classification_outcomes, 1);
+        let classification_flow_lock_dir =
+            crate::task_lifecycle::run_dir_for_flow_id("flow_1825_classification_failure")
+                .expect("valid classification failure flow run directory")
+                .join(".dispatch-dedupe");
+        assert!(
+            !classification_flow_lock_dir.exists()
+                || std::fs::read_dir(&classification_flow_lock_dir)
+                    .expect("classification flow lock directory")
+                    .next()
+                    .is_none(),
+            "classification failure must release the flow dispatch slot"
+        );
+
         // Pre-spawn: the real Staff launch has registered its managed owner
         // and accepted cancellation, but the production runner has not yet
         // called Command::spawn. Releasing the keyed barrier lets that runner

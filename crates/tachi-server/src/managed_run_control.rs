@@ -10,6 +10,61 @@ use tokio::sync::{mpsc, oneshot};
 
 const CONTROL_CHANNEL_CAPACITY: usize = 1;
 
+#[cfg(test)]
+static MANAGED_CUSTOM_START_WRITE_FAILURES: std::sync::OnceLock<
+    Mutex<HashMap<std::path::PathBuf, usize>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct ManagedCustomStartWriteFailureGuard(std::path::PathBuf);
+
+#[cfg(test)]
+impl Drop for ManagedCustomStartWriteFailureGuard {
+    fn drop(&mut self) {
+        if let Some(failures) = MANAGED_CUSTOM_START_WRITE_FAILURES.get() {
+            failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_managed_custom_start_status_write(
+    run_dir: &std::path::Path,
+) -> ManagedCustomStartWriteFailureGuard {
+    let key = run_dir.to_path_buf();
+    let previous = MANAGED_CUSTOM_START_WRITE_FAILURES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key.clone(), 1);
+    assert!(
+        previous.is_none(),
+        "managed start failure already installed for run"
+    );
+    ManagedCustomStartWriteFailureGuard(key)
+}
+
+#[cfg(test)]
+fn managed_custom_start_write_failure_injected(run_dir: &std::path::Path) -> bool {
+    let Some(failures) = MANAGED_CUSTOM_START_WRITE_FAILURES.get() else {
+        return false;
+    };
+    let mut failures = failures
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(remaining) = failures.get_mut(run_dir) else {
+        return false;
+    };
+    *remaining -= 1;
+    if *remaining == 0 {
+        failures.remove(run_dir);
+    }
+    true
+}
+
 #[derive(Default)]
 pub(crate) struct ManagedRunControlRegistry {
     entries: Mutex<HashMap<String, Entry>>,
@@ -343,6 +398,10 @@ pub(crate) fn mark_managed_custom_start(
     crate::managed_run_control::advance_status_revision(object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|e| format!("serialize managed custom status: {e}"))?;
+    #[cfg(test)]
+    if managed_custom_start_write_failure_injected(run_dir) {
+        return Err("injected managed custom classification persistence failure".to_string());
+    }
     crate::utils::write_owner_only_file_atomic(&path, &body)
         .map_err(|e| format!("persist managed custom classification: {e}"))
 }
@@ -1435,7 +1494,7 @@ mod issue_1825_status_revision_writer_regression_tests {
             (
                 "resolved-completion persistence",
                 include_str!("complete_ops/handler.rs"),
-                "persist_resolved_completion_receipt_at",
+                "persist_resolved_completion_receipt_at_with_admission",
             ),
             (
                 "pending-recovery persistence",

@@ -480,12 +480,39 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         if managed_cancellation_confirmed {
             receipt_terminal_state = Some("TASK_STATE_CANCELED");
         }
+        if !managed_cancellation_confirmed {
+            match completion_receipt_state_after_admission(
+                &workspace_dir_for_spawn,
+                watchdog_interval,
+            )
+            .await
+            {
+                Ok(CompletionReceiptState::Terminal(receipt_state)) => {
+                    receipt_terminal_state = Some(receipt_state);
+                }
+                Ok(CompletionReceiptState::PendingRecovery) => pending_completion_recovery = true,
+                Ok(CompletionReceiptState::Open) => {}
+                Ok(CompletionReceiptState::AdmissionInProgress) => {
+                    unreachable!("admission wait resolves")
+                }
+                Err(error) => receipt_read_error = Some(error),
+            }
+        }
         for _ in 0..watchdog_polls {
-            if managed_cancellation_confirmed {
+            if managed_cancellation_confirmed
+                || receipt_terminal_state.is_some()
+                || pending_completion_recovery
+                || receipt_read_error.is_some()
+            {
                 break;
             }
             tokio::time::sleep(watchdog_interval).await;
-            match completion_receipt_state(&workspace_dir_for_spawn) {
+            match completion_receipt_state_after_admission(
+                &workspace_dir_for_spawn,
+                watchdog_interval,
+            )
+            .await
+            {
                 Ok(CompletionReceiptState::Terminal(receipt_state)) => {
                     receipt_terminal_state = Some(receipt_state);
                     break;
@@ -493,6 +520,9 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 Ok(CompletionReceiptState::PendingRecovery) => {
                     pending_completion_recovery = true;
                     break;
+                }
+                Ok(CompletionReceiptState::AdmissionInProgress) => {
+                    unreachable!("admission wait resolves")
                 }
                 Ok(CompletionReceiptState::Open) => {}
                 Err(error) => {
@@ -514,11 +544,19 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             && !pending_completion_recovery
             && receipt_read_error.is_none()
         {
-            match completion_receipt_state(&workspace_dir_for_spawn) {
+            match completion_receipt_state_after_admission(
+                &workspace_dir_for_spawn,
+                watchdog_interval,
+            )
+            .await
+            {
                 Ok(CompletionReceiptState::Terminal(receipt_state)) => {
                     receipt_terminal_state = Some(receipt_state)
                 }
                 Ok(CompletionReceiptState::PendingRecovery) => pending_completion_recovery = true,
+                Ok(CompletionReceiptState::AdmissionInProgress) => {
+                    unreachable!("admission wait resolves")
+                }
                 Ok(CompletionReceiptState::Open) => {}
                 Err(error) => receipt_read_error = Some(error),
             }
@@ -1266,6 +1304,7 @@ fn terminal_status_state(
 enum CompletionReceiptState {
     Terminal(&'static str),
     PendingRecovery,
+    AdmissionInProgress,
     Open,
 }
 
@@ -1294,11 +1333,10 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
         .and_then(Value::as_str)
     {
         return Ok(if recovery_status == "completion_admitted" {
-            // This is only a volatile handler admission fence. A real
-            // background terminal owner must be allowed to supersede it;
-            // otherwise a later handler rollback can erase the sole marker
-            // and strand the run in WORKING.
-            CompletionReceiptState::Open
+            // A handler holding the private registry lease owns all
+            // irreversible completion writes. The terminal owner waits for
+            // that lease to resolve instead of racing an eval/outcome receipt.
+            CompletionReceiptState::AdmissionInProgress
         } else {
             CompletionReceiptState::PendingRecovery
         });
@@ -1360,13 +1398,27 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
     })
 }
 
+async fn completion_receipt_state_after_admission(
+    run_dir: &std::path::Path,
+    poll_interval: Duration,
+) -> Result<CompletionReceiptState, String> {
+    loop {
+        match completion_receipt_state(run_dir)? {
+            CompletionReceiptState::AdmissionInProgress => tokio::time::sleep(poll_interval).await,
+            state => return Ok(state),
+        }
+    }
+}
+
 #[cfg(test)]
 fn resolved_completion_terminal_state(
     run_dir: &std::path::Path,
 ) -> Result<Option<&'static str>, String> {
     Ok(match completion_receipt_state(run_dir)? {
         CompletionReceiptState::Terminal(state) => Some(state),
-        CompletionReceiptState::PendingRecovery | CompletionReceiptState::Open => None,
+        CompletionReceiptState::PendingRecovery
+        | CompletionReceiptState::AdmissionInProgress
+        | CompletionReceiptState::Open => None,
     })
 }
 
