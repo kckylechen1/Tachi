@@ -2430,6 +2430,8 @@ mod tests {
             project_db: Arc::new(StdRwLock::new(None)),
             attached_project_dbs: Arc::new(StdRwLock::new(HashMap::new())),
             project_attach_init_gate: Arc::new(StdMutex::new(())),
+            attach_pause_hook: Arc::new(StdMutex::new(None)),
+            activation_at_gate_observer: Arc::new(StdMutex::new(None)),
             schema_migration: MigrationAuthority::Deny,
             // Runtime unit tests assert routing/locking, not tuning: the pure
             // default is the honest stand-in for a host that injected nothing.
@@ -3563,6 +3565,1176 @@ mod tests {
         );
 
         drop(entry0_state_before);
+        let _ = std::fs::remove_dir_all(temp);
+    }
+    // ----------------------------------------------------------------------
+    // issue #1588 — the daemon locked its own saves out because a named-project
+    // attach for the BOUND project DB's own file opened a second SQLite writer
+    // connection, leaving SQLite file locks as the only arbiter between the two.
+    //
+    // FIX-A routes the named path to the bound store's single mutex when the
+    // canonicalized paths match. T1/T2 are the red/green discriminators; T3/T5
+    // are baseline sanity (green on both sides); T4 (added with FIX-B) pins the
+    // write-hold warn.
+    // ----------------------------------------------------------------------
+
+    /// A MemoryEntry shaped like the crate's write-contention benchmark uses,
+    /// with a caller-unique id. Valid RFC3339 literal timestamp; the benchmark
+    /// deliberately avoids a `chrono` dep for test stamps.
+    fn test_memory_entry(id: &str) -> memcore::MemoryEntry {
+        memcore::MemoryEntry {
+            id: id.to_string(),
+            path: "/1588".to_string(),
+            summary: "1588 write-lock repro".to_string(),
+            text: "1588 write-lock repro".to_string(),
+            importance: 0.3,
+            timestamp: "2026-01-01T00:00:00.000Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "other".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "1588-test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
+            revision: 1,
+            metadata: serde_json::json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    /// Seed a project DB file stamped with the given role, so a later declared
+    /// claim of that same role passes the tachi#1579 identity check instead of
+    /// being refused as a role conflict.
+    fn seed_project_db(db_path: &Path, role: &str) {
+        std::fs::create_dir_all(db_path.parent().expect("project parent")).expect("project dir");
+        drop(
+            MemoryStore::open_with_label(db_path.to_str().expect("project utf8"), role)
+                .expect("seed project db"),
+        );
+    }
+
+    /// #1588 T2 and T4 both touch FIX-B's write-hold warn counter: T2's 35s
+    /// bound-store hold fires the warn, and T4 asserts exact counts around its
+    /// own writes. In the shared-process `cargo test --lib` runs they must not
+    /// overlap, or T2's warn can land inside T4's delta window. nextest's
+    /// per-test processes make this inert there.
+    static WRITER_LOCKOUT_TESTS_SERIAL: StdMutex<()> = StdMutex::new(());
+
+    /// #1588 FIX-A (T1, structural discriminator): a named-project attach for
+    /// the bound project DB's own physical file must return the SAME store
+    /// identity as the bound state — same store mutex Arc, so named-route
+    /// traffic serializes through the bound store's single mutex instead of a
+    /// second SQLite connection. Pre-fix this fails (a twin is opened).
+    #[test]
+    fn issue_1588_named_attach_aliases_bound_store_identity() {
+        let temp = unique_temp_dir("1588-alias-bound");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        let other_db = temp.join("other/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "named");
+        seed_project_db(&other_db, "other");
+        let runtime = test_runtime(global_db);
+        assert!(
+            runtime
+                .activate_project_db(project_db.clone())
+                .expect("bind project db"),
+            "a fresh runtime must have had no bound project yet"
+        );
+
+        let bound = runtime
+            .project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .expect("bound project db")
+            .clone();
+
+        let aliased = runtime
+            .attached_project_state(&project_db, StoreLabel::Declared("named"))
+            .expect("attach bound path");
+        assert!(
+            Arc::ptr_eq(&bound.store, &aliased.store),
+            "a named attach for the bound project DB's own file must reuse the \
+             bound store's mutex — a second connection to the same file is how \
+             the daemon locks its own saves out (#1588)"
+        );
+
+        let distinct = runtime
+            .attached_project_state(&other_db, StoreLabel::Declared("other"))
+            .expect("attach distinct path");
+        assert!(
+            !Arc::ptr_eq(&bound.store, &distinct.store),
+            "a genuinely different path must still open its own store"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// #1588 FIX-A (T2, behavioral red/green): with a bound project DB at P,
+    /// a named-route write to P must NOT contend at the SQLite layer against
+    /// the bound store's own open transaction. Thread A holds the bound
+    /// store's write lock via `with_project_store` for the full lockout
+    /// window; the main thread then writes the same file through the named
+    /// route. This test asserts the POST-FIX contract, so it is RED pre-fix
+    /// and GREEN post-fix (the discriminator).
+    ///
+    /// Pre-fix (no FIX-A): the named route uses a SECOND connection to the
+    /// same file. The write-path failure is deterministic but its exact site
+    /// depends on attach state:
+    ///   - a COLD attach under the held lock fails inside the twin OPEN
+    ///     (~5s, single SQLite busy wait — the open path's write-side schema
+    ///     work runs under BEGIN IMMEDIATE and has no `retry_memory_locked`
+    ///     loop);
+    ///   - a WARM attach (the twin already cached, which is the production
+    ///     steady state — the named project was attached earlier) reaches the
+    ///     UPSERT, whose `retry_memory_locked` loop exhausts its budget — 6
+    ///     attempts x 5s busy_timeout plus backoff sleeps ≈ 30.5s
+    ///     (memcore/src/db/open.rs:54-58: LOCK_RETRY_ATTEMPTS=6,
+    ///     BUSY_TIMEOUT_MS=5_000, LOCK_RETRY_MAX_ELAPSED_MS=30_000) — and
+    ///     errors "database is locked".
+    ///
+    /// To reproduce the frozen evidence (upsert retry exhaustion ≈ 31s, not
+    /// the attach-time ~5s), this test warms the attach with one no-op named
+    /// route call BEFORE the lock is taken, mirroring production's cached
+    /// twin.
+    ///
+    /// Post-fix: the named route aliases the bound store, so it blocks on the
+    /// bound store's mutex for the whole hold, then the upsert succeeds with
+    /// zero SQLite-level retries and the row is present — serialization, not
+    /// lockout.
+    #[test]
+    fn issue_1588_named_route_write_serialized_not_sqlite_locked() {
+        // Must exceed the named-route upsert's retry exhaustion (~30.5s, see
+        // the doc comment and memcore/src/db/open.rs:54-58) so the PRE-fix
+        // cached-twin upsert exhausts retries and errors instead of
+        // recovering inside the busy handler. It also makes the POST-fix
+        // mutex-serialization wait observable in the elapsed assertion.
+        const WRITER_HOLD_FOR_LOCKOUT: Duration = Duration::from_secs(35);
+
+        let _serial = WRITER_LOCKOUT_TESTS_SERIAL.lock().unwrap();
+        let temp = unique_temp_dir("1588-t2-lockout");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "named");
+        let runtime = Arc::new(test_runtime(global_db));
+        assert!(
+            runtime
+                .activate_project_db(project_db.clone())
+                .expect("bind project db"),
+            "a fresh runtime must have had no bound project yet"
+        );
+
+        // Warm the named attach BEFORE any write lock is held. Pre-fix this
+        // caches the twin (production steady state) so the lockout surfaces
+        // on the cached twin's UPSERT retry exhaustion; post-fix it is the
+        // FIX-A alias (a no-op). A cold attach under the held lock would fail
+        // earlier at the twin OPEN (~5s) instead — see the doc comment.
+        runtime
+            .with_path_store_with_label(&project_db, "named", |_store| Ok(()))
+            .expect("warm-up named attach");
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let holder_runtime = runtime.clone();
+        let holder_barrier = barrier.clone();
+        let holder = std::thread::spawn(move || {
+            holder_runtime
+                .with_project_store(|store| {
+                    store
+                        .connection()
+                        .execute_batch("BEGIN IMMEDIATE")
+                        .map_err(|e| e.to_string())?;
+                    holder_barrier.wait();
+                    std::thread::sleep(WRITER_HOLD_FOR_LOCKOUT);
+                    store
+                        .connection()
+                        .execute_batch("COMMIT")
+                        .map_err(|e| e.to_string())?;
+                    Ok(())
+                })
+                .expect("bound writer thread");
+        });
+
+        let entry = test_memory_entry("1588-named-route-write");
+        let backoffs_before = memcore::db::lock_retry_backoff_count();
+        barrier.wait();
+        let started = Instant::now();
+        let result = runtime.with_path_store_with_label(&project_db, "named", |store| {
+            store.upsert(&entry).map_err(|e| e.to_string())
+        });
+        let elapsed = started.elapsed();
+        let backoffs_observed = memcore::db::lock_retry_backoff_count() - backoffs_before;
+        holder.join().expect("holder thread");
+
+        // POST-FIX contract: the named write succeeds. Pre-fix this panics
+        // with the SQLite lock message (the RED evidence).
+        let () = result.expect(
+            "named-route write to the bound project file must succeed — pre-fix \
+             it errors with the SQLite lock message instead (see the failure \
+             above for the RED evidence)",
+        );
+
+        // The named route serialized through the bound store's mutex for the
+        // full lockout window instead of contending at the SQLite layer —
+        // proving serialization, not lockout.
+        assert!(
+            elapsed >= WRITER_HOLD_FOR_LOCKOUT - Duration::from_secs(2),
+            "named write must have waited out the bound store's hold (mutex \
+             serialization), took only {elapsed:?}"
+        );
+        assert_eq!(
+            backoffs_observed, 0,
+            "post-fix the upsert must succeed on its first SQLite attempt — \
+             any explicit retry backoff means SQLite-layer contention \
+             (observed {backoffs_observed})"
+        );
+
+        let visible = runtime
+            .with_project_store_read(|store| {
+                store
+                    .get(&entry.id)
+                    .map(|row| row.is_some())
+                    .map_err(|e| e.to_string())
+            })
+            .expect("bound-store read back");
+        assert!(
+            visible,
+            "row written via the named route must be visible through the bound \
+             store"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// #1588 T3 (post-fix-only sanity, green pre-fix too): a named-route write
+    /// to the bound path succeeds and is visible through the bound store, with
+    /// the declared label preserved on the handle.
+    #[test]
+    fn issue_1588_named_route_write_visible_via_bound_read() {
+        let temp = unique_temp_dir("1588-t3-visible");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "named");
+        let runtime = test_runtime(global_db);
+        assert!(
+            runtime
+                .activate_project_db(project_db.clone())
+                .expect("bind project db"),
+            "a fresh runtime must have had no bound project yet"
+        );
+
+        let entry = test_memory_entry("1588-t3-visible");
+        runtime
+            .with_path_store_with_label(&project_db, "named", |store| {
+                assert_eq!(
+                    store.db_label(),
+                    "named",
+                    "the declared label must be preserved on the handle"
+                );
+                store.upsert(&entry).map_err(|e| e.to_string())
+            })
+            .expect("named-route write to the bound path");
+
+        let visible = runtime
+            .with_project_store_read(|store| {
+                store
+                    .get(&entry.id)
+                    .map(|row| row.is_some())
+                    .map_err(|e| e.to_string())
+            })
+            .expect("bound-store read");
+        assert!(
+            visible,
+            "row written via the named route must be visible through the bound \
+             store"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// #1588 T5 (baseline): with NO bound project DB, a named attach behaves
+    /// exactly as before — it opens its own twin store (distinct Arc identity
+    /// per path, cache hit still returns the same twin), never an alias.
+    #[test]
+    fn issue_1588_named_attach_without_bound_opens_twin() {
+        let temp = unique_temp_dir("1588-t5-no-bound");
+        let global_db = temp.join("global/memory.db");
+        let first_db = temp.join("first/.tachi/memory.db");
+        let second_db = temp.join("second/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&first_db, "first");
+        seed_project_db(&second_db, "second");
+        // Deliberately NO activate_project_db: no bound project DB.
+        let runtime = test_runtime(global_db);
+
+        let first = runtime
+            .attached_project_state(&first_db, StoreLabel::Declared("first"))
+            .expect("attach first path");
+        let second = runtime
+            .attached_project_state(&second_db, StoreLabel::Declared("second"))
+            .expect("attach second path");
+        assert!(
+            !Arc::ptr_eq(&first.store, &second.store),
+            "without a bound project DB every named path must open its own twin \
+             store"
+        );
+
+        let first_again = runtime
+            .attached_project_state(&first_db, StoreLabel::Declared("first"))
+            .expect("re-attach first path");
+        assert!(
+            Arc::ptr_eq(&first.store, &first_again.store),
+            "a cache hit must still return the same twin state"
+        );
+
+        // The twin is a real store: a named write through it works.
+        let entry = test_memory_entry("1588-t5-twin-write");
+        runtime
+            .with_path_store_with_label(&first_db, "first", |store| {
+                store.upsert(&entry).map_err(|e| e.to_string())
+            })
+            .expect("named write on an unbound runtime");
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// #1588 FIX-B (T4, re-anchored R8/W1): a writer hold beyond the threshold
+    /// produces exactly TWO forensics warns in two distinct phases — the
+    /// in-hold watchdog tier fires at the threshold while the closure is
+    /// STILL holding the lock (a forever-hold is never silent), and the Drop
+    /// tier fires with the final total after the hold returns. A sub-threshold
+    /// hold produces none. The warn path bumps an internal counter (no
+    /// subscriber needed), and the threshold is shrunk via the test override.
+    #[test]
+    fn issue_1588_write_hold_warns_only_beyond_threshold() {
+        // Serialized against T2: T2's 35s bound-store hold also fires the
+        // write-hold warns (in-hold + post-hold, bumping this same counter);
+        // overlapping with the 50ms override here would land T2's warns inside
+        // this test's delta window.
+        let _serial = WRITER_LOCKOUT_TESTS_SERIAL.lock().unwrap();
+        let temp = unique_temp_dir("1588-t4-write-hold-warn");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = Arc::new(test_runtime(global_db));
+
+        let baseline = WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed);
+
+        // Shrink the threshold so a sub-second hold is measurable.
+        WRITE_HOLD_WARN_THRESHOLD_OVERRIDE_MILLIS.store(50, Ordering::Relaxed);
+
+        // Phase A — the fast path stays silent: a sub-threshold hold (5ms <
+        // 50ms) must warn 0 times. The in-hold watchdog wakes after the
+        // threshold, finds the hold already disarmed by the guard's Drop, and
+        // fires nothing.
+        runtime
+            .with_global_store(|_store| {
+                std::thread::sleep(Duration::from_millis(5));
+                Ok(())
+            })
+            .expect("fast write");
+        assert_eq!(
+            WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed) - baseline,
+            0,
+            "a sub-threshold hold must not warn"
+        );
+
+        // Phase B — a slow-returning hold: the in-hold watchdog fires at the
+        // 50ms threshold while the 200ms closure is still sleeping, and the
+        // Drop guard fires again at release with the final total — exactly
+        // two events, distinct phases.
+        runtime
+            .with_global_store(|_store| {
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(())
+            })
+            .expect("slow write");
+        assert_eq!(
+            WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed) - baseline,
+            2,
+            "a 200ms hold with a 50ms threshold must warn twice: the in-hold \
+             watchdog tier at the threshold plus the post-hold Drop tier at \
+             release (two events, distinct phases)"
+        );
+
+        // Phase C — the in-hold phase observation (R8/W1 re-anchor): the
+        // closure parks on a channel while holding the store lock; the test
+        // must observe the in-hold warn fire BEFORE releasing the closure.
+        // The watchdog fires at the threshold (~50ms in), bumping the counter
+        // while the closure is still blocked — pre-watchdog this observation
+        // cannot happen (no warn until Drop, and Drop cannot run while the
+        // closure is parked), so this phase is RED on the pre-repair head and
+        // GREEN with the watchdog.
+        let before_inhold = WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let holder_runtime = runtime.clone();
+        let holder = std::thread::spawn(move || {
+            holder_runtime
+                .with_global_store(|_store| {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv();
+                    Ok(())
+                })
+                .expect("parked write returns Ok after release")
+        });
+        held_rx
+            .recv()
+            .expect("closure must enter and hold the store lock");
+        // The closure is provably blocked INSIDE the hold: it sent `held` only
+        // after acquiring the store lock and cannot return until `release` is
+        // sent. The in-hold warn must bump the counter while it is blocked.
+        let inhold_deadline = Instant::now() + Duration::from_millis(50 * 20);
+        while WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed) - before_inhold == 0 {
+            assert!(
+                Instant::now() < inhold_deadline,
+                "the in-hold warn must fire while the closure is still blocked \
+                 (watchdog tier) — no counter bump observed within the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Release the closure: the Drop tier then fires with the final total.
+        let _ = release_tx.send(());
+        holder.join().expect("holder thread");
+        assert_eq!(
+            WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed) - before_inhold,
+            2,
+            "the parked over-threshold hold must warn twice: the in-hold tier \
+             (observed above while blocked) plus the post-hold Drop tier after \
+             release"
+        );
+
+        // Phase D — the unwind path: a panicking over-threshold closure still
+        // releases the store+gate guards during unwind, and the drop-guard's
+        // Drop runs after them and warns. The in-hold watchdog fires at the
+        // threshold while the panicking closure is still sleeping; the
+        // unwinding Drop-guard fires the post-hold tier — two events.
+        // Pre-repair (R3) the non-recorder path never reached its warn on
+        // panic, so this delta was 0 and the assertion was RED.
+        let before_panic = WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.with_global_store::<()>(|_store| {
+                std::thread::sleep(Duration::from_millis(200));
+                panic!("intentional panic for the write-hold warn on unwind (#1588 R3)")
+            })
+        }));
+        assert!(
+            panicked.is_err(),
+            "the panicking write must propagate its panic through with_global_store"
+        );
+        assert_eq!(
+            WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed) - before_panic,
+            2,
+            "a >threshold hold that panics must warn twice — the in-hold \
+             watchdog tier at the threshold plus the unwinding drop-guard tier \
+             (#1588 R3/W1)"
+        );
+
+        // Phase E — the RECORDER path (issue #1588 R8): with contention
+        // recording enabled, `with_global_store` takes the recorder branch,
+        // which pre-repair holds the store lock with post-hold-only timing —
+        // a forever-hold is silent there. Post-repair the same
+        // WriteHoldWatchdog is armed at store-lock acquisition. Park the
+        // closure on a channel while holding the store lock (same shape as
+        // Phase C): the in-hold warn must bump the counter while the closure
+        // is STILL blocked — pre-repair this observation cannot happen (no
+        // warn until `catch_unwind` returns, which requires the closure to
+        // return), so this phase is RED on the pre-repair head and GREEN with
+        // the watchdog armed on the recorder path.
+        let recorder = runtime.enable_global_contention_receipts();
+        let before_recorder = WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let holder_runtime = runtime.clone();
+        let holder = std::thread::spawn(move || {
+            holder_runtime
+                .with_global_store(|_store| {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv();
+                    Ok(())
+                })
+                .expect("parked recorder-path write returns Ok after release")
+        });
+        held_rx
+            .recv()
+            .expect("recorder-path closure must enter and hold the store lock");
+        // The closure is provably blocked INSIDE the hold (it sent `held`
+        // after acquiring the store lock and cannot return until `release` is
+        // sent). The in-hold warn must bump the counter while it is blocked.
+        let inhold_deadline = Instant::now() + Duration::from_millis(50 * 20);
+        while WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed) - before_recorder == 0 {
+            assert!(
+                Instant::now() < inhold_deadline,
+                "recorder path: the in-hold warn must fire while the closure \
+                 is still blocked (watchdog tier) — no counter bump observed \
+                 within the deadline (#1588 R8)"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Release the closure: the post-hold tier then fires with the final
+        // total.
+        let _ = release_tx.send(());
+        holder.join().expect("holder thread");
+        assert_eq!(
+            WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed) - before_recorder,
+            2,
+            "the parked over-threshold recorder-path hold must warn twice: the \
+             in-hold tier (observed above while blocked) plus the post-hold \
+             tier after release (#1588 R8)"
+        );
+
+        // The recorder itself must keep working: exactly one completed
+        // global_store write receipt, with the slow hold actually measured.
+        let receipts = recorder.drain();
+        assert_eq!(receipts.dropped_samples, 0);
+        assert_eq!(
+            receipts.receipts.len(),
+            1,
+            "the recorder path must still record the write receipt"
+        );
+        let receipt = &receipts.receipts[0];
+        assert_eq!(receipt.resource, "global_store");
+        assert_eq!(receipt.action, "write");
+        assert!(receipt.completed, "the released write completed Ok");
+        assert!(
+            receipt.resource_hold >= Duration::from_millis(50),
+            "the recorded hold must include the parked over-threshold duration \
+             (measured {}, threshold 50ms)",
+            receipt.resource_hold.as_millis()
+        );
+
+        WRITE_HOLD_WARN_THRESHOLD_OVERRIDE_MILLIS.store(0, Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// issue #1588 R1 (T6, red/green discriminator): activating a project DB
+    /// must EVICT any cached attached twin of the same physical file, and the
+    /// subsequent named route must alias the bound store instead of the
+    /// surviving twin. Pre-repair the twin is never evicted, so the
+    /// post-activation attach returns the cached twin — a DISTINCT store Arc
+    /// from the bound state, i.e. the exact second-writer topology that locked
+    /// the daemon out of its own saves.
+    #[test]
+    fn issue_1588_activate_evicts_cached_twin_and_aliases_bound() {
+        let temp = unique_temp_dir("1588-t6-evict-twin");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "named");
+        let runtime = test_runtime(global_db);
+
+        // Twin first: a named attach with no bound project caches a twin.
+        runtime
+            .with_path_store_with_label(&project_db, "named", |_store| Ok(()))
+            .expect("named attach before activation");
+        let key = project_db_cache_key(&project_db).expect("cache key");
+        assert!(
+            runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&key),
+            "pre-activation named attach must have cached a twin"
+        );
+
+        // Binding the same physical file must evict the twin.
+        assert!(
+            runtime
+                .activate_project_db(project_db.clone())
+                .expect("bind project db"),
+            "a fresh runtime must have had no bound project yet"
+        );
+        let bound = runtime
+            .project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .expect("bound project db")
+            .clone();
+        assert!(
+            !runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&key),
+            "activation must evict the cached twin of the bound file (#1588 R1)"
+        );
+
+        // Post-activation named attach: must alias the bound store, not the
+        // (pre-fix surviving) twin. Pre-repair the cache fast-path serves the
+        // twin, whose store Arc is distinct from the bound store's.
+        let aliased = runtime
+            .attached_project_state(&project_db, StoreLabel::Declared("named"))
+            .expect("attach bound path after activation");
+        assert!(
+            Arc::ptr_eq(&bound.store, &aliased.store),
+            "post-activation named attach must reuse the bound store's mutex — \
+             a distinct Arc means the cached twin survived activation and would \
+             lock the daemon out of its own saves (#1588 R1)"
+        );
+        assert!(
+            !runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&key),
+            "the alias path must not re-insert the bound file into the attached cache"
+        );
+
+        // Named-route write through the bound store works and is visible.
+        let entry = test_memory_entry("1588-t6-bound-write");
+        runtime
+            .with_path_store_with_label(&project_db, "named", |store| {
+                store.upsert(&entry).map_err(|e| e.to_string())
+            })
+            .expect("named write via the bound store after activation");
+        let visible = runtime
+            .with_project_store_read(|store| {
+                store
+                    .get(&entry.id)
+                    .map(|row| row.is_some())
+                    .map_err(|e| e.to_string())
+            })
+            .expect("bound-store read");
+        assert!(
+            visible,
+            "row written via the alias must be visible through the bound store"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// #1588 R6/T7-det-2: BACKSTOP budget for the T7 rendezvous waits — how
+    /// long main waits for the activation-at-gate probe to fire, and how
+    /// long it BLOCKINGLY waits on the activation completion channel while
+    /// A still holds the gate. The value is a deadlock backstop: the budget
+    /// exists only so a rendezvous stall (e.g. a regressed activation that
+    /// never reaches the gate) fails the suite with a timeout error instead
+    /// of hanging it. Post-repair the discrimination does not depend on it —
+    /// the checkpoint is a blocking `recv_timeout` whose RESULT is the
+    /// assertion, and the causal chain is (A holds gate) → (activation
+    /// cannot pass gate) → (completion send cannot fire) → recv MUST time
+    /// out, so any finite budget produces the same Err. On the PRE-repair
+    /// side the budget only bounds what was OBSERVED: the red evidence runs
+    /// (branch 1588-t7det-red-evidence @ 603156305/dfbd14ddc, plus the
+    /// oracle's independent reproduction) saw the completion arrive within
+    /// it, but schedule-complete pre-repair determinism is NOT claimed — an
+    /// adversarially descheduled activation tail can converge to the evicted
+    /// final state, and the incident-class deterministic pre-fix
+    /// discriminator is T2. Widen here (not inline) if a loaded machine
+    /// needs more slack to reach the rendezvous points.
+    const ACTIVATION_OBSERVATION_TIMEOUT: Duration = Duration::from_millis(500);
+
+    /// issue #1588 R4 (T7, race-window regression pin): activation must not
+    /// be able to bind+evict inside an in-flight attach's open→insert
+    /// window. Thread A attaches path P and parks at the test-only pause
+    /// hook after opening the twin but before caching it (still holding
+    /// `project_attach_init_gate`); the activation is requested while A is
+    /// parked at that rendezvous (causal — A sent `parked` only after the
+    /// open completed and cannot leave until main releases it), and A is
+    /// only released after the activation either completed or (post-repair)
+    /// blocked on the gate A holds.
+    ///
+    /// Pre-repair the activation has no gate to wait on. In the schedule the
+    /// red evidence runs OBSERVED, it binds and evicts the (then empty) cache
+    /// while A is parked, A then inserts its twin, and the twin survives the
+    /// bind — a second writer connection to the bound file that the next
+    /// named attach would serve from the cache. Schedule-complete pre-repair
+    /// determinism is NOT claimed for that ordering: an adversarially
+    /// descheduled activation tail can run after A's insert and evict the
+    /// twin itself (converging to the fixed final state); the
+    /// incident-class deterministic pre-fix discriminator is T2. Post-repair
+    /// the activation's bind+evict takes the same gate A holds, so it is
+    /// causally guaranteed to run after A's insert and evict the twin; the
+    /// final cache holds no twin and a subsequent named attach aliases the
+    /// bound store.
+    ///
+    /// Pinned post-repair semantics: A's already-returned in-flight twin is
+    /// NOT retroactively swapped — its Arc drains naturally after the
+    /// eviction (the eviction only removes the cache slot, exactly as
+    /// `evict_attached_twin_of_bound` documents). What must hold is that no
+    /// twin survives in the cache and that the next named attach for the
+    /// bound file aliases the bound store.
+    ///
+    /// R6/T7-det-2 causal checkpoint: the checkpoint no longer samples the
+    /// completion channel with `try_recv` (a bare sample can pass pre-repair
+    /// if main wakes immediately after the probe, before the activation's
+    /// uncontended tail runs — the completion arrives but is not yet
+    /// observable). The activation-at-gate probe fires after the activation's
+    /// real open completes, immediately before it attempts the attach gate;
+    /// main WAITS on the probe, then BLOCKS on the activation-completion
+    /// channel with `recv_timeout` while A still holds the gate, and the
+    /// recv's RESULT is the assertion: POST-repair this is a causal
+    /// lock-semantics guarantee — the happens-before chain (A holds gate) →
+    /// (activation cannot pass gate) → (completion send cannot fire) forces
+    /// the recv to time out (Err), and the backstop value does not
+    /// participate in the discrimination. PRE-repair the probe lands at the
+    /// equivalent about-to-install point in an activate with no gate and the
+    /// activation's post-probe tail is uncontended in-memory work that A's
+    /// hold cannot block — the recv returning Ok and the is_err() assertion
+    /// failing were OBSERVED repeatedly (red evidence branch
+    /// 1588-t7det-red-evidence @ 603156305/dfbd14ddc; the oracle's
+    /// independent run reproduced the failure too), but schedule-complete
+    /// pre-repair determinism is NOT claimed: an adversarially descheduled
+    /// activation tail can converge to the evicted final state. The
+    /// incident-class deterministic pre-fix discriminator is T2.
+    #[test]
+    fn issue_1588_activation_cannot_leave_twin_inside_inflight_attach_window() {
+        let temp = unique_temp_dir("1588-t7-race-attach-activate");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "named");
+        let runtime = test_runtime(global_db);
+
+        // Rendezvous points: `parked` (A → main: causal parking — sent only
+        // after the open completed, does NOT release A), `release` (main →
+        // A: the barrier that lets A insert), `at_gate` (activation → main:
+        // the probe — activation's real open has completed and it is about
+        // to attempt the attach gate A holds), and `activation_done`
+        // (activation thread → main). Main waits for `at_gate` (causal
+        // arrival at the gate's threshold), then BLOCKS on `activation_done`
+        // with `recv_timeout` while A is still parked — post-repair the recv
+        // must time out (Err, causal); pre-repair the completion was
+        // OBSERVED to arrive within the budget (Ok) in the red evidence
+        // runs, but schedule-complete red-side determinism is not claimed.
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        let release = Arc::new(Barrier::new(2));
+        runtime.set_attach_pause_hook_for_test(parked_tx, release.clone());
+        let (at_gate_tx, at_gate_rx) = std::sync::mpsc::channel();
+        runtime.set_activation_at_gate_observer_for_test(at_gate_tx);
+        let (activation_done_tx, activation_done_rx) = std::sync::mpsc::channel();
+
+        let attach_runtime = runtime.clone();
+        let attach_db = project_db.clone();
+        let attach_handle = std::thread::spawn(move || {
+            attach_runtime.attached_project_state(&attach_db, StoreLabel::Declared("named"))
+        });
+
+        // A is provably between open and insert: it sent `parked` only after
+        // opening the twin, and it cannot leave until main arrives at
+        // `release`. Observe without releasing.
+        parked_rx.recv().expect("attach thread parked");
+
+        let activate_runtime = runtime.clone();
+        let activate_db = project_db.clone();
+        let activate_handle = std::thread::spawn(move || {
+            let result = activate_runtime.activate_project_db(activate_db);
+            let _ = activation_done_tx.send(());
+            result
+        });
+
+        // WAIT for the probe: activation is now causally AT the attach gate —
+        // its real open completed and the gate acquisition is its very next
+        // step. `ACTIVATION_OBSERVATION_TIMEOUT` here is backstop-only
+        // deadlock protection; on the post-repair side the discriminating
+        // assertions do not depend on it.
+        at_gate_rx
+            .recv_timeout(ACTIVATION_OBSERVATION_TIMEOUT)
+            .expect("activation must reach the attach gate's threshold (probe fired)");
+
+        // While A still holds the gate, the activation must NOT complete
+        // within the observation budget — the recv MUST time out. This is a
+        // BLOCKING checkpoint, not a try_recv sample: post-repair the
+        // happens-before chain is (A holds gate) → (activation cannot pass
+        // gate) → (completion send cannot fire) → recv MUST time out (Err).
+        // That chain is a causal lock-semantics guarantee, so on the
+        // post-repair side any finite backstop value produces the same Err
+        // and the discrimination does not depend on the timeout.
+        // Pre-repair there is no gate and the probe fires at the equivalent
+        // about-to-install point; between the probe and the completion send
+        // there is only uncontended in-memory work (bind write + evict
+        // attempt on an empty cache) with NO lock acquisition that A's hold
+        // blocks — the completion arriving within the budget (recv Ok,
+        // is_err() failing) was OBSERVED repeatedly (red evidence branch
+        // 1588-t7det-red-evidence @ 603156305/dfbd14ddc; oracle's
+        // independent run reproduced it too). Schedule-complete pre-repair
+        // determinism is NOT claimed: an adversarially descheduled
+        // activation tail can converge to the evicted final state; the
+        // incident-class deterministic pre-fix discriminator is T2.
+        assert!(
+            activation_done_rx
+                .recv_timeout(ACTIVATION_OBSERVATION_TIMEOUT)
+                .is_err(),
+            "the racing activation must still be blocked on the attach gate \
+             A holds — a completion delivered within the observation budget \
+             means the activation ran to completion past the probe while A \
+             was parked inside its open→insert window, i.e. the gate \
+             serialization regressed and the bind+evict raced (or would \
+             race) an empty cache again (#1588 R6 T7-det-2)"
+        );
+
+        // Release A: its insert lands after the pre-repair eviction (which
+        // found the empty cache — the red runs observed this ordering) and
+        // before the post-repair bind+evict (gate ordering guarantees the
+        // activation waits for A's insert and then evicts the twin).
+        release.wait();
+        let attach_result = attach_handle.join().expect("attach thread panicked");
+        let activation_result = activate_handle.join().expect("activation thread panicked");
+
+        assert!(
+            activation_result.expect("activation succeeded"),
+            "a fresh runtime must have had no bound project yet"
+        );
+        let returned = attach_result.expect("attach succeeded");
+        let key = project_db_cache_key(&project_db).expect("cache key");
+        let bound = runtime
+            .project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .expect("bound project db installed by activation")
+            .clone();
+
+        // Post-repair: gate ordering causally guarantees the activation's
+        // eviction ran after A's insert, so the twin must be gone from the
+        // cache. Pre-repair: in the observed red schedule the eviction ran
+        // against the empty cache and A's twin survived — schedule-complete
+        // pre-repair determinism is not claimed (see the doc comment above);
+        // the assert below is the red/green discriminator.
+        assert!(
+            !runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&key),
+            "activation must not leave an attached twin of the bound file in \
+             the cache (#1588 R4): the eviction ran before this attach's \
+             insert, so its twin survived the bind and the next named attach \
+             would be served a second writer connection to the bound file"
+        );
+
+        // Pinned semantics: the in-flight attach's twin drains naturally (its
+        // Arc outlives the eviction); it is not retroactively swapped for the
+        // bound store.
+        assert!(
+            !Arc::ptr_eq(&bound.store, &returned.store),
+            "the in-flight attach's twin must drain naturally rather than be \
+             retroactively swapped; the eviction removes the cache slot, not \
+             the already-returned Arc (#1588 R4)"
+        );
+
+        // The next named attach for the bound file aliases the bound store.
+        let aliased = runtime
+            .attached_project_state(&project_db, StoreLabel::Declared("named"))
+            .expect("attach bound path after racing activation");
+        assert!(
+            Arc::ptr_eq(&bound.store, &aliased.store),
+            "a named attach after the racing activation must reuse the bound \
+             store's mutex — a distinct Arc means a twin survived and would \
+             lock the daemon out of its own saves (#1588 R4)"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// issue #1588 R5 (T8, red/green discriminator): replacing the bound
+    /// project DB with a different one must DEMOTE the outgoing bound state
+    /// into the attach cache under its canonical key (when no entry exists),
+    /// so a later attach for the demoted file reuses that same connection
+    /// instead of opening a fresh twin. Pre-repair the A→B→A sequence leaves
+    /// TWO live writer connections to A's file — the in-flight clone of the
+    /// old bound state plus the freshly opened attach — the exact topology
+    /// that locks the daemon out of its own saves. Post-repair the attach
+    /// returns the ORIGINAL state (Arc::ptr_eq with the pre-replacement
+    /// clone) and a write through it is visible through the original handle.
+    ///
+    /// Also covers the two boundary shapes of the demotion: an activation
+    /// with nothing previously bound must insert nothing (no demotion), and
+    /// re-binding a demoted path (A→B→A) must evict the cached demoted state
+    /// so the re-bound store is the single canonical connection for the file.
+    #[test]
+    fn issue_1588_bind_replacement_demotes_old_bound_state_not_twin() {
+        let temp = unique_temp_dir("1588-t8-demote");
+        let global_db = temp.join("global/memory.db");
+        let global_db_2 = temp.join("global-2/memory.db");
+        let global_db_3 = temp.join("global-3/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        std::fs::create_dir_all(global_db_2.parent().expect("global-2 parent"))
+            .expect("global-2 dir");
+        std::fs::create_dir_all(global_db_3.parent().expect("global-3 parent"))
+            .expect("global-3 dir");
+
+        // --- Phase 1: A→B replacement demotes A into the attach cache. ---
+        let project_db_a = temp.join("project-a/.tachi/memory.db");
+        let project_db_b = temp.join("project-b/.tachi/memory.db");
+        seed_project_db(&project_db_a, "project-a");
+        seed_project_db(&project_db_b, "project-b");
+        let runtime = test_runtime(global_db.clone());
+        assert!(
+            runtime
+                .activate_project_db(project_db_a.clone())
+                .expect("bind project db A"),
+            "a fresh runtime must have had no bound project yet"
+        );
+        let key_a = project_db_cache_key(&project_db_a).expect("cache key A");
+        assert!(
+            !runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&key_a),
+            "while A is bound a named attach aliases it and must not have been \
+             cached — the demotion below is what puts A into the cache (#1588 R5)"
+        );
+
+        // The pre-replacement clone: the named op on A holds this Arc across
+        // the replacement, which is the scenario that used to recreate a twin.
+        let original = runtime
+            .attached_project_state(&project_db_a, StoreLabel::Declared("project-a"))
+            .expect("named attach on the bound A (pre-replacement clone)");
+
+        // Replace the bound A with B. `was_none == false` pins that a demotion
+        // was due.
+        assert!(
+            !runtime
+                .activate_project_db(project_db_b.clone())
+                .expect("bind project db B"),
+            "replacing the bound A must report was_none == false"
+        );
+
+        // The post-replacement named attach for A must return the ORIGINAL
+        // state. Pre-repair it opens and caches a fresh twin — a DISTINCT Arc
+        // from the pre-replacement clone — which is the primary red/green
+        // discriminator of this test.
+        let attached_a = runtime
+            .attached_project_state(&project_db_a, StoreLabel::Declared("project-a"))
+            .expect("attach the demoted A after the replacement");
+        assert!(
+            Arc::ptr_eq(&original.store, &attached_a.store),
+            "the attach after A→B must return the ORIGINAL A state (Arc::ptr_eq \
+             with the pre-replacement clone), not a fresh twin — a distinct Arc \
+             means two writer connections to A's file are live (#1588 R5)"
+        );
+
+        // The demotion must have cached the ORIGINAL A state under A's key —
+        // pre-repair no entry exists here (the old bound state was simply
+        // dropped).
+        let cached_a = runtime
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key_a)
+            .map(|entry| entry.state.clone())
+            .expect(
+                "the demoted bound A must be the canonical attached state for its file (#1588 R5)",
+            );
+        assert!(
+            Arc::ptr_eq(&original.store, &cached_a.store),
+            "the demoted entry must be the same connection as the pre-replacement \
+             clone — a fresh state here is a second writer to A's file (#1588 R5)"
+        );
+
+        // A write through the post-replacement attach is visible through the
+        // original A handle: both are the same connection (same store mutex
+        // and read pool).
+        let entry = test_memory_entry("1588-t8-demoted-write");
+        runtime
+            .with_path_store_with_label(&project_db_a, "project-a", |store| {
+                store.upsert(&entry).map_err(|e| e.to_string())
+            })
+            .expect("write through the post-replacement attach");
+        let visible = {
+            let _gate = read_or_recover(&original.rw_gate, "project_rw_gate");
+            original.read_pool.with_store("project_read_pool", |store| {
+                store
+                    .get(&entry.id)
+                    .map(|row| row.is_some())
+                    .map_err(|e| e.to_string())
+            })
+        }
+        .expect("read via the original A handle");
+        assert!(
+            visible,
+            "a write through the post-replacement attach must be visible via \
+             the original A handle — a distinct connection would not see it \
+             through this handle (#1588 R5)"
+        );
+
+        drop(original);
+        drop(attached_a);
+        drop(cached_a);
+        drop(runtime);
+
+        // --- Phase 2: activation with nothing previously bound inserts
+        // nothing (no demotion). ---
+        let project_db_b2 = temp.join("project-b2/.tachi/memory.db");
+        seed_project_db(&project_db_b2, "project-b2");
+        let runtime2 = test_runtime(global_db_2);
+        assert!(
+            runtime2
+                .activate_project_db(project_db_b2.clone())
+                .expect("bind project db B2"),
+            "a fresh runtime must have had no bound project yet"
+        );
+        assert!(
+            runtime2
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "binding with nothing previously bound must not insert anything \
+             into the attach cache — a demotion requires an outgoing bound \
+             state (#1588 R5)"
+        );
+        drop(runtime2);
+
+        // --- Phase 3: re-binding a demoted path (A→B→A) must evict the
+        // cached demoted state and make the re-bound store the single
+        // canonical connection for A's file. ---
+        let project_db_a3 = temp.join("project-a3/.tachi/memory.db");
+        let project_db_b3 = temp.join("project-b3/.tachi/memory.db");
+        seed_project_db(&project_db_a3, "project-a3");
+        seed_project_db(&project_db_b3, "project-b3");
+        let runtime3 = test_runtime(global_db_3);
+        assert!(
+            runtime3
+                .activate_project_db(project_db_a3.clone())
+                .expect("bind project db A3"),
+            "a fresh runtime must have had no bound project yet"
+        );
+        let key_a3 = project_db_cache_key(&project_db_a3).expect("cache key A3");
+
+        // A→B demotes A3 into the cache.
+        assert!(
+            !runtime3
+                .activate_project_db(project_db_b3.clone())
+                .expect("bind project db B3"),
+            "replacing the bound A3 must report was_none == false"
+        );
+        assert!(
+            runtime3
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&key_a3),
+            "the A→B demotion must have cached A3 under its key (#1588 R5)"
+        );
+
+        // Re-binding the demoted path: the existing bind path must evict the
+        // cached demoted state (the re-bound store is the one canonical
+        // connection for the file from here on).
+        assert!(
+            !runtime3
+                .activate_project_db(project_db_a3.clone())
+                .expect("re-bind project db A3"),
+            "re-binding must report was_none == false"
+        );
+        assert!(
+            !runtime3
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&key_a3),
+            "re-binding A must evict the cached demoted A state — the new bound \
+             state is the single canonical connection for A's file (#1588 R5)"
+        );
+
+        // The post-rebind named attach aliases the NEW bound store (never the
+        // stale demoted state).
+        let rebound_bound = runtime3
+            .project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .expect("re-bound project db A3")
+            .clone();
+        let attached_a3 = runtime3
+            .attached_project_state(&project_db_a3, StoreLabel::Declared("project-a3"))
+            .expect("attach the re-bound A3");
+        assert!(
+            Arc::ptr_eq(&rebound_bound.store, &attached_a3.store),
+            "a named attach after re-binding A must alias the NEW bound store — \
+             a distinct Arc means a stale connection survived the re-bind and \
+             would lock the daemon out of its own saves (#1588 R5)"
+        );
+
+        drop(rebound_bound);
+        drop(attached_a3);
+        drop(runtime3);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// issue #1588 R2 (red/green discriminator): the alias path must enforce
+    /// the same #1579 declared-role-vs-stamp conflict gate the open path
+    /// applies. Pre-repair the alias returns the bound state without
+    /// consulting the conferral, so a disagreeing declared role silently
+    /// proceeds (the closure runs through the aliased handle); post-repair it
+    /// fails with the typed role-conflict refusal, and a matching declared
+    /// role still succeeds.
+    #[test]
+    fn issue_1588_alias_enforces_declared_role_conflict() {
+        let temp = unique_temp_dir("1588-r2-role-conflict");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "project-a");
+        let runtime = test_runtime(global_db);
+        assert!(
+            runtime
+                .activate_project_db(project_db.clone())
+                .expect("bind project db"),
+            "a fresh runtime must have had no bound project yet"
+        );
+
+        // A matching declared role succeeds via the alias and is provably the
+        // bound store (Arc identity).
+        let bound = runtime
+            .project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .expect("bound project db")
+            .clone();
+        let matching = runtime
+            .attached_project_state(&project_db, StoreLabel::Declared("project-a"))
+            .expect("matching declared role must pass the alias gate");
+        assert!(
+            Arc::ptr_eq(&bound.store, &matching.store),
+            "the matching-role attach must alias the bound store"
+        );
+
+        // A disagreeing declared role must refuse exactly like the open path:
+        // the typed role-conflict error, not a silent alias (tachi#1579).
+        let conflicting =
+            runtime.attached_project_state(&project_db, StoreLabel::Declared("project-b"));
+        let err = match conflicting {
+            Ok(_) => panic!(
+                "a declared role that contradicts the bound store's stamp must refuse \
+                 on the alias path (#1588 R2)"
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            err.contains("store role conflict"),
+            "expected the typed role-conflict refusal, got: {err}"
+        );
+        assert!(
+            err.contains("project-b") && err.contains("project-a"),
+            "the conflict error must name both the claimed and the stamped role, got: {err}"
+        );
+
+        // Anonymous/inherited labels follow the open path: no claim, no conflict.
+        runtime
+            .attached_project_state(&project_db, StoreLabel::inferred(&project_db))
+            .expect("an anonymous attach must not conflict with the stamp");
+
         let _ = std::fs::remove_dir_all(temp);
     }
 }
