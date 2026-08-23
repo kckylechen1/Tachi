@@ -342,14 +342,22 @@ pub(crate) mod tests {
         bin_dir: &std::path::Path,
         root_pid: &std::path::Path,
         descendant_pid: &std::path::Path,
+        cancel_trigger: &std::path::Path,
+        cancel_ack: &std::path::Path,
+        cancel_latch: &std::path::Path,
+        nonce: &str,
     ) {
         let worker = bin_dir.join("opencode");
         std::fs::write(
             &worker,
             format!(
-                "#!/bin/sh\ntrap '' TERM\nprintf '%s\\n' \"$$\" > '{}'\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'opencode test fixture 1.0\\n'\n  exit 0\nfi\ntrap '' TERM\nprintf '%s\\n' \"$$\" > '{}'\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\nwhile test ! -e '{}'; do sleep 0.01; done\nprintf '%s:%s\\n' \"$$\" '{}' > '{}'\nwhile test ! -e '{}'; do sleep 0.01; done\nwait\n",
                 root_pid.display(),
                 descendant_pid.display(),
+                cancel_trigger.display(),
+                nonce,
+                cancel_ack.display(),
+                cancel_latch.display(),
             ),
         )
         .expect("write hanging managed custom worker");
@@ -394,9 +402,11 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
-    async fn wait_for_test_process_exit(pid: libc::pid_t) -> bool {
+    #[cfg(unix)]
+    async fn wait_for_test_process_group_absence(pgid: libc::pid_t) -> bool {
         for _ in 0..360 {
-            let absent = unsafe { libc::kill(pid, 0) } != 0
+            // SAFETY: signal 0 probes only the fixture's recorded process group.
+            let absent = unsafe { libc::kill(-pgid, 0) } != 0
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
             if absent {
                 return true;
@@ -717,7 +727,19 @@ pub(crate) mod tests {
         let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
         let root_pid = temp_bin.path().join("root.pid");
         let descendant_pid = temp_bin.path().join("descendant.pid");
-        write_hanging_managed_custom_worker(temp_bin.path(), &root_pid, &descendant_pid);
+        let cancel_trigger = temp_bin.path().join("cancel-trigger");
+        let cancel_ack = temp_bin.path().join("cancel-ack");
+        let cancel_latch = temp_bin.path().join("cancel-latch");
+        let cancel_nonce = "staff-cancel-live-nonce";
+        write_hanging_managed_custom_worker(
+            temp_bin.path(),
+            &root_pid,
+            &descendant_pid,
+            &cancel_trigger,
+            &cancel_ack,
+            &cancel_latch,
+            cancel_nonce,
+        );
         let old_path = std::env::var_os("PATH").unwrap_or_default();
         let joined_path = std::env::join_paths(
             std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
@@ -729,6 +751,8 @@ pub(crate) mod tests {
         let _transport = crate::test_support::EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "cli");
         let _v2 = crate::test_support::EnvRestore::set("DISPATCH_V2_ENABLED", "false");
         let _review = crate::test_support::EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+        let _embedding =
+            crate::test_support::EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
         let server = test_server();
         let mut request = staff_request("tachi");
         request.profile = Some("glm_impl".to_string());
@@ -765,23 +789,169 @@ pub(crate) mod tests {
             accepted_status["execution_classification"],
             "managed_custom"
         );
-
-        let cancel: Value = serde_json::from_str(
-            &staff_cancel(
-                &server,
+        let root_before_cancel: libc::pid_t = std::fs::read_to_string(&root_pid)
+            .expect("root pid before cancellation")
+            .trim()
+            .parse()
+            .expect("numeric root pid before cancellation");
+        let descendant_before_cancel: libc::pid_t = std::fs::read_to_string(&descendant_pid)
+            .expect("descendant pid before cancellation")
+            .trim()
+            .parse()
+            .expect("numeric descendant pid before cancellation");
+        // SAFETY: both PIDs come from this test's freshly-created fixture and
+        // `getpgid` only queries kernel process metadata.
+        assert_eq!(
+            unsafe { libc::getpgid(root_before_cancel) },
+            root_before_cancel
+        );
+        // SAFETY: the descendant is emitted by the same freshly-created fixture.
+        assert_eq!(
+            unsafe { libc::getpgid(descendant_before_cancel) },
+            root_before_cancel
+        );
+        // SAFETY: signal 0 is a non-mutating existence probe for the fixture.
+        assert_eq!(unsafe { libc::kill(root_before_cancel, 0) }, 0);
+        // SAFETY: signal 0 is a non-mutating existence probe for the fixture.
+        assert_eq!(unsafe { libc::kill(descendant_before_cancel, 0) }, 0);
+        assert_eq!(
+            crate::dispatch_ops::take_managed_cancel_child_pid(&run_dir)
+                .expect("runner records its managed child"),
+            root_before_cancel as u32,
+            "the Staff fixture root must be the runner-owned process leader"
+        );
+        let (dequeued, continue_cancel, observation) =
+            crate::dispatch_ops::install_managed_cancel_dequeue_barrier();
+        let cancel_server = server.clone();
+        let cancel_dispatch_id = dispatch_id.to_string();
+        let cancel_task = tokio::spawn(async move {
+            staff_cancel(
+                &cancel_server,
                 StaffCancelRequest {
-                    dispatch_id: dispatch_id.to_string(),
+                    dispatch_id: cancel_dispatch_id,
                     expected_status_revision: accepted_revision,
                 },
             )
             .await
-            .expect("actual Staff cancel response"),
+            .expect("actual Staff cancel response")
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || dequeued.recv().expect("dequeued cancellation")),
         )
-        .expect("cancel response JSON");
+        .await
+        .expect("Staff cancellation must reach the live production runner")
+        .expect("dequeue observation join");
+        std::fs::write(&cancel_trigger, b"trigger").expect("trigger live-root acknowledgement");
+        for _ in 0..360 {
+            if cancel_ack.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            std::fs::read_to_string(&cancel_ack).expect("live-root acknowledgement"),
+            format!("{root_before_cancel}:{cancel_nonce}\n"),
+            "only a live root can acknowledge cancellation dequeue"
+        );
+        continue_cancel.send(()).expect("release production runner");
+        let observation = tokio::task::spawn_blocking(move || {
+            observation
+                .recv()
+                .expect("dequeued runner try_wait observation")
+        })
+        .await
+        .expect("try_wait observation join");
+        assert_eq!(observation.run_dir, run_dir);
+        assert_eq!(observation.child_pid, Some(root_before_cancel as u32));
+        assert_eq!(observation.try_wait_result, "running");
+        assert_eq!(observation.sigterm_result, "delivered");
+        assert!(matches!(
+            observation.reap_result,
+            "root_reaped" | "root_killed"
+        ));
+        assert!(observation.group_absent);
+        assert_eq!(
+            observation.runner_error.as_deref(),
+            Some("managed_cancelled")
+        );
+        assert_eq!(
+            observation.termination_proof,
+            Some("unix_process_group_absent")
+        );
+        assert!(observation.finalization_directive);
+        assert_eq!(
+            observation.finalization_result,
+            Some("cancellation_confirmed")
+        );
+        assert_eq!(
+            observation.canonical_receipt.as_deref(),
+            Some("cancellation_confirmed")
+        );
+        assert_eq!(observation.canonical_reason, None);
+        assert_eq!(
+            observation.canonical_state.as_deref(),
+            Some("TASK_STATE_CANCELED")
+        );
+        let cancel: Value = serde_json::from_str(&cancel_task.await.expect("Staff cancel task"))
+            .expect("cancel response JSON");
         assert_no_cancellation_control_keys(&cancel);
-        assert_eq!(cancel["receipt"], "cancellation_confirmed");
+        assert_eq!(
+            cancel["receipt"], "cancellation_confirmed",
+            "managed Staff cancellation must confirm its live runner: {cancel}"
+        );
         assert_eq!(cancel["expected_status_revision"], accepted_revision);
         assert_eq!(cancel["termination_proof"], "unix_process_group_absent");
+
+        // The facade releases this response only after the production terminal
+        // owner persists cancellation, cleans run-scoped credentials, releases
+        // the flow slot, and removes its managed registry entry.
+        let instant_status: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: dispatch_id.to_string(),
+                },
+            )
+            .await
+            .expect("Staff status at cancellation response boundary"),
+        )
+        .expect("instant canonical status JSON");
+        assert_eq!(terminal_staff_state(&instant_status), "TASK_STATE_CANCELED");
+        assert_eq!(
+            instant_status["cancellation"]["receipt"],
+            "cancellation_confirmed"
+        );
+        assert_eq!(
+            instant_status["cancellation"]["observed_status_revision"],
+            accepted_revision + 1,
+            "request receipt remains the frozen nested +1 revision"
+        );
+        assert_eq!(
+            cancel["observed_status_revision"],
+            accepted_revision + 2,
+            "response remains the frozen +2 confirmation revision"
+        );
+        assert!(
+            !run_dir.join("credentials").exists(),
+            "ephemeral credential materialization must be gone before cancel responds"
+        );
+        let flow_lock_dir =
+            crate::task_lifecycle::run_dir_for_flow_id("flow_1825_managed_cancel_e2e")
+                .expect("valid flow run directory")
+                .join(".dispatch-dedupe");
+        assert!(
+            !flow_lock_dir.exists()
+                || std::fs::read_dir(&flow_lock_dir)
+                    .expect("flow lock directory")
+                    .next()
+                    .is_none(),
+            "flow dispatch slot must be released before cancel responds"
+        );
+        assert!(
+            !server.managed_run_controls.contains(dispatch_id),
+            "managed registry entry must be removed before cancel responds"
+        );
 
         let (terminal, _result) = wait_for_staff_terminal(&run_dir).await;
         assert_no_cancellation_control_keys(&terminal["cancellation"]);
@@ -829,23 +999,9 @@ pub(crate) mod tests {
                 "trajectory missing {event}: {trajectory}"
             );
         }
-        let root: libc::pid_t = std::fs::read_to_string(&root_pid)
-            .expect("root pid")
-            .trim()
-            .parse()
-            .expect("numeric root pid");
-        let descendant: libc::pid_t = std::fs::read_to_string(&descendant_pid)
-            .expect("descendant pid")
-            .trim()
-            .parse()
-            .expect("numeric descendant pid");
         assert!(
-            wait_for_test_process_exit(root).await,
-            "managed root must be absent"
-        );
-        assert!(
-            wait_for_test_process_exit(descendant).await,
-            "managed descendant must be absent"
+            wait_for_test_process_group_absence(root_before_cancel).await,
+            "managed process group must be absent"
         );
         cleanup_guard.disarm();
     }

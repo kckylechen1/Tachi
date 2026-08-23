@@ -794,10 +794,16 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // once credential cleanup, slot release, and registry removal are all
         // complete. No detached responder can outlive this owner.
         drop(_managed_run_guard);
-        if let (Some(command), Some(completion)) =
-            (managed_cancellation.take(), managed_cancel_completion)
-        {
-            let _ = command.response.send(completion);
+        if let Some(command) = managed_cancellation.take() {
+            #[cfg(test)]
+            let mut command = command;
+            #[cfg(test)]
+            if let Some(observation) = command.test_observation.take() {
+                observation.complete(&workspace_dir_for_spawn, managed_cancel_completion.as_ref());
+            }
+            if let Some(completion) = managed_cancel_completion {
+                let _ = command.response.send(completion);
+            }
         }
         #[cfg(test)]
         mark_background_dispatch_cleanup_complete(&d_id);

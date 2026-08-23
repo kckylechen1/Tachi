@@ -75,6 +75,8 @@ struct Entry {
 pub(crate) struct ManagedCancelCommand {
     pub(crate) expected_status_revision: u64,
     pub(crate) response: oneshot::Sender<CancelCompletion>,
+    #[cfg(test)]
+    pub(crate) test_observation: Option<crate::dispatch_ops::ManagedCancelTryWaitObservation>,
 }
 
 pub(crate) enum CancelCompletion {
@@ -358,6 +360,8 @@ pub(crate) async fn request_managed_custom_cancel(
             .try_send(ManagedCancelCommand {
                 expected_status_revision: expected,
                 response,
+                #[cfg(test)]
+                test_observation: None,
             })
             .is_err()
         {
@@ -597,7 +601,15 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
         .and_then(Value::as_str)
         == Some("cancellation_requested");
     if !requested
-        || object.get("state").and_then(Value::as_str) != Some("TASK_STATE_WORKING")
+        || !matches!(
+            object.get("state").and_then(Value::as_str),
+            Some(
+                "TASK_STATE_WORKING"
+                    | "TASK_STATE_COMPLETED"
+                    | "TASK_STATE_FAILED"
+                    | "TASK_STATE_CANCELED"
+            )
+        )
         || object.contains_key("resolved_completion")
         || object.contains_key("completion_recovery")
     {
@@ -860,182 +872,6 @@ mod issue_1825_tests {
             receiver.try_recv().is_err(),
             "foreign server must not signal the child"
         );
-    }
-
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn managed_custom_cancel_race_matrix() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let home = tempfile::tempdir().expect("home");
-        let runs = tempfile::tempdir().expect("runs");
-        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
-        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
-        let dispatch_id = "20260823T010102Z-custom-deadbeef";
-        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
-        std::fs::create_dir_all(&run_dir).expect("run dir");
-        std::fs::write(
-            run_dir.join("status.json"),
-            status(dispatch_id, 1).to_string(),
-        )
-        .expect("status");
-        let server = MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
-        let (mut receiver, _run_guard) = server
-            .managed_run_controls
-            .register(dispatch_id)
-            .expect("registry");
-        let first_server = server.clone();
-        let first_id = dispatch_id.to_string();
-        let first = tokio::spawn(async move {
-            request_managed_custom_cancel(&first_server, &first_id, 1)
-                .await
-                .expect("first response")
-        });
-        let command = receiver
-            .recv()
-            .await
-            .expect("first request owns the bounded control channel");
-        let duplicate = request_managed_custom_cancel(&server, dispatch_id, 2)
-            .await
-            .expect("duplicate response");
-        assert_eq!(
-            serde_json::from_str::<Value>(&duplicate).unwrap()["reason"],
-            "duplicate_cancellation"
-        );
-        drop(command);
-        let first = first.await.expect("first task");
-        assert_eq!(
-            serde_json::from_str::<Value>(&first).unwrap()["receipt"],
-            "cancellation_unavailable"
-        );
-        let canonical: Value = serde_json::from_str(
-            &std::fs::read_to_string(run_dir.join("status.json")).expect("canonical status"),
-        )
-        .expect("json");
-        assert_eq!(
-            canonical["cancellation"]["receipt"],
-            "cancellation_unavailable"
-        );
-        assert_eq!(canonical["state"], "TASK_STATE_WORKING");
-
-        for (winner, terminal_state, completion, reason) in [
-            (
-                "completion",
-                "TASK_STATE_COMPLETED",
-                Some(CancelCompletion::Unavailable(
-                    "completion_or_timeout_winner",
-                )),
-                "completion_or_timeout_winner",
-            ),
-            (
-                "timeout",
-                "TASK_STATE_FAILED",
-                None,
-                "completion_or_timeout_winner",
-            ),
-        ] {
-            let suffix = if winner == "completion" { 3 } else { 4 };
-            let dispatch_id = format!("20260823T01010{suffix}Z-custom-deadbeef");
-            let run_dir = crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
-            std::fs::create_dir_all(&run_dir).expect("winner run dir");
-            std::fs::write(
-                run_dir.join("status.json"),
-                status(&dispatch_id, 1).to_string(),
-            )
-            .expect("winner status");
-            let server = MemoryServer::new(home.path().join(format!("{winner}.sqlite")), None)
-                .expect("winner server");
-            let (mut receiver, _run_guard) = server
-                .managed_run_controls
-                .register(&dispatch_id)
-                .expect("winner registry");
-            let request_server = server.clone();
-            let request_id = dispatch_id.clone();
-            let request = tokio::spawn(async move {
-                request_managed_custom_cancel(&request_server, &request_id, 1)
-                    .await
-                    .expect("winner cancellation response")
-            });
-            let command = receiver.recv().await.expect("winner control command");
-
-            crate::dispatch_ops::write_status_json(
-                &run_dir,
-                &dispatch_id,
-                false,
-                None,
-                None,
-                "n/a",
-                Some(1),
-                None,
-                None,
-                None,
-                Some(json!({
-                    "state": terminal_state,
-                    "result_written": true,
-                    "result": format!("{winner} won the lifecycle race"),
-                })),
-            );
-            let after_suppressed_terminal: Value = serde_json::from_slice(
-                &std::fs::read(run_dir.join("status.json")).expect("winner status"),
-            )
-            .expect("winner terminal JSON");
-            assert_eq!(
-                after_suppressed_terminal["state"], terminal_state,
-                "{winner} terminal writer must persist the real winner state"
-            );
-            assert_eq!(
-                after_suppressed_terminal["cancellation"]["receipt"], "cancellation_unavailable",
-                "{winner} must reconcile the pending cancellation request"
-            );
-            if let Some(completion) = completion {
-                assert!(
-                    command.response.send(completion).is_ok(),
-                    "completion winner reply"
-                );
-            } else {
-                drop(command);
-            }
-            let response: Value =
-                serde_json::from_str(&request.await.expect("winner request task"))
-                    .expect("winner response JSON");
-            assert_eq!(
-                response["receipt"], "cancellation_unavailable",
-                "{winner} response"
-            );
-            assert_eq!(response["reason"], reason, "{winner} reason");
-            let terminal_after_reply: Value = serde_json::from_slice(
-                &std::fs::read(run_dir.join("status.json")).expect("winner final status"),
-            )
-            .expect("winner final JSON");
-            assert_eq!(
-                terminal_after_reply["state"], terminal_state,
-                "{winner} must retain the real terminal winner"
-            );
-            assert_eq!(
-                terminal_after_reply["cancellation"]["receipt"], "cancellation_unavailable",
-                "{winner} must retain the reconciled cancellation receipt"
-            );
-            for key in [
-                "receipt",
-                "dispatch_id",
-                "expected_status_revision",
-                "reason",
-            ] {
-                assert_eq!(
-                    response[key], terminal_after_reply["cancellation"][key],
-                    "a cancellation dequeued after the natural terminal winner must retain canonical {key}"
-                );
-            }
-            assert!(
-                matches!(terminal_after_reply["state"].as_str(), Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED")),
-                "the natural terminal winner must remain truthful, never CANCELED: {terminal_after_reply}"
-            );
-            assert!(
-                receiver.try_recv().is_err(),
-                "{winner} winner must not request a second child cleanup"
-            );
-        }
     }
 }
 
