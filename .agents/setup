@@ -91,6 +91,60 @@ if command -v cargo >/dev/null 2>&1; then
   done
 fi
 
+# A1 toolchain pin assertion (fail-closed; gated so CI stub harness with SIMULATE_* fakes is unaffected)
+if [[ -z "${SIMULATE_CARGO_VERSION:-}" ]]; then
+  cargo_resolved="$(command -v cargo 2>/dev/null || echo 'not-found')"
+  if command -v cargo >/dev/null 2>&1; then
+    cargo_version="$(cd -- "${REPO_ROOT}" && cargo --version 2>/dev/null || true)"
+    read -r cargo_name cargo_actual _ <<<"${cargo_version}"
+    if [[ "${cargo_name:-}" != cargo || "${cargo_actual:-}" != "${REQUIRED_RUST_VERSION}" ]]; then
+      printf 'setup: FAILED -- toolchain pin mismatch\n' >&2
+      printf '  cargo --version resolved to: %s\n' "${cargo_actual:-unknown}"
+      printf '  required channel from rust-toolchain.toml: %s\n' "${REQUIRED_RUST_VERSION}"
+      printf '  command -v cargo: %s\n' "${cargo_resolved}"
+      printf '  rustup shims (or direct toolchain bin dir) must precede Homebrew on PATH.\n' >&2
+      printf '  Example: export PATH="/Users/kckylechen/.rustup/toolchains/1.97.0-aarch64-apple-darwin/bin:$PATH"\n' >&2
+      exit 1
+    fi
+  fi
+
+  clippy_resolved="$(command -v cargo-clippy 2>/dev/null || echo 'not-found')"
+  if command -v cargo-clippy >/dev/null 2>&1; then
+    clippy_version="$(cd -- "${REPO_ROOT}" && cargo-clippy --version 2>/dev/null || true)"
+    read -r clippy_name clippy_actual _ <<<"${clippy_version}"
+    rust_minor="${REQUIRED_RUST_VERSION#*.}"; rust_minor="${rust_minor%%.*}"
+    expected_clippy="0.1.${rust_minor}"
+    if [[ "${clippy_name:-}" != clippy || "${clippy_actual:-}" != "${expected_clippy}" ]]; then
+      printf 'setup: FAILED -- toolchain pin mismatch\n' >&2
+      printf '  cargo-clippy --version resolved to: %s\n' "${clippy_actual:-unknown}"
+      printf '  required (derived from channel %s): %s\n' "${REQUIRED_RUST_VERSION}" "${expected_clippy}"
+      printf '  command -v cargo-clippy: %s\n' "${clippy_resolved}"
+      printf '  rustup shims must precede Homebrew on PATH.\n' >&2
+      exit 1
+    fi
+  else
+    printf 'setup: FAILED -- toolchain pin: cargo-clippy not resolvable in PATH\n' >&2
+    printf '  command -v cargo-clippy: %s\n' "${clippy_resolved}"
+    exit 1
+  fi
+fi
+
+# A1 gh auth sanity (only if gh present; optional tool — do not add hard requirement)
+if command -v gh >/dev/null 2>&1; then
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    if ! gh api user --jq .login >/dev/null 2>&1; then
+      printf 'setup: FAILED -- gh auth sanity: GITHUB_TOKEN is set but invalid (shadows keyring entry)\n' >&2
+      printf '  remediation: env -u GITHUB_TOKEN or fix the token\n' >&2
+      exit 1
+    fi
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    printf 'setup: FAILED -- gh present but gh auth status does not resolve a usable token with ambient env\n' >&2
+    printf '  run `gh auth login` or ensure GITHUB_TOKEN/keyring provides valid token\n' >&2
+    exit 1
+  fi
+fi
+
 if ((${#missing[@]})); then
   printf 'setup: FAILED -- missing or unusable preinstalled CI tools: %s\n' "${missing[*]}" >&2
   printf 'setup: refusing readiness; provision the orb image, then rerun this check.\n' >&2
