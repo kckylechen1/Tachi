@@ -127,6 +127,33 @@ enum ManagedControlOrigin {
     StaffFacade,
 }
 
+type ManagedControlRegistration = (
+    tokio::sync::mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
+    crate::managed_run_control::ManagedRunGuard,
+);
+
+fn managed_custom_control_required(
+    origin: ManagedControlOrigin,
+    managed_custom_eligible: bool,
+) -> bool {
+    managed_custom_eligible && origin == ManagedControlOrigin::StaffFacade
+}
+
+/// The only dispatch production doorway that may create managed cancellation
+/// control. Eligibility is prepared by the concrete backend; the Staff facade
+/// is the only caller that owns the resulting child lifecycle.
+fn register_managed_custom_control(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    origin: ManagedControlOrigin,
+    managed_custom_eligible: bool,
+) -> Result<Option<ManagedControlRegistration>, String> {
+    if !managed_custom_control_required(origin, managed_custom_eligible) {
+        return Ok(None);
+    }
+    server.managed_run_controls.register(dispatch_id).map(Some)
+}
+
 mod artifacts;
 mod authority;
 mod backend;
@@ -1068,91 +1095,92 @@ async fn launch_canonical_dispatch(
 
     // Register managed-custom control before task scheduling.
     let managed_ephemeral_credential_cleanup =
-        if managed_custom_eligible && managed_control_origin == ManagedControlOrigin::StaffFacade {
-            Some(ManagedEphemeralCredentialCleanupObligation::Required)
-        } else {
-            None
-        };
-    let (execution, managed_run_guard) =
-        if managed_custom_eligible && managed_control_origin == ManagedControlOrigin::StaffFacade {
-            let (receiver, guard) = match server.managed_run_controls.register(&dispatch_id) {
-                Ok(registration) => registration,
-                Err(error) => {
-                    let _ = server.with_global_store(|store| {
-                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
-                    });
-                    release_flow_dispatch_slot(flow_dispatch_slot);
-                    close_kanban_row_on_early_exit(
-                        server,
-                        &dispatch_id,
-                        "managed-custom control registration",
-                        request.project.as_deref(),
-                    )
-                    .await;
-                    return Err(error);
-                }
-            };
-            if let Err(error) =
-                crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
-            {
-                let result = format!("managed custom classification failed: {error}");
-                let result_persist_error = persist_dispatch_result_artifact(
-                    &workspace_dir.join("result.md"),
-                    result.as_bytes(),
-                    true,
-                )
-                .err();
-                let _ = write_status_json(
-                    &workspace_dir,
-                    &dispatch_id,
-                    v2,
-                    plan_generated_at.as_deref(),
-                    None,
-                    if v2 { "approved" } else { "n/a" },
-                    None,
-                    plan_duration_ms,
-                    None,
-                    plan_duration_ms,
-                    Some(json!({
-                        "agent": resolved_assignment.selected_worker,
-                        "state": "TASK_STATE_FAILED",
-                        "updated_at": Utc::now().to_rfc3339(),
-                        "result_written": result_persist_error.is_none(),
-                        "result_persist_error": result_persist_error,
-                        "classification_error": error,
-                    })),
-                );
-                let _ = server.with_global_store(|store| {
-                    cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
-                });
-                release_flow_dispatch_slot(flow_dispatch_slot);
-                close_kanban_row_on_early_exit(
-                    server,
-                    &dispatch_id,
-                    "managed-custom control classification",
-                    request.project.as_deref(),
-                )
-                .await;
-                crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
-                    server,
-                    &dispatch_id,
-                    "managed_custom_classification",
-                    Some(resolved_assignment.selected_worker.as_str()),
-                    request.project.as_deref(),
-                );
-                drop(guard);
-                return Err(error);
+        managed_custom_control_required(managed_control_origin, managed_custom_eligible)
+            .then_some(ManagedEphemeralCredentialCleanupObligation::Required);
+    let managed_registration = match register_managed_custom_control(
+        server,
+        &dispatch_id,
+        managed_control_origin,
+        managed_custom_eligible,
+    ) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let _ = server.with_global_store(|store| {
+                cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+            });
+            release_flow_dispatch_slot(flow_dispatch_slot);
+            close_kanban_row_on_early_exit(
+                server,
+                &dispatch_id,
+                "managed-custom control registration",
+                request.project.as_deref(),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let (execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
+        if let Err(error) =
+            crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
+        {
+            let result = format!("managed custom classification failed: {error}");
+            let result_persist_error = persist_dispatch_result_artifact(
+                &workspace_dir.join("result.md"),
+                result.as_bytes(),
+                true,
+            )
+            .err();
+            let _ = write_status_json(
+                &workspace_dir,
+                &dispatch_id,
+                v2,
+                plan_generated_at.as_deref(),
+                None,
+                if v2 { "approved" } else { "n/a" },
+                None,
+                plan_duration_ms,
+                None,
+                plan_duration_ms,
+                Some(json!({
+                    "agent": resolved_assignment.selected_worker,
+                    "state": "TASK_STATE_FAILED",
+                    "updated_at": Utc::now().to_rfc3339(),
+                    "result_written": result_persist_error.is_none(),
+                    "result_persist_error": result_persist_error,
+                    "classification_error": error,
+                })),
+            );
+            let _ = server.with_global_store(|store| {
+                cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+            });
+            release_flow_dispatch_slot(flow_dispatch_slot);
+            close_kanban_row_on_early_exit(
+                server,
+                &dispatch_id,
+                "managed-custom control classification",
+                request.project.as_deref(),
+            )
+            .await;
+            crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                server,
+                &dispatch_id,
+                "managed_custom_classification",
+                Some(resolved_assignment.selected_worker.as_str()),
+                request.project.as_deref(),
+            );
+            drop(guard);
+            return Err(error);
+        }
+        let execution = match execution {
+            DispatchExecution::Subprocess(command) => {
+                DispatchExecution::ManagedCustom(command, receiver)
             }
-            let execution = match execution {
-                DispatchExecution::Subprocess(command) => {
-                    DispatchExecution::ManagedCustom(command, receiver)
-                }
-                _ => unreachable!("managed custom eligibility requires a subprocess execution"),
-            };
-            (execution, Some(guard))
-        } else {
-            (execution, None)
+            _ => unreachable!("managed custom eligibility requires a subprocess execution"),
         };
+        (execution, Some(guard))
+    } else {
+        (execution, None)
+    };
 
     // 8. Spawn background task with Watchdog
     let workspace_dir_for_response = workspace_dir.clone();

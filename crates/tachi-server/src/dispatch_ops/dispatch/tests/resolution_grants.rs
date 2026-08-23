@@ -162,45 +162,58 @@ fn shared_status_revision_increment_rejects_invalid_and_overflowed_receipts() {
 
 #[test]
 fn managed_custom_registration_uses_prepared_execution_eligibility() {
-    let source = include_str!("../../dispatch.rs");
-    let start = source
-        .find("// Register managed-custom control before task scheduling.")
-        .expect("managed custom registration comment");
-    let registration = &source[start..]
-        .split_once("// 8. Spawn background task with Watchdog")
-        .expect("managed custom registration body")
-        .0;
-    const AUTHORITATIVE_REGISTRATION_GATE: &str =
-        "if managed_custom_eligible && managed_control_origin == ManagedControlOrigin::StaffFacade {";
-    let registration_branch = registration
-        .split_once("let (execution, managed_run_guard) =")
-        .expect("managed control registration branch")
-        .1;
-    let uses_prepared_staff_eligibility = |source: &str| {
-        source.contains(AUTHORITATIVE_REGISTRATION_GATE)
-            && source.contains("server.managed_run_controls.register(&dispatch_id)")
-    };
+    let server = crate::tests::make_server();
+    for (name, origin, prepared_eligible, admitted) in [
+        (
+            "staff-eligible",
+            ManagedControlOrigin::StaffFacade,
+            true,
+            true,
+        ),
+        (
+            "staff-ineligible",
+            ManagedControlOrigin::StaffFacade,
+            false,
+            false,
+        ),
+        (
+            "direct-eligible",
+            ManagedControlOrigin::DirectHandle,
+            true,
+            false,
+        ),
+        (
+            "direct-ineligible",
+            ManagedControlOrigin::DirectHandle,
+            false,
+            false,
+        ),
+    ] {
+        let dispatch_id = format!("20260824T000000Z-managed-registration-{name}");
+        let registration =
+            register_managed_custom_control(&server, &dispatch_id, origin, prepared_eligible)
+                .expect("managed control admission");
+        assert_eq!(
+            registration.is_some(),
+            admitted,
+            "{name} must register only when prepared backend eligibility and Staff ownership agree"
+        );
+        assert_eq!(
+            server.managed_run_controls.contains(&dispatch_id),
+            admitted,
+            "{name} registry membership must match the admission result"
+        );
+        if let Some((_receiver, guard)) = registration {
+            drop(guard);
+            assert!(
+                !server.managed_run_controls.contains(&dispatch_id),
+                "{name} managed control guard must release registry ownership"
+            );
+        }
+    }
     assert!(
-        uses_prepared_staff_eligibility(registration_branch),
-        "managed control registration must require prepared eligibility and the Staff origin"
-    );
-    let predicate_removed = registration_branch.replacen(
-        AUTHORITATIVE_REGISTRATION_GATE,
-        "if managed_control_origin == ManagedControlOrigin::StaffFacade {",
-        1,
-    );
-    assert!(
-        !uses_prepared_staff_eligibility(&predicate_removed),
-        "the registration discriminator must fail if the prepared eligibility predicate is removed"
-    );
-    let bypassed = registration_branch.replacen(AUTHORITATIVE_REGISTRATION_GATE, "if true {", 1);
-    assert!(
-        !uses_prepared_staff_eligibility(&bypassed),
-        "the registration discriminator must fail if either prepared eligibility or Staff origin is bypassed"
-    );
-    assert!(
-        !registration.contains("selected_backend == \"custom\""),
-        "a backend-name string must not decide whether a process receives cancellation control"
+        !managed_custom_control_required(ManagedControlOrigin::DirectHandle, true),
+        "direct custom execution must remain outside Staff lifecycle ownership"
     );
     let backend = include_str!("../backend.rs");
     for concrete_branch_guard in [
