@@ -1073,14 +1073,18 @@ fn panic_after_managed_spawn(run_dir: &std::path::Path) {
     let Some(run_root) = std::env::var_os("TACHI_RUN_ROOT") else {
         return;
     };
+    let key = (
+        std::path::PathBuf::from(home),
+        std::path::PathBuf::from(run_root),
+    );
     if MANAGED_PANIC_AFTER_SPAWN_ROOTS.get().is_some_and(|roots| {
+        // Root-keyed injections are one-shot: once the intended managed
+        // runner has consumed it, a later Staff subcase sharing this isolated
+        // home/run root cannot inherit a stale panic hook.
         roots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(&(
-                std::path::PathBuf::from(home),
-                std::path::PathBuf::from(run_root),
-            ))
+            .remove(&key)
     }) {
         panic!("injected managed panic after spawn for isolated run root");
     }

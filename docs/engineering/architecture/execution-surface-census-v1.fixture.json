@@ -75,8 +75,9 @@
         ]
       },
       "tachi_staff": {
-        "action_count": 2,
+        "action_count": 3,
         "actions": [
+          "cancel",
           "start",
           "status"
         ]
@@ -130,8 +131,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 136012,
-        "total_tool_definition_bytes": 166513,
+        "total_input_schema_bytes": 136134,
+        "total_tool_definition_bytes": 166732,
         "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",
@@ -219,8 +220,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 90875,
-        "total_tool_definition_bytes": 103933,
+        "total_input_schema_bytes": 90997,
+        "total_tool_definition_bytes": 104152,
         "visible_tool_count": 29,
         "visible_tools": [
           "extract_facts",
@@ -459,11 +460,12 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3455,
-            "property_count": 13,
+            "input_schema_bytes": 3577,
+            "property_count": 14,
             "property_names": [
               "action",
               "dispatch_id",
+              "expected_status_revision",
               "flow_id",
               "format",
               "issue_ref",
@@ -580,11 +582,12 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3455,
-            "property_count": 13,
+            "input_schema_bytes": 3577,
+            "property_count": 14,
             "property_names": [
               "action",
               "dispatch_id",
+              "expected_status_revision",
               "flow_id",
               "format",
               "issue_ref",
@@ -966,14 +969,14 @@
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 136120,
-        "max_total_tool_definition_bytes": 166620,
+        "max_total_input_schema_bytes": 136242,
+        "max_total_tool_definition_bytes": 166839,
         "max_visible_tools": 82,
         "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "coordinate": {
-        "max_total_input_schema_bytes": 90983,
-        "max_total_tool_definition_bytes": 104040,
+        "max_total_input_schema_bytes": 91105,
+        "max_total_tool_definition_bytes": 104259,
         "max_visible_tools": 29,
         "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
