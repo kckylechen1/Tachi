@@ -858,7 +858,7 @@ pub(crate) mod tests {
         classification_request.worker = Some("custom".to_string());
         classification_request.flow_id = Some("flow_1825_classification_failure".to_string());
         let classification_server = server.clone();
-        let classification_start = tokio::spawn(async move {
+        let classification_start = tokio::task::spawn(async move {
             staff_start(&classification_server, classification_request).await
         });
         let classification_dir = tokio::task::spawn_blocking(move || {
@@ -984,7 +984,7 @@ pub(crate) mod tests {
             .expect("pre-spawn revision");
         let pre_server = server.clone();
         let pre_id = pre_dispatch_id.to_string();
-        let pre_cancel = tokio::spawn(async move {
+        let pre_cancel = tokio::task::spawn(async move {
             pre_server
                 .tachi_staff(rmcp::handler::server::wrapper::Parameters(
                     serde_json::from_value::<tachi_params::TachiStaffParams>(serde_json::json!({
@@ -1192,7 +1192,7 @@ pub(crate) mod tests {
             .expect("late-timeout accepted revision");
         let late_cancel_server = server.clone();
         let late_cancel_id = late_timeout_id.clone();
-        let late_cancel = tokio::spawn(async move {
+        let late_cancel = tokio::task::spawn(async move {
             late_cancel_server
                 .tachi_staff(rmcp::handler::server::wrapper::Parameters(
                     serde_json::from_value::<tachi_params::TachiStaffParams>(serde_json::json!({
@@ -1722,7 +1722,7 @@ pub(crate) mod tests {
             crate::dispatch_ops::install_managed_cancel_dequeue_barrier(&run_dir);
         let cancel_server = server.clone();
         let cancel_dispatch_id = dispatch_id.to_string();
-        let cancel_task = tokio::spawn(async move {
+        let cancel_task = tokio::task::spawn(async move {
             cancel_server
                 .tachi_staff(rmcp::handler::server::wrapper::Parameters(
                     serde_json::from_value::<tachi_params::TachiStaffParams>(serde_json::json!({
