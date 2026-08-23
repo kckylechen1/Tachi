@@ -1902,7 +1902,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
-    async fn issue_1825_background_terminal_waits_for_successful_completion_admission() {
+    async fn issue_1825_committed_completion_admission_makes_cancel_unavailable_without_signaling_and_can_finalize(
+    ) {
         struct CurrentDirRestore(std::path::PathBuf);
 
         impl Drop for CurrentDirRestore {
@@ -2051,6 +2052,37 @@ mod tests {
         tokio::task::spawn_blocking(move || entered.recv().expect("handler admission barrier"))
             .await
             .expect("admission barrier join");
+        let admitted: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read admitted status before cancellation"),
+        )
+        .expect("parse admitted status before cancellation");
+        let expected_status_revision = admitted["status_revision"]
+            .as_u64()
+            .expect("committed admission status revision");
+        let evals_before_completion = eval_memory_count(&server, &dispatch_id);
+        let outcomes_before_completion = dispatch_outcome_count(&server, &dispatch_id);
+        let adjudications_before_completion = dispatch_adjudication_count(&server, &dispatch_id);
+        let cancellation: Value = serde_json::from_str(
+            &crate::managed_run_control::request_managed_custom_cancel(
+                &server,
+                &dispatch_id,
+                expected_status_revision,
+            )
+            .await
+            .expect("cancel after real completion admission"),
+        )
+        .expect("cancellation JSON");
+        assert_eq!(cancellation["receipt"], "cancellation_unavailable");
+        assert_eq!(cancellation["reason"], "terminal_or_recovery_state");
+        assert!(
+            admitted.get("cancellation").is_none(),
+            "a cancellation rejected by the committed completion admission must not signal the child"
+        );
+        let concurrent =
+            handle_tachi_complete(&server, managed_completion_params(&dispatch_id), false)
+                .await
+                .expect_err("a second handler must not inherit the admitted owner");
+        assert_eq!(concurrent, "managed completion already admitted");
         std::fs::write(&exit_trigger, b"release background terminal")
             .expect("release controlled worker");
         tokio::time::timeout(Duration::from_secs(8), async {
@@ -2095,6 +2127,16 @@ mod tests {
         .await
         .expect("completion receipt must be the sole terminal truth");
         assert!(terminal.get("completion_recovery").is_none());
+        assert_eq!(
+            eval_memory_count(&server, &dispatch_id),
+            evals_before_completion + 1,
+            "only the admitted handler may persist the canonical eval"
+        );
+        assert_eq!(
+            dispatch_adjudication_count(&server, &dispatch_id),
+            adjudications_before_completion,
+            "successful completion and the rejected second handler must not fabricate an adjudication"
+        );
         assert!(
             !run_dir.join("credentials/opencode.json").exists(),
             "a completion-owned nonzero managed terminal must clean its real overlay before release"
@@ -2116,8 +2158,9 @@ mod tests {
             })
             .expect("count canonical completion outcomes");
         assert_eq!(
-            outcomes, 1,
-            "the background must not fabricate a second outcome"
+            outcomes,
+            outcomes_before_completion + 1,
+            "only the admitted handler may project the canonical outcome"
         );
         for _ in 0..360 {
             if !server.managed_run_controls.contains(&dispatch_id) {
@@ -2519,52 +2562,6 @@ mod tests {
             .expect("managed completion owns the corrected admission");
         revoke_managed_completion_admission(&server, Some(dispatch_id), generation)
             .expect("release corrected admission");
-    }
-
-    #[tokio::test]
-    async fn committed_completion_admission_makes_cancel_unavailable_without_signaling_and_can_finalize(
-    ) {
-        let (server, _home) = crate::tests::make_server_with_temp_home();
-        let dispatch_id = "20260823T182513Z-custom-deadbeef";
-        seed_managed_working_status(&server, dispatch_id, None);
-        let (mut receiver, _run_guard) = server
-            .managed_run_controls
-            .register(dispatch_id)
-            .expect("managed cancellation registry");
-
-        admit_managed_completion(&server, Some(dispatch_id), true)
-            .expect("commit admission marker");
-        let cancellation: Value = serde_json::from_str(
-            &crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, 8)
-                .await
-                .expect("cancel after completion admission"),
-        )
-        .expect("cancellation JSON");
-        assert_eq!(cancellation["receipt"], "cancellation_unavailable");
-        assert_eq!(cancellation["reason"], "terminal_or_recovery_state");
-        assert!(
-            receiver.try_recv().is_err(),
-            "admitted completion must not signal the child"
-        );
-
-        handle_tachi_complete(&server, managed_completion_params(dispatch_id), false)
-            .await
-            .expect("admitted completion can finalize");
-        let status: Value = serde_json::from_slice(
-            &std::fs::read(
-                server
-                    .tachi_home_dir()
-                    .join("runs")
-                    .join(dispatch_id)
-                    .join("status.json"),
-            )
-            .expect("final status"),
-        )
-        .expect("final status JSON");
-        assert_eq!(
-            status["resolved_completion"]["state"],
-            "TASK_STATE_COMPLETED"
-        );
     }
 
     #[test]
