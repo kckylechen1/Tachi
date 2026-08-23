@@ -548,12 +548,17 @@ pub(crate) fn write_status_json(
                     Some("unix_process_group_absent") => Some("unix_process_group_absent"),
                     _ => None,
                 };
+                let credential_cleanup_failed = finalization
+                    .get("credential_cleanup_failed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 managed_terminal = Some(
                     crate::managed_run_control::apply_dequeued_cancellation_to_terminal_status(
                         &mut obj,
                         expected,
                         runner_error,
                         proof,
+                        credential_cleanup_failed,
                     ),
                 );
             }
@@ -602,10 +607,8 @@ pub(crate) fn write_status_json(
         crate::managed_run_control::ManagedTerminalCancellation::Unconfirmed => {
             crate::managed_run_control::CancelCompletion::Unconfirmed
         }
-        crate::managed_run_control::ManagedTerminalCancellation::Unavailable => {
-            crate::managed_run_control::CancelCompletion::Unavailable(
-                "completion_or_timeout_winner",
-            )
+        crate::managed_run_control::ManagedTerminalCancellation::Unavailable(reason) => {
+            crate::managed_run_control::CancelCompletion::Unavailable(reason)
         }
     });
     let body =

@@ -573,7 +573,7 @@ pub(crate) fn finalize_dequeued_managed_cancellation(
 pub(crate) enum ManagedTerminalCancellation {
     Confirmed { termination_proof: &'static str },
     Unconfirmed,
-    Unavailable,
+    Unavailable(&'static str),
 }
 
 /// Apply a dequeued cancellation to the status object that the terminal writer
@@ -583,6 +583,7 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
     expected: u64,
     runner_error: Option<&str>,
     termination_proof: Option<&'static str>,
+    credential_cleanup_failed: bool,
 ) -> ManagedTerminalCancellation {
     let dispatch_id = object
         .get("dispatch_id")
@@ -612,10 +613,28 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
         || object.contains_key("resolved_completion")
         || object.contains_key("completion_recovery")
     {
-        return ManagedTerminalCancellation::Unavailable;
+        return ManagedTerminalCancellation::Unavailable("completion_or_timeout_winner");
     }
     match runner_error {
         Some("managed_cancelled") => {
+            if credential_cleanup_failed {
+                object.insert(
+                    "cancellation".to_string(),
+                    cancellation_receipt(
+                        "cancellation_unavailable",
+                        &dispatch_id,
+                        expected,
+                        observed,
+                        Some("credential_cleanup_failed"),
+                        None,
+                    ),
+                );
+                object.insert(
+                    "state".to_string(),
+                    Value::String("TASK_STATE_FAILED".to_string()),
+                );
+                return ManagedTerminalCancellation::Unavailable("credential_cleanup_failed");
+            }
             let proof = termination_proof.unwrap_or("unix_process_group_absent");
             object.insert(
                 "cancellation".to_string(),
@@ -660,7 +679,7 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
         _ => {
             let _ =
                 reconcile_pending_cancellation_unavailable(object, "completion_or_timeout_winner");
-            ManagedTerminalCancellation::Unavailable
+            ManagedTerminalCancellation::Unavailable("completion_or_timeout_winner")
         }
     }
 }
@@ -750,68 +769,6 @@ fn record_unavailable_if_pending(
     Ok(unavailable(dispatch_id, expected, Some(observed), reason))
 }
 
-/// Credential materialization is part of the managed terminal contract. A
-/// process-group proof is not a confirmed cancellation while credentials may
-/// remain on disk, so replacement of a just-written confirmation is itself a
-/// canonical unavailable terminal transition.
-pub(crate) fn record_managed_credential_cleanup_failure(
-    run_dir: &std::path::Path,
-    expected: u64,
-) -> Result<(), String> {
-    let lock = crate::dispatch_ops::status_json_lock_for(run_dir);
-    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let path = run_dir.join("status.json");
-    let Some(mut status) = crate::task_lifecycle::read_json_file(&path)? else {
-        return Err("managed cancellation status is absent during credential cleanup".to_string());
-    };
-    let object = status.as_object_mut().ok_or_else(|| {
-        "managed cancellation status is malformed during credential cleanup".to_string()
-    })?;
-    let receipt = object
-        .get("cancellation")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            "managed cancellation receipt is absent during credential cleanup".to_string()
-        })?;
-    if receipt.get("receipt").and_then(Value::as_str) != Some("cancellation_confirmed")
-        || receipt
-            .get("expected_status_revision")
-            .and_then(Value::as_u64)
-            != Some(expected)
-    {
-        return Err("managed cancellation receipt no longer owns credential cleanup".to_string());
-    }
-    let dispatch_id = object
-        .get("dispatch_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "managed cancellation dispatch identity is absent".to_string())?
-        .to_string();
-    let observed = object
-        .get("status_revision")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "managed cancellation status revision is absent".to_string())?;
-    object.insert(
-        "cancellation".to_string(),
-        cancellation_receipt(
-            "cancellation_unavailable",
-            &dispatch_id,
-            expected,
-            observed,
-            Some("credential_cleanup_failed"),
-            None,
-        ),
-    );
-    object.insert(
-        "state".to_string(),
-        Value::String("TASK_STATE_FAILED".to_string()),
-    );
-    crate::managed_run_control::advance_status_revision(object)?;
-    let body = serde_json::to_vec_pretty(&status)
-        .map_err(|error| format!("serialize credential cleanup failure receipt: {error}"))?;
-    crate::utils::write_owner_only_file_atomic(&path, &body)
-        .map_err(|error| format!("persist credential cleanup failure receipt: {error}"))
-}
-
 fn canonical_cancellation_receipt(run_dir: &std::path::Path) -> Option<String> {
     let lock = crate::dispatch_ops::status_json_lock_for(run_dir);
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -834,6 +791,9 @@ fn cancellation_receipt(
             "cancellation_requested" => Value::String("TASK_STATE_WORKING".to_string()),
             "cancellation_confirmed" => Value::String("TASK_STATE_CANCELED".to_string()),
             "termination_unconfirmed" => Value::String("TASK_STATE_FAILED".to_string()),
+            "cancellation_unavailable" if reason == Some("credential_cleanup_failed") => {
+                Value::String("TASK_STATE_FAILED".to_string())
+            }
             _ => Value::Null,
         },
         "lifecycle_owner": "memory_server_managed_custom", "backend": "custom",
@@ -942,7 +902,7 @@ mod issue_1825_tests {
     }
 
     #[test]
-    fn credential_cleanup_failure_is_not_returned_as_a_clean_confirmation() {
+    fn issue_1825_credential_cleanup_failure_is_not_returned_as_a_clean_confirmation() {
         let temp = tempfile::tempdir().expect("temporary managed run");
         let dispatch_id = "20260823T182521Z-credential-cleanup-failure";
         std::fs::write(
@@ -959,17 +919,38 @@ mod issue_1825_tests {
             .to_string(),
         )
         .expect("seed requested cancellation");
-        confirm_managed_custom_cancellation(temp.path(), 7, "unix_process_group_absent")
-            .expect("commit termination proof");
-        record_managed_credential_cleanup_failure(temp.path(), 7)
-            .expect("persist cleanup failure evidence");
+        let completion = crate::dispatch_ops::write_status_json(
+            temp.path(),
+            dispatch_id,
+            false,
+            None,
+            None,
+            "n/a",
+            None,
+            None,
+            None,
+            None,
+            Some(json!({
+                "state": "TASK_STATE_FAILED",
+                "managed_cancellation_finalization": {
+                    "expected_status_revision": 7,
+                    "runner_error": "managed_cancelled",
+                    "termination_proof": "unix_process_group_absent",
+                    "credential_cleanup_failed": true,
+                }
+            })),
+        );
+        assert!(matches!(
+            completion,
+            Some(CancelCompletion::Unavailable("credential_cleanup_failed"))
+        ));
 
         let status: Value = serde_json::from_slice(
             &std::fs::read(temp.path().join("status.json")).expect("read cleanup receipt"),
         )
         .expect("parse cleanup receipt");
         assert_eq!(status["state"], "TASK_STATE_FAILED");
-        assert_eq!(status["status_revision"], 9);
+        assert_eq!(status["status_revision"], 8);
         assert_eq!(
             status["cancellation"]["receipt"],
             "cancellation_unavailable"
@@ -978,19 +959,48 @@ mod issue_1825_tests {
             status["cancellation"]["reason"], "credential_cleanup_failed",
             "a termination proof alone is not a clean cancellation"
         );
-        let response: Value = serde_json::from_str(
-            &record_unavailable_if_pending(
-                temp.path(),
-                dispatch_id,
-                7,
-                9,
-                "credential_cleanup_failed",
-            )
-            .expect("truthful cleanup failure response"),
-        )
-        .expect("parse truthful cleanup failure response");
-        assert_eq!(response["receipt"], "cancellation_unavailable");
-        assert_eq!(response["reason"], "credential_cleanup_failed");
+        assert_eq!(status["cancellation"]["state"], "TASK_STATE_FAILED");
+        assert_ne!(status["cancellation"]["receipt"], "cancellation_confirmed");
+    }
+
+    #[test]
+    fn issue_1825_final_cancellation_write_failure_never_confirms_or_cancels() {
+        let temp = tempfile::tempdir().expect("temporary managed run");
+        let dispatch_id = "20260823T182523Z-final-write-failure";
+        std::fs::create_dir(temp.path().join("status.json"))
+            .expect("inject atomic status write target failure");
+
+        let completion = crate::dispatch_ops::write_status_json(
+            temp.path(),
+            dispatch_id,
+            false,
+            None,
+            None,
+            "n/a",
+            None,
+            None,
+            None,
+            None,
+            Some(json!({
+                "state": "TASK_STATE_CANCELED",
+                "managed_cancellation_finalization": {
+                    "expected_status_revision": 1,
+                    "runner_error": "managed_cancelled",
+                    "termination_proof": "unix_process_group_absent",
+                    "credential_cleanup_failed": false,
+                }
+            })),
+        );
+        assert!(matches!(
+            completion,
+            Some(CancelCompletion::Unavailable(
+                "managed_terminal_status_unreadable"
+            ))
+        ));
+        assert!(
+            temp.path().join("status.json").is_dir(),
+            "the failed atomic final write must not leave a CANCELED receipt"
+        );
     }
 }
 
@@ -1107,5 +1117,59 @@ mod issue_1825_status_revision_writer_regression_tests {
             1,
             "terminal writer must advance revision"
         );
+
+        fn bounded_writer_body<'a>(source: &'a str, name: &str) -> &'a str {
+            let start = source
+                .find(&format!("fn {name}"))
+                .unwrap_or_else(|| panic!("missing canonical writer {name}"));
+            let after = &source[start + 1..];
+            let end = ["\nfn ", "\npub(crate) fn ", "\n#[cfg"]
+                .iter()
+                .filter_map(|boundary| after.find(boundary))
+                .min()
+                .map(|offset| start + 1 + offset)
+                .unwrap_or_else(|| panic!("unbounded canonical writer {name}"));
+            &source[start..end]
+        }
+
+        let writers = [
+            (
+                "base status write",
+                include_str!("dispatch_ops/dispatch_v2.rs"),
+                "write_status_json",
+            ),
+            (
+                "route-decision stamp",
+                include_str!("dispatch_ops/dispatch_v2.rs"),
+                "stamp_route_decision_id",
+            ),
+            (
+                "ACP identity acknowledgement",
+                include_str!("dispatch_ops/dispatch/execution.rs"),
+                "persist_acp_model_acknowledgement",
+            ),
+            (
+                "resolved-completion persistence",
+                include_str!("complete_ops/handler.rs"),
+                "persist_resolved_completion_receipt_at",
+            ),
+            (
+                "pending-recovery persistence",
+                include_str!("complete_ops/handler.rs"),
+                "persist_pending_completion_recovery_receipt_at",
+            ),
+            (
+                "cancellation mutations",
+                include_str!("managed_run_control.rs"),
+                "confirm_managed_custom_cancellation",
+            ),
+        ];
+        assert_eq!(writers.len(), 6, "#1825 freezes six writer families");
+        for (family, source, name) in writers {
+            assert!(
+                bounded_writer_body(source, name).contains("advance_status_revision("),
+                "{family} must advance status_revision in its own bounded writer body"
+            );
+        }
     }
 }

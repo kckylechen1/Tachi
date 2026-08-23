@@ -121,11 +121,11 @@ fn admit_managed_completion(
     {
         return Ok(());
     }
-    if !server.managed_run_controls.contains(dispatch_id) {
-        return Ok(());
-    }
     if crate::managed_run_control::cancellation_blocks_terminal_writer(object) {
         return Err("managed cancellation owns terminal completion".to_string());
+    }
+    if !server.managed_run_controls.contains(dispatch_id) {
+        return Ok(());
     }
     if !persist_admission {
         return Ok(());
@@ -1408,7 +1408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_cancellation_rejects_real_completion_before_outcome_or_receipt_writes() {
+    async fn issue_1825_post_cancel_completion_after_registry_drop_has_no_residue() {
         for receipt in ["cancellation_requested", "cancellation_confirmed"] {
             let (server, _home) = crate::tests::make_server_with_temp_home();
             let dispatch_id = format!(
@@ -1416,6 +1416,15 @@ mod tests {
                 if receipt.ends_with("requested") { 1 } else { 2 }
             );
             seed_managed_working_status(&server, &dispatch_id, Some(json!({ "receipt": receipt })));
+            let (_receiver, registry_guard) = server
+                .managed_run_controls
+                .register(&dispatch_id)
+                .expect("managed registry");
+            drop(registry_guard);
+            assert!(
+                !server.managed_run_controls.contains(&dispatch_id),
+                "the volatile registry must be absent when durable cancellation is checked"
+            );
 
             let error =
                 handle_tachi_complete(&server, managed_completion_params(&dispatch_id), false)
@@ -1431,6 +1440,11 @@ mod tests {
                 dispatch_adjudication_count(&server, &dispatch_id),
                 0,
                 "{receipt} must reject before dispatch_adjudications can be derived"
+            );
+            assert_eq!(
+                eval_memory_count(&server, &dispatch_id),
+                0,
+                "{receipt} must reject before an eval row is persisted"
             );
             let status: Value = serde_json::from_slice(
                 &std::fs::read(

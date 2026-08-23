@@ -669,6 +669,49 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             Err(_) => false,
             Ok(_) => false,
         };
+        // A managed cancellation is confirmed only if its ephemeral
+        // credentials are already gone.  The cleanup result is therefore an
+        // input to the one canonical terminal write below, never a later
+        // downgrade of a committed confirmation.
+        let credential_cleanup_failed = if should_cleanup {
+            let credential_cleanup = server_clone.with_global_store(|store| {
+                cleanup_ephemeral_credential_materializations(
+                    store,
+                    &workspace_dir_for_spawn,
+                    false,
+                )
+            });
+            let failed = match &credential_cleanup {
+                Ok(report) => !report.errors.is_empty(),
+                Err(_) => true,
+            };
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "credentials_cleanup",
+                    "dispatch_id": d_id,
+                    "agent": agent_for_watchdog,
+                    "report": credential_cleanup
+                        .as_ref()
+                        .map(|report| serde_json::to_value(report).unwrap_or_else(|_| json!({"error": "serialize cleanup report"})))
+                        .unwrap_or_else(|err| json!({"errors": [err]})),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "workspace_retained",
+                    "dispatch_id": d_id,
+                    "reason": "run_dir is retained so board/status links remain valid",
+                    "run_dir": workspace_dir.to_string_lossy(),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            failed
+        } else {
+            false
+        };
 
         // Final audit: dispatch_finished + status.json refresh.
         let final_exit_code = match &result {
@@ -739,7 +782,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 d_id, error
             );
         }
-        let final_status_state = if matches!(&result, Err(error) if error == "managed_cancelled") {
+        let final_status_state = if matches!(&result, Err(error) if error == "managed_cancelled")
+            && credential_cleanup_failed
+        {
+            "TASK_STATE_FAILED"
+        } else if matches!(&result, Err(error) if error == "managed_cancelled") {
             "TASK_STATE_CANCELED"
         } else if matches!(&result, Err(error) if error == "termination_unconfirmed" || error.starts_with("managed cancellation child probe failed"))
         {
@@ -765,10 +812,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "expected_status_revision": command.expected_status_revision,
                 "runner_error": result.as_ref().err(),
                 "termination_proof": managed_termination_proof,
+                "credential_cleanup_failed": credential_cleanup_failed,
             })
         });
 
-        let mut managed_cancel_completion = write_status_json(
+        let managed_cancel_completion = write_status_json(
             &workspace_dir_for_spawn,
             &d_id,
             v2_for_spawn,
@@ -817,59 +865,6 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             })),
         );
 
-        if should_cleanup {
-            let credential_cleanup = server_clone.with_global_store(|store| {
-                cleanup_ephemeral_credential_materializations(
-                    store,
-                    &workspace_dir_for_spawn,
-                    false,
-                )
-            });
-            let credential_cleanup_failed = match &credential_cleanup {
-                Ok(report) => !report.errors.is_empty(),
-                Err(_) => true,
-            };
-            append_trajectory_event(
-                &traj_path_for_spawn,
-                json!({
-                    "event": "credentials_cleanup",
-                    "dispatch_id": d_id,
-                    "agent": agent_for_watchdog,
-                    "report": credential_cleanup
-                        .as_ref()
-                        .map(|report| serde_json::to_value(report).unwrap_or_else(|_| json!({"error": "serialize cleanup report"})))
-                        .unwrap_or_else(|err| json!({"errors": [err]})),
-                    "timestamp": Utc::now().to_rfc3339(),
-                }),
-            );
-            append_trajectory_event(
-                &traj_path_for_spawn,
-                json!({
-                    "event": "workspace_retained",
-                    "dispatch_id": d_id,
-                    "reason": "run_dir is retained so board/status links remain valid",
-                    "run_dir": workspace_dir.to_string_lossy(),
-                    "timestamp": Utc::now().to_rfc3339(),
-                }),
-            );
-            if credential_cleanup_failed {
-                if let Some(command) = managed_cancellation.as_ref() {
-                    let cleanup_completion =
-                        crate::managed_run_control::record_managed_credential_cleanup_failure(
-                            &workspace_dir_for_spawn,
-                            command.expected_status_revision,
-                        );
-                    managed_cancel_completion = Some(match cleanup_completion {
-                        Ok(()) => crate::managed_run_control::CancelCompletion::Unavailable(
-                            "credential_cleanup_failed",
-                        ),
-                        Err(_) => crate::managed_run_control::CancelCompletion::Unavailable(
-                            "credential_cleanup_status_persist_failed",
-                        ),
-                    });
-                }
-            }
-        }
         if matches!(
             managed_cancel_completion,
             Some(crate::managed_run_control::CancelCompletion::Confirmed { .. })
@@ -888,6 +883,29 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     d_id, error
                 );
             }
+        }
+        if matches!(
+            managed_cancel_completion,
+            Some(crate::managed_run_control::CancelCompletion::Unavailable(
+                "credential_cleanup_failed"
+            ))
+        ) {
+            if let Err(error) =
+                update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None, Some(false))
+                    .await
+            {
+                eprintln!(
+                    "[watchdog] failed to mark credential-cleanup failure {}: {}",
+                    d_id, error
+                );
+            }
+            crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                &server_clone,
+                &d_id,
+                "credential_cleanup_failed",
+                Some(agent_for_watchdog.as_str()),
+                project_for_watchdog.as_deref(),
+            );
         }
         early_exit_cleanup.complete();
         // The response itself is a lifecycle receipt: it is released only
