@@ -1222,6 +1222,27 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
+    struct CaptureGateEnforceGuard {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl CaptureGateEnforceGuard {
+        fn new() -> Self {
+            let original = std::env::var_os("TACHI_CAPTURE_GATE");
+            std::env::set_var("TACHI_CAPTURE_GATE", "enforce");
+            Self { original }
+        }
+    }
+
+    impl Drop for CaptureGateEnforceGuard {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => std::env::set_var("TACHI_CAPTURE_GATE", value),
+                None => std::env::remove_var("TACHI_CAPTURE_GATE"),
+            }
+        }
+    }
+
     fn managed_completion_params(dispatch_id: &str) -> TachiCompleteParams {
         TachiCompleteParams {
             task_id: None,
@@ -1308,6 +1329,70 @@ mod tests {
                     .map_err(|error| error.to_string())
             })
             .expect("query dispatch adjudication count")
+    }
+
+    fn eval_memory_count(server: &MemoryServer, dispatch_id: &str) -> i64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memories \
+                         WHERE json_extract(metadata, '$.dispatch_id') = ?1",
+                        [dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("query eval memory count")
+    }
+
+    #[tokio::test]
+    async fn issue_1825_capture_gate_saved_false_revokes_managed_completion_without_residue() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182519Z-custom-gate-reject";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let _capture_gate = CaptureGateEnforceGuard::new();
+
+        let mut params = managed_completion_params(dispatch_id);
+        params.task_id = Some("issue-1825-capture-gate-reject".to_string());
+        params.task = "x".to_string();
+        params.agent = "x".to_string();
+        let error = handle_tachi_complete(&server, params, false)
+            .await
+            .expect_err("the real capture-gate saved:false response must reject completion");
+        assert_eq!(error, "completion eval was not durably recorded");
+
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(
+                server
+                    .tachi_home_dir()
+                    .join("runs")
+                    .join(dispatch_id)
+                    .join("status.json"),
+            )
+            .expect("read rolled-back managed status"),
+        )
+        .expect("parse rolled-back managed status");
+        assert!(
+            status.get("completion_recovery").is_none(),
+            "saved:false must revoke the temporary completion admission: {status:#}"
+        );
+        assert!(
+            status.get("resolved_completion").is_none(),
+            "saved:false must never fabricate a resolved completion receipt: {status:#}"
+        );
+        assert_eq!(
+            status["status_revision"], 9,
+            "admission and rollback are the only two status mutations"
+        );
+        assert_eq!(dispatch_outcome_count(&server, dispatch_id), 0);
+        assert_eq!(dispatch_adjudication_count(&server, dispatch_id), 0);
+        assert_eq!(
+            eval_memory_count(&server, dispatch_id),
+            0,
+            "capture-gate rejection must not leave an eval row"
+        );
     }
 
     #[tokio::test]
@@ -1774,32 +1859,6 @@ mod tests {
             source.matches(&shared_lock_call).count(),
             2,
             "every tachi_complete status read-modify-replace must take the shared per-run lock"
-        );
-    }
-}
-
-#[cfg(test)]
-mod issue_1825_durable_eval_tests {
-    use super::durable_eval_memory_id;
-    use serde_json::json;
-
-    #[test]
-    fn ok_but_nonrecorded_eval_never_fabricates_a_completion_id() {
-        assert_eq!(
-            durable_eval_memory_id(&json!({"saved": false, "id": "stale"})),
-            Err("completion eval was not durably recorded")
-        );
-        assert_eq!(
-            durable_eval_memory_id(&json!({"saved": false, "rejected_by": "capture_gate"})),
-            Err("completion eval was not durably recorded")
-        );
-        assert_eq!(
-            durable_eval_memory_id(&json!({"status": "saved"})),
-            Err("completion eval response omitted its durable id")
-        );
-        assert_eq!(
-            durable_eval_memory_id(&json!({"status": "saved", "id": "eval-1825"})),
-            Ok("eval-1825".to_string())
         );
     }
 }

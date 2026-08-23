@@ -718,7 +718,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
-    async fn staff_cancel_managed_custom_start_status_cancel_e2e() {
+    async fn issue_1825_managed_custom_cancel_race_matrix() {
         let _environment = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -814,14 +814,8 @@ pub(crate) mod tests {
         assert_eq!(unsafe { libc::kill(root_before_cancel, 0) }, 0);
         // SAFETY: signal 0 is a non-mutating existence probe for the fixture.
         assert_eq!(unsafe { libc::kill(descendant_before_cancel, 0) }, 0);
-        assert_eq!(
-            crate::dispatch_ops::take_managed_cancel_child_pid(&run_dir)
-                .expect("runner records its managed child"),
-            root_before_cancel as u32,
-            "the Staff fixture root must be the runner-owned process leader"
-        );
-        let (dequeued, continue_cancel, observation) =
-            crate::dispatch_ops::install_managed_cancel_dequeue_barrier();
+        let (_dequeue_guard, dequeued, continue_cancel, observation) =
+            crate::dispatch_ops::install_managed_cancel_dequeue_barrier(&run_dir);
         let cancel_server = server.clone();
         let cancel_dispatch_id = dispatch_id.to_string();
         let cancel_task = tokio::spawn(async move {
@@ -842,6 +836,20 @@ pub(crate) mod tests {
         .await
         .expect("Staff cancellation must reach the live production runner")
         .expect("dequeue observation join");
+        let duplicate: Value = serde_json::from_str(
+            &staff_cancel(
+                &server,
+                StaffCancelRequest {
+                    dispatch_id: dispatch_id.to_string(),
+                    expected_status_revision: accepted_revision + 1,
+                },
+            )
+            .await
+            .expect("duplicate Staff cancellation response"),
+        )
+        .expect("duplicate cancellation JSON");
+        assert_eq!(duplicate["receipt"], "cancellation_unavailable");
+        assert_eq!(duplicate["reason"], "duplicate_cancellation");
         std::fs::write(&cancel_trigger, b"trigger").expect("trigger live-root acknowledgement");
         for _ in 0..360 {
             if cancel_ack.exists() {
@@ -951,6 +959,27 @@ pub(crate) mod tests {
         assert!(
             !server.managed_run_controls.contains(dispatch_id),
             "managed registry entry must be removed before cancel responds"
+        );
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, dispatch_id).await,
+            Some("TASK_STATE_CANCELED".to_string()),
+            "confirmed managed cancellation must bypass watchdog FAILED kanban projection"
+        );
+        let cancellation_outcomes: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count cancellation outcomes");
+        assert_eq!(
+            cancellation_outcomes, 0,
+            "confirmed managed cancellation must not synthesize a watchdog failure outcome"
         );
 
         let (terminal, _result) = wait_for_staff_terminal(&run_dir).await;

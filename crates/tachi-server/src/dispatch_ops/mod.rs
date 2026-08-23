@@ -45,8 +45,6 @@ pub(crate) use prompt::seat_card::{
     resolve_exact_seat_card_readiness,
 };
 #[cfg(test)]
-pub(crate) use subprocess::take_managed_cancel_child_pid;
-#[cfg(test)]
 pub(crate) use subprocess::{
     install_managed_cancel_dequeue_barrier, ManagedCancelTryWaitObservation,
 };

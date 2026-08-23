@@ -343,7 +343,20 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         let mut pending_completion_recovery = false;
         let mut receipt_read_error = None;
         let mut kanban_state = None;
+        // A runner that has reaped the managed group and returned its
+        // cancellation proof already owns the terminal classification.  Do
+        // not feed that result through the ordinary watchdog path: it would
+        // synthesize a failure eval/outcome before the terminal writer has
+        // persisted the cancellation receipt.
+        let managed_cancellation_confirmed =
+            matches!(&result, Err(error) if error == "managed_cancelled");
+        if managed_cancellation_confirmed {
+            receipt_terminal_state = Some("TASK_STATE_CANCELED");
+        }
         for _ in 0..watchdog_polls {
+            if managed_cancellation_confirmed {
+                break;
+            }
             tokio::time::sleep(watchdog_interval).await;
             match completion_receipt_state(&workspace_dir_for_spawn) {
                 Ok(CompletionReceiptState::Terminal(receipt_state)) => {
@@ -708,7 +721,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             })
         });
 
-        let managed_cancel_completion = write_status_json(
+        let mut managed_cancel_completion = write_status_json(
             &workspace_dir_for_spawn,
             &d_id,
             v2_for_spawn,
@@ -765,6 +778,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     false,
                 )
             });
+            let credential_cleanup_failed = match &credential_cleanup {
+                Ok(report) => !report.errors.is_empty(),
+                Err(_) => true,
+            };
             append_trajectory_event(
                 &traj_path_for_spawn,
                 json!({
@@ -788,6 +805,21 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
             );
+            if credential_cleanup_failed {
+                if let Some(command) = managed_cancellation.as_ref() {
+                    if crate::managed_run_control::record_managed_credential_cleanup_failure(
+                        &workspace_dir_for_spawn,
+                        command.expected_status_revision,
+                    )
+                    .is_err()
+                    {
+                        managed_cancel_completion =
+                            Some(crate::managed_run_control::CancelCompletion::Unavailable(
+                                "credential_cleanup_status_persist_failed",
+                            ));
+                    }
+                }
+            }
         }
         early_exit_cleanup.complete();
         // The response itself is a lifecycle receipt: it is released only

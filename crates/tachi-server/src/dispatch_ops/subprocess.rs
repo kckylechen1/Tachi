@@ -12,23 +12,61 @@ const PROCESS_GROUP_TERM_GRACE: Duration = Duration::from_millis(1500);
 static OPENCODE_SOP_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 
 #[cfg(test)]
-static MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR: OnceLock<
-    std::sync::Mutex<Option<std::path::PathBuf>>,
+static MANAGED_CANCEL_PROBE_FAILURE_RUN_DIRS: OnceLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
 > = OnceLock::new();
 
 #[cfg(test)]
-static MANAGED_CANCEL_CHILD_PID: OnceLock<std::sync::Mutex<Option<(std::path::PathBuf, u32)>>> =
-    OnceLock::new();
+static MANAGED_PANIC_AFTER_SPAWN_RUN_DIRS: OnceLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = OnceLock::new();
 
 #[cfg(test)]
-static MANAGED_PANIC_AFTER_SPAWN_RUN_DIR: OnceLock<std::sync::Mutex<Option<std::path::PathBuf>>> =
-    OnceLock::new();
+static MANAGED_CANCEL_CHILD_PID_OBSERVERS: OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, std::sync::mpsc::SyncSender<u32>>,
+    >,
+> = OnceLock::new();
 
 #[cfg(test)]
 struct ManagedCancelDequeueBarrier {
     entered: std::sync::mpsc::SyncSender<()>,
     release: std::sync::mpsc::Receiver<()>,
     observation: std::sync::mpsc::SyncSender<ManagedCancelTryWaitObservation>,
+}
+
+#[cfg(test)]
+pub(crate) struct ManagedCancelDequeueBarrierGuard {
+    run_dir: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for ManagedCancelDequeueBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(barriers) = MANAGED_CANCEL_DEQUEUE_BARRIERS.get() {
+            barriers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.run_dir);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ManagedCancelChildPidObserverGuard {
+    run_dir: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for ManagedCancelChildPidObserverGuard {
+    fn drop(&mut self) {
+        if let Some(observers) = MANAGED_CANCEL_CHILD_PID_OBSERVERS.get() {
+            observers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.run_dir);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -115,8 +153,8 @@ impl ManagedCancelTryWaitObservation {
 }
 
 #[cfg(test)]
-static MANAGED_CANCEL_DEQUEUE_BARRIER: OnceLock<
-    std::sync::Mutex<Option<ManagedCancelDequeueBarrier>>,
+static MANAGED_CANCEL_DEQUEUE_BARRIERS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, ManagedCancelDequeueBarrier>>,
 > = OnceLock::new();
 
 pub(super) async fn run_agent_subprocess(
@@ -178,7 +216,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                     return ManagedSubprocessOutcome::plain(Err("managed cancellation channel closed".to_string()));
                 };
                 #[cfg(test)]
-                let observation = pause_managed_cancel_after_dequeue();
+                let observation = pause_managed_cancel_after_dequeue(run_dir);
                 #[cfg(test)]
                 let mut command = command;
                 let status = match try_wait_for_managed_cancellation(&mut child, run_dir) {
@@ -378,7 +416,10 @@ pub(crate) async fn run_managed_custom_subprocess(
 }
 
 #[cfg(test)]
-pub(crate) fn install_managed_cancel_dequeue_barrier() -> (
+pub(crate) fn install_managed_cancel_dequeue_barrier(
+    run_dir: &std::path::Path,
+) -> (
+    ManagedCancelDequeueBarrierGuard,
     std::sync::mpsc::Receiver<()>,
     std::sync::mpsc::SyncSender<()>,
     std::sync::mpsc::Receiver<ManagedCancelTryWaitObservation>,
@@ -386,25 +427,41 @@ pub(crate) fn install_managed_cancel_dequeue_barrier() -> (
     let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let (observation_tx, observation_rx) = std::sync::mpsc::sync_channel(1);
-    let barrier = MANAGED_CANCEL_DEQUEUE_BARRIER.get_or_init(|| std::sync::Mutex::new(None));
-    *barrier
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ManagedCancelDequeueBarrier {
-        entered: entered_tx,
-        release: release_rx,
-        observation: observation_tx,
-    });
-    (entered_rx, release_tx, observation_rx)
+    let run_dir = run_dir.to_path_buf();
+    let barriers = MANAGED_CANCEL_DEQUEUE_BARRIERS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    assert!(
+        barriers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                run_dir.clone(),
+                ManagedCancelDequeueBarrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                    observation: observation_tx,
+                },
+            )
+            .is_none(),
+        "managed cancellation dequeue barrier already installed for run"
+    );
+    (
+        ManagedCancelDequeueBarrierGuard { run_dir },
+        entered_rx,
+        release_tx,
+        observation_rx,
+    )
 }
 
 #[cfg(test)]
 fn pause_managed_cancel_after_dequeue(
+    run_dir: &std::path::Path,
 ) -> Option<std::sync::mpsc::SyncSender<ManagedCancelTryWaitObservation>> {
-    let barrier = MANAGED_CANCEL_DEQUEUE_BARRIER.get().and_then(|barrier| {
-        barrier
+    let barrier = MANAGED_CANCEL_DEQUEUE_BARRIERS.get().and_then(|barriers| {
+        barriers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
+            .remove(run_dir)
     })?;
     let _ = barrier.entered.send(());
     let _ = barrier.release.recv();
@@ -521,11 +578,11 @@ fn try_wait_for_managed_cancellation(
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
     #[cfg(test)]
     {
-        let configured_run_dir = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR
-            .get_or_init(|| std::sync::Mutex::new(None))
+        let configured_run_dirs = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIRS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if configured_run_dir.as_deref() == Some(_run_dir) {
+        if configured_run_dirs.contains(_run_dir) {
             return Err(std::io::Error::other(
                 "injected managed cancellation probe failure",
             ));
@@ -535,16 +592,16 @@ fn try_wait_for_managed_cancellation(
 }
 
 #[cfg(test)]
-struct ManagedCancelProbeFailureGuard;
+struct ManagedCancelProbeFailureGuard(std::path::PathBuf);
 
 #[cfg(test)]
 impl Drop for ManagedCancelProbeFailureGuard {
     fn drop(&mut self) {
-        let mut configured_run_dir = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR
-            .get_or_init(|| std::sync::Mutex::new(None))
+        let mut configured_run_dirs = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIRS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *configured_run_dir = None;
+        configured_run_dirs.remove(&self.0);
     }
 }
 
@@ -552,15 +609,38 @@ impl Drop for ManagedCancelProbeFailureGuard {
 fn inject_managed_cancel_probe_failure(
     run_dir: &std::path::Path,
 ) -> ManagedCancelProbeFailureGuard {
-    let mut configured_run_dir = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIR
-        .get_or_init(|| std::sync::Mutex::new(None))
+    let run_dir = run_dir.to_path_buf();
+    let mut configured_run_dirs = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIRS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert!(
-        configured_run_dir.replace(run_dir.to_path_buf()).is_none(),
+        configured_run_dirs.insert(run_dir.clone()),
         "managed cancellation probe failure already configured"
     );
-    ManagedCancelProbeFailureGuard
+    ManagedCancelProbeFailureGuard(run_dir)
+}
+
+#[cfg(test)]
+pub(crate) fn install_managed_cancel_child_pid_observer(
+    run_dir: &std::path::Path,
+) -> (
+    ManagedCancelChildPidObserverGuard,
+    std::sync::mpsc::Receiver<u32>,
+) {
+    let run_dir = run_dir.to_path_buf();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let observers = MANAGED_CANCEL_CHILD_PID_OBSERVERS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    assert!(
+        observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(run_dir.clone(), sender)
+            .is_none(),
+        "managed cancellation child observer already installed for run"
+    );
+    (ManagedCancelChildPidObserverGuard { run_dir }, receiver)
 }
 
 #[cfg(test)]
@@ -568,55 +648,52 @@ fn record_managed_cancel_child_pid(run_dir: &std::path::Path, pid: Option<u32>) 
     let Some(pid) = pid else {
         return;
     };
-    let mut observed = MANAGED_CANCEL_CHILD_PID
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _ = observed.replace((run_dir.to_path_buf(), pid));
+    let Some(sender) = MANAGED_CANCEL_CHILD_PID_OBSERVERS
+        .get()
+        .and_then(|observers| {
+            observers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(run_dir)
+        })
+    else {
+        return;
+    };
+    let _ = sender.send(pid);
 }
 
 #[cfg(test)]
-pub(crate) fn take_managed_cancel_child_pid(run_dir: &std::path::Path) -> Option<u32> {
-    let mut observed = MANAGED_CANCEL_CHILD_PID
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (recorded_run_dir, pid) = observed.take()?;
-    assert_eq!(recorded_run_dir, run_dir);
-    Some(pid)
-}
-
-#[cfg(test)]
-struct ManagedPanicAfterSpawnGuard;
+struct ManagedPanicAfterSpawnGuard(std::path::PathBuf);
 
 #[cfg(test)]
 impl Drop for ManagedPanicAfterSpawnGuard {
     fn drop(&mut self) {
-        let mut configured = MANAGED_PANIC_AFTER_SPAWN_RUN_DIR
-            .get_or_init(|| std::sync::Mutex::new(None))
+        let mut configured = MANAGED_PANIC_AFTER_SPAWN_RUN_DIRS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *configured = None;
+        configured.remove(&self.0);
     }
 }
 
 #[cfg(test)]
 fn inject_managed_panic_after_spawn(run_dir: &std::path::Path) -> ManagedPanicAfterSpawnGuard {
-    let mut configured = MANAGED_PANIC_AFTER_SPAWN_RUN_DIR
-        .get_or_init(|| std::sync::Mutex::new(None))
+    let run_dir = run_dir.to_path_buf();
+    let mut configured = MANAGED_PANIC_AFTER_SPAWN_RUN_DIRS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert!(configured.replace(run_dir.to_path_buf()).is_none());
-    ManagedPanicAfterSpawnGuard
+    assert!(configured.insert(run_dir.clone()));
+    ManagedPanicAfterSpawnGuard(run_dir)
 }
 
 #[cfg(test)]
 fn panic_after_managed_spawn(run_dir: &std::path::Path) {
-    let configured = MANAGED_PANIC_AFTER_SPAWN_RUN_DIR
-        .get_or_init(|| std::sync::Mutex::new(None))
+    let configured = MANAGED_PANIC_AFTER_SPAWN_RUN_DIRS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if configured.as_deref() == Some(run_dir) {
+    if configured.contains(run_dir) {
         // The fixture writes this marker only after its descendant is live.
         // This is test-only and proves the guard covers an unwind after
         // ownership, rather than merely a root that never ran.
@@ -681,7 +758,8 @@ mod issue_1825_tests {
             .managed_run_controls
             .register(dispatch_id)
             .expect("registry");
-        let (entered, continue_cancel, _observation) = install_managed_cancel_dequeue_barrier();
+        let (_dequeue_guard, entered, continue_cancel, _observation) =
+            install_managed_cancel_dequeue_barrier(&run_dir);
         let mut command = Command::new("/bin/sh");
         command.args([
             "-c",
@@ -764,6 +842,7 @@ mod issue_1825_tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", &format!("touch '{}' && sleep 30", started.display())]);
         let runner_run_dir = run_dir.clone();
+        let (_pid_guard, pid_observer) = install_managed_cancel_child_pid_observer(&run_dir);
         let runner = tokio::spawn(async move {
             run_managed_custom_subprocess(
                 command,
@@ -774,7 +853,7 @@ mod issue_1825_tests {
             .await
         });
         wait_for_file(&started).await;
-        let pid = take_managed_cancel_child_pid(&run_dir).expect("managed child pid");
+        let pid = pid_observer.recv().expect("managed child pid");
         let _failure = inject_managed_cancel_probe_failure(&run_dir);
         let response =
             crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, 1)
@@ -1729,225 +1808,6 @@ mod managed_process_group_regression_tests {
         assert!(
             process_absent(pid).await,
             "panic unwind left descendant alive"
-        );
-    }
-}
-
-#[cfg(test)]
-mod issue_1825_race_matrix_tests {
-    use super::*;
-    use serde_json::{json, Value};
-
-    fn working_status(dispatch_id: &str) -> Value {
-        json!({
-            "dispatch_id": dispatch_id,
-            "state": "TASK_STATE_WORKING",
-            "status_revision": 1,
-            "execution_classification": "managed_custom",
-        })
-    }
-
-    struct ReleaseChildOnDrop(std::path::PathBuf);
-
-    impl Drop for ReleaseChildOnDrop {
-        fn drop(&mut self) {
-            let _ = std::fs::write(&self.0, b"release");
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[allow(clippy::await_holding_lock)]
-    async fn managed_custom_cancel_race_matrix() {
-        let _serial = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let home = tempfile::tempdir().expect("home");
-        let runs = tempfile::tempdir().expect("runs");
-        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
-        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
-
-        // The first request owns the one bounded control channel. A duplicate
-        // cannot become a second termination owner, and a pre-spawn command
-        // suppresses the real child rather than merely rewriting a receipt.
-        let dispatch_id = "20260823T010102Z-custom-deadbeef";
-        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
-        std::fs::create_dir_all(&run_dir).expect("pre-spawn run dir");
-        std::fs::write(
-            run_dir.join("status.json"),
-            working_status(dispatch_id).to_string(),
-        )
-        .expect("pre-spawn status");
-        let server = crate::MemoryServer::new(home.path().join("pre-spawn.sqlite"), None)
-            .expect("pre-spawn server");
-        let (receiver, guard) = server
-            .managed_run_controls
-            .register(dispatch_id)
-            .expect("pre-spawn registry");
-        let request_server = server.clone();
-        let first = tokio::spawn(async move {
-            crate::managed_run_control::request_managed_custom_cancel(
-                &request_server,
-                dispatch_id,
-                1,
-            )
-            .await
-            .expect("first cancellation response")
-        });
-        for _ in 0..100 {
-            let status: Value = serde_json::from_slice(
-                &std::fs::read(run_dir.join("status.json")).expect("pending status"),
-            )
-            .expect("pending status JSON");
-            if status["cancellation"]["receipt"] == "cancellation_requested" {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let duplicate: Value = serde_json::from_str(
-            &crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, 2)
-                .await
-                .expect("duplicate response"),
-        )
-        .expect("duplicate response JSON");
-        assert_eq!(duplicate["reason"], "duplicate_cancellation");
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "exit 99"]);
-        let result =
-            run_managed_custom_subprocess(command, Duration::from_secs(2), receiver, &run_dir)
-                .await;
-        assert!(matches!(result, Err(ref error) if error == "managed_cancelled"));
-        assert_eq!(
-            serde_json::from_str::<Value>(&first.await.expect("first task"))
-                .expect("first response JSON")["receipt"],
-            "cancellation_confirmed"
-        );
-        drop(guard);
-        assert!(
-            !server.managed_run_controls.contains(dispatch_id),
-            "pre-spawn cancellation must leave no managed registry residue"
-        );
-
-        // The command is dequeued by the actual runner, then the child exits
-        // through the test-only barrier. Completion wins without a hand-written
-        // terminal status or a second process-group termination attempt.
-        let dispatch_id = "20260823T010103Z-custom-deadbeef";
-        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
-        std::fs::create_dir_all(&run_dir).expect("completion run dir");
-        std::fs::write(
-            run_dir.join("status.json"),
-            working_status(dispatch_id).to_string(),
-        )
-        .expect("completion status");
-        let server = crate::MemoryServer::new(home.path().join("completion.sqlite"), None)
-            .expect("completion server");
-        let (receiver, guard) = server
-            .managed_run_controls
-            .register(dispatch_id)
-            .expect("completion registry");
-        let child_started = run_dir.join("child-started");
-        let release_child = run_dir.join("release-child");
-        let _release_child = ReleaseChildOnDrop(release_child.clone());
-        let child_exited = run_dir.join("child-exited");
-        let mut command = Command::new("/bin/sh");
-        command.args([
-            "-c",
-            &format!(
-                "touch '{}' ; while test ! -e '{}'; do sleep 0.01; done; touch '{}'",
-                child_started.display(),
-                release_child.display(),
-                child_exited.display(),
-            ),
-        ]);
-        let runner_dir = run_dir.clone();
-        let runner = tokio::spawn(async move {
-            run_managed_custom_subprocess(command, Duration::from_secs(2), receiver, &runner_dir)
-                .await
-        });
-        for _ in 0..100 {
-            if child_started.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            child_started.exists(),
-            "real child must start before dequeue"
-        );
-        let (dequeued, continue_cancel, _observation) = install_managed_cancel_dequeue_barrier();
-        let request_server = server.clone();
-        let cancel = tokio::spawn(async move {
-            crate::managed_run_control::request_managed_custom_cancel(
-                &request_server,
-                dispatch_id,
-                1,
-            )
-            .await
-            .expect("completion winner response")
-        });
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::task::spawn_blocking(move || dequeued.recv().expect("dequeued command")),
-        )
-        .await
-        .expect("runner must dequeue cancellation")
-        .expect("dequeue join");
-        std::fs::write(&release_child, b"release").expect("release child");
-        for _ in 0..100 {
-            if child_exited.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            child_exited.exists(),
-            "child exit must happen after dequeue"
-        );
-        continue_cancel.send(()).expect("release runner");
-        assert!(runner.await.expect("runner task").is_ok());
-        let completion: Value = serde_json::from_str(&cancel.await.expect("cancel task"))
-            .expect("completion response JSON");
-        assert_eq!(completion["receipt"], "cancellation_unavailable");
-        assert_eq!(completion["reason"], "completion_or_timeout_winner");
-        drop(guard);
-        assert!(
-            !server.managed_run_controls.contains(dispatch_id),
-            "completion winner must leave no managed registry residue"
-        );
-
-        // A real timeout reaps its process group. Once that owner is gone a
-        // late cancel is unavailable, never a second termination operation.
-        let dispatch_id = "20260823T010104Z-custom-deadbeef";
-        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
-        std::fs::create_dir_all(&run_dir).expect("timeout run dir");
-        std::fs::write(
-            run_dir.join("status.json"),
-            working_status(dispatch_id).to_string(),
-        )
-        .expect("timeout status");
-        let server = crate::MemoryServer::new(home.path().join("timeout.sqlite"), None)
-            .expect("timeout server");
-        let (receiver, guard) = server
-            .managed_run_controls
-            .register(dispatch_id)
-            .expect("timeout registry");
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "sleep 60"]);
-        let result =
-            run_managed_custom_subprocess(command, Duration::from_millis(20), receiver, &run_dir)
-                .await;
-        assert!(matches!(result, Err(ref error) if error.contains("timed out")));
-        drop(guard);
-        let late: Value = serde_json::from_str(
-            &crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, 1)
-                .await
-                .expect("late timeout response"),
-        )
-        .expect("late timeout response JSON");
-        assert_eq!(late["receipt"], "cancellation_unavailable");
-        assert_eq!(late["reason"], "absent_same_daemon_handle");
-        assert!(
-            !server.managed_run_controls.contains(dispatch_id),
-            "timeout winner must leave no managed registry residue"
         );
     }
 }

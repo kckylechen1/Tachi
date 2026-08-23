@@ -34,6 +34,50 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
+#[cfg(test)]
+fn managed_terminal_status_write_failures(
+) -> &'static Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    static FAILURES: OnceLock<Mutex<std::collections::HashSet<std::path::PathBuf>>> =
+        OnceLock::new();
+    FAILURES.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(test)]
+struct ManagedTerminalStatusWriteFailureGuard {
+    status_path: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for ManagedTerminalStatusWriteFailureGuard {
+    fn drop(&mut self) {
+        managed_terminal_status_write_failures()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.status_path);
+    }
+}
+
+#[cfg(test)]
+fn fail_next_managed_terminal_status_write(
+    run_dir: &std::path::Path,
+) -> ManagedTerminalStatusWriteFailureGuard {
+    let status_path = run_dir.join("status.json");
+    let inserted = managed_terminal_status_write_failures()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(status_path.clone());
+    assert!(inserted, "one managed terminal write fault per status path");
+    ManagedTerminalStatusWriteFailureGuard { status_path }
+}
+
+#[cfg(test)]
+fn take_managed_terminal_status_write_failure(status_path: &std::path::Path) -> bool {
+    managed_terminal_status_write_failures()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(status_path)
+}
+
 /// System prompt prepended to the Stage-1 task body. Kept verbatim so the
 /// LLM produces a deterministic, parseable plan layout.
 pub(super) const PLAN_SYSTEM_PROMPT: &str = r#"You are a planning engine for Tachi dispatch.
@@ -411,6 +455,22 @@ pub(crate) fn write_status_json(
     let mut managed_terminal = None;
 
     let path = run_dir.join("status.json");
+    // Managed cancellation may acknowledge only a committed canonical
+    // receipt.  Ordinary terminal writes retain their historical best-effort
+    // compatibility, but this path must refuse a missing/corrupt prior
+    // receipt rather than manufacturing CANCELED in a fresh object.
+    if managed_finalization.is_some()
+        && !matches!(
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok()),
+            Some(Value::Object(_))
+        )
+    {
+        return Some(crate::managed_run_control::CancelCompletion::Unavailable(
+            "managed_terminal_status_unreadable",
+        ));
+    }
     // Host-profile routing is fixed at dispatch acceptance. Later lifecycle
     // writers (preflight failure, watchdog, completion) describe a changing
     // state but must not erase that admission decision from the receipt.
@@ -550,7 +610,21 @@ pub(crate) fn write_status_json(
     });
     let body =
         serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_else(|_| "{}".to_string());
-    if let Err(e) = crate::utils::write_owner_only_file_atomic(&path, body.as_bytes()) {
+    #[cfg(test)]
+    let write_result =
+        if managed_finalization.is_some() && take_managed_terminal_status_write_failure(&path) {
+            Err("injected managed terminal status write failure".to_string())
+        } else {
+            crate::utils::write_owner_only_file_atomic(&path, body.as_bytes())
+        };
+    #[cfg(not(test))]
+    let write_result = crate::utils::write_owner_only_file_atomic(&path, body.as_bytes());
+    if let Err(e) = write_result {
+        if managed_finalization.is_some() {
+            return Some(crate::managed_run_control::CancelCompletion::Unavailable(
+                "managed_terminal_status_persist_failed",
+            ));
+        }
         eprintln!("[dispatch-v2] failed to write {}: {e}", path.display());
     }
     completion
@@ -660,6 +734,95 @@ impl PlanSections {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_finalization_refuses_a_corrupt_prior_status_without_writing_canceled() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        let path = temp.path().join("status.json");
+        std::fs::write(&path, b"{not json").expect("write corrupt status");
+
+        let completion = write_status_json(
+            temp.path(),
+            "20260823T182599Z-corrupt-managed-terminal",
+            false,
+            None,
+            None,
+            "n/a",
+            None,
+            None,
+            None,
+            None,
+            Some(serde_json::json!({
+                "state": "TASK_STATE_CANCELED",
+                "managed_cancellation_finalization": {
+                    "expected_status_revision": 1,
+                    "runner_error": "managed_cancelled",
+                    "termination_proof": "unix_process_group_absent",
+                }
+            })),
+        );
+
+        assert!(matches!(
+            completion,
+            Some(crate::managed_run_control::CancelCompletion::Unavailable(
+                "managed_terminal_status_unreadable"
+            ))
+        ));
+        assert_eq!(
+            std::fs::read(&path).expect("read unchanged status"),
+            b"{not json"
+        );
+    }
+
+    #[test]
+    fn managed_finalization_refuses_an_atomic_status_write_failure_without_confirmation() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        let status_path = temp.path().join("status.json");
+        let initial = serde_json::json!({
+            "dispatch_id": "20260823T182520Z-managed-write-failure",
+            "state": "TASK_STATE_WORKING",
+            "status_revision": 7,
+            "execution_classification": "managed_custom",
+        });
+        std::fs::write(&status_path, initial.to_string()).expect("seed managed status");
+        let _failure = fail_next_managed_terminal_status_write(temp.path());
+
+        let completion = write_status_json(
+            temp.path(),
+            "20260823T182520Z-managed-write-failure",
+            false,
+            None,
+            None,
+            "n/a",
+            Some(143),
+            None,
+            None,
+            None,
+            Some(serde_json::json!({
+                "state": "TASK_STATE_CANCELED",
+                "managed_cancellation_finalization": {
+                    "expected_status_revision": 7,
+                    "runner_error": "managed_cancelled",
+                    "termination_proof": "unix_process_group_absent",
+                }
+            })),
+        );
+
+        match completion {
+            Some(crate::managed_run_control::CancelCompletion::Unavailable(reason)) => {
+                assert_eq!(reason, "managed_terminal_status_persist_failed");
+            }
+            _ => panic!("atomic status failure must not confirm managed cancellation"),
+        }
+        let after: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read untouched managed status"),
+        )
+        .expect("parse untouched managed status");
+        assert_eq!(
+            after, initial,
+            "failed atomic replacement must not persist CANCELED"
+        );
+    }
 
     #[test]
     fn terminal_status_rewrite_preserves_resolved_completion_receipt() {
