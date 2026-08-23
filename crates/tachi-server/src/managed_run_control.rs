@@ -230,8 +230,10 @@ pub(crate) fn cancellation_blocks_terminal_writer(object: &serde_json::Map<Strin
             true
         }
         Some("cancellation_unavailable") => {
-            receipt.get("reason").and_then(Value::as_str) == Some("credential_cleanup_failed")
-                && receipt.get("state").and_then(Value::as_str) == Some("TASK_STATE_FAILED")
+            matches!(
+                receipt.get("reason").and_then(Value::as_str),
+                Some("credential_cleanup_failed" | "result_persist_failed")
+            ) && receipt.get("state").and_then(Value::as_str) == Some("TASK_STATE_FAILED")
                 && object.get("state").and_then(Value::as_str) == Some("TASK_STATE_FAILED")
         }
         _ => false,
@@ -776,6 +778,7 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
     runner_error: Option<&str>,
     termination_proof: Option<&'static str>,
     credential_cleanup_failed: bool,
+    result_persist_failed: bool,
 ) -> ManagedTerminalCancellation {
     let dispatch_id = object
         .get("dispatch_id")
@@ -809,6 +812,24 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
     }
     match runner_error {
         Some("managed_cancelled") => {
+            if result_persist_failed {
+                object.insert(
+                    "cancellation".to_string(),
+                    cancellation_receipt(
+                        "cancellation_unavailable",
+                        &dispatch_id,
+                        expected,
+                        observed,
+                        Some("result_persist_failed"),
+                        None,
+                    ),
+                );
+                object.insert(
+                    "state".to_string(),
+                    Value::String("TASK_STATE_FAILED".to_string()),
+                );
+                return ManagedTerminalCancellation::Unavailable("result_persist_failed");
+            }
             let Some(proof) = termination_proof else {
                 object.insert(
                     "cancellation".to_string(),
@@ -1269,6 +1290,7 @@ mod issue_1825_tests {
             7,
             Some("managed_cancelled"),
             None,
+            false,
             false,
         );
 

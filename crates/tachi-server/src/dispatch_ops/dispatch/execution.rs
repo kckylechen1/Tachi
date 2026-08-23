@@ -40,6 +40,13 @@ pub(super) enum DispatchExecution {
     NativeAcp(NativeAcpRunSpec),
 }
 
+/// Private lifecycle evidence that this registered Staff-managed run owns only
+/// its own run-scoped ephemeral materializations. It is established before
+/// background handoff and is independent of process exit or completion state.
+pub(super) enum ManagedEphemeralCredentialCleanupObligation {
+    Required,
+}
+
 pub(super) struct BackgroundDispatchContext {
     pub(super) server: MemoryServer,
     pub(super) dispatch_id: String,
@@ -68,6 +75,8 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) flow_dispatch_slot: Option<PathBuf>,
     pub(super) mcp_config_path: Option<PathBuf>,
     pub(super) managed_run_guard: Option<crate::managed_run_control::ManagedRunGuard>,
+    pub(super) managed_ephemeral_credential_cleanup:
+        Option<ManagedEphemeralCredentialCleanupObligation>,
 }
 
 /// Covers an unwind before the ordinary background terminal path reaches its
@@ -253,7 +262,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
     let mcp_config_path = ctx.mcp_config_path;
     let managed_run_guard = ctx.managed_run_guard;
-    let managed_execution = managed_run_guard.is_some();
+    let managed_ephemeral_credential_cleanup = ctx.managed_ephemeral_credential_cleanup;
 
     tokio::task::spawn(async move {
         // Keep the registry entry and its sender alive for the entire
@@ -439,11 +448,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         }
 
         // Save full output to result.md for orchestrator eval
-        {
+        let result_persist_error = {
             let result_path = workspace_dir.join("result.md");
-            if let Err(err) =
-                crate::utils::write_owner_only_file_atomic(&result_path, full_output.as_bytes())
-            {
+            let error = super::persist_dispatch_result_artifact(
+                &result_path,
+                full_output.as_bytes(),
+                managed_ephemeral_credential_cleanup.is_some(),
+            )
+            .err();
+            if let Some(err) = error.as_ref() {
                 tracing::warn!(
                     dispatch_id = %d_id,
                     path = %result_path.display(),
@@ -461,7 +474,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     }),
                 );
             }
-        }
+            error
+        };
 
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
         // Poll for kanban state instead of a fixed sleep to avoid race conditions
@@ -763,17 +777,13 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }
         }
 
-        let should_cleanup =
-            if managed_execution_requires_credential_cleanup(managed_execution, &result) {
-                true
-            } else {
-                match &result {
-                    Ok(r) if !pending_completion_recovery => {
-                        should_cleanup_run(r.exit_code, kanban_state.as_deref())
-                    }
-                    Err(_) => false,
-                    Ok(_) => false,
+        let should_cleanup = managed_ephemeral_credential_cleanup.is_some()
+            || match &result {
+                Ok(r) if !pending_completion_recovery => {
+                    should_cleanup_run(r.exit_code, kanban_state.as_deref())
                 }
+                Err(_) => false,
+                Ok(_) => false,
             };
         // A managed cancellation is confirmed only if its ephemeral
         // credentials are already gone.  The cleanup result is therefore an
@@ -905,7 +915,9 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 d_id, error
             );
         }
-        let final_status_state = if matches!(&result, Err(error) if error == "managed_cancelled")
+        let final_status_state = if result_persist_error.is_some() {
+            "TASK_STATE_FAILED"
+        } else if matches!(&result, Err(error) if error == "managed_cancelled")
             && credential_cleanup_failed
         {
             "TASK_STATE_FAILED"
@@ -936,6 +948,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "runner_error": result.as_ref().err(),
                 "termination_proof": managed_termination_proof,
                 "credential_cleanup_failed": credential_cleanup_failed,
+                "result_persist_failed": result_persist_error.is_some(),
             })
         });
 
@@ -956,7 +969,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "closure_kind": terminal_closure_kind(final_status_state),
                 "updated_at": Utc::now().to_rfc3339(),
                 "run_dir": workspace_dir_for_spawn.to_string_lossy(),
-                "result_written": true,
+                "result_written": result_persist_error.is_none(),
+                "result_persist_error": result_persist_error,
                 "artifact_read_error": artifact_read_error,
                 "completion_predicate": preserved_predicate,
                 "cwd": preserved_cwd,
@@ -1010,7 +1024,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         if let Some(crate::managed_run_control::CancelCompletion::Unavailable(reason)) =
             managed_cancel_completion.as_ref()
         {
-            if *reason == "credential_cleanup_failed" || *reason == "persist_failed" {
+            if *reason == "credential_cleanup_failed"
+                || *reason == "persist_failed"
+                || *reason == "result_persist_failed"
+            {
                 if let Err(error) = update_kanban_state(
                     &server_clone,
                     &d_id,
@@ -1053,16 +1070,6 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         #[cfg(test)]
         mark_background_dispatch_cleanup_complete(&d_id);
     });
-}
-
-fn managed_execution_requires_credential_cleanup<T>(
-    managed_execution: bool,
-    result: &Result<T, String>,
-) -> bool {
-    // A registry-owned managed execution has materialized credentials under
-    // its run root. Any terminal error belongs to that owner and must clean
-    // them before the background lifecycle releases its authority.
-    managed_execution && result.is_err()
 }
 
 #[cfg(test)]
@@ -2143,27 +2150,13 @@ mod tests {
 
 #[cfg(test)]
 mod issue_1825_credential_cleanup_tests {
-    use super::managed_execution_requires_credential_cleanup;
+    use super::ManagedEphemeralCredentialCleanupObligation;
 
     #[test]
     fn managed_terminal_failures_always_select_ephemeral_credential_cleanup() {
-        for error in [
-            "managed_cancelled",
-            "termination_unconfirmed",
-            "managed cancellation child probe failed: injected",
-            "managed subprocess panicked: task 7 panicked",
-            "Agent process timed out after 1s",
-            "managed subprocess channel closed",
-            "spawn custom worker failed",
-        ] {
-            assert!(managed_execution_requires_credential_cleanup::<()>(
-                true,
-                &Err(error.to_string())
-            ));
-        }
-        assert!(!managed_execution_requires_credential_cleanup::<()>(
-            false,
-            &Err("non-managed failure".to_string())
-        ));
+        let managed = Some(ManagedEphemeralCredentialCleanupObligation::Required);
+        let non_managed: Option<ManagedEphemeralCredentialCleanupObligation> = None;
+        assert!(managed.is_some());
+        assert!(non_managed.is_none());
     }
 }

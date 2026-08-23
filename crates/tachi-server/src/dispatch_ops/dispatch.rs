@@ -219,6 +219,75 @@ mod managed_materialization_barrier {
 }
 
 #[cfg(test)]
+static MANAGED_RESULT_PERSIST_FAILURES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<(PathBuf, PathBuf)>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct ManagedResultPersistFailureGuard {
+    key: (PathBuf, PathBuf),
+}
+
+#[cfg(test)]
+impl Drop for ManagedResultPersistFailureGuard {
+    fn drop(&mut self) {
+        if let Some(failures) = MANAGED_RESULT_PERSIST_FAILURES.get() {
+            failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_managed_result_persist_failure(
+    home: &Path,
+    run_root: &Path,
+) -> ManagedResultPersistFailureGuard {
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    assert!(MANAGED_RESULT_PERSIST_FAILURES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key.clone()));
+    ManagedResultPersistFailureGuard { key }
+}
+
+#[cfg(test)]
+fn managed_result_persist_failure_injected() -> bool {
+    let Some(home) = std::env::var_os("TACHI_HOME") else {
+        return false;
+    };
+    let Some(run_root) = std::env::var_os("TACHI_RUN_ROOT") else {
+        return false;
+    };
+    let key = (PathBuf::from(home), PathBuf::from(run_root));
+    let Some(failures) = MANAGED_RESULT_PERSIST_FAILURES.get() else {
+        return false;
+    };
+    failures
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&key)
+}
+
+pub(super) fn persist_dispatch_result_artifact(
+    path: &Path,
+    body: &[u8],
+    managed_ephemeral_credential_cleanup: bool,
+) -> Result<(), String> {
+    #[cfg(not(test))]
+    let _ = managed_ephemeral_credential_cleanup;
+    #[cfg(test)]
+    if managed_ephemeral_credential_cleanup && managed_result_persist_failure_injected() {
+        return Err("injected managed result persistence failure".to_string());
+    }
+    crate::utils::write_owner_only_file_atomic(path, body)
+        .map_err(|error| format!("persist dispatch result {}: {error}", path.display()))
+}
+
+#[cfg(test)]
 mod tests;
 
 use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
@@ -235,7 +304,10 @@ use self::credential_apply::{
 };
 use self::credentials::*;
 use self::dedupe::*;
-use self::execution::{spawn_background_dispatch, BackgroundDispatchContext, DispatchExecution};
+use self::execution::{
+    spawn_background_dispatch, BackgroundDispatchContext, DispatchExecution,
+    ManagedEphemeralCredentialCleanupObligation,
+};
 use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
 use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
 use self::plan_stage::{run_v2_plan_stage, PlanStageInputs};
@@ -995,6 +1067,12 @@ async fn launch_canonical_dispatch(
     managed_materialization_barrier::pause_after_managed_credential_materialization(&workspace_dir);
 
     // Register managed-custom control before task scheduling.
+    let managed_ephemeral_credential_cleanup =
+        if managed_custom_eligible && managed_control_origin == ManagedControlOrigin::StaffFacade {
+            Some(ManagedEphemeralCredentialCleanupObligation::Required)
+        } else {
+            None
+        };
     let (execution, managed_run_guard) =
         if managed_custom_eligible && managed_control_origin == ManagedControlOrigin::StaffFacade {
             let (receiver, guard) = match server.managed_run_controls.register(&dispatch_id) {
@@ -1018,10 +1096,12 @@ async fn launch_canonical_dispatch(
                 crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
             {
                 let result = format!("managed custom classification failed: {error}");
-                let _ = crate::utils::write_owner_only_file_atomic(
+                let result_persist_error = persist_dispatch_result_artifact(
                     &workspace_dir.join("result.md"),
                     result.as_bytes(),
-                );
+                    true,
+                )
+                .err();
                 let _ = write_status_json(
                     &workspace_dir,
                     &dispatch_id,
@@ -1037,7 +1117,8 @@ async fn launch_canonical_dispatch(
                         "agent": resolved_assignment.selected_worker,
                         "state": "TASK_STATE_FAILED",
                         "updated_at": Utc::now().to_rfc3339(),
-                        "result_written": true,
+                        "result_written": result_persist_error.is_none(),
+                        "result_persist_error": result_persist_error,
                         "classification_error": error,
                     })),
                 );
@@ -1099,6 +1180,7 @@ async fn launch_canonical_dispatch(
         flow_dispatch_slot,
         mcp_config_path,
         managed_run_guard,
+        managed_ephemeral_credential_cleanup,
     });
 
     // 9. Immediately return — main agent is unblocked!

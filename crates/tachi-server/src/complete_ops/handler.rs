@@ -1903,6 +1903,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
     async fn issue_1825_background_terminal_waits_for_successful_completion_admission() {
+        struct CurrentDirRestore(std::path::PathBuf);
+
+        impl Drop for CurrentDirRestore {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore completion fixture directory");
+            }
+        }
+
         let _serial = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1936,13 +1944,74 @@ mod tests {
         let _transport = crate::test_support::EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "cli");
         let _v2 = crate::test_support::EnvRestore::set("DISPATCH_V2_ENABLED", "false");
         let _review = crate::test_support::EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+        let _embedding =
+            crate::test_support::EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
+        std::fs::create_dir_all(temp_bin.path().join(".tachi/credentials"))
+            .expect("create isolated credential profile directory");
+        std::fs::write(
+            temp_bin
+                .path()
+                .join(".tachi/credentials/opencode-shared.json"),
+            serde_json::json!({
+                "credential_profiles": {
+                    "opencode_shared": {
+                        "entries": {"auth_json": "OPENCODE_SHARED_AUTH_JSON"},
+                        "allowed_consumers": {
+                            "agents": ["opencode"],
+                            "profiles": ["opencode_builder"]
+                        },
+                        "materializers": [{
+                            "type": "env",
+                            "source": "auth_json",
+                            "target": "OPENCODE_SHARED_AUTH_JSON"
+                        }, {
+                            "type": "config_overlay",
+                            "source": "auth_json",
+                            "target": "{credentials_dir}/opencode.json",
+                            "template": {
+                                "provider": {
+                                    "fixture": {"apiKey": "{env:OPENCODE_SHARED_AUTH_JSON}"}
+                                }
+                            }
+                        }]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write isolated OpenCode credential profile");
+        let _cwd = CurrentDirRestore(std::env::current_dir().expect("read completion fixture cwd"));
+        std::env::set_current_dir(temp_bin.path()).expect("enter completion credential fixture");
         let server = crate::staffing_ops::tests::test_server();
+        crate::vault_ops::handle_vault_init(
+            &server,
+            crate::vault_ops::VaultInitParams {
+                password: "issue-1825-opencode-fixture".to_string(),
+            },
+        )
+        .await
+        .expect("initialize isolated credential vault");
+        crate::vault_ops::handle_vault_set(
+            &server,
+            crate::vault_ops::VaultSetParams {
+                name: "OPENCODE_SHARED_AUTH_JSON".to_string(),
+                value: r#"{"token":"issue-1825-fixture"}"#.to_string(),
+                agent_id: None,
+                secret_type: "api_key".to_string(),
+                description: "issue-1825 successful completion credential fixture".to_string(),
+                allowed_agents: None,
+                enable_rotation: false,
+                rotation_strategy: None,
+            },
+        )
+        .await
+        .expect("seed isolated OpenCode credential secret");
         let raw = crate::staffing_ops::staff_start(
             &server,
             crate::staffing_ops::StaffStartRequest {
                 task: "interleave real managed terminal with successful completion".to_string(),
                 staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
-                profile: Some("glm_impl".to_string()),
+                profile: Some("opencode_builder".to_string()),
                 worker: Some("custom".to_string()),
                 project: None,
                 stage: None,
@@ -1963,6 +2032,10 @@ mod tests {
             .to_string();
         let run_dir = crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
         let status_path = run_dir.join("status.json");
+        assert!(
+            run_dir.join("credentials/opencode.json").exists(),
+            "the managed completion fixture must use a real ephemeral OpenCode overlay"
+        );
         let (_barrier_guard, entered, release) =
             install_managed_completion_admission_barrier(&dispatch_id);
         let handler_server = server.clone();
@@ -2022,6 +2095,10 @@ mod tests {
         .await
         .expect("completion receipt must be the sole terminal truth");
         assert!(terminal.get("completion_recovery").is_none());
+        assert!(
+            !run_dir.join("credentials/opencode.json").exists(),
+            "a completion-owned nonzero managed terminal must clean its real overlay before release"
+        );
         assert_eq!(
             crate::dispatch_ops::get_kanban_state(&server, &dispatch_id).await,
             Some("TASK_STATE_COMPLETED".to_string())

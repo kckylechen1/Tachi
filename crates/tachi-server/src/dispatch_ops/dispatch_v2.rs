@@ -614,6 +614,10 @@ pub(crate) fn write_status_json(
                     .get("credential_cleanup_failed")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let result_persist_failed = finalization
+                    .get("result_persist_failed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 managed_terminal = Some(
                     crate::managed_run_control::apply_dequeued_cancellation_to_terminal_status(
                         &mut obj,
@@ -621,6 +625,7 @@ pub(crate) fn write_status_json(
                         runner_error,
                         proof,
                         credential_cleanup_failed,
+                        result_persist_failed,
                     ),
                 );
             }

@@ -883,6 +883,11 @@ pub(crate) mod tests {
             crate::managed_run_control::fail_next_managed_custom_start_status_write(
                 &classification_dir,
             );
+        let _classification_result_failure =
+            crate::dispatch_ops::install_managed_result_persist_failure(
+                temp_home.path(),
+                temp_runs.path(),
+            );
         materialization_release
             .send(())
             .expect("release classification after failure injection");
@@ -901,11 +906,11 @@ pub(crate) mod tests {
             terminal_staff_state(&classification_status),
             "TASK_STATE_FAILED"
         );
-        assert!(
-            std::fs::read_to_string(classification_dir.join("result.md"))
-                .expect("classification failure result")
-                .contains("managed custom classification failed")
+        assert_eq!(
+            classification_status["result_written"], false,
+            "the early classification path must not claim a result after its atomic write fails"
         );
+        assert!(!classification_dir.join("result.md").exists());
         assert!(
             !classification_dir.join("credentials/opencode.json").exists(),
             "classification failure must clean the materialized OpenCode overlay before registry drop"
@@ -1522,6 +1527,136 @@ pub(crate) mod tests {
         wait_for_staff_cleanup(cleanup_id).await;
         cleanup_guard.disarm();
         drop(_cleanup_failure);
+
+        // The actual result artifact is part of the managed terminal receipt:
+        // a keyed write failure must turn the public cancel response into the
+        // committed unavailable receipt only after cleanup and release.
+        let _result_persist_failure = crate::dispatch_ops::install_managed_result_persist_failure(
+            temp_home.path(),
+            temp_runs.path(),
+        );
+        let mut result_failure_request = staff_request(cleanup_project);
+        result_failure_request.profile = Some("opencode_builder".to_string());
+        result_failure_request.worker = Some("custom".to_string());
+        result_failure_request.flow_id = Some("flow_1825_result_persist_failure".to_string());
+        let result_failure_raw = staff_start(&server, result_failure_request)
+            .await
+            .expect("result-persist-failure Staff start");
+        let mut result_failure_guard = StaffCleanupGuard::arm(&result_failure_raw);
+        result_failure_guard.track_process_group(&root_pid);
+        let result_failure_start: Value =
+            serde_json::from_str(&result_failure_raw).expect("result-persist-failure start JSON");
+        let result_failure_id = result_failure_start["dispatch_id"]
+            .as_str()
+            .expect("result-persist-failure dispatch id");
+        let result_failure_dir = dispatch_runs_root().join(result_failure_id);
+        assert!(
+            result_failure_dir
+                .join("credentials/opencode.json")
+                .exists(),
+            "the result-write discriminator must begin with the real OpenCode overlay"
+        );
+        wait_for_managed_custom_processes(&result_failure_dir, &root_pid, &descendant_pid).await;
+        let result_failure_status: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: result_failure_id.to_string(),
+                },
+            )
+            .await
+            .expect("result-persist-failure accepted status"),
+        )
+        .expect("result-persist-failure accepted status JSON");
+        let result_failure_revision = result_failure_status["status_revision"]
+            .as_u64()
+            .expect("result-persist-failure accepted revision");
+        let result_failure_cancel_raw = server
+            .tachi_staff(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value::<tachi_params::TachiStaffParams>(serde_json::json!({
+                    "action": "cancel",
+                    "dispatch_id": result_failure_id,
+                    "expected_status_revision": result_failure_revision,
+                }))
+                .expect("result-persist-failure cancellation parameters"),
+            ))
+            .await
+            .expect("result-persist-failure cancellation response");
+        let result_failure_cancel: Value = serde_json::from_str(&result_failure_cancel_raw)
+            .expect("result-persist-failure cancellation JSON");
+        let result_failure_final: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: result_failure_id.to_string(),
+                },
+            )
+            .await
+            .expect("result-persist-failure terminal status"),
+        )
+        .expect("result-persist-failure terminal status JSON");
+        assert_eq!(
+            terminal_staff_state(&result_failure_final),
+            "TASK_STATE_FAILED"
+        );
+        assert_eq!(
+            result_failure_final["result_written"], false,
+            "a failed atomic artifact write must never claim a canonical result"
+        );
+        assert_eq!(
+            result_failure_final["cancellation"]["reason"],
+            "result_persist_failed"
+        );
+        assert_eq!(result_failure_cancel, result_failure_final["cancellation"]);
+        assert_eq!(
+            result_failure_cancel_raw,
+            serde_json::to_string(&result_failure_final["cancellation"])
+                .expect("serialize canonical result-persist receipt")
+        );
+        assert_ne!(
+            result_failure_final["cancellation"]["receipt"],
+            "cancellation_confirmed"
+        );
+        assert!(!result_failure_dir.join("result.md").exists());
+        assert!(
+            !result_failure_dir
+                .join("credentials/opencode.json")
+                .exists(),
+            "result persistence failure must still clean the real OpenCode overlay"
+        );
+        assert!(!server.managed_run_controls.contains(result_failure_id));
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, result_failure_id).await,
+            Some("TASK_STATE_FAILED".to_string())
+        );
+        let result_failure_outcomes: i64 = server
+            .with_named_project_store_read(cleanup_project, |store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [result_failure_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count result-persist failure outcomes");
+        assert_eq!(result_failure_outcomes, 1);
+        let result_failure_flow_lock_dir =
+            crate::task_lifecycle::run_dir_for_flow_id("flow_1825_result_persist_failure")
+                .expect("valid result-persist flow run directory")
+                .join(".dispatch-dedupe");
+        assert!(
+            !result_failure_flow_lock_dir.exists()
+                || std::fs::read_dir(&result_failure_flow_lock_dir)
+                    .expect("result-persist flow lock directory")
+                    .next()
+                    .is_none(),
+            "result persistence failure must release the flow slot before responding"
+        );
+        wait_for_staff_cleanup(result_failure_id).await;
+        result_failure_guard.disarm();
+        drop(_result_persist_failure);
 
         let mut request = staff_request("tachi");
         request.profile = Some("glm_impl".to_string());

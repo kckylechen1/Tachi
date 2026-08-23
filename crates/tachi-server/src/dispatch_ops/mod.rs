@@ -28,6 +28,8 @@ pub(crate) use dispatch::install_managed_credential_cleanup_failure;
 #[cfg(test)]
 pub(crate) use dispatch::install_managed_credential_materialization_barrier;
 #[cfg(test)]
+pub(crate) use dispatch::install_managed_result_persist_failure;
+#[cfg(test)]
 pub(crate) use dispatch::install_managed_timeout_override;
 pub(crate) use dispatch::launch_staff_assignment;
 #[cfg(test)]
