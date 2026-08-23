@@ -964,28 +964,32 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 );
             }
         }
-        if matches!(
-            managed_cancel_completion,
-            Some(crate::managed_run_control::CancelCompletion::Unavailable(
-                "credential_cleanup_failed"
-            ))
-        ) {
-            if let Err(error) =
-                update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None, Some(false))
-                    .await
-            {
-                eprintln!(
-                    "[watchdog] failed to mark credential-cleanup failure {}: {}",
-                    d_id, error
+        if let Some(crate::managed_run_control::CancelCompletion::Unavailable(reason)) =
+            managed_cancel_completion.as_ref()
+        {
+            if *reason == "credential_cleanup_failed" || *reason == "persist_failed" {
+                if let Err(error) = update_kanban_state(
+                    &server_clone,
+                    &d_id,
+                    "TASK_STATE_FAILED",
+                    None,
+                    Some(false),
+                )
+                .await
+                {
+                    eprintln!(
+                        "[watchdog] failed to mark managed terminal failure {}: {}",
+                        d_id, error
+                    );
+                }
+                crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                    &server_clone,
+                    &d_id,
+                    reason,
+                    Some(agent_for_watchdog.as_str()),
+                    project_for_watchdog.as_deref(),
                 );
             }
-            crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
-                &server_clone,
-                &d_id,
-                "credential_cleanup_failed",
-                Some(agent_for_watchdog.as_str()),
-                project_for_watchdog.as_deref(),
-            );
         }
         early_exit_cleanup.complete();
         // The response itself is a lifecycle receipt: it is released only
@@ -1012,6 +1016,7 @@ fn managed_terminal_requires_credential_cleanup(error: &str) -> bool {
     error == "managed_cancelled"
         || error == "termination_unconfirmed"
         || error.starts_with("managed cancellation child probe failed")
+        || error.starts_with("managed subprocess panicked")
 }
 
 #[cfg(test)]
@@ -2077,6 +2082,9 @@ mod issue_1825_credential_cleanup_tests {
         ));
         assert!(managed_terminal_requires_credential_cleanup(
             "managed cancellation child probe failed: injected"
+        ));
+        assert!(managed_terminal_requires_credential_cleanup(
+            "managed subprocess panicked: task 7 panicked"
         ));
         assert!(!managed_terminal_requires_credential_cleanup(
             "Agent process timed out after 1s"

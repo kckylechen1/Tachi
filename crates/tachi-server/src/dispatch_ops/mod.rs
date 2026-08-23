@@ -32,6 +32,8 @@ pub(crate) use dispatch::launch_staff_assignment;
 pub(crate) use dispatch::new_dispatch_id;
 pub(crate) use dispatch::recover_orphaned_dispatch_runs;
 pub(crate) use dispatch::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
+#[cfg(test)]
+pub(crate) use dispatch_v2::fail_next_managed_terminal_status_write;
 pub(crate) use dispatch_v2::stamp_route_decision_id;
 pub(crate) use dispatch_v2::status_json_lock_for;
 #[cfg(test)]

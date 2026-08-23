@@ -43,7 +43,7 @@ fn managed_terminal_status_write_failures(
 }
 
 #[cfg(test)]
-struct ManagedTerminalStatusWriteFailureGuard {
+pub(crate) struct ManagedTerminalStatusWriteFailureGuard {
     status_path: std::path::PathBuf,
 }
 
@@ -58,7 +58,7 @@ impl Drop for ManagedTerminalStatusWriteFailureGuard {
 }
 
 #[cfg(test)]
-fn fail_next_managed_terminal_status_write(
+pub(crate) fn fail_next_managed_terminal_status_write(
     run_dir: &std::path::Path,
 ) -> ManagedTerminalStatusWriteFailureGuard {
     let status_path = run_dir.join("status.json");
@@ -76,6 +76,55 @@ fn take_managed_terminal_status_write_failure(status_path: &std::path::Path) -> 
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(status_path)
+}
+
+/// The managed terminal writer is the sole durable owner of cancellation
+/// classification. If its first atomic replacement fails, preserve that
+/// ownership under the same receipt mutex with an explicitly unavailable
+/// FAILED receipt before volatile dispatch ownership is released.
+fn persist_managed_terminal_status_failure(
+    path: &std::path::Path,
+    status: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    status.insert(
+        "state".to_string(),
+        Value::String("TASK_STATE_FAILED".to_string()),
+    );
+    {
+        let cancellation = status
+            .entry("cancellation".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let cancellation = cancellation
+            .as_object_mut()
+            .ok_or_else(|| "managed cancellation receipt is not an object".to_string())?;
+        cancellation.insert(
+            "receipt".to_string(),
+            Value::String("cancellation_unavailable".to_string()),
+        );
+        cancellation.insert(
+            "reason".to_string(),
+            Value::String("persist_failed".to_string()),
+        );
+        cancellation.insert(
+            "state".to_string(),
+            Value::String("TASK_STATE_FAILED".to_string()),
+        );
+        cancellation.insert("termination_proof".to_string(), Value::Null);
+    }
+    crate::managed_run_control::advance_status_revision(status)?;
+    let revision = status
+        .get("status_revision")
+        .cloned()
+        .unwrap_or(Value::Null);
+    status
+        .get_mut("cancellation")
+        .and_then(Value::as_object_mut)
+        .expect("managed cancellation receipt was just initialized")
+        .insert("observed_status_revision".to_string(), revision);
+    let body = serde_json::to_vec_pretty(&Value::Object(status.clone()))
+        .map_err(|error| format!("serialize {}: {error}", path.display()))?;
+    crate::utils::write_owner_only_file_atomic(path, &body)
+        .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 /// System prompt prepended to the Stage-1 task body. Kept verbatim so the
@@ -617,8 +666,8 @@ pub(crate) fn write_status_json(
             crate::managed_run_control::CancelCompletion::Unavailable(reason)
         }
     });
-    let body =
-        serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_else(|_| "{}".to_string());
+    let body = serde_json::to_string_pretty(&Value::Object(obj.clone()))
+        .unwrap_or_else(|_| "{}".to_string());
     #[cfg(test)]
     let write_result =
         if managed_finalization.is_some() && take_managed_terminal_status_write_failure(&path) {
@@ -630,8 +679,13 @@ pub(crate) fn write_status_json(
     let write_result = crate::utils::write_owner_only_file_atomic(&path, body.as_bytes());
     if let Err(e) = write_result {
         if managed_finalization.is_some() {
+            if let Err(fallback_error) = persist_managed_terminal_status_failure(&path, &mut obj) {
+                eprintln!(
+                    "[dispatch-v2] managed terminal write failed ({e}); fallback also failed: {fallback_error}"
+                );
+            }
             return Some(crate::managed_run_control::CancelCompletion::Unavailable(
-                "managed_terminal_status_persist_failed",
+                "persist_failed",
             ));
         }
         eprintln!("[dispatch-v2] failed to write {}: {e}", path.display());
@@ -819,17 +873,20 @@ mod tests {
 
         match completion {
             Some(crate::managed_run_control::CancelCompletion::Unavailable(reason)) => {
-                assert_eq!(reason, "managed_terminal_status_persist_failed");
+                assert_eq!(reason, "persist_failed");
             }
             _ => panic!("atomic status failure must not confirm managed cancellation"),
         }
         let after: Value = serde_json::from_slice(
-            &std::fs::read(&status_path).expect("read untouched managed status"),
+            &std::fs::read(&status_path).expect("read fallback managed status"),
         )
         .expect("parse untouched managed status");
+        assert_eq!(after["state"], "TASK_STATE_FAILED");
+        assert_eq!(after["cancellation"]["receipt"], "cancellation_unavailable");
+        assert_eq!(after["cancellation"]["reason"], "persist_failed");
         assert_eq!(
-            after, initial,
-            "failed atomic replacement must not persist CANCELED"
+            after["cancellation"]["observed_status_revision"], after["status_revision"],
+            "fallback receipt must bind its committed root revision"
         );
     }
 

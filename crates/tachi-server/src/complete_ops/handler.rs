@@ -149,6 +149,7 @@ fn admit_managed_completion(
         .managed_run_controls
         .acquire_completion_lease(dispatch_id)
         .ok_or_else(|| "managed completion already admitted".to_string())?;
+    let mut lease = ManagedCompletionLeaseAcquisitionGuard::arm(server, dispatch_id, generation);
     object.insert(
         "completion_recovery".to_string(),
         json!({ "status": "completion_admitted" }),
@@ -157,12 +158,9 @@ fn admit_managed_completion(
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|error| format!("serialize managed completion admission: {error}"))?;
     if let Err(error) = crate::utils::write_owner_only_file_atomic(&status_path, &body) {
-        server
-            .managed_run_controls
-            .release_completion_lease(dispatch_id, generation);
         return Err(format!("persist managed completion admission: {error}"));
     }
-    Ok(Some(generation))
+    Ok(Some(lease.disarm()))
 }
 
 /// The admission marker is a narrow cancellation fence, not evidence. If the
@@ -221,6 +219,38 @@ fn revoke_managed_completion_admission(
 /// Admission is a temporary cancellation fence. Once it is persisted, every
 /// later error or unwind must remove it unless a durable terminal/recovery
 /// receipt has taken ownership of the completion.
+struct ManagedCompletionLeaseAcquisitionGuard {
+    server: MemoryServer,
+    dispatch_id: String,
+    generation: Option<u64>,
+}
+
+impl ManagedCompletionLeaseAcquisitionGuard {
+    fn arm(server: &MemoryServer, dispatch_id: &str, generation: u64) -> Self {
+        Self {
+            server: server.clone(),
+            dispatch_id: dispatch_id.to_string(),
+            generation: Some(generation),
+        }
+    }
+
+    fn disarm(&mut self) -> u64 {
+        self.generation
+            .take()
+            .expect("completion lease is transferred once")
+    }
+}
+
+impl Drop for ManagedCompletionLeaseAcquisitionGuard {
+    fn drop(&mut self) {
+        if let Some(generation) = self.generation.take() {
+            self.server
+                .managed_run_controls
+                .release_completion_lease(&self.dispatch_id, generation);
+        }
+    }
+}
+
 /// A registry generation owns the persisted fence; no volatile identity token
 /// is exposed in status or a completion response.
 struct ManagedCompletionAdmissionGuard {
@@ -1914,6 +1944,43 @@ mod tests {
         );
         revoke_managed_completion_admission(&server, Some(dispatch_id), owner_b)
             .expect("second owner rollback");
+    }
+
+    #[test]
+    fn issue_1825_failed_admission_write_releases_the_volatile_completion_lease() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182527Z-managed-admission-write-error";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let status_path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        let (_receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
+
+        let mut invalid: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read seeded managed status"),
+        )
+        .expect("parse seeded managed status");
+        invalid["status_revision"] = json!("not-a-u64");
+        std::fs::write(&status_path, invalid.to_string()).expect("persist invalid revision");
+        let error = admit_managed_completion(&server, Some(dispatch_id), true)
+            .expect_err("invalid canonical revision rejects admission");
+        assert!(
+            error.contains("status_revision"),
+            "unexpected admission error: {error}"
+        );
+
+        invalid["status_revision"] = json!(8);
+        std::fs::write(&status_path, invalid.to_string()).expect("repair canonical revision");
+        let generation = admit_managed_completion(&server, Some(dispatch_id), true)
+            .expect("a corrected admission may acquire a released lease")
+            .expect("managed completion owns the corrected admission");
+        revoke_managed_completion_admission(&server, Some(dispatch_id), generation)
+            .expect("release corrected admission");
     }
 
     #[tokio::test]

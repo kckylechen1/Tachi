@@ -525,6 +525,22 @@ pub(crate) mod tests {
         }
     }
 
+    struct CurrentDirGuard(std::path::PathBuf);
+
+    impl CurrentDirGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::current_dir().expect("read current test directory");
+            std::env::set_current_dir(path).expect("enter isolated credential fixture directory");
+            Self(previous)
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.0).expect("restore test current directory");
+        }
+    }
+
     fn terminal_staff_state(status: &Value) -> &str {
         status
             .get("status")
@@ -753,7 +769,67 @@ pub(crate) mod tests {
         let _review = crate::test_support::EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
         let _embedding =
             crate::test_support::EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
+        std::fs::create_dir_all(temp_bin.path().join(".tachi/credentials"))
+            .expect("create isolated credential profile directory");
+        std::fs::write(
+            temp_bin
+                .path()
+                .join(".tachi/credentials/opencode-shared.json"),
+            serde_json::json!({
+                "credential_profiles": {
+                    "opencode_shared": {
+                        "entries": {"auth_json": "OPENCODE_SHARED_AUTH_JSON"},
+                        "allowed_consumers": {
+                            "agents": ["opencode"],
+                            "profiles": ["opencode_builder"]
+                        },
+                        "materializers": [{
+                            "type": "env",
+                            "source": "auth_json",
+                            "target": "OPENCODE_SHARED_AUTH_JSON"
+                        }, {
+                            "type": "config_overlay",
+                            "source": "auth_json",
+                            "target": "{credentials_dir}/opencode.json",
+                            "template": {
+                                "provider": {
+                                    "fixture": {
+                                        "apiKey": "{env:OPENCODE_SHARED_AUTH_JSON}"
+                                    }
+                                }
+                            }
+                        }]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write isolated opencode credential profile");
+        let _cwd = CurrentDirGuard::set(temp_bin.path());
         let server = test_server();
+        crate::vault_ops::handle_vault_init(
+            &server,
+            crate::vault_ops::VaultInitParams {
+                password: "issue-1825-opencode-fixture".to_string(),
+            },
+        )
+        .await
+        .expect("initialize isolated credential vault");
+        crate::vault_ops::handle_vault_set(
+            &server,
+            crate::vault_ops::VaultSetParams {
+                name: "OPENCODE_SHARED_AUTH_JSON".to_string(),
+                value: r#"{"token":"issue-1825-fixture"}"#.to_string(),
+                agent_id: None,
+                secret_type: "api_key".to_string(),
+                description: "issue-1825 managed panic credential fixture".to_string(),
+                allowed_agents: None,
+                enable_rotation: false,
+                rotation_strategy: None,
+            },
+        )
+        .await
+        .expect("seed isolated opencode credential secret");
         let cleanup_project = "tachi";
         let cleanup_project_db =
             crate::path_utils::plan_c_global_db_path_in_home(temp_home.path(), cleanup_project);
@@ -1056,7 +1132,7 @@ pub(crate) mod tests {
             temp_runs.path(),
         );
         let mut panic_request = staff_request("tachi");
-        panic_request.profile = Some("glm_impl".to_string());
+        panic_request.profile = Some("opencode_builder".to_string());
         panic_request.worker = Some("custom".to_string());
         panic_request.flow_id = Some("flow_1825_managed_panic".to_string());
         let panic_raw = staff_start(&server, panic_request)
@@ -1068,18 +1144,126 @@ pub(crate) mod tests {
             .as_str()
             .expect("panic dispatch id");
         let panic_dir = dispatch_runs_root().join(panic_id);
+        assert!(
+            panic_dir.join("credentials/opencode.json").exists(),
+            "the managed OpenCode profile must materialize ephemeral credentials before panic cleanup"
+        );
         let (panic_terminal, panic_result) = wait_for_staff_terminal(&panic_dir).await;
         wait_for_staff_cleanup(panic_id).await;
         assert_eq!(terminal_staff_state(&panic_terminal), "TASK_STATE_FAILED");
         assert!(panic_result.contains("managed subprocess panicked"));
         assert!(!server.managed_run_controls.contains(panic_id));
-        assert!(!panic_dir.join("credentials").exists());
+        assert!(
+            !panic_dir.join("credentials/opencode.json").exists(),
+            "panic terminal cleanup must remove the actual OpenCode credential materialization"
+        );
         assert_eq!(
             crate::dispatch_ops::get_kanban_state(&server, panic_id).await,
             Some("TASK_STATE_FAILED".to_string())
         );
+        let panic_flow_lock_dir =
+            crate::task_lifecycle::run_dir_for_flow_id("flow_1825_managed_panic")
+                .expect("valid panic flow run directory")
+                .join(".dispatch-dedupe");
+        assert!(
+            !panic_flow_lock_dir.exists()
+                || std::fs::read_dir(&panic_flow_lock_dir)
+                    .expect("panic flow lock directory")
+                    .next()
+                    .is_none(),
+            "panic finalization must release the Staff flow slot"
+        );
         panic_cleanup.disarm();
         drop(_panic_injection);
+
+        // A one-shot failure of the first managed terminal replacement must
+        // still terminalize this real Staff/background run before volatile
+        // registry and flow ownership are released.
+        let mut persist_failure_request = staff_request("tachi");
+        persist_failure_request.profile = Some("glm_impl".to_string());
+        persist_failure_request.worker = Some("custom".to_string());
+        persist_failure_request.flow_id = Some("flow_1825_terminal_write_failure".to_string());
+        let persist_failure_raw = staff_start(&server, persist_failure_request)
+            .await
+            .expect("terminal-write-failure Staff start");
+        let mut persist_failure_cleanup = StaffCleanupGuard::arm(&persist_failure_raw);
+        let persist_failure_start: Value =
+            serde_json::from_str(&persist_failure_raw).expect("terminal-write-failure start JSON");
+        let persist_failure_id = persist_failure_start["dispatch_id"]
+            .as_str()
+            .expect("terminal-write-failure dispatch id");
+        let persist_failure_dir = dispatch_runs_root().join(persist_failure_id);
+        wait_for_managed_custom_processes(&persist_failure_dir, &root_pid, &descendant_pid).await;
+        let _persist_failure =
+            crate::dispatch_ops::fail_next_managed_terminal_status_write(&persist_failure_dir);
+        let persist_failure_status: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: persist_failure_id.to_string(),
+                },
+            )
+            .await
+            .expect("terminal-write-failure accepted status"),
+        )
+        .expect("terminal-write-failure accepted status JSON");
+        let persist_failure_revision = persist_failure_status["status_revision"]
+            .as_u64()
+            .expect("terminal-write-failure accepted revision");
+        let persist_failure_cancel_raw = server
+            .tachi_staff(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value::<tachi_params::TachiStaffParams>(serde_json::json!({
+                    "action": "cancel",
+                    "dispatch_id": persist_failure_id,
+                    "expected_status_revision": persist_failure_revision,
+                }))
+                .expect("terminal-write-failure cancellation parameters"),
+            ))
+            .await
+            .expect("terminal-write-failure cancellation response");
+        let persist_failure_cancel: Value = serde_json::from_str(&persist_failure_cancel_raw)
+            .expect("terminal-write-failure cancellation JSON");
+        let (persist_failure_terminal, persist_failure_result) =
+            wait_for_staff_terminal(&persist_failure_dir).await;
+        wait_for_staff_cleanup(persist_failure_id).await;
+        assert_eq!(
+            persist_failure_cancel["receipt"],
+            "cancellation_unavailable"
+        );
+        assert_eq!(persist_failure_cancel["reason"], "persist_failed");
+        assert_eq!(
+            terminal_staff_state(&persist_failure_terminal),
+            "TASK_STATE_FAILED"
+        );
+        assert!(persist_failure_result.contains("managed_cancelled"));
+        assert_eq!(
+            persist_failure_terminal["cancellation"],
+            persist_failure_cancel
+        );
+        assert_eq!(
+            persist_failure_terminal["cancellation"]["observed_status_revision"],
+            persist_failure_terminal["status_revision"]
+        );
+        assert!(!server.managed_run_controls.contains(persist_failure_id));
+        assert!(!persist_failure_dir.join("credentials").exists());
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, persist_failure_id).await,
+            Some("TASK_STATE_FAILED".to_string())
+        );
+        let persist_failure_flow_lock_dir =
+            crate::task_lifecycle::run_dir_for_flow_id("flow_1825_terminal_write_failure")
+                .expect("valid terminal-write-failure flow run directory")
+                .join(".dispatch-dedupe");
+        assert!(
+            !persist_failure_flow_lock_dir.exists()
+                || std::fs::read_dir(&persist_failure_flow_lock_dir)
+                    .expect("terminal-write-failure flow lock directory")
+                    .next()
+                    .is_none(),
+            "terminal-write fallback must release the Staff flow slot"
+        );
+        persist_failure_cleanup.disarm();
+        drop(_persist_failure);
 
         // Credential cleanup participates in the same real Staff ->
         // background terminalization as process proof. Inject only this

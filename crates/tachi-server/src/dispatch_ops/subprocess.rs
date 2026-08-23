@@ -692,10 +692,15 @@ fn process_group_absent(pid: Option<u32>) -> bool {
 }
 
 #[cfg(unix)]
-fn wait_for_process_group_absence_after_reap(pid: Option<u32>) {
+fn wait_for_process_group_absence_after_reap(pid: Option<u32>) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !process_group_absent(pid) {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    true
 }
 
 #[cfg(unix)]
@@ -884,7 +889,7 @@ impl Drop for ManagedProcessGroupGuard {
                 }
             }
             self.state = ManagedProcessGroupState::RootReaped(pid);
-            wait_for_process_group_absence_after_reap(pid);
+            let _ = wait_for_process_group_absence_after_reap(pid);
         }
     }
 }
@@ -2159,7 +2164,7 @@ mod managed_process_group_regression_tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn managed_panic_after_spawn_kills_owned_process_group() {
+    async fn issue_1825_managed_panic_after_spawn_kills_owned_process_group() {
         let _serial = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
