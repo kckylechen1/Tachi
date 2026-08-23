@@ -170,15 +170,33 @@ fn managed_custom_registration_uses_prepared_execution_eligibility() {
         .split_once("// 8. Spawn background task with Watchdog")
         .expect("managed custom registration body")
         .0;
-    const AUTHORITATIVE_PREDICATE: &str = "if managed_custom_eligible";
+    const AUTHORITATIVE_REGISTRATION_GATE: &str =
+        "if managed_custom_eligible && managed_control_origin == ManagedControlOrigin::StaffFacade {";
+    let registration_branch = registration
+        .split_once("let (execution, managed_run_guard) =")
+        .expect("managed control registration branch")
+        .1;
+    let uses_prepared_staff_eligibility = |source: &str| {
+        source.contains(AUTHORITATIVE_REGISTRATION_GATE)
+            && source.contains("server.managed_run_controls.register(&dispatch_id)")
+    };
     assert!(
-        registration.contains(AUTHORITATIVE_PREDICATE),
-        "managed control registration must use prepared execution eligibility"
+        uses_prepared_staff_eligibility(registration_branch),
+        "managed control registration must require prepared eligibility and the Staff origin"
     );
-    let mutant = registration.replacen(AUTHORITATIVE_PREDICATE, "false", 1);
+    let predicate_removed = registration_branch.replacen(
+        AUTHORITATIVE_REGISTRATION_GATE,
+        "if managed_control_origin == ManagedControlOrigin::StaffFacade {",
+        1,
+    );
     assert!(
-        !mutant.contains(AUTHORITATIVE_PREDICATE),
+        !uses_prepared_staff_eligibility(&predicate_removed),
         "the registration discriminator must fail if the prepared eligibility predicate is removed"
+    );
+    let bypassed = registration_branch.replacen(AUTHORITATIVE_REGISTRATION_GATE, "if true {", 1);
+    assert!(
+        !uses_prepared_staff_eligibility(&bypassed),
+        "the registration discriminator must fail if either prepared eligibility or Staff origin is bypassed"
     );
     assert!(
         !registration.contains("selected_backend == \"custom\""),
