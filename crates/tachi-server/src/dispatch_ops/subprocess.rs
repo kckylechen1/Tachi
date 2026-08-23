@@ -283,150 +283,161 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         let stderr = child.stderr.take();
         let stdout_task = tokio::spawn(read_pipe(stdout));
         let stderr_task = tokio::spawn(read_pipe(stderr));
-        let status = tokio::select! {
-            biased;
-            command = cancellations.recv() => {
-                let Some(command) = command else {
-                    reap_timed_out_child(&mut child, pid).await;
-                    drain_managed_output(stdout_task, stderr_task).await;
-                    process_group.disarm_after_absence().await;
-                    return ManagedSubprocessOutcome::plain(Err("managed cancellation channel closed".to_string()));
-                };
-                #[cfg(test)]
-                let observation = pause_managed_cancel_after_dequeue(run_dir);
-                #[cfg(test)]
-                let mut command = command;
-                let status = match try_wait_for_managed_cancellation(&mut child, run_dir) {
-                    Ok(status) => status,
-                    Err(error) => {
-                        reap_timed_out_child(&mut child, pid).await;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match observe_managed_root_exit_without_reap(pid, run_dir) {
+                Ok(true) => {
+                    // The leader is a zombie, so its PID still owns the group
+                    // identity while descendant cleanup is performed.
+                    let sigterm = process_group.signal(libc::SIGTERM);
+                    process_group.prepare_group_for_root_reap(sigterm).await;
+                    let status = reap_managed_root(&mut child, &mut process_group).await;
+                    let group_absent = process_group.prove_absence_after_root_reaped().await;
+                    if !group_absent {
                         drain_managed_output(stdout_task, stderr_task).await;
-                        process_group.disarm_after_absence().await;
-                        return ManagedSubprocessOutcome::dequeued(
-                            Err(format!("managed cancellation child probe failed: {error}")),
-                            command,
-                        );
+                        return ManagedSubprocessOutcome::plain(Err(
+                            "termination_unconfirmed".to_string()
+                        ));
                     }
-                };
-                #[cfg(test)]
-                let mut observation = observation.map(|completion| {
-                    ManagedCancelTryWaitObservation::new(
-                        completion,
-                        run_dir,
-                        pid,
-                        if status.is_some() { "exited" } else { "running" },
-                    )
-                });
-                if let Some(status) = status {
-                    #[cfg(test)]
-                    if let Some(mut observation) = observation {
-                        let result = finish_managed_output(status, stdout_task, stderr_task).await;
-                        observation.runner_error = result.as_ref().err().cloned();
-                        observation.finalization_directive = true;
-                        command.test_observation = Some(observation);
-                        return ManagedSubprocessOutcome::dequeued(result, command);
-                    }
-                    process_group.disarm_after_absence().await;
-                    return ManagedSubprocessOutcome::dequeued(
-                        finish_managed_output(status, stdout_task, stderr_task).await,
-                        command,
-                    );
-                }
-                let sigterm = signal_process_group(pid, libc::SIGTERM);
-                #[cfg(test)]
-                if let Some(observation) = observation.as_mut() {
-                    observation.sigterm_result = match sigterm {
-                        ProcessGroupSignal::Delivered => "delivered",
-                        ProcessGroupSignal::Absent => "absent",
-                        ProcessGroupSignal::Failed => "failed",
-                    };
-                }
-                if matches!(sigterm, ProcessGroupSignal::Absent) {
-                    let status = match child.wait().await {
-                        Ok(status) => status,
+                    return ManagedSubprocessOutcome::plain(match status {
+                        Ok(status) => finish_managed_output(status, stdout_task, stderr_task).await,
                         Err(error) => {
+                            drain_managed_output(stdout_task, stderr_task).await;
+                            Err(format!("Agent process error: {error}"))
+                        }
+                    });
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let sigterm = process_group.signal(libc::SIGTERM);
+                    process_group.prepare_group_for_root_reap(sigterm).await;
+                    let _ = reap_managed_root(&mut child, &mut process_group).await;
+                    drain_managed_output(stdout_task, stderr_task).await;
+                    return ManagedSubprocessOutcome::plain(Err(format!(
+                        "managed child probe failed: {error}"
+                    )));
+                }
+            }
+            tokio::select! {
+                biased;
+                command = cancellations.recv() => {
+                    let Some(command) = command else {
+                        let sigterm = process_group.signal(libc::SIGTERM);
+                        process_group.prepare_group_for_root_reap(sigterm).await;
+                        let _ = reap_managed_root(&mut child, &mut process_group).await;
+                        drain_managed_output(stdout_task, stderr_task).await;
+                        return ManagedSubprocessOutcome::plain(Err("managed cancellation channel closed".to_string()));
+                    };
+                    #[cfg(test)]
+                    let mut command = command;
+                    #[cfg(test)]
+                    let observation = pause_managed_cancel_after_dequeue(run_dir);
+                    let exited = match observe_managed_root_exit_without_reap(pid, run_dir) {
+                        Ok(exited) => exited,
+                        Err(error) => {
+                            let sigterm = process_group.signal(libc::SIGTERM);
+                            process_group.prepare_group_for_root_reap(sigterm).await;
+                            let _ = reap_managed_root(&mut child, &mut process_group).await;
+                            drain_managed_output(stdout_task, stderr_task).await;
                             return ManagedSubprocessOutcome::dequeued(
-                                Err(format!("Agent process error: {error}")),
-                                command,
-                            );
+                                Err(format!("managed cancellation child probe failed: {error}")), command);
                         }
                     };
                     #[cfg(test)]
-                    if let Some(mut observation) = observation {
-                        observation.reap_result = "group_absent_before_reap";
-                        observation.group_absent = true;
-                        let result = finish_managed_output(status, stdout_task, stderr_task).await;
-                        observation.runner_error = result.as_ref().err().cloned();
-                        observation.finalization_directive = true;
-                        command.test_observation = Some(observation);
-                        return ManagedSubprocessOutcome::dequeued(result, command);
+                    let mut observation = observation.map(|completion| {
+                        ManagedCancelTryWaitObservation::new(
+                            completion, run_dir, pid,
+                            if exited { "exited" } else { "running" },
+                        )
+                    });
+                    if exited {
+                        let sigterm = process_group.signal(libc::SIGTERM);
+                        process_group.prepare_group_for_root_reap(sigterm).await;
+                        let status = reap_managed_root(&mut child, &mut process_group).await;
+                        let group_absent = process_group.prove_absence_after_root_reaped().await;
+                        if !group_absent {
+                            #[cfg(test)]
+                            if let Some(mut observation) = observation {
+                                observation.reap_result = "root_reaped";
+                                observation.group_absent = false;
+                                observation.runner_error = Some("termination_unconfirmed".to_string());
+                                observation.finalization_directive = true;
+                                command.test_observation = Some(observation);
+                            }
+                            drain_managed_output(stdout_task, stderr_task).await;
+                            return ManagedSubprocessOutcome::dequeued(
+                                Err("termination_unconfirmed".to_string()), command);
+                        }
+                        #[cfg(test)]
+                        if let Some(mut observation) = observation {
+                            observation.reap_result = "root_reaped";
+                            observation.group_absent = group_absent;
+                            let result = match status {
+                                Ok(status) => finish_managed_output(status, stdout_task, stderr_task).await,
+                                Err(error) => Err(format!("Agent process error: {error}")),
+                            };
+                            observation.runner_error = result.as_ref().err().cloned();
+                            observation.finalization_directive = true;
+                            command.test_observation = Some(observation);
+                            return ManagedSubprocessOutcome::dequeued(result, command);
+                        }
+                        return ManagedSubprocessOutcome::dequeued(
+                            match status {
+                                Ok(status) => finish_managed_output(status, stdout_task, stderr_task).await,
+                                Err(error) => Err(format!("Agent process error: {error}")),
+                            }, command);
                     }
-                    process_group.disarm_after_absence().await;
-                    return ManagedSubprocessOutcome::dequeued(
-                        finish_managed_output(status, stdout_task, stderr_task).await,
-                        command,
-                    );
-                }
-                let reaped_root = reap_timed_out_child(&mut child, pid).await;
-                #[cfg(not(test))]
-                let _ = reaped_root;
-                drain_managed_output(stdout_task, stderr_task).await;
-                let group_absent = wait_for_process_group_absence(pid).await;
-                #[cfg(test)]
-                if let Some(observation) = observation.as_mut() {
-                    observation.reap_result = if reaped_root { "root_reaped" } else { "root_killed" };
-                    observation.group_absent = group_absent;
-                }
-                if !group_absent {
+                    let sigterm = process_group.signal(libc::SIGTERM);
+                    #[cfg(test)]
+                    if let Some(observation) = observation.as_mut() {
+                        observation.sigterm_result = sigterm.as_str();
+                    }
+                    process_group.prepare_group_for_root_reap(sigterm).await;
+                    let status = reap_managed_root(&mut child, &mut process_group).await;
+                    let group_absent = process_group.prove_absence_after_root_reaped().await;
                     #[cfg(test)]
                     if let Some(mut observation) = observation {
-                        observation.runner_error = Some("termination_unconfirmed".to_string());
+                        observation.reap_result = "root_reaped";
+                        observation.group_absent = group_absent;
+                        if !group_absent {
+                            observation.runner_error = Some("termination_unconfirmed".to_string());
+                            observation.finalization_directive = true;
+                            command.test_observation = Some(observation);
+                            drain_managed_output(stdout_task, stderr_task).await;
+                            return ManagedSubprocessOutcome::dequeued(Err("termination_unconfirmed".to_string()), command);
+                        }
+                        let _ = status;
+                        drain_managed_output(stdout_task, stderr_task).await;
+                        observation.runner_error = Some("managed_cancelled".to_string());
+                        observation.termination_proof = Some("unix_process_group_absent");
                         observation.finalization_directive = true;
                         command.test_observation = Some(observation);
+                        return ManagedSubprocessOutcome::dequeued_with_proof(Err("managed_cancelled".to_string()), command, "unix_process_group_absent");
                     }
-                    return ManagedSubprocessOutcome::dequeued(
-                        Err("termination_unconfirmed".to_string()),
-                        command,
-                    );
-                }
-                process_group.disarm_after_absence().await;
-                #[cfg(test)]
-                if let Some(mut observation) = observation {
-                    observation.runner_error = Some("managed_cancelled".to_string());
-                    observation.termination_proof = Some("unix_process_group_absent");
-                    observation.finalization_directive = true;
-                    command.test_observation = Some(observation);
-                }
-                return ManagedSubprocessOutcome::dequeued_with_proof(
-                    Err("managed_cancelled".to_string()),
-                    command,
-                    "unix_process_group_absent",
-                );
-            },
-            result = tokio::time::timeout(timeout, child.wait()) => match result {
-                Ok(Ok(status)) => status,
-                Ok(Err(error)) => {
+                    let _ = status;
                     drain_managed_output(stdout_task, stderr_task).await;
-                    process_group.disarm_after_absence().await;
-                    return ManagedSubprocessOutcome::plain(Err(format!("Agent process error: {error}")));
+                    return if group_absent {
+                        ManagedSubprocessOutcome::dequeued_with_proof(Err("managed_cancelled".to_string()), command, "unix_process_group_absent")
+                    } else {
+                        ManagedSubprocessOutcome::dequeued(Err("termination_unconfirmed".to_string()), command)
+                    };
                 }
-                Err(_) => {
-                    reap_timed_out_child(&mut child, pid).await;
+                _ = tokio::time::sleep_until(deadline) => {
+                    // A final non-reaping observation keeps a late natural
+                    // completion ahead of timeout signalling.
+                    if matches!(observe_managed_root_exit_without_reap(pid, run_dir), Ok(true)) {
+                        continue;
+                    }
+                    let sigterm = process_group.signal(libc::SIGTERM);
+                    process_group.prepare_group_for_root_reap(sigterm).await;
+                    let _ = reap_managed_root(&mut child, &mut process_group).await;
                     drain_managed_output(stdout_task, stderr_task).await;
-                    process_group.disarm_after_absence().await;
-                    return ManagedSubprocessOutcome::plain(Err(format!("Agent process timed out after {}s (process group killed)", timeout.as_secs())));
+                    return ManagedSubprocessOutcome::plain(Err(format!(
+                        "Agent process timed out after {}s (process group killed)", timeout.as_secs())));
                 }
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
-        };
-        // The root can exit while a forked descendant still owns the pipe. A
-        // managed natural exit is not complete until its owned group is gone.
-        if !reap_residual_managed_process_group(pid).await {
-            return ManagedSubprocessOutcome::plain(Err("termination_unconfirmed".to_string()));
         }
-        process_group.disarm_after_absence().await;
-        ManagedSubprocessOutcome::plain(
-            finish_managed_output(status, stdout_task, stderr_task).await,
-        )
     }
 }
 
@@ -609,50 +620,10 @@ async fn drain_managed_output(
 }
 
 #[cfg(unix)]
-async fn reap_residual_managed_process_group(pid: Option<u32>) -> bool {
-    if process_group_absent(pid) {
-        return true;
-    }
-    terminate_process_group(pid, libc::SIGTERM);
-    if wait_for_process_group_absence(pid).await {
-        return true;
-    }
-    terminate_process_group(pid, libc::SIGKILL);
-    wait_for_process_group_absence(pid).await
-}
-
-#[cfg(unix)]
-struct ManagedProcessGroupGuard {
-    pid: Option<u32>,
-    armed: bool,
-}
-
-#[cfg(unix)]
-impl ManagedProcessGroupGuard {
-    fn arm(pid: Option<u32>) -> Self {
-        Self { pid, armed: true }
-    }
-
-    async fn disarm_after_absence(&mut self) {
-        if reap_residual_managed_process_group(self.pid).await {
-            self.armed = false;
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ManagedProcessGroupGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            terminate_process_group(self.pid, libc::SIGKILL);
-        }
-    }
-}
-
-fn try_wait_for_managed_cancellation(
-    child: &mut tokio::process::Child,
+fn observe_managed_root_exit_without_reap(
+    child_pid: Option<u32>,
     _run_dir: &std::path::Path,
-) -> std::io::Result<Option<std::process::ExitStatus>> {
+) -> std::io::Result<bool> {
     #[cfg(test)]
     {
         let configured_run_dirs = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIRS
@@ -665,7 +636,120 @@ fn try_wait_for_managed_cancellation(
             ));
         }
     }
-    child.try_wait()
+    let Some(child_pid) = child_pid else {
+        return Ok(true);
+    };
+    // `WNOWAIT` observes a zombie without consuming it. Keeping the leader
+    // unreaped reserves its numeric PGID until all group signals are complete.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child_pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+#[cfg(unix)]
+async fn reap_managed_root(
+    child: &mut tokio::process::Child,
+    process_group: &mut ManagedProcessGroupGuard,
+) -> std::io::Result<std::process::ExitStatus> {
+    let status = child.wait().await;
+    // This must happen even for a failed wait: the Child has been asked to
+    // reap, so Drop and every guard API become signal-free permanently.
+    process_group.mark_root_reaped();
+    status
+}
+
+#[cfg(unix)]
+struct ManagedProcessGroupGuard {
+    state: ManagedProcessGroupState,
+}
+
+#[cfg(unix)]
+enum ManagedProcessGroupState {
+    RootLive(Option<u32>),
+    RootReaped(Option<u32>),
+}
+
+#[cfg(unix)]
+impl ManagedProcessGroupGuard {
+    fn arm(pid: Option<u32>) -> Self {
+        Self {
+            state: ManagedProcessGroupState::RootLive(pid),
+        }
+    }
+
+    fn signal(&self, signal: libc::c_int) -> ProcessGroupSignal {
+        match self.state {
+            ManagedProcessGroupState::RootLive(pid) => signal_process_group(pid, signal),
+            ManagedProcessGroupState::RootReaped(_) => ProcessGroupSignal::RootReaped,
+        }
+    }
+
+    async fn prepare_group_for_root_reap(&self, sigterm: ProcessGroupSignal) {
+        if matches!(sigterm, ProcessGroupSignal::Absent) {
+            return;
+        }
+        if wait_for_process_group_absence(self.pid()).await {
+            return;
+        }
+        let _ = self.signal(libc::SIGKILL);
+    }
+
+    async fn prove_absence_after_root_reaped(&self) -> bool {
+        match self.state {
+            ManagedProcessGroupState::RootLive(_) => false,
+            ManagedProcessGroupState::RootReaped(pid) => wait_for_process_group_absence(pid).await,
+        }
+    }
+
+    fn mark_root_reaped(&mut self) {
+        let pid = self.pid();
+        self.state = ManagedProcessGroupState::RootReaped(pid);
+    }
+
+    fn pid(&self) -> Option<u32> {
+        match self.state {
+            ManagedProcessGroupState::RootLive(pid) => pid,
+            ManagedProcessGroupState::RootReaped(_) => None,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ManagedProcessGroupGuard {
+    fn drop(&mut self) {
+        if let ManagedProcessGroupState::RootLive(pid) = self.state {
+            terminate_process_group(pid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn issue_1825_reaped_root_guard_never_signals_a_reused_numeric_group() {
+    // `foreign_group_pid` models a numeric PGID that has been reused after the
+    // managed root was reaped. The type state rejects it before libc::kill can
+    // observe that number, so an unrelated process group cannot be signalled.
+    let foreign_group_pid = Some(42);
+    let mut guard = ManagedProcessGroupGuard::arm(foreign_group_pid);
+    guard.mark_root_reaped();
+    assert!(matches!(
+        guard.signal(libc::SIGTERM),
+        ProcessGroupSignal::RootReaped
+    ));
+    assert!(matches!(
+        guard.signal(libc::SIGKILL),
+        ProcessGroupSignal::RootReaped
+    ));
 }
 
 #[cfg(test)]
@@ -1125,10 +1209,24 @@ fn configure_process_group(cmd: &mut Command) {
 fn configure_process_group(_cmd: &mut Command) {}
 
 #[cfg(unix)]
+#[derive(Clone, Copy)]
 enum ProcessGroupSignal {
     Delivered,
     Absent,
     Failed,
+    RootReaped,
+}
+
+#[cfg(all(test, unix))]
+impl ProcessGroupSignal {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::Absent => "absent",
+            Self::Failed => "failed",
+            Self::RootReaped => "root_reaped",
+        }
+    }
 }
 
 #[cfg(unix)]

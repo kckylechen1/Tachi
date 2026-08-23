@@ -409,6 +409,11 @@ pub(crate) async fn request_managed_custom_cancel(
                 .ok_or_else(|| {
                     "managed cancellation committed without a canonical receipt".to_string()
                 }),
+            Ok(CancelCompletion::Unavailable("credential_cleanup_failed")) => {
+                canonical_cancellation_receipt(&run_dir).ok_or_else(|| {
+                    "credential cleanup failure committed without a canonical receipt".to_string()
+                })
+            }
             Ok(CancelCompletion::Unavailable(reason)) => {
                 record_unavailable_if_pending(&run_dir, dispatch_id, expected, observed, reason)
             }
@@ -559,20 +564,24 @@ pub(crate) fn finalize_dequeued_managed_cancellation(
     termination_proof: Option<&'static str>,
 ) -> CancelCompletion {
     match runner_error {
-        Some("managed_cancelled") => match confirm_managed_custom_cancellation(
-            run_dir,
-            expected,
-            termination_proof.unwrap_or("unix_process_group_absent"),
-        ) {
-            Ok(status_revision) => CancelCompletion::Confirmed {
-                termination_proof: termination_proof.unwrap_or("unix_process_group_absent"),
-                status_revision,
-            },
-            Err(_) => match record_termination_unconfirmed(run_dir, expected) {
-                Ok(()) => CancelCompletion::Unconfirmed,
-                Err(_) => CancelCompletion::Unavailable("completion_or_timeout_winner"),
-            },
-        },
+        Some("managed_cancelled") => {
+            let Some(termination_proof) = termination_proof else {
+                return match record_termination_unconfirmed(run_dir, expected) {
+                    Ok(()) => CancelCompletion::Unconfirmed,
+                    Err(_) => CancelCompletion::Unavailable("completion_or_timeout_winner"),
+                };
+            };
+            match confirm_managed_custom_cancellation(run_dir, expected, termination_proof) {
+                Ok(status_revision) => CancelCompletion::Confirmed {
+                    termination_proof,
+                    status_revision,
+                },
+                Err(_) => match record_termination_unconfirmed(run_dir, expected) {
+                    Ok(()) => CancelCompletion::Unconfirmed,
+                    Err(_) => CancelCompletion::Unavailable("completion_or_timeout_winner"),
+                },
+            }
+        }
         Some(error)
             if error == "termination_unconfirmed"
                 || error.starts_with("managed cancellation child probe failed") =>
@@ -633,6 +642,24 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
     }
     match runner_error {
         Some("managed_cancelled") => {
+            let Some(proof) = termination_proof else {
+                object.insert(
+                    "cancellation".to_string(),
+                    cancellation_receipt(
+                        "termination_unconfirmed",
+                        &dispatch_id,
+                        expected,
+                        observed,
+                        Some("termination_unconfirmed"),
+                        None,
+                    ),
+                );
+                object.insert(
+                    "state".to_string(),
+                    Value::String("TASK_STATE_FAILED".to_string()),
+                );
+                return ManagedTerminalCancellation::Unconfirmed;
+            };
             if credential_cleanup_failed {
                 object.insert(
                     "cancellation".to_string(),
@@ -651,7 +678,6 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
                 );
                 return ManagedTerminalCancellation::Unavailable("credential_cleanup_failed");
             }
-            let proof = termination_proof.unwrap_or("unix_process_group_absent");
             object.insert(
                 "cancellation".to_string(),
                 cancellation_receipt(
@@ -1020,6 +1046,40 @@ mod issue_1825_tests {
         );
         assert_eq!(status["cancellation"]["state"], "TASK_STATE_FAILED");
         assert_ne!(status["cancellation"]["receipt"], "cancellation_confirmed");
+    }
+
+    #[test]
+    fn issue_1825_managed_cancelled_without_termination_proof_is_unconfirmed() {
+        let mut status = serde_json::Map::new();
+        status.insert(
+            "dispatch_id".to_string(),
+            Value::String("proof-missing".to_string()),
+        );
+        status.insert(
+            "state".to_string(),
+            Value::String("TASK_STATE_WORKING".to_string()),
+        );
+        status.insert("status_revision".to_string(), Value::from(7));
+        status.insert(
+            "cancellation".to_string(),
+            cancellation_receipt("cancellation_requested", "proof-missing", 7, 7, None, None),
+        );
+
+        let result = apply_dequeued_cancellation_to_terminal_status(
+            &mut status,
+            7,
+            Some("managed_cancelled"),
+            None,
+            false,
+        );
+
+        assert!(matches!(result, ManagedTerminalCancellation::Unconfirmed));
+        assert_eq!(status["state"], "TASK_STATE_FAILED");
+        assert_eq!(status["cancellation"]["receipt"], "termination_unconfirmed");
+        assert!(
+            status["cancellation"]["termination_proof"].is_null(),
+            "missing proof must stay absent/null rather than fabricated"
+        );
     }
 
     #[test]

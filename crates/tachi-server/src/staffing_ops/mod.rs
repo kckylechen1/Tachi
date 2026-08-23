@@ -754,6 +754,19 @@ pub(crate) mod tests {
         let _embedding =
             crate::test_support::EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
         let server = test_server();
+        let cleanup_project = "tachi";
+        let cleanup_project_db =
+            crate::path_utils::plan_c_global_db_path_in_home(temp_home.path(), cleanup_project);
+        std::fs::create_dir_all(
+            cleanup_project_db
+                .parent()
+                .expect("named project database parent"),
+        )
+        .expect("create named project database parent");
+        std::fs::write(&cleanup_project_db, b"").expect("seed named project database");
+        server
+            .with_named_project_store(cleanup_project, |_| Ok(()))
+            .expect("initialize named project store");
 
         // Pre-spawn: the real Staff launch has registered its managed owner
         // and accepted cancellation, but the production runner has not yet
@@ -922,7 +935,6 @@ pub(crate) mod tests {
         let mut cleanup_request = staff_request("tachi");
         cleanup_request.profile = Some("glm_impl".to_string());
         cleanup_request.worker = Some("custom".to_string());
-        cleanup_request.project = None;
         cleanup_request.flow_id = Some("flow_1825_cleanup_failure".to_string());
         let cleanup_raw = staff_start(&server, cleanup_request)
             .await
@@ -983,6 +995,10 @@ pub(crate) mod tests {
             cleanup_final["cancellation"]["reason"],
             "credential_cleanup_failed"
         );
+        assert_eq!(
+            cleanup_cancel, cleanup_final["cancellation"],
+            "cleanup-failure response must return the already committed canonical receipt"
+        );
         assert_ne!(
             cleanup_final["cancellation"]["receipt"],
             "cancellation_confirmed"
@@ -991,7 +1007,7 @@ pub(crate) mod tests {
             crate::dispatch_ops::get_kanban_state(&server, cleanup_id).await,
             Some("TASK_STATE_FAILED".to_string())
         );
-        let cleanup_outcomes: i64 = server
+        let global_cleanup_outcomes: i64 = server
             .with_global_store_read(|store| {
                 store
                     .connection()
@@ -1002,7 +1018,20 @@ pub(crate) mod tests {
                     )
                     .map_err(|error| error.to_string())
             })
-            .expect("count cleanup failure outcomes");
+            .expect("count global cleanup failure outcomes");
+        assert_eq!(global_cleanup_outcomes, 0);
+        let cleanup_outcomes: i64 = server
+            .with_named_project_store_read(cleanup_project, |store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [cleanup_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count named-project cleanup failure outcomes");
         assert_eq!(cleanup_outcomes, 1);
         assert!(!server.managed_run_controls.contains(cleanup_id));
         let cleanup_flow_lock_dir =
