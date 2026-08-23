@@ -1919,12 +1919,14 @@ mod tests {
         let temp_runs = tempfile::tempdir().expect("temporary run root");
         let temp_bin = tempfile::tempdir().expect("temporary worker bin");
         let exit_trigger = temp_bin.path().join("exit-trigger");
+        let worker_started = temp_bin.path().join("worker-started");
         let worker = temp_bin.path().join("opencode");
         std::fs::write(
             &worker,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile test ! -e '{}'; do sleep 0.01; done\nprintf 'background terminal held for successful completion\\n'\nexit 2\n",
-                exit_trigger.display()
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\ntouch '{}'\nwhile test ! -e '{}'; do sleep 0.01; done\nprintf 'background terminal held for successful completion\\n'\nexit 2\n",
+                worker_started.display(),
+                exit_trigger.display(),
             ),
         )
         .expect("write controlled managed worker");
@@ -2033,10 +2035,22 @@ mod tests {
             .to_string();
         let run_dir = crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
         let status_path = run_dir.join("status.json");
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if worker_started.exists() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("real background root must acknowledge startup before cancellation");
         assert!(
             run_dir.join("credentials/opencode.json").exists(),
             "the managed completion fixture must use a real ephemeral OpenCode overlay"
         );
+        let (_cancel_dequeue_guard, cancel_dequeued, continue_cancel, cancel_observation) =
+            crate::dispatch_ops::install_managed_cancel_dequeue_barrier(&run_dir);
         let (_barrier_guard, entered, release) =
             install_managed_completion_admission_barrier(&dispatch_id);
         let handler_server = server.clone();
@@ -2062,21 +2076,59 @@ mod tests {
         let evals_before_completion = eval_memory_count(&server, &dispatch_id);
         let outcomes_before_completion = dispatch_outcome_count(&server, &dispatch_id);
         let adjudications_before_completion = dispatch_adjudication_count(&server, &dispatch_id);
-        let cancellation: Value = serde_json::from_str(
-            &crate::managed_run_control::request_managed_custom_cancel(
-                &server,
-                &dispatch_id,
+        let cancel_server = server.clone();
+        let cancel_dispatch_id = dispatch_id.clone();
+        let cancellation_task = tokio::task::spawn(async move {
+            crate::managed_run_control::request_managed_custom_cancel(
+                &cancel_server,
+                &cancel_dispatch_id,
                 expected_status_revision,
             )
             .await
-            .expect("cancel after real completion admission"),
+        });
+        match tokio::task::spawn_blocking(move || {
+            cancel_dequeued.recv_timeout(Duration::from_millis(250))
+        })
+        .await
+        .expect("join cancellation dequeue observation")
+        {
+            Ok(()) => {
+                continue_cancel
+                    .send(())
+                    .expect("release unexpectedly dequeued cancellation");
+                let response = cancellation_task
+                    .await
+                    .expect("unexpected cancellation task join");
+                panic!("completion admission must reject before the background owner dequeues cancellation: {response:?}");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("cancellation dequeue observer disconnected before the response")
+            }
+        }
+        let cancellation: Value = serde_json::from_str(
+            &cancellation_task
+                .await
+                .expect("cancellation task join")
+                .expect("cancel after real completion admission"),
         )
         .expect("cancellation JSON");
         assert_eq!(cancellation["receipt"], "cancellation_unavailable");
         assert_eq!(cancellation["reason"], "terminal_or_recovery_state");
         assert!(
+            matches!(
+                cancel_observation.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "an unavailable cancellation must not reach the real background terminal owner"
+        );
+        assert!(
             admitted.get("cancellation").is_none(),
             "a cancellation rejected by the committed completion admission must not signal the child"
+        );
+        assert!(
+            worker_started.exists() && !run_dir.join("result.md").exists(),
+            "the acknowledged root must remain live until the explicit completion trigger"
         );
         let concurrent =
             handle_tachi_complete(&server, managed_completion_params(&dispatch_id), false)
