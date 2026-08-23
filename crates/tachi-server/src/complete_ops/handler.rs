@@ -88,7 +88,7 @@ fn admit_managed_completion(
     server: &MemoryServer,
     dispatch_id: Option<&str>,
     persist_admission: bool,
-) -> Result<Option<ManagedCompletionAdmissionToken>, String> {
+) -> Result<Option<u64>, String> {
     let Some(dispatch_id) = dispatch_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(None);
     };
@@ -145,17 +145,24 @@ fn admit_managed_completion(
     if object.contains_key("completion_recovery") {
         return Ok(None);
     }
-    let token = ManagedCompletionAdmissionToken(uuid::Uuid::new_v4().to_string());
+    let generation = server
+        .managed_run_controls
+        .acquire_completion_lease(dispatch_id)
+        .ok_or_else(|| "managed completion already admitted".to_string())?;
     object.insert(
         "completion_recovery".to_string(),
-        json!({ "status": "completion_admitted", "token": token.0 }),
+        json!({ "status": "completion_admitted" }),
     );
     crate::managed_run_control::advance_status_revision(object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|error| format!("serialize managed completion admission: {error}"))?;
-    crate::utils::write_owner_only_file_atomic(&status_path, &body)
-        .map_err(|error| format!("persist managed completion admission: {error}"))?;
-    Ok(Some(token))
+    if let Err(error) = crate::utils::write_owner_only_file_atomic(&status_path, &body) {
+        server
+            .managed_run_controls
+            .release_completion_lease(dispatch_id, generation);
+        return Err(format!("persist managed completion admission: {error}"));
+    }
+    Ok(Some(generation))
 }
 
 /// The admission marker is a narrow cancellation fence, not evidence. If the
@@ -164,7 +171,7 @@ fn admit_managed_completion(
 fn revoke_managed_completion_admission(
     server: &MemoryServer,
     dispatch_id: Option<&str>,
-    token: &ManagedCompletionAdmissionToken,
+    generation: u64,
 ) -> Result<(), String> {
     let Some(dispatch_id) = dispatch_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(());
@@ -187,13 +194,15 @@ fn revoke_managed_completion_admission(
             status_path.display()
         )
     })?;
-    if object
-        .get("completion_recovery")
-        .and_then(Value::as_object)
-        .is_some_and(|recovery| {
-            recovery.get("status").and_then(Value::as_str) == Some("completion_admitted")
-                && recovery.get("token").and_then(Value::as_str) == Some(token.0.as_str())
-        })
+    if server
+        .managed_run_controls
+        .owns_completion_lease(dispatch_id, generation)
+        && object
+            .get("completion_recovery")
+            .and_then(Value::as_object)
+            .and_then(|recovery| recovery.get("status"))
+            .and_then(Value::as_str)
+            == Some("completion_admitted")
         && !object.contains_key("resolved_completion")
     {
         object.remove("completion_recovery");
@@ -203,52 +212,136 @@ fn revoke_managed_completion_admission(
         crate::utils::write_owner_only_file_atomic(&status_path, &body)
             .map_err(|error| format!("persist managed completion admission rollback: {error}"))?;
     }
+    server
+        .managed_run_controls
+        .release_completion_lease(dispatch_id, generation);
     Ok(())
 }
 
 /// Admission is a temporary cancellation fence. Once it is persisted, every
 /// later error or unwind must remove it unless a durable terminal/recovery
 /// receipt has taken ownership of the completion.
-#[derive(Debug)]
-struct ManagedCompletionAdmissionToken(String);
-
-/// The persisted admission fence belongs to exactly one completing caller.
-/// Other callers neither inherit it nor may roll it back during their unwind.
+/// A registry generation owns the persisted fence; no volatile identity token
+/// is exposed in status or a completion response.
 struct ManagedCompletionAdmissionGuard {
     server: MemoryServer,
     dispatch_id: Option<String>,
-    token: Option<ManagedCompletionAdmissionToken>,
+    generation: Option<u64>,
 }
 
 impl ManagedCompletionAdmissionGuard {
-    fn arm(
-        server: &MemoryServer,
-        dispatch_id: Option<&str>,
-        token: Option<ManagedCompletionAdmissionToken>,
-    ) -> Self {
+    fn arm(server: &MemoryServer, dispatch_id: Option<&str>, generation: Option<u64>) -> Self {
         Self {
             server: server.clone(),
             dispatch_id: dispatch_id.map(str::to_string),
-            token,
+            generation,
         }
     }
 
     fn disarm(&mut self) {
-        self.token = None;
+        if let Some(generation) = self.generation.take() {
+            if let Some(dispatch_id) = self.dispatch_id.as_deref() {
+                self.server
+                    .managed_run_controls
+                    .release_completion_lease(dispatch_id, generation);
+            }
+        }
     }
 }
 
 impl Drop for ManagedCompletionAdmissionGuard {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() {
+        if let Some(generation) = self.generation.take() {
             if let Err(error) = revoke_managed_completion_admission(
                 &self.server,
                 self.dispatch_id.as_deref(),
-                &token,
+                generation,
             ) {
                 tracing::error!(error = %error, "failed to revoke stranded managed completion admission");
             }
+            if let Some(dispatch_id) = self.dispatch_id.as_deref() {
+                self.server
+                    .managed_run_controls
+                    .release_completion_lease(dispatch_id, generation);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+struct ManagedCompletionAdmissionBarrier {
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+struct ManagedCompletionAdmissionBarrierGuard(String);
+
+#[cfg(test)]
+impl Drop for ManagedCompletionAdmissionBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(barriers) = MANAGED_COMPLETION_ADMISSION_BARRIERS.get() {
+            barriers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+static MANAGED_COMPLETION_ADMISSION_BARRIERS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, ManagedCompletionAdmissionBarrier>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn install_managed_completion_admission_barrier(
+    dispatch_id: &str,
+) -> (
+    ManagedCompletionAdmissionBarrierGuard,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    assert!(
+        MANAGED_COMPLETION_ADMISSION_BARRIERS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                dispatch_id.to_string(),
+                ManagedCompletionAdmissionBarrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            )
+            .is_none(),
+        "managed completion admission barrier already installed"
+    );
+    (
+        ManagedCompletionAdmissionBarrierGuard(dispatch_id.to_string()),
+        entered_rx,
+        release_tx,
+    )
+}
+
+#[cfg(test)]
+fn pause_managed_completion_after_admission(dispatch_id: Option<&str>) {
+    let Some(dispatch_id) = dispatch_id else {
+        return;
+    };
+    let barrier = MANAGED_COMPLETION_ADMISSION_BARRIERS
+        .get()
+        .and_then(|barriers| {
+            barriers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(dispatch_id)
+        });
+    if let Some(barrier) = barrier {
+        let _ = barrier.entered.send(());
+        let _ = barrier.release.recv();
     }
 }
 
@@ -653,6 +746,8 @@ pub(crate) async fn handle_tachi_complete(
         params.dispatch_id.as_deref(),
         admission_token,
     );
+    #[cfg(test)]
+    pause_managed_completion_after_admission(params.dispatch_id.as_deref());
     let save_result = match save_eval_memory(server, mem_params).await {
         Ok(result) => result,
         Err(error) => return Err(error),
@@ -1477,6 +1572,58 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn issue_1825_concurrent_handlers_keep_one_volatile_admission_owner() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182527Z-concurrent-completion";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let status_path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        let (_receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
+        let _capture_gate = CaptureGateEnforceGuard::new();
+        let (_barrier_guard, entered, release) =
+            install_managed_completion_admission_barrier(dispatch_id);
+        let first_server = server.clone();
+        let first = tokio::spawn(async move {
+            handle_tachi_complete(&first_server, managed_completion_params(dispatch_id), false)
+                .await
+        });
+        tokio::task::spawn_blocking(move || entered.recv().expect("first handler admitted"))
+            .await
+            .expect("admission barrier join");
+        let second = handle_tachi_complete(&server, managed_completion_params(dispatch_id), false)
+            .await
+            .expect_err("second handler must not share the first admission");
+        assert_eq!(second, "managed completion already admitted");
+        let blocked: Value = serde_json::from_str(
+            &crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, 8)
+                .await
+                .expect("cancellation response while first handler owns admission"),
+        )
+        .expect("blocked cancellation JSON");
+        assert_eq!(blocked["receipt"], "cancellation_unavailable");
+        release.send(()).expect("release first handler");
+        assert_eq!(
+            first
+                .await
+                .expect("first handler join")
+                .expect_err("capture gate rolls back first admission"),
+            "completion eval was not durably recorded"
+        );
+        let after: Value =
+            serde_json::from_slice(&std::fs::read(&status_path).expect("read rolled-back status"))
+                .expect("parse rolled-back status");
+        assert!(after.get("completion_recovery").is_none());
+        assert_eq!(dispatch_outcome_count(&server, dispatch_id), 0);
+        assert_eq!(eval_memory_count(&server, dispatch_id), 0);
+    }
+
     #[tokio::test]
     async fn issue_1825_post_save_predicate_error_revokes_managed_completion_admission() {
         let (server, _home) = crate::tests::make_server_with_temp_home();
@@ -1699,7 +1846,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn issue_1825_managed_completion_admission_has_one_token_owner() {
+    async fn managed_completion_generation_lease_unit() {
         let (server, _home) = crate::tests::make_server_with_temp_home();
         let dispatch_id = "20260823T182526Z-managed-admission-owner";
         seed_managed_working_status(&server, dispatch_id, None);
@@ -1749,22 +1896,23 @@ mod tests {
         .expect("blocked cancellation JSON");
         assert_eq!(blocked["receipt"], "cancellation_unavailable");
 
-        revoke_managed_completion_admission(&server, Some(dispatch_id), &owner_a)
+        revoke_managed_completion_admission(&server, Some(dispatch_id), owner_a)
             .expect("first owner rollback");
         let owner_b = admit_managed_completion(&server, Some(dispatch_id), true)
             .expect("second completion admission after rollback")
             .expect("second admission owns a token");
-        revoke_managed_completion_admission(&server, Some(dispatch_id), &owner_a)
+        revoke_managed_completion_admission(&server, Some(dispatch_id), owner_a)
             .expect("stale owner rollback is harmless");
         let after: Value = serde_json::from_slice(
             &std::fs::read(&status_path).expect("read second admission marker"),
         )
         .expect("parse second admission marker");
         assert_eq!(
-            after["completion_recovery"]["token"], owner_b.0,
+            after["completion_recovery"],
+            json!({"status": "completion_admitted"}),
             "a stale completion unwind must not erase another owner's marker"
         );
-        revoke_managed_completion_admission(&server, Some(dispatch_id), &owner_b)
+        revoke_managed_completion_admission(&server, Some(dispatch_id), owner_b)
             .expect("second owner rollback");
     }
 

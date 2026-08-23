@@ -406,8 +406,6 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                     )));
                 }
             }
-            #[cfg(test)]
-            pause_managed_before_select(run_dir);
             // `biased` below otherwise gives a simultaneously-ready cancel
             // precedence over the watchdog. Check before receiving a command
             // so a request that arrives after the deadline cannot signal a
@@ -425,8 +423,21 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                 drain_managed_output(stdout_task, stderr_task).await;
                 return ManagedSubprocessOutcome::plain(Err("process timed out".to_string()));
             }
+            #[cfg(test)]
+            pause_managed_before_select(run_dir);
             tokio::select! {
                 biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    if matches!(observe_managed_root_exit_without_reap(pid, run_dir), Ok(true)) {
+                        continue;
+                    }
+                    let sigterm = process_group.signal(libc::SIGTERM);
+                    process_group.prepare_group_for_root_reap(sigterm).await;
+                    let _ = reap_managed_root(&mut child, &mut process_group).await;
+                    drain_managed_output(stdout_task, stderr_task).await;
+                    return ManagedSubprocessOutcome::plain(Err(format!(
+                        "Agent process timed out after {}s (process group killed)", timeout.as_secs())));
+                }
                 command = cancellations.recv() => {
                     let Some(command) = command else {
                         let sigterm = process_group.signal(libc::SIGTERM);
@@ -435,11 +446,19 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                         drain_managed_output(stdout_task, stderr_task).await;
                         return ManagedSubprocessOutcome::plain(Err("managed cancellation channel closed".to_string()));
                     };
+                    if tokio::time::Instant::now() >= deadline {
+                        let sigterm = process_group.signal(libc::SIGTERM);
+                        process_group.prepare_group_for_root_reap(sigterm).await;
+                        let _ = reap_managed_root(&mut child, &mut process_group).await;
+                        drain_managed_output(stdout_task, stderr_task).await;
+                        return ManagedSubprocessOutcome::plain(Err(format!(
+                            "Agent process timed out after {}s (process group killed)", timeout.as_secs())));
+                    }
                     #[cfg(test)]
                     let mut command = command;
                     #[cfg(test)]
                     let observation = pause_managed_cancel_after_dequeue(run_dir);
-                    let exited = match observe_managed_root_exit_without_reap(pid, run_dir) {
+                    let exited = match try_wait_for_managed_cancellation(pid, run_dir) {
                         Ok(exited) => exited,
                         Err(error) => {
                             let sigterm = process_group.signal(libc::SIGTERM);
@@ -555,7 +574,7 @@ pub(super) struct ManagedSubprocessOutcome {
 }
 
 impl ManagedSubprocessOutcome {
-    fn plain(result: Result<DispatchResult, String>) -> Self {
+    pub(super) fn plain(result: Result<DispatchResult, String>) -> Self {
         Self {
             result,
             cancellation: None,
@@ -738,18 +757,6 @@ fn observe_managed_root_exit_without_reap(
     child_pid: Option<u32>,
     _run_dir: &std::path::Path,
 ) -> std::io::Result<bool> {
-    #[cfg(test)]
-    {
-        let configured_run_dirs = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIRS
-            .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if configured_run_dirs.contains(_run_dir) {
-            return Err(std::io::Error::other(
-                "injected managed cancellation probe failure",
-            ));
-        }
-    }
     let Some(child_pid) = child_pid else {
         return Ok(true);
     };
@@ -768,6 +775,26 @@ fn observe_managed_root_exit_without_reap(
         return Err(std::io::Error::last_os_error());
     }
     Ok(unsafe { info.si_pid() } != 0)
+}
+
+#[cfg(unix)]
+fn try_wait_for_managed_cancellation(
+    child_pid: Option<u32>,
+    run_dir: &std::path::Path,
+) -> std::io::Result<bool> {
+    #[cfg(test)]
+    {
+        let configured_run_dirs = MANAGED_CANCEL_PROBE_FAILURE_RUN_DIRS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if configured_run_dirs.contains(run_dir) {
+            return Err(std::io::Error::other(
+                "injected managed cancellation probe failure",
+            ));
+        }
+    }
+    observe_managed_root_exit_without_reap(child_pid, run_dir)
 }
 
 #[cfg(unix)]
@@ -956,6 +983,46 @@ fn record_managed_cancel_child_pid(run_dir: &std::path::Path, pid: Option<u32>) 
 struct ManagedPanicAfterSpawnGuard(std::path::PathBuf);
 
 #[cfg(test)]
+type ManagedPanicAfterSpawnRootKey = (std::path::PathBuf, std::path::PathBuf);
+
+#[cfg(test)]
+pub(crate) struct ManagedPanicAfterSpawnRootGuard(ManagedPanicAfterSpawnRootKey);
+
+#[cfg(test)]
+static MANAGED_PANIC_AFTER_SPAWN_ROOTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<ManagedPanicAfterSpawnRootKey>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+impl Drop for ManagedPanicAfterSpawnRootGuard {
+    fn drop(&mut self) {
+        if let Some(roots) = MANAGED_PANIC_AFTER_SPAWN_ROOTS.get() {
+            roots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_managed_panic_after_spawn_for_run_root(
+    home: &std::path::Path,
+    run_root: &std::path::Path,
+) -> ManagedPanicAfterSpawnRootGuard {
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    assert!(
+        MANAGED_PANIC_AFTER_SPAWN_ROOTS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone()),
+        "managed panic-after-spawn root injection already installed"
+    );
+    ManagedPanicAfterSpawnRootGuard(key)
+}
+
+#[cfg(test)]
 impl Drop for ManagedPanicAfterSpawnGuard {
     fn drop(&mut self) {
         let mut configured = MANAGED_PANIC_AFTER_SPAWN_RUN_DIRS
@@ -994,6 +1061,23 @@ fn panic_after_managed_spawn(run_dir: &std::path::Path) {
         }
         assert!(ready.exists(), "panic-after-spawn fixture was not ready");
         panic!("injected managed panic after spawn");
+    }
+    let Some(home) = std::env::var_os("TACHI_HOME") else {
+        return;
+    };
+    let Some(run_root) = std::env::var_os("TACHI_RUN_ROOT") else {
+        return;
+    };
+    if MANAGED_PANIC_AFTER_SPAWN_ROOTS.get().is_some_and(|roots| {
+        roots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&(
+                std::path::PathBuf::from(home),
+                std::path::PathBuf::from(run_root),
+            ))
+    }) {
+        panic!("injected managed panic after spawn for isolated run root");
     }
 }
 
@@ -1112,7 +1196,8 @@ mod issue_1825_tests {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn request_cancel_reconciles_injected_child_probe_failure_through_the_real_runner() {
+    async fn issue_1825_request_cancel_reconciles_injected_child_probe_failure_through_the_real_runner(
+    ) {
         let _serial = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -1048,6 +1048,39 @@ pub(crate) mod tests {
         late_timeout_cleanup.disarm();
         drop(_late_timeout_override);
 
+        // A panic inside the managed runner is joined by the outer production
+        // background task, which must still write FAILED and release all
+        // durable/volatile ownership before status is observed.
+        let _panic_injection = crate::dispatch_ops::install_managed_panic_after_spawn_for_run_root(
+            temp_home.path(),
+            temp_runs.path(),
+        );
+        let mut panic_request = staff_request("tachi");
+        panic_request.profile = Some("glm_impl".to_string());
+        panic_request.worker = Some("custom".to_string());
+        panic_request.flow_id = Some("flow_1825_managed_panic".to_string());
+        let panic_raw = staff_start(&server, panic_request)
+            .await
+            .expect("panic-injected Staff start");
+        let mut panic_cleanup = StaffCleanupGuard::arm(&panic_raw);
+        let panic_response: Value = serde_json::from_str(&panic_raw).expect("panic start JSON");
+        let panic_id = panic_response["dispatch_id"]
+            .as_str()
+            .expect("panic dispatch id");
+        let panic_dir = dispatch_runs_root().join(panic_id);
+        let (panic_terminal, panic_result) = wait_for_staff_terminal(&panic_dir).await;
+        wait_for_staff_cleanup(panic_id).await;
+        assert_eq!(terminal_staff_state(&panic_terminal), "TASK_STATE_FAILED");
+        assert!(panic_result.contains("managed subprocess panicked"));
+        assert!(!server.managed_run_controls.contains(panic_id));
+        assert!(!panic_dir.join("credentials").exists());
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, panic_id).await,
+            Some("TASK_STATE_FAILED".to_string())
+        );
+        panic_cleanup.disarm();
+        drop(_panic_injection);
+
         // Credential cleanup participates in the same real Staff ->
         // background terminalization as process proof. Inject only this
         // isolated run root's cleanup call so the final writer must choose a

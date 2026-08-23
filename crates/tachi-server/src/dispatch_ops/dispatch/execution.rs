@@ -303,13 +303,23 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     (run_agent_subprocess(cmd, timeout).await, None, None)
                 }
                 DispatchExecution::ManagedCustom(cmd, receiver) => {
-                    let outcome = run_managed_custom_subprocess_outcome(
-                        cmd,
-                        timeout,
-                        receiver,
-                        &workspace_dir_for_spawn,
-                    )
-                    .await;
+                    let managed_run_dir = workspace_dir_for_spawn.clone();
+                    let outcome = match tokio::spawn(async move {
+                        run_managed_custom_subprocess_outcome(
+                            cmd,
+                            timeout,
+                            receiver,
+                            &managed_run_dir,
+                        )
+                        .await
+                    })
+                    .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => super::super::subprocess::ManagedSubprocessOutcome::plain(
+                            Err(format!("managed subprocess panicked: {error}")),
+                        ),
+                    };
                     (
                         outcome.result,
                         outcome.cancellation,

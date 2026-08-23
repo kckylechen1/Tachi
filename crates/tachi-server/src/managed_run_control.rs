@@ -13,6 +13,7 @@ const CONTROL_CHANNEL_CAPACITY: usize = 1;
 #[derive(Default)]
 pub(crate) struct ManagedRunControlRegistry {
     entries: Mutex<HashMap<String, Entry>>,
+    completion_leases: Mutex<HashMap<String, u64>>,
     next: Mutex<u64>,
 }
 
@@ -241,6 +242,42 @@ impl Drop for ManagedRunGuard {
 }
 
 impl ManagedRunControlRegistry {
+    pub(crate) fn acquire_completion_lease(&self, dispatch_id: &str) -> Option<u64> {
+        let mut leases = self
+            .completion_leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if leases.contains_key(dispatch_id) {
+            return None;
+        }
+        let mut next = self
+            .next
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *next = next.checked_add(1)?;
+        leases.insert(dispatch_id.to_string(), *next);
+        Some(*next)
+    }
+
+    pub(crate) fn owns_completion_lease(&self, dispatch_id: &str, generation: u64) -> bool {
+        self.completion_leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(dispatch_id)
+            .copied()
+            == Some(generation)
+    }
+
+    pub(crate) fn release_completion_lease(&self, dispatch_id: &str, generation: u64) {
+        let mut leases = self
+            .completion_leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if leases.get(dispatch_id).copied() == Some(generation) {
+            leases.remove(dispatch_id);
+        }
+    }
+
     pub(crate) fn register(
         self: &Arc<Self>,
         dispatch_id: &str,
