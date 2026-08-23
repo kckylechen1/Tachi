@@ -1103,6 +1103,20 @@ enum LifecycleWriterRoute {
     NamedProject(String),
 }
 
+/// Liveness backstop for the hook's two 2s waits on the writer (the
+/// attempted-signal handshake and the outcome-report probe window). It
+/// bounds liveness only and never participates in discrimination (test-doc
+/// claim (c)). The causal anchor is the lock boundary: the writer's outcome
+/// report is emitted only from inside its store closure, and post-#1588 that
+/// closure can only run after the bound store mutex was released (strictly
+/// after the proposal COMMIT). A report arriving while the transaction is
+/// open proves a second connection reached the store and panics. This bound
+/// exists only so a correctly-serialized writer — which cannot report until
+/// after COMMIT — does not hang the hook forever. A delayed twin whose store
+/// entry lands after COMMIT is byte-identical at this layer to a serialized
+/// write and is indistinguishable by design (test-doc claim (d)).
+const WRITER_PROBE_BACKSTOP_TIMEOUT: StdDuration = StdDuration::from_secs(2);
+
 async fn assert_proposal_persistence_precedes_writer(
     server: &crate::server_state::MemoryServer,
     writer_route: LifecycleWriterRoute,
@@ -1110,7 +1124,6 @@ async fn assert_proposal_persistence_precedes_writer(
     writer_target_id: &str,
     path_prefix: &str,
 ) {
-    let expects_physical_db_probe = matches!(&writer_route, LifecycleWriterRoute::NamedProject(_));
     let writer_server = server.clone();
     let (start_writer_tx, start_writer_rx) = mpsc::channel::<String>();
     let (writer_attempted_tx, writer_attempted_rx) = mpsc::channel();
@@ -1128,33 +1141,60 @@ async fn assert_proposal_persistence_precedes_writer(
         let proposal_id = start_writer_rx
             .recv_timeout(StdDuration::from_secs(2))
             .expect("proposal hook must release the writer");
-        writer_attempted_tx
-            .send(())
-            .expect("proposal hook must observe writer attempt");
         let proposal_was_visible = match writer_route {
-            LifecycleWriterRoute::Global => writer_server.with_global_store(|store| {
-                assert_eq!(
-                    store
-                        .mark_superseded_closing_validity(
-                            &writer_source_id,
-                            &writer_target_id_for_writer,
-                            "2026-07-25T00:00:03.000Z",
-                        )
-                        .map_err(|e| e.to_string())?,
-                    1,
-                    "same-server writer must apply its final A -> C effect"
-                );
-                let proposal_was_visible = store
-                    .get_state_kv("memory_lifecycle_proposals", &proposal_id)
-                    .map_err(|e| e.to_string())?
-                    .is_some();
-                writer_probe_tx
-                    .send(true)
-                    .expect("proposal hook receiver must remain alive through writer completion");
-                Ok(proposal_was_visible)
-            }),
+            LifecycleWriterRoute::Global => {
+                // Liveness handshake only — its one honest role is proving
+                // the writer thread reached its route, fired immediately
+                // before the store call. It is NOT a discriminator: the
+                // outcome report (writer_probe_tx) is sent from inside the
+                // store closure, i.e. only after the writer acquired the
+                // store, so only that report's arrival while the proposal
+                // transaction is open proves a second connection.
+                writer_attempted_tx
+                    .send(())
+                    .expect("proposal hook must observe writer attempt");
+                writer_server.with_global_store(|store| {
+                    assert_eq!(
+                        store
+                            .mark_superseded_closing_validity(
+                                &writer_source_id,
+                                &writer_target_id_for_writer,
+                                "2026-07-25T00:00:03.000Z",
+                            )
+                            .map_err(|e| e.to_string())?,
+                        1,
+                        "same-server writer must apply its final A -> C effect"
+                    );
+                    let proposal_was_visible = store
+                        .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                        .map_err(|e| e.to_string())?
+                        .is_some();
+                    writer_probe_tx.send(true).expect(
+                        "proposal hook receiver must remain alive through writer completion",
+                    );
+                    Ok(proposal_was_visible)
+                })
+            }
             LifecycleWriterRoute::NamedProject(project) => {
+                // Liveness handshake only — same role as the global arm:
+                // proves the writer thread reached its route, immediately
+                // before the store call. Not a discriminator (test-doc
+                // claims (a)/(c)).
+                writer_attempted_tx
+                    .send(())
+                    .expect("proposal hook must observe writer attempt");
                 writer_server.with_named_project_store(&project, |store| {
+                    // Causal boundary: post-#1588 the named route aliases the
+                    // bound project store (bound_project_db_alias_of), so this
+                    // closure can only run after the bound store mutex was
+                    // released — strictly after the proposal transaction
+                    // COMMIT. The outcome report sent inside this closure is
+                    // therefore the discriminator: it can never arrive while
+                    // the hook holds the transaction open. Second layer: the
+                    // zero-timeout first attempt must land outright — a
+                    // BUSY/LOCKED here means a second connection reached the
+                    // bound file while the proposal transaction was open (the
+                    // pre-fix twin-writer topology).
                     store
                         .connection()
                         .busy_timeout(StdDuration::ZERO)
@@ -1164,25 +1204,11 @@ async fn assert_proposal_persistence_precedes_writer(
                         &writer_target_id_for_writer,
                         "2026-07-25T00:00:03.000Z",
                     );
-                    store
-                        .connection()
-                        .busy_timeout(StdDuration::from_secs(5))
-                        .map_err(|e| e.to_string())?;
-
-                    match first_attempt {
-                        Ok(1) => {
-                            let proposal_was_visible = store
-                                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
-                                .map_err(|e| e.to_string())?
-                                .is_some();
-                            writer_probe_tx
-                                .send(true)
-                                .expect("report alias writer completed before persistence");
-                            Ok(proposal_was_visible)
-                        }
+                    let attempt_ok = match &first_attempt {
+                        Ok(1) => true,
                         Ok(affected) => Err(format!(
                             "alias writer unexpectedly affected {affected} rows on first attempt"
-                        )),
+                        ))?,
                         Err(memcore::MemoryError::Sqlite(error))
                             if matches!(
                                 error.sqlite_error_code(),
@@ -1192,29 +1218,31 @@ async fn assert_proposal_persistence_precedes_writer(
                                 )
                             ) =>
                         {
-                            writer_probe_tx
-                                .send(false)
-                                .expect("report physical DB transaction contention");
-                            assert_eq!(
-                                store
-                                    .mark_superseded_closing_validity(
-                                        &writer_source_id,
-                                        &writer_target_id_for_writer,
-                                        "2026-07-25T00:00:03.000Z",
-                                    )
-                                    .map_err(|e| e.to_string())?,
-                                1,
-                                "alias writer must land A -> C after proposal commit"
-                            );
-                            Ok(store
-                                .get_state_kv("memory_lifecycle_proposals", &proposal_id)
-                                .map_err(|e| e.to_string())?
-                                .is_some())
+                            false
                         }
                         Err(error) => Err(format!(
-                            "alias writer expected SQLite BUSY/LOCKED before persistence: {error}"
-                        )),
-                    }
+                            "alias writer first attempt failed unexpectedly: {error}"
+                        ))?,
+                    };
+                    // Report while still inside the closure: the hook holds
+                    // the proposal transaction open, so any probe arriving
+                    // there means the writer entered the store through a
+                    // second connection instead of serializing behind the
+                    // bound store mutex.
+                    writer_probe_tx
+                        .send(attempt_ok)
+                        .expect("report alias writer's serialized first-attempt outcome");
+                    assert!(
+                        attempt_ok,
+                        "alias writer hit SQLite BUSY/LOCKED on its zero-timeout first attempt: \
+                         the named route must alias the bound store and serialize behind its \
+                         mutex, not open a second connection to the bound file"
+                    );
+                    let proposal_was_visible = store
+                        .get_state_kv("memory_lifecycle_proposals", &proposal_id)
+                        .map_err(|e| e.to_string())?
+                        .is_some();
+                    Ok(proposal_was_visible)
                 })
             }
         }
@@ -1239,21 +1267,35 @@ async fn assert_proposal_persistence_precedes_writer(
                     .send(proposal_id)
                     .expect("start same-server writer");
                 writer_attempted_rx
-                    .recv_timeout(StdDuration::from_secs(2))
+                    .recv_timeout(WRITER_PROBE_BACKSTOP_TIMEOUT)
                     .expect("writer must reach its real facade/store route");
-                // Named-route discrimination is causal: its zero-busy-wait
-                // SQLite attempt sends false only for BUSY/LOCKED and true if
-                // A -> C completed. The timeout is only a deadlock guard there.
-                // The global same-gate case cannot enter its closure until
-                // release, so its expected timeout remains the original gate
-                // discrimination.
+                // Causal anchor (test-doc claim (a)): the writer's outcome
+                // report is emitted only from inside its store closure,
+                // which can run only after the writer acquired the store.
+                // Post-#1588 the named route aliases the bound project
+                // store, so "acquired the store" means the bound store mutex
+                // was released — strictly after this proposal transaction
+                // COMMITs. A report arriving here, while this hook still
+                // holds the transaction open, therefore proves the writer
+                // entered the store through a second connection instead of
+                // serializing behind the bound mutex: the twin-writer
+                // topology #1588 deleted. The timeout below bounds liveness
+                // only (claim (c)) — a correctly-serialized writer cannot
+                // report until after COMMIT, so it must not hang the hook;
+                // it never participates in discrimination. A delayed twin
+                // whose store entry lands post-commit is indistinguishable
+                // here by design and harmless to the ordering claim
+                // (claim (d)).
                 let completed_early =
-                    match hook_writer_probe_rx.recv_timeout(StdDuration::from_secs(2)) {
-                        Ok(completed_early) => completed_early,
-                        Err(mpsc::RecvTimeoutError::Timeout) if !expects_physical_db_probe => false,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            panic!("alias writer did not report its SQLite contention result")
-                        }
+                    match hook_writer_probe_rx.recv_timeout(WRITER_PROBE_BACKSTOP_TIMEOUT) {
+                        Ok(completed_early) => panic!(
+                            "same-server writer reported its write outcome while the proposal \
+                             transaction was still open (completed_before_persist={completed_early}): \
+                             the writer's report is produced only inside its store closure, which \
+                             post-alias runs only after the bound store mutex release — a \
+                             pre-commit report means a second connection reached the store"
+                        ),
+                        Err(mpsc::RecvTimeoutError::Timeout) => false,
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
                             panic!("writer disconnected before reporting its ordering result")
                         }
@@ -1364,9 +1406,46 @@ async fn consolidate_proposal_persistence_blocks_same_server_writer_until_visibl
     .await;
 }
 
-/// Active-project proposal routing and named-project writes can open the same
-/// physical SQLite file through distinct runtime gates. The DB transaction,
-/// rather than either route-local gate, must order persistence before A -> C.
+/// Post-#1588 topology: the named-project route aliases the bound project
+/// store, so the alias writer serializes behind the bound store mutex and
+/// its A -> C write lands strictly after the proposal COMMIT — with no
+/// SQLite BUSY/LOCKED window at all. That is the fix: the contention window
+/// the old twin-connection scenario simulated no longer exists for the bound
+/// file.
+///
+/// What this test pins — exact claim:
+/// (a) ORDERING under the alias topology. The writer's outcome report is
+///     emitted only from inside its store closure, and post-alias that
+///     closure can only run after the bound store mutex was released —
+///     strictly after this proposal transaction COMMITs. A report arriving
+///     while the transaction is open therefore proves a second connection
+///     reached the store and panics. The final assertions pin that the
+///     writer's A -> C effect landed after the proposal was durably
+///     persisted.
+/// (b) The topology discrimination itself is NOT this test's job: it is
+///     delegated to memory-server-runtime's structural pins — T1 (Arc::ptr_eq
+///     alias identity of a named attach for the bound file), T6 (the
+///     attach->activate->attach eviction/alias red/green), T7 (the
+///     attach/activate race window) and T8 (A->B->A demotion).
+/// (c) The 2s backstop bounds liveness only and never participates in
+///     discrimination: both the attempted-handshake wait and the probe
+///     window exist so a correctly-serialized writer (which cannot report
+///     until after COMMIT) does not hang the hook. A timeout is deadlock
+///     relief, not evidence.
+/// (d) The delayed-twin-post-commit schedule — a hypothetical second
+///     connection whose store entry lands after the proposal COMMIT — is
+///     byte-identical at this layer to a serialized write and is
+///     indistinguishable here BY DESIGN. It is harmless to the ordering
+///     claim: the final effect (A -> C landed after persistence) still
+///     holds, and the twin topology that could schedule it is excluded by
+///     the runtime pins in (b).
+///
+/// Second layer inside the closure: the writer's zero-timeout first attempt
+/// must succeed outright (BUSY/LOCKED on that attempt also means a second
+/// connection reached the bound file while the transaction was open). The
+/// proposal is visible at the writer's observation point and the final state
+/// matches the old test's post-retry expectations (A -> C landed, proposal
+/// pending).
 #[tokio::test(flavor = "current_thread")]
 async fn consolidate_project_alias_writer_waits_for_proposal_persistence() {
     let (server, temp_home) = make_server_with_temp_home();
@@ -1400,8 +1479,8 @@ async fn consolidate_project_alias_writer_waits_for_proposal_persistence() {
         "test routes must resolve to one physical SQLite database"
     );
     // Warm the named write route before the proposal transaction starts so
-    // the discriminator observes write ordering, not attachment/schema-open
-    // initialization waiting on the transaction.
+    // the discriminator observes the serialized write ordering through the
+    // aliased bound store, not cold route resolution during the transaction.
     server
         .with_named_project_store(&project, |_| Ok(()))
         .expect("warm named-project write route");
