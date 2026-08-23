@@ -87,8 +87,17 @@ async fn lifecycle_release_note_writes_flow_artifact_with_refs() {
         "Merge state: `merged`",
         "spec: `docs/engineering/specs/dispatch-policy.md`",
         "doc: `docs/engineering/architecture/subagent-eval-system.md`",
-        "Overall: `passed`",
-        "`passed` cargo test -p tachi-server lifecycle_release_note",
+        // #1454 G3 re-anchor: the note's verification headline is the GATE
+        // verdict with the best server-known head. This flow has no GitHub
+        // head and no receipts in the server store — the fail-closed display
+        // is `unverified`, never the raw caller-asserted ledger "passed"
+        // (which stays visible as a detail row).
+        "Overall: `unverified`",
+        "Ledger overall (caller-asserted): `passed`",
+        // #1454 O2 re-anchor: the caller-authored item NAME (command string)
+        // renders through the shared `markup_text` helper — single-line
+        // compact + markdown-escape, so its underscores appear escaped.
+        "`passed` cargo test -p tachi-server lifecycle\\_release\\_note",
     ] {
         assert!(note.contains(expected), "missing {expected}: {note}");
     }

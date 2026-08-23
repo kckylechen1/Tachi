@@ -45,6 +45,13 @@ pub(crate) async fn handle_task_cycle_status(
         .map(crate::verify_ops::read_verification_ledger)
         .transpose()?
         .flatten();
+    // #1454 F6: the readiness verdict is the authority-aware gate result, not
+    // the raw ledger `overall`. Best server-known head: the GitHub head the
+    // server wrote into status.json::github (safe_merge/link_pr observed it),
+    // else the receipt-store head; with neither, `unverified` (fail-closed
+    // display — never caller-passed).
+    let verification_verdict =
+        verification_verdict(server, flow_id.as_deref(), &status, verification.as_ref())?;
     let close_loop = run_dir
         .as_ref()
         .map(|dir| read_json_file(&dir.join("close_loop.json")))
@@ -102,7 +109,7 @@ pub(crate) async fn handle_task_cycle_status(
         &status,
         issue_ref.as_deref(),
         pr_ref.as_deref(),
-        verification.as_ref(),
+        verification_verdict.as_deref(),
         release_note_present,
         close_loop.as_ref(),
     );
@@ -114,6 +121,7 @@ pub(crate) async fn handle_task_cycle_status(
         pr_ref.as_deref(),
         &linked_docs,
         &linked_specs,
+        verification_verdict.as_deref(),
         verification.as_ref(),
         &status,
         result_present,
@@ -130,7 +138,7 @@ pub(crate) async fn handle_task_cycle_status(
         pr_ref.as_deref(),
         &linked_docs,
         &linked_specs,
-        verification.as_ref(),
+        verification_verdict.as_deref(),
         merge_state.as_deref(),
         release_note_present,
         close_loop.as_ref(),
@@ -162,6 +170,7 @@ pub(crate) async fn handle_task_cycle_status(
             "merge_state": merge_state,
         },
         "verification": verification,
+        "verification_verdict": verification_verdict,
         "artifacts": artifacts,
         "events": events,
         "spec_drift": drift,
@@ -405,7 +414,7 @@ fn infer_cycle_stage(
     status: &Value,
     issue_ref: Option<&str>,
     pr_ref: Option<&str>,
-    verification: Option<&Value>,
+    verification_verdict: Option<&str>,
     release_note_present: bool,
     close_loop: Option<&Value>,
 ) -> String {
@@ -415,11 +424,8 @@ fn infer_cycle_stage(
     if release_note_present {
         return "release".to_string();
     }
-    if let Some(overall) = verification
-        .and_then(|ledger| ledger.get("overall"))
-        .and_then(Value::as_str)
-    {
-        if overall == "passed" {
+    if let Some(verdict) = verification_verdict {
+        if verdict == "passed" {
             return "verified".to_string();
         }
         return "verify".to_string();
@@ -445,6 +451,7 @@ fn spec_drift(
     pr_ref: Option<&str>,
     linked_docs: &[String],
     linked_specs: &[String],
+    verification_verdict: Option<&str>,
     verification: Option<&Value>,
     status: &Value,
     result_present: bool,
@@ -505,22 +512,25 @@ fn spec_drift(
             "Record required checks with tachi_verify before safe_merge or close_loop.",
         ));
     }
-    if let Some(verification) = verification {
-        if let Some(overall) = verification.get("overall").and_then(Value::as_str) {
-            if overall != "passed" {
+    // #1454 F6: readiness flags follow the authority-aware verdict. A
+    // caller-asserted "passed" ledger with no server-run receipts reads
+    // `unverified`/`pending` and must surface as drift.
+    if verification.is_some() {
+        if let Some(verdict) = verification_verdict {
+            if verdict != "passed" {
                 drift.push(drift_item(
                     "verification_not_passed",
-                    &format!("Verification ledger overall state is {overall}."),
+                    &format!("Verification gate state is {verdict}."),
                     "Resolve pending/failed/stale checks before merge or close_loop.",
                 ));
             }
         }
-        let verification_head = verification.get("head_sha").and_then(Value::as_str);
+        let verification_head = verification.and_then(|ledger| ledger.get("head_sha"));
         let github_head = status
             .get("github")
             .and_then(|github| github.get("head_sha"))
             .and_then(Value::as_str);
-        if let (Some(v_head), Some(g_head)) = (verification_head, github_head) {
+        if let (Some(Value::String(v_head)), Some(g_head)) = (verification_head, github_head) {
             if v_head != g_head {
                 drift.push(drift_item(
                     "verification_head_mismatch",
@@ -565,12 +575,54 @@ fn drift_item(kind: &str, detail: &str, action: &str) -> Value {
     })
 }
 
+/// #1454 F6: authority-aware verification verdict for the cycle view.
+///
+/// Best server-known head for the flow: the GitHub head the server itself
+/// wrote into `status.json::github::head_sha` (safe_merge/link_pr observed
+/// it from GitHub), else the receipt-store head (the server observed it at
+/// run time). With neither, the verdict is `unverified` — fail-closed
+/// display, never the caller-asserted ledger `overall`. `None` means no
+/// ledger exists (callers keep their missing-verification coaching).
+fn verification_verdict(
+    server: &MemoryServer,
+    flow_id: Option<&str>,
+    status: &Value,
+    ledger: Option<&Value>,
+) -> Result<Option<String>, String> {
+    let Some(flow_id) = flow_id else {
+        return Ok(None);
+    };
+    if ledger.is_none() {
+        return Ok(None);
+    }
+    let home = server.tachi_home_dir();
+    let head = status
+        .get("github")
+        .and_then(|github| github.get("head_sha"))
+        .and_then(Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| crate::verify_ops::best_receipt_head(&home, flow_id));
+    let Some(head) = head else {
+        return Ok(Some("unverified".to_string()));
+    };
+    match crate::verify_ops::evaluate_verification_gate(Some(flow_id), &head, &home)? {
+        Some(gate) => Ok(Some(
+            gate.get("overall")
+                .and_then(Value::as_str)
+                .unwrap_or("unverified")
+                .to_string(),
+        )),
+        None => Ok(Some("unverified".to_string())),
+    }
+}
+
 fn next_action(
     issue_ref: Option<&str>,
     pr_ref: Option<&str>,
     linked_docs: &[String],
     linked_specs: &[String],
-    verification: Option<&Value>,
+    verification_verdict: Option<&str>,
     merge_state: Option<&str>,
     release_note_present: bool,
     close_loop: Option<&Value>,
@@ -590,10 +642,7 @@ fn next_action(
         return "Prepare or link a PR with tachi_gh(action='pr_handoff') and tachi_gh(action='link_pr')."
             .to_string();
     }
-    match verification
-        .and_then(|ledger| ledger.get("overall"))
-        .and_then(Value::as_str)
-    {
+    match verification_verdict {
         None => {
             return "Record required verification with tachi_verify before PR gate.".to_string()
         }

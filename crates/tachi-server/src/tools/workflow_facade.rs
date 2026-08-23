@@ -41,7 +41,7 @@ impl MemoryServer {
     // ─── Tachi Verify: background verification evidence ledger ─────────────
 
     #[tool(
-        description = "Background verification ledger. action='start' seeds pending checks; action='record' stores results from external runners (gitleaks, cargo check, clippy, tests); action='status'/'board' reads .tachi/runs/<flow_id>/verification.json. Safe-merge consumes required checks for the matching flow/head SHA: failed or stale required checks block merges, and missing required checks wait in standard/strict mode."
+        description = "Background verification ledger. action='start' seeds pending checks; action='record' stores results from external runners (gitleaks, cargo check, clippy, tests); action='run' executes a closed-set check (fmt/clippy/nextest/doc/audit) in the flow's claimed worktree with server-observed head_sha and source='server_run:<kind>' — the only evidence that can satisfy the safe-merge authority gate; action='status'/'board' reads .tachi/runs/<flow_id>/verification.json. Safe-merge consumes required checks for the matching flow/head SHA: failed or stale required checks block merges, and missing required checks wait in standard/strict mode."
     )]
     pub(crate) async fn tachi_verify(
         &self,

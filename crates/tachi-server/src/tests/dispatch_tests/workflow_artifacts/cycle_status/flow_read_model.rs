@@ -32,7 +32,7 @@ async fn tachi_task_cycle_status_reads_flow_artifacts_without_github() {
         }),
     )
     .expect("merge github status");
-    write_passed_verification(flow_id);
+    write_passed_verification(&server, flow_id, "abc123");
 
     let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());

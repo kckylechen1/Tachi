@@ -37,6 +37,8 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
             required: Some(true),
             limit: None,
             checks: vec![],
+            check_kind: None,
+            timeout_secs: None,
         }))
         .await?;
     let status = server
@@ -58,6 +60,8 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
             required: None,
             limit: None,
             checks: vec![],
+            check_kind: None,
+            timeout_secs: None,
         }))
         .await?;
     let unrelated = server
@@ -79,6 +83,8 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
             required: None,
             limit: None,
             checks: vec![],
+            check_kind: None,
+            timeout_secs: None,
         }))
         .await?;
     let record_json: Value =
@@ -112,7 +118,11 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
                 .map(Vec::len)
         })
         .unwrap_or(0);
-    if overall != Some("passed") || gate_overall != Some("passed") || unrelated_items != 0 {
+    // #1454 F1/F6: a caller-asserted record must NEVER read as a passed
+    // readiness verdict. With no server-run receipts and no server-known
+    // head, the display is fail-closed `unverified` — and the gate must not
+    // be present (no server-known head to evaluate against).
+    if overall != Some("unverified") || gate_overall.is_some() || unrelated_items != 0 {
         return Err(format!(
             "verification ledger probe failed: overall={overall:?} gate_overall={gate_overall:?} unrelated_items={unrelated_items} status={status_json} unrelated={unrelated_json}"
         ));
@@ -120,7 +130,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
     Ok(json!({
         "name": "verify_ledger",
         "status": "passed",
-        "expected": "current flow verification passes and unrelated flow evidence is not reused",
+        "expected": "caller-asserted record never mints a passed verdict (fail-closed unverified display); unrelated flow evidence is not reused",
         "observed": {
             "flow_id": flow_id,
             "record": record_json,
