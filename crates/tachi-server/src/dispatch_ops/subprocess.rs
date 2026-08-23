@@ -157,6 +157,81 @@ static MANAGED_CANCEL_DEQUEUE_BARRIERS: OnceLock<
     std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, ManagedCancelDequeueBarrier>>,
 > = OnceLock::new();
 
+#[cfg(test)]
+type ManagedPreSpawnBarrierKey = (std::path::PathBuf, std::path::PathBuf);
+#[cfg(test)]
+type ManagedPreSpawnBarrier = (
+    std::sync::mpsc::SyncSender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+#[cfg(test)]
+type ManagedPreSpawnBarriers =
+    std::sync::Mutex<std::collections::HashMap<ManagedPreSpawnBarrierKey, ManagedPreSpawnBarrier>>;
+#[cfg(test)]
+static MANAGED_PRE_SPAWN_BARRIERS: OnceLock<ManagedPreSpawnBarriers> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct ManagedPreSpawnBarrierGuard {
+    key: ManagedPreSpawnBarrierKey,
+}
+
+#[cfg(test)]
+impl Drop for ManagedPreSpawnBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(barriers) = MANAGED_PRE_SPAWN_BARRIERS.get() {
+            barriers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_managed_pre_spawn_barrier(
+    home: &std::path::Path,
+    run_root: &std::path::Path,
+) -> (
+    ManagedPreSpawnBarrierGuard,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    assert!(MANAGED_PRE_SPAWN_BARRIERS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.clone(), (entered_tx, release_rx))
+        .is_none());
+    (ManagedPreSpawnBarrierGuard { key }, entered_rx, release_tx)
+}
+
+#[cfg(test)]
+fn pause_managed_pre_spawn() {
+    let Some(home) = std::env::var_os("TACHI_HOME") else {
+        return;
+    };
+    let Some(run_root) = std::env::var_os("TACHI_RUN_ROOT") else {
+        return;
+    };
+    let key = (
+        std::path::PathBuf::from(home),
+        std::path::PathBuf::from(run_root),
+    );
+    let barrier = MANAGED_PRE_SPAWN_BARRIERS.get().and_then(|barriers| {
+        barriers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key)
+    });
+    if let Some((entered, release)) = barrier {
+        let _ = entered.send(());
+        let _ = release.recv();
+    }
+}
+
 pub(super) async fn run_agent_subprocess(
     mut cmd: Command,
     timeout: Duration,
@@ -180,6 +255,8 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
     }
     #[cfg(unix)]
     {
+        #[cfg(test)]
+        pause_managed_pre_spawn();
         if let Ok(command) = cancellations.try_recv() {
             return finish_pre_spawn_cancellation(command);
         }

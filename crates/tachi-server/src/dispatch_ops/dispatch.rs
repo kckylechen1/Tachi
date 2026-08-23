@@ -137,6 +137,8 @@ mod dedupe;
 mod execution;
 #[cfg(test)]
 pub(crate) use execution::background_dispatch_cleanup_complete;
+#[cfg(test)]
+pub(crate) use execution::install_managed_timeout_override;
 mod flow_setup;
 mod harness_preflight;
 mod plan_stage;

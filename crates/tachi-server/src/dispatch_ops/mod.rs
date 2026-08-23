@@ -23,6 +23,8 @@ pub(crate) use dispatch::apply_unlocked_vault_env;
 pub(crate) use dispatch::background_dispatch_cleanup_complete;
 pub(crate) use dispatch::dispatch_runs_root;
 pub(crate) use dispatch::handle_tachi_dispatch;
+#[cfg(test)]
+pub(crate) use dispatch::install_managed_timeout_override;
 pub(crate) use dispatch::launch_staff_assignment;
 #[cfg(test)]
 pub(crate) use dispatch::new_dispatch_id;
@@ -46,7 +48,8 @@ pub(crate) use prompt::seat_card::{
 };
 #[cfg(test)]
 pub(crate) use subprocess::{
-    install_managed_cancel_dequeue_barrier, ManagedCancelTryWaitObservation,
+    install_managed_cancel_dequeue_barrier, install_managed_pre_spawn_barrier,
+    ManagedCancelTryWaitObservation,
 };
 // tachi#1173 k2 fix: shared dispatch-id path-traversal gate (allowlist +
 // canonicalize-and-confine), consumed by `board::runs`, `dispatch::dedupe`,

@@ -754,6 +754,162 @@ pub(crate) mod tests {
         let _embedding =
             crate::test_support::EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
         let server = test_server();
+
+        // Pre-spawn: the real Staff launch has registered its managed owner
+        // and accepted cancellation, but the production runner has not yet
+        // called Command::spawn. Releasing the keyed barrier lets that runner
+        // consume the queued command and prove spawn suppression.
+        let (_pre_guard, pre_entered, pre_release) =
+            crate::dispatch_ops::install_managed_pre_spawn_barrier(
+                temp_home.path(),
+                temp_runs.path(),
+            );
+        let mut pre_request = staff_request("tachi");
+        pre_request.profile = Some("glm_impl".to_string());
+        pre_request.worker = Some("custom".to_string());
+        pre_request.flow_id = Some("flow_1825_pre_spawn".to_string());
+        let pre_raw = staff_start(&server, pre_request)
+            .await
+            .expect("pre-spawn Staff start");
+        let _pre_cleanup = StaffCleanupGuard::arm(&pre_raw);
+        let pre: Value = serde_json::from_str(&pre_raw).expect("pre-spawn response");
+        let pre_dispatch_id = pre["dispatch_id"].as_str().expect("pre-spawn dispatch id");
+        tokio::task::spawn_blocking(move || pre_entered.recv().expect("pre-spawn barrier"))
+            .await
+            .expect("pre-spawn barrier join");
+        let pre_status: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: pre_dispatch_id.to_string(),
+                },
+            )
+            .await
+            .expect("pre-spawn status"),
+        )
+        .expect("pre-spawn status JSON");
+        let pre_revision = pre_status["status_revision"]
+            .as_u64()
+            .expect("pre-spawn revision");
+        let pre_server = server.clone();
+        let pre_id = pre_dispatch_id.to_string();
+        let pre_cancel = tokio::spawn(async move {
+            staff_cancel(
+                &pre_server,
+                StaffCancelRequest {
+                    dispatch_id: pre_id,
+                    expected_status_revision: pre_revision,
+                },
+            )
+            .await
+        });
+        for _ in 0..100 {
+            let status: Value = serde_json::from_str(
+                &staff_status(
+                    &server,
+                    StaffStatusRequest {
+                        dispatch_id: pre_dispatch_id.to_string(),
+                    },
+                )
+                .await
+                .expect("pre requested status"),
+            )
+            .expect("pre requested JSON");
+            if status["cancellation"]["receipt"] == "cancellation_requested" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        pre_release.send(()).expect("release pre-spawn runner");
+        let pre_cancel: Value = serde_json::from_str(
+            &pre_cancel
+                .await
+                .expect("pre cancel join")
+                .expect("pre cancel response"),
+        )
+        .expect("pre cancel JSON");
+        assert_eq!(pre_cancel["receipt"], "cancellation_confirmed");
+        assert_eq!(pre_cancel["termination_proof"], "spawn_suppressed");
+        let pre_final: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: pre_dispatch_id.to_string(),
+                },
+            )
+            .await
+            .expect("pre final status"),
+        )
+        .expect("pre final JSON");
+        assert_eq!(terminal_staff_state(&pre_final), "TASK_STATE_CANCELED");
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, pre_dispatch_id).await,
+            Some("TASK_STATE_CANCELED".to_string())
+        );
+        assert!(!server.managed_run_controls.contains(pre_dispatch_id));
+        assert!(!dispatch_runs_root()
+            .join(pre_dispatch_id)
+            .join("credentials")
+            .exists());
+
+        // Timeout: this is the real Staff background watchdog, narrowed only
+        // by the isolated run-root override, never by a direct runner call.
+        let _timeout_override = crate::dispatch_ops::install_managed_timeout_override(
+            temp_home.path(),
+            temp_runs.path(),
+            std::time::Duration::from_millis(200),
+        );
+        let mut timeout_request = staff_request("tachi");
+        timeout_request.profile = Some("glm_impl".to_string());
+        timeout_request.worker = Some("custom".to_string());
+        timeout_request.flow_id = Some("flow_1825_timeout".to_string());
+        let timeout_raw = staff_start(&server, timeout_request)
+            .await
+            .expect("timeout Staff start");
+        let mut timeout_cleanup = StaffCleanupGuard::arm(&timeout_raw);
+        let timeout_response: Value = serde_json::from_str(&timeout_raw).expect("timeout response");
+        let timeout_id = timeout_response["dispatch_id"]
+            .as_str()
+            .expect("timeout dispatch id");
+        let timeout_dir = dispatch_runs_root().join(timeout_id);
+        let (timeout_status, _) = wait_for_staff_terminal(&timeout_dir).await;
+        wait_for_staff_cleanup(timeout_id).await;
+        assert_eq!(terminal_staff_state(&timeout_status), "TASK_STATE_FAILED");
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, timeout_id).await,
+            Some("TASK_STATE_FAILED".to_string())
+        );
+        let timeout_outcomes: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [timeout_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count timeout outcomes");
+        assert_eq!(
+            timeout_outcomes, 0,
+            "a watchdog timeout must not fabricate a completion outcome"
+        );
+        assert!(!server.managed_run_controls.contains(timeout_id));
+        assert!(!timeout_dir.join("credentials").exists());
+        let timeout_flow_lock_dir = crate::task_lifecycle::run_dir_for_flow_id("flow_1825_timeout")
+            .expect("valid timeout flow run directory")
+            .join(".dispatch-dedupe");
+        assert!(
+            !timeout_flow_lock_dir.exists()
+                || std::fs::read_dir(&timeout_flow_lock_dir)
+                    .expect("timeout flow lock directory")
+                    .next()
+                    .is_none(),
+            "timeout completion must release the flow dispatch slot"
+        );
+        timeout_cleanup.disarm();
+        drop(_timeout_override);
         let mut request = staff_request("tachi");
         request.profile = Some("glm_impl".to_string());
         request.worker = Some("custom".to_string());

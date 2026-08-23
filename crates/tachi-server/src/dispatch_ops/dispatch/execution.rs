@@ -112,6 +112,59 @@ impl Drop for BackgroundEarlyExitCleanup {
     }
 }
 
+#[cfg(test)]
+static MANAGED_TIMEOUT_OVERRIDES: OnceLock<
+    Mutex<std::collections::HashMap<(PathBuf, PathBuf), std::time::Duration>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct ManagedTimeoutOverrideGuard {
+    key: (PathBuf, PathBuf),
+}
+
+#[cfg(test)]
+impl Drop for ManagedTimeoutOverrideGuard {
+    fn drop(&mut self) {
+        if let Some(overrides) = MANAGED_TIMEOUT_OVERRIDES.get() {
+            overrides
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_managed_timeout_override(
+    home: &std::path::Path,
+    run_root: &std::path::Path,
+    timeout: std::time::Duration,
+) -> ManagedTimeoutOverrideGuard {
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    assert!(MANAGED_TIMEOUT_OVERRIDES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.clone(), timeout)
+        .is_none());
+    ManagedTimeoutOverrideGuard { key }
+}
+
+#[cfg(test)]
+fn managed_timeout_override() -> Option<std::time::Duration> {
+    let key = (
+        PathBuf::from(std::env::var_os("TACHI_HOME")?),
+        PathBuf::from(std::env::var_os("TACHI_RUN_ROOT")?),
+    );
+    MANAGED_TIMEOUT_OVERRIDES.get().and_then(|overrides| {
+        overrides
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+            .copied()
+    })
+}
+
 pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let server_clone = ctx.server;
     let d_id = ctx.dispatch_id;
@@ -124,8 +177,18 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let v2_for_spawn = ctx.v2;
     let plan_generated_at_for_spawn = ctx.plan_generated_at;
     let plan_duration_ms_for_spawn = ctx.plan_duration_ms;
-    let timeout_secs_for_spawn = ctx.timeout_secs;
-    let timeout = ctx.timeout;
+    let (timeout_secs_for_spawn, timeout) = {
+        #[cfg(test)]
+        {
+            managed_timeout_override()
+                .map(|override_timeout| (override_timeout.as_secs().max(1), override_timeout))
+                .unwrap_or((ctx.timeout_secs, ctx.timeout))
+        }
+        #[cfg(not(test))]
+        {
+            (ctx.timeout_secs, ctx.timeout)
+        }
+    };
     let capability_bundle_card_for_spawn = ctx.capability_bundle_card;
     let feedback_rules_trace_for_spawn = ctx.feedback_rules_trace;
     let harness_transport_for_spawn = ctx.harness_transport;
@@ -399,22 +462,6 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         let polled_terminal_state = canonical_terminal_state(kanban_state.as_deref());
         let is_closed = !pending_completion_recovery
             && (receipt_terminal_state.is_some() || polled_terminal_state.is_some());
-        if receipt_terminal_state == Some("TASK_STATE_CANCELED") {
-            if let Err(error) = update_kanban_state(
-                &server_clone,
-                &d_id,
-                "TASK_STATE_CANCELED",
-                None,
-                Some(false),
-            )
-            .await
-            {
-                eprintln!(
-                    "[watchdog] failed to mark cancelled dispatch {}: {}",
-                    d_id, error
-                );
-            }
-        }
         if receipt_terminal_state == Some("TASK_STATE_FAILED") {
             crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
                 &server_clone,
@@ -807,18 +854,39 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             );
             if credential_cleanup_failed {
                 if let Some(command) = managed_cancellation.as_ref() {
-                    if crate::managed_run_control::record_managed_credential_cleanup_failure(
-                        &workspace_dir_for_spawn,
-                        command.expected_status_revision,
-                    )
-                    .is_err()
-                    {
-                        managed_cancel_completion =
-                            Some(crate::managed_run_control::CancelCompletion::Unavailable(
-                                "credential_cleanup_status_persist_failed",
-                            ));
-                    }
+                    let cleanup_completion =
+                        crate::managed_run_control::record_managed_credential_cleanup_failure(
+                            &workspace_dir_for_spawn,
+                            command.expected_status_revision,
+                        );
+                    managed_cancel_completion = Some(match cleanup_completion {
+                        Ok(()) => crate::managed_run_control::CancelCompletion::Unavailable(
+                            "credential_cleanup_failed",
+                        ),
+                        Err(_) => crate::managed_run_control::CancelCompletion::Unavailable(
+                            "credential_cleanup_status_persist_failed",
+                        ),
+                    });
                 }
+            }
+        }
+        if matches!(
+            managed_cancel_completion,
+            Some(crate::managed_run_control::CancelCompletion::Confirmed { .. })
+        ) {
+            if let Err(error) = update_kanban_state(
+                &server_clone,
+                &d_id,
+                "TASK_STATE_CANCELED",
+                None,
+                Some(false),
+            )
+            .await
+            {
+                eprintln!(
+                    "[watchdog] failed to mark cancelled dispatch {}: {}",
+                    d_id, error
+                );
             }
         }
         early_exit_cleanup.complete();

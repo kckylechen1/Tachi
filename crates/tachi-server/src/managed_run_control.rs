@@ -188,7 +188,6 @@ impl ManagedRunControlRegistry {
         ))
     }
 
-    #[cfg(test)]
     pub(crate) fn contains(&self, dispatch_id: &str) -> bool {
         self.entries
             .lock()
@@ -751,11 +750,10 @@ fn record_unavailable_if_pending(
     Ok(unavailable(dispatch_id, expected, Some(observed), reason))
 }
 
-/// Credential materialization is an extension of the managed terminal
-/// contract. A process-group proof is not a clean cancellation receipt when
-/// those short-lived credentials remain on disk. Preserve the termination
-/// proof while making the cleanup failure visible to both the canonical status
-/// and the response assembled from it.
+/// Credential materialization is part of the managed terminal contract. A
+/// process-group proof is not a confirmed cancellation while credentials may
+/// remain on disk, so replacement of a just-written confirmation is itself a
+/// canonical unavailable terminal transition.
 pub(crate) fn record_managed_credential_cleanup_failure(
     run_dir: &std::path::Path,
     expected: u64,
@@ -770,8 +768,8 @@ pub(crate) fn record_managed_credential_cleanup_failure(
         "managed cancellation status is malformed during credential cleanup".to_string()
     })?;
     let receipt = object
-        .get_mut("cancellation")
-        .and_then(Value::as_object_mut)
+        .get("cancellation")
+        .and_then(Value::as_object)
         .ok_or_else(|| {
             "managed cancellation receipt is absent during credential cleanup".to_string()
         })?;
@@ -783,9 +781,29 @@ pub(crate) fn record_managed_credential_cleanup_failure(
     {
         return Err("managed cancellation receipt no longer owns credential cleanup".to_string());
     }
-    receipt.insert(
-        "reason".to_string(),
-        Value::String("credential_cleanup_failed".to_string()),
+    let dispatch_id = object
+        .get("dispatch_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "managed cancellation dispatch identity is absent".to_string())?
+        .to_string();
+    let observed = object
+        .get("status_revision")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "managed cancellation status revision is absent".to_string())?;
+    object.insert(
+        "cancellation".to_string(),
+        cancellation_receipt(
+            "cancellation_unavailable",
+            &dispatch_id,
+            expected,
+            observed,
+            Some("credential_cleanup_failed"),
+            None,
+        ),
+    );
+    object.insert(
+        "state".to_string(),
+        Value::String("TASK_STATE_FAILED".to_string()),
     );
     crate::managed_run_control::advance_status_revision(object)?;
     let body = serde_json::to_vec_pretty(&status)
@@ -950,9 +968,12 @@ mod issue_1825_tests {
             &std::fs::read(temp.path().join("status.json")).expect("read cleanup receipt"),
         )
         .expect("parse cleanup receipt");
-        assert_eq!(status["state"], "TASK_STATE_CANCELED");
+        assert_eq!(status["state"], "TASK_STATE_FAILED");
         assert_eq!(status["status_revision"], 9);
-        assert_eq!(status["cancellation"]["receipt"], "cancellation_confirmed");
+        assert_eq!(
+            status["cancellation"]["receipt"],
+            "cancellation_unavailable"
+        );
         assert_eq!(
             status["cancellation"]["reason"], "credential_cleanup_failed",
             "a termination proof alone is not a clean cancellation"
@@ -1003,7 +1024,7 @@ mod issue_1825_status_revision_writer_regression_tests {
     }
 
     #[test]
-    fn canonical_writers_advance_real_status_revisions() {
+    fn status_revision_advances_across_every_canonical_writer() {
         let temp = tempfile::tempdir().expect("temporary run root");
         let requested = cancellation_receipt(
             "cancellation_requested",

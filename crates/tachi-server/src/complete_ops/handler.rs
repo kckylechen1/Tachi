@@ -117,6 +117,13 @@ fn admit_managed_completion(
     {
         return Ok(());
     }
+    if object.get("lifecycle_owner").and_then(Value::as_str) != Some("memory_server_managed_custom")
+    {
+        return Ok(());
+    }
+    if !server.managed_run_controls.contains(dispatch_id) {
+        return Ok(());
+    }
     if crate::managed_run_control::cancellation_blocks_terminal_writer(object) {
         return Err("managed cancellation owns terminal completion".to_string());
     }
@@ -1292,6 +1299,7 @@ mod tests {
             "state": "TASK_STATE_WORKING",
             "status_revision": 7,
             "execution_classification": "managed_custom",
+            "lifecycle_owner": "memory_server_managed_custom",
         });
         if let Some(cancellation) = cancellation {
             status["cancellation"] = cancellation;
@@ -1352,6 +1360,10 @@ mod tests {
         let (server, _home) = crate::tests::make_server_with_temp_home();
         let dispatch_id = "20260823T182519Z-custom-gate-reject";
         seed_managed_working_status(&server, dispatch_id, None);
+        let (_receiver, _managed_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
         let _capture_gate = CaptureGateEnforceGuard::new();
 
         let mut params = managed_completion_params(dispatch_id);
@@ -1438,6 +1450,46 @@ mod tests {
             assert!(
                 status.get("completion_recovery").is_none(),
                 "{receipt} must not admit completion"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_1825_managed_completion_admission_requires_the_persisted_managed_owner() {
+        for owner in [None, Some("foreign_owner")] {
+            let (server, _home) = crate::tests::make_server_with_temp_home();
+            let dispatch_id = "20260823T182522Z-managed-owner";
+            seed_managed_working_status(&server, dispatch_id, None);
+            let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+            let status_path = run_dir.join("status.json");
+            let mut status: Value = serde_json::from_slice(
+                &std::fs::read(&status_path).expect("read seeded managed status"),
+            )
+            .expect("parse seeded managed status");
+            match owner {
+                Some(owner) => status["lifecycle_owner"] = Value::String(owner.to_string()),
+                None => {
+                    status
+                        .as_object_mut()
+                        .expect("managed status object")
+                        .remove("lifecycle_owner");
+                }
+            }
+            std::fs::write(&status_path, status.to_string()).expect("write owner mutant");
+            let (_receiver, _guard) = server
+                .managed_run_controls
+                .register(dispatch_id)
+                .expect("managed registry");
+
+            admit_managed_completion(&server, Some(dispatch_id), true)
+                .expect("foreign or missing owner is not admission failure");
+            let after: Value = serde_json::from_slice(
+                &std::fs::read(&status_path).expect("read admission result"),
+            )
+            .expect("parse admission result");
+            assert!(
+                after.get("completion_recovery").is_none(),
+                "only the persisted managed owner may admit completion: {after:#}"
             );
         }
     }
