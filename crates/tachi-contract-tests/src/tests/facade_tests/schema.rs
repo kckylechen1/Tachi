@@ -563,6 +563,21 @@ fn tachi_verify_numeric_params_schema_accepts_string_or_number() {
         .expect("schema serializes");
     assert_field_accepts_string_and_number(&value, "exit_code", "integer");
     assert_field_accepts_string_and_number(&value, "limit", "integer");
+    // #1454 slice 2: action=run timeout, same string-or-number admission.
+    assert_field_accepts_string_and_number(&value, "timeout_secs", "integer");
+}
+
+#[test]
+fn tachi_verify_run_timeout_accepts_numeric_strings() {
+    let params: tachi_params::TachiVerifyParams = serde_json::from_value(json!({
+        "action": "run",
+        "flow_id": "flow_schema-run",
+        "check_kind": "fmt",
+        "timeout_secs": "900"
+    }))
+    .expect("runtime accepts numeric strings for run timeout");
+    assert_eq!(params.timeout_secs, Some(900));
+    assert_eq!(params.check_kind.as_deref(), Some("fmt"));
 }
 
 #[test]

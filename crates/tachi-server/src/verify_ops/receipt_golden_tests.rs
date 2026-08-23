@@ -28,6 +28,8 @@ fn verify_params(action: &str) -> TachiVerifyParams {
         required: None,
         limit: None,
         checks: vec![],
+        check_kind: None,
+        timeout_secs: None,
     }
 }
 
@@ -122,7 +124,11 @@ async fn g2_batch_record_receipt_lists_both_ids() {
         .expect("status");
     let status: Value = serde_json::from_str(&status_resp).expect("status JSON");
     assert!(status.get("verification").is_none());
-    assert_eq!(status["overall"], json!("failed"));
+    // #1454 F6: the readiness verdict is the authority-aware gate result.
+    // Caller-asserted records (no server-run receipts, no server-known head)
+    // display fail-closed as `unverified` — never the ledger's "failed".
+    assert_eq!(status["overall"], json!("unverified"));
+    assert_eq!(status["ledger_overall"], json!("failed"));
     assert!(status["problems"]
         .as_array()
         .unwrap()
@@ -301,6 +307,7 @@ fn g6_verification_json_matches_expected_structure() {
             "status": "passed",
             "required": true,
             "head_sha": "abc123",
+            "source": "caller_asserted",
         }],
     });
     assert_eq!(
