@@ -86,12 +86,17 @@ suites = list(root) if root.tag.endswith("testsuites") else (
 )
 slows = []
 for suite in suites:
+    suite_name = suite.get("name") or ""
     for case in suite.findall("testcase"):
         name = case.get("name") or ""
+        # nextest splits the binary into classname/testsuite; the roster (and
+        # nextest's own SLOW listing) names tests as "<binary> <name>".
+        classname = case.get("classname") or ""
+        binary = classname or suite_name
         t = case.get("time") or "0"
         try:
             if float(t) > 20.0 and name:
-                slows.append(name)
+                slows.append(f"{binary} {name}".strip() if binary else name)
         except ValueError:
             pass
 with open(slows_path, "w", encoding="utf-8") as out:
