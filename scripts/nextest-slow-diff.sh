@@ -106,7 +106,9 @@ PY
 else
   # Nextest slow listing output (from --final-status-level slow) or plain list.
   # Extract test path: for "SLOW [  35.999s] ( 590/3647) <name>" take after ") ".
-  # If no SLOW lines, fall back to treating file as one-name-per-line list.
+  # Captured nextest output with zero SLOW records (Summary/PASS/FAIL present) is a
+  # no-slow run, NOT a plain list. The one-name-per-line fallback applies only when
+  # neither SLOW lines nor captured-run markers exist.
   if grep -q '^ *SLOW \[' "${INPUT}"; then
     grep '^ *SLOW \[' "${INPUT}" | sed 's/.*) //' | sort -u > "${SLOWS_FILE}"
   elif grep -qE '^(Summary \[| *FAIL \[| *PASS \[| *SLOW \[| *Starting [0-9]+ test)' "${INPUT}"; then
