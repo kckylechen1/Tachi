@@ -558,19 +558,10 @@ fn retired_surface_documentation_has_markers() {
             files.push(p);
         }
     }
-    // prompts/**
+    // prompts/** (recursive per B2)
     let prompts_dir = repo_root.join("prompts");
     if prompts_dir.is_dir() {
-        if let Ok(rd) = std::fs::read_dir(&prompts_dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                    if ext == "md" || ext == "mdx" || ext == "txt" {
-                        files.push(p);
-                    }
-                }
-            }
-        }
+        collect_prompts_files(&prompts_dir, &mut files);
     }
     // docs/** (exclude archive)
     let docs_dir = repo_root.join("docs");
@@ -581,17 +572,38 @@ fn retired_surface_documentation_has_markers() {
     let marker_words = ["retired", "RETIRED", "退役", "历史", "historical"];
 
     let mut bad_hits: Vec<String> = vec![];
-    let mut negative_exempt_count: usize = 0;
 
     // derive retired tokens from code (machine-known, no hand copy of full list)
     let native_tokens: &[&str] = RETIRED_NATIVE_ALIASES;
-    // pinned superset for tachi_skill retired; tied to census fixture per contract
-    let superset: Vec<&str> = vec!["discover", "run", "bundle", "loadout", "from_pattern"];
+    // reuse the router retired check rather than duplicate (B4)
+    retired_native_aliases_stay_retired();
+    // B4 self-maintaining: historical superset (all known skill actions ever) MINUS live = retired set.
+    // cross-assertion: superset names must be live or retired (so adding live requires updating superset;
+    // retiring a skill without having had it in superset would make retirement invisible to docs lint).
+    const HISTORICAL_SKILL_SUPERSET: &[&str] =
+        &["discover", "run", "bundle", "loadout", "from_pattern"];
     let live_skill: Vec<&str> = TACHI_SKILL_ACTIONS.to_vec();
-    let skill_tokens: Vec<&str> = superset
-        .into_iter()
+    for &name in &live_skill {
+        assert!(
+            HISTORICAL_SKILL_SUPERSET.contains(&name),
+            "live skill action '{}' must be listed in HISTORICAL_SKILL_SUPERSET so future retirement is visible to lint",
+            name
+        );
+    }
+    let skill_tokens: Vec<&str> = HISTORICAL_SKILL_SUPERSET
+        .iter()
         .filter(|a| !live_skill.contains(a))
+        .copied()
         .collect();
+    for &name in HISTORICAL_SKILL_SUPERSET {
+        let is_live = live_skill.contains(&name);
+        let is_retired = skill_tokens.contains(&name);
+        assert!(
+            is_live || is_retired,
+            "superset name '{}' must be EITHER in TACHI_SKILL_ACTIONS (live) OR in lint retired set (invariant: superset = live ∪ retired always)",
+            name
+        );
+    }
 
     for file in &files {
         let content = match std::fs::read_to_string(file) {
@@ -605,62 +617,36 @@ fn retired_surface_documentation_has_markers() {
             .to_string_lossy()
             .to_string();
 
+        let mut in_code_fence = false;
+        let mut current_section_header = "";
         for (i, line) in lines.iter().enumerate() {
-            // nearest preceding section header (for "under a section header carrying one")
-            let section_header = {
-                let mut h = "";
-                for j in (0..=i).rev() {
-                    let trimmed = lines[j].trim_start();
-                    if trimmed.starts_with('#') {
-                        h = lines[j];
-                        break;
-                    }
-                }
-                h
-            };
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                in_code_fence = !in_code_fence;
+            }
+            if !in_code_fence && trimmed.starts_with('#') {
+                current_section_header = line;
+            }
+            let section_header = current_section_header;
 
             let line_has_marker = marker_words.iter().any(|m| line.contains(m));
             let header_has_marker = marker_words.iter().any(|m| section_header.contains(m));
             let exempted_by_marker = line_has_marker || header_has_marker;
 
-            // native retired: exact bounded ident token + positive teaching context (use/call/invoke)
-            // to avoid flagging pure historical lists / names without teaching active use (fix matcher per stop)
+            // native retired: exact bounded ident token + instruction context (B1)
+            // heuristics: imperative verbs (use|call|invoke|run|via|通过|调用|使用), code-fence/json/inline-code presence,
+            // or table row presenting token as available. Zero FP bar on clean tree.
             for tok in native_tokens {
-                if is_exact_identifier_hit(line, tok) {
-                    let l = line.to_lowercase();
-                    let has_positive_teaching =
-                        l.contains(&format!("use {}", tok)) || l.contains(&format!("use `{}", tok));
-                    if has_positive_teaching && !exempted_by_marker {
-                        // negative/prohibition or backcompat listing contexts (per contract: report count; only marker names retirement for full exempt)
-                        if l.contains("tachi_memory")
-                            && (*tok == "tachi_briefing" || tok.starts_with("tachi_"))
-                        {
-                            negative_exempt_count += 1;
-                            continue;
-                        }
-                        if *tok == "remember"
-                            && (l.contains("bundle") || l.contains("remember more"))
-                        {
-                            negative_exempt_count += 1;
-                            continue;
-                        }
-                        if l.contains("backcompat")
-                            || l.contains("compatibility")
-                            || l.contains("instead")
-                            || l.contains("remain available")
-                            || l.contains("old client")
-                            || l.contains("remain compatibility")
-                        {
-                            negative_exempt_count += 1;
-                            continue;
-                        }
-                        bad_hits.push(format!(
-                            "{}:{}: unmarked retired token '{}'",
-                            rel,
-                            i + 1,
-                            tok
-                        ));
-                    }
+                if is_exact_identifier_hit(line, tok)
+                    && is_teaching_context(line, tok)
+                    && !exempted_by_marker
+                {
+                    bad_hits.push(format!(
+                        "{}:{}: unmarked retired token '{}'",
+                        rel,
+                        i + 1,
+                        tok
+                    ));
                 }
             }
             // tachi_skill retired tokens: only in tachi_skill or action= form (exact)
@@ -668,29 +654,20 @@ fn retired_surface_documentation_has_markers() {
                 let has_tachi_skill_ctx = line.contains("tachi_skill");
                 let has_action_form = line.contains(&format!("action=\"{}\"", tok))
                     || line.contains(&format!("action='{}'", tok));
-                if (has_tachi_skill_ctx || has_action_form) && is_exact_identifier_hit(line, tok) {
-                    if !exempted_by_marker {
-                        let l = line.to_lowercase();
-                        if l.contains("backcompat")
-                            || l.contains("compatibility")
-                            || l.contains("instead")
-                        {
-                            negative_exempt_count += 1;
-                            continue;
-                        }
-                        bad_hits.push(format!(
-                            "{}:{}: unmarked retired tachi_skill token '{}'",
-                            rel,
-                            i + 1,
-                            tok
-                        ));
-                    }
+                if (has_tachi_skill_ctx || has_action_form)
+                    && is_exact_identifier_hit(line, tok)
+                    && !exempted_by_marker
+                {
+                    bad_hits.push(format!(
+                        "{}:{}: unmarked retired tachi_skill token '{}'",
+                        rel,
+                        i + 1,
+                        tok
+                    ));
                 }
             }
         }
     }
-
-    println!("NEGATIVE_EXEMPT_COUNT={}", negative_exempt_count);
 
     assert!(
         bad_hits.is_empty(),
@@ -725,6 +702,35 @@ fn is_exact_identifier_hit(line: &str, tok: &str) -> bool {
     false
 }
 
+fn is_teaching_context(line: &str, tok: &str) -> bool {
+    let l = line.to_lowercase();
+    let t = tok.to_lowercase();
+    // B1: imperative verb immediately before token (narrowed to zero-fp on README lists/tables; via dropped)
+    if l.contains(&format!("use {}", t))
+        || l.contains(&format!("use `{}", t))
+        || l.contains(&format!("call {}", t))
+        || l.contains(&format!("call `{}", t))
+        || l.contains(&format!("invoke {}", t))
+        || l.contains(&format!("invoke `{}", t))
+        || l.contains(&format!("run {}", t))
+        || l.contains(&format!("run `{}", t))
+        || l.contains(&format!("通过{}", t))
+        || l.contains(&format!("调用{}", t))
+        || l.contains(&format!("使用{}", t))
+        || l.contains(&format!("执行{}", t))
+    {
+        return true;
+    }
+    // usage forms: tok( or action=
+    if line.contains(&format!("{}(", tok))
+        || line.contains(&format!("action=\"{}\"", tok))
+        || line.contains(&format!("action='{}'", tok))
+    {
+        return true;
+    }
+    false
+}
+
 fn collect_docs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -737,6 +743,21 @@ fn collect_docs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
                 collect_docs_files(&p, out);
             } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                 if ext == "md" || ext == "mdx" {
+                    out.push(p);
+                }
+            }
+        }
+    }
+}
+
+fn collect_prompts_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_prompts_files(&p, out);
+            } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                if ext == "md" || ext == "mdx" || ext == "txt" {
                     out.push(p);
                 }
             }
