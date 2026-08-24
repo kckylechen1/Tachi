@@ -20,7 +20,7 @@ Use SFT in four lanes:
 
 | Lane | Purpose | Storage | Recall rule |
 |---|---|---|---|
-| Prompt exemplar | Show answer shape and verification discipline | `/sft/...` memory rows | `tachi_dispatch` may inject 1-2 compact examples |
+| Prompt exemplar | Show answer shape and verification discipline | `/sft/...` memory rows | (retired route) `tachi_dispatch` may inject 1-2 compact examples |
 | Memory card | One reusable rule, failure mode, command, or model behavior | `/agent/...` or `/scratch/...` after human distillation | Normal recall only after conversion |
 | Wiki draft | Stable runbook or architecture rule | `/wiki/drafts/...` pending review | Human promotion required |
 | Eval fixture | Score model-role routing quality | JSONL fixture or `/eval/...` production ledger | Do not mix fixture rows with live eval rows |

@@ -445,7 +445,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 #### 陷阱 2：环境泥潭
 
 **对策：**
-- `tachi_dispatch` 的 `max_turns` 限制（默认 100）
+- `tachi_dispatch`(已退役) 的 `max_turns` 限制（默认 100)
 - 环境问题识别：如果连续 3 个 turn 都是 infra/debug 类工具调用 → 标记为"环境泥潭"
 - 自动建议："是否缩小范围到单一根因？"
 
@@ -459,7 +459,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 #### 陷阱 4：信息黑洞
 
 **对策：**
-- `tachi_dispatch` 实时 stream 到 kanban card（Multica 的 `Messages` channel 模式）
+- `tachi_dispatch`(已退役) 实时 stream 到 kanban card（Multica 的 `Messages` channel 模式）
 - 每 N turns 必须产出可见结论（summary），否则暂停
 - `tachi_task(action="complete")` 的 `notes` 字段强制要求产出摘要(旧 standalone 名 `tachi_complete` 已退役)
 
@@ -475,7 +475,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 | Amp 设计 | Tachi 借鉴 |
 |----------|-----------|
 | 3 种专用 subagent（Oracle/Task/Search） | Agent Router 根据 task 类型自动路由到不同 agent |
-| 双通道输出（commentary + final） | `tachi_dispatch` stream 实时状态 + `tachi_task(action="complete")` 最终摘要 |
+| 双通道输出（commentary + final） | `tachi_dispatch`(已退役) stream 实时状态 + `tachi_task(action="complete")` 最终摘要 |
 | Feature flag 模型路由 | `TACHI_BACKEND_*_TIER` env 变量 |
 | 并行执行精确控制 | Kanban card 的 `disjoint_writes` 标记 |
 | Thread callback（report_back） | `tachi_task(action="complete")` 后自动更新 kanban + 通知 parent task |
@@ -486,7 +486,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 |-----------------|-----------|
 | TaskCreate/TaskUpdate 工具 | Kanban 经内部处理器/`tachi_task` 看板动作(旧名 `post_card`/`update_card` 已退役) |
 | `--continue` session 恢复 | `tachi_memory briefing` 跨 session 恢复 |
-| Agent 工具 spawn subagent | `tachi_dispatch` + `tachi_task(action="complete")` |
+| Agent 工具 spawn subagent | `tachi_dispatch`(已退役,现归 `tachi_staff`) + `tachi_task(action="complete")` |
 | Compaction 不影响 TODO | Memory 工具独立于对话（已实现） |
 
 ---

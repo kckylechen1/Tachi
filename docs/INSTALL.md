@@ -503,7 +503,7 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 
 ### Core Memory
 
-(the legacy direct names — `save_memory`, `search_memory`, `get_memory`, `list_memories`, `archive_memory`, `memory_stats`, `remember`, `find_similar_memory` — are all retired)
+(the legacy direct names `save_memory`, `search_memory`, `get_memory`, `remember`, and `find_similar_memory` are retired; `list_memories`, `archive_memory`, and `memory_stats` remain live native routes)
 
 the legacy direct names were retired; there is no backcompat catalog entry. Daily
 agent profiles should use `tachi_memory(action="get")` instead. The canonical
@@ -523,7 +523,7 @@ action.
 
 ### Knowledge Graph & Domains
 
-Graph primitives (`add_edge`, `get_edges`, `memory_graph`) were internalized
+Graph primitives (`add_edge`, `get_edges`, `memory_graph`) were retired/internalized
 off the MCP surface in #757 — no live tool call reaches them anymore; the
 tachi-server facade helper layer that used to wrap them was deleted outright
 once #913 found zero remaining in-crate callers, so only the
@@ -537,7 +537,7 @@ MCP concept; there is no replacement action.
 
 ### State & Config
 
-State primitives (`set_state`, `get_state`) were internalized off the MCP
+State primitives (`set_state`, `get_state`) were retired/internalized off the MCP
 surface in #757 for the same reason — there is no facade equivalent for raw
 KV state.
 

@@ -27,7 +27,7 @@ The `f1098_live_action_inventory_has_explicit_effect_metadata()` ratchet enumera
 
 ## Dispatch dedupe
 
-When `tachi_dispatch` is invoked without `flow_id`, the task string is hashed and a lock file is taken under:
+When `tachi_dispatch` (retired route) was invoked without `flow_id`, the task string is hashed and a lock file is taken under:
 
 ```text
 ~/.tachi/runs/.dispatch-dedupe/<hash>.lock

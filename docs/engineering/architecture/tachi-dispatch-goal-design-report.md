@@ -522,7 +522,7 @@ if goal.audit_required && outcome == "success" {
 
 - [ ] 增强 kanban 初始化（goal metadata）
 - [ ] 状态映射（GoalStatus → a2a_state）
-- [ ] `tachi_board` 查询支持 goal 过滤
+- [ ] (retired route) `tachi_board` 查询支持 goal 过滤
 
 **总计**: 8 个工作日
 

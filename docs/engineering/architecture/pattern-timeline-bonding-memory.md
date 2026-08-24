@@ -91,7 +91,7 @@ discovered, defended, revised, and externally validated. Timeline memory answers
 "why is this conclusion trustworthy?" rather than "what did we discuss on which day?".
 - **Evolution chain:** append-only `tachi_events` plus `ProjectionKind::Timeline`
   projections exist. Explicit causal edges with existing memory-id endpoints persist
-  through `add_edge`; natural-language endpoint resolution remains a target.
+  through `add_edge` (retired/internalized, not MCP-facing); natural-language endpoint resolution remains a target.
 - **Generation:** `capture_session` emits `session.captured`; the optional continuity
   pipeline can emit candidates and `session.outcome`. Context output now carries a
   `TimelineEntry` schema marker and typed metadata; enforced Rust validation is still

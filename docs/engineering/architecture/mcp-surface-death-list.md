@@ -63,13 +63,13 @@ This ledger used a worktree-local CodeGraph index, not only string search:
 `codegraph init -i .` indexed 1,370 files, 14,044 nodes, and 44,711 edges.
 Relevant checks:
 
-- `codegraph query tachi_dispatch --path .` shows
-  `MemoryServer::tachi_dispatch` at
+- `codegraph query tachi_dispatch --path .` showed (historical; tachi_dispatch is retired)
+  `MemoryServer::tachi_dispatch` (retired) at
   `crates/tachi-server/src/tools/dispatch_facade.rs:18`, plus many
-  `tachi_dispatch` crate/module imports. Deletion leaves must target the MCP
+  `tachi_dispatch` (retired) crate/module imports. Deletion leaves must target the MCP
   wrapper route, not broad string matches against the dispatch implementation
   crate.
-- `codegraph callers MemoryServer::tachi_dispatch --path .` reports no direct
+- `codegraph callers MemoryServer::tachi_dispatch` (retired) — historical: reported no direct
   Rust callers for the wrapper method, matching its deprecated/backcompat route
   classification.
 - `codegraph impact MemoryServer::tachi_complete --path . --depth 2` (historical command; tachi_complete is retired) reports 20
@@ -164,7 +164,7 @@ to the correct facade, then deleting duplicate action aliases.
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
 | `tachi_task` PR actions | **DONE under open #757 — PR-action slice only:** removed from `tachi_task` enum/router; canonical only on `tachi_gh`. Shared lifecycle handlers remain under `task_lifecycle` for `tachi_gh` / ship. | `tachi_gh` for PR/GitHub work. | Deleted dual entry. | — |
-| `tachi_task` tuning actions | **DONE under #1426:** `route_simulate`/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
+| `tachi_task` tuning actions | **DONE under #1426:** `route_simulate` (all retired)/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
 | `tachi_memory` tuning actions | **DONE under #1426:** `recall_simulate`/`recall_proposals`/`review_recall_proposal`/`apply_recall_proposals` are gone from `TACHI_MEMORY_ACTIONS`, the action schema, and the router; the handlers moved to `tune_ops/recall_*`. | `tachi_tune(action='recall_simulate'\|'recall_proposals'\|'recall_review'\|'recall_apply')`, admin-only. | Extracted. | — |
 | `tachi_save` shorthand (retired) | Standard allow-list includes it at `patterns.rs:130`. | `tachi_memory(action="save")`. | Retired (executed). | Dogfood decision after Batch A. |
 | `tachi_briefing` shorthand | Standard allow-list includes it at `patterns.rs:128`; separate briefing also exists in `tachi_memory` and the feature-scoped `tachi_task(action="brief")`. | `tachi_memory(action="briefing")`. | Retired (executed). | Dogfood decision after action-level profile design. |
@@ -214,7 +214,7 @@ entrypoints.
    Move direct tests to handlers or task/arena facades, then remove
    `check_inbox`, `post_card`, and `update_card` from MCP (executed, all retired).
 4. **DONE Batch C via PR #822; open #757 tracks later migration work.**
-   `tachi_dispatch`, `tachi_board`, and the direct `approve_merge` route are no
+   (all retired) `tachi_dispatch`, `tachi_board`, and the direct `approve_merge` route are no
    longer model-facing; GitHub merge behavior remains on `tachi_gh`.
 5. **Fold direct wiki aliases.**
    Move docs/tests/callers to `tachi_wiki` actions, then delete direct wiki

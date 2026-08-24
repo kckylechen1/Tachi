@@ -85,7 +85,7 @@ Agent / IDE / CLI
   - 用 `merge_attempted` / `merge_executed` 判断是否真的调用或完成 merge，不要只看请求模式。
   - 默认 `merge_policy="standard"`，缺失 checks 或 review decision 会等待，不会静默当作绿色。
   - 传入 `flow_id` 时，会把 `pending|blocked|ready|merged` 写入 `.tachi/runs/<flow_id>/status.json`，并追加 GitHub 事件到 `events.jsonl`。
-- **`tachi_dispatch`**：拉起 Claude/Codex 等子进程；若子进程配置里自带 MCP/shell，那是外围 harness 配置，不代表 Tachi 自动查 PR 或自动 merge。
+- ~~**`tachi_dispatch`**~~(已退役,现经 `tachi_staff`)：拉起 Claude/Codex 等子进程;若子进程配置里自带 MCP/shell，那是外围 harness 配置，不代表 Tachi 自动查 PR 或自动 merge。
 - **Hub proxy**：已注册 MCP 可通过 **`hub_call` / `server__tool`** 暴露；可对子能力配 **sandbox policy**（目录、env 白名单、超时等）。
 - **规则**：PR 生命周期与 PR 合并用 `tachi_gh`；不要把本地 worktree 清理路径当成 GitHub merge 路径。
 

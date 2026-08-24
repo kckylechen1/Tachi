@@ -285,7 +285,7 @@ Memories are stored under `path` namespaces (e.g. `/user/preferences`, `/project
 - **RRF fusion** — reciprocal rank fusion blends all channels, with vector cosine weighted in to reduce rank inversions on highly semantic queries.
 
 ### 3. Causal Graph
-The graph engine creates and traverses causal, temporal, and entity relationships. `tachi_memory(action="save")` can automatically link entries sharing entities (`auto_link`). `add_edge` / `get_edges` / `memory_graph` are internal `MemoryStore` primitives — not on the MCP surface (#757); agents reach graph behavior through `tachi_memory` auto-linking and recall's graph-spreading-activation channel (§2 above) — there is no standalone graph-traversal action.
+The graph engine creates and traverses causal, temporal, and entity relationships. `tachi_memory(action="save")` can automatically link entries sharing entities (`auto_link`). `add_edge` / `get_edges` / `memory_graph` are internal `MemoryStore` primitives — retired from the MCP surface (#757); agents reach graph behavior through `tachi_memory` auto-linking and recall's graph-spreading-activation channel (§2 above) — there is no standalone graph-traversal action.
 
 ### 4. Domain-Tagged Storage
 Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"personal"`). `tachi_memory(action="save")` and `tachi_memory(action="search")` can filter by domain. There is no separate domain registry — domains are ad-hoc tags on memory rows, not a configured resource.

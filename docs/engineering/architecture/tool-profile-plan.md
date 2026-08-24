@@ -96,7 +96,7 @@ The OpenClaw plugin now keeps its default Tachi-facing model tool surface focuse
 - `memory_save`
 - `memory_get`
 
-`memory_graph` was dropped from the plugin's registered tools (and from the
+`memory_graph` was dropped (retired) from the plugin's registered tools (and from the
 Tachi MCP surface entirely — internalized in #757; the underlying graph
 engine remains, just not tool-callable).
 

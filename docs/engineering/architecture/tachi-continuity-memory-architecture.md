@@ -267,7 +267,7 @@ Timeline memory stores the **credibility history** of a judgment or pattern. It 
 The timeline is an evolution chain: discovered → defended → revised → externally validated. Each transition is a causal edge with temporal validity. The depth of adversarial testing and external verification is itself evidence for the conclusion's reliability.
 
 Current storage: append-only `tachi_events` plus `ProjectionKind::Timeline` projections under `/timeline/<domain>/<hash>`. The projector preserves a first typed metadata slice at `metadata.timeline`: `discoveries`, `decisions`, `open_threads`, `evolution`, `causal_edges`, `external_validations`, and temporal validity fields.
-Current surface: `tachi_event action=context` returns a dedicated `timeline[]` read-model section with a `TimelineEntry` schema marker when timeline projections are available. Explicit causal edges with existing memory-id endpoints persist through `add_edge`; natural-language endpoint resolution and fully enforced Rust `TimelineEntry` / `JudgmentEvolution` validation remain design targets.
+Current surface: `tachi_event action=context` returns a dedicated `timeline[]` read-model section with a `TimelineEntry` schema marker when timeline projections are available. Explicit causal edges with existing memory-id endpoints persist through `add_edge` (retired/internalized, not MCP-facing); natural-language endpoint resolution and fully enforced Rust `TimelineEntry` / `JudgmentEvolution` validation remain design targets.
 
 ### 2.3 Bonding layer — shared communication protocol
 

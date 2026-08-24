@@ -7,7 +7,7 @@ use tachi_hub::{
 };
 use tachi_params::{
     TACHI_GH_ACTIONS, TACHI_MEMORY_ACTIONS, TACHI_MEMORY_RETIRED_C2B_ACTIONS, TACHI_SKILL_ACTIONS,
-    TACHI_TASK_RETIRED_ACTIONS,
+    TACHI_TASK_RETIRED_ACTIONS, TACHI_TUNE_ACTIONS,
 };
 
 fn ensure_test_env() {
@@ -601,7 +601,33 @@ fn retired_surface_documentation_has_markers() {
     let mut bad_hits: Vec<String> = vec![];
 
     // derive retired tokens from code (machine-known, no hand copy of full list)
-    let native_tokens: &[&str] = RETIRED_NATIVE_ALIASES;
+    // Native retired = aliases ∪ deleted routes ∪ internalized graph/state names
+    // (the latter two are not "teachable as MCP" surfaces either).
+    let native_tokens: Vec<&str> = RETIRED_NATIVE_ALIASES
+        .iter()
+        .chain(DELETED_NATIVE_ROUTES)
+        .chain(INTERNALIZED_GRAPH_STATE_MCP_NAMES)
+        .copied()
+        .collect();
+    // Self-validation: every deleted route is absent from the live router, and every
+    // pinned facade action is rejected by the live typed wire parser.
+    {
+        let route_names: std::collections::BTreeSet<String> =
+            native_route_names().into_iter().collect();
+        for r in DELETED_NATIVE_ROUTES {
+            assert!(
+                !route_names.contains(*r),
+                "deleted native route '{r}' must stay absent from the router (else move it off the lint list)"
+            );
+        }
+        for a in FACADE_RETIRED_ACTIONS {
+            assert!(
+                serde_json::from_value::<tachi_params::TachiTaskAction>(serde_json::json!(a))
+                    .is_err(),
+                "retired task action '{a}' must stay rejected by the typed wire parser"
+            );
+        }
+    }
     // reuse the router retired check rather than duplicate (B4)
     retired_native_aliases_stay_retired();
     // B4 repair (accepted): HISTORICAL_SKILL_SUPERSET is independent hand-maintained
@@ -625,7 +651,39 @@ fn retired_surface_documentation_has_markers() {
     // {dispatch, wait, cancel} comes from the enum's typed rejection path
     // (crates/tachi-params/src/facade/action_enums.rs:168,239 +
     // facade/task.rs:443,457,601) — if those arms change, update this pin.
-    const FACADE_RETIRED_ACTIONS: &[&str] = &["dispatch", "wait", "cancel"];
+    // Full typed-rejection set mirrored from TachiTaskAction::is_explicit_retired_wire
+    // (action_enums.rs:164-192). Self-validating below: every name is asserted
+    // rejected by the live wire parser, so this list can never drift stale.
+    const FACADE_RETIRED_ACTIONS: &[&str] = &[
+        "dispatch",
+        "wait",
+        "cancel",
+        "plan",
+        "cycle_plan",
+        "recommend",
+        "refine_issues",
+        "merge",
+        "ux_matrix",
+        "briefing",
+        "doc_index",
+        "cycle_status",
+        "profiles",
+        "profile",
+        "card",
+        "build_references",
+        "close_loop",
+        "route_simulate",
+        "proposals",
+        "review_proposal",
+        "apply_proposals",
+        "link_pr",
+        "pr_status",
+        "pr_handoff",
+        "release_note",
+    ];
+    // Fully deleted native routes (absent from router AND from RETIRED_NATIVE_ALIASES):
+    // verified absent from the live router below, so a reintroduction fails loudly.
+    const DELETED_NATIVE_ROUTES: &[&str] = &["tachi_dispatch", "tachi_board", "approve_merge"];
     let live_skill: Vec<&str> = TACHI_SKILL_ACTIONS.to_vec();
     for &name in &live_skill {
         assert!(
@@ -703,7 +761,8 @@ fn retired_surface_documentation_has_markers() {
             // `"tool": "<name>"` so a later `"action": "<tok>"` line attributes
             // to that facade (closes the multiline-envelope evasion).
             if in_code_fence {
-                if trimmed == "}" || trimmed == "{" || trimmed == "}," {
+                let boundary = line.trim();
+                if boundary == "}" || boundary == "{" || boundary == "}," {
                     fence_current_tool = None;
                 }
                 if let Some(m) = line.find("\"tool\"") {
@@ -789,11 +848,11 @@ fn retired_surface_documentation_has_markers() {
             // shapes: verb adj (EN+CN within line), inline `tok`, tok(, flex action=, table first-cell.
             // Fence content counts ONLY in code-shaped context (action= form / tok( / backticked /
             // "tool": "tok" JSON shape) — bare prose inside an example fence is not teaching.
-            for tok in native_tokens {
-                // Retired aliases that are unambiguous identifiers (contain '_' or a
-                // tachi-prefix — they can't be English prose): any unmarked exact hit
-                // in an active doc IS drift ("Execute run_skill" must fail).
-                // English-word aliases (e.g. "remember") keep the teaching-context gate.
+            for &tok in &native_tokens {
+                // Unambiguous identifiers (contain '_' or tachi-prefix — cannot be
+                // English prose): any unmarked exact hit IS drift ("Execute run_skill"
+                // must fail). English-word aliases (e.g. "remember") keep the
+                // teaching-context gate.
                 let unambiguous = tok.contains('_') || tok.starts_with("tachi");
                 let is_hit = is_exact_identifier_hit(line, tok)
                     && (unambiguous || is_teaching_context(line, tok));
@@ -852,7 +911,8 @@ fn retired_surface_documentation_has_markers() {
                 let live_anywhere = live_memory.contains(tok)
                     || live_task.contains(tok)
                     || TACHI_SKILL_ACTIONS.contains(tok)
-                    || TACHI_GH_ACTIONS.contains(tok);
+                    || TACHI_GH_ACTIONS.contains(tok)
+                    || TACHI_TUNE_ACTIONS.contains(tok);
                 let facade_named = line.contains(owner_facade)
                     || fence_current_tool.as_deref() == Some(owner_facade);
                 let quoted = line.contains(&format!("\"{}\"", tok))

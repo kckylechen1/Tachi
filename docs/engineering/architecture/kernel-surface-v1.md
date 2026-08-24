@@ -43,7 +43,7 @@ Examples:
 - `memory_search`
 - `memory_save`
 - `memory_get`
-- `memory_graph`
+- `memory_graph`(已退役)
 - `section.build`
 - `compact.rollup`
 - `compact.session_memory`
@@ -256,7 +256,7 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 - `memory_stats`
 - `tachi_skill(action="discover")`
 
-(`memory_graph` / `get_edges` were dropped from `observe` in #757 — internalized
+(`memory_graph` / `get_edges` were dropped (retired) from `observe` in #757 — internalized
 off the MCP surface entirely, not just this bundle.)
 
 ### `remember` (retired name)
