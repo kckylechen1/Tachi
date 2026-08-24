@@ -537,7 +537,8 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
 /// HISTORICAL_SKILL_SUPERSET is independent hand-maintained grows-only list of
 /// all skill actions ever (live + retired); see B4 repair.
 /// Scans ACTIVE documentation surface line-by-line: `docs/**` (EXCLUDING
-/// `docs/archive/**`), `README.md`, `README.zh-CN.md`, `prompts/**`.
+/// `docs/archive/**`), `README.md`, `README.zh-CN.md`, `README.classical.md`,
+/// `prompts/**`.
 /// Line-based. Exempt only if line carries a retirement marker or under nearest
 /// preceding section header (#...) carrying one. (Headers inside code fences ignored.)
 /// Markers: retired, RETIRED, 退役, historical, 历史.
