@@ -196,7 +196,7 @@ These examples show the JSON arguments you would pass to the MCP tools. Facade t
 {
   "tool": "tachi_task",
   "arguments": {
-    "action": "briefing",
+    "action": "brief",
     "task": "Review the API boundary and identify compatibility risks."
   }
 }

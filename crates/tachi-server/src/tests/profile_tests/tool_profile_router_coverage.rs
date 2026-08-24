@@ -678,6 +678,7 @@ fn retired_surface_documentation_has_markers() {
 
         let mut fence_opener: Option<(char, usize)> = None;
         let mut current_section_header = "";
+        let mut fence_current_tool: Option<String> = None;
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim_start();
             // B3 repair: track opener char + length; only same-char fence of len >= opener closes.
@@ -698,14 +699,88 @@ fn retired_surface_documentation_has_markers() {
             }
             let in_code_fence = fence_opener.is_some();
 
+            // Multi-line JSON envelopes: inside a fence, track the current
+            // `"tool": "<name>"` so a later `"action": "<tok>"` line attributes
+            // to that facade (closes the multiline-envelope evasion).
+            if in_code_fence {
+                if let Some(m) = line.find("\"tool\"") {
+                    let rest = &line[m..];
+                    if let Some(name) = rest.split('"').nth(3) {
+                        fence_current_tool = Some(name.to_string());
+                    }
+                }
+            } else {
+                fence_current_tool = None;
+            }
+
             if !in_code_fence && trimmed.starts_with('#') {
                 current_section_header = line;
             }
             let section_header = current_section_header;
 
-            let line_has_marker = marker_words.iter().any(|m| line.contains(m));
+            // Line-level markers must be ADJACENT to the token (within 20 chars
+            // either direction) or on the nearest section header. A bare marker
+            // word elsewhere on the line ("Deprecated clients should call X")
+            // does not exempt — adjacency is the honest signal. Header markers
+            // stay section-scoped. (Docs lint guards drift, not adversarial
+            // prose — the residual: a line crafted to place a marker within 20
+            // chars while meaning something else is accepted as out of scope.)
             let header_has_marker = marker_words.iter().any(|m| section_header.contains(m));
-            let exempted_by_marker = line_has_marker || header_has_marker;
+            // Enumeration rule: a line naming ≥2 retired tokens with any marker
+            // is a retirement record (e.g. "all retired: `a`, `b`") — adjacency
+            // can't stretch across a list. A single token + a marker still needs
+            // adjacency (20 chars) so "Deprecated clients should call X" fails.
+            let retired_hit_count = {
+                let mut n = 0usize;
+                for tok in native_tokens
+                    .iter()
+                    .chain(skill_tokens.iter())
+                    .chain(TACHI_TASK_RETIRED_ACTIONS.iter())
+                    .chain(TACHI_MEMORY_RETIRED_C2B_ACTIONS.iter())
+                    .chain(FACADE_RETIRED_ACTIONS.iter())
+                {
+                    if is_exact_identifier_hit(line, tok) {
+                        n += 1;
+                    }
+                }
+                n
+            };
+            let line_has_any_marker = marker_words.iter().any(|m| line.contains(m));
+            let marker_near = |line: &str, tok: &str| {
+                if header_has_marker {
+                    return true;
+                }
+                if retired_hit_count >= 2 && line_has_any_marker {
+                    return true;
+                }
+                let mut start = 0usize;
+                // adjacency is 20 CHARS (not bytes — a byte window is 3x too
+                // tight for CJK lines and misses adjacent markers there).
+                let chars: Vec<(usize, char)> = line.char_indices().collect();
+                while let Some(idx) = line[start..].find(tok) {
+                    let abs = start + idx;
+                    // char index of the hit
+                    let ci = chars.partition_point(|(b, _)| *b < abs);
+                    let lo_ci = ci.saturating_sub(20);
+                    let hi_ci = (ci + tok.chars().count() + 20).min(chars.len());
+                    if hi_ci > lo_ci {
+                        let (lo_b, hi_b) = (
+                            chars[lo_ci].0,
+                            if hi_ci == chars.len() {
+                                line.len()
+                            } else {
+                                chars[hi_ci].0
+                            },
+                        );
+                        let window = &line[lo_b..hi_b];
+                        if marker_words.iter().any(|m| window.contains(m)) {
+                            return true;
+                        }
+                    }
+                    start = abs + 1;
+                }
+                false
+            };
 
             // native retired: exact bounded ident token + instruction context (B1)
             // shapes: verb adj (EN+CN within line), inline `tok`, tok(, flex action=, table first-cell.
@@ -714,7 +789,7 @@ fn retired_surface_documentation_has_markers() {
             for tok in native_tokens {
                 let is_teaching =
                     is_teaching_context(line, tok) || (in_code_fence && code_shaped(line, tok));
-                if is_exact_identifier_hit(line, tok) && is_teaching && !exempted_by_marker {
+                if is_exact_identifier_hit(line, tok) && is_teaching && !marker_near(line, tok) {
                     bad_hits.push(format!(
                         "{}:{}: unmarked retired token '{}'",
                         rel,
@@ -731,7 +806,7 @@ fn retired_surface_documentation_has_markers() {
                 let is_teaching = has_tachi_skill_ctx
                     || has_action_form
                     || (in_code_fence && code_shaped(line, tok));
-                if is_teaching && is_exact_identifier_hit(line, tok) && !exempted_by_marker {
+                if is_teaching && is_exact_identifier_hit(line, tok) && !marker_near(line, tok) {
                     bad_hits.push(format!(
                         "{}:{}: unmarked retired tachi_skill token '{}'",
                         rel,
@@ -781,7 +856,8 @@ fn retired_surface_documentation_has_markers() {
                     || live_task.contains(tok)
                     || TACHI_SKILL_ACTIONS.contains(tok)
                     || TACHI_GH_ACTIONS.contains(tok);
-                let facade_named = line.contains(owner_facade);
+                let facade_named = line.contains(owner_facade)
+                    || fence_current_tool.as_deref() == Some(owner_facade);
                 let quoted = line.contains(&format!("\"{}\"", tok))
                     || line.contains(&format!("'{}'", tok))
                     || line.contains(&format!("`{}`", tok));
@@ -790,7 +866,7 @@ fn retired_surface_documentation_has_markers() {
                     && ((facade_named && (has_action_form || quoted))
                         || (has_action_form && !live_anywhere)
                         || (in_code_fence && contains_flex_action(line, tok) && !live_anywhere));
-                if is_teaching && is_exact_identifier_hit(line, tok) && !exempted_by_marker {
+                if is_teaching && is_exact_identifier_hit(line, tok) && !marker_near(line, tok) {
                     bad_hits.push(format!(
                         "{}:{}: unmarked retired facade action '{}'",
                         rel,

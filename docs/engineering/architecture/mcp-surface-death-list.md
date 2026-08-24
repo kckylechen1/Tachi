@@ -74,7 +74,7 @@ Relevant checks:
   classification.
 - `codegraph impact MemoryServer::tachi_complete --path . --depth 2` reports 20
   affected symbols, mostly completion/eval/dispatch tests. That is why
-  `tachi_complete` was in the worker-escape-hatch batch (all since retired), not in an immediate
+  `tachi_complete` (retired) was in the worker-escape-hatch batch (all since retired), not in an immediate
   delete batch.
 - `codegraph impact remap_daemon_tool --path . --depth 2` reports
   `call_daemon_tool` and `maybe_forward_tool`, confirming old-name retirement
@@ -129,7 +129,7 @@ delete wrappers.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `tachi_wiki_search` | Direct wiki search remains in observe patterns at `patterns.rs:4`; CLI map already routes `tachi_wiki_search` and `wiki_search` to `tachi_wiki(action="search")` at `tool_map.rs:20`. | `tachi_wiki(action="search")` | Retired (executed). | Migrate tests/docs to `tachi_wiki`. |
+| `tachi_wiki_search` | (retired) Direct wiki search was in observe patterns at `patterns.rs:4`; CLI map already routes `tachi_wiki_search` and `wiki_search` to `tachi_wiki(action="search")` at `tool_map.rs:20`. | `tachi_wiki(action="search")` | Retired (executed). | Migrate tests/docs to `tachi_wiki`. |
 | `wiki_search` | **DONE:** Retired and removed from MCP tool router and observe patterns. | `tachi_wiki(action="search")` | Hard-retired alias. | — |
 | `tachi_wiki_write` | Direct wiki write remains in remember patterns at `patterns.rs:40`; CLI map routes `tachi_wiki_write` and `wiki_write` to `tachi_wiki(action="write")` at `tool_map.rs:21`. | `tachi_wiki(action="write")` | Fold/delete candidate. | Same wiki alias leaf. |
 | `tachi_browse` | Facade read tool remains in observe patterns at `patterns.rs:23`. | `tachi_wiki(action="browse")` if browse stays a wiki action. | Fold candidate, but not first cut. | Confirm delegate dogfood before removing; delegate currently exposes `tachi_browse`. |
@@ -166,7 +166,7 @@ to the correct facade, then deleting duplicate action aliases.
 | `tachi_task` PR actions | **DONE under open #757 — PR-action slice only:** removed from `tachi_task` enum/router; canonical only on `tachi_gh`. Shared lifecycle handlers remain under `task_lifecycle` for `tachi_gh` / ship. | `tachi_gh` for PR/GitHub work. | Deleted dual entry. | — |
 | `tachi_task` tuning actions | **DONE under #1426:** `route_simulate`/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
 | `tachi_memory` tuning actions | **DONE under #1426:** `recall_simulate`/`recall_proposals`/`review_recall_proposal`/`apply_recall_proposals` are gone from `TACHI_MEMORY_ACTIONS`, the action schema, and the router; the handlers moved to `tune_ops/recall_*`. | `tachi_tune(action='recall_simulate'\|'recall_proposals'\|'recall_review'\|'recall_apply')`, admin-only. | Extracted. | — |
-| `tachi_save` shorthand | Standard allow-list includes it at `patterns.rs:130`. | `tachi_memory(action="save")`. | Retired (executed). | Dogfood decision after Batch A. |
+| `tachi_save` shorthand (retired) | Standard allow-list includes it at `patterns.rs:130`. | `tachi_memory(action="save")`. | Retired (executed). | Dogfood decision after Batch A. |
 | `tachi_briefing` shorthand | Standard allow-list includes it at `patterns.rs:128`; separate briefing also exists in `tachi_memory` and the feature-scoped `tachi_task(action="brief")`. | `tachi_memory(action="briefing")`. | Retired (executed). | Dogfood decision after action-level profile design. |
 
 ### Batch E: Admin Quarantine, Not Immediate Deletion
@@ -209,7 +209,7 @@ entrypoints.
 2. **Migrate raw memory direct callers.**
    Convert tests, CLI text, and internal dogfood to `tachi_memory` actions.
    Then retired (executed): `search_memory`, `save_memory`, `remember`, and possibly
-   `get_memory` MCP wrappers (all retired).
+   `get_memory` (retired) MCP wrappers.
 3. **Retire direct kanban MCP routes.**
    Move direct tests to handlers or task/arena facades, then remove
    `check_inbox`, `post_card`, and `update_card` from MCP (executed, all retired).
