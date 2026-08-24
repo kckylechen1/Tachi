@@ -107,12 +107,18 @@ else
   else
     sort -u "${INPUT}" > "${SLOWS_FILE}"
   fi
-fi
+  fi
+
+# C4: strip \r (CRLF) on input lines before comparison. Plain-list inputs
+# (e.g. from clipboard, cross-platform, or windows editors) must not
+# produce false outsiders due to trailing \r in test names.
+tr -d '\r' < "${SLOWS_FILE}" | sort -u > "${SLOWS_FILE}.tmp" && mv "${SLOWS_FILE}.tmp" "${SLOWS_FILE}"
 
 if [[ ! -s "${SLOWS_FILE}" ]]; then
   echo "nextest-slow-diff: OK — no slow tests in input"
   exit 0
 fi
+
 
 # Outsiders: slows not in roster
 comm -23 "${SLOWS_FILE}" "${ROSTER_SORTED}" > "${OUTSIDERS}"
