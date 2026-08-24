@@ -150,7 +150,7 @@ Two important nuances:
 | codex_55_review | `standard` (needs to see more) |
 | kimi_arch / deepseek_explore / kimi_ux | `observe` (read-only review/exploration) |
 
-**The `delegate` allow-list deliberately omits `tachi_task`.** Including it would hand the retired `dispatch` action to
+**The `delegate` allow-list once omitted `tachi_task` entirely.** (Historical: the retired `dispatch` action could not be denied alone.) Today `delegate` carries an action-scoped `tachi_task` subset (`complete`/`status`/`board`/`brief` per `tool_profiles/patterns.rs` + `action_policy.rs`) — the coarse-facade problem this passage warned about was resolved by action-level policy.
 the worker (recursive dispatch). The cost: workers cannot use `complete` or `status` from the
 facade, and must fall back to standalone legacy tools (`tachi_task(action="complete")`, `tachi_unstick`) that never
 moved into a facade.

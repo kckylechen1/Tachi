@@ -703,6 +703,9 @@ fn retired_surface_documentation_has_markers() {
             // `"tool": "<name>"` so a later `"action": "<tok>"` line attributes
             // to that facade (closes the multiline-envelope evasion).
             if in_code_fence {
+                if trimmed == "}" || trimmed == "{" || trimmed == "}," {
+                    fence_current_tool = None;
+                }
                 if let Some(m) = line.find("\"tool\"") {
                     let rest = &line[m..];
                     if let Some(name) = rest.split('"').nth(3) {
@@ -787,9 +790,14 @@ fn retired_surface_documentation_has_markers() {
             // Fence content counts ONLY in code-shaped context (action= form / tok( / backticked /
             // "tool": "tok" JSON shape) — bare prose inside an example fence is not teaching.
             for tok in native_tokens {
-                let is_teaching =
-                    is_teaching_context(line, tok) || (in_code_fence && code_shaped(line, tok));
-                if is_exact_identifier_hit(line, tok) && is_teaching && !marker_near(line, tok) {
+                // Retired aliases that are unambiguous identifiers (contain '_' or a
+                // tachi-prefix — they can't be English prose): any unmarked exact hit
+                // in an active doc IS drift ("Execute run_skill" must fail).
+                // English-word aliases (e.g. "remember") keep the teaching-context gate.
+                let unambiguous = tok.contains('_') || tok.starts_with("tachi");
+                let is_hit = is_exact_identifier_hit(line, tok)
+                    && (unambiguous || is_teaching_context(line, tok));
+                if is_hit && !marker_near(line, tok) {
                     bad_hits.push(format!(
                         "{}:{}: unmarked retired token '{}'",
                         rel,
@@ -824,18 +832,7 @@ fn retired_surface_documentation_has_markers() {
             // is also named on the line. A bare action="tok" (no facade named) fires only
             // when the token is retired from EVERY facade (e.g. cancel/dispatch/wait).
             let live_memory = TACHI_MEMORY_ACTIONS;
-            let live_task: &[&str] = &[
-                "intake",
-                "claim",
-                "heartbeat",
-                "handoff",
-                "release",
-                "board",
-                "status",
-                "complete",
-                "adjudicate",
-                "brief",
-            ];
+            let live_task: Vec<&str> = tachi_params::TachiTaskAction::primary_wire_strings(); // authoritative enum (单源)
             for tok in TACHI_TASK_RETIRED_ACTIONS
                 .iter()
                 .chain(TACHI_MEMORY_RETIRED_C2B_ACTIONS.iter())

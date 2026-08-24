@@ -304,7 +304,7 @@ Pattern memory is already stored in the memory DB under `/user/patterns/*`. It u
 Ordinary memory recall excludes `/user/patterns/`, `/user/affect/`, `/timeline/`, `/lorebook/`, and other continuity projection rows by default, while `tachi_search scope="patterns"` reads projected pattern rows explicitly.
 
 Integration direction:
-- Ordinary public save facades do not emit `memory.saved`; admitted internal callers can opt into the internal `tachi_memory(action="save")` continuity event path.
+- Ordinary public save facades do not emit `memory.saved`; admitted internal callers can opt into the internal save path (the retired standalone `save_memory`'s crate-internal route; the public `tachi_memory(action="save")` facade intentionally does not expose continuity emission).
 - The distill lane can consume `memory.saved` events to discover or update patterns.
 - Internal completion and workflow-closure pattern use is recorded through a crate-private append-only evidence seam. Each admitted event carries a real flow id, a source revision, an evidence digest, the exact pattern id, the `seen` / `hit` / `miss` / `stale` outcome, and a deterministic idempotency key. The fixed `tachi.pattern_evidence.v1` adapter writes `CollectOnly` + `EffectScope::None` events with no projection hints, so these receipts never project, promote, or update pattern counters. `tachi_task(action="complete")` and `tachi_gh(action="close_loop")` are admitted only with a non-empty flow id from their owning operational path. A missing identity is a typed skip, never a query/domain/comment fallback. The model-facing `tachi_search scope="patterns"` and `tachi_event action=context` surfaces remain read-only even when a caller supplies session text. There is no model-facing pattern-feedback workflow. Concrete instance memories under `/memory/instances/<pattern_id>/` are still a target.
 
@@ -597,7 +597,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 ### 8.3 Memory save emits continuity event when requested
 
-- **File:** `crates/tachi-server/src/memory_search_ops/save_memory/handler.rs`
+- **File:** `crates/tachi-server/src/memory_search_ops/save_memory/handler.rs` (the internal save path; the standalone `save_memory` tool name is retired)
 - **Function:** `handle_save_memory`
 - **Current behavior:** after `upsert_save_entry`, `emit_continuity=true` calls `emit_memory_saved_event`.
 - **File:** `crates/tachi-server/src/continuity_ops/emit.rs`

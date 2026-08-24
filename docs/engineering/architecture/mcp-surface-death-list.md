@@ -72,7 +72,7 @@ Relevant checks:
 - `codegraph callers MemoryServer::tachi_dispatch --path .` reports no direct
   Rust callers for the wrapper method, matching its deprecated/backcompat route
   classification.
-- `codegraph impact MemoryServer::tachi_complete --path . --depth 2` reports 20
+- `codegraph impact MemoryServer::tachi_complete --path . --depth 2` (historical command; tachi_complete is retired) reports 20
   affected symbols, mostly completion/eval/dispatch tests. That is why
   `tachi_complete` (retired) was in the worker-escape-hatch batch (all since retired), not in an immediate
   delete batch.
@@ -152,7 +152,7 @@ These entries record the completed compatibility-route deletion. They are not a 
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `tachi_dispatch` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal handler remains reachable through the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_task(action="dispatch")` | Deleted. | — |
+| `tachi_dispatch` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal handler remains reachable through the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_staff` (the Task dispatch action itself was retired later, #1319-C2) | Deleted. | — |
 | `tachi_board` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal board handler remains behind the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_task(action="board")` | Deleted. | — |
 | `approve_merge` | **DONE Batch C (PR #822):** the direct route is absent; PR merge remains on `tachi_gh(action="safe_merge")`. Open migration tracker #757 remains active for other surfaces. | `tachi_gh(action="safe_merge")` for PRs. | Deleted direct route; Task merge retired later. | — |
 
