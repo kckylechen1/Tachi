@@ -30,10 +30,10 @@ The target split is:
    - `recall_context`, `capture_session`, and later `compact_context` are runtime/adapter APIs, not part of the ordinary IDE default
 3. Capability selection should become a first-class public layer.
    - `tachi_skill(action="discover"|"run")` is the canonical skill workflow UX
-   - standalone `run_skill` and skill-focused `hub_discover` calls are compatibility routes, not the canonical new-caller path
+   - standalone `run_skill` and skill-focused `hub_discover` calls were retired by #1690/#757 (no compatibility routes remain); the canonical new-caller path
    - raw hub / pack / vc governance tools should not leak into ordinary agent surfaces
 4. Workflow tools are not kernel primitives.
-   - `ghost_*`, `post_card`, `check_inbox`, `update_card`, proposal review/project tools stay hidden unless a host or profile explicitly asks for them
+   - `ghost_*` stays hidden; `post_card`/`check_inbox`/`update_card` and the proposal review/project tools are retired; unless a host or profile explicitly asks for them
 5. Filtering must only reduce exposure.
    - Effective surface is the intersection of:
      - built-in surface bundle selection
@@ -52,16 +52,16 @@ The target split is:
 - `observe`
   - capability recommendation
   - read-only memory and graph inspection
-- `remember`
+- `remember` (retired name; canonical `tachi_memory(action="save")`)
   - `observe` +
-  - `save_memory`
+  - `save_memory` (retired name; canonical `tachi_memory(action="save")`)
   - `extract_facts`
-  - `tachi_skill(action="run")`; standalone `run_skill` remains for compatibility
+  - `tachi_skill(action="run")`; standalone `run_skill` is retired by #1690
 - `coordinate`
-  - `remember` +
+  - `remember` (retired name) +
   - kanban / ghost / handoff collaboration tools
 - `operate`
-  - `remember` +
+  - `remember` (retired name) +
   - runtime hook primitives (`recall_context`, `capture_session`, `compact_*`, `section_build`)
   - routed execution helpers (`hub_call`, `hub_disconnect`, `archive_memory`, `find_similar_memory`, `get_pipeline_status`, `sync_memories`, `wiki_lint`, `vault_unlock`/`vault_lock`/`vault_status`) — the proposal queue/review/project tools and `agent_register` this bundle used to route were retired under #757, superseded by the memory-line promotion path (#950, #534)
 - `admin`
@@ -140,9 +140,9 @@ Today this is a typed MCP/runtime primitive, not an OpenClaw hook integration ye
 
 `Tachi` now exposes a first-pass capability layer:
 
-- `recommend_capability`
-- `recommend_skill`
-- `recommend_toolchain`
+- `recommend_capability` (retired by #1690)
+- `recommend_skill` (retired by #1690)
+- `recommend_toolchain` (retired by #1690)
 
 Current behavior:
 

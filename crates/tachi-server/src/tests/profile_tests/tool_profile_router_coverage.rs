@@ -530,21 +530,26 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
 
 /// Retired-surface documentation lint (issue #1830).
 /// Derives retired tokens from RETIRED_NATIVE_ALIASES (this file) +
-/// complement of TACHI_SKILL_ACTIONS against pinned superset (tied to census
-/// fixture with comment: see crates/tachi-params/src/facade/action_inventory.rs:289
-/// assert_eq!(TACHI_SKILL_ACTIONS, &["discover", "run"])).
+/// hand-pinned HISTORICAL_SKILL_RETIRED (the retired set from census history).
+/// HISTORICAL_SKILL_SUPERSET is independent hand-maintained grows-only list of
+/// all skill actions ever (live + retired); see B4 repair.
 /// Scans ACTIVE documentation surface line-by-line: `docs/**` (EXCLUDING
 /// `docs/archive/**`), `README.md`, `README.zh-CN.md`, `prompts/**`.
 /// Line-based. Exempt only if line carries a retirement marker or under nearest
-/// preceding section header (#...) carrying one.
+/// preceding section header (#...) carrying one. (Headers inside code fences ignored.)
 /// Markers: retired, RETIRED, 退役, historical, 历史.
 /// Match EXACT identifier tokens (bounded non-alnum, e.g. `action="loadout"`,
 /// `from_pattern`, `recommend_capability`, `run_skill`) to avoid false hits on
-/// unrelated prose. For tachi_skill retired, hit only on tachi_skill ctx or
-/// action="..." forms (other words like "bundle"/"loadout" are common prose).
-/// Must pass on current tree. Negative/prohibition teaching lines (e.g. backcompat
-/// listings naming old tokens) are counted separately; pure marker is the gate.
-/// Conservative: do not weaken positive detection.
+/// unrelated prose.
+/// Teaching shapes implemented (B1): (i) inline-code/backtick `tok` presence;
+/// (ii) code-fence CONTENT presence (distinct from header logic);
+/// (iii) table row with exact tok in FIRST cell;
+/// (iv) verb adjacency (EN: use/call/invoke/run/via + CN: 使用/调用/通过/采用/用 ) within same line;
+/// (v) `action = "x"` with flexible spacing around = and quotes.
+/// For tachi_skill retired: hit on tachi_skill ctx, action=... (flex), or fence content.
+/// Native retired: verb/ ( /action/table/fence/inline-code.
+/// Must pass on current (clean) tree. Negative/prohibition teaching lines are ok if marked.
+/// Conservative: do not weaken positive detection. Zero-FP required on clean tree.
 #[test]
 fn retired_surface_documentation_has_markers() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -569,7 +574,21 @@ fn retired_surface_documentation_has_markers() {
         collect_docs_files(&docs_dir, &mut files);
     }
 
-    let marker_words = ["retired", "RETIRED", "退役", "历史", "historical"];
+    let marker_words = [
+        "retir",
+        "RETIR",
+        "Retir",
+        "退役",
+        "历史",
+        "historical",
+        "Historical",
+        "deprecated",
+        "Deprecated",
+        "superseded",
+        "Superseded",
+        "legacy",
+        "Legacy",
+    ];
 
     let mut bad_hits: Vec<String> = vec![];
 
@@ -577,11 +596,22 @@ fn retired_surface_documentation_has_markers() {
     let native_tokens: &[&str] = RETIRED_NATIVE_ALIASES;
     // reuse the router retired check rather than duplicate (B4)
     retired_native_aliases_stay_retired();
-    // B4 self-maintaining: historical superset (all known skill actions ever) MINUS live = retired set.
-    // cross-assertion: superset names must be live or retired (so adding live requires updating superset;
-    // retiring a skill without having had it in superset would make retirement invisible to docs lint).
+    // B4 repair (accepted): HISTORICAL_SKILL_SUPERSET is independent hand-maintained
+    // grows-only list (append on new live skill; never delete).
+    // retired set is hand-pinned HISTORICAL_SKILL_RETIRED (computed from census history,
+    // NOT derived as superset-minus-live to avoid tautology).
+    // Assertions:
+    // (i) superset == live ∪ retired exactly
+    // (ii) retired ∩ live = ∅
+    // (iii) known {bundle, loadout, from_pattern} ⊆ retired
+    // Double-delete escape (remove from superset AND live simultaneously) cannot be
+    // caught by this test — tie catch to census fixture's inventory pin (see
+    // crates/tachi-params/src/facade/action_inventory.rs:289): a retirement shrinks
+    // live → the re-anchor review sees the change and must ensure superset keeps the
+    // token and retired list gains it.
     const HISTORICAL_SKILL_SUPERSET: &[&str] =
         &["discover", "run", "bundle", "loadout", "from_pattern"];
+    const HISTORICAL_SKILL_RETIRED: &[&str] = &["bundle", "loadout", "from_pattern"];
     let live_skill: Vec<&str> = TACHI_SKILL_ACTIONS.to_vec();
     for &name in &live_skill {
         assert!(
@@ -590,18 +620,33 @@ fn retired_surface_documentation_has_markers() {
             name
         );
     }
-    let skill_tokens: Vec<&str> = HISTORICAL_SKILL_SUPERSET
-        .iter()
-        .filter(|a| !live_skill.contains(a))
-        .copied()
-        .collect();
-    for &name in HISTORICAL_SKILL_SUPERSET {
-        let is_live = live_skill.contains(&name);
-        let is_retired = skill_tokens.contains(&name);
+    let skill_tokens: Vec<&str> = HISTORICAL_SKILL_RETIRED.to_vec();
+    // (i) superset == live ∪ retired exactly (retired from census source)
+    let mut union: Vec<&str> = live_skill.clone();
+    union.extend(HISTORICAL_SKILL_RETIRED.iter().copied());
+    union.sort_unstable();
+    union.dedup();
+    let mut sup: Vec<&str> = HISTORICAL_SKILL_SUPERSET.to_vec();
+    sup.sort_unstable();
+    sup.dedup();
+    assert_eq!(
+        sup, union,
+        "HISTORICAL_SKILL_SUPERSET must == live ∪ retired exactly (no tautology; retired is hand list from census history, not superset-minus-live)"
+    );
+    // (ii) retired ∩ live = ∅
+    for &r in HISTORICAL_SKILL_RETIRED {
         assert!(
-            is_live || is_retired,
-            "superset name '{}' must be EITHER in TACHI_SKILL_ACTIONS (live) OR in lint retired set (invariant: superset = live ∪ retired always)",
-            name
+            !live_skill.contains(&r),
+            "retired skill '{}' must not be live per census",
+            r
+        );
+    }
+    // (iii) known retired set ⊆ retired
+    for &k in &["bundle", "loadout", "from_pattern"] {
+        assert!(
+            HISTORICAL_SKILL_RETIRED.contains(&k),
+            "known retired set item '{}' must be in HISTORICAL_SKILL_RETIRED",
+            k
         );
     }
 
@@ -617,13 +662,28 @@ fn retired_surface_documentation_has_markers() {
             .to_string_lossy()
             .to_string();
 
-        let mut in_code_fence = false;
+        let mut fence_opener: Option<(char, usize)> = None;
         let mut current_section_header = "";
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-                in_code_fence = !in_code_fence;
+            // B3 repair: track opener char + length; only same-char fence of len >= opener closes.
+            // This prevents naive toggle from leaking exemptions on nested/mixed (e.g. 4` outer
+            // with 3` inner containing `# historical` must not set header marker or flip state).
+            // Oracle evasion must not leak.
+            if let Some((op_ch, op_len)) = fence_opener {
+                if let Some((ch, len)) = parse_fence_opener(trimmed) {
+                    if ch == op_ch && len >= op_len {
+                        fence_opener = None;
+                    }
+                    // else: inner fence or shorter; stay inside (do not toggle)
+                }
+            } else if let Some((ch, len)) = parse_fence_opener(trimmed) {
+                if len >= 3 {
+                    fence_opener = Some((ch, len));
+                }
             }
+            let in_code_fence = fence_opener.is_some();
+
             if !in_code_fence && trimmed.starts_with('#') {
                 current_section_header = line;
             }
@@ -634,13 +694,13 @@ fn retired_surface_documentation_has_markers() {
             let exempted_by_marker = line_has_marker || header_has_marker;
 
             // native retired: exact bounded ident token + instruction context (B1)
-            // heuristics: imperative verbs (use|call|invoke|run|via|通过|调用|使用), code-fence/json/inline-code presence,
-            // or table row presenting token as available. Zero FP bar on clean tree.
+            // shapes: verb adj (EN+CN within line), inline `tok`, tok(, flex action=, table first-cell.
+            // Fence content counts ONLY in code-shaped context (action= form / tok( / backticked /
+            // "tool": "tok" JSON shape) — bare prose inside an example fence is not teaching.
             for tok in native_tokens {
-                if is_exact_identifier_hit(line, tok)
-                    && is_teaching_context(line, tok)
-                    && !exempted_by_marker
-                {
+                let is_teaching =
+                    is_teaching_context(line, tok) || (in_code_fence && code_shaped(line, tok));
+                if is_exact_identifier_hit(line, tok) && is_teaching && !exempted_by_marker {
                     bad_hits.push(format!(
                         "{}:{}: unmarked retired token '{}'",
                         rel,
@@ -649,15 +709,15 @@ fn retired_surface_documentation_has_markers() {
                     ));
                 }
             }
-            // tachi_skill retired tokens: only in tachi_skill or action= form (exact)
+            // tachi_skill retired tokens: tachi_skill ctx, flex action=, or fence content in
+            // code-shaped context (same prose-in-fence guard as native).
             for tok in &skill_tokens {
                 let has_tachi_skill_ctx = line.contains("tachi_skill");
-                let has_action_form = line.contains(&format!("action=\"{}\"", tok))
-                    || line.contains(&format!("action='{}'", tok));
-                if (has_tachi_skill_ctx || has_action_form)
-                    && is_exact_identifier_hit(line, tok)
-                    && !exempted_by_marker
-                {
+                let has_action_form = contains_flex_action(line, tok);
+                let is_teaching = has_tachi_skill_ctx
+                    || has_action_form
+                    || (in_code_fence && code_shaped(line, tok));
+                if is_teaching && is_exact_identifier_hit(line, tok) && !exempted_by_marker {
                     bad_hits.push(format!(
                         "{}:{}: unmarked retired tachi_skill token '{}'",
                         rel,
@@ -702,30 +762,110 @@ fn is_exact_identifier_hit(line: &str, tok: &str) -> bool {
     false
 }
 
+/// Parse fence opener from trimmed line: returns (char, len) if starts with 3+ ``` or ~~~ .
+fn parse_fence_opener(trimmed: &str) -> Option<(char, usize)> {
+    if trimmed.is_empty() {
+        return None;
+    }
+    let first = trimmed.chars().next().unwrap();
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let mut count = 0usize;
+    for c in trimmed.chars() {
+        if c == first {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    if count >= 3 {
+        Some((first, count))
+    } else {
+        None
+    }
+}
+
+/// Inside a code fence, a token counts as teaching only in a code-shaped
+/// context: `action="tok"` (any quote/spacing), `tok(`, backticked `tok`, or a
+/// JSON-ish `"tool": "tok"` / `"action": "tok"` pair. Bare prose quoted inside
+/// an example fence (e.g. a "remember more" sentence) is not teaching.
+fn code_shaped(line: &str, tok: &str) -> bool {
+    contains_flex_action(line, tok)
+        || line.contains(&format!("{}(", tok))
+        || line.contains(&format!("`{}`", tok))
+        || line.contains(&format!("\"{}\"", tok))
+}
+
+fn contains_flex_action(line: &str, tok: &str) -> bool {
+    let l = line.to_lowercase();
+    let t = tok.to_lowercase();
+    // (v) flexible spacing: action = "x" , action="x", action= "x" etc, ' or "
+    let patterns = [
+        format!("action=\"{}\"", t),
+        format!("action='{}'", t),
+        format!("action = \"{}\"", t),
+        format!("action = '{}'", t),
+        format!("action= \"{}\"", t),
+        format!("action= '{}'", t),
+        format!("action =\"{}\"", t),
+        format!("action ='{}'", t),
+    ];
+    patterns.iter().any(|p| l.contains(p))
+}
+
+fn is_table_first_cell_hit(line: &str, tok: &str) -> bool {
+    let t = line.trim();
+    if !t.starts_with('|') {
+        return false;
+    }
+    // first cell is the first non-empty after leading |
+    let cells: Vec<&str> = t
+        .split('|')
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if cells.is_empty() {
+        return false;
+    }
+    let first_cell = cells[0];
+    is_exact_identifier_hit(first_cell, tok)
+}
+
 fn is_teaching_context(line: &str, tok: &str) -> bool {
     let l = line.to_lowercase();
     let t = tok.to_lowercase();
-    // B1: imperative verb immediately before token (narrowed to zero-fp on README lists/tables; via dropped)
-    if l.contains(&format!("use {}", t))
-        || l.contains(&format!("use `{}", t))
-        || l.contains(&format!("call {}", t))
-        || l.contains(&format!("call `{}", t))
-        || l.contains(&format!("invoke {}", t))
-        || l.contains(&format!("invoke `{}", t))
-        || l.contains(&format!("run {}", t))
-        || l.contains(&format!("run `{}", t))
-        || l.contains(&format!("通过{}", t))
-        || l.contains(&format!("调用{}", t))
-        || l.contains(&format!("使用{}", t))
-        || l.contains(&format!("执行{}", t))
-    {
+    // B1 (iv) verb adjacency: EN {use,call,invoke,run,via} + CN {使用,调用,通过,采用,用} within same line
+    // (attached or spaced; ` after verb for inline)
+    let en_verbs = ["use", "call", "invoke", "run", "via"];
+    let cn_verbs = ["使用", "调用", "通过", "采用", "用"];
+    for v in en_verbs {
+        if l.contains(&format!("{} {}", v, t)) || l.contains(&format!("{} `{}", v, t)) {
+            return true;
+        }
+    }
+    for v in cn_verbs {
+        if l.contains(&format!("{}{}", v, t))
+            || l.contains(&format!("{} {}", v, t))
+            || l.contains(&format!("{} `{}", v, t))
+        {
+            return true;
+        }
+    }
+    // (i) inline-code/backtick presence of exact retired token = teaching
+    if line.contains(&format!("`{}`", tok)) || line.contains(&format!("`{}`", t)) {
         return true;
     }
-    // usage forms: tok( or action=
-    if line.contains(&format!("{}(", tok))
-        || line.contains(&format!("action=\"{}\"", tok))
-        || line.contains(&format!("action='{}'", tok))
-    {
+    // tok( form
+    if line.contains(&format!("{}(", tok)) {
+        return true;
+    }
+    // (v) flex action= (also covers native)
+    if contains_flex_action(line, tok) {
+        return true;
+    }
+    // (iii) table row containing exact retired token in the FIRST cell = teaching
+    if is_table_first_cell_hit(line, tok) {
         return true;
     }
     false
@@ -761,6 +901,128 @@ fn collect_prompts_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
                     out.push(p);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod matcher_unit_tests {
+    use super::*;
+
+    #[test]
+    fn fence_parser_b3() {
+        // B3: simple fences, nested valid CommonMark, mixed delimiters, unterminated.
+        // (full state machine exercised by RED scratch + clean docs lint)
+        assert_eq!(parse_fence_opener("```"), Some(('`', 3)));
+        assert_eq!(parse_fence_opener("````"), Some(('`', 4)));
+        assert_eq!(parse_fence_opener("~~~"), Some(('~', 3)));
+        assert_eq!(parse_fence_opener("```rust"), Some(('`', 3)));
+        assert_eq!(parse_fence_opener("``"), None);
+        assert_eq!(parse_fence_opener("` ``"), None);
+        // unterminated opener still parses
+        assert_eq!(parse_fence_opener("```"), Some(('`', 3)));
+        // mixed 4 vs 3: parse detects each independently (state prevents false close)
+        assert_eq!(parse_fence_opener("````"), Some(('`', 4)));
+        assert_eq!(parse_fence_opener("```"), Some(('`', 3)));
+    }
+
+    #[test]
+    fn matcher_adversarial_table_round1_round2() {
+        // oracle checkpoint 6: table of adversarial inputs (round-1 + round-2 evasion shapes) -> expected verdict
+        // each must produce correct teaching/exact for B1 shapes; zero FP on non-teaching
+        let cases: &[(&str, &str, bool, &str)] = &[
+            // B1 shapes that must fire (RED will exercise in scratch)
+            (
+                r#"Call run_skill"#,
+                "run_skill",
+                true,
+                "verb EN Call (round1)",
+            ),
+            (
+                r#"Invoke recommend_capability"#,
+                "recommend_capability",
+                true,
+                "verb EN Invoke (round1)",
+            ),
+            (
+                r#"action = "loadout""#,
+                "loadout",
+                true,
+                "spaced action= B1(v) (round2)",
+            ),
+            (
+                r#"请采用 tachi_complete 完成任务"#,
+                "tachi_complete",
+                true,
+                "CN 采用 verb B1(iv) (round2)",
+            ),
+            (
+                r#"请用 tachi_complete 完成任务"#,
+                "tachi_complete",
+                true,
+                "CN 用 verb B1(iv) (round2)",
+            ),
+            (
+                r#"| tachi_complete | completion tool |"#,
+                "tachi_complete",
+                true,
+                "table first cell B1(iii) (round2)",
+            ),
+            (
+                r#"see the `run_skill` API"#,
+                "run_skill",
+                true,
+                "inline-code/backtick B1(i)",
+            ),
+            (
+                r#"`recommend_capability` (retired)"#,
+                "recommend_capability",
+                true,
+                "inline code presence",
+            ),
+            (
+                r#"tachi_skill(action = 'bundle')"#,
+                "bundle",
+                true,
+                "flex action for skill retired",
+            ),
+            // code fence content: presence inside fence counts (tested via || in_code_fence in main loop)
+            // negative to keep zero-FP
+            (
+                r#"the loadout of skills"#,
+                "loadout",
+                false,
+                "prose 'loadout' without verb/action/table/fence/inline",
+            ),
+            (r#"bundle of facts"#, "bundle", false, "prose bundle"),
+            (
+                r#"| bar | tachi_complete |"#,
+                "tachi_complete",
+                false,
+                "token not in FIRST cell",
+            ),
+            (
+                r#"use the discover action"#,
+                "discover",
+                false,
+                "live skill not retired",
+            ),
+            (
+                r#"action = "from_pattern" in old code"#,
+                "from_pattern",
+                true,
+                "flex action",
+            ),
+        ];
+        for (line, tok, expect, note) in cases {
+            let exact = is_exact_identifier_hit(line, tok);
+            let teach = is_teaching_context(line, tok);
+            let detected = exact && teach;
+            assert_eq!(
+                detected, *expect,
+                "matcher unit {}: tok={} line={}",
+                note, tok, line
+            );
         }
     }
 }

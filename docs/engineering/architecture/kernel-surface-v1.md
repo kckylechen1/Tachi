@@ -250,8 +250,8 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 
 ### `observe`
 
-- `search_memory`
-- `tachi_memory(action="get")`; native `get_memory` is admin/backcompat only
+- `search_memory` (retired name; canonical `tachi_memory(action="search")`)
+- `tachi_memory(action="get")`; native `get_memory` is retired (not routable at all)
 - `list_memories`
 - `memory_stats`
 - `tachi_skill(action="discover")`
@@ -259,22 +259,22 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 (`memory_graph` / `get_edges` were dropped from `observe` in #757 — internalized
 off the MCP surface entirely, not just this bundle.)
 
-### `remember`
+### `remember` (retired name)
 
 - `observe` +
-- `save_memory`
+- `save_memory` (retired name; canonical `tachi_memory(action="save")`)
 - `extract_facts`
-- `tachi_skill(action="run")`; native `run_skill` is backcompat only
+- `tachi_skill(action="run")`; native `run_skill` is retired by #1690
 
 ### `coordinate`
 
-- `remember` +
+- `remember` (retired name) +
 - `ghost_*`
 - kanban / delegation / handoff
 
 ### `operate`
 
-- `remember` +
+- `remember` (retired name) +
 - `recall_context`
 - `capture_session`
 - `compact_context`

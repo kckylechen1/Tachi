@@ -54,9 +54,9 @@ It answers three questions raised during a facade review:
 2. **`merge` was semantically split, then resolved (#1683 C1a).** `tachi_task(merge)` used to mean
    local worktree merge, distinct from `tachi_gh(safe_merge)`'s GitHub PR merge — same word, different
    machine. `tachi_task(merge)` is retired; `tachi_gh(safe_merge)` is now the only `merge` on either facade.
-3. **Briefing still appears in three surfaces** — `tachi_briefing` (standalone),
+3. **Briefing then appeared in three surfaces** (historical) — `tachi_briefing` (standalone, since retired),
    `tachi_memory(briefing)`, and the feature-scoped `tachi_task(brief)`. `save` is duplicated
-   across `tachi_save` and `tachi_memory(save)`.
+   across `tachi_save` (retired shorthand) and `tachi_memory(save)`.
 4. **Self-tuning actions were interleaved with execution (resolved #1426).** Eight of the nine —
    `route_simulate` / `proposals` / `review_proposal` / `apply_proposals` (task side) and
    `recall_simulate` / `recall_proposals` / `review_recall_proposal` / `apply_recall_proposals`
@@ -152,7 +152,7 @@ Two important nuances:
 
 **The `delegate` allow-list deliberately omits `tachi_task`.** Including it would hand `dispatch` to
 the worker (recursive dispatch). The cost: workers cannot use `complete` or `status` from the
-facade, and must fall back to standalone legacy tools (`tachi_complete`, `tachi_unstick`) that never
+facade, and must fall back to standalone legacy tools (`tachi_task(action="complete")`, `tachi_unstick`) that never
 moved into a facade.
 
 > This is the smoking gun: **`delegate` still needs a pile of un-faceted legacy tools precisely because

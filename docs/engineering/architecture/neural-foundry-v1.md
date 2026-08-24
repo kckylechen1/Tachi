@@ -118,8 +118,8 @@ Completed:
 - canonical Foundry schema in `memcore`
 - manual `synthesize_agent_evolution` tool
 - first-pass `Kernel Surface V1` docs
-- first-pass capability recommendation APIs: `recommend_capability`, `recommend_skill`, `recommend_toolchain`
-- `prepare_capability_bundle` for host-aware skill / tool / pack assembly
+- first-pass capability recommendation APIs (all retired by #1690): `recommend_capability`, `recommend_skill`, `recommend_toolchain`
+- `prepare_capability_bundle` (retired by #1690) for host-aware skill / tool / pack assembly
 - `memory_graph` as the read-only agent-facing graph lookup (later internalized
   off the MCP surface in #757 — this "Completed" entry documents the
   migration-branch state at the time, not current tool availability)
@@ -236,7 +236,7 @@ Status:
 Already done:
 
 - built-in host tool profiles now separate `ide`, `runtime`, `workflow`, and `admin`
-- direct MCP hosts can see the first-pass capability layer through `recommend_capability`, `recommend_skill`, and `recommend_toolchain`
+- (retired by #1690) direct MCP hosts could see the first-pass capability layer through `recommend_capability`, `recommend_skill`, and `recommend_toolchain`
 - online recall moved behind `recall_context`
 - session capture moved behind `capture_session`
 - compaction now has a typed `compact_context` runtime API, ready for host hook wiring

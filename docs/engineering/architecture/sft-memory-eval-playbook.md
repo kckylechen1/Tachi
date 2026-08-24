@@ -126,7 +126,7 @@ model, bounded task slice, task type, outcome, latency, evaluator, usefulness,
 verification impact, plan delta, retry count, and failure mode. Do not store
 prompts, chain-of-thought, or uncompressed logs in memory.
 
-Live eval records are memory-first. `tachi_complete` writes them under
+Live eval records are memory-first. `tachi_task(action="complete")` writes them under
 `/eval/...` with `category="eval"`, and ordinary memory search should exclude
 them unless the caller explicitly scopes to `/eval`. Use
 `tachi_agent_eval(action="aggregate_live")` to aggregate production eval memory;

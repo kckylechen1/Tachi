@@ -432,7 +432,7 @@ This session is not a hypothetical. It is a real design conversation that:
 If the continuity memory system cannot capture and crystallize this session, it cannot capture the work it is meant to support.
 
 Current code-alignment note: capture, projection, pattern search, wiki pattern
-references, explicit pattern feedback, `tachi_complete` evidence-ref feedback,
+references, explicit pattern feedback, `tachi_task(action="complete")` evidence-ref feedback,
 `close_loop` pattern hit feedback, promotion review artifacts, and pending skill
 generation exist. `tachi_event action=promote` can execute conservative review
 artifact creation, and `tachi_event action=context` exposes first-slice
