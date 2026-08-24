@@ -15,14 +15,32 @@ pub(crate) async fn handle_vault_init(
 
         let salt = crypto::generate_salt();
         let salt_b64 = B64.encode(salt);
-        let key = crypto::DerivedVaultKey::derive(&params.password, &salt)?;
+        let key = {
+            #[cfg(test)]
+            {
+                crypto::derive_cheap(&params.password, &salt)?
+            }
+            #[cfg(not(test))]
+            {
+                crypto::DerivedVaultKey::derive(&params.password, &salt)?
+            }
+        };
         let verifier = crypto::create_verifier(key.bytes())?;
         let now = Utc::now().to_rfc3339();
         let config = VaultConfig {
             salt: salt_b64,
             verifier,
             kdf_algorithm: "argon2id".to_string(),
-            kdf_params: crypto::active_kdf_params_json().to_string(),
+            kdf_params: {
+                #[cfg(test)]
+                {
+                    crypto::cheap_kdf_params_json().to_string()
+                }
+                #[cfg(not(test))]
+                {
+                    crypto::active_kdf_params_json().to_string()
+                }
+            },
             cipher: VaultCipher::Aes256Gcm,
             created_at: now.clone(),
             updated_at: now,
