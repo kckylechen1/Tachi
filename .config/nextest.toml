@@ -95,8 +95,9 @@ path = "junit.xml"
 # operator/local gate (like the local gitleaks hook), NOT invoked by CI
 # (Actions disabled repo-wide per #1562). Run manually:
 #   cargo nextest run -p tachi-server -p memory-server-runtime --locked \
-#     --final-status-level slow
-#   scripts/nextest-slow-diff.sh <(the slow output or file)
+#     --final-status-level slow > /tmp/slow.txt 2>&1
+#   scripts/nextest-slow-diff.sh /tmp/slow.txt
+#   # (or with --profile ci; or a JUnit .xml file; or plain list of full test paths)
 [test-groups]
 known-deterministic-reds = { max-threads = "num-cpus" }
 

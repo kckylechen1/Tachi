@@ -5,9 +5,9 @@
 #
 # Invocation (exact command + expected input via --final-status-level slow):
 #   cargo nextest run -p tachi-server -p memory-server-runtime --locked \
-#     --final-status-level slow > /tmp/slow.txt
+#     --final-status-level slow > /tmp/slow.txt 2>&1
 #   scripts/nextest-slow-diff.sh /tmp/slow.txt
-#   # (or with --profile ci; or pipe JUnit; or plain list of full test paths)
+#   # (or with --profile ci; or a JUnit .xml file; or plain list of full test paths)
 #
 # Usage:
 #   scripts/nextest-slow-diff.sh <nextest-slow-output.txt | slow-list.txt | junit.xml>
