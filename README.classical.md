@@ -66,12 +66,12 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0
 - **⚡ 玄铁剑心**：Rust 纯血核心，SQLite + sqlite-vec，亚十毫秒级五脉混合检索（设计目标）。
 - **🗂️ 藏经阁流**：以 `path` 分层（如 `/user/preferences`、`/project/architecture`），各阁互不沾染。
 - **🔍 五脉归元**：语义、词法、时间衰减、图谱激活蔓延、RRF 融合五路合一。
-- **🕸️ 因果千丝**：图谱引擎织就因果、时序、实体之缘；`add_edge` / `get_edges` / `memory_graph` 深藏不出（`memcore::MemoryStore` 内秘之器，不列 MCP 曲面，#757 已收），唯托 `tachi_save` / `tachi_memory` 自动牵丝、暨五脉归元之图谱蔓延一脉而显其效，别无单列寻迹之诀。
+- **🕸️ 因果千丝**：图谱引擎织就因果、时序、实体之缘；`add_edge`、`get_edges`、`memory_graph`（皆已退役并内化为 `memcore::MemoryStore` 之器，不列 MCP 曲面，#757 已收），唯托 `tachi_save`（已退役）/ `tachi_memory` 自动牵丝、暨五脉归元之图谱蔓延一脉而显其效，别无单列寻迹之诀。
 - **🔌 两界分治**：大千识海 `~/.tachi/global/tachi-memory.db`，宗门密库 `<git-root>/.tachi/tachi-memory.db`。
 - **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换。
 - **🎯 万宝楼**：Skill、MCP、仙诀一次登录，诸路灵核共享。
 - **👻 跨界传信**：幽灵低语、看板、交接令牌，跨灵核协同。
-- **⚔️ 工务总枢**：`tachi_task` 掌纪略，`tachi_staff` 遣偏师记工籍（`action='start'`，唯例外方用），`tachi_verify` 存验据，`tachi_complete` 录因果。
+- **⚔️ 工务总枢**：`tachi_task` 掌纪略与完结（`action='complete'`），`tachi_staff` 遣偏师记工籍（`action='start'`，唯例外方用），`tachi_verify` 存验据；旧 `tachi_complete` 已退役。
 - **🏭 神经熔炉与维基**：上下文生灭、Agent 进化提案、薪火相传之典籍。
 
 ---
@@ -81,7 +81,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0
 | 令旗 | 用途 |
 |------|------|
 | `standard` | IDE 灵核之默认，14 器门面集。 |
-| `coordinate` | 主尊调度，兼掌 handoff / workflow / orchestrator / task / approve_merge / verify。 |
+| `coordinate` | 主尊调度，兼掌 handoff / workflow / orchestrator / task / verify；`approve_merge` 已退役。 |
 | `operate` | 运行时适配与 OpenClaw，兼掌 Foundry / Vault 会话。 |
 | `delegate` | 小弟偏师，极简 9 器，无派发、无交接。 |
 | `admin` | 维护治理，全量法器。 |

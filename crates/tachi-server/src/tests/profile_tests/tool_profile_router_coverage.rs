@@ -560,7 +560,7 @@ fn retired_surface_documentation_has_markers() {
 
     let mut files: Vec<std::path::PathBuf> = vec![];
     // READMEs
-    for name in ["README.md", "README.zh-CN.md"] {
+    for name in ["README.md", "README.zh-CN.md", "README.classical.md"] {
         let p = repo_root.join(name);
         if p.exists() {
             files.push(p);
