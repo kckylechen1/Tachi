@@ -113,7 +113,7 @@ async fn repeated_task_complete_reuses_outcome_and_completion_events() {
         .tachi_task(rmcp::handler::server::wrapper::Parameters(params.clone()))
         .await
         .expect("first task completion");
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    crate::tests::wait_for_distinct_utc_second().await;
     let second_raw = server
         .tachi_task(rmcp::handler::server::wrapper::Parameters(params))
         .await

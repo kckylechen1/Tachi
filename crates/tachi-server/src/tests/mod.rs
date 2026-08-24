@@ -27,6 +27,28 @@ fn ensure_test_env() {
     });
 }
 
+/// Wait for a generated timestamp to enter a different UTC second.
+///
+/// The monotonic deadline keeps a frozen clock from hanging a test forever;
+/// any changed second counts as progress, including a backward clock jump.
+pub(crate) async fn wait_for_distinct_utc_second() {
+    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+    let initial_second = Utc::now().timestamp();
+    let deadline = std::time::Instant::now() + MAX_WAIT;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "UTC timestamp second did not change within {MAX_WAIT:?}; initial_second={initial_second}"
+            );
+        }
+        if Utc::now().timestamp() != initial_second {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        tokio::time::sleep(remaining.min(std::time::Duration::from_millis(10))).await;
+    }
+}
+
 fn home_test_lock() -> &'static std::sync::Mutex<()> {
     crate::utils::global_test_lock()
 }
@@ -139,8 +161,8 @@ impl Drop for TestServer {
     }
 }
 
-/// Path to a schema-initialized SQLite file, built once per test binary
-/// process, that every `make_server*` call below copies from instead of
+/// Path to a schema-initialized SQLite file, built once per test executable
+/// artifact, that every `make_server*` call below copies from instead of
 /// paying `MemoryServer::new`'s full DDL + `ensure_column` + data-migration
 /// chain on a brand-new empty file. `run_data_migrations` is already
 /// exercised twice-in-a-row by memcore's own migration tests (see
@@ -149,42 +171,63 @@ impl Drop for TestServer {
 /// state (identical to a real restart against an existing `~/.tachi` DB) —
 /// not a special case invented for this fixture (issue #682 template-DB
 /// fixture, G2).
-/// The template lives at a STABLE path keyed by the test binary's identity
-/// (path + size + mtime), NOT behind a process-local `OnceLock` alone:
-/// nextest runs each test in its own process, so a per-process cache would
-/// rebuild the template for every single test and make the suite slower,
-/// not faster. Keying on the binary identity means a recompile (which is
-/// the only way the schema/migration chain can change) automatically gets
-/// a fresh template, while all test processes of one build share one file.
+/// The template lives outside `test_fixture_root` at a stable path keyed by
+/// the test executable's identity (path + size + mtime), NOT behind a
+/// process-local `OnceLock` alone. Nextest runs each test in its own process,
+/// so a per-process cache would rebuild the template for every single test
+/// and make the suite slower, not faster. Keying on the executable means a
+/// recompile (which is the only way the schema/migration chain can change)
+/// automatically gets a fresh template, while all test processes of one
+/// build share one file. The guard-only environment override gives the
+/// cross-process regression test an isolated cache without changing the
+/// production default.
 fn template_db_path() -> &'static std::path::PathBuf {
     static TEMPLATE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     TEMPLATE.get_or_init(|| {
         ensure_test_env();
+        let executable = std::env::current_exe().expect("test executable path");
+        let metadata = std::fs::metadata(&executable).expect("test executable metadata");
         let fingerprint = {
             use std::hash::{Hash, Hasher};
-            let exe = std::env::current_exe().expect("test binary path");
-            let meta = std::fs::metadata(&exe).expect("test binary metadata");
             let mut hasher = std::hash::DefaultHasher::new();
-            exe.hash(&mut hasher);
-            meta.len().hash(&mut hasher);
-            meta.modified()
-                .expect("test binary mtime")
+            executable.hash(&mut hasher);
+            metadata.len().hash(&mut hasher);
+            metadata
+                .modified()
+                .expect("test executable mtime")
                 .hash(&mut hasher);
             hasher.finish()
         };
-        let path = crate::utils::test_fixture_path(format!(
+        let cache_root = std::env::var_os(TEMPLATE_CACHE_ROOT_ENV)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                executable
+                    .parent()
+                    .expect("test executable parent")
+                    .join(".tachi-server-template-cache")
+            });
+        std::fs::create_dir_all(&cache_root).expect("create test template cache directory");
+        let path = cache_root.join(format!(
             "memory-server-test-template-{fingerprint:016x}.sqlite"
         ));
-        if path.exists() {
+        if path.is_file() {
             return path;
         }
-        // Build at a unique scratch path first, then atomically rename into
+        if path.exists() {
+            panic!(
+                "test template cache path exists but is not a file: {}",
+                path.display()
+            );
+        }
+
+        // Build at a unique scratch path first, then atomically publish into
         // place so concurrent test processes never observe a half-written
         // template. If several processes race, each builds an equivalent
-        // file and the renames just overwrite one another; `fs::copy`
-        // readers hold their own fd so an overwrite mid-copy is still safe.
-        let build = crate::utils::test_fixture_path(format!(
-            "memory-server-test-template-build-{}.sqlite",
+        // file; Unix permits the later rename to replace the first, while
+        // platforms that reject replacement use the already-published file.
+        let build = cache_root.join(format!(
+            "memory-server-test-template-build-{}-{}.sqlite",
+            std::process::id(),
             uuid::Uuid::new_v4()
         ));
         {
@@ -202,12 +245,32 @@ fn template_db_path() -> &'static std::path::PathBuf {
                 .expect("checkpoint template test db fixture");
         } // `server` (and its connections) drop here before the rename.
         clear_template_store_role_stamp(&build);
-        for suffix in ["-wal", "-shm"] {
+        for suffix in ["-wal", "-shm", ".migration-marker"] {
             let mut sidecar = build.clone().into_os_string();
             sidecar.push(suffix);
-            let _ = std::fs::remove_file(std::path::PathBuf::from(sidecar));
+            let sidecar = std::path::PathBuf::from(sidecar);
+            match std::fs::remove_file(&sidecar) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!(
+                    "remove test template sidecar {}: {error}",
+                    sidecar.display()
+                ),
+            }
         }
-        std::fs::rename(&build, &path).expect("publish template test db fixture");
+        match std::fs::rename(&build, &path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !path.is_file() {
+                    panic!(
+                        "template publish raced with a non-file cache path: {}",
+                        path.display()
+                    );
+                }
+                std::fs::remove_file(&build).expect("remove losing concurrent test template build");
+            }
+            Err(error) => panic!("publish test template {}: {error}", path.display()),
+        }
         path
     })
 }
@@ -257,6 +320,92 @@ fn clear_template_store_role_stamp(build: &std::path::Path) {
 /// carries no `store_identity` role (see [`clear_template_store_role_stamp`]).
 fn copy_template_db(dest: &std::path::Path) {
     std::fs::copy(template_db_path(), dest).expect("seed test db from template fixture");
+}
+
+const TEMPLATE_CACHE_ROOT_ENV: &str = "TACHI_TEST_TEMPLATE_CACHE_ROOT";
+const TEMPLATE_GUARD_HELPER_ENV: &str = "TACHI_TEST_TEMPLATE_GUARD_HELPER";
+const TEMPLATE_GUARD_OUTPUT_ENV: &str = "TACHI_TEST_TEMPLATE_GUARD_OUTPUT";
+
+#[test]
+fn template_db_path_is_shared_across_processes() {
+    if std::env::var_os(TEMPLATE_GUARD_HELPER_ENV).is_some() {
+        let output_path =
+            std::env::var_os(TEMPLATE_GUARD_OUTPUT_ENV).expect("template guard helper output path");
+        let template = template_db_path().clone();
+        let copied = crate::utils::test_fixture_path(format!(
+            "template-cross-process-{}.sqlite",
+            std::process::id()
+        ));
+        copy_template_db(&copied);
+        let _server = MemoryServer::new(copied, None).expect("initialize copied template");
+        std::fs::write(&output_path, template.display().to_string())
+            .expect("record resolved template path");
+        println!("template_db_path={}", template.display());
+        return;
+    }
+
+    let isolated_root = tempfile::tempdir().expect("create isolated template guard root");
+    let isolated_tmp = isolated_root.path().join("tmp");
+    let isolated_cache = isolated_root.path().join("cache");
+    std::fs::create_dir_all(&isolated_tmp).expect("create isolated template guard tmp");
+    std::fs::create_dir_all(&isolated_cache).expect("create isolated template guard cache");
+
+    let executable = std::env::current_exe().expect("current test executable");
+    let test_name = "tests::template_db_path_is_shared_across_processes";
+    let spawn_child = |index: usize| {
+        let output_path = isolated_root
+            .path()
+            .join(format!("resolved-template-{index}.txt"));
+        std::process::Command::new(&executable)
+            .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+            .env(TEMPLATE_GUARD_HELPER_ENV, "1")
+            .env(TEMPLATE_GUARD_OUTPUT_ENV, &output_path)
+            .env(TEMPLATE_CACHE_ROOT_ENV, &isolated_cache)
+            .env("TMPDIR", &isolated_tmp)
+            .env("TEMP", &isolated_tmp)
+            .env("TMP", &isolated_tmp)
+            .env("CARGO_TERM_COLOR", "never")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn template guard child {index}: {error}"))
+    };
+
+    let first = spawn_child(0);
+    let second = spawn_child(1);
+    let first = first
+        .wait_with_output()
+        .expect("wait for template guard child 0");
+    let second = second
+        .wait_with_output()
+        .expect("wait for template guard child 1");
+
+    assert!(
+        first.status.success(),
+        "template guard child 0 failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "template guard child 1 failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let first_path = std::fs::read_to_string(isolated_root.path().join("resolved-template-0.txt"))
+        .expect("read template guard child 0 path");
+    let second_path = std::fs::read_to_string(isolated_root.path().join("resolved-template-1.txt"))
+        .expect("read template guard child 1 path");
+    assert_eq!(
+        first_path,
+        second_path,
+        "template cache must be shared across processes\nchild 0 stdout:\n{}\nchild 0 stderr:\n{}\nchild 1 stdout:\n{}\nchild 1 stderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
 }
 
 fn make_test_server(project_name: Option<&str>) -> (TestServer, Option<std::path::PathBuf>) {
