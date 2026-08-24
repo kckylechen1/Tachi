@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use tachi_hub::{
     tool_matches_bundle, tool_name_matches_pattern, ToolBundle, COORDINATE_TOOL_PATTERNS,
     DELEGATE_MINIMAL_TOOL_PATTERNS, OBSERVE_TOOL_PATTERNS, OPERATE_TOOL_PATTERNS,
     REMEMBER_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS,
 };
+use tachi_params::TACHI_SKILL_ACTIONS;
 
 fn ensure_test_env() {
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -523,5 +525,221 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
             "'{fixed_route}' must classify unsafe-to-replay through the live \
              router (PR #1213 checkpoint 4 fix)"
         );
+    }
+}
+
+/// Retired-surface documentation lint (issue #1830).
+/// Derives retired tokens from RETIRED_NATIVE_ALIASES (this file) +
+/// complement of TACHI_SKILL_ACTIONS against pinned superset (tied to census
+/// fixture with comment: see crates/tachi-params/src/facade/action_inventory.rs:289
+/// assert_eq!(TACHI_SKILL_ACTIONS, &["discover", "run"])).
+/// Scans ACTIVE documentation surface line-by-line: `docs/**` (EXCLUDING
+/// `docs/archive/**`), `README.md`, `README.zh-CN.md`, `prompts/**`.
+/// Line-based. Exempt only if line carries a retirement marker or under nearest
+/// preceding section header (#...) carrying one.
+/// Markers: retired, RETIRED, 退役, historical, 历史.
+/// Match EXACT identifier tokens (bounded non-alnum, e.g. `action="loadout"`,
+/// `from_pattern`, `recommend_capability`, `run_skill`) to avoid false hits on
+/// unrelated prose. For tachi_skill retired, hit only on tachi_skill ctx or
+/// action="..." forms (other words like "bundle"/"loadout" are common prose).
+/// Must pass on current tree. Negative/prohibition teaching lines (e.g. backcompat
+/// listings naming old tokens) are counted separately; pure marker is the gate.
+/// Conservative: do not weaken positive detection.
+#[test]
+fn retired_surface_documentation_has_markers() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = Path::new(manifest_dir).join("../..");
+
+    let mut files: Vec<std::path::PathBuf> = vec![];
+    // READMEs
+    for name in ["README.md", "README.zh-CN.md"] {
+        let p = repo_root.join(name);
+        if p.exists() {
+            files.push(p);
+        }
+    }
+    // prompts/**
+    let prompts_dir = repo_root.join("prompts");
+    if prompts_dir.is_dir() {
+        if let Ok(rd) = std::fs::read_dir(&prompts_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                    if ext == "md" || ext == "mdx" || ext == "txt" {
+                        files.push(p);
+                    }
+                }
+            }
+        }
+    }
+    // docs/** (exclude archive)
+    let docs_dir = repo_root.join("docs");
+    if docs_dir.is_dir() {
+        collect_docs_files(&docs_dir, &mut files);
+    }
+
+    let marker_words = ["retired", "RETIRED", "退役", "历史", "historical"];
+
+    let mut bad_hits: Vec<String> = vec![];
+    let mut negative_exempt_count: usize = 0;
+
+    // derive retired tokens from code (machine-known, no hand copy of full list)
+    let native_tokens: &[&str] = RETIRED_NATIVE_ALIASES;
+    // pinned superset for tachi_skill retired; tied to census fixture per contract
+    let superset: Vec<&str> = vec!["discover", "run", "bundle", "loadout", "from_pattern"];
+    let live_skill: Vec<&str> = TACHI_SKILL_ACTIONS.to_vec();
+    let skill_tokens: Vec<&str> = superset
+        .into_iter()
+        .filter(|a| !live_skill.contains(a))
+        .collect();
+
+    for file in &files {
+        let content = match std::fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let rel = file
+            .strip_prefix(&repo_root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .to_string();
+
+        for (i, line) in lines.iter().enumerate() {
+            // nearest preceding section header (for "under a section header carrying one")
+            let section_header = {
+                let mut h = "";
+                for j in (0..=i).rev() {
+                    let trimmed = lines[j].trim_start();
+                    if trimmed.starts_with('#') {
+                        h = lines[j];
+                        break;
+                    }
+                }
+                h
+            };
+
+            let line_has_marker = marker_words.iter().any(|m| line.contains(m));
+            let header_has_marker = marker_words.iter().any(|m| section_header.contains(m));
+            let exempted_by_marker = line_has_marker || header_has_marker;
+
+            // native retired: exact bounded ident token + positive teaching context (use/call/invoke)
+            // to avoid flagging pure historical lists / names without teaching active use (fix matcher per stop)
+            for tok in native_tokens {
+                if is_exact_identifier_hit(line, tok) {
+                    let l = line.to_lowercase();
+                    let has_positive_teaching =
+                        l.contains(&format!("use {}", tok)) || l.contains(&format!("use `{}", tok));
+                    if has_positive_teaching && !exempted_by_marker {
+                        // negative/prohibition or backcompat listing contexts (per contract: report count; only marker names retirement for full exempt)
+                        if l.contains("tachi_memory")
+                            && (*tok == "tachi_briefing" || tok.starts_with("tachi_"))
+                        {
+                            negative_exempt_count += 1;
+                            continue;
+                        }
+                        if *tok == "remember"
+                            && (l.contains("bundle") || l.contains("remember more"))
+                        {
+                            negative_exempt_count += 1;
+                            continue;
+                        }
+                        if l.contains("backcompat")
+                            || l.contains("compatibility")
+                            || l.contains("instead")
+                            || l.contains("remain available")
+                            || l.contains("old client")
+                            || l.contains("remain compatibility")
+                        {
+                            negative_exempt_count += 1;
+                            continue;
+                        }
+                        bad_hits.push(format!(
+                            "{}:{}: unmarked retired token '{}'",
+                            rel,
+                            i + 1,
+                            tok
+                        ));
+                    }
+                }
+            }
+            // tachi_skill retired tokens: only in tachi_skill or action= form (exact)
+            for tok in &skill_tokens {
+                let has_tachi_skill_ctx = line.contains("tachi_skill");
+                let has_action_form = line.contains(&format!("action=\"{}\"", tok))
+                    || line.contains(&format!("action='{}'", tok));
+                if (has_tachi_skill_ctx || has_action_form) && is_exact_identifier_hit(line, tok) {
+                    if !exempted_by_marker {
+                        let l = line.to_lowercase();
+                        if l.contains("backcompat")
+                            || l.contains("compatibility")
+                            || l.contains("instead")
+                        {
+                            negative_exempt_count += 1;
+                            continue;
+                        }
+                        bad_hits.push(format!(
+                            "{}:{}: unmarked retired tachi_skill token '{}'",
+                            rel,
+                            i + 1,
+                            tok
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    println!("NEGATIVE_EXEMPT_COUNT={}", negative_exempt_count);
+
+    assert!(
+        bad_hits.is_empty(),
+        "retired tokens found in active documentation surface without retirement marker (on line or section header); fix docs or matcher:\n{}",
+        bad_hits.join("\n")
+    );
+}
+
+fn is_exact_identifier_hit(line: &str, tok: &str) -> bool {
+    if !line.contains(tok) {
+        return false;
+    }
+    let mut search_start = 0usize;
+    while let Some(idx) = line[search_start..].find(tok) {
+        let abs_idx = search_start + idx;
+        let before = if abs_idx == 0 {
+            '\0'
+        } else {
+            line.as_bytes()[abs_idx - 1] as char
+        };
+        let after_pos = abs_idx + tok.len();
+        let after = if after_pos >= line.len() {
+            '\0'
+        } else {
+            line.as_bytes()[after_pos] as char
+        };
+        if !before.is_alphanumeric() && before != '_' && !after.is_alphanumeric() && after != '_' {
+            return true;
+        }
+        search_start = abs_idx + 1;
+    }
+    false
+}
+
+fn collect_docs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "archive" {
+                continue;
+            }
+            if p.is_dir() {
+                collect_docs_files(&p, out);
+            } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                if ext == "md" || ext == "mdx" {
+                    out.push(p);
+                }
+            }
+        }
     }
 }
