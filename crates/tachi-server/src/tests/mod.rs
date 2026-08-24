@@ -161,10 +161,13 @@ impl Drop for TestServer {
     }
 }
 
-/// Path to a schema-initialized SQLite file, built once per test executable
+/// Path to a schema/migrations-only SQLite file, built once per test executable
 /// artifact, that every `make_server*` call below copies from instead of
 /// paying `MemoryServer::new`'s full DDL + `ensure_column` + data-migration
-/// chain on a brand-new empty file. `run_data_migrations` is already
+/// chain on a brand-new empty file. Constructor-seeded hub capabilities and
+/// sandbox policies are removed before publication so each copied store gets
+/// only the seed state appropriate to its role when the server opens it.
+/// `run_data_migrations` is already
 /// exercised twice-in-a-row by memcore's own migration tests (see
 /// `crates/memcore/src/db/migrations.rs`), so re-running the same
 /// startup path against an already-migrated file is a normal, supported
@@ -172,32 +175,127 @@ impl Drop for TestServer {
 /// not a special case invented for this fixture (issue #682 template-DB
 /// fixture, G2).
 /// The template lives outside `test_fixture_root` at a stable path keyed by
-/// the test executable's identity (path + size + mtime), NOT behind a
-/// process-local `OnceLock` alone. Nextest runs each test in its own process,
-/// so a per-process cache would rebuild the template for every single test
-/// and make the suite slower, not faster. Keying on the executable means a
-/// recompile (which is the only way the schema/migration chain can change)
-/// automatically gets a fresh template, while all test processes of one
-/// build share one file. The guard-only environment override gives the
-/// cross-process regression test an isolated cache without changing the
-/// production default.
+/// identity compiled into the running image: Git SHA, package version, schema
+/// version, and embedded template/schema/migration source bytes. `current_exe`
+/// selects only the cache parent; mutable executable-path metadata does not
+/// define identity. Nextest runs each test in its own process, so a
+/// process-local cache would rebuild the template for every test. The
+/// guard-only environment override gives cross-process regression tests an
+/// isolated cache without changing the production default.
+struct TemplateDbCache {
+    path: std::path::PathBuf,
+    _use_lock: TemplateCacheUseLock,
+}
+
+macro_rules! embedded_template_source {
+    ($path:literal) => {
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), $path))
+    };
+}
+
+// `GIT_SHA` is `"unknown"` in source archives and stays unchanged for dirty
+// local builds. These bytes are compiled into the running image, so changes
+// to the template builder or complete schema/migration chain still select a
+// new cache identity without reopening the mutable executable pathname.
+const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
+    embedded_template_source!("/src/tests/mod.rs"),
+    embedded_template_source!("/src/server_state/init.rs"),
+    embedded_template_source!("/src/builtins.rs"),
+    embedded_template_source!("/src/builtins/coding.rs"),
+    embedded_template_source!("/src/builtins/helpers.rs"),
+    embedded_template_source!("/src/builtins/mcp.rs"),
+    embedded_template_source!("/src/builtins/seed.rs"),
+    embedded_template_source!("/src/builtins/superpowers.rs"),
+    embedded_template_source!("/src/builtins/trading.rs"),
+    embedded_template_source!("/src/builtins/waza.rs"),
+    embedded_template_source!("/../memcore/src/db/store_profile.rs"),
+    embedded_template_source!("/../memcore/src/db/schema.rs"),
+    embedded_template_source!("/../memcore/src/db/schema/ddl.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/a2a_body_retention.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/basic.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/cross_db.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/dispatch_adjudications.rs"),
+    embedded_template_source!(
+        "/../memcore/src/db/migrations/dispatch_outcomes_attribution_basis.rs"
+    ),
+    embedded_template_source!(
+        "/../memcore/src/db/migrations/dispatch_outcomes_identity_receipt.rs"
+    ),
+    embedded_template_source!("/../memcore/src/db/migrations/dispatch_outcomes_reported.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/domain_retire.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/exec_env_class.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/hard_state_index.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/harness_session_attachments.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/identity_workclaim_spine.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/idless_identity.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/legacy_columns.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/mirror_eval.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/pack_retire.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/sentinel.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/session_claims_identity.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/symbolic_fts.rs"),
+];
+
+fn extend_template_cache_fingerprint(hash: &mut u64, bytes: &[u8]) {
+    // Deterministic FNV-1a with component lengths to preserve boundaries.
+    for byte in (bytes.len() as u64).to_le_bytes().iter().chain(bytes) {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+fn template_cache_fingerprint_for_sources(sources: &[&[u8]]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325;
+    extend_template_cache_fingerprint(&mut hash, crate::build_info::GIT_SHA.as_bytes());
+    extend_template_cache_fingerprint(&mut hash, env!("CARGO_PKG_VERSION").as_bytes());
+    extend_template_cache_fingerprint(
+        &mut hash,
+        &memcore::db::migrations::EXPECTED_SCHEMA_VERSION.to_le_bytes(),
+    );
+    for source in sources {
+        extend_template_cache_fingerprint(&mut hash, source);
+    }
+    hash
+}
+
+fn template_cache_fingerprint() -> u64 {
+    template_cache_fingerprint_for_sources(TEMPLATE_IDENTITY_SOURCE_BLOBS)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PublishedTemplateState {
+    Missing,
+    RegularFile,
+}
+
+fn published_template_state(path: &std::path::Path) -> std::io::Result<PublishedTemplateState> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(PublishedTemplateState::RegularFile),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "test template cache path is not a direct regular file: {}",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(PublishedTemplateState::Missing)
+        }
+        Err(error) => Err(template_cache_io_error(
+            "inspect published test template",
+            path,
+            error,
+        )),
+    }
+}
+
 fn template_db_path() -> &'static std::path::PathBuf {
-    static TEMPLATE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    TEMPLATE.get_or_init(|| {
+    static TEMPLATE: std::sync::OnceLock<TemplateDbCache> = std::sync::OnceLock::new();
+    let cache = TEMPLATE.get_or_init(|| {
         ensure_test_env();
         let executable = std::env::current_exe().expect("test executable path");
-        let metadata = std::fs::metadata(&executable).expect("test executable metadata");
-        let fingerprint = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::hash::DefaultHasher::new();
-            executable.hash(&mut hasher);
-            metadata.len().hash(&mut hasher);
-            metadata
-                .modified()
-                .expect("test executable mtime")
-                .hash(&mut hasher);
-            hasher.finish()
-        };
+        let fingerprint = template_cache_fingerprint();
         let cache_root = std::env::var_os(TEMPLATE_CACHE_ROOT_ENV)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
@@ -208,25 +306,50 @@ fn template_db_path() -> &'static std::path::PathBuf {
             });
         std::fs::create_dir_all(&cache_root).expect("create test template cache directory");
         let path = cache_root.join(format!(
-            "memory-server-test-template-{fingerprint:016x}.sqlite"
+            "{TEMPLATE_PUBLISHED_PREFIX}{fingerprint:016x}.sqlite"
         ));
-        if path.is_file() {
-            return path;
-        }
-        if path.exists() {
+        let mut use_lock = TemplateCacheUseLock::acquire(&cache_root)
+            .expect("acquire test template cache use lock");
+        use_lock
+            .reap_stale_entries(
+                &cache_root,
+                &path,
+                TEMPLATE_CACHE_MAX_AGE,
+                std::time::SystemTime::now(),
+            )
+            .expect("reap stale test template cache entries");
+        use_lock
+            .retain_shared()
+            .expect("retain shared test template cache use lock");
+        // Lock ordering is global use lock (shared for process lifetime), then
+        // the one persistent builder-election lock. Cleanup needs the global
+        // exclusive lock and never takes the builder lock, so there is no
+        // reverse edge. Every worker re-checks the direct entry only after
+        // winning builder election.
+        let builder_lock = acquire_template_builder_lock(&cache_root)
+            .expect("acquire test template builder-election lock");
+        match published_template_state(&path).unwrap_or_else(|error| {
             panic!(
-                "test template cache path exists but is not a file: {}",
+                "validate published test template {}: {error}",
                 path.display()
-            );
+            )
+        }) {
+            PublishedTemplateState::RegularFile => {
+                return TemplateDbCache {
+                    path,
+                    _use_lock: use_lock,
+                };
+            }
+            PublishedTemplateState::Missing => {}
         }
 
         // Build at a unique scratch path first, then atomically publish into
-        // place so concurrent test processes never observe a half-written
-        // template. If several processes race, each builds an equivalent
-        // file; Unix permits the later rename to replace the first, while
-        // platforms that reject replacement use the already-published file.
+        // place so no process observes a half-written template. The persistent
+        // builder lock serializes all fingerprints without leaking one lock
+        // file per rebuild; the re-check above makes exactly one cold worker
+        // perform this work.
         let build = cache_root.join(format!(
-            "memory-server-test-template-build-{}-{}.sqlite",
+            "{TEMPLATE_BUILD_PREFIX}{}-{}.sqlite",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
@@ -244,7 +367,7 @@ fn template_db_path() -> &'static std::path::PathBuf {
                 .checkpoint_wal_truncate()
                 .expect("checkpoint template test db fixture");
         } // `server` (and its connections) drop here before the rename.
-        clear_template_store_role_stamp(&build);
+        sanitize_template_for_copy(&build);
         for suffix in ["-wal", "-shm", ".migration-marker"] {
             let mut sidecar = build.clone().into_os_string();
             sidecar.push(suffix);
@@ -258,28 +381,67 @@ fn template_db_path() -> &'static std::path::PathBuf {
                 ),
             }
         }
+        if let Some(receipt_path) = std::env::var_os(TEMPLATE_BUILD_RECEIPT_ENV) {
+            use std::io::Write;
+            let receipt_path = std::path::PathBuf::from(receipt_path);
+            let mut receipt = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&receipt_path)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "open template build receipt {}: {error}",
+                        receipt_path.display()
+                    )
+                });
+            writeln!(
+                receipt,
+                "pid={} build={}",
+                std::process::id(),
+                build.display()
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "write template build receipt {}: {error}",
+                    receipt_path.display()
+                )
+            });
+        }
         match std::fs::rename(&build, &path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !path.is_file() {
+                match published_template_state(&path).unwrap_or_else(|state_error| {
                     panic!(
-                        "template publish raced with a non-file cache path: {}",
+                        "validate template publish race {}: {state_error}",
                         path.display()
-                    );
+                    )
+                }) {
+                    PublishedTemplateState::RegularFile => {}
+                    PublishedTemplateState::Missing => panic!(
+                        "template publish reported AlreadyExists but path is missing: {}",
+                        path.display()
+                    ),
                 }
                 std::fs::remove_file(&build).expect("remove losing concurrent test template build");
             }
             Err(error) => panic!("publish test template {}: {error}", path.display()),
         }
-        path
-    })
+        drop(builder_lock);
+        TemplateDbCache {
+            path,
+            _use_lock: use_lock,
+        }
+    });
+    &cache.path
 }
 
-/// Strip the template's `store_identity/role` stamp before it is published.
+/// Strip constructor-seeded state and the template's `store_identity/role`
+/// stamp before publication.
 ///
-/// The template is a schema **shape**, but it is produced by a real
+/// The template is a schema/migrations **shape**, but it is produced by a real
 /// `MemoryServer::new`, and that constructor legitimately confers the role
-/// `"global"` on its own global store (`server_state/init.rs`). Since
+/// `"global"` and seeds builtin hub capabilities and sandbox policies in its
+/// own global store (`server_state/init.rs`). Since
 /// tachi#1579 that conferral is a write-once row *inside the file*, so
 /// [`copy_template_db`]'s `fs::copy` would clone one server's identity into
 /// every fixture database below — including project and named-project stores.
@@ -295,10 +457,22 @@ fn template_db_path() -> &'static std::path::PathBuf {
 /// what a real database does. The `store_identity/profile` row deliberately
 /// stays: every copy really is the `tachi_full` shape the template was built
 /// with, and profile is not a per-copy fact.
-fn clear_template_store_role_stamp(build: &std::path::Path) {
-    let conn =
-        rusqlite::Connection::open(build).expect("open template test db fixture for unstamping");
-    conn.execute(
+///
+/// This scratch database is brand-new and dedicated to the test template, so
+/// whole-table deletion is intentional: a published template must contain no
+/// cached builtin rows that a copied project store could use to shadow the
+/// freshly seeded global definitions.
+fn sanitize_template_for_copy(build: &std::path::Path) {
+    let mut conn =
+        rusqlite::Connection::open(build).expect("open template test db fixture for sanitizing");
+    let tx = conn
+        .transaction()
+        .expect("begin template test db sanitization");
+    tx.execute("DELETE FROM sandbox_policies", [])
+        .expect("clear template sandbox policies");
+    tx.execute("DELETE FROM hub_capabilities", [])
+        .expect("clear template hub capabilities");
+    tx.execute(
         "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
         params![
             memcore::db::store_profile::STORE_IDENTITY_NAMESPACE,
@@ -306,18 +480,20 @@ fn clear_template_store_role_stamp(build: &std::path::Path) {
         ],
     )
     .expect("clear template store-identity role stamp");
-    // Fold this write into the base file too: the caller removes the `-wal`
-    // sidecar next, so an unflushed delete would be silently discarded and the
-    // published template would still carry the role.
+    tx.commit().expect("commit template test db sanitization");
+    // Fold these writes into the base file too: the caller removes the `-wal`
+    // sidecar next, so unflushed deletes would be silently discarded and the
+    // published template would still carry constructor seed state or its role.
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-        .expect("checkpoint template test db fixture after unstamping");
+        .expect("checkpoint template test db fixture after sanitizing");
 }
 
-/// Copy the schema-initialized template into `dest` so the caller's
+/// Copy the schema/migrations-only template into `dest` so the caller's
 /// subsequent `MemoryServer::new` finds an already-migrated file. The
 /// template is checkpointed with `wal_checkpoint(TRUNCATE)` before publish,
 /// so the base file alone is a complete snapshot (no sidecars to copy), and
-/// carries no `store_identity` role (see [`clear_template_store_role_stamp`]).
+/// carries neither constructor-seeded hub/sandbox rows nor a `store_identity`
+/// role (see [`sanitize_template_for_copy`]).
 fn copy_template_db(dest: &std::path::Path) {
     std::fs::copy(template_db_path(), dest).expect("seed test db from template fixture");
 }
@@ -325,10 +501,1041 @@ fn copy_template_db(dest: &std::path::Path) {
 const TEMPLATE_CACHE_ROOT_ENV: &str = "TACHI_TEST_TEMPLATE_CACHE_ROOT";
 const TEMPLATE_GUARD_HELPER_ENV: &str = "TACHI_TEST_TEMPLATE_GUARD_HELPER";
 const TEMPLATE_GUARD_OUTPUT_ENV: &str = "TACHI_TEST_TEMPLATE_GUARD_OUTPUT";
+const TEMPLATE_BUILD_RECEIPT_ENV: &str = "TACHI_TEST_TEMPLATE_BUILD_RECEIPT";
+const TEMPLATE_LIFETIME_HELPER_ENV: &str = "TACHI_TEST_TEMPLATE_LIFETIME_HELPER";
+const TEMPLATE_LIFETIME_ROOT_ENV: &str = "TACHI_TEST_TEMPLATE_LIFETIME_ROOT";
+const TEMPLATE_LIFETIME_NOW_NANOS_ENV: &str = "TACHI_TEST_TEMPLATE_LIFETIME_NOW_NANOS";
+const TEMPLATE_PUBLISHED_PREFIX: &str = "memory-server-test-template-";
+const TEMPLATE_BUILD_PREFIX: &str = "memory-server-test-template-build-";
+
+/// A prior executable fingerprint older than one day is outside an ordinary
+/// test/build handoff, so this retention window time-bounds rebuild
+/// accumulation. Correctness does not depend on that age assumption: every
+/// process retains a shared cache-use lock with its cached path, and cleanup
+/// requires the exclusive lock. Unique build files additionally require a
+/// dead PID owner; the current published template is always preserved.
+const TEMPLATE_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const TEMPLATE_CACHE_LOCK_NAME: &str = "memory-server-test-template-cache.lock";
+const TEMPLATE_BUILDER_LOCK_NAME: &str = "memory-server-test-template-builder.lock";
+
+fn acquire_template_builder_lock(cache_root: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let lock_path = cache_root.join(TEMPLATE_BUILDER_LOCK_NAME);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            template_cache_io_error("open template builder lock", &lock_path, error)
+        })?;
+    file.lock().map_err(|error| {
+        template_cache_io_error("acquire template builder lock", &lock_path, error)
+    })?;
+    Ok(file)
+}
+
+struct TemplateCacheUseLock {
+    file: std::fs::File,
+    cleanup_permitted: bool,
+}
+
+impl TemplateCacheUseLock {
+    fn acquire(cache_root: &std::path::Path) -> std::io::Result<Self> {
+        let lock_path = cache_root.join(TEMPLATE_CACHE_LOCK_NAME);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| {
+                template_cache_io_error("open template cache use lock", &lock_path, error)
+            })?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self {
+                file,
+                cleanup_permitted: true,
+            }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                // Another active cache user or cleaner owns the conflicting
+                // lock. Wait only for its short exclusive cleanup phase, then
+                // retain a shared lock for this cached path's lifetime.
+                file.lock_shared().map_err(|error| {
+                    template_cache_io_error(
+                        "acquire shared template cache use lock",
+                        &lock_path,
+                        error,
+                    )
+                })?;
+                Ok(Self {
+                    file,
+                    cleanup_permitted: false,
+                })
+            }
+            Err(std::fs::TryLockError::Error(error)) => Err(template_cache_io_error(
+                "acquire exclusive template cache cleanup lock",
+                &lock_path,
+                error,
+            )),
+        }
+    }
+
+    fn cleanup_permitted(&self) -> bool {
+        self.cleanup_permitted
+    }
+
+    fn reap_stale_entries(
+        &self,
+        cache_root: &std::path::Path,
+        current_template: &std::path::Path,
+        max_age: std::time::Duration,
+        now: std::time::SystemTime,
+    ) -> std::io::Result<usize> {
+        if !self.cleanup_permitted {
+            return Ok(0);
+        }
+        reap_stale_template_cache_entries(cache_root, current_template, max_age, now)
+    }
+
+    fn retain_shared(&mut self) -> std::io::Result<()> {
+        if !self.cleanup_permitted {
+            return Ok(());
+        }
+        // Release the short cleanup lock before retaining shared use. Another
+        // cleaner may run in this gap, but this process has not inspected or
+        // cached its template path yet; once the shared lock is acquired, the
+        // subsequent path check/build remains protected for process lifetime.
+        self.file.unlock()?;
+        self.file.lock_shared()?;
+        self.cleanup_permitted = false;
+        Ok(())
+    }
+}
+
+enum TemplateCacheEntry {
+    Published,
+    Build { owner_pid: i32 },
+}
+
+fn recognized_template_cache_entry(name: &str) -> Option<TemplateCacheEntry> {
+    if let Some(build_name) = name.strip_prefix(TEMPLATE_BUILD_PREFIX) {
+        let identity = [
+            ".sqlite-wal",
+            ".sqlite-shm",
+            ".sqlite.migration-marker",
+            ".sqlite",
+        ]
+        .into_iter()
+        .find_map(|suffix| build_name.strip_suffix(suffix))?;
+        let (pid, build_id) = identity.split_once('-')?;
+        let owner_pid = pid.parse::<i32>().ok().filter(|pid| *pid > 1)?;
+        let parsed_build_id = uuid::Uuid::parse_str(build_id).ok()?;
+        if parsed_build_id.hyphenated().to_string() != build_id {
+            return None;
+        }
+        return Some(TemplateCacheEntry::Build { owner_pid });
+    }
+
+    let fingerprint = name
+        .strip_prefix(TEMPLATE_PUBLISHED_PREFIX)?
+        .strip_suffix(".sqlite")?;
+    if fingerprint.len() == 16
+        && fingerprint
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        Some(TemplateCacheEntry::Published)
+    } else {
+        None
+    }
+}
+
+fn template_cache_io_error(
+    action: &str,
+    path: &std::path::Path,
+    error: std::io::Error,
+) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!("{action} {}: {error}", path.display()),
+    )
+}
+
+fn reap_stale_template_cache_entries(
+    cache_root: &std::path::Path,
+    current_template: &std::path::Path,
+    max_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(cache_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(template_cache_io_error(
+                "read template cache directory",
+                cache_root,
+                error,
+            ));
+        }
+    };
+
+    let mut removed = 0;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let path = entry.path();
+        if path == current_template {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(kind) = recognized_template_cache_entry(file_name) else {
+            continue;
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(template_cache_io_error(
+                    "inspect template cache entry type",
+                    &path,
+                    error,
+                ));
+            }
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(template_cache_io_error(
+                    "inspect template cache entry metadata",
+                    &path,
+                    error,
+                ));
+            }
+        };
+        let modified = metadata.modified().map_err(|error| {
+            template_cache_io_error("read template cache entry mtime", &path, error)
+        })?;
+        let Some(age) = now.duration_since(modified).ok() else {
+            continue;
+        };
+        if age <= max_age {
+            continue;
+        }
+        if matches!(kind, TemplateCacheEntry::Build { owner_pid } if crate::daemon_lock::process_alive(owner_pid))
+        {
+            continue;
+        }
+
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(template_cache_io_error(
+                    "remove stale template cache entry",
+                    &path,
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(removed)
+}
+
+#[test]
+fn template_cache_fingerprint_uses_only_compiled_image_inputs() {
+    assert_eq!(
+        template_cache_fingerprint(),
+        template_cache_fingerprint_for_sources(TEMPLATE_IDENTITY_SOURCE_BLOBS)
+    );
+
+    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tests/mod.rs"));
+    let identity_source_list = source
+        .split_once("const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[")
+        .expect("template identity source list")
+        .1
+        .split_once("];\n\nfn extend_template_cache_fingerprint")
+        .expect("template identity source list boundary")
+        .0;
+    let path_function = source
+        .split_once("fn template_db_path()")
+        .expect("template_db_path source")
+        .1
+        .split_once("/// Strip constructor-seeded state")
+        .expect("template_db_path source boundary")
+        .0;
+    assert!(path_function.contains("template_cache_fingerprint()"));
+    assert!(!path_function.contains("std::fs::metadata"));
+    assert!(!path_function.contains(".modified()"));
+
+    let builtins_source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/builtins.rs"));
+    let builtins_root_path = format!("/src/{}.rs", "builtins");
+    assert!(
+        identity_source_list.contains(&builtins_root_path),
+        "builtin seed root is missing from the compiled template fingerprint"
+    );
+
+    let mut cfg_test = false;
+    let mut saw_test_module = false;
+    for line in builtins_source.lines() {
+        let line = line.trim();
+        if line == "#[cfg(test)]" {
+            cfg_test = true;
+            continue;
+        }
+        let Some(module) = line
+            .strip_prefix("mod ")
+            .and_then(|module| module.strip_suffix(';'))
+        else {
+            continue;
+        };
+        let embedded_path = format!("/src/builtins/{module}.rs");
+        if cfg_test {
+            assert_eq!(module, "tests", "unexpected cfg(test) builtin module");
+            assert!(
+                !identity_source_list.contains(&embedded_path),
+                "test-only builtin module must not affect the template fingerprint"
+            );
+            saw_test_module = true;
+        } else {
+            assert!(
+                identity_source_list.contains(&embedded_path),
+                "builtin seed module {module} is missing from the compiled template fingerprint"
+            );
+        }
+        cfg_test = false;
+    }
+    assert!(
+        saw_test_module,
+        "expected an explicitly cfg(test) builtin module"
+    );
+
+    let builtins_blob_index = TEMPLATE_IDENTITY_SOURCE_BLOBS
+        .iter()
+        .position(|blob| *blob == builtins_source.as_bytes())
+        .expect("builtins.rs must be embedded in the template fingerprint");
+    let mut changed_builtins = builtins_source.as_bytes().to_vec();
+    changed_builtins.extend_from_slice(b"\n// template fingerprint discriminator\n");
+    let mut changed_sources = TEMPLATE_IDENTITY_SOURCE_BLOBS.to_vec();
+    changed_sources[builtins_blob_index] = &changed_builtins;
+    assert_ne!(
+        template_cache_fingerprint(),
+        template_cache_fingerprint_for_sources(&changed_sources),
+        "changing compiled builtin seed source must change the template fingerprint"
+    );
+
+    let migrations_source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../memcore/src/db/migrations.rs"
+    ));
+    for module in migrations_source.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("mod ")
+            .and_then(|module| module.strip_suffix(';'))
+    }) {
+        let embedded_path = format!("/../memcore/src/db/migrations/{module}.rs");
+        assert!(
+            identity_source_list.contains(&embedded_path),
+            "migration module {module} is missing from the compiled template fingerprint"
+        );
+    }
+}
+
+#[test]
+fn template_copy_is_schema_only_for_seeded_state() {
+    let dir = tempfile::tempdir().expect("create raw template copy directory");
+    let copied = dir.path().join("template.sqlite");
+    copy_template_db(&copied);
+
+    let conn = rusqlite::Connection::open(&copied).expect("open raw copied template");
+    let seeded_counts: (i64, i64) = conn
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM hub_capabilities),
+                (SELECT COUNT(*) FROM sandbox_policies)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count seeded rows in raw copied template");
+    assert_eq!(
+        seeded_counts,
+        (0, 0),
+        "published template copies must not carry constructor-seeded hub capabilities or sandbox policies"
+    );
+
+    let profile_json: String = conn
+        .query_row(
+            "SELECT value_json FROM hard_state WHERE namespace = ?1 AND key = ?2",
+            params![
+                memcore::db::store_profile::STORE_IDENTITY_NAMESPACE,
+                memcore::db::store_profile::STORE_PROFILE_KEY
+            ],
+            |row| row.get(0),
+        )
+        .expect("copied template retains its store profile");
+    let profile: serde_json::Value =
+        serde_json::from_str(&profile_json).expect("parse copied template store profile");
+    assert_eq!(profile["value"], "tachi_full");
+}
+
+#[test]
+fn template_project_copy_does_not_shadow_global_builtin_seed() {
+    const BUILTIN_ID: &str = "skill:coding-architecture-decision";
+
+    let (server, _project_db) = make_server_with_project_fixture("template-builtin-shadow");
+    let global_builtin = server
+        .with_global_store_read(|store| {
+            store.hub_get(BUILTIN_ID).map_err(|error| error.to_string())
+        })
+        .expect("read representative builtin from global store");
+    let project_builtin = server
+        .with_project_store_read(|store| {
+            store.hub_get(BUILTIN_ID).map_err(|error| error.to_string())
+        })
+        .expect("read representative builtin from project store");
+
+    assert!(
+        global_builtin.is_some(),
+        "server initialization must seed the representative builtin into the global store"
+    );
+    assert!(
+        project_builtin.is_none(),
+        "project template copy must not retain a cached builtin that can shadow the refreshed global definition"
+    );
+}
+
+#[test]
+fn template_published_entry_requires_a_direct_regular_file() {
+    let cache = tempfile::tempdir().expect("template entry-state tempdir");
+    let missing = cache.path().join("missing.sqlite");
+    assert_eq!(
+        published_template_state(&missing).expect("inspect missing template entry"),
+        PublishedTemplateState::Missing
+    );
+
+    let regular = cache.path().join("regular.sqlite");
+    std::fs::write(&regular, b"template").expect("write regular template entry");
+    assert_eq!(
+        published_template_state(&regular).expect("inspect regular template entry"),
+        PublishedTemplateState::RegularFile
+    );
+
+    let directory = cache.path().join("directory.sqlite");
+    std::fs::create_dir(&directory).expect("create non-regular template entry");
+    let error = published_template_state(&directory)
+        .expect_err("directory template entry must fail loudly");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+    #[cfg(unix)]
+    {
+        let symlink = cache.path().join("symlink.sqlite");
+        std::os::unix::fs::symlink(&regular, &symlink).expect("create template entry symlink");
+        let error =
+            published_template_state(&symlink).expect_err("template symlink must not be followed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(&regular).expect("symlink rejection preserves target"),
+            b"template"
+        );
+    }
+}
+
+#[test]
+fn template_cache_reaps_stale_recognized_entries_only() {
+    let cache = tempfile::tempdir().expect("template cache tempdir");
+    let current = cache
+        .path()
+        .join("memory-server-test-template-1111111111111111.sqlite");
+    let prior = cache
+        .path()
+        .join("memory-server-test-template-2222222222222222.sqlite");
+    let dead_pid = 2_000_000_001i32;
+    assert!(
+        !crate::daemon_lock::process_alive(dead_pid),
+        "fixture assumes pid {dead_pid} is dead"
+    );
+    let abandoned = cache.path().join(format!(
+        "memory-server-test-template-build-{dead_pid}-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.sqlite"
+    ));
+    let abandoned_wal = {
+        let mut path = abandoned.clone().into_os_string();
+        path.push("-wal");
+        std::path::PathBuf::from(path)
+    };
+    let active = cache.path().join(format!(
+        "memory-server-test-template-build-{}-aaaaaaaa-bbbb-cccc-dddd-ffffffffffff.sqlite",
+        std::process::id()
+    ));
+    let unrecognized = cache
+        .path()
+        .join("memory-server-test-template-not-a-fingerprint.sqlite");
+
+    for path in [
+        &current,
+        &prior,
+        &abandoned,
+        &abandoned_wal,
+        &active,
+        &unrecognized,
+    ] {
+        std::fs::write(path, b"fixture").expect("write template cache fixture");
+    }
+    let newest_mtime = [
+        &current,
+        &prior,
+        &abandoned,
+        &abandoned_wal,
+        &active,
+        &unrecognized,
+    ]
+    .into_iter()
+    .map(|path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .expect("template cache fixture mtime")
+    })
+    .max()
+    .expect("template cache fixture mtime set");
+    let removed = reap_stale_template_cache_entries(
+        cache.path(),
+        &current,
+        TEMPLATE_CACHE_MAX_AGE,
+        newest_mtime + TEMPLATE_CACHE_MAX_AGE + std::time::Duration::from_secs(5),
+    )
+    .expect("reap stale template cache fixtures");
+
+    assert_eq!(removed, 3, "prior template + abandoned build and WAL");
+    assert!(current.exists(), "current template must always survive");
+    assert!(!prior.exists(), "stale prior fingerprint must be reaped");
+    assert!(!abandoned.exists(), "stale dead-owner build must be reaped");
+    assert!(
+        !abandoned_wal.exists(),
+        "stale dead-owner build WAL must be reaped"
+    );
+    assert!(active.exists(), "a live owner's build must survive");
+    assert!(
+        unrecognized.exists(),
+        "unrecognized cache entries are never owned by this reaper"
+    );
+}
+
+#[test]
+fn template_cache_preserves_young_recognized_entries() {
+    let cache = tempfile::tempdir().expect("template cache tempdir");
+    let current = cache
+        .path()
+        .join("memory-server-test-template-1111111111111111.sqlite");
+    let young_prior = cache
+        .path()
+        .join("memory-server-test-template-2222222222222222.sqlite");
+    let dead_pid = 2_000_000_001i32;
+    assert!(
+        !crate::daemon_lock::process_alive(dead_pid),
+        "fixture assumes pid {dead_pid} is dead"
+    );
+    let young_abandoned = cache.path().join(format!(
+        "memory-server-test-template-build-{dead_pid}-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.sqlite"
+    ));
+    for path in [&current, &young_prior, &young_abandoned] {
+        std::fs::write(path, b"fixture").expect("write young template cache fixture");
+    }
+
+    let removed = reap_stale_template_cache_entries(
+        cache.path(),
+        &current,
+        TEMPLATE_CACHE_MAX_AGE,
+        std::time::SystemTime::now(),
+    )
+    .expect("scan young template cache fixtures");
+
+    assert_eq!(removed, 0);
+    assert!(current.exists());
+    assert!(young_prior.exists(), "young prior template must survive");
+    assert!(
+        young_abandoned.exists(),
+        "young dead-owner build must survive the age gate"
+    );
+}
+
+const TEMPLATE_LIFETIME_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+const TEMPLATE_LIFETIME_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+struct TemplateHelperChild {
+    child: Option<std::process::Child>,
+    name: String,
+}
+
+impl TemplateHelperChild {
+    fn new(child: std::process::Child, name: String) -> Self {
+        Self {
+            child: Some(child),
+            name,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut std::process::Child {
+        self.child.as_mut().expect("template helper disarmed")
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child_mut().try_wait()
+    }
+
+    fn terminate_if_running(&mut self) -> std::io::Result<()> {
+        if let Ok(Some(_)) = self.try_wait() {
+            return Ok(());
+        }
+        match self.child_mut().kill() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Ok(Some(_)) = self.try_wait() {
+                    return Ok(());
+                }
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    fn collect_terminal_output(&mut self) -> std::io::Result<std::process::Output> {
+        use std::io::Read;
+
+        let mut child = self.child.take().expect("template helper disarmed");
+        let status = child.wait()?;
+        let mut stdout = Vec::new();
+        let stdout_error = child
+            .stdout
+            .take()
+            .and_then(|mut pipe| pipe.read_to_end(&mut stdout).err());
+        let mut stderr = Vec::new();
+        let stderr_error = child
+            .stderr
+            .take()
+            .and_then(|mut pipe| pipe.read_to_end(&mut stderr).err());
+        if let Some(error) = stdout_error.or(stderr_error) {
+            return Err(error);
+        }
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn wait_and_collect(&mut self) -> std::io::Result<std::process::Output> {
+        self.collect_terminal_output()
+    }
+}
+
+impl Drop for TemplateHelperChild {
+    fn drop(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+        if let Err(error) = self.terminate_if_running() {
+            eprintln!(
+                "terminate template helper {} during cleanup: {error}",
+                self.name
+            );
+        }
+        if let Err(error) = self.wait_and_collect() {
+            eprintln!("reap template helper {} during cleanup: {error}", self.name);
+        }
+    }
+}
+
+fn spawn_template_helper(command: &mut std::process::Command, name: String) -> TemplateHelperChild {
+    match command.spawn() {
+        Ok(child) => TemplateHelperChild::new(child, name),
+        Err(error) => panic!("spawn template helper {name}: {error}"),
+    }
+}
+
+fn wait_for_template_lifetime_signal(path: &std::path::Path, signal: &str) {
+    let deadline = std::time::Instant::now() + TEMPLATE_LIFETIME_WAIT;
+    loop {
+        match path.try_exists() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => panic!(
+                "inspect template lifetime {signal} {}: {error}",
+                path.display()
+            ),
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out after {TEMPLATE_LIFETIME_WAIT:?} waiting for template lifetime {signal} {}",
+            path.display()
+        );
+        std::thread::sleep(remaining.min(TEMPLATE_LIFETIME_POLL));
+    }
+}
+
+fn wait_for_template_lifetime_ready_child(
+    child: &mut TemplateHelperChild,
+    ready: &std::path::Path,
+) {
+    let deadline = std::time::Instant::now() + TEMPLATE_LIFETIME_WAIT;
+    loop {
+        match ready.try_exists() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => panic!(
+                "inspect template lifetime holder ready file {}: {error}",
+                ready.display()
+            ),
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child
+                    .collect_terminal_output()
+                    .expect("collect exited template lifetime holder output");
+                panic!(
+                    "template lifetime holder exited before ready: {}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(None) => {}
+            Err(error) => panic!("poll template lifetime holder: {error}"),
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            let kill_error = child.terminate_if_running().err();
+            let output = child
+                .wait_and_collect()
+                .expect("collect timed-out template lifetime holder output");
+            panic!(
+                "timed out after {TEMPLATE_LIFETIME_WAIT:?} waiting for template lifetime holder ready; kill_error={kill_error:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(remaining.min(TEMPLATE_LIFETIME_POLL));
+    }
+}
+
+fn wait_for_template_lifetime_child(
+    child: &mut TemplateHelperChild,
+    child_name: &str,
+) -> std::process::Output {
+    let deadline = std::time::Instant::now() + TEMPLATE_LIFETIME_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child.collect_terminal_output().unwrap_or_else(|error| {
+                    panic!("collect template lifetime {child_name}: {error}")
+                });
+            }
+            Ok(None) => {}
+            Err(error) => panic!("poll template lifetime {child_name}: {error}"),
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            let kill_error = child.terminate_if_running().err();
+            let output = child.wait_and_collect().unwrap_or_else(|error| {
+                panic!("collect timed-out template lifetime {child_name}: {error}")
+            });
+            panic!(
+                "template lifetime {child_name} timed out after {TEMPLATE_LIFETIME_WAIT:?}; kill_error={kill_error:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(remaining.min(TEMPLATE_LIFETIME_POLL));
+    }
+}
+
+#[test]
+fn template_cache_active_user_blocks_prior_fingerprint_cleanup() {
+    if let Some(mode) = std::env::var_os(TEMPLATE_LIFETIME_HELPER_ENV) {
+        let mode = mode
+            .into_string()
+            .expect("template lifetime helper mode must be UTF-8");
+        let cache_root = std::path::PathBuf::from(
+            std::env::var_os(TEMPLATE_LIFETIME_ROOT_ENV)
+                .expect("template lifetime helper cache root"),
+        );
+        let prior = cache_root.join("memory-server-test-template-1111111111111111.sqlite");
+        let current = cache_root.join("memory-server-test-template-2222222222222222.sqlite");
+        let injected_now_nanos = std::env::var(TEMPLATE_LIFETIME_NOW_NANOS_ENV)
+            .expect("template lifetime helper injected now")
+            .parse::<u64>()
+            .expect("template lifetime helper injected now nanoseconds");
+        let injected_now =
+            std::time::UNIX_EPOCH + std::time::Duration::from_nanos(injected_now_nanos);
+
+        match mode.as_str() {
+            "hold-shared" => {
+                let mut use_lock = TemplateCacheUseLock::acquire(&cache_root)
+                    .expect("holder acquires template cache lock");
+                assert!(
+                    use_lock.cleanup_permitted(),
+                    "holder must be the initial exclusive acquirer"
+                );
+                use_lock
+                    .retain_shared()
+                    .expect("holder retains shared template cache lock");
+                let ready = cache_root.join("holder.ready");
+                std::fs::write(&ready, b"shared-lock-held")
+                    .expect("record template lifetime holder readiness");
+                println!("template_lifetime mode=hold-shared state=ready shared=true");
+
+                wait_for_template_lifetime_signal(
+                    &cache_root.join("holder.release"),
+                    "holder release",
+                );
+                let copied = cache_root.join("holder-later-copy.sqlite");
+                std::fs::copy(&prior, &copied)
+                    .expect("active holder must still copy its cached prior template");
+                assert_eq!(
+                    std::fs::read(&copied).expect("read active holder later copy"),
+                    b"cached template"
+                );
+                println!("template_lifetime mode=hold-shared state=released prior_copy_ok=true");
+            }
+            "probe-active" => {
+                let use_lock = TemplateCacheUseLock::acquire(&cache_root)
+                    .expect("active probe acquires template cache lock");
+                assert!(
+                    !use_lock.cleanup_permitted(),
+                    "active probe must not obtain exclusive cleanup while holder is alive"
+                );
+                let removed = use_lock
+                    .reap_stale_entries(&cache_root, &current, TEMPLATE_CACHE_MAX_AGE, injected_now)
+                    .expect("active probe checks template cache cleanup");
+                let prior_exists = prior.exists();
+                let current_exists = current.exists();
+                assert_eq!(removed, 0);
+                assert!(prior_exists, "active holder's prior template must survive");
+                assert!(current_exists, "current template must survive active probe");
+                let result = format!(
+                    "cleanup_permitted=false removed={removed} prior_exists={prior_exists} current_exists={current_exists}"
+                );
+                std::fs::write(cache_root.join("probe-active.result"), &result)
+                    .expect("record active template lifetime probe");
+                println!("template_lifetime mode=probe-active {result}");
+            }
+            "probe-released" => {
+                let use_lock = TemplateCacheUseLock::acquire(&cache_root)
+                    .expect("released probe acquires template cache lock");
+                assert!(
+                    use_lock.cleanup_permitted(),
+                    "released probe must obtain exclusive cleanup after holder exits"
+                );
+                let removed = use_lock
+                    .reap_stale_entries(&cache_root, &current, TEMPLATE_CACHE_MAX_AGE, injected_now)
+                    .expect("released probe reaps prior template");
+                let prior_exists = prior.exists();
+                let current_exists = current.exists();
+                assert_eq!(
+                    removed, 1,
+                    "released probe must reap exactly the prior template"
+                );
+                assert!(
+                    !prior_exists,
+                    "released probe must remove the prior template"
+                );
+                assert!(
+                    current_exists,
+                    "released probe must preserve the current template"
+                );
+                let result = format!(
+                    "cleanup_permitted=true removed={removed} prior_exists={prior_exists} current_exists={current_exists}"
+                );
+                std::fs::write(cache_root.join("probe-released.result"), &result)
+                    .expect("record released template lifetime probe");
+                println!("template_lifetime mode=probe-released {result}");
+            }
+            _ => panic!("unknown template lifetime helper mode: {mode}"),
+        }
+        return;
+    }
+
+    let cache = tempfile::tempdir().expect("template cache tempdir");
+    let cached_by_process_a = cache
+        .path()
+        .join("memory-server-test-template-1111111111111111.sqlite");
+    let current_for_process_b = cache
+        .path()
+        .join("memory-server-test-template-2222222222222222.sqlite");
+    std::fs::write(&cached_by_process_a, b"cached template")
+        .expect("write process A cached template");
+    std::fs::write(&current_for_process_b, b"new template")
+        .expect("write process B current template");
+    let newest_mtime = [&cached_by_process_a, &current_for_process_b]
+        .into_iter()
+        .map(|path| {
+            std::fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .expect("active-user template mtime")
+        })
+        .max()
+        .expect("active-user template mtime set");
+    let injected_now = newest_mtime + TEMPLATE_CACHE_MAX_AGE + std::time::Duration::from_secs(5);
+    let injected_now_nanos: u64 = injected_now
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("active-user injected now after Unix epoch")
+        .as_nanos()
+        .try_into()
+        .expect("active-user injected now fits nanoseconds in u64");
+    let injected_now_nanos = injected_now_nanos.to_string();
+
+    let executable = std::env::current_exe().expect("current test executable");
+    let test_name = "tests::template_cache_active_user_blocks_prior_fingerprint_cleanup";
+    let spawn_helper = |mode: &str| {
+        spawn_template_helper(
+            std::process::Command::new(&executable)
+                .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+                .env(TEMPLATE_LIFETIME_HELPER_ENV, mode)
+                .env(TEMPLATE_LIFETIME_ROOT_ENV, cache.path())
+                .env(TEMPLATE_LIFETIME_NOW_NANOS_ENV, &injected_now_nanos)
+                .env("CARGO_TERM_COLOR", "never")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+            format!("template lifetime helper {mode}"),
+        )
+    };
+
+    let mut holder = spawn_helper("hold-shared");
+    wait_for_template_lifetime_ready_child(&mut holder, &cache.path().join("holder.ready"));
+
+    let mut active_probe_child = spawn_helper("probe-active");
+    let active_probe =
+        wait_for_template_lifetime_child(&mut active_probe_child, "active-cleanup probe");
+    assert!(
+        active_probe.status.success(),
+        "active-cleanup probe failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&active_probe.stdout),
+        String::from_utf8_lossy(&active_probe.stderr)
+    );
+    let active_result = std::fs::read_to_string(cache.path().join("probe-active.result"))
+        .expect("read active template lifetime probe result");
+    assert_eq!(
+        active_result, "cleanup_permitted=false removed=0 prior_exists=true current_exists=true",
+        "active-cleanup probe must discriminate exclusive cleanup denial"
+    );
+    assert!(
+        cached_by_process_a.exists(),
+        "active holder's prior template must remain before release"
+    );
+
+    std::fs::write(cache.path().join("holder.release"), b"release")
+        .expect("release template lifetime holder");
+    let holder = wait_for_template_lifetime_child(&mut holder, "holder");
+    assert!(
+        holder.status.success(),
+        "template lifetime holder failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&holder.stdout),
+        String::from_utf8_lossy(&holder.stderr)
+    );
+
+    let mut released_probe_child = spawn_helper("probe-released");
+    let released_probe =
+        wait_for_template_lifetime_child(&mut released_probe_child, "released-cleanup probe");
+    assert!(
+        released_probe.status.success(),
+        "released-cleanup probe failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&released_probe.stdout),
+        String::from_utf8_lossy(&released_probe.stderr)
+    );
+    let released_result = std::fs::read_to_string(cache.path().join("probe-released.result"))
+        .expect("read released template lifetime probe result");
+    assert_eq!(
+        released_result, "cleanup_permitted=true removed=1 prior_exists=false current_exists=true",
+        "released-cleanup probe must remove exactly the stale prior fingerprint"
+    );
+
+    println!(
+        "{}\n{}\n{}",
+        String::from_utf8_lossy(&holder.stdout).trim(),
+        String::from_utf8_lossy(&active_probe.stdout).trim(),
+        String::from_utf8_lossy(&released_probe.stdout).trim()
+    );
+}
+
+#[test]
+fn template_helper_guard_drop_reaps_holder_and_releases_lock() {
+    let cache = tempfile::tempdir().expect("template helper guard tempdir");
+    for (name, contents) in [
+        (
+            "memory-server-test-template-1111111111111111.sqlite",
+            b"cached template".as_slice(),
+        ),
+        (
+            "memory-server-test-template-2222222222222222.sqlite",
+            b"new template".as_slice(),
+        ),
+    ] {
+        std::fs::write(cache.path().join(name), contents)
+            .expect("write template helper guard fixture");
+    }
+    let injected_now_nanos: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("template helper guard time after Unix epoch")
+        .as_nanos()
+        .try_into()
+        .expect("template helper guard time fits nanoseconds in u64");
+    let executable = std::env::current_exe().expect("current test executable");
+    let helper_test = "tests::template_cache_active_user_blocks_prior_fingerprint_cleanup";
+    let mut holder = spawn_template_helper(
+        std::process::Command::new(&executable)
+            .args(["--exact", helper_test, "--nocapture", "--test-threads=1"])
+            .env(TEMPLATE_LIFETIME_HELPER_ENV, "hold-shared")
+            .env(TEMPLATE_LIFETIME_ROOT_ENV, cache.path())
+            .env(
+                TEMPLATE_LIFETIME_NOW_NANOS_ENV,
+                injected_now_nanos.to_string(),
+            )
+            .env("CARGO_TERM_COLOR", "never")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+        "template guard drop holder".to_string(),
+    );
+    let ready = cache.path().join("holder.ready");
+    let release = cache.path().join("holder.release");
+    wait_for_template_lifetime_ready_child(&mut holder, &ready);
+    assert!(
+        !release.exists(),
+        "drop regression must not release holder cleanly"
+    );
+
+    drop(holder);
+
+    assert!(
+        !release.exists(),
+        "holder must be terminated without release signal"
+    );
+    let fresh = TemplateCacheUseLock::acquire(cache.path())
+        .expect("fresh acquirer after template helper guard drop");
+    assert!(
+        fresh.cleanup_permitted(),
+        "reaped holder must release its shared cache lock"
+    );
+}
 
 #[test]
 fn template_db_path_is_shared_across_processes() {
-    if std::env::var_os(TEMPLATE_GUARD_HELPER_ENV).is_some() {
+    if let Some(mode) = std::env::var_os(TEMPLATE_GUARD_HELPER_ENV) {
+        assert_eq!(
+            mode, "resolve-template",
+            "unknown template guard helper mode"
+        );
         let output_path =
             std::env::var_os(TEMPLATE_GUARD_OUTPUT_ENV).expect("template guard helper output path");
         let template = template_db_path().clone();
@@ -347,6 +1554,7 @@ fn template_db_path_is_shared_across_processes() {
     let isolated_root = tempfile::tempdir().expect("create isolated template guard root");
     let isolated_tmp = isolated_root.path().join("tmp");
     let isolated_cache = isolated_root.path().join("cache");
+    let build_receipt = isolated_root.path().join("template-builds.txt");
     std::fs::create_dir_all(&isolated_tmp).expect("create isolated template guard tmp");
     std::fs::create_dir_all(&isolated_cache).expect("create isolated template guard cache");
 
@@ -356,29 +1564,27 @@ fn template_db_path_is_shared_across_processes() {
         let output_path = isolated_root
             .path()
             .join(format!("resolved-template-{index}.txt"));
-        std::process::Command::new(&executable)
-            .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
-            .env(TEMPLATE_GUARD_HELPER_ENV, "1")
-            .env(TEMPLATE_GUARD_OUTPUT_ENV, &output_path)
-            .env(TEMPLATE_CACHE_ROOT_ENV, &isolated_cache)
-            .env("TMPDIR", &isolated_tmp)
-            .env("TEMP", &isolated_tmp)
-            .env("TMP", &isolated_tmp)
-            .env("CARGO_TERM_COLOR", "never")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|error| panic!("spawn template guard child {index}: {error}"))
+        spawn_template_helper(
+            std::process::Command::new(&executable)
+                .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+                .env(TEMPLATE_GUARD_HELPER_ENV, "resolve-template")
+                .env(TEMPLATE_GUARD_OUTPUT_ENV, &output_path)
+                .env(TEMPLATE_BUILD_RECEIPT_ENV, &build_receipt)
+                .env(TEMPLATE_CACHE_ROOT_ENV, &isolated_cache)
+                .env("TMPDIR", &isolated_tmp)
+                .env("TEMP", &isolated_tmp)
+                .env("TMP", &isolated_tmp)
+                .env("CARGO_TERM_COLOR", "never")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+            format!("template guard child {index}"),
+        )
     };
 
-    let first = spawn_child(0);
-    let second = spawn_child(1);
-    let first = first
-        .wait_with_output()
-        .expect("wait for template guard child 0");
-    let second = second
-        .wait_with_output()
-        .expect("wait for template guard child 1");
+    let mut first_child = spawn_child(0);
+    let mut second_child = spawn_child(1);
+    let first = wait_for_template_lifetime_child(&mut first_child, "template guard child 0");
+    let second = wait_for_template_lifetime_child(&mut second_child, "template guard child 1");
 
     assert!(
         first.status.success(),
@@ -401,6 +1607,21 @@ fn template_db_path_is_shared_across_processes() {
         first_path,
         second_path,
         "template cache must be shared across processes\nchild 0 stdout:\n{}\nchild 0 stderr:\n{}\nchild 1 stdout:\n{}\nchild 1 stderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let receipts = std::fs::read_to_string(&build_receipt).unwrap_or_else(|error| {
+        panic!(
+            "read template build receipt {}: {error}",
+            build_receipt.display()
+        )
+    });
+    assert_eq!(
+        receipts.lines().count(),
+        1,
+        "exactly one process must build the shared template; receipts:\n{receipts}\nchild 0 stdout:\n{}\nchild 0 stderr:\n{}\nchild 1 stdout:\n{}\nchild 1 stderr:\n{}",
         String::from_utf8_lossy(&first.stdout),
         String::from_utf8_lossy(&first.stderr),
         String::from_utf8_lossy(&second.stdout),
