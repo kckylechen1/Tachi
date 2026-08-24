@@ -38,7 +38,7 @@ Typical roles:
 | `executor` | Implement a bounded slice | Small correct diff, local tests, no scope expansion |
 | `verifier` | Check completion evidence | Reproducible commands and clear pass/fail result |
 
-The leader records each helper in `tachi_complete.subagents` using structured
+The leader records each helper in `tachi_task(action="complete").subagents` using structured
 fields:
 
 ```json
@@ -72,7 +72,7 @@ Subagent eval rows are production eval data, not ordinary working memory.
 
 Current behavior:
 
-- `tachi_complete` writes task outcomes under `/eval/YYYY-MM-DD/<task_id>`.
+- `tachi_task(action="complete")` writes task outcomes under `/eval/YYYY-MM-DD/<task_id>`.
 - Eval rows use `category="eval"`.
 - Ordinary memory search excludes `/eval` / `category=eval`.
 - Explicit `/eval` scoped search can retrieve eval rows.
@@ -91,7 +91,7 @@ ledger or generated-column indexes instead of storing duplicate live state.
 3. Delegate only bounded, verifiable slices.
 4. Require each helper to report evidence, not just conclusions.
 5. The leader integrates, edits, verifies, and owns final output.
-6. Call `tachi_complete` with `subagents=[...]`.
+6. Call `tachi_task(action="complete", subagents=[...])`.
 7. Run `tachi_agent_eval(action="aggregate_live")` periodically to update
    routing hypotheses.
 

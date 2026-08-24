@@ -43,7 +43,7 @@ Inspired by [UltraCode-Shim](https://github.com/OnlyTerp/UltraCode-Shim/)'s prox
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Tachi Memory Server                           │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │tachi_staff │  │tachi_briefing│  │tachi_memory │  │tachi_task │  │
+│  │tachi_staff │  │tachi_briefing (RETIRED)│  │tachi_memory │  │tachi_task │  │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘  │
 │         └─────────────────┴─────────────────┴───────────────┘       │
 │                                 │                                   │
@@ -502,7 +502,7 @@ Output format: {output_format}
 Rules:
 - Always use the specified output format.
 - When calling tools, follow the exact JSON schema.
-- If you need more context, use tachi_briefing or tachi_memory tools.
+- If you need more context, use tachi_memory(action="briefing") or tachi_task(action="brief") tools. (tachi_briefing RETIRED)
 - Do not hallucinate file contents — read them via tools.
 ```
 
@@ -838,7 +838,7 @@ pub fn default_role_config(role: DispatchRole) -> RoleConfig {
 ```
 
 **Secretary integration points:**
-- `tachi_complete` → auto-check eval completeness (missing cost? missing diff?)
+- `tachi_complete` (RETIRED) → auto-check eval completeness (missing cost? missing diff?)  (use tachi_task(action="complete"))
 - `tachi_wiki_write` → auto-extract `references` from content if empty
 - `tachi_dispatch` → pre-flight cost heuristic, post-flight format normalization
 - Kanban → auto-suggest label/priority from card title/body

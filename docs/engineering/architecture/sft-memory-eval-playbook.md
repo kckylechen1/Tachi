@@ -146,7 +146,7 @@ Leader workflow:
    challenges risks, verifier checks completion evidence.
 3. Integrate child outputs into the final decision; the leader owns the patch.
 4. Run the real verification gate.
-5. Call `tachi_complete` with `subagents=[...]`.
+5. Call `tachi_task(action="complete", subagents=[...])`. (tachi_complete RETIRED)
 6. Use `tachi_agent_eval(action="aggregate_live")` to update routing policy
    from live evidence. For local fixture replay, set
    `TACHI_AGENT_EVAL_ALLOW_FIXTURE=1` and call
