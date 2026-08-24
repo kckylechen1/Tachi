@@ -129,19 +129,24 @@ if [[ -z "${SIMULATE_CARGO_VERSION:-}" ]]; then
   fi
 fi
 
-# A1 gh auth sanity (only if gh present; optional tool — do not add hard requirement)
+# gh auth check (A2/A3): gh is optional. Fail ONLY on token-env poisoning (the case where GH_TOKEN or GITHUB_TOKEN is set but invalid).
+# gh CLI resolves GH_TOKEN before GITHUB_TOKEN; we validate the EFFECTIVE resolution (run gh api user --jq .login).
+# When no env token set, gh absence-of-auth (e.g. isolated empty keyring) is NOT a setup failure — print skip and continue.
+# Remediation always names both unsets. Never print token material.
 if command -v gh >/dev/null 2>&1; then
-  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  token_vars=()
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then token_vars+=("GITHUB_TOKEN"); fi
+  if [[ -n "${GH_TOKEN:-}" ]]; then token_vars+=("GH_TOKEN"); fi
+  if ((${#token_vars[@]} > 0)); then
+    # token env(s) present — validate effective auth (GH_TOKEN wins if both)
     if ! gh api user --jq .login >/dev/null 2>&1; then
-      printf 'setup: FAILED -- gh auth sanity: GITHUB_TOKEN is set but invalid (shadows keyring entry)\n' >&2
-      printf '  remediation: env -u GITHUB_TOKEN or fix the token\n' >&2
+      printf 'setup: FAILED -- gh auth sanity: effective gh auth env invalid (set: %s)\n' "${token_vars[*]}" >&2
+      printf '  remediation: env -u GITHUB_TOKEN and env -u GH_TOKEN or fix the token\n' >&2
       exit 1
     fi
-  fi
-  if ! gh auth status >/dev/null 2>&1; then
-    printf 'setup: FAILED -- gh present but gh auth status does not resolve a usable token with ambient env\n' >&2
-    printf '  run `gh auth login` or ensure GITHUB_TOKEN/keyring provides valid token\n' >&2
-    exit 1
+  else
+    # no token env set: gh optional, skip auth check (even if no keyring); do not fail
+    printf 'setup: skip -- gh present but no token env set (gh is optional; keyring absence not a failure)\n'
   fi
 fi
 

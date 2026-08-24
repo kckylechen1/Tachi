@@ -119,24 +119,28 @@ jobs:
           printf '%s\n' \
             '#!/bin/sh' \
             'printf "rustc %s (fake)\n" "${SIMULATE_RUSTC_VERSION:-1.97.0}"' >"${setup_stub_dir}/rustc"
-          printf '%s\n' \
-            '#!/bin/sh' \
-            'printf "cargo-audit %s (fake)\n" "${SIMULATE_CARGO_AUDIT_VERSION:-0.22.2}"' >"${setup_stub_dir}/cargo-audit"
-          printf '%s\n' \
-            '#!/bin/sh' \
-            'printf "%s\n" "${SIMULATE_NODE_VERSION:-v20.0.0}"' >"${setup_stub_dir}/node"
-          chmod +x "${setup_stub_dir}"/*
+           printf '%s\n' \
+             '#!/bin/sh' \
+             'printf "cargo-audit %s (fake)\n" "${SIMULATE_CARGO_AUDIT_VERSION:-0.22.2}"' >"${setup_stub_dir}/cargo-audit"
+           printf '%s\n' \
+             '#!/bin/sh' \
+             'printf "cargo-clippy %s (fake)\n" "${SIMULATE_CLIPPY_VERSION:-0.1.97}"' >"${setup_stub_dir}/cargo-clippy"
+           printf '%s\n' \
+             '#!/bin/sh' \
+             'printf "%s\n" "${SIMULATE_NODE_VERSION:-v20.0.0}"' >"${setup_stub_dir}/node"
+           chmod +x "${setup_stub_dir}"/*
 
-          run_fake_setup() {
-            SIMULATE_MISSING_COMPONENT="${1:-}" \
-              SIMULATE_NODE_VERSION="${2:-v20.0.0}" \
-              SIMULATE_RUSTC_VERSION="${3:-1.97.0}" \
-              SIMULATE_CARGO_VERSION="${4:-1.97.0}" \
-              SIMULATE_CARGO_AUDIT_VERSION="${5:-0.22.2}" \
-              CARGO_HOME="${setup_test_root}/cargo-home" \
-              PATH="${setup_stub_dir}" \
-              /bin/bash .agents/setup >"${setup_test_root}/output" 2>&1
-          }
+           run_fake_setup() {
+             SIMULATE_MISSING_COMPONENT="${1:-}" \
+               SIMULATE_NODE_VERSION="${2:-v20.0.0}" \
+               SIMULATE_RUSTC_VERSION="${3:-1.97.0}" \
+               SIMULATE_CARGO_VERSION="${4-1.97.0}" \
+               SIMULATE_CARGO_AUDIT_VERSION="${5:-0.22.2}" \
+               SIMULATE_CLIPPY_VERSION="${6-0.1.97}" \
+               CARGO_HOME="${setup_test_root}/cargo-home" \
+               PATH="${setup_stub_dir}" \
+               /bin/bash .agents/setup >"${setup_test_root}/output" 2>&1
+           }
 
           run_fake_setup
           for tool in "${required_tools[@]}"; do
@@ -178,13 +182,22 @@ jobs:
             exit 1
           fi
           grep -F 'cargo=1.96.0(required:1.97.0)' "${setup_test_root}/output"
-          if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.1; then
-            echo 'setup accepted a mismatched cargo-audit' >&2
-            exit 1
-          fi
-          grep -F 'cargo-audit=0.22.1(required:0.22.2)' "${setup_test_root}/output"
+           if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.1; then
+             echo 'setup accepted a mismatched cargo-audit' >&2
+             exit 1
+           fi
+           grep -F 'cargo-audit=0.22.1(required:0.22.2)' "${setup_test_root}/output"
 
-  rust:
+           # A4: exercise clippy-version mapping through the guarded assertion (use "" for SIMULATE_CARGO_VERSION
+           # so -z guard is true and detailed pin runs; stubs report matching cargo/rustc but mismatched clippy)
+           if run_fake_setup "" v20.0.0 1.97.0 "" 0.22.2 0.1.96; then
+             echo 'setup accepted a mismatched effective clippy' >&2
+             exit 1
+           fi
+           grep -F 'cargo-clippy --version resolved to: 0.1.96' "${setup_test_root}/output"
+           grep -F 'required (derived from channel 1.97.0): 0.1.97' "${setup_test_root}/output"
+ 
+   rust:
     name: Rust workspace
     runs-on: ubuntu-24.04
     timeout-minutes: 30
