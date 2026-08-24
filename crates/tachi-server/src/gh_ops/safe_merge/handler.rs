@@ -124,27 +124,34 @@ pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Siz
         )
         .await;
     }
-    let mut verification_gate = match evaluate_verification_gate(flow_id, &pr.head_sha) {
-        Ok(gate) => gate,
-        Err(err) if flow_id.is_some() => Some(json!({
-            "flow_id": flow_id,
-            "overall": "failed",
-            "required_total": 0,
-            "current_head_sha": pr.head_sha,
-            "passed": [],
-            "failed": [],
-            "pending": [],
-            "stale": [],
-            "waiting_on": [],
-            "reasons": ["verification:invalid"],
-            "error": err,
-        })),
-        Err(err) => return Err(err),
-    };
+    // #1454 F1/F4: the gate reads the server-owned receipt store under the
+    // canonical Tachi home (`path_utils::tachi_home()` — the same funnel
+    // `MemoryServer::tachi_home_dir()` froze at construction; pinned equal by
+    // memory_server_tachi_home_dir_matches_canonical_resolution).
+    let verification_home = crate::path_utils::tachi_home();
+    let mut verification_gate =
+        match evaluate_verification_gate(flow_id, &pr.head_sha, &verification_home) {
+            Ok(gate) => gate,
+            Err(err) if flow_id.is_some() => Some(json!({
+                "flow_id": flow_id,
+                "overall": "failed",
+                "required_total": 0,
+                "current_head_sha": pr.head_sha,
+                "passed": [],
+                "failed": [],
+                "pending": [],
+                "stale": [],
+                "waiting_on": [],
+                "reasons": ["verification:invalid"],
+                "error": err,
+            })),
+            Err(err) => return Err(err),
+        };
     if verification_gate.is_none() && !tests_run.is_empty() {
         if let Some(fid) = flow_id {
             record_tests_run_verification(fid, repo, pr_number, &pr.head_sha, tests_run)?;
-            verification_gate = evaluate_verification_gate(flow_id, &pr.head_sha)?;
+            verification_gate =
+                evaluate_verification_gate(flow_id, &pr.head_sha, &verification_home)?;
         }
     }
     if verification_gate.is_none()
@@ -293,12 +300,12 @@ pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Siz
             },
             "requirement": policy.require_head_consistency,
             "source": if verification_satisfies_head_consistency(verification_gate.as_ref(), policy) {
-                "verification_ledger"
+                "verification_receipts"
             } else {
                 "single_pr_snapshot"
             },
             "note": if verification_satisfies_head_consistency(verification_gate.as_ref(), policy) {
-                "required verification ledger passed for the same PR head SHA; match-head-commit still pins the final merge command"
+                "server-run verification receipts passed for the same PR head SHA; match-head-commit still pins the final merge command"
             } else {
                 "gh_pr_checks does not expose independent head SHA data; match-head-commit still pins the final merge command"
             },
@@ -705,11 +712,13 @@ fn record_tests_run_verification(
         status: Some("passed".to_string()),
         exit_code: Some(0),
         log_path: None,
-        summary: Some("safe_merge recorded caller-supplied tests_run evidence".to_string()),
+        summary: Some("caller-supplied tests_run recorded as advisory only; merge authority requires tachi_verify action=run (server-executed) evidence (#1454)".to_string()),
         cwd: None,
         required: Some(true),
         limit: None,
         checks: Vec::new(),
+        check_kind: None,
+        timeout_secs: None,
     };
     record_verification_items(&params, "passed")
         .map(|_| ())

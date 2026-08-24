@@ -289,7 +289,16 @@ pub(crate) fn facade_action_effect(
         // Preserve the existing conservative treatment of these facades while
         // making the set exhaustive. Unknown actions receive no metadata.
         "tachi_skill" => (&["discover"], &[], &["run"]),
-        "tachi_verify" => (&[], &[], &["start", "record", "status", "board"]),
+        "tachi_verify" => (
+            &[],
+            &[],
+            &[
+                "start", "record", "status", "board",
+                // #1454 slice 2: server-executed checks are side-effecting
+                // (process spawn + ledger write) and never replay-safe.
+                "run",
+            ],
+        ),
         _ => return None,
     };
 
@@ -506,6 +515,30 @@ mod tests {
                 "{tool}(action='{action}') must remain unsafe to replay"
             );
         }
+    }
+
+    /// #1454 slice 2: `tachi_verify(action='run')` is a server-executed,
+    /// side-effecting check — a replayed DLQ retry would spawn a second
+    /// process run and double-write the ledger. It must never be classified
+    /// replay-safe, and the whole-facade cache-invalidating membership must
+    /// stay (the cache is invalidated regardless of which action runs).
+    #[test]
+    fn f1454_verify_run_action_is_never_replay_safe() {
+        assert!(dlq_unsafe("tachi_verify", Some("run")));
+        assert_eq!(
+            dlq_replay_metadata(
+                "tachi_verify",
+                Some(&serde_json::Map::from_iter([(
+                    "action".to_string(),
+                    Value::String("run".to_string())
+                )]))
+            ),
+            Some(ActionEffectMetadata::MUTATING_UNSAFE)
+        );
+        assert!(
+            CACHE_INVALIDATING_TOOLS.contains(&"tachi_verify"),
+            "tachi_verify must stay cache-invalidating (run/record/start all mutate the ledger)"
+        );
     }
 
     #[test]

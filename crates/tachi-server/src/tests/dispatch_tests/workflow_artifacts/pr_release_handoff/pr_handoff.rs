@@ -43,6 +43,37 @@ async fn tachi_gh_pr_handoff_writes_pr_body_with_verification_and_gaps() {
         .expect("verification json"),
     )
     .expect("write verification");
+    // #1454 F1/F6: the pr_handoff readiness verdict is the gate result over
+    // the server-owned receipt store (pr_handoff resolves the home via
+    // path_utils::tachi_home() == the pinned TACHI_HOME env here). No GitHub
+    // head exists in this flow status, so the receipt-store head is the best
+    // server-known head. Seed the full canonical set for a fixed head so the
+    // happy path (safe_to_open) stays green.
+    let receipt_head = "pr-handoff-fixture-head";
+    for kind in crate::verify_ops::MERGE_REQUIRED_RUN_KINDS {
+        let receipt = serde_json::json!({
+            "flow_id": flow_id,
+            "kind": kind,
+            "head_sha": receipt_head,
+            "status": "passed",
+            "reason": null,
+            "exit_code": 0,
+            "log_path": "/tmp/pr-handoff-seed.log",
+            "duration_ms": 1,
+            "ran_at": "2026-08-18T00:00:00Z",
+            "timed_out": false,
+            "kill_abandoned": false,
+            "source_head": receipt_head,
+            "executed_in_detached_copy": true,
+            "copy_head_before": receipt_head,
+            "copy_head_after": receipt_head,
+            "copy_clean_before": true,
+            "copy_clean_after": true,
+            "tool_version": "seed-tool-1.0",
+        });
+        crate::verify_ops::seed_run_receipt_for_test(temp_home.path(), flow_id, kind, &receipt)
+            .expect("seed receipt");
+    }
 
     let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());

@@ -245,7 +245,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             // Tool is listed under Coordinate patterns; treat status reads as
             // Observe so pure observe profiles that gain the tool later stay safe.
             "status" | "board" => Some(ToolBundle::Observe),
-            "start" | "record" => Some(ToolBundle::Coordinate),
+            "start" | "record" | "run" => Some(ToolBundle::Coordinate),
             _ => None,
         },
         "tachi_gh" => match action.as_str() {

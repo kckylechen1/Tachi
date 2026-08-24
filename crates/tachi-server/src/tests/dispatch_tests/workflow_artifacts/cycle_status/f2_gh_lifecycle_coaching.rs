@@ -58,7 +58,7 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_for_release_note() {
         }),
     )
     .expect("merge github status");
-    write_passed_verification(flow_id);
+    write_passed_verification(&server, flow_id, "abc123");
 
     let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());

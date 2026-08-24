@@ -21,10 +21,19 @@ pub enum TachiVerifyAction {
     Record,
     Status,
     Board,
+    /// #1454 slice 2: server-executed verification run (closed kind → argv
+    /// table, server-observed head_sha). Side-effecting; NOT replay-safe.
+    Run,
 }
 
 impl TachiVerifyAction {
-    pub const ALL: &'static [Self] = &[Self::Start, Self::Record, Self::Status, Self::Board];
+    pub const ALL: &'static [Self] = &[
+        Self::Start,
+        Self::Record,
+        Self::Status,
+        Self::Board,
+        Self::Run,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -32,6 +41,7 @@ impl TachiVerifyAction {
             Self::Record => "record",
             Self::Status => "status",
             Self::Board => "board",
+            Self::Run => "run",
         }
     }
 
@@ -57,8 +67,9 @@ impl FromStr for TachiVerifyAction {
             "record" => Ok(Self::Record),
             "status" => Ok(Self::Status),
             "board" => Ok(Self::Board),
+            "run" => Ok(Self::Run),
             other => Err(format!(
-                "Invalid tachi_verify action '{other}'. Use 'start', 'record', 'status', or 'board'."
+                "Invalid tachi_verify action '{other}'. Use 'start', 'record', 'status', 'board', or 'run'."
             )),
         }
     }

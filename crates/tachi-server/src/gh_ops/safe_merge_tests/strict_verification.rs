@@ -108,9 +108,7 @@ async fn safe_merge_with_flow_id_missing_verification_waits() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let tmp = tempfile::tempdir().unwrap();
-    let original = std::env::var_os("TACHI_RUN_ROOT");
-    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let (_home, _runs, original_home, original_runs) = with_verify_env();
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
@@ -139,11 +137,7 @@ async fn safe_merge_with_flow_id_missing_verification_waits() {
         .iter()
         .any(|r| r == "verification:missing"));
     assert!(client.merge_calls().is_empty());
-    if let Some(v) = original {
-        std::env::set_var("TACHI_RUN_ROOT", v);
-    } else {
-        std::env::remove_var("TACHI_RUN_ROOT");
-    }
+    restore_env(original_home, original_runs);
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -152,11 +146,20 @@ async fn safe_merge_failed_verification_blocks_even_permissive() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let tmp = tempfile::tempdir().unwrap();
-    let original = std::env::var_os("TACHI_RUN_ROOT");
-    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let (home, runs, original_home, original_runs) = with_verify_env();
     let flow = "flow_failed-verification";
-    write_verification(tmp.path(), flow, "failed", "deadbeef");
+    // #1454 F1: authority lives in the receipt store; a FAILED receipt for a
+    // canonical kind blocks under every policy (including permissive).
+    write_verification(runs.path(), flow, "failed", "deadbeef");
+    seed_receipt(
+        home.path(),
+        flow,
+        "fmt",
+        "failed",
+        1,
+        "deadbeef",
+        Some("failed"),
+    );
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
@@ -182,13 +185,9 @@ async fn safe_merge_failed_verification_blocks_even_permissive() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|r| r == "verification:gitleaks:failed"));
+        .any(|r| r == "verification:fmt:failed"));
     assert!(client.merge_calls().is_empty());
-    if let Some(v) = original {
-        std::env::set_var("TACHI_RUN_ROOT", v);
-    } else {
-        std::env::remove_var("TACHI_RUN_ROOT");
-    }
+    restore_env(original_home, original_runs);
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -197,11 +196,12 @@ async fn safe_merge_stale_verification_waits_on_head_mismatch() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let tmp = tempfile::tempdir().unwrap();
-    let original = std::env::var_os("TACHI_RUN_ROOT");
-    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let (home, runs, original_home, original_runs) = with_verify_env();
     let flow = "flow_stale-verification";
-    write_verification(tmp.path(), flow, "passed", "oldsha");
+    // Receipt bound to an OLD head: the PR head is deadbeef, the receipt
+    // head is oldsha → stale (F4 head-match requirement).
+    write_verification(runs.path(), flow, "passed", "oldsha");
+    seed_receipt(home.path(), flow, "fmt", "passed", 0, "oldsha", None);
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
@@ -227,13 +227,9 @@ async fn safe_merge_stale_verification_waits_on_head_mismatch() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|r| r == "verification:gitleaks:stale"));
+        .any(|r| r == "verification:fmt:stale"));
     assert!(client.merge_calls().is_empty());
-    if let Some(v) = original {
-        std::env::set_var("TACHI_RUN_ROOT", v);
-    } else {
-        std::env::remove_var("TACHI_RUN_ROOT");
-    }
+    restore_env(original_home, original_runs);
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -242,11 +238,12 @@ async fn safe_merge_strict_uses_passed_verification_for_head_consistency() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let tmp = tempfile::tempdir().unwrap();
-    let original = std::env::var_os("TACHI_RUN_ROOT");
-    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let (home, runs, original_home, original_runs) = with_verify_env();
     let flow = "flow_strict-verification";
-    write_verification(tmp.path(), flow, "passed", "deadbeef");
+    // The FULL canonical set has valid receipts for the PR head → gate
+    // passed → head consistency verified (F4).
+    write_verification(runs.path(), flow, "passed", "deadbeef");
+    seed_full_passed_set(home.path(), flow, "deadbeef", None);
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
@@ -272,16 +269,26 @@ async fn safe_merge_strict_uses_passed_verification_for_head_consistency() {
         v["status_patch"]["head_consistency"]["state"],
         "verified_by_tachi_verification"
     );
+    // #1454 P4 re-anchor: when receipt-backed verification satisfies head
+    // consistency, the provenance is the server-run RECEIPT store (F1), never
+    // the caller-asserted ledger — the patch must say so truthfully.
+    assert_eq!(
+        v["status_patch"]["head_consistency"]["source"],
+        "verification_receipts"
+    );
+    assert!(
+        v["status_patch"]["head_consistency"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("server-run verification receipts passed")),
+        "note must name the receipt authority: {}",
+        v["status_patch"]["head_consistency"]["note"]
+    );
     assert_eq!(
         v["status_patch"]["head_consistency"]["head_consistent"],
         true
     );
     assert!(client.merge_calls().is_empty());
-    if let Some(v) = original {
-        std::env::set_var("TACHI_RUN_ROOT", v);
-    } else {
-        std::env::remove_var("TACHI_RUN_ROOT");
-    }
+    restore_env(original_home, original_runs);
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -290,11 +297,9 @@ async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proo
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let tmp = tempfile::tempdir().unwrap();
-    let original = std::env::var_os("TACHI_RUN_ROOT");
-    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let (_home, runs, original_home, original_runs) = with_verify_env();
     let flow = "flow_strict-not-required";
-    let run_dir = tmp.path().join(flow);
+    let run_dir = runs.path().join(flow);
     std::fs::create_dir_all(&run_dir).unwrap();
     std::fs::write(
         run_dir.join("verification.json"),
@@ -328,6 +333,8 @@ async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proo
     .expect("ok");
 
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // #1454 F2: an all-optional ledger must not read as "no verification
+    // needed" — the gate itself emits verification:missing.
     assert_eq!(v["merge_state"], "pending");
     assert_eq!(
         v["status_patch"]["head_consistency"]["head_consistent"],
@@ -337,13 +344,14 @@ async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proo
         .as_array()
         .unwrap()
         .iter()
+        .any(|r| r == "verification:missing"));
+    assert!(v["decision"]["waiting_on"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|r| r == "head:consistency_unavailable"));
     assert!(client.merge_calls().is_empty());
-    if let Some(v) = original {
-        std::env::set_var("TACHI_RUN_ROOT", v);
-    } else {
-        std::env::remove_var("TACHI_RUN_ROOT");
-    }
+    restore_env(original_home, original_runs);
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -352,9 +360,7 @@ async fn safe_merge_records_missing_verification_from_tests_run() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let tmp = tempfile::tempdir().unwrap();
-    let original = std::env::var_os("TACHI_RUN_ROOT");
-    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let (_home, runs, original_home, original_runs) = with_verify_env();
     let flow = "flow_record-tests-run";
     let tests_run = vec![
         "cargo test -p tachi-server gh_ops::safe_merge_tests".to_string(),
@@ -380,14 +386,30 @@ async fn safe_merge_records_missing_verification_from_tests_run() {
     .expect("ok");
 
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["merge_state"], "ready");
-    assert_eq!(v["status_patch"]["verification"]["overall"], "passed");
-    assert_eq!(v["status_patch"]["verification"]["required_total"], 2);
+    // #1454 F1/F4 fail-closed: caller-supplied tests_run items land in the
+    // ledger (display) but never mint authority; the gate requires the full
+    // canonical receipt set and waits on every missing kind.
+    assert_eq!(v["merge_state"], "pending");
+    assert_eq!(v["will_merge"], false);
+    assert_eq!(v["status_patch"]["verification"]["overall"], "pending");
+    assert_eq!(v["status_patch"]["verification"]["required_total"], 7);
+    assert!(v["decision"]["waiting_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "verification:version-sync:missing"));
+    assert!(v["decision"]["waiting_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "verification:portable-contract:missing"));
 
     let ledger: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(tmp.path().join(flow).join("verification.json")).unwrap(),
+        &std::fs::read_to_string(runs.path().join(flow).join("verification.json")).unwrap(),
     )
     .unwrap();
+    // The stored ledger overall remains status-derived (display-only); the
+    // gate overall is the authority surface and stays pending.
     assert_eq!(ledger["overall"], "passed");
     assert_eq!(ledger["pr_ref"], "o/r#42");
     assert_eq!(ledger["head_sha"], "deadbeef");
@@ -395,11 +417,12 @@ async fn safe_merge_records_missing_verification_from_tests_run() {
     assert!(ledger["items"].as_array().unwrap().iter().all(|item| {
         item.get("status").and_then(serde_json::Value::as_str) == Some("passed")
             && item.get("head_sha").and_then(serde_json::Value::as_str) == Some("deadbeef")
+            && item.get("source").and_then(serde_json::Value::as_str) == Some("caller_asserted")
+            && item
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|s| s.contains("advisory only") && s.contains("server-executed"))
     }));
     assert!(client.merge_calls().is_empty());
-    if let Some(v) = original {
-        std::env::set_var("TACHI_RUN_ROOT", v);
-    } else {
-        std::env::remove_var("TACHI_RUN_ROOT");
-    }
+    restore_env(original_home, original_runs);
 }

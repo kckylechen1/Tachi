@@ -58,6 +58,9 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
     let tmp = tempfile::tempdir().unwrap();
     let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
     std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let home = tempfile::tempdir().unwrap();
+    let original_home = std::env::var_os("TACHI_HOME");
+    std::env::set_var("TACHI_HOME", home.path());
 
     let bin_dir = tmp.path().join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
@@ -71,6 +74,9 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
 
     let flow = "flow_reclaim-success";
     write_verification(tmp.path(), flow, "passed", "deadbeef");
+    // #1454 F1: the gate needs the full canonical receipt set in the
+    // server-owned store before safe_merge may reach ready/merged.
+    seed_full_passed_set(home.path(), flow, "deadbeef", None);
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
@@ -130,6 +136,11 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
     } else {
         std::env::remove_var("TACHI_RUN_ROOT");
     }
+
+    match original_home {
+        Some(v) => std::env::set_var("TACHI_HOME", v),
+        None => std::env::remove_var("TACHI_HOME"),
+    }
     match original_clean_bin {
         Some(v) => std::env::set_var("TACHI_CLEAN_BIN", v),
         None => std::env::remove_var("TACHI_CLEAN_BIN"),
@@ -148,6 +159,9 @@ async fn safe_merge_holder_refusal_happens_before_external_cleaner() {
     let tmp = tempfile::tempdir().unwrap();
     let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
     std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let home = tempfile::tempdir().unwrap();
+    let original_home = std::env::var_os("TACHI_HOME");
+    std::env::set_var("TACHI_HOME", home.path());
     let bin_dir = tmp.path().join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let (bin_path, marker_path) = install_fake_cleaner(&bin_dir, true);
@@ -158,6 +172,9 @@ async fn safe_merge_holder_refusal_happens_before_external_cleaner() {
 
     let flow = "flow_reclaim-held";
     write_verification(tmp.path(), flow, "passed", "deadbeef");
+    // #1454 F1: the gate needs the full canonical receipt set in the
+    // server-owned store before safe_merge may reach ready/merged.
+    seed_full_passed_set(home.path(), flow, "deadbeef", None);
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
@@ -197,6 +214,11 @@ async fn safe_merge_holder_refusal_happens_before_external_cleaner() {
     } else {
         std::env::remove_var("TACHI_RUN_ROOT");
     }
+
+    match original_home {
+        Some(v) => std::env::set_var("TACHI_HOME", v),
+        None => std::env::remove_var("TACHI_HOME"),
+    }
     match original_clean_bin {
         Some(v) => std::env::set_var("TACHI_CLEAN_BIN", v),
         None => std::env::remove_var("TACHI_CLEAN_BIN"),
@@ -215,6 +237,9 @@ async fn safe_merge_dry_run_does_not_reclaim_worktree() {
     let tmp = tempfile::tempdir().unwrap();
     let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
     std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let home = tempfile::tempdir().unwrap();
+    let original_home = std::env::var_os("TACHI_HOME");
+    std::env::set_var("TACHI_HOME", home.path());
 
     let bin_dir = tmp.path().join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
@@ -227,6 +252,9 @@ async fn safe_merge_dry_run_does_not_reclaim_worktree() {
 
     let flow = "flow_reclaim-dry-run";
     write_verification(tmp.path(), flow, "passed", "deadbeef");
+    // #1454 F1: the gate needs the full canonical receipt set in the
+    // server-owned store before safe_merge may reach ready/merged.
+    seed_full_passed_set(home.path(), flow, "deadbeef", None);
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
@@ -271,6 +299,11 @@ async fn safe_merge_dry_run_does_not_reclaim_worktree() {
     } else {
         std::env::remove_var("TACHI_RUN_ROOT");
     }
+
+    match original_home {
+        Some(v) => std::env::set_var("TACHI_HOME", v),
+        None => std::env::remove_var("TACHI_HOME"),
+    }
     match original_clean_bin {
         Some(v) => std::env::set_var("TACHI_CLEAN_BIN", v),
         None => std::env::remove_var("TACHI_CLEAN_BIN"),
@@ -289,12 +322,18 @@ async fn safe_merge_missing_worktree_warns_does_not_fail_merge() {
     let tmp = tempfile::tempdir().unwrap();
     let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
     std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let home = tempfile::tempdir().unwrap();
+    let original_home = std::env::var_os("TACHI_HOME");
+    std::env::set_var("TACHI_HOME", home.path());
 
     // A worktree path that does not exist on disk.
     let missing_worktree = tmp.path().join("does-not-exist-wt");
 
     let flow = "flow_reclaim-missing";
     write_verification(tmp.path(), flow, "passed", "deadbeef");
+    // #1454 F1: the gate needs the full canonical receipt set in the
+    // server-owned store before safe_merge may reach ready/merged.
+    seed_full_passed_set(home.path(), flow, "deadbeef", None);
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
@@ -343,5 +382,10 @@ async fn safe_merge_missing_worktree_warns_does_not_fail_merge() {
         std::env::set_var("TACHI_RUN_ROOT", v);
     } else {
         std::env::remove_var("TACHI_RUN_ROOT");
+    }
+
+    match original_home {
+        Some(v) => std::env::set_var("TACHI_HOME", v),
+        None => std::env::remove_var("TACHI_HOME"),
     }
 }

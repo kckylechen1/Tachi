@@ -77,6 +77,10 @@ fn base_item_from_check(entry: &TachiVerifyCheckItem, status: &str) -> Result<Va
         "kind": entry.kind,
         "status": status,
         "required": entry.required.unwrap_or(true),
+        // #1454: server-forced provenance. The batch checks[] writer goes
+        // through this same path, so no caller-supplied authority key can
+        // survive into the ledger.
+        "source": CALLER_ASSERTED_SOURCE,
         "updated_at": now(),
     });
     if let Some(command) = entry.command.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -98,6 +102,12 @@ fn base_item(params: &TachiVerifyParams, command: Option<&str>, status: &str) ->
         "kind": params.kind.as_deref().unwrap_or(&id),
         "status": status,
         "required": params.required.unwrap_or(true),
+        // #1454: server-forced provenance. Caller-supplied `source`,
+        // `evidence`, `exit_code`, `log_path`, `ran_at`, `duration_ms` are
+        // stripped/overwritten here — a caller must not smuggle authority
+        // fields through record/start. Server-run items are written by the
+        // executor with their own `server_run:<kind>` source (slice 2).
+        "source": CALLER_ASSERTED_SOURCE,
         "updated_at": now(),
     });
     if let Some(command) = command.filter(|s| !s.trim().is_empty()) {
@@ -106,18 +116,14 @@ fn base_item(params: &TachiVerifyParams, command: Option<&str>, status: &str) ->
     if let Some(head_sha) = params.head_sha.as_deref().filter(|s| !s.trim().is_empty()) {
         item["head_sha"] = json!(head_sha);
     }
-    if let Some(exit_code) = params.exit_code {
-        item["exit_code"] = json!(exit_code);
-    }
-    if let Some(log_path) = params.log_path.as_deref().filter(|s| !s.trim().is_empty()) {
-        item["log_path"] = json!(log_path);
-    }
     if let Some(summary) = params.summary.as_deref().filter(|s| !s.trim().is_empty()) {
         item["summary"] = json!(summary);
     }
     if let Some(cwd) = params.cwd.as_deref().filter(|s| !s.trim().is_empty()) {
         item["cwd"] = json!(cwd);
     }
+    // Note: `params.exit_code` / `params.log_path` are deliberately not
+    // persisted — they are caller-authored fields with no authority value.
     item
 }
 
@@ -173,4 +179,29 @@ pub(crate) fn record_items(params: &TachiVerifyParams, status: &str) -> Result<V
 
 pub(crate) fn read_verification_ledger(flow_id: &str) -> Result<Option<Value>, String> {
     read_json(&ledger_path_for_flow(flow_id)?)
+}
+
+/// #1454 slice 2: internal server-run item write.
+///
+/// This is the ONLY path that persists a `server_run:<kind>` item. It
+/// deliberately bypasses the caller-facing record/start strip path
+/// (`base_item`/`record_items`): the item JSON is built by the executor
+/// entirely from server-observed state (spawn exit code, `git rev-parse HEAD`,
+/// the run log the server itself wrote), so there is no caller-authored field
+/// to strip. `source` starts with [`super::SERVER_RUN_SOURCE_PREFIX`] by
+/// construction — the gate's merge-authority class.
+pub(crate) fn record_server_run_item(flow_id: &str, item: Value) -> Result<Value, String> {
+    let path = ledger_path_for_flow(flow_id)?;
+    let mut ledger = read_or_new_ledger(flow_id)?;
+    ledger["flow_id"] = json!(flow_id);
+    upsert_item(&mut ledger, item);
+    refresh_overall(&mut ledger);
+    write_json(&path, &ledger)?;
+    Ok(json!({
+        "status": "completed",
+        "action": "run",
+        "flow_id": flow_id,
+        "ledger_path": path.display().to_string(),
+        "verification": ledger,
+    }))
 }

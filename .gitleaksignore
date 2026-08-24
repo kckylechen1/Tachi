@@ -2,3 +2,11 @@
 f85bec56cb6a09f39eab2d1db3acb4b7d7a982df:V2_IMPROVEMENTS.md:generic-api-key:336
 74b9188d7c3ef075a5e887650f4626e316136747:integrations/openclaw/test-glm4-flash.py:generic-api-key:6
 .tachi-plans/llm_bench.py:generic-api-key:4
+
+# False positives confirmed 2026-08-17 (fixture/dummy values, not secrets):
+# - migrations.rs:912 = schema-version key string in a v32->v31 downgrade fixture SQL
+# - broker/tests.rs:108 = "lease-fixture-001" test fixture
+# - harness_session_attachments.rs:847 = "idempotency-1" test fixture
+8184820a2471e360045af1387f6d84b4786061e0:crates/memcore/src/db/migrations.rs:generic-api-key:912
+b51c41d14cf65e678c707b843123e8e1badcea20:crates/tachi-llm/src/llm/broker/tests.rs:generic-api-key:108
+3d25c94d12f4902e4a4394d5242c12201b195d36:crates/memcore/src/db/harness_session_attachments.rs:generic-api-key:847
