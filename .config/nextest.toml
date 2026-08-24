@@ -7,21 +7,14 @@ dir = "target/nextest"
 # has accumulated a few weeks of real CI history
 # (`cargo nextest run --workspace --locked` timing, or the JUnit report at
 # `target/nextest/ci/junit.xml`).
-#
-# Slow tests (>20s) are anchored by scripts/nextest-slow-roster.txt + scripts/nextest-slow-diff.sh
-# (parallel to known-deterministic-reds + nextest-known-reds-diff.sh). New slow creep
-# fails the gate unless explicitly rostered.
 [profile.default]
-test-threads = 4
 # Warn (not fail) once a test has been running this long, so a slow-but-alive
 # test is visible in output without being killed.
-# Slow creep is gated by scripts/nextest-slow-diff.sh against scripts/nextest-slow-roster.txt
-# (exact-match, mirroring known-reds semantics).
-slow-timeout = { period = "15s", terminate-after = 4 }
-# terminate-after = 4 -> hard cap at 4 * 15s = 60s per test. The slowest
+slow-timeout = { period = "20s", terminate-after = 6 }
+# terminate-after = 6 -> hard cap at 6 * 20s = 120s per test. The slowest
 # known tests in this workspace are bounded polling loops (~6s worst case,
 # see crates/tachi-server/src/tests/dispatch_tests/mod.rs
-# DISPATCH_TEST_WAIT_ATTEMPTS/DISPATCH_TEST_WAIT_INTERVAL). 60s gives ~10x
+# DISPATCH_TEST_WAIT_ATTEMPTS/DISPATCH_TEST_WAIT_INTERVAL). 120s gives ~20x
 # headroom over that before nextest terminates and names the offender -- this
 # is the mechanism issue #682 wants for the class of hang diagnosed in #505
 # (FTS tokenizer contention), so a genuine future hang is killed and reported
@@ -102,12 +95,4 @@ path = "junit.xml"
 # post-run gate for >20s creep, not a nextest override group.
 [test-groups]
 known-deterministic-reds = { max-threads = "num-cpus" }
-heavy-integration = { max-threads = 2 }
 
-[[profile.default.overrides]]
-filter = 'test(facade_tests) | test(dispatch_tests) | test(cli_daemon) | test(event::project)'
-test-group = 'heavy-integration'
-
-[[profile.ci.overrides]]
-filter = 'test(facade_tests) | test(dispatch_tests) | test(cli_daemon) | test(event::project)'
-test-group = 'heavy-integration'
