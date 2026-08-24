@@ -1,2 +1,1 @@
-tachi-server bootstrap::cli_tool::cards_ledger::tests::sync_clears_stale_counter_clauses_on_removal
 memory-server-runtime tests::issue_1588_named_route_write_serialized_not_sqlite_locked
