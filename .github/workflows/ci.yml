@@ -196,8 +196,8 @@ jobs:
            fi
            grep -F 'cargo-clippy --version resolved to: 0.1.96' "${setup_test_root}/output"
            grep -F 'required (derived from channel 1.97.0): 0.1.97' "${setup_test_root}/output"
- 
-   rust:
+
+  rust:
     name: Rust workspace
     runs-on: ubuntu-24.04
     timeout-minutes: 30
