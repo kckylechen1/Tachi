@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# nextest-slow-diff.sh — gate new >20s tests against checked-in roster (parallel to known-reds #1278)
+# nextest-slow-diff.sh — operator/local gate for new >20s tests against checked-in roster
+# (parallel to known-reds #1278; like the local gitleaks hook). NOT invoked by CI
+# (Actions disabled repo-wide per #1562). Run manually by operators / local tooling.
+#
+# Invocation (exact command + expected input via --final-status-level slow):
+#   cargo nextest run -p tachi-server -p memory-server-runtime --locked \
+#     --final-status-level slow > /tmp/slow.txt
+#   scripts/nextest-slow-diff.sh /tmp/slow.txt
+#   # (or with --profile ci; or pipe JUnit; or plain list of full test paths)
 #
 # Usage:
 #   scripts/nextest-slow-diff.sh <nextest-slow-output.txt | slow-list.txt | junit.xml>
 #
 # Exact input format for nextest slow listing (the primary measurement path):
-#   Output captured from:
-#     cargo nextest run -p tachi-server -p memory-server-runtime --locked \
-#       --profile ci --final-status-level slow
+#   Output captured from the --final-status-level slow run above.
 #   Contains lines of form (indented):
 #     SLOW [  35.999s] ( 590/3647) memory-server-runtime tests::issue_1588_...
 #   The script extracts the text after the final ") " as the full test path.

@@ -92,7 +92,11 @@ path = "junit.xml"
 #
 # Parallel slow-test roster (see scripts/nextest-slow-roster.txt and
 # scripts/nextest-slow-diff.sh) lives outside test-groups; it is a separate
-# post-run gate for >20s creep, not a nextest override group.
+# operator/local gate (like the local gitleaks hook), NOT invoked by CI
+# (Actions disabled repo-wide per #1562). Run manually:
+#   cargo nextest run -p tachi-server -p memory-server-runtime --locked \
+#     --final-status-level slow
+#   scripts/nextest-slow-diff.sh <(the slow output or file)
 [test-groups]
 known-deterministic-reds = { max-threads = "num-cpus" }
 
