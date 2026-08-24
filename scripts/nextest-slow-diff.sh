@@ -109,6 +109,10 @@ else
   # If no SLOW lines, fall back to treating file as one-name-per-line list.
   if grep -q '^ *SLOW \[' "${INPUT}"; then
     grep '^ *SLOW \[' "${INPUT}" | sed 's/.*) //' | sort -u > "${SLOWS_FILE}"
+  elif grep -qE '^(Summary \[| *FAIL \[| *PASS \[| *SLOW \[| *Starting [0-9]+ test)' "${INPUT}"; then
+    # Captured nextest run output with zero SLOW records: this is a run with
+    # no slow tests (the documented no-slow case), NOT a plain name list.
+    : > "${SLOWS_FILE}"
   else
     sort -u "${INPUT}" > "${SLOWS_FILE}"
   fi
