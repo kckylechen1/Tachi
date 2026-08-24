@@ -78,7 +78,7 @@ So the spec's job is **codifying prose/cross-domain patterns into one canonical 
   lower ACT-R decay than raw/consolidated memories.
 - **Weight:** projection metadata currently stores `seen / hit / miss / confidence /
   last_seen`. Explicit feedback updates counters; pattern search records `seen`;
-  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; `close_loop` records
+  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; `tachi_gh(action="close_loop")` records
   reviewed attached patterns as `hit`. Briefing/context runtime still does not decide
   hit/miss automatically.
 - **Recall:** existing hybrid search supports pattern scope. Session-start preload is
@@ -329,7 +329,7 @@ Implemented substrate:
   `target_event_id` or `session_id`.
 - A held-out label-eval smoke fixture exercises that harness before `challenge_rate`
   is treated as an over-fit signal.
-- `tachi_memory(action="save")` can opt into `memory.saved` events with `emit_continuity=true`.
+- the internal save path (the retired standalone `save_memory`) can opt into `memory.saved` events with `emit_continuity=true`; the public `tachi_memory(action="save")` facade intentionally does not expose that knob.
 - `tachi_search scope="patterns"` searches projected `/user/patterns` rows without
   mixing them into ordinary memory recall.
 - `tachi_wiki_write include_patterns=true` persists reviewed `pattern_refs` and emits

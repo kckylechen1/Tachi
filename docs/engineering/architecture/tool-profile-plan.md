@@ -30,7 +30,7 @@ The target split is:
    - `recall_context`, `capture_session`, and later `compact_context` are runtime/adapter APIs, not part of the ordinary IDE default
 3. Capability selection should become a first-class public layer.
    - `tachi_skill(action="discover"|"run")` is the canonical skill workflow UX
-   - standalone `run_skill` and skill-focused `hub_discover` calls were retired by #1690/#757 (no compatibility routes remain); the canonical new-caller path
+   - standalone `run_skill` was retired by #1690/#757 (`hub_discover` remains the hub discovery route); the canonical new-caller path
    - raw hub / pack / vc governance tools should not leak into ordinary agent surfaces
 4. Workflow tools are not kernel primitives.
    - `ghost_*` stays hidden; `post_card`/`check_inbox`/`update_card` and the proposal review/project tools are retired; unless a host or profile explicitly asks for them

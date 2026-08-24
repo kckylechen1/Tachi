@@ -306,7 +306,7 @@ Ordinary memory recall excludes `/user/patterns/`, `/user/affect/`, `/timeline/`
 Integration direction:
 - Ordinary public save facades do not emit `memory.saved`; admitted internal callers can opt into the internal `tachi_memory(action="save")` continuity event path.
 - The distill lane can consume `memory.saved` events to discover or update patterns.
-- Internal completion and workflow-closure pattern use is recorded through a crate-private append-only evidence seam. Each admitted event carries a real flow id, a source revision, an evidence digest, the exact pattern id, the `seen` / `hit` / `miss` / `stale` outcome, and a deterministic idempotency key. The fixed `tachi.pattern_evidence.v1` adapter writes `CollectOnly` + `EffectScope::None` events with no projection hints, so these receipts never project, promote, or update pattern counters. `tachi_task(action="complete")` and `close_loop` are admitted only with a non-empty flow id from their owning operational path. A missing identity is a typed skip, never a query/domain/comment fallback. The model-facing `tachi_search scope="patterns"` and `tachi_event action=context` surfaces remain read-only even when a caller supplies session text. There is no model-facing pattern-feedback workflow. Concrete instance memories under `/memory/instances/<pattern_id>/` are still a target.
+- Internal completion and workflow-closure pattern use is recorded through a crate-private append-only evidence seam. Each admitted event carries a real flow id, a source revision, an evidence digest, the exact pattern id, the `seen` / `hit` / `miss` / `stale` outcome, and a deterministic idempotency key. The fixed `tachi.pattern_evidence.v1` adapter writes `CollectOnly` + `EffectScope::None` events with no projection hints, so these receipts never project, promote, or update pattern counters. `tachi_task(action="complete")` and `tachi_gh(action="close_loop")` are admitted only with a non-empty flow id from their owning operational path. A missing identity is a typed skip, never a query/domain/comment fallback. The model-facing `tachi_search scope="patterns"` and `tachi_event action=context` surfaces remain read-only even when a caller supplies session text. There is no model-facing pattern-feedback workflow. Concrete instance memories under `/memory/instances/<pattern_id>/` are still a target.
 
 ### 3.2 Wiki — pattern promotion path
 
@@ -422,7 +422,7 @@ Next session start / explicit context request
 Implemented integration slice:
 
 ```
-tachi_memory(action="save") with emit_continuity=true → memory.saved event
+internal save path (the retired standalone `save_memory`, now the crate-internal save route) with emit_continuity=true → memory.saved event — note: the public `tachi_memory(action="save")` facade intentionally does NOT expose emit_continuity
 tachi_search scope=patterns      → explicit read-only /user/patterns recall
 tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
 tachi_skill action=discover/run  → discover and execute listed Hub skills
@@ -491,7 +491,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - Affect projections carry explicit guardrails plus local rule-based signals for language switches, known markers, input/output length, and IO ratio.
 - `tachi_event action=label_eval` provides a label-quality harness.
 - A held-out label-eval smoke fixture covers `session.outcome` vs `session.outcome.review` matching before `challenge_rate` is used as an over-fit signal.
-- `tachi_memory(action="save")` supports explicit `emit_continuity=true`, appending a `memory.saved` event with path/category-derived projection hints.
+- the internal save path (the retired standalone `save_memory`) supports explicit `emit_continuity=true`, appending a `memory.saved` event with path/category-derived projection hints.
 - `tachi_search` supports `scope="patterns"` and excludes continuity projection rows from ordinary `memory` recall.
 - `tachi_wiki_write` supports `include_patterns=true`, persisting active pattern references in wiki metadata.
 - `tachi_wiki_write` emits `wiki.saved` continuity events for reviewed wiki writes.
@@ -508,7 +508,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 3. **No cross-process A2A transport**: a local read-only `a2a` evidence bundle and `action=a2a` poll surface exist, but there is no daemon pub/sub API, no independent cold-seat host profile, and no transport-level evidence/open-question feed.
 4. **Label-quality calibration incomplete**: harness and smoke fixture exist, but calibration still needs a larger reviewed held-out corpus, thresholds, and an operator-visible calibration status.
 5. **Maturity gates are partially implemented**: projection reports and `tachi_event action="promote"` expose external-validation / cold-seat-review gate status. The gate still does not auto-promote drafts/candidates to final wiki, listed skill, or Agent MD writes.
-6. **Pattern evidence is append-only but downstream interpretation remains partial**: `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs when it has a real flow id, and `close_loop` can append `hit` evidence for reviewed attached patterns when it has a real flow id. Missing flow identity produces a typed skip. `tachi_search scope="patterns"` and `tachi_event action=context` are read-only. These internal receipts do not project or change counters. The explicit legacy feedback action can still emit counter-mutating `hit` / `miss` / `stale` signals. Ordinary briefing/context use still does not automatically decide hit/miss without downstream outcome evidence.
+6. **Pattern evidence is append-only but downstream interpretation remains partial**: `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs when it has a real flow id, and `tachi_gh(action="close_loop")` can append `hit` evidence for reviewed attached patterns when it has a real flow id. Missing flow identity produces a typed skip. `tachi_search scope="patterns"` and `tachi_event action=context` are read-only. These internal receipts do not project or change counters. The explicit legacy feedback action can still emit counter-mutating `hit` / `miss` / `stale` signals. Ordinary briefing/context use still does not automatically decide hit/miss without downstream outcome evidence.
 7. **Timeline graph is partially wired**: timeline projections expose a typed `metadata.timeline` / `timeline[]` read-model slice with a `TimelineEntry` schema marker, and explicit causal edges with existing memory-id endpoints persist to `memory_edges`. Natural-language causal edges, typed `JudgmentEvolution`, and automatic endpoint resolution are still missing.
 8. **Bonding privacy migration is unbuilt**: current `/user/patterns/bonding/*` projections are not physically partitioned by `(user trust domain, agent_identity_id)`, and current local A2A bundles expose bonding refs. Migrate to the private relationship partition, bind identity, exclude all bonding refs/content from A2A/workers/cold seats, and add migration/leakage goldens. The current `SharedLexicon` shape also lacks a standalone Rust domain type.
 9. **Rule-based affect detector is first-slice**: affect projections extract language switch, known markers, IO ratio, and length signals, but response-latency-like signals are not yet available without host timing input.
@@ -534,7 +534,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 1. Done: `scope="patterns"` exists on `tachi_search`.
 2. Done: `tachi_event action=context` returns a dedicated `patterns` section.
-3. Done: `tachi_memory(action="save")` can emit `memory.saved` when `emit_continuity=true`.
+3. Done: the internal save path (the retired standalone `save_memory`) can emit `memory.saved` when `emit_continuity=true` — the public `tachi_memory(action="save")` facade does not expose this knob.
 4. Done: `tachi_event action=context` returns `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, local `a2a`, and `host_lifecycle` read-model sections.
 5. Done: `tachi_wiki_write` can recall and reference active patterns with `include_patterns=true`.
 6. Done: `tachi_wiki_write` emits `wiki.saved` continuity events with reviewed `pattern_refs`.

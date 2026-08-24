@@ -5,7 +5,10 @@ use tachi_hub::{
     DELEGATE_MINIMAL_TOOL_PATTERNS, OBSERVE_TOOL_PATTERNS, OPERATE_TOOL_PATTERNS,
     REMEMBER_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS,
 };
-use tachi_params::TACHI_SKILL_ACTIONS;
+use tachi_params::{
+    TACHI_GH_ACTIONS, TACHI_MEMORY_ACTIONS, TACHI_MEMORY_RETIRED_C2B_ACTIONS, TACHI_SKILL_ACTIONS,
+    TACHI_TASK_RETIRED_ACTIONS,
+};
 
 fn ensure_test_env() {
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -586,8 +589,13 @@ fn retired_surface_documentation_has_markers() {
         "Deprecated",
         "superseded",
         "Superseded",
-        "legacy",
-        "Legacy",
+        "removed",
+        "Removed",
+        "denied",
+        "no longer",
+        // NOTE: "legacy"/"Legacy" is NOT a marker — it commonly describes
+        // clients, not the token's retirement status ("Legacy clients should
+        // call run_skill" must still fail).
     ];
 
     let mut bad_hits: Vec<String> = vec![];
@@ -612,6 +620,12 @@ fn retired_surface_documentation_has_markers() {
     const HISTORICAL_SKILL_SUPERSET: &[&str] =
         &["discover", "run", "bundle", "loadout", "from_pattern"];
     const HISTORICAL_SKILL_RETIRED: &[&str] = &["bundle", "loadout", "from_pattern"];
+    // W2: retired facade actions (Task/Memory) are machine-known in
+    // tachi-params' authoritative inventories. Pinned legacy-rejection set
+    // {dispatch, wait, cancel} comes from the enum's typed rejection path
+    // (crates/tachi-params/src/facade/action_enums.rs:168,239 +
+    // facade/task.rs:443,457,601) — if those arms change, update this pin.
+    const FACADE_RETIRED_ACTIONS: &[&str] = &["dispatch", "wait", "cancel"];
     let live_skill: Vec<&str> = TACHI_SKILL_ACTIONS.to_vec();
     for &name in &live_skill {
         assert!(
@@ -720,6 +734,65 @@ fn retired_surface_documentation_has_markers() {
                 if is_teaching && is_exact_identifier_hit(line, tok) && !exempted_by_marker {
                     bad_hits.push(format!(
                         "{}:{}: unmarked retired tachi_skill token '{}'",
+                        rel,
+                        i + 1,
+                        tok
+                    ));
+                }
+            }
+            // W2: retired facade actions (tachi_task/tachi_memory action names like
+            // "cancel"/"merge"/"card") — these are common English words, so they ONLY
+            // count when pinned to a facade context on the same line where the token is
+            // NOT live on any facade named on that line. E.g. `tachi_task(action="cancel")`
+            // fires (cancel is dead on task); a memory-row line naming tachi_memory and
+            // listing `briefing` (live on memory) does not fire just because tachi_task
+            // is also named on the line. A bare action="tok" (no facade named) fires only
+            // when the token is retired from EVERY facade (e.g. cancel/dispatch/wait).
+            let live_memory = TACHI_MEMORY_ACTIONS;
+            let live_task: &[&str] = &[
+                "intake",
+                "claim",
+                "heartbeat",
+                "handoff",
+                "release",
+                "board",
+                "status",
+                "complete",
+                "adjudicate",
+                "brief",
+            ];
+            for tok in TACHI_TASK_RETIRED_ACTIONS
+                .iter()
+                .chain(TACHI_MEMORY_RETIRED_C2B_ACTIONS.iter())
+                .chain(FACADE_RETIRED_ACTIONS.iter())
+            {
+                let owner_facade = if TACHI_MEMORY_RETIRED_C2B_ACTIONS.contains(tok) {
+                    "tachi_memory"
+                } else {
+                    "tachi_task"
+                };
+                let live_on_named_facade = (line.contains("tachi_memory")
+                    && live_memory.contains(tok))
+                    || (line.contains("tachi_task") && live_task.contains(tok))
+                    || (line.contains("tachi_skill") && TACHI_SKILL_ACTIONS.contains(tok));
+                let live_on_named_facade = live_on_named_facade
+                    || (line.contains("tachi_gh") && TACHI_GH_ACTIONS.contains(tok));
+                let live_anywhere = live_memory.contains(tok)
+                    || live_task.contains(tok)
+                    || TACHI_SKILL_ACTIONS.contains(tok)
+                    || TACHI_GH_ACTIONS.contains(tok);
+                let facade_named = line.contains(owner_facade);
+                let quoted = line.contains(&format!("\"{}\"", tok))
+                    || line.contains(&format!("'{}'", tok))
+                    || line.contains(&format!("`{}`", tok));
+                let has_action_form = contains_flex_action(line, tok);
+                let is_teaching = !live_on_named_facade
+                    && ((facade_named && (has_action_form || quoted))
+                        || (has_action_form && !live_anywhere)
+                        || (in_code_fence && contains_flex_action(line, tok) && !live_anywhere));
+                if is_teaching && is_exact_identifier_hit(line, tok) && !exempted_by_marker {
+                    bad_hits.push(format!(
+                        "{}:{}: unmarked retired facade action '{}'",
                         rel,
                         i + 1,
                         tok
@@ -1013,6 +1086,22 @@ mod matcher_unit_tests {
                 true,
                 "flex action",
             ),
+            // W3: "legacy" must NOT exempt — it describes clients, not token status
+            (
+                r#"Legacy clients should call run_skill for every workflow."#,
+                "run_skill",
+                true,
+                "W3: legacy-clients sentence must still detect (marker exemption is line/header-scoped and legacy is not a marker)",
+            ),
+            // W2: retired facade action in action= form
+            (
+                r#"tachi_task(action="cancel", dispatch_id=...)"#,
+                "cancel",
+                true,
+                "W2: retired facade action in action= form",
+            ),
+            // W2: bare English word without action/facade context must NOT fire
+            (r#"remember to merge the PR"#, "merge", false, "W2: bare English 'merge' is not a retired-action hit"),
         ];
         for (line, tok, expect, note) in cases {
             let exact = is_exact_identifier_hit(line, tok);

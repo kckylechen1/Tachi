@@ -117,8 +117,9 @@ tachi --version
 ```json
 // tachi_memory(action="save") —— 结构化记忆
 {
-  "tool": "tachi_memory", "action": "save",
+  "tool": "tachi_memory",
   "arguments": {
+    "action": "save",
     "text": "前端必须使用 Vite，严禁 Webpack。允许 Tailwind。",
     "path": "/project/frontend",
     "importance": 0.8,
@@ -249,7 +250,7 @@ graph TD
 本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。项目内 Agent 可通过 `.tachi/vault.env` 别名解析 Vault 密钥。`tachi vault exec --require NAME -- <cmd>` 可在子进程中注入 Vault 凭证运行命令（Vault 只补全调用方未设置的环境变量）；默认情况下，若 Vault 不可用则拒绝派生无凭证的子进程，`--allow-unauthenticated` 可显式选择回退为继承当前环境运行。详见 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
 ### 6. Tachi Hub 与技能包
-一次注册 MCP 服务器、技能和工作流，所有已连接 Agent 都能发现并调用。`pack_register` / `pack_project` 安装 curated 技能集合并投射到 Claude、Cursor、Codex、Gemini、OpenCode 等格式。`tachi_skill(action="discover"|"run")` 是 canonical 技能门面；独立 `tachi_skill(action="run")` 和面向技能发现的 `hub_discover` 仍作为旧客户端兼容入口保留。
+一次注册 MCP 服务器、技能和工作流，所有已连接 Agent 都能发现并调用。`pack_register` / `pack_project` 安装 curated 技能集合并投射到 Claude、Cursor、Codex、Gemini、OpenCode 等格式。`tachi_skill(action="discover"|"run")` 是 canonical 技能门面；旧名 `run_skill` 已退役(由 #1690/#757);`hub_discover` 仍是 Hub 发现路由。
 
 ### 7. 跨 Agent 协调
 - **幽灵低语** —— Agent 间持久化主题发布/订阅（`ghost_publish`、`ghost_subscribe`、`ghost_ack`、`ghost_reflect`、`ghost_promote`）。

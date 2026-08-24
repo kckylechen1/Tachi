@@ -51,7 +51,7 @@ It answers three questions raised during a facade review:
 1. **PR lifecycle dual entry (resolved #757).** `link_pr` / `pr_status` / `pr_handoff` / `release_note`
    now live only on `tachi_gh`. The previous `tachi_task` compatibility aliases were deleted so agents
    no longer guess which entry point to call.
-2. **`merge` was semantically split, then resolved (#1683 C1a).** `tachi_task(merge)` used to mean
+2. **`merge` was semantically split, then resolved — the `tachi_task` `merge` action was retired (#1683 C1a).** It used to mean
    local worktree merge, distinct from `tachi_gh(safe_merge)`'s GitHub PR merge — same word, different
    machine. `tachi_task(merge)` is retired; `tachi_gh(safe_merge)` is now the only `merge` on either facade.
 3. **Briefing then appeared in three surfaces** (historical) — `tachi_briefing` (standalone, since retired),
@@ -120,7 +120,7 @@ someone hand-types `--profile observe+coordinate`. That is dead design.
 `ToolProfile` trims by **tool name** via glob matching
 ([`profiles/matching.rs#L77-L112`](../../../crates/tachi-server/src/profiles/matching.rs)).
 But a facade packs many capabilities behind one name (`tachi_task` = 10 actions), so a profile can
-only allow or deny the *entire* `tachi_task` — it cannot deny just `dispatch`.
+only allow or deny the *entire* `tachi_task` — it cannot deny just `dispatch` (the retired Task dispatch action).
 
 ## 4. Case study: the `delegate`/worker surface proves the mismatch
 
@@ -150,7 +150,7 @@ Two important nuances:
 | codex_55_review | `standard` (needs to see more) |
 | kimi_arch / deepseek_explore / kimi_ux | `observe` (read-only review/exploration) |
 
-**The `delegate` allow-list deliberately omits `tachi_task`.** Including it would hand `dispatch` to
+**The `delegate` allow-list deliberately omits `tachi_task`.** Including it would hand the retired `dispatch` action to
 the worker (recursive dispatch). The cost: workers cannot use `complete` or `status` from the
 facade, and must fall back to standalone legacy tools (`tachi_task(action="complete")`, `tachi_unstick`) that never
 moved into a facade.

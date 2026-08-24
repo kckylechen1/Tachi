@@ -168,8 +168,9 @@ These examples show the JSON arguments you would pass to the MCP tools. Facade t
 ```json
 // tachi_memory(action="save") — structured memory
 {
-  "tool": "tachi_memory", "action": "save",
+  "tool": "tachi_memory",
   "arguments": {
+    "action": "save",
     "text": "Frontend must use Vite, never Webpack. Tailwind is allowed.",
     "path": "/project/frontend",
     "importance": 0.8,
@@ -293,7 +294,7 @@ Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"persona
 Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. `tachi vault exec --require NAME -- <cmd>` runs a child process with Vault-delivered credentials (Vault only fills env names the caller did not already set); by default it refuses to spawn a credential-less child if the Vault is unavailable, and `--allow-unauthenticated` opts back into running with the inherited environment. See [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### 6. Tachi Hub & Skill Packs
-Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `tachi_skill(action="discover"|"run")` is the canonical skill facade; standalone `run_skill` and skill-focused `hub_discover` calls are retired (retired by #1690/#757) — `tachi_skill` is the only skill route.
+Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `tachi_skill(action="discover"|"run")` is the canonical skill facade; standalone `run_skill` is retired (by #1690/#757); `hub_discover` remains the hub discovery route.
 
 Read-only diagnostics help keep those surfaces aligned:
 

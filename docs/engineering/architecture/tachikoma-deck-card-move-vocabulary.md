@@ -572,7 +572,7 @@ carry the workflow.
 | upstream source status | `tachi skill-surface sources` | implemented |
 | upstream source sync planning | `tachi skill-surface sync-plan` | starter implemented |
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |
-| dispatch backend status/cancel | `tachi_task(action="status" \| "cancel", dispatch_id=...)` | starter implemented |
+| dispatch backend status/cancel | `tachi_task(action="status", dispatch_id=...)  (the retired `cancel` action is not a live Task action; cancellation goes through tachi_staff/poke surfaces)` | starter implemented |
 | Poke smoke suite | `tachi poke run --suite smoke` | starter implemented |
 | Card evolution proposals | `tachi_tune(action="route_proposals" \| "route_apply")` (moved off `tachi_task` in #1426) | implemented |
 
@@ -685,7 +685,7 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - Run one-shot execution from Tachi-generated `prompt.md`.
 - Optionally run named sessions with `TACHI_ACPX_RUN_MODE=session` and store
   status/cancel control argv in run metadata.
-- Route `tachi_task(action="status" | "cancel")` through dispatch-scoped acpx
+- Route `tachi_task(action="status")` through (the retired `cancel` action is not routed) dispatch-scoped acpx
   status/cancel controls when the run used acpx session mode.
 - Persist raw JSON/ACP output as `acpx_events.jsonl`.
 - Map basic events into existing trajectory/progress/status/result artifacts.
