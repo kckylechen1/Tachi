@@ -651,6 +651,9 @@ fn maturity_review_artifacts(entry: &MemoryEntry, reason: &str) -> Value {
     let slug = promotion_slug(entry);
     let pattern_ref = crate::continuity_ops::pattern_ref_json(entry);
     let gate = promotion_gate(entry);
+    // #1690 C2: the `skill_candidate` review artifact (tool "tachi_skill",
+    // action "from_pattern") advertised a fan-out that slice C deleted — it
+    // must not be projected. wiki_draft / agent_profile_proposal stay.
     json!({
         "review_required": true,
         "auto_promote": false,

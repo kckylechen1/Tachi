@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 mod acp_transport;
 mod board_first;
+mod c3_mbit_retirement;
 mod completion_eval;
 mod prompt_credentials_board;
 mod recommend_policy;
@@ -45,7 +46,6 @@ fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
         pr_ref: None,
         flow_id: None,
         tool_profile: None,
-        auto_capability_bundle: None,
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
         verbose: None,
@@ -123,7 +123,6 @@ fn task_params(action: &str) -> TachiTaskParams {
         include_result: false,
         risk: None,
         tool_profile: None,
-        auto_capability_bundle: None,
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
         state_filter: None,

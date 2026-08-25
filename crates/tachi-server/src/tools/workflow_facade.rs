@@ -2,10 +2,10 @@ use super::*;
 
 #[tool_router(router = workflow_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
-    // ─── Facade: skill (discover / run) ───────────────────────────────────────
+    // ─── Facade: skill (discover / run) ─────────────────────────────────────
 
     #[tool(
-        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='run': execute a named skill by ID."
+        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='run': execute a named skill by ID. Delegate tool profiles may use discover/run. Always discover before writing custom multi-step logic."
     )]
     pub(crate) async fn tachi_skill(
         &self,
@@ -53,7 +53,7 @@ impl MemoryServer {
     // ─── Tachi Staff: external staffing facade ──────────────────────────────
 
     #[tool(
-        description = "External staffing: start a worker via the canonical dispatch kernel, or read a worker's canonical status receipt. start requires a typed staffing_reason (native-first exception); execution detail is resolved by profile/policy, not the caller."
+        description = "External staffing: start a worker via the canonical dispatch kernel, read a worker's canonical status receipt, or request same-daemon managed-custom cancellation with a dispatch_id and expected_status_revision. start requires a typed staffing_reason (native-first exception); execution detail is resolved by profile/policy, not the caller."
     )]
     pub(crate) async fn tachi_staff(
         &self,
@@ -72,6 +72,9 @@ impl MemoryServer {
         let format = params.format.clone();
         let raw = match action.as_str() {
             "start" => {
+                if params.expected_status_revision.is_some() {
+                    return Err("tachi_staff: action='start' rejects cancel-only field `expected_status_revision`".to_string());
+                }
                 let request = params.to_assignment_request().map_err(|e| {
                     if e.contains("staffing_reason") {
                         "tachi_staff: action='start' requires a typed staffing_reason (the native-first exception); use the host harness's native subagent for ordinary delegation, or set staffing_reason to explicit_user_request / durable_cross_session / cross_device_remote / native_subagent_unavailable for an admitted exception; zero staffing or dispatch artifacts were created.".to_string()
@@ -95,12 +98,28 @@ impl MemoryServer {
                 )
                 .await?
             }
+            "cancel" => {
+                let (dispatch_id, expected_status_revision) = params.cancel_request()?;
+                crate::staffing_ops::staff_cancel(
+                    self,
+                    crate::staffing_ops::StaffCancelRequest {
+                        dispatch_id,
+                        expected_status_revision,
+                    },
+                )
+                .await?
+            }
             other => {
                 return Err(format!(
-                    "tachi_staff: unknown action '{other}' (start|status)"
+                    "tachi_staff: unknown action '{other}' (start|status|cancel)"
                 ))
             }
         };
+        if action == "cancel" {
+            // The cancel result is itself the committed canonical receipt.
+            // Do not wrap it in a facade action/status projection.
+            return Ok(raw);
+        }
         format_facade_response(
             &format!("Tachi staff {}", action),
             &action,

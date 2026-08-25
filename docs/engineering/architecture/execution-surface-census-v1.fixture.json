@@ -1,9 +1,67 @@
 {
+  "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-08-20",
+    "date": "2026-08-16",
     "revision": "c3fc6e6e467a955cf1855f80765ffb88cda15ae7",
-    "scope": "native composed MemoryServer router after #1690 skill evolution retirement, #1691 component and event internalization; environment exposure override unset"
+    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738); environment exposure override unset"
+  },
+  "provisional_budgets": {
+    "profiles": {
+      "admin": {
+        "max_total_input_schema_bytes": 137053,
+        "max_total_tool_definition_bytes": 167986,
+        "max_visible_tools": 82,
+        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
+      },
+      "coordinate": {
+        "max_total_input_schema_bytes": 91938,
+        "max_total_tool_definition_bytes": 105428,
+        "max_visible_tools": 29,
+        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
+      },
+      "delegate": {
+        "max_total_input_schema_bytes": 38713,
+        "max_total_tool_definition_bytes": 43273,
+        "max_visible_tools": 10,
+        "rationale": "Exact live observed #1691 census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
+      },
+      "operate": {
+        "max_total_input_schema_bytes": 85511,
+        "max_total_tool_definition_bytes": 99232,
+        "max_visible_tools": 39,
+        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
+      },
+      "standard": {
+        "max_total_input_schema_bytes": 56795,
+        "max_total_tool_definition_bytes": 65811,
+        "max_visible_tools": 15,
+        "rationale": "Exact live observed #1691 census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
+      }
+    },
+    "status": "provisional",
+    "surfaces": {
+      "admin.tachi_task": {
+        "max_input_schema_bytes": 25735,
+        "max_top_level_properties": 65,
+        "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
+      },
+      "standard.tachi_gh": {
+        "max_input_schema_bytes": 11983,
+        "max_top_level_properties": 57,
+        "rationale": "Exact live observed #1713 tachi_gh schema after close_loop relocation; zero headroom."
+      },
+      "standard.tachi_memory": {
+        "max_input_schema_bytes": 7736,
+        "max_top_level_properties": 43,
+        "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
+      },
+      "standard.tachi_task": {
+        "max_input_schema_bytes": 24481,
+        "max_top_level_properties": 65,
+        "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
+      }
+    }
   },
   "observed": {
     "canonical_action_inventories": {
@@ -75,8 +133,9 @@
         ]
       },
       "tachi_staff": {
-        "action_count": 2,
+        "action_count": 3,
         "actions": [
+          "cancel",
           "start",
           "status"
         ]
@@ -131,8 +190,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 137143,
-        "total_tool_definition_bytes": 167878,
+        "total_input_schema_bytes": 137053,
+        "total_tool_definition_bytes": 167986,
         "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",
@@ -220,8 +279,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 92006,
-        "total_tool_definition_bytes": 105298,
+        "total_input_schema_bytes": 91938,
+        "total_tool_definition_bytes": 105428,
         "visible_tool_count": 29,
         "visible_tools": [
           "extract_facts",
@@ -256,8 +315,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 38894,
-        "total_tool_definition_bytes": 43353,
+        "total_input_schema_bytes": 38713,
+        "total_tool_definition_bytes": 43273,
         "visible_tool_count": 10,
         "visible_tools": [
           "peer_query",
@@ -273,8 +332,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 85692,
-        "total_tool_definition_bytes": 99312,
+        "total_input_schema_bytes": 85511,
+        "total_tool_definition_bytes": 99232,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -319,8 +378,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 56976,
-        "total_tool_definition_bytes": 65891,
+        "total_input_schema_bytes": 56795,
+        "total_tool_definition_bytes": 65811,
         "visible_tool_count": 15,
         "visible_tools": [
           "peer_query",
@@ -460,11 +519,12 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3455,
-            "property_count": 13,
+            "input_schema_bytes": 3568,
+            "property_count": 14,
             "property_names": [
               "action",
               "dispatch_id",
+              "expected_status_revision",
               "flow_id",
               "format",
               "issue_ref",
@@ -479,8 +539,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 25916,
-            "property_count": 66,
+            "input_schema_bytes": 25735,
+            "property_count": 65,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -489,7 +549,6 @@
               "agent_id",
               "agent_identity_id",
               "allow_umbrella_close",
-              "auto_capability_bundle",
               "branch",
               "claim_id",
               "claim_mode",
@@ -581,11 +640,12 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3455,
-            "property_count": 13,
+            "input_schema_bytes": 3568,
+            "property_count": 14,
             "property_names": [
               "action",
               "dispatch_id",
+              "expected_status_revision",
               "flow_id",
               "format",
               "issue_ref",
@@ -600,8 +660,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 24662,
-            "property_count": 66,
+            "input_schema_bytes": 24481,
+            "property_count": 65,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -610,7 +670,6 @@
               "agent_id",
               "agent_identity_id",
               "allow_umbrella_close",
-              "auto_capability_bundle",
               "branch",
               "claim_id",
               "claim_mode",
@@ -820,8 +879,8 @@
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 24662,
-          "property_count": 66,
+          "input_schema_bytes": 24481,
+          "property_count": 65,
           "property_names": [
             "__tachi_project_explicit",
             "action",
@@ -830,7 +889,6 @@
             "agent_id",
             "agent_identity_id",
             "allow_umbrella_close",
-            "auto_capability_bundle",
             "branch",
             "claim_id",
             "claim_mode",
@@ -965,63 +1023,5 @@
         }
       }
     }
-  },
-  "provisional_budgets": {
-    "profiles": {
-      "admin": {
-        "max_total_input_schema_bytes": 137143,
-        "max_total_tool_definition_bytes": 167878,
-        "max_visible_tools": 82,
-        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
-      },
-      "coordinate": {
-        "max_total_input_schema_bytes": 92006,
-        "max_total_tool_definition_bytes": 105298,
-        "max_visible_tools": 29,
-        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
-      },
-      "delegate": {
-        "max_total_input_schema_bytes": 38894,
-        "max_total_tool_definition_bytes": 43353,
-        "max_visible_tools": 10,
-        "rationale": "Exact live observed #1691 census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
-      },
-      "operate": {
-        "max_total_input_schema_bytes": 85692,
-        "max_total_tool_definition_bytes": 99312,
-        "max_visible_tools": 39,
-        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
-      },
-      "standard": {
-        "max_total_input_schema_bytes": 56976,
-        "max_total_tool_definition_bytes": 65891,
-        "max_visible_tools": 15,
-        "rationale": "Exact live observed #1691 census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
-      }
-    },
-    "status": "provisional",
-    "surfaces": {
-      "admin.tachi_task": {
-        "max_input_schema_bytes": 25916,
-        "max_top_level_properties": 66,
-        "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
-      },
-      "standard.tachi_gh": {
-        "max_input_schema_bytes": 11983,
-        "max_top_level_properties": 57,
-        "rationale": "Exact live observed #1713 tachi_gh schema after close_loop relocation; zero headroom."
-      },
-      "standard.tachi_memory": {
-        "max_input_schema_bytes": 7736,
-        "max_top_level_properties": 43,
-        "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
-      },
-      "standard.tachi_task": {
-        "max_input_schema_bytes": 24662,
-        "max_top_level_properties": 66,
-        "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
-      }
-    }
-  },
-  "schema_version": 1
+  }
 }

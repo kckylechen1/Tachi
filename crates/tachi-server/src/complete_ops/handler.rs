@@ -77,11 +77,643 @@ struct CompletionVerdict {
     override_reason: Option<String>,
 }
 
+enum CompletionStatusTarget {
+    Path(std::path::PathBuf),
+    #[cfg(unix)]
+    Anchored(crate::managed_run_control::AnchoredRunStatus),
+}
+
+impl CompletionStatusTarget {
+    fn for_path(run_dir: &std::path::Path) -> Self {
+        Self::Path(run_dir.join("status.json"))
+    }
+
+    #[cfg(unix)]
+    fn anchored(anchor: &crate::managed_run_control::AnchoredRunStatus) -> Self {
+        Self::Anchored(anchor.clone())
+    }
+
+    fn lock(&self) -> std::sync::Arc<std::sync::Mutex<()>> {
+        match self {
+            Self::Path(path) => crate::dispatch_ops::status_json_lock_for(
+                path.parent()
+                    .expect("completion status path has a run directory parent"),
+            ),
+            #[cfg(unix)]
+            Self::Anchored(anchor) => anchor.lock(),
+        }
+    }
+
+    fn status_path(&self) -> std::path::PathBuf {
+        match self {
+            Self::Path(path) => path.clone(),
+            #[cfg(unix)]
+            Self::Anchored(anchor) => anchor.status_path(),
+        }
+    }
+
+    fn read_json(&self) -> Result<Option<Value>, String> {
+        match self {
+            Self::Path(path) => {
+                let Some(run_dir) = path.parent() else {
+                    return Err(format!(
+                        "completion status path has no parent: {}",
+                        path.display()
+                    ));
+                };
+                let Some(raw) = crate::dispatch_ops::read_text_file_within(
+                    run_dir,
+                    path,
+                    COMPLETION_RECEIPT_STATUS_MAX_BYTES,
+                )?
+                else {
+                    return Ok(None);
+                };
+                serde_json::from_str(&raw)
+                    .map(Some)
+                    .map_err(|error| format!("parse {}: {error}", path.display()))
+            }
+            #[cfg(unix)]
+            Self::Anchored(anchor) => anchor.read_json(),
+        }
+    }
+
+    fn write_atomic(&self, bytes: &[u8]) -> Result<(), String> {
+        match self {
+            Self::Path(path) => crate::utils::write_owner_only_file_atomic(path, bytes)
+                .map_err(|error| error.to_string()),
+            #[cfg(unix)]
+            Self::Anchored(anchor) => anchor.write_atomic(bytes),
+        }
+    }
+}
+
 fn ensure_completion_artifact_read_support(dispatch_id: Option<&str>) -> Result<(), String> {
     if dispatch_id.is_some_and(|dispatch_id| !dispatch_id.trim().is_empty()) {
         crate::dispatch_ops::ensure_descriptor_reads_supported()?;
     }
     Ok(())
+}
+
+struct ManagedCompletionLease {
+    generation: u64,
+    #[cfg(unix)]
+    status_anchor: crate::managed_run_control::AnchoredRunStatus,
+    #[cfg(unix)]
+    owns_retained_status_anchor: bool,
+}
+
+fn admit_managed_completion(
+    server: &MemoryServer,
+    dispatch_id: Option<&str>,
+    persist_admission: bool,
+) -> Result<Option<ManagedCompletionLease>, String> {
+    let Some(dispatch_id) = dispatch_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
+        return Ok(None);
+    }
+    let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
+    let target = {
+        #[cfg(unix)]
+        if persist_admission {
+            let anchor = if let Some(anchor) = server
+                .managed_run_controls
+                .accepted_status_anchor(dispatch_id)
+            {
+                anchor
+            } else {
+                crate::managed_run_control::AnchoredRunStatus::open(&run_dir).map_err(|error| {
+                    format!(
+                        "cannot anchor managed completion status for dispatch_id={dispatch_id}: {error:?}"
+                    )
+                })?
+            };
+            CompletionStatusTarget::anchored(&anchor)
+        } else {
+            CompletionStatusTarget::for_path(&run_dir)
+        }
+        #[cfg(not(unix))]
+        {
+            CompletionStatusTarget::for_path(&run_dir)
+        }
+    };
+    let status_lock = target.lock();
+    let _status_guard = status_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let status_path = target.status_path();
+    let Some(mut status) = target.read_json()? else {
+        return Ok(None);
+    };
+    let object = status.as_object_mut().ok_or_else(|| {
+        format!(
+            "managed completion status is not an object: {}",
+            status_path.display()
+        )
+    })?;
+    if object
+        .get("execution_classification")
+        .and_then(Value::as_str)
+        != Some("managed_custom")
+    {
+        return Ok(None);
+    }
+    if object.get("lifecycle_owner").and_then(Value::as_str) != Some("memory_server_managed_custom")
+    {
+        return Ok(None);
+    }
+    if object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err("managed completion dispatch identity mismatch".to_string());
+    }
+    if crate::managed_run_control::cancellation_blocks_terminal_writer(object) {
+        return Err("managed cancellation owns terminal completion".to_string());
+    }
+    if object.get("state").and_then(Value::as_str) != Some("TASK_STATE_WORKING") {
+        return Err("managed completion no longer owns a working run".to_string());
+    }
+    if !server.managed_run_controls.contains(dispatch_id) {
+        return Ok(None);
+    }
+    if !persist_admission {
+        return Ok(None);
+    }
+    if object.contains_key("resolved_completion") {
+        return Ok(None);
+    }
+    if object
+        .get("completion_recovery")
+        .and_then(Value::as_object)
+        .and_then(|recovery| recovery.get("status"))
+        .and_then(Value::as_str)
+        == Some("completion_admitted")
+    {
+        return Err("managed completion already admitted".to_string());
+    }
+    if object.contains_key("completion_recovery") {
+        return Ok(None);
+    }
+    let generation = server
+        .managed_run_controls
+        .acquire_completion_lease(dispatch_id)
+        .ok_or_else(|| "managed completion already admitted".to_string())?;
+    #[cfg(unix)]
+    let status_anchor = match &target {
+        CompletionStatusTarget::Anchored(anchor) => anchor.clone(),
+        CompletionStatusTarget::Path(_) => {
+            return Err("managed completion status anchor missing".to_string());
+        }
+    };
+    let mut lease = ManagedCompletionLeaseAcquisitionGuard::arm(
+        server,
+        dispatch_id,
+        generation,
+        #[cfg(unix)]
+        status_anchor.clone(),
+    );
+    #[cfg(unix)]
+    {
+        let owns_retained_status_anchor = server
+            .managed_run_controls
+            .retain_accepted_status_anchor(dispatch_id, status_anchor)
+            .map_err(|reason| format!("retain managed completion status anchor: {reason}"))?;
+        lease.owns_retained_status_anchor = owns_retained_status_anchor;
+    }
+    object.insert(
+        "completion_recovery".to_string(),
+        json!({ "status": "completion_admitted" }),
+    );
+    crate::managed_run_control::advance_status_revision(object)?;
+    let body = serde_json::to_vec_pretty(&status)
+        .map_err(|error| format!("serialize managed completion admission: {error}"))?;
+    if let Err(error) = target.write_atomic(&body) {
+        return Err(format!("persist managed completion admission: {error}"));
+    }
+    Ok(Some(lease.disarm()))
+}
+
+/// The admission marker is a narrow cancellation fence, not evidence. If the
+/// eval write never starts, remove it so a retry or cancellation is not
+/// stranded behind a phantom completion owner.
+fn revoke_managed_completion_admission(
+    server: &MemoryServer,
+    dispatch_id: Option<&str>,
+    lease: &ManagedCompletionLease,
+) -> Result<(), String> {
+    let Some(dispatch_id) = dispatch_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(());
+    };
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
+    #[cfg(unix)]
+    let target = CompletionStatusTarget::anchored(&lease.status_anchor);
+    #[cfg(not(unix))]
+    let target = CompletionStatusTarget::for_path(&run_dir);
+    let status_lock = target.lock();
+    let _status_guard = status_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let status_path = target.status_path();
+    let Some(mut status) = target.read_json()? else {
+        return Ok(());
+    };
+    let object = status.as_object_mut().ok_or_else(|| {
+        format!(
+            "managed completion status is not an object: {}",
+            status_path.display()
+        )
+    })?;
+    if object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err("managed completion dispatch identity mismatch".to_string());
+    }
+    if server
+        .managed_run_controls
+        .owns_completion_lease(dispatch_id, lease.generation)
+        && object
+            .get("completion_recovery")
+            .and_then(Value::as_object)
+            .and_then(|recovery| recovery.get("status"))
+            .and_then(Value::as_str)
+            == Some("completion_admitted")
+        && !object.contains_key("resolved_completion")
+    {
+        object.remove("completion_recovery");
+        crate::managed_run_control::advance_status_revision(object)?;
+        let body = serde_json::to_vec_pretty(&status)
+            .map_err(|error| format!("serialize managed completion admission rollback: {error}"))?;
+        target
+            .write_atomic(&body)
+            .map_err(|error| format!("persist managed completion admission rollback: {error}"))?;
+    }
+    #[cfg(unix)]
+    if lease.owns_retained_status_anchor {
+        server
+            .managed_run_controls
+            .clear_accepted_status_anchor(dispatch_id, &lease.status_anchor);
+    }
+    server
+        .managed_run_controls
+        .release_completion_lease(dispatch_id, lease.generation);
+    Ok(())
+}
+
+/// Admission is a temporary cancellation fence. Once it is persisted, every
+/// later error or unwind must remove it unless a durable terminal/recovery
+/// receipt has taken ownership of the completion.
+struct ManagedCompletionLeaseAcquisitionGuard {
+    server: MemoryServer,
+    dispatch_id: String,
+    generation: Option<u64>,
+    #[cfg(unix)]
+    status_anchor: crate::managed_run_control::AnchoredRunStatus,
+    #[cfg(unix)]
+    owns_retained_status_anchor: bool,
+}
+
+impl ManagedCompletionLeaseAcquisitionGuard {
+    fn arm(
+        server: &MemoryServer,
+        dispatch_id: &str,
+        generation: u64,
+        #[cfg(unix)] status_anchor: crate::managed_run_control::AnchoredRunStatus,
+    ) -> Self {
+        Self {
+            server: server.clone(),
+            dispatch_id: dispatch_id.to_string(),
+            generation: Some(generation),
+            #[cfg(unix)]
+            status_anchor,
+            #[cfg(unix)]
+            owns_retained_status_anchor: false,
+        }
+    }
+
+    fn disarm(&mut self) -> ManagedCompletionLease {
+        ManagedCompletionLease {
+            generation: self
+                .generation
+                .take()
+                .expect("completion lease is transferred once"),
+            #[cfg(unix)]
+            status_anchor: self.status_anchor.clone(),
+            #[cfg(unix)]
+            owns_retained_status_anchor: self.owns_retained_status_anchor,
+        }
+    }
+}
+
+impl Drop for ManagedCompletionLeaseAcquisitionGuard {
+    fn drop(&mut self) {
+        if let Some(generation) = self.generation.take() {
+            #[cfg(unix)]
+            if self.owns_retained_status_anchor {
+                self.server
+                    .managed_run_controls
+                    .clear_accepted_status_anchor(&self.dispatch_id, &self.status_anchor);
+            }
+            self.server
+                .managed_run_controls
+                .release_completion_lease(&self.dispatch_id, generation);
+        }
+    }
+}
+
+/// A registry generation and the one opened status anchor own the persisted
+/// fence; no volatile identity token is exposed in status or a completion
+/// response.
+struct ManagedCompletionAdmissionGuard {
+    server: MemoryServer,
+    dispatch_id: Option<String>,
+    lease: Option<ManagedCompletionLease>,
+}
+
+impl ManagedCompletionAdmissionGuard {
+    fn arm(
+        server: &MemoryServer,
+        dispatch_id: Option<&str>,
+        lease: Option<ManagedCompletionLease>,
+    ) -> Self {
+        Self {
+            server: server.clone(),
+            dispatch_id: dispatch_id.map(str::to_string),
+            lease,
+        }
+    }
+
+    fn disarm(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            if let Some(dispatch_id) = self.dispatch_id.as_deref() {
+                self.server
+                    .managed_run_controls
+                    .release_completion_lease(dispatch_id, lease.generation);
+            }
+        }
+    }
+
+    fn verify(&self) -> Result<(), String> {
+        let (Some(dispatch_id), Some(lease)) = (self.dispatch_id.as_deref(), self.lease.as_ref())
+        else {
+            return Ok(());
+        };
+        #[cfg(unix)]
+        let target = CompletionStatusTarget::anchored(&lease.status_anchor);
+        #[cfg(not(unix))]
+        let target = CompletionStatusTarget::for_path(&resolved_completion_run_dir(
+            &self.server.tachi_home_dir(),
+            dispatch_id,
+        )?);
+        let status_lock = target.lock();
+        let _status_guard = status_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let status_path = target.status_path();
+        let Some(mut status) = target.read_json()? else {
+            return Err("managed completion status disappeared after admission".to_string());
+        };
+        let object = status.as_object_mut().ok_or_else(|| {
+            format!(
+                "managed completion status is not an object: {}",
+                status_path.display()
+            )
+        })?;
+        validate_managed_completion_admission(&self.server, dispatch_id, lease.generation, object)
+    }
+
+    fn persist_resolved_completion_receipt(
+        &self,
+        server: &MemoryServer,
+        dispatch_id: &str,
+        new_state: &str,
+        eval_memory_id: &str,
+        reviewed: bool,
+    ) -> Result<(), String> {
+        let (Some(owned_dispatch_id), Some(lease)) =
+            (self.dispatch_id.as_deref(), self.lease.as_ref())
+        else {
+            return persist_resolved_completion_receipt(
+                server,
+                dispatch_id,
+                new_state,
+                eval_memory_id,
+                reviewed,
+            );
+        };
+        if owned_dispatch_id != dispatch_id {
+            return Err("managed completion admission dispatch identity changed".to_string());
+        }
+        #[cfg(unix)]
+        let target = CompletionStatusTarget::anchored(&lease.status_anchor);
+        #[cfg(not(unix))]
+        let target = CompletionStatusTarget::for_path(&resolved_completion_run_dir(
+            &server.tachi_home_dir(),
+            dispatch_id,
+        )?);
+        persist_resolved_completion_receipt_at_with_admission(
+            &target,
+            dispatch_id,
+            new_state,
+            eval_memory_id,
+            reviewed,
+            Some((server, lease.generation)),
+        )
+    }
+
+    fn persist_pending_completion_recovery_receipt(
+        &self,
+        server: &MemoryServer,
+        dispatch_id: &str,
+        new_state: &str,
+        eval_memory_id: &str,
+        reviewed: bool,
+        dispatch_outcome: &Value,
+    ) -> Result<(), String> {
+        let (Some(owned_dispatch_id), Some(lease)) =
+            (self.dispatch_id.as_deref(), self.lease.as_ref())
+        else {
+            return persist_pending_completion_recovery_receipt(
+                server,
+                dispatch_id,
+                new_state,
+                eval_memory_id,
+                reviewed,
+                dispatch_outcome,
+            );
+        };
+        if owned_dispatch_id != dispatch_id {
+            return Err("managed completion admission dispatch identity changed".to_string());
+        }
+        #[cfg(unix)]
+        let target = CompletionStatusTarget::anchored(&lease.status_anchor);
+        #[cfg(not(unix))]
+        let target = CompletionStatusTarget::for_path(&resolved_completion_run_dir(
+            &server.tachi_home_dir(),
+            dispatch_id,
+        )?);
+        persist_pending_completion_recovery_receipt_at(
+            &target,
+            dispatch_id,
+            new_state,
+            eval_memory_id,
+            reviewed,
+            dispatch_outcome,
+        )
+    }
+}
+
+fn validate_managed_completion_admission(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    generation: u64,
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    if !server
+        .managed_run_controls
+        .owns_completion_lease(dispatch_id, generation)
+        || !server.managed_run_controls.contains(dispatch_id)
+    {
+        return Err("managed completion admission lease is no longer owned".to_string());
+    }
+    if object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err("managed completion dispatch identity mismatch".to_string());
+    }
+    if object
+        .get("execution_classification")
+        .and_then(Value::as_str)
+        != Some("managed_custom")
+        || object.get("lifecycle_owner").and_then(Value::as_str)
+            != Some("memory_server_managed_custom")
+        || object.get("state").and_then(Value::as_str) != Some("TASK_STATE_WORKING")
+        || object.contains_key("resolved_completion")
+        || crate::managed_run_control::cancellation_blocks_terminal_writer(object)
+        || object
+            .get("completion_recovery")
+            .and_then(Value::as_object)
+            .and_then(|recovery| recovery.get("status"))
+            .and_then(Value::as_str)
+            != Some("completion_admitted")
+    {
+        return Err("managed completion admission is no longer eligible".to_string());
+    }
+    Ok(())
+}
+
+impl Drop for ManagedCompletionAdmissionGuard {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            if let Err(error) = revoke_managed_completion_admission(
+                &self.server,
+                self.dispatch_id.as_deref(),
+                &lease,
+            ) {
+                tracing::error!(error = %error, "failed to revoke stranded managed completion admission");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+struct ManagedCompletionAdmissionBarrier {
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+struct ManagedCompletionAdmissionBarrierGuard(String);
+
+#[cfg(test)]
+impl Drop for ManagedCompletionAdmissionBarrierGuard {
+    fn drop(&mut self) {
+        if let Some(barriers) = MANAGED_COMPLETION_ADMISSION_BARRIERS.get() {
+            barriers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+static MANAGED_COMPLETION_ADMISSION_BARRIERS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, ManagedCompletionAdmissionBarrier>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn install_managed_completion_admission_barrier(
+    dispatch_id: &str,
+) -> (
+    ManagedCompletionAdmissionBarrierGuard,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    assert!(
+        MANAGED_COMPLETION_ADMISSION_BARRIERS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                dispatch_id.to_string(),
+                ManagedCompletionAdmissionBarrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            )
+            .is_none(),
+        "managed completion admission barrier already installed"
+    );
+    (
+        ManagedCompletionAdmissionBarrierGuard(dispatch_id.to_string()),
+        entered_rx,
+        release_tx,
+    )
+}
+
+#[cfg(test)]
+fn pause_managed_completion_after_admission(dispatch_id: Option<&str>) {
+    let Some(dispatch_id) = dispatch_id else {
+        return;
+    };
+    let barrier = MANAGED_COMPLETION_ADMISSION_BARRIERS
+        .get()
+        .and_then(|barriers| {
+            barriers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(dispatch_id)
+        });
+    if let Some(barrier) = barrier {
+        let _ = barrier.entered.send(());
+        let _ = barrier.release.recv();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CompletionEvalSave {
+    Durable(String),
+    NotRecorded,
+}
+
+fn classify_completion_eval_save(save_json: &Value) -> Result<CompletionEvalSave, &'static str> {
+    if let Some(id) = save_json
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    {
+        return Ok(CompletionEvalSave::Durable(id.to_string()));
+    }
+    if save_json
+        .get("saved")
+        .and_then(Value::as_bool)
+        .is_some_and(|saved| !saved)
+    {
+        return Ok(CompletionEvalSave::NotRecorded);
+    }
+    Err("completion eval response omitted its durable id")
 }
 
 /// Persist the resolved close in the dispatch's own run receipt before
@@ -136,29 +768,43 @@ fn persist_resolved_completion_receipt_at(
     eval_memory_id: &str,
     reviewed: bool,
 ) -> Result<(), String> {
-    let status_lock = crate::dispatch_ops::status_json_lock_for(run_dir);
+    let target = CompletionStatusTarget::for_path(run_dir);
+    persist_resolved_completion_receipt_at_with_admission(
+        &target,
+        dispatch_id,
+        new_state,
+        eval_memory_id,
+        reviewed,
+        None,
+    )
+}
+
+fn persist_resolved_completion_receipt_at_with_admission(
+    target: &CompletionStatusTarget,
+    dispatch_id: &str,
+    new_state: &str,
+    eval_memory_id: &str,
+    reviewed: bool,
+    admission: Option<(&MemoryServer, u64)>,
+) -> Result<(), String> {
+    let status_lock = match target {
+        CompletionStatusTarget::Path(path) => {
+            let run_dir = path
+                .parent()
+                .expect("completion status path has a run directory parent");
+            crate::dispatch_ops::status_json_lock_for(run_dir)
+        }
+        #[cfg(unix)]
+        CompletionStatusTarget::Anchored(anchor) => anchor.lock(),
+    };
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let status_path = run_dir.join("status.json");
-    let mut status = match crate::dispatch_ops::read_text_file_within(
-        run_dir,
-        &status_path,
-        COMPLETION_RECEIPT_STATUS_MAX_BYTES,
-    )
-    .map_err(|error| {
-        format!(
-            "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
-                 {error}"
-        )
+    let status_path = target.status_path();
+    let mut status = match target.read_json().map_err(|error| {
+        format!("cannot persist resolved completion receipt for dispatch_id={dispatch_id}: {error}")
     })? {
-        Some(raw) => serde_json::from_str(&raw).map_err(|error| {
-            format!(
-                "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
-                 parse {}: {error}",
-                status_path.display()
-            )
-        })?,
+        Some(status) => status,
         None => json!({ "dispatch_id": dispatch_id }),
     };
     #[cfg(test)]
@@ -166,10 +812,26 @@ fn persist_resolved_completion_receipt_at(
     let status_object = status.as_object_mut().ok_or_else(|| {
         format!(
             "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
-             {} is not a JSON object",
+            {} is not a JSON object",
             status_path.display()
         )
     })?;
+    if status_object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err(format!(
+            "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
+             managed completion dispatch identity mismatch"
+        ));
+    }
+    if let Some((server, generation)) = admission {
+        validate_managed_completion_admission(server, dispatch_id, generation, status_object)?;
+    }
+    crate::managed_run_control::reconcile_pending_cancellation_unavailable(
+        status_object,
+        "completion_winner",
+    );
+    if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
+        return Err("cannot overwrite a managed cancellation".to_string());
+    }
     status_object.insert(
         "resolved_completion".to_string(),
         json!({
@@ -188,12 +850,13 @@ fn persist_resolved_completion_receipt_at(
     // claiming final completion. The canonical row is durable now, so replace
     // that marker in the same atomic status write.
     status_object.remove("completion_recovery");
+    crate::managed_run_control::advance_status_revision(status_object)?;
     let body = serde_json::to_string_pretty(&status).map_err(|error| {
         format!(
             "cannot serialize resolved completion receipt for dispatch_id={dispatch_id}: {error}"
         )
     })?;
-    crate::utils::write_owner_only_file_atomic(&status_path, body.as_bytes()).map_err(|error| {
+    target.write_atomic(body.as_bytes()).map_err(|error| {
         format!(
             "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
              write {}: {error}",
@@ -221,8 +884,29 @@ fn persist_pending_completion_recovery_receipt(
         ));
     }
     let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
+    let target = CompletionStatusTarget::for_path(&run_dir);
     persist_pending_completion_recovery_receipt_at(
-        &run_dir,
+        &target,
+        dispatch_id,
+        new_state,
+        eval_memory_id,
+        reviewed,
+        dispatch_outcome,
+    )
+}
+
+#[cfg(test)]
+fn persist_pending_completion_recovery_receipt_for_test(
+    run_dir: &std::path::Path,
+    dispatch_id: &str,
+    new_state: &str,
+    eval_memory_id: &str,
+    reviewed: bool,
+    dispatch_outcome: &Value,
+) -> Result<(), String> {
+    let target = CompletionStatusTarget::for_path(run_dir);
+    persist_pending_completion_recovery_receipt_at(
+        &target,
         dispatch_id,
         new_state,
         eval_memory_id,
@@ -232,33 +916,31 @@ fn persist_pending_completion_recovery_receipt(
 }
 
 fn persist_pending_completion_recovery_receipt_at(
-    run_dir: &std::path::Path,
+    target: &CompletionStatusTarget,
     dispatch_id: &str,
     new_state: &str,
     eval_memory_id: &str,
     reviewed: bool,
     dispatch_outcome: &Value,
 ) -> Result<(), String> {
-    let status_lock = crate::dispatch_ops::status_json_lock_for(run_dir);
+    let status_lock = match target {
+        CompletionStatusTarget::Path(path) => {
+            let run_dir = path
+                .parent()
+                .expect("completion status path has a run directory parent");
+            crate::dispatch_ops::status_json_lock_for(run_dir)
+        }
+        #[cfg(unix)]
+        CompletionStatusTarget::Anchored(anchor) => anchor.lock(),
+    };
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let status_path = run_dir.join("status.json");
-    let mut status = match crate::dispatch_ops::read_text_file_within(
-        run_dir,
-        &status_path,
-        COMPLETION_RECEIPT_STATUS_MAX_BYTES,
-    )
-    .map_err(|error| {
+    let status_path = target.status_path();
+    let mut status = match target.read_json().map_err(|error| {
         format!("cannot persist completion recovery receipt for dispatch_id={dispatch_id}: {error}")
     })? {
-        Some(raw) => serde_json::from_str(&raw).map_err(|error| {
-            format!(
-                "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
-                 parse {}: {error}",
-                status_path.display()
-            )
-        })?,
+        Some(status) => status,
         None => json!({ "dispatch_id": dispatch_id }),
     };
     #[cfg(test)]
@@ -266,10 +948,23 @@ fn persist_pending_completion_recovery_receipt_at(
     let status_object = status.as_object_mut().ok_or_else(|| {
         format!(
             "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
-             {} is not a JSON object",
+            {} is not a JSON object",
             status_path.display()
         )
     })?;
+    if status_object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err(format!(
+            "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
+             managed completion dispatch identity mismatch"
+        ));
+    }
+    crate::managed_run_control::reconcile_pending_cancellation_unavailable(
+        status_object,
+        "completion_winner",
+    );
+    if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
+        return Err("cannot overwrite a managed cancellation".to_string());
+    }
     let recovery = json!({
         "status": "pending_canonical_outcome",
         "state": new_state,
@@ -289,12 +984,13 @@ fn persist_pending_completion_recovery_receipt_at(
     }
     status_object.remove("resolved_completion");
     status_object.insert("completion_recovery".to_string(), recovery);
+    crate::managed_run_control::advance_status_revision(status_object)?;
     let body = serde_json::to_string_pretty(&status).map_err(|error| {
         format!(
             "cannot serialize completion recovery receipt for dispatch_id={dispatch_id}: {error}"
         )
     })?;
-    crate::utils::write_owner_only_file_atomic(&status_path, body.as_bytes()).map_err(|error| {
+    target.write_atomic(body.as_bytes()).map_err(|error| {
         format!(
             "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
              write {}: {error}",
@@ -327,6 +1023,7 @@ pub(crate) async fn handle_tachi_complete(
     // the first executable action so an unsupported platform refuses before
     // eval/outcome/claim/receipt/kanban/continuity state can be mutated.
     ensure_completion_artifact_read_support(params.dispatch_id.as_deref())?;
+    let _ = admit_managed_completion(server, params.dispatch_id.as_deref(), false)?;
     let resolved_flow_id = params
         .dispatch_id
         .as_deref()
@@ -443,16 +1140,71 @@ pub(crate) async fn handle_tachi_complete(
     // detection / "single project on disk"): that silently reroutes eval rows
     // away from the server's own stores. Callers must pass `project` (or the
     // server must have a bound project DB) for project-scoped persistence.
-    let save_result = save_eval_memory(server, mem_params).await?;
+    // Recheck and persist immediately before the first side effect. The
+    // earlier read-only check keeps invalid inputs cheap; this fence prevents
+    // cancellation from winning between validation and eval/outcome writes.
+    let admission_token = admit_managed_completion(server, params.dispatch_id.as_deref(), true)?;
+    let managed_completion_admitted = admission_token.is_some();
+    let mut managed_admission = ManagedCompletionAdmissionGuard::arm(
+        server,
+        params.dispatch_id.as_deref(),
+        admission_token,
+    );
+    #[cfg(test)]
+    pause_managed_completion_after_admission(params.dispatch_id.as_deref());
+    managed_admission.verify()?;
+    let save_result = match save_eval_memory(server, mem_params).await {
+        Ok(result) => result,
+        Err(error) => return Err(error),
+    };
     let save_json: serde_json::Value = serde_json::from_str(&save_result)
         .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
 
-    // Extract the eval memory ID for the kanban hook
-    let eval_memory_id = save_json
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&task_id)
-        .to_string();
+    // A duplicate save can truthfully return saved:false with the existing
+    // durable id. Validation/capture rejection has no id and must never be
+    // projected as an eval, outcome, receipt, or terminal completion.
+    let eval_memory_id = match classify_completion_eval_save(&save_json)? {
+        CompletionEvalSave::Durable(id) => id,
+        CompletionEvalSave::NotRecorded if managed_completion_admitted => {
+            return Err("completion eval was not durably recorded".to_string());
+        }
+        CompletionEvalSave::NotRecorded => {
+            let pipeline_status = json!({
+                "reason": "completion eval not recorded",
+                "dispatch_outcome": "skipped (completion eval not recorded)",
+                "adjudication": "skipped (completion eval not recorded)",
+                "completion_receipt": "skipped (completion eval not recorded)",
+                "kanban_update": "skipped (completion eval not recorded)",
+                "continuity_events": "skipped (completion eval not recorded)",
+                "pattern_feedback": "skipped (completion eval not recorded)",
+                "dispatch_completion_link": "skipped (completion eval not recorded)",
+                "post_complete_hooks": "skipped (completion eval not recorded)",
+                "signature_recording": crate::signature_evidence::record_complete_signatures(server, &params),
+                "precedent_recording": crate::precedent_ops::record_complete_rulings(server, &params, project_explicit).await,
+                "precedent_candidate_decomposition": crate::precedent_candidate_ops::record_complete_precedent_candidates(
+                    server,
+                    &params,
+                    project_explicit,
+                )
+                .await,
+            });
+            // This is a truthful rejection receipt, not a completion.  The
+            // compact completion formatter deliberately projects eval entries
+            // and would erase the capture-gate evidence; preserve the raw
+            // rejection for every requested format instead.
+            let response = json!({
+                "recorded": false,
+                "reason": "completion eval not recorded",
+                "eval_entry": save_json,
+                "pipeline": pipeline_status,
+                "secret_redactions": secret_redactions,
+            });
+            return serde_json::to_string(&response).map_err(|error| {
+                format!("Failed to serialize nonrecorded completion bundle: {error}")
+            });
+        }
+    };
+    managed_admission.verify()?;
 
     // #773 Layer-2 ②: resolve the #878-A completion predicate BEFORE writing
     // the canonical outcome row, so `execution_outcome` records the MACHINE
@@ -532,21 +1284,26 @@ pub(crate) async fn handle_tachi_complete(
             // the supplied delivery evidence remains durable, while this
             // local recovery may only reconcile the canonical outcome and its
             // receipt on a later complete call.
-            let recovery_receipt = match persist_pending_completion_recovery_receipt(
-                server,
-                dispatch_id,
-                verdict.new_state,
-                &eval_memory_id,
-                verdict.reviewed_flag,
-                &dispatch_outcome_status,
-            ) {
-                Ok(()) => json!({
-                    "status": "pending_canonical_outcome",
-                    "dispatch_id": dispatch_id,
-                    "state": verdict.new_state,
-                    "eval_memory_id": eval_memory_id,
-                    "reviewed": verdict.reviewed_flag,
-                }),
+            let recovery_receipt = match managed_admission.verify().and_then(|()| {
+                managed_admission.persist_pending_completion_recovery_receipt(
+                    server,
+                    dispatch_id,
+                    verdict.new_state,
+                    &eval_memory_id,
+                    verdict.reviewed_flag,
+                    &dispatch_outcome_status,
+                )
+            }) {
+                Ok(()) => {
+                    managed_admission.disarm();
+                    json!({
+                        "status": "pending_canonical_outcome",
+                        "dispatch_id": dispatch_id,
+                        "state": verdict.new_state,
+                        "eval_memory_id": eval_memory_id,
+                        "reviewed": verdict.reviewed_flag,
+                    })
+                }
                 Err(error) => json!({
                     "status": "recovery_receipt_failed",
                     "dispatch_id": dispatch_id,
@@ -560,8 +1317,6 @@ pub(crate) async fn handle_tachi_complete(
                 "kanban_update": "skipped (canonical outcome pending)",
                 "continuity_events": "skipped (canonical outcome pending)",
                 "pattern_feedback": "skipped (canonical outcome pending)",
-                "distill_trajectory": "skipped (canonical outcome pending)",
-                "skill_evolve": "skipped (canonical outcome pending)",
                 "post_complete_hooks": "skipped (canonical outcome pending)",
             });
             let response = shape_complete_response(
@@ -609,8 +1364,6 @@ pub(crate) async fn handle_tachi_complete(
         "dispatch_outcome": dispatch_outcome_status,
         "adjudication": adjudication_status,
         "kanban_update": "skipped (no dispatch_id)",
-        "distill_trajectory": "skipped (automatic distillation retired)",
-        "skill_evolve": "skipped",
         "continuity_events": "pending",
         "post_complete_hooks": "pending",
     });
@@ -807,13 +1560,14 @@ pub(crate) async fn handle_tachi_complete(
         // durable before kanban is touched; a failed write is loud because
         // continuing would allow the watchdog to manufacture COMPLETED from
         // an exit-zero process after a missing/stale kanban projection.
-        persist_resolved_completion_receipt(
+        managed_admission.persist_resolved_completion_receipt(
             server,
             did,
             new_state,
             &eval_memory_id,
             reviewed_flag,
         )?;
+        managed_admission.disarm();
         pipeline_status["completion_receipt"] = json!({
             "status": "persisted",
             "dispatch_id": did,
@@ -1081,6 +1835,1267 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
+    struct CaptureGateEnforceGuard {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl CaptureGateEnforceGuard {
+        fn new() -> Self {
+            let original = std::env::var_os("TACHI_CAPTURE_GATE");
+            std::env::set_var("TACHI_CAPTURE_GATE", "enforce");
+            Self { original }
+        }
+    }
+
+    impl Drop for CaptureGateEnforceGuard {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => std::env::set_var("TACHI_CAPTURE_GATE", value),
+                None => std::env::remove_var("TACHI_CAPTURE_GATE"),
+            }
+        }
+    }
+
+    fn managed_completion_params(dispatch_id: &str) -> TachiCompleteParams {
+        TachiCompleteParams {
+            task_id: None,
+            task: "complete managed dispatch".to_string(),
+            agent: "codex".to_string(),
+            outcome: "success".to_string(),
+            task_type: None,
+            profile: None,
+            risk: None,
+            duration_ms: None,
+            skills_used: Vec::new(),
+            cost_tokens: None,
+            cost_usd: None,
+            quality_score: None,
+            notes: None,
+            trajectory: None,
+            diff: None,
+            worktree: None,
+            subagents: Vec::new(),
+            eval_run_ids: Vec::new(),
+            feedback_rules_applied: Vec::new(),
+            dispatch_id: Some(dispatch_id.to_string()),
+            flow_id: None,
+            issue_ref: None,
+            pr_ref: None,
+            evidence_refs: Vec::new(),
+            tests_run: Vec::new(),
+            diff_present: None,
+            scope: None,
+            project: None,
+            format: None,
+            signatures: Vec::new(),
+            rulings: Vec::new(),
+            adjudication: None,
+        }
+    }
+
+    fn seed_managed_working_status(
+        server: &MemoryServer,
+        dispatch_id: &str,
+        cancellation: Option<Value>,
+    ) {
+        let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("managed run directory");
+        let mut status = json!({
+            "dispatch_id": dispatch_id,
+            "state": "TASK_STATE_WORKING",
+            "status_revision": 7,
+            "execution_classification": "managed_custom",
+            "lifecycle_owner": "memory_server_managed_custom",
+        });
+        if let Some(cancellation) = cancellation {
+            status["cancellation"] = cancellation;
+        }
+        std::fs::write(run_dir.join("status.json"), status.to_string()).expect("managed status");
+    }
+
+    fn dispatch_outcome_count(server: &MemoryServer, dispatch_id: &str) -> i64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("query dispatch outcome count")
+    }
+
+    fn dispatch_adjudication_count(server: &MemoryServer, dispatch_id: &str) -> i64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_adjudications AS adjudication \
+                         JOIN dispatch_outcomes AS outcome ON outcome.outcome_id = adjudication.outcome_id \
+                         WHERE outcome.dispatch_id = ?1",
+                        [dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("query dispatch adjudication count")
+    }
+
+    fn eval_memory_count(server: &MemoryServer, dispatch_id: &str) -> i64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memories \
+                         WHERE json_extract(metadata, '$.dispatch_id') = ?1",
+                        [dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("query eval memory count")
+    }
+
+    #[tokio::test]
+    async fn issue_1825_capture_gate_saved_false_revokes_managed_completion_without_residue() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182519Z-custom-gate-reject";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let (_receiver, _managed_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
+        let _capture_gate = CaptureGateEnforceGuard::new();
+
+        let mut params = managed_completion_params(dispatch_id);
+        params.task_id = Some("issue-1825-capture-gate-reject".to_string());
+        params.task = "x".to_string();
+        params.agent = "x".to_string();
+        let error = handle_tachi_complete(&server, params, false)
+            .await
+            .expect_err("the real capture-gate saved:false response must reject completion");
+        assert_eq!(error, "completion eval was not durably recorded");
+
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(
+                server
+                    .tachi_home_dir()
+                    .join("runs")
+                    .join(dispatch_id)
+                    .join("status.json"),
+            )
+            .expect("read rolled-back managed status"),
+        )
+        .expect("parse rolled-back managed status");
+        assert!(
+            status.get("completion_recovery").is_none(),
+            "saved:false must revoke the temporary completion admission: {status:#}"
+        );
+        assert!(
+            status.get("resolved_completion").is_none(),
+            "saved:false must never fabricate a resolved completion receipt: {status:#}"
+        );
+        assert_eq!(
+            status["status_revision"], 9,
+            "admission and rollback are the only two status mutations"
+        );
+        assert_eq!(dispatch_outcome_count(&server, dispatch_id), 0);
+        assert_eq!(dispatch_adjudication_count(&server, dispatch_id), 0);
+        assert_eq!(
+            eval_memory_count(&server, dispatch_id),
+            0,
+            "capture-gate rejection must not leave an eval row"
+        );
+    }
+
+    #[test]
+    fn completion_eval_save_classifies_duplicate_id_before_saved_flag() {
+        assert_eq!(
+            classify_completion_eval_save(&json!({
+                "saved": false,
+                "id": "existing-eval-memory",
+            }))
+            .expect("duplicate response classifies"),
+            CompletionEvalSave::Durable("existing-eval-memory".to_string())
+        );
+        assert_eq!(
+            classify_completion_eval_save(&json!({"saved": false}))
+                .expect("capture rejection classifies"),
+            CompletionEvalSave::NotRecorded
+        );
+    }
+
+    #[tokio::test]
+    async fn unmanaged_capture_gate_saved_false_returns_truthful_nonrecorded_bundle() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260824T000000Z-unmanaged-capture-reject";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let status_path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        let mut status: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read seeded unmanaged status"),
+        )
+        .expect("parse seeded unmanaged status");
+        let status_object = status.as_object_mut().expect("seeded status object");
+        status_object.remove("execution_classification");
+        status_object.remove("lifecycle_owner");
+        std::fs::write(&status_path, status.to_string()).expect("persist unmanaged status");
+        let _capture_gate = CaptureGateEnforceGuard::new();
+
+        let mut params = managed_completion_params(dispatch_id);
+        params.task_id = Some("unmanaged-capture-gate-reject".to_string());
+        params.task = "x".to_string();
+        params.agent = "x".to_string();
+        let response: Value = serde_json::from_str(
+            &handle_tachi_complete(&server, params, false)
+                .await
+                .expect("unmanaged capture rejection returns a truthful bundle"),
+        )
+        .expect("nonrecorded completion response JSON");
+        assert_eq!(response["recorded"], false);
+        assert_eq!(response["reason"], "completion eval not recorded");
+        assert_eq!(response["eval_entry"]["saved"], false);
+        assert_eq!(response["eval_entry"]["rejected_by"], "capture_gate");
+        assert!(
+            response["eval_entry"]["violations"].is_array(),
+            "the default-format receipt must preserve capture-gate violations: {response:#}"
+        );
+        assert!(
+            response["eval_entry"].get("status").is_none(),
+            "the raw capture-gate entry must not gain a terminal status: {response:#}"
+        );
+        for skipped in [
+            "dispatch_outcome",
+            "adjudication",
+            "completion_receipt",
+            "kanban_update",
+            "continuity_events",
+            "pattern_feedback",
+            "dispatch_completion_link",
+            "post_complete_hooks",
+        ] {
+            assert_eq!(
+                response["pipeline"][skipped], "skipped (completion eval not recorded)",
+                "{skipped} must not run without a durable eval id"
+            );
+        }
+        for sidecar in [
+            "signature_recording",
+            "precedent_recording",
+            "precedent_candidate_decomposition",
+        ] {
+            assert!(
+                response["pipeline"].get(sidecar).is_some(),
+                "{sidecar} remains a best-effort caller-supplied sidecar"
+            );
+        }
+        assert_eq!(dispatch_outcome_count(&server, dispatch_id), 0);
+        assert_eq!(dispatch_adjudication_count(&server, dispatch_id), 0);
+        assert_eq!(eval_memory_count(&server, dispatch_id), 0);
+        let after: Value =
+            serde_json::from_slice(&std::fs::read(&status_path).expect("read nonrecorded status"))
+                .expect("parse nonrecorded status");
+        assert!(after.get("completion_recovery").is_none());
+        assert!(after.get("resolved_completion").is_none());
+        assert_eq!(after["state"], "TASK_STATE_WORKING");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn issue_1825_background_terminal_supersedes_failed_completion_admission() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temporary Tachi home");
+        let temp_runs = tempfile::tempdir().expect("temporary run root");
+        let temp_bin = tempfile::tempdir().expect("temporary worker bin");
+        let exit_trigger = temp_bin.path().join("exit-trigger");
+        let worker = temp_bin.path().join("opencode");
+        std::fs::write(
+            &worker,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile test ! -e '{}'; do sleep 0.01; done\nprintf 'background terminal after admitted completion\\n'\nexit 2\n",
+                exit_trigger.display()
+            ),
+        )
+        .expect("write controlled managed worker");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&worker)
+            .expect("controlled worker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).expect("make controlled worker executable");
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join controlled worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _transport = crate::test_support::EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "cli");
+        let _v2 = crate::test_support::EnvRestore::set("DISPATCH_V2_ENABLED", "false");
+        let _review = crate::test_support::EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+        let _capture_gate = CaptureGateEnforceGuard::new();
+        let server = crate::staffing_ops::tests::test_server();
+        let raw = crate::staffing_ops::staff_start(
+            &server,
+            crate::staffing_ops::StaffStartRequest {
+                task: "interleave real managed terminal with completion rollback".to_string(),
+                staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
+                profile: Some("glm_impl".to_string()),
+                worker: Some("custom".to_string()),
+                project: None,
+                stage: None,
+                execution_level: None,
+                issue_ref: Some("kckylechen1/tachi#1825".to_string()),
+                pr_ref: None,
+                flow_id: Some("flow_1825_admission_terminal_interleave".to_string()),
+                completion_predicate: None,
+                recommendation_ref: None,
+            },
+        )
+        .await
+        .expect("real Staff background launch");
+        let response: Value = serde_json::from_str(&raw).expect("Staff response JSON");
+        let dispatch_id = response["dispatch_id"]
+            .as_str()
+            .expect("managed dispatch id")
+            .to_string();
+        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
+        let status_path = run_dir.join("status.json");
+        let (_barrier_guard, entered, release) =
+            install_managed_completion_admission_barrier(&dispatch_id);
+        let handler_server = server.clone();
+        let handler_dispatch_id = dispatch_id.clone();
+        let completion = tokio::spawn(async move {
+            handle_tachi_complete(
+                &handler_server,
+                managed_completion_params(&handler_dispatch_id),
+                false,
+            )
+            .await
+        });
+        tokio::task::spawn_blocking(move || entered.recv().expect("handler admission barrier"))
+            .await
+            .expect("admission barrier join");
+        std::fs::write(&exit_trigger, b"release background terminal")
+            .expect("release controlled worker");
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if std::fs::read_to_string(run_dir.join("result.md")).is_ok() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "real background runner must persist its result while waiting for admission: {}",
+                std::fs::read_to_string(&status_path)
+                    .unwrap_or_else(|error| format!("<status unavailable: {error}>"))
+            )
+        });
+        let fenced: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read admitted status before handler release"),
+        )
+        .expect("parse admitted status before handler release");
+        assert_eq!(fenced["state"], "TASK_STATE_WORKING");
+        assert_eq!(
+            fenced["completion_recovery"]["status"],
+            "completion_admitted",
+            "the background finalizer must retain ownership while the handler admission lease is live"
+        );
+        assert!(server.managed_run_controls.contains(&dispatch_id));
+        release.send(()).expect("release failed completion handler");
+        assert_eq!(
+            completion
+                .await
+                .expect("completion handler join")
+                .expect_err("capture gate rejects completion after terminalization"),
+            "completion eval was not durably recorded"
+        );
+        let terminal = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Ok(raw_status) = std::fs::read_to_string(&status_path) {
+                    if let Ok(status) = serde_json::from_str::<Value>(&raw_status) {
+                        if status["state"] == "TASK_STATE_FAILED" {
+                            return status;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("background finalizer must terminalize after admission rollback");
+        for _ in 0..360 {
+            if !server.managed_run_controls.contains(&dispatch_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let after: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read terminal status after rollback"),
+        )
+        .expect("parse terminal status after rollback");
+        assert_eq!(terminal["state"], "TASK_STATE_FAILED");
+        assert_eq!(after["state"], "TASK_STATE_FAILED");
+        assert!(after.get("completion_recovery").is_none());
+        assert!(std::fs::read_to_string(run_dir.join("result.md"))
+            .expect("terminal result")
+            .contains("background terminal after admitted completion"));
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, &dispatch_id).await,
+            Some("TASK_STATE_FAILED".to_string())
+        );
+        let outcomes: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [&dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count terminal failure outcomes");
+        assert_eq!(outcomes, 1);
+        assert!(!server.managed_run_controls.contains(&dispatch_id));
+        let flow_slot =
+            crate::task_lifecycle::run_dir_for_flow_id("flow_1825_admission_terminal_interleave")
+                .expect("flow run directory")
+                .join(".dispatch-dedupe");
+        assert!(
+            !flow_slot.exists()
+                || std::fs::read_dir(&flow_slot)
+                    .expect("flow slot directory")
+                    .next()
+                    .is_none(),
+            "terminal background owner must release the flow slot"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn issue_1825_committed_completion_admission_makes_cancel_unavailable_without_signaling_and_can_finalize(
+    ) {
+        struct CurrentDirRestore(std::path::PathBuf);
+
+        impl Drop for CurrentDirRestore {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore completion fixture directory");
+            }
+        }
+
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temporary Tachi home");
+        let temp_runs = tempfile::tempdir().expect("temporary run root");
+        let temp_bin = tempfile::tempdir().expect("temporary worker bin");
+        let exit_trigger = temp_bin.path().join("exit-trigger");
+        let worker_started = temp_bin.path().join("worker-started");
+        let worker = temp_bin.path().join("opencode");
+        std::fs::write(
+            &worker,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\ntouch '{}'\nwhile test ! -e '{}'; do sleep 0.01; done\nprintf 'background terminal held for successful completion\\n'\nexit 2\n",
+                worker_started.display(),
+                exit_trigger.display(),
+            ),
+        )
+        .expect("write controlled managed worker");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&worker)
+            .expect("controlled worker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&worker, permissions).expect("make controlled worker executable");
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join controlled worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _transport = crate::test_support::EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "cli");
+        let _v2 = crate::test_support::EnvRestore::set("DISPATCH_V2_ENABLED", "false");
+        let _review = crate::test_support::EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+        let _embedding =
+            crate::test_support::EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
+        std::fs::create_dir_all(temp_bin.path().join(".tachi/credentials"))
+            .expect("create isolated credential profile directory");
+        std::fs::write(
+            temp_bin
+                .path()
+                .join(".tachi/credentials/opencode-shared.json"),
+            serde_json::json!({
+                "credential_profiles": {
+                    "opencode_shared": {
+                        "entries": {"auth_json": "OPENCODE_SHARED_AUTH_JSON"},
+                        "allowed_consumers": {
+                            "agents": ["opencode"],
+                            "profiles": ["opencode_builder"]
+                        },
+                        "materializers": [{
+                            "type": "env",
+                            "source": "auth_json",
+                            "target": "OPENCODE_SHARED_AUTH_JSON"
+                        }, {
+                            "type": "config_overlay",
+                            "source": "auth_json",
+                            "target": "{credentials_dir}/opencode.json",
+                            "template": {
+                                "provider": {
+                                    "fixture": {"apiKey": "{env:OPENCODE_SHARED_AUTH_JSON}"}
+                                }
+                            }
+                        }]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write isolated OpenCode credential profile");
+        let _cwd = CurrentDirRestore(std::env::current_dir().expect("read completion fixture cwd"));
+        std::env::set_current_dir(temp_bin.path()).expect("enter completion credential fixture");
+        let server = crate::staffing_ops::tests::test_server();
+        crate::vault_ops::handle_vault_init(
+            &server,
+            crate::vault_ops::VaultInitParams {
+                password: "issue-1825-opencode-fixture".to_string(),
+            },
+        )
+        .await
+        .expect("initialize isolated credential vault");
+        crate::vault_ops::handle_vault_set(
+            &server,
+            crate::vault_ops::VaultSetParams {
+                name: "OPENCODE_SHARED_AUTH_JSON".to_string(),
+                value: r#"{"token":"issue-1825-fixture"}"#.to_string(),
+                agent_id: None,
+                secret_type: "api_key".to_string(),
+                description: "issue-1825 successful completion credential fixture".to_string(),
+                allowed_agents: None,
+                enable_rotation: false,
+                rotation_strategy: None,
+            },
+        )
+        .await
+        .expect("seed isolated OpenCode credential secret");
+        let raw = crate::staffing_ops::staff_start(
+            &server,
+            crate::staffing_ops::StaffStartRequest {
+                task: "interleave real managed terminal with successful completion".to_string(),
+                staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
+                profile: Some("opencode_builder".to_string()),
+                worker: Some("custom".to_string()),
+                project: None,
+                stage: None,
+                execution_level: None,
+                issue_ref: Some("kckylechen1/tachi#1825".to_string()),
+                pr_ref: None,
+                flow_id: Some("flow_1825_admission_success_interleave".to_string()),
+                completion_predicate: None,
+                recommendation_ref: None,
+            },
+        )
+        .await
+        .expect("real Staff background launch");
+        let response: Value = serde_json::from_str(&raw).expect("Staff response JSON");
+        let dispatch_id = response["dispatch_id"]
+            .as_str()
+            .expect("managed dispatch id")
+            .to_string();
+        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
+        let status_path = run_dir.join("status.json");
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if worker_started.exists() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("real background root must acknowledge startup before cancellation");
+        assert!(
+            run_dir.join("credentials/opencode.json").exists(),
+            "the managed completion fixture must use a real ephemeral OpenCode overlay"
+        );
+        let (_cancel_dequeue_guard, cancel_dequeued, continue_cancel, cancel_observation) =
+            crate::dispatch_ops::install_managed_cancel_dequeue_barrier(&run_dir);
+        let (_barrier_guard, entered, release) =
+            install_managed_completion_admission_barrier(&dispatch_id);
+        let handler_server = server.clone();
+        let handler_dispatch_id = dispatch_id.clone();
+        let completion = tokio::spawn(async move {
+            handle_tachi_complete(
+                &handler_server,
+                managed_completion_params(&handler_dispatch_id),
+                false,
+            )
+            .await
+        });
+        tokio::task::spawn_blocking(move || entered.recv().expect("handler admission barrier"))
+            .await
+            .expect("admission barrier join");
+        let admitted: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read admitted status before cancellation"),
+        )
+        .expect("parse admitted status before cancellation");
+        let expected_status_revision = admitted["status_revision"]
+            .as_u64()
+            .expect("committed admission status revision");
+        let evals_before_completion = eval_memory_count(&server, &dispatch_id);
+        let outcomes_before_completion = dispatch_outcome_count(&server, &dispatch_id);
+        let adjudications_before_completion = dispatch_adjudication_count(&server, &dispatch_id);
+        let cancel_server = server.clone();
+        let cancel_dispatch_id = dispatch_id.clone();
+        let cancellation_task = tokio::task::spawn(async move {
+            crate::managed_run_control::request_managed_custom_cancel(
+                &cancel_server,
+                &cancel_dispatch_id,
+                expected_status_revision,
+            )
+            .await
+        });
+        match tokio::task::spawn_blocking(move || {
+            cancel_dequeued.recv_timeout(Duration::from_millis(250))
+        })
+        .await
+        .expect("join cancellation dequeue observation")
+        {
+            Ok(()) => {
+                continue_cancel
+                    .send(())
+                    .expect("release unexpectedly dequeued cancellation");
+                let response = cancellation_task
+                    .await
+                    .expect("unexpected cancellation task join");
+                panic!("completion admission must reject before the background owner dequeues cancellation: {response:?}");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("cancellation dequeue observer disconnected before the response")
+            }
+        }
+        let cancellation: Value = serde_json::from_str(
+            &cancellation_task
+                .await
+                .expect("cancellation task join")
+                .expect("cancel after real completion admission"),
+        )
+        .expect("cancellation JSON");
+        assert_eq!(cancellation["receipt"], "cancellation_unavailable");
+        assert_eq!(cancellation["reason"], "terminal_or_recovery_state");
+        assert!(
+            matches!(
+                cancel_observation.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "an unavailable cancellation must not reach the real background terminal owner"
+        );
+        assert!(
+            admitted.get("cancellation").is_none(),
+            "a cancellation rejected by the committed completion admission must not signal the child"
+        );
+        assert!(
+            worker_started.exists() && !run_dir.join("result.md").exists(),
+            "the acknowledged root must remain live until the explicit completion trigger"
+        );
+        let concurrent =
+            handle_tachi_complete(&server, managed_completion_params(&dispatch_id), false)
+                .await
+                .expect_err("a second handler must not inherit the admitted owner");
+        assert_eq!(concurrent, "managed completion already admitted");
+        std::fs::write(&exit_trigger, b"release background terminal")
+            .expect("release controlled worker");
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if std::fs::read_to_string(run_dir.join("result.md")).is_ok() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("background runner must finish before completion is released");
+        let fenced: Value =
+            serde_json::from_slice(&std::fs::read(&status_path).expect("read admitted status"))
+                .expect("parse admitted status");
+        assert_eq!(fenced["state"], "TASK_STATE_WORKING");
+        assert_eq!(
+            fenced["completion_recovery"]["status"],
+            "completion_admitted"
+        );
+        release
+            .send(())
+            .expect("release successful completion handler");
+        completion
+            .await
+            .expect("completion handler join")
+            .expect("completion must win its owned admission");
+        let terminal = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Ok(raw_status) = std::fs::read_to_string(&status_path) {
+                    if let Ok(status) = serde_json::from_str::<Value>(&raw_status) {
+                        if status["state"] == "TASK_STATE_COMPLETED"
+                            && status.get("resolved_completion").is_some()
+                        {
+                            return status;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("completion receipt must be the sole terminal truth");
+        assert!(terminal.get("completion_recovery").is_none());
+        assert_eq!(
+            eval_memory_count(&server, &dispatch_id),
+            evals_before_completion + 1,
+            "only the admitted handler may persist the canonical eval"
+        );
+        assert_eq!(
+            dispatch_adjudication_count(&server, &dispatch_id),
+            adjudications_before_completion,
+            "successful completion and the rejected second handler must not fabricate an adjudication"
+        );
+        assert!(
+            !run_dir.join("credentials/opencode.json").exists(),
+            "a completion-owned nonzero managed terminal must clean its real overlay before release"
+        );
+        assert_eq!(
+            crate::dispatch_ops::get_kanban_state(&server, &dispatch_id).await,
+            Some("TASK_STATE_COMPLETED".to_string())
+        );
+        let outcomes: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                        [&dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count canonical completion outcomes");
+        assert_eq!(
+            outcomes,
+            outcomes_before_completion + 1,
+            "only the admitted handler may project the canonical outcome"
+        );
+        for _ in 0..360 {
+            if !server.managed_run_controls.contains(&dispatch_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!server.managed_run_controls.contains(&dispatch_id));
+        let flow_slot =
+            crate::task_lifecycle::run_dir_for_flow_id("flow_1825_admission_success_interleave")
+                .expect("flow run directory")
+                .join(".dispatch-dedupe");
+        assert!(
+            !flow_slot.exists()
+                || std::fs::read_dir(&flow_slot)
+                    .expect("flow slot directory")
+                    .next()
+                    .is_none(),
+            "the terminal background owner must release the flow slot after completion wins"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn issue_1825_concurrent_handlers_keep_one_volatile_admission_owner() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182527Z-concurrent-completion";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let status_path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        let (_receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
+        let _capture_gate = CaptureGateEnforceGuard::new();
+        let (_barrier_guard, entered, release) =
+            install_managed_completion_admission_barrier(dispatch_id);
+        let first_server = server.clone();
+        let first = tokio::spawn(async move {
+            handle_tachi_complete(&first_server, managed_completion_params(dispatch_id), false)
+                .await
+        });
+        tokio::task::spawn_blocking(move || entered.recv().expect("first handler admitted"))
+            .await
+            .expect("admission barrier join");
+        let second = handle_tachi_complete(&server, managed_completion_params(dispatch_id), false)
+            .await
+            .expect_err("second handler must not share the first admission");
+        assert_eq!(second, "managed completion already admitted");
+        let blocked: Value = serde_json::from_str(
+            &crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, 8)
+                .await
+                .expect("cancellation response while first handler owns admission"),
+        )
+        .expect("blocked cancellation JSON");
+        assert_eq!(blocked["receipt"], "cancellation_unavailable");
+        release.send(()).expect("release first handler");
+        assert_eq!(
+            first
+                .await
+                .expect("first handler join")
+                .expect_err("capture gate rolls back first admission"),
+            "completion eval was not durably recorded"
+        );
+        let after: Value =
+            serde_json::from_slice(&std::fs::read(&status_path).expect("read rolled-back status"))
+                .expect("parse rolled-back status");
+        assert!(after.get("completion_recovery").is_none());
+        assert_eq!(dispatch_outcome_count(&server, dispatch_id), 0);
+        assert_eq!(eval_memory_count(&server, dispatch_id), 0);
+    }
+
+    #[tokio::test]
+    async fn issue_1825_post_save_predicate_error_revokes_managed_completion_admission() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182526Z-post-save-predicate-error";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+        let status_path = run_dir.join("status.json");
+        let mut status: Value =
+            serde_json::from_slice(&std::fs::read(&status_path).expect("read managed status"))
+                .expect("parse managed status");
+        status["completion_predicate"] = json!({ "type": "output_matches", "pattern": ".*" });
+        std::fs::write(&status_path, status.to_string()).expect("write predicate status");
+        std::fs::write(run_dir.join("result.md"), [0xff_u8])
+            .expect("write invalid UTF-8 result artifact");
+        let (mut receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed registry");
+
+        let error = handle_tachi_complete(&server, managed_completion_params(dispatch_id), false)
+            .await
+            .expect_err("invalid result artifact must fail after durable eval save");
+        assert!(
+            error.contains("UTF-8") || error.contains("utf-8"),
+            "{error}"
+        );
+        let after: Value =
+            serde_json::from_slice(&std::fs::read(&status_path).expect("read rolled-back status"))
+                .expect("parse rolled-back status");
+        assert!(
+            after.get("completion_recovery").is_none(),
+            "admission marker stranded: {after:#}"
+        );
+        assert!(after.get("resolved_completion").is_none());
+        assert_eq!(
+            eval_memory_count(&server, dispatch_id),
+            1,
+            "post-save predicate failure must preserve the durable eval"
+        );
+
+        let cancel_server = server.clone();
+        let cancel = tokio::spawn(async move {
+            crate::managed_run_control::request_managed_custom_cancel(
+                &cancel_server,
+                dispatch_id,
+                9,
+            )
+            .await
+        });
+        let command = receiver
+            .recv()
+            .await
+            .expect("revoked admission reopens cancellation");
+        assert!(
+            command
+                .response
+                .send(crate::managed_run_control::CancelCompletion::Unconfirmed)
+                .is_ok(),
+            "respond cancellation"
+        );
+        let cancellation: Value =
+            serde_json::from_str(&cancel.await.expect("cancel join").expect("cancel response"))
+                .expect("cancellation JSON");
+        assert_eq!(
+            cancellation["receipt"], "cancellation_requested",
+            "the restored control path can enqueue a real cancellation command"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_1825_post_cancel_completion_after_registry_drop_has_no_residue() {
+        for receipt in ["cancellation_requested", "cancellation_confirmed"] {
+            let (server, _home) = crate::tests::make_server_with_temp_home();
+            let dispatch_id = format!(
+                "20260823T18251{}Z-custom-deadbeef",
+                if receipt.ends_with("requested") { 1 } else { 2 }
+            );
+            seed_managed_working_status(&server, &dispatch_id, Some(json!({ "receipt": receipt })));
+            let (_receiver, registry_guard) = server
+                .managed_run_controls
+                .register(&dispatch_id)
+                .expect("managed registry");
+            drop(registry_guard);
+            assert!(
+                !server.managed_run_controls.contains(&dispatch_id),
+                "the volatile registry must be absent when durable cancellation is checked"
+            );
+
+            let error =
+                handle_tachi_complete(&server, managed_completion_params(&dispatch_id), false)
+                    .await
+                    .expect_err("managed cancellation owns completion before durable writes");
+            assert_eq!(error, "managed cancellation owns terminal completion");
+            assert_eq!(
+                dispatch_outcome_count(&server, &dispatch_id),
+                0,
+                "{receipt} must reject before dispatch_outcomes/adjudication can be derived"
+            );
+            assert_eq!(
+                dispatch_adjudication_count(&server, &dispatch_id),
+                0,
+                "{receipt} must reject before dispatch_adjudications can be derived"
+            );
+            assert_eq!(
+                eval_memory_count(&server, &dispatch_id),
+                0,
+                "{receipt} must reject before an eval row is persisted"
+            );
+            let status: Value = serde_json::from_slice(
+                &std::fs::read(
+                    server
+                        .tachi_home_dir()
+                        .join("runs")
+                        .join(&dispatch_id)
+                        .join("status.json"),
+                )
+                .expect("status remains readable"),
+            )
+            .expect("status JSON");
+            assert!(
+                status.get("resolved_completion").is_none(),
+                "{receipt} must not resolve completion"
+            );
+            assert!(
+                status.get("completion_recovery").is_none(),
+                "{receipt} must not admit completion"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_1825_cleanup_failure_receipt_fences_completion_after_registry_drop() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182524Z-cleanup-failure-fence";
+        seed_managed_working_status(
+            &server,
+            dispatch_id,
+            Some(json!({
+                "receipt": "cancellation_unavailable",
+                "reason": "credential_cleanup_failed",
+                "state": "TASK_STATE_FAILED",
+            })),
+        );
+        let status_path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        let mut status: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read cleanup-failure status"),
+        )
+        .expect("parse cleanup-failure status");
+        status["state"] = Value::String("TASK_STATE_FAILED".to_string());
+        std::fs::write(&status_path, status.to_string()).expect("persist cleanup-failure status");
+        crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+            &server,
+            dispatch_id,
+            "credential_cleanup_failed",
+            Some("custom"),
+            None,
+        );
+
+        let error = handle_tachi_complete(&server, managed_completion_params(dispatch_id), false)
+            .await
+            .expect_err("cleanup failure owns the terminal receipt after registry drop");
+        assert_eq!(error, "managed cancellation owns terminal completion");
+        assert_eq!(
+            dispatch_outcome_count(&server, dispatch_id),
+            1,
+            "completion must preserve the one existing cleanup-failure outcome"
+        );
+        assert_eq!(dispatch_adjudication_count(&server, dispatch_id), 0);
+        assert_eq!(eval_memory_count(&server, dispatch_id), 0);
+        let after: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read fenced cleanup-failure status"),
+        )
+        .expect("parse fenced cleanup-failure status");
+        assert!(after.get("resolved_completion").is_none());
+        assert!(after.get("completion_recovery").is_none());
+    }
+
+    #[test]
+    fn issue_1825_managed_completion_admission_requires_the_persisted_managed_owner() {
+        for owner in [None, Some("foreign_owner")] {
+            let (server, _home) = crate::tests::make_server_with_temp_home();
+            let dispatch_id = "20260823T182522Z-managed-owner";
+            seed_managed_working_status(&server, dispatch_id, None);
+            let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+            let status_path = run_dir.join("status.json");
+            let mut status: Value = serde_json::from_slice(
+                &std::fs::read(&status_path).expect("read seeded managed status"),
+            )
+            .expect("parse seeded managed status");
+            match owner {
+                Some(owner) => status["lifecycle_owner"] = Value::String(owner.to_string()),
+                None => {
+                    status
+                        .as_object_mut()
+                        .expect("managed status object")
+                        .remove("lifecycle_owner");
+                }
+            }
+            std::fs::write(&status_path, status.to_string()).expect("write owner mutant");
+            let (_receiver, _guard) = server
+                .managed_run_controls
+                .register(dispatch_id)
+                .expect("managed registry");
+
+            admit_managed_completion(&server, Some(dispatch_id), true)
+                .expect("foreign or missing owner is not admission failure");
+            let after: Value = serde_json::from_slice(
+                &std::fs::read(&status_path).expect("read admission result"),
+            )
+            .expect("parse admission result");
+            assert!(
+                after.get("completion_recovery").is_none(),
+                "only the persisted managed owner may admit completion: {after:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_completion_generation_lease_unit() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182526Z-managed-admission-owner";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let status_path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        let (_receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
+
+        let owner_a = admit_managed_completion(&server, Some(dispatch_id), true)
+            .expect("first completion admission")
+            .expect("first admission owns a token");
+        let revision_after_a = serde_json::from_slice::<Value>(
+            &std::fs::read(&status_path).expect("read first admission marker"),
+        )
+        .expect("parse first admission marker")["status_revision"]
+            .clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let barrier_for_b = barrier.clone();
+        let server_for_b = server.clone();
+        let owner_b_attempt = std::thread::spawn(move || {
+            barrier_for_b.wait();
+            admit_managed_completion(&server_for_b, Some(dispatch_id), true)
+        });
+        barrier.wait();
+        assert_eq!(
+            owner_b_attempt
+                .join()
+                .expect("second completion admission thread")
+                .err()
+                .expect("a concurrent completion must not share admission"),
+            "managed completion already admitted"
+        );
+        let after_b_rejection: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read rejected second admission"),
+        )
+        .expect("parse rejected second admission");
+        assert_eq!(after_b_rejection["status_revision"], revision_after_a);
+        let blocked: Value = serde_json::from_str(
+            &crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, 8)
+                .await
+                .expect("cancel response while completion owns admission"),
+        )
+        .expect("blocked cancellation JSON");
+        assert_eq!(blocked["receipt"], "cancellation_unavailable");
+
+        revoke_managed_completion_admission(&server, Some(dispatch_id), &owner_a)
+            .expect("first owner rollback");
+        let owner_b = admit_managed_completion(&server, Some(dispatch_id), true)
+            .expect("second completion admission after rollback")
+            .expect("second admission owns a token");
+        revoke_managed_completion_admission(&server, Some(dispatch_id), &owner_a)
+            .expect("stale owner rollback is harmless");
+        let after: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read second admission marker"),
+        )
+        .expect("parse second admission marker");
+        assert_eq!(
+            after["completion_recovery"],
+            json!({"status": "completion_admitted"}),
+            "a stale completion unwind must not erase another owner's marker"
+        );
+        revoke_managed_completion_admission(&server, Some(dispatch_id), &owner_b)
+            .expect("second owner rollback");
+    }
+
+    #[test]
+    fn issue_1825_failed_admission_write_releases_the_volatile_completion_lease() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260823T182527Z-managed-admission-write-error";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let status_path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        let (_receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
+
+        let mut invalid: Value = serde_json::from_slice(
+            &std::fs::read(&status_path).expect("read seeded managed status"),
+        )
+        .expect("parse seeded managed status");
+        invalid["status_revision"] = json!("not-a-u64");
+        std::fs::write(&status_path, invalid.to_string()).expect("persist invalid revision");
+        let error = admit_managed_completion(&server, Some(dispatch_id), true)
+            .err()
+            .expect("invalid canonical revision rejects admission");
+        assert!(
+            error.contains("status_revision"),
+            "unexpected admission error: {error}"
+        );
+
+        invalid["status_revision"] = json!(8);
+        std::fs::write(&status_path, invalid.to_string()).expect("repair canonical revision");
+        let generation = admit_managed_completion(&server, Some(dispatch_id), true)
+            .expect("a corrected admission may acquire a released lease")
+            .expect("managed completion owns the corrected admission");
+        revoke_managed_completion_admission(&server, Some(dispatch_id), &generation)
+            .expect("release corrected admission");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_1833_managed_completion_receipt_stays_on_admitted_a_after_replacement() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260825T183308Z-completion-physical-identity";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let run_a = server.tachi_home_dir().join("runs").join(dispatch_id);
+        let replacement_b = server
+            .tachi_home_dir()
+            .join("runs")
+            .join("replacement-completion-physical-identity");
+        let parked_a = server
+            .tachi_home_dir()
+            .join("runs")
+            .join("parked-completion-physical-identity");
+        let (_receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
+
+        let admission_token = admit_managed_completion(&server, Some(dispatch_id), true)
+            .expect("managed completion admission")
+            .expect("managed completion lease");
+        let admitted_a = std::fs::read(run_a.join("status.json")).expect("admitted A status");
+        std::fs::create_dir_all(&replacement_b).expect("replacement B directory");
+        std::fs::write(replacement_b.join("status.json"), &admitted_a)
+            .expect("byte-identical replacement B status");
+        let b_before = std::fs::read(replacement_b.join("status.json"))
+            .expect("replacement B before completion");
+        let mut admission =
+            ManagedCompletionAdmissionGuard::arm(&server, Some(dispatch_id), Some(admission_token));
+
+        std::fs::rename(&run_a, &parked_a).expect("park admitted A");
+        std::fs::rename(&replacement_b, &run_a).expect("install replacement B at A");
+
+        admission
+            .verify()
+            .expect("completion verification remains on admitted A");
+        admission
+            .persist_resolved_completion_receipt(
+                &server,
+                dispatch_id,
+                "TASK_STATE_COMPLETED",
+                "eval-1833-physical-identity",
+                true,
+            )
+            .expect("authoritative completion receipt remains on admitted A");
+        admission.disarm();
+
+        let retained_terminal_anchor = server
+            .managed_run_controls
+            .accepted_status_anchor(dispatch_id)
+            .expect("completion admission retains the terminal writer anchor");
+        crate::dispatch_ops::write_status_json_with_managed_anchor(
+            &run_a,
+            dispatch_id,
+            false,
+            None,
+            None,
+            "n/a",
+            Some(0),
+            None,
+            Some(1),
+            Some(1),
+            Some(json!({
+                "state": "TASK_STATE_COMPLETED",
+                "result_written": true,
+            })),
+            &retained_terminal_anchor,
+        );
+
+        let a_after: Value = serde_json::from_slice(
+            &std::fs::read(parked_a.join("status.json")).expect("completed A status"),
+        )
+        .expect("completed A JSON");
+        assert_eq!(
+            a_after["resolved_completion"]["state"], "TASK_STATE_COMPLETED",
+            "authoritative completion must remain on the admitted physical A"
+        );
+        assert_eq!(
+            a_after["state"], "TASK_STATE_COMPLETED",
+            "the later background terminal writer must remain on admitted physical A"
+        );
+        assert_eq!(
+            std::fs::read(run_a.join("status.json")).expect("replacement B after completion"),
+            b_before,
+            "replacement B must remain byte-identical and untouched"
+        );
+    }
+
     #[test]
     fn completion_without_dispatch_id_does_not_require_descriptor_platform_support() {
         ensure_completion_artifact_read_support(None).expect("manual completion has no run read");
@@ -1102,9 +3117,6 @@ mod tests {
     /// silently turn a partial + exit 0 into COMPLETED.
     #[test]
     fn resolved_completion_receipt_write_failure_is_loud() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temporary receipt parent");
         let non_directory = temp.path().join("not-a-run-directory");
         std::fs::write(&non_directory, "not a directory").expect("seed blocking file");
@@ -1149,9 +3161,6 @@ mod tests {
 
     #[test]
     fn pending_completion_recovery_receipt_is_idempotent_and_not_terminal() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temporary receipt parent");
         let dispatch_id = "20260719T000003Z-recovery-receipt";
         let run_dir = temp.path().join(dispatch_id);
@@ -1171,7 +3180,7 @@ mod tests {
             "error": "dispatch outcome persistence failed after retry_memory_locked(op=dispatch_outcomes_upsert, db_label=global): database is locked"
         });
 
-        persist_pending_completion_recovery_receipt_at(
+        persist_pending_completion_recovery_receipt_for_test(
             &run_dir,
             dispatch_id,
             "TASK_STATE_COMPLETED",
@@ -1191,8 +3200,13 @@ mod tests {
             first_json["completion_recovery"]["dispatch_outcome"]["recorded"],
             json!(false)
         );
+        assert_eq!(
+            first_json["status_revision"],
+            json!(1),
+            "the recovery writer advances the shared revision"
+        );
 
-        persist_pending_completion_recovery_receipt_at(
+        persist_pending_completion_recovery_receipt_for_test(
             &run_dir,
             dispatch_id,
             "TASK_STATE_COMPLETED",
@@ -1224,8 +3238,12 @@ mod tests {
             resolved["resolved_completion"]["eval_ledger_id"],
             json!("eval-recovery")
         );
+        assert_eq!(
+            resolved["status_revision"],
+            json!(2),
+            "the resolved-completion writer advances after the recovery writer"
+        );
     }
-
     /// Completion receipts pause after their stale read while holding the same
     /// canonical per-run mutex as lifecycle and route writers. The lifecycle
     /// writer uses an existing `run/../run` spelling: a raw-path registry or a
@@ -1364,7 +3382,7 @@ mod tests {
             install_completion_status_read_barrier(Arc::clone(&read), Arc::clone(&resume));
         let writer_dir = recovery_dir.clone();
         let recovery_writer = std::thread::spawn(move || {
-            persist_pending_completion_recovery_receipt_at(
+            persist_pending_completion_recovery_receipt_for_test(
                 &writer_dir,
                 recovery_dispatch_id,
                 "TASK_STATE_COMPLETED",

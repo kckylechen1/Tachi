@@ -12,7 +12,13 @@ async fn dispatch_prompt_includes_task_route_overlay() {
     assert!(prompt.contains("## Tachi task route"), "{prompt}");
     assert!(prompt.contains("intent: test_request"), "{prompt}");
     assert!(prompt.contains("skill:coding-test-strategy"), "{prompt}");
-    assert!(prompt.contains("## Required skill invocation"), "{prompt}");
+    // #1690 C3 S1 re-anchor: the task-route overlay keeps the SOP advisory, but
+    // with empty skills the prompt must NOT synthesize a Required skill
+    // invocation section from it (task-selected SOP promotion is retired).
+    assert!(
+        !prompt.contains("## Required skill invocation"),
+        "empty skills must not auto-inject a skill-invocation section from task-selected SOPs: {prompt}"
+    );
     assert!(prompt.contains("tachi_unstick(check)"), "{prompt}");
 }
 

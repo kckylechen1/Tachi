@@ -333,11 +333,6 @@ pub struct TachiTaskParams {
     #[serde(default)]
     #[schemars(skip)]
     pub tool_profile: Option<String>,
-    #[serde(default, alias = "include_capability_bundle")]
-    #[schemars(
-        description = "[action=brief] When true, includes the capability bundle in the briefing context when supported."
-    )]
-    pub auto_capability_bundle: Option<bool>,
     #[serde(default)]
     #[schemars(skip)]
     pub mcp_access: Option<DispatchMcpAccessParams>,

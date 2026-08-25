@@ -284,7 +284,7 @@ pub(crate) fn facade_action_effect(
                 "close_loop",
             ],
         ),
-        "tachi_staff" => (&["status"], &[], &["start"]),
+        "tachi_staff" => (&["status"], &[], &["start", "cancel"]),
         "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
         // Preserve the existing conservative treatment of these facades while
         // making the set exhaustive. Unknown actions receive no metadata.
@@ -508,6 +508,7 @@ mod tests {
             ("tachi_wiki", "write"),
             ("tachi_task", "complete"),
             ("tachi_staff", "start"),
+            ("tachi_staff", "cancel"),
         ] {
             assert!(
                 dlq_unsafe(tool, Some(action)),
@@ -686,5 +687,18 @@ mod tests {
             cacheable.is_disjoint(&invalidating),
             "a tool name must not be both cacheable and cache-invalidating"
         );
+    }
+}
+
+#[cfg(test)]
+mod issue_1825_cancel_effect_tests {
+    use super::*;
+
+    #[test]
+    fn tachi_staff_cancel_schema_and_effect_contract() {
+        let metadata = facade_action_effect("tachi_staff", Some("cancel"))
+            .expect("cancel has explicit action-effect metadata");
+        assert_eq!(metadata.effect, ActionEffect::Mutating);
+        assert_eq!(metadata.replay, ReplaySafety::Unsafe);
     }
 }

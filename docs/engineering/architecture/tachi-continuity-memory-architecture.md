@@ -26,7 +26,7 @@ Because this bridge can drift toward the user's short-term feedback at the expen
 
 ### 1.1 Core invariant: one ledger, many read models
 
-Continuity memory is an **append-only evidence substrate** plus projected read models. Pattern, timeline, bonding, affect, lorebook/world-book, eval, wiki, and skill crystallization share one logical event protocol and provenance model, not isolated cache semantics. Physically isolated trust-domain partitions are required for private user, relationship, and journal material; “one ledger” does not mean one readable database.
+Continuity memory is an **append-only evidence substrate** plus projected read models. Pattern, timeline, bonding, affect, lorebook/world-book, eval, and wiki share one logical event protocol and provenance model, not isolated cache semantics. The event protocol itself survives; the skill-crystallization leg is **RETIRED by #1690 C3** — promotion emits wiki drafts and agent-profile proposals only, never skill candidates. Physically isolated trust-domain partitions are required for private user, relationship, and journal material; “one ledger” does not mean one readable database.
 
 This means:
 
@@ -325,23 +325,23 @@ A wiki page derived from a pattern must retain a `pattern_ref` link. It is **not
 
 ### 3.3 Skill — pattern execution path
 
-Skill is the **executable crystallization** of patterns. The generated-skill system named here (`run_skill`, `recommend_skill`, `skill_evolve`) is **retired by #1690** — the surviving skill surface is static reviewed skills via `tachi_skill(action="discover"|"run")`; this section is kept as the design record. Pattern memory should become its **evidence-driven discovery layer**, not a replacement.
+Skill **was** the executable crystallization of patterns; that crystallization leg is **RETIRED by #1690 C3** — promotion emits wiki drafts and agent-profile proposals only, never skill candidates. This section is kept as a historical record of the retired path. Tachi has a complete skill system (`hub_register`, `tachi_skill(action='run'|'discover')`). The retired "second model brain" surfaces that used to ride here — `run_skill` (native alias), `recommend_skill`, `skill_evolve`, and `tachi_skill(action='from_pattern')` — are deleted end-to-end by #1690 C3 (delete list: "skill recommendation and auto-selection", "skill generation"). Pattern memory is a **read-model source for reviewed artifacts**, not an evidence-driven skill-selection layer.
 
-Two integration modes:
+The two integration modes once planned here are both retired:
 
-1. **Recommendation signal** (retired by #1690): `recommend_skill` used to include active patterns as context. Matching recommendations carry `pattern_refs`; `tachi_task`'s lightweight skill recommendations use the same bridge signal.
-2. **Skill generation** (higher risk): `tachi_event action="promote"` can generate a disabled, pending-review, discoverable skill candidate with `pattern_ref` traceability. Human/maturity promotion to a listed skill is still a target.
+1. **Recommendation signal** (low risk): **RETIRED by #1690 C3** — `recommend_skill` is deleted; no skill matching consumes pattern context.
+2. **Skill generation** (higher risk): `tachi_skill(action="from_pattern")` is **RETIRED by #1690 C3**; patterns never mint skill candidates. Mature patterns promote to reviewed wiki/runbook artifacts only.
 
 This mirrors the Karpathy LLM Wiki flow:
 
 ```
-Raw notes / sessions → pattern memory → wiki → skill
+Raw notes / sessions → pattern memory → wiki → skill   (historical Karpathy mirror; Tachi's skill leg is retired — see §3.3)
 ```
 
 Tachi maps this as:
 
 ```
-Notes / memory / session → /user/patterns/* → /wiki/drafts/patterns/* → skill:<name>
+Notes / memory / session → /user/patterns/* → /wiki/drafts/patterns/* → reviewed wiki/runbook   (no skill minting — retired by #1690 C3)
 ```
 
 ### 3.4 Eval — the credibility loop
@@ -425,8 +425,8 @@ Implemented integration slice:
 internal save path (the retired standalone `save_memory`, now the crate-internal save route) with emit_continuity=true → memory.saved event — note: the public `tachi_memory(action="save")` facade intentionally does NOT expose emit_continuity
 tachi_search scope=patterns      → explicit read-only /user/patterns recall
 tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
-tachi_skill action=discover/run  → discover and execute listed Hub skills
-tachi_event action=promote       → wiki draft + pending skill + agent-profile proposal review artifacts
+tachi_skill action=discover|run  → static reviewed skill surface only (the retired from_pattern action was deleted by #1690 C3; no skill candidate is ever minted from a pattern)
+tachi_event action=promote       → wiki draft + agent-profile proposal review artifacts (the disabled skill-candidate artifact is retired by #1690 C3)
 tachi_domain_adapter lorebook_import → repo lorebook shape → world_book events
 tachi_event action=context       → read-only local context bundle; caller session text is not evidence admission
 tachi_event action=a2a           → read-only A2A evidence bundle without context feedback writes
@@ -437,7 +437,7 @@ Target integration still to add:
 ```
 pattern maturity → external validation + cold-seat check
 review artifact → human-approved wiki/runbook promotion
-review artifact → human-approved generated skill promotion to listed/enabled
+review artifact → human-approved generated skill promotion to listed/enabled   (moot — RETIRED by #1690 C3: no generated skills exist)
 review artifact → human-approved Agent MD/profile write
 ```
 
@@ -466,9 +466,12 @@ Runtime event
 Pattern matures (hit_rate / confidence threshold + external validation + cold-seat check)
     → projection report includes review_artifacts
     → review artifact can create /wiki/drafts/patterns/<name>.md
-    → review artifact can create skill:<name> candidate
+    → review artifact can create an agent_profile.proposal continuity event
+      (the skill:<name> candidate leg is retired by #1690 C3 — no skill
+      candidate is ever minted from a pattern)
     → human review
-    → promote to wiki + hub skill
+    → human-approved wiki/runbook promotion (hub-skill promotion is moot:
+      no generated skills exist)
 ```
 
 ---
@@ -495,11 +498,11 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `tachi_search` supports `scope="patterns"` and excludes continuity projection rows from ordinary `memory` recall.
 - `tachi_wiki_write` supports `include_patterns=true`, persisting active pattern references in wiki metadata.
 - `tachi_wiki_write` emits `wiki.saved` continuity events for reviewed wiki writes.
-- `tachi_skill(action="discover"|"run")` discovers and executes listed Hub skills.
-- (retired by #1690) `recommend_skill` and feature/task lightweight skill recommendation used active patterns as a bridge between the user's query and the skill surface; recommendations attach `pattern_refs` when a pattern contributed to the score.
-- `tachi_event action="promote"` executes conservative review-artifact creation for mature patterns: a pending wiki draft, a disabled skill candidate, and an `agent_profile.proposal` continuity event. It supports `dry_run`, `force`, per-artifact skip flags, and a promotion gate that marks external-validation / cold-seat-review readiness before any final promotion.
-- The daemon runs a scoped background continuity projection loop; projection reports include projected, skipped, and promotion candidate counters plus review artifacts for wiki drafts, skill candidates, and agent-profile proposals.
-- Skill system then: `hub_register`, `run_skill`, `recommend_skill`, `skill_evolve`, builtin skills (all retired by #1690 except the static builtin/registry surface).
+- `tachi_skill(action="from_pattern")` **RETIRED by #1690 C3** — no skill candidate is ever minted from a pattern; the `from_pattern` action is typed-rejected.
+- `recommend_skill` and feature/task lightweight skill recommendation **RETIRED by #1690 C3** — no skill matching consumes pattern context; the static task-brief intent map (`selected_sops`) is the only surviving advisory projection.
+- `tachi_event action="promote"` executes conservative review-artifact creation for mature patterns: a pending wiki draft and an `agent_profile.proposal` continuity event (the disabled skill-candidate artifact is retired by #1690 C3). It supports `dry_run`, `force`, per-artifact skip flags, and a promotion gate that marks external-validation / cold-seat-review readiness before any final promotion.
+- The daemon runs a scoped background continuity projection loop; projection reports include projected, skipped, and promotion candidate counters plus review artifacts for wiki drafts and agent-profile proposals (the `skill_candidate` review artifact is retired by #1690 C3).
+- Complete skill system: `hub_register`, `tachi_skill(action='run'|'discover')`, builtin skills. The native `run_skill` alias, `recommend_skill`, and `skill_evolve` are retired by #1690 C3.
 
 ### Missing / gaps
 
@@ -507,7 +510,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 2. **Agent MD crystallization is only first-slice**: the `tachi_profile` tool that used to import/render/context profile packs and target `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Cursor, and OpenClaw files was retired from the MCP surface under #757, superseded by the memory-line promotion path (#950, #534). `tachi_event action="promote"` can emit an `agent_profile.proposal` event for a mature pattern, but it does not yet render or write host Agent MD files.
 3. **No cross-process A2A transport**: a local read-only `a2a` evidence bundle and `action=a2a` poll surface exist, but there is no daemon pub/sub API, no independent cold-seat host profile, and no transport-level evidence/open-question feed.
 4. **Label-quality calibration incomplete**: harness and smoke fixture exist, but calibration still needs a larger reviewed held-out corpus, thresholds, and an operator-visible calibration status.
-5. **Maturity gates are partially implemented**: projection reports and `tachi_event action="promote"` expose external-validation / cold-seat-review gate status. The gate still does not auto-promote drafts/candidates to final wiki, listed skill, or Agent MD writes.
+5. **Maturity gates are partially implemented**: projection reports and `tachi_event action="promote"` expose external-validation / cold-seat-review gate status. The gate still does not auto-promote drafts or proposals to final wiki or Agent MD writes (the listed-skill promotion leg is **retired by #1690 C3** — no generated skills exist, so there is no listed-skill target to promote).
 6. **Pattern evidence is append-only but downstream interpretation remains partial**: `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs when it has a real flow id, and `tachi_gh(action="close_loop")` can append `hit` evidence for reviewed attached patterns when it has a real flow id. Missing flow identity produces a typed skip. `tachi_search scope="patterns"` and `tachi_event action=context` are read-only. These internal receipts do not project or change counters. The explicit legacy feedback action can still emit counter-mutating `hit` / `miss` / `stale` signals. Ordinary briefing/context use still does not automatically decide hit/miss without downstream outcome evidence.
 7. **Timeline graph is partially wired**: timeline projections expose a typed `metadata.timeline` / `timeline[]` read-model slice with a `TimelineEntry` schema marker, and explicit causal edges with existing memory-id endpoints persist to `memory_edges`. Natural-language causal edges, typed `JudgmentEvolution`, and automatic endpoint resolution are still missing.
 8. **Bonding privacy migration is unbuilt**: current `/user/patterns/bonding/*` projections are not physically partitioned by `(user trust domain, agent_identity_id)`, and current local A2A bundles expose bonding refs. Migrate to the private relationship partition, bind identity, exclude all bonding refs/content from A2A/workers/cold seats, and add migration/leakage goldens. The current `SharedLexicon` shape also lacks a standalone Rust domain type.
@@ -547,16 +550,16 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 2. Done: auto projection skips `Blocker` and `ExecutionGate` authority events.
 3. Done: reports and scheduler logs include projected count, skipped count, promotion candidates, and review artifacts.
 
-### Phase 4 — Skill crystallization
+### Phase 4 — Skill crystallization (RETIRED by #1690 C3)
 
-**Goal:** mature patterns become executable skills.
+**Goal:** mature patterns become executable skills — **retired end-to-end** (delete list: "skill recommendation and auto-selection", "skill generation"; `recommend_skill`, `tachi_skill(action='from_pattern')`, and `skill_evolve` are deleted). The implemented items below describe the retired state, kept as history:
 
-1. Done (later retired by #1690): `recommend_skill` and lightweight task skill recommendation used active pattern bridge signals and expose `pattern_refs` on matches.
-2. Done: `tachi_event action="promote"` generates skill candidates from active patterns.
-3. Done: generated skills are `discoverable`, disabled, pending review, and carry `pattern_ref` metadata.
-4. Done: maturity gate creates review artifacts before promotion to `listed`.
-5. Done: `tachi_event action="promote"` can materialize the pending wiki draft, disabled skill candidate, and agent-profile proposal event for an eligible or forced pattern.
-6. Remaining: generated skill candidates should reference the evidence chain used for promotion, not just the latest pattern projection.
+1. Done (retired): `recommend_skill` and lightweight task skill recommendation used active pattern bridge signals and exposed `pattern_refs` on matches.
+2. Done (retired): `tachi_skill action=from_pattern` generated skill candidates from active patterns.
+3. Done (retired): generated skills were `discoverable`, disabled, pending review, and carried `pattern_ref` metadata.
+4. Done (retired): the maturity gate created review artifacts before promotion to `listed`.
+5. Done (retired): `tachi_event action="promote"` materialized the pending wiki draft, disabled skill candidate, and agent-profile proposal event for an eligible or forced pattern — the skill-candidate artifact is gone post-#1690 C3.
+6. Remaining (moot): generated skill candidates should reference the evidence chain used for promotion, not just the latest pattern projection.
 
 ### Phase 5 — A2A and cold seat transport
 
@@ -575,7 +578,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 - **File:** `crates/tachi-server/src/continuity_ops/context.rs`
 - **Function:** `build_continuity_context`
-- **Current behavior:** after building `memories`, active `/user/patterns` and bonding projections are returned under `"patterns"` with `pattern_ref`; bonding projections are also exposed through `"bonding"` with `SharedLexicon` schema markers and `lexicon`; timeline projections are exposed through `"timeline"` with `TimelineEntry` schema markers and typed timeline metadata; the local `"a2a"` section exposes evidence/open-thread refs without raw payloads; `"host_lifecycle"` exposes the adapter contract. Context records `seen` feedback for returned pattern refs, while `action=a2a` remains read-only.
+- **Current behavior:** after building `memories`, active `/user/patterns` and bonding projections are returned under `"patterns"` with `pattern_ref`; bonding projections are also exposed through `"bonding"` with `SharedLexicon` schema markers and `lexicon`; timeline projections are exposed through `"timeline"` with `TimelineEntry` schema markers and typed timeline metadata; the local `"a2a"` section exposes evidence/open-thread refs without raw payloads; `"host_lifecycle"` exposes the adapter contract. Context returns a **read-only preview receipt** of `seen` feedback for returned pattern refs — the synthetic `seen` events are projected in-memory via `preview_auto_projection_with_events` (`dry_run=true`) and never durably written to the event ledger; `action=a2a` remains read-only as well.
 
 ### 8.2 `scope="patterns"` in `tachi_search`
 
@@ -611,28 +614,30 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - **Function:** `handle_tachi_wiki_write`
 - **Current behavior:** when `include_patterns=true`, active patterns are queried and merged into `metadata.pattern_refs`.
 - **File:** `crates/tachi-server/src/continuity_ops/context.rs`
-- **Current behavior:** `pub(crate) fn list_active_patterns` is available for wiki/skill integration.
+- **Current behavior:** `pub(crate) fn list_active_patterns` is available for wiki integration (the skill-crystallization leg is retired by #1690 C3 — no skill caller exists).
 - **File:** `crates/tachi-params/src/memory/wiki.rs`
 - **Current behavior:** `WikiWriteParams` has `include_patterns`, `pattern_query`, and `pattern_top_k`.
 
-### 8.5 Pattern → skill generator (promotion ops)
+### 8.5 Pattern → skill generator (RETIRED by #1690 C3)
 
-- **File:** `crates/tachi-server/src/continuity_ops/promotion.rs`
-- **Function:** `materialize_pattern_skill_candidate`
-- **Current behavior:**
-  1. Fetch active patterns.
-  2. Build skill definition JSON (system, prompt, content, inputSchema, policy, tags, `pattern_ref`).
-  3. Persist via `store.hub_register`.
-  4. Keep generated skills disabled and pending review; do not auto-expose as listed tools.
-- **File:** `crates/tachi-server/src/continuity_ops/mod.rs`
-- **Current behavior:** executes via `tachi_event(action="promote")`.
+This section described `crates/tachi-server/src/hub_ops/pattern_to_skill.rs` /
+`handle_skill_from_pattern` — **deleted end-to-end in #1690 C3**. Historical
+behavior (kept for record):
+
+- `tachi_skill(action="from_pattern")` used to fetch active patterns, build a
+  skill definition JSON (system, prompt, content, inputSchema, policy, tags,
+  `pattern_ref`), persist via `store.hub_register`, and keep the generated
+  skills disabled + pending review (never auto-exposed as listed tools).
+- The action is now typed-rejected (`tachi_skill` accepts only `discover`/`run`;
+  `crates/tachi-params/src/facade/action_inventory.rs`). Patterns never mint
+  skill candidates; promotion creates reviewed wiki/runbook artifacts only.
 
 ---
 
 ## 9. Open questions
 
 1. **Should any memory categories auto-emit `memory.saved` events?** Current behavior is explicit only (`emit_continuity=true`).
-2. **What is the promotion threshold from pattern to wiki/skill?** Pure hit-rate, or hit-rate + external validation + timeline depth?
+2. **What is the promotion threshold from pattern to wiki/runbook?** Pure hit-rate, or hit-rate + external validation + timeline depth? (The skill promotion leg is retired by #1690 C3 — promotion targets wiki/runbook and agent-profile proposals only.)
 3. **How does the cold seat participate in cross-process A2A?** Does it subscribe to events but ignore timeline conclusions, or does it maintain a separate evidence stream?
 4. **Pattern scope is authority-specific, not one global switch.** Engineering
    instances may be project-scoped; user-model and dyadic relationship patterns
@@ -644,14 +649,14 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 ## 10. Summary
 
-Tachi already has a continuity observation substrate: the `tachi_events` ledger, projection machinery, counters, guardrails, typed timeline/bonding read-model slices, wiki references, pending pattern-derived skill candidates, and lifecycle/GitHub evidence surfaces. It does **not** yet have the revision-aware current-truth reducer or an exposed profile-pack rendering surface. Remaining work is reconciliation, loop closure, calibration, stronger schemas, causal endpoint resolution, and final promotion:
+Tachi already has a continuity observation substrate: the `tachi_events` ledger, projection machinery, counters, guardrails, typed timeline/bonding read-model slices, wiki references, pattern-derived wiki/runbook + agent-profile review artifacts (skill candidates are retired by #1690 C3), and lifecycle/GitHub evidence surfaces. It does **not** yet have the revision-aware current-truth reducer or an exposed profile-pack rendering surface. Remaining work is reconciliation, loop closure, calibration, stronger schemas, causal endpoint resolution, and final promotion:
 
 - Build the **predicate-authorized current-truth reducer** and derived action queue before treating timeline/handoff output as current state.
 - Extend **automatic pattern hit/miss feedback** beyond search/context/complete/close_loop into briefing runtime and outcome-backed hit/miss classification.
-- Extend **maturity gates** from explicit readiness reporting into final promotion enforcement for wiki/listed skill/Agent MD writes.
+- Extend **maturity gates** from explicit readiness reporting into final promotion enforcement for wiki/Agent MD writes (the listed-skill promotion leg is retired by #1690 C3 — no generated skills exist).
 - Add **Agent MD crystallization** so mature continuity patterns become reviewed profile proposals that can be rendered for each host.
 - Harden **timeline and bonding read models** from schema-marked/validated output into standalone Rust domain types and richer automatic causal endpoint resolution; explicit existing-ID causal edges already persist.
 - Extend the local **A2A evidence/open-thread bundle** and poll surface into cross-process transport while preserving the cold seat.
 - Keep the **over-fit brake and cold seat** as un-revocable safeguards.
 
-The result is a system that learns the user's alignment, surfaces it when relevant, and turns it into durable knowledge and executable skills — without losing the ability to be challenged or corrected.
+The result is a system that learns the user's alignment, surfaces it when relevant, and turns it into durable knowledge and reviewed wiki/runbook + agent-profile artifacts — the skill-crystallization leg is retired by #1690 C3 — without losing the ability to be challenged or corrected.

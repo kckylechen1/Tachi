@@ -1,27 +1,17 @@
 use tachi_params::StaffAssignmentRequest;
 
-/// Resolve effective skills list, applying stage-based defaults when the caller
-/// did not explicitly provide skills.
+/// Resolve the explicit skill list and preserve only the advisory stage
+/// instruction. #1690 C3 S1 retires stage defaults and task-SOP promotion.
 pub(in crate::dispatch_ops) fn resolve_assignment_skills(
     request: &StaffAssignmentRequest,
     explicit_skills: &[String],
 ) -> (Vec<String>, Option<String>) {
     let stage_key = crate::skill_policy::dispatch_stage_key(request.stage.as_deref());
     let auto_instruction = crate::skill_policy::dispatch_stage_instruction(&stage_key);
-
     if !explicit_skills.is_empty() {
         return (explicit_skills.to_vec(), auto_instruction);
     }
-
-    let mut skills = crate::skill_policy::dispatch_stage_skills(&stage_key);
-
-    if stage_key != "brainstorm" {
-        let route = crate::copilot_ops::build_task_brief_routing(&request.task, &[]);
-        crate::skill_policy::append_builtin_sops(&mut skills, route.selected_sops.into_iter());
-    }
-
-    crate::skill_policy::dedupe_preserve_order(&mut skills);
-    (skills, auto_instruction)
+    (Vec::new(), auto_instruction)
 }
 
 pub(super) fn render_skill_invocation_contract(

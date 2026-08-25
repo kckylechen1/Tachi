@@ -55,21 +55,18 @@ pub use native_skill_ids::{
     WAZA_READ, WAZA_SKILL_IDS, WAZA_TACHI, WAZA_THINK, WAZA_WRITE,
 };
 pub use profiles::{
-    dispatch_profile_alias, profile_demotion_targets_from_overlay, profile_deprecated_aliases,
-    profile_evidence_contract_json, profile_evidence_contract_json_with_overlay,
-    profile_evidence_required, profile_evidence_required_with_overlay, profile_json,
+    dispatch_profile_alias, profile_deprecated_aliases, profile_evidence_contract_json,
+    profile_evidence_contract_json_with_overlay, profile_evidence_required,
+    profile_evidence_required_with_overlay, profile_json,
     profile_json_with_loadout_and_evidence_contract, profile_json_with_overlay,
     profile_matches_agent, profile_projected_evidence_required_from_overlay,
-    profile_projected_passive_traits_from_overlay, profile_projected_signature_skills_from_overlay,
-    profile_projected_weak_against_from_overlay, profile_required_skill_ids,
-    profile_required_skill_ids_with_overlay, profile_resolved_model, profile_skill_loadout_json,
-    profile_skill_loadout_json_with_overlay, profile_uses_opencode_adapter, profile_weak_against,
-    profile_weak_against_with_overlay, recommendation_identity_receipt,
+    profile_required_skill_ids, profile_resolved_model, profile_skill_loadout_json,
+    profile_uses_opencode_adapter, profile_weak_against, recommendation_identity_receipt,
     resolve_and_apply_dispatch_profile, resolve_and_apply_staff_assignment_profile,
     resolve_dispatch_profile, DispatchProfileAlias, DispatchProfileDef, ResolvedDispatchProfile,
     DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES, DISPATCH_PROFILE_ALIASES,
-    MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES,
-    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
+    MIN_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES, PROFILE_CARD_OVERLAY_NS,
+    ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 pub use registry::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported, normalize_dispatch_agent_name,
@@ -84,9 +81,8 @@ pub use routing::{
     AppliedRoutePolicyRule, DispatchRisk, ProfileCandidate, RecommendationProfilePayload,
     RouteEvalRow, RouteEvidenceSource, RoutePerformanceRow, RoutePolicyRuleLoadout,
     RoutePolicyRuleRecord, RouteSimulationChoice, RouteSimulationSummary, RouteSubagentScore,
-    SkippedRoutePolicyRule, BASELINE_MBIT_FIT_REASON, NO_LEDGER_EVIDENCE_REASON,
-    RETIRED_EVIDENCE_SOURCE_SKIP_REASON, ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
-    ROUTE_EVIDENCE_SOURCE_LIVE_EVAL_MEMORY,
+    SkippedRoutePolicyRule, NO_LEDGER_EVIDENCE_REASON, RETIRED_EVIDENCE_SOURCE_SKIP_REASON,
+    ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
 };
 pub use signatures::{
     dispatch_role_class, normalize_vendor, project_counter_clauses, resolve_signature_id,

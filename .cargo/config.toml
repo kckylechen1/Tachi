@@ -8,14 +8,21 @@
 # ~289% on a 10-core machine because of a serialized tail).
 pipelining = true
 
-# Optional faster linker. Uncomment after `brew install mold` (arm64) or
-# installing lld. This is NOT required — the default linker works fine.
-# mold shaves link time off the 165K-LOC tachi-server crate on debug builds.
+# Faster ELF linker (Linux / cross-link only). Do NOT enable on Darwin.
 #
-# [target.aarch64-apple-darwin]
-# linker = "clang"
-# rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.mold"]
+# Homebrew mold 2.42+: "Support for Mach-O targets has been removed."
+# `ld64.mold` is gone. Passing `-fuse-ld=mold` on Apple Silicon fails at
+# link: mold rejects ld64's `-dynamic`.
 #
-# [target.x86_64-apple-darwin]
+# Measured 2026-08-25 on origin/main `fd18fdf79` (Apple ld-1267, arm64,
+# CARGO_TARGET_DIR shared cache, tachi-server libtest harness 257MB):
+#   cargo nextest run -p tachi-server --lib --no-run
+#     after `touch src/lib.rs`: 227s / 283s wall (user ~201–210s = rustc)
+#     after deleting only the 257MB harness binary: 198s wall (user 185s)
+# Link is a small slice of the edit→rerun cost; rustc codegen dominates.
+# A faster Mach-O linker would not change the 3–4 minute loop.
+#
+# Linux ELF only — uncomment after `mold` is on PATH:
+# [target.x86_64-unknown-linux-gnu]
 # linker = "clang"
-# rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.mold"]
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]

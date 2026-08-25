@@ -2,7 +2,7 @@
 
 Status: active vocabulary; execution-ownership sections superseded by
 `dispatch-lifecycle.md` and issue #749
-Updated: 2026-07-20
+Updated: 2026-08-25
 Related: GitHub issue #381, GitHub issue #382, GitHub issue #383,
 `docs/engineering/architecture/dispatch-policy-learning-spec.md`,
 `docs/engineering/architecture/credentialed-dispatch-profiles.md`
@@ -42,14 +42,14 @@ Keep the public model small.
 |---|---|
 | **Tachikoma backplane** | The whole Tachi shared work/memory/evidence/skill system that sits behind the primary IDE assistant or human. |
 | **Deck** | The set of available Cards for a project/runtime. |
-| **Card** | One subagent evaluation/profile unit. It defines role, permissions, behavior, evidence contract, metrics, and skill loadout. A Card is currently implemented as a `DispatchProfileDef` with a Tachikoma-facing JSON view. |
+| **Card** | One subagent evaluation/profile unit. It defines role, permissions, behavior, evidence contract, and skill loadout (the retired `mbit_card` metrics/evolution projection is deleted by #1690 C3). A Card is currently implemented as a `DispatchProfileDef` with a Tachikoma-facing JSON view. |
 | **Superpowers** | Development guidance / lifecycle doctrine. They govern when to plan, execute, review, verify, and ship. |
 | **Waza** | Concrete tactical techniques. They are working methods such as `check`, `health`, `hunt`, `read`, `think`, `write`. |
 | **External skill** | A discovered plugin/skill that must be inspected and approved before use. |
 | **Move** | A concrete Waza or approved external skill available to a Card. Superpowers are guidance, not moves. |
 | **Guidance** | The Superpowers doctrine attached to a Card. Guidance shapes decision gates, not executable moves. |
 | **Evidence contract** | The artifacts and verification the Card must produce for a task to be considered complete. |
-| **Evolution** | Reviewed changes to a Card's skill set, evidence contract, strengths/weaknesses, or permissions based on task outcomes. |
+| **Evolution** | Reviewed changes to a Card's profile data based on task outcomes — the loadout-evolution machinery behind this term is **retired by #1690 C3**; profiles and skill loadouts are static reviewed data, and surviving changes go through the reviewed change path. |
 | **Execution backend** | The low-level adapter that runs a Tachi-assembled prompt/work packet through an agent transport such as a CLI subprocess or ACP client. It is transport, not planning or governance. |
 
 ## Product Loop
@@ -66,8 +66,9 @@ Primary IDE assistant / human
   -> evidence artifact collection
   -> leader verification
   -> /eval completion row
-  -> Card performance summary
-  -> evolution proposal (review-required)
+  -> read-only performance summary (aggregate_live / route_simulate)
+  -> evidence may propose a reviewed route-policy / Card profile change
+     (loadout evolution is retired by #1690 C3)
   -> GitHub issue/PR + docs + memory link-back
 ```
 
@@ -122,13 +123,14 @@ Deferred until needed:
 This model reuses what already exists instead of creating a parallel system.
 
 1. **Dispatch profiles are Cards.**
-- `DispatchProfileDef` in `crates/tachi-server/src/dispatch_profile.rs`
+- `DispatchProfileDef` in `crates/tachi-dispatch/src/profiles.rs:24`
   already carries `role`, `stage`, `common_skills`, `signature_skills`,
   `forbidden_skills`, `evidence_required`, `strong_against`, and
   `weak_against`.
-- The runtime JSON view (`profile_json_for_server`) already emits an
-  `mbit_card` object with a Poke/SCV/Raven `archetype`, `stats`,
-  `skill_loadout`, `evidence_contract`, and an `evolution` projection.
+- The runtime JSON view (`profile_json_for_server`) emits the static
+  reviewed `skill_loadout` and `evidence_contract`; the `mbit_card` object with
+  Poke/SCV/Raven `archetype`, `stats`, and `evolution` projection was retired by
+  #1690 C3.
    - The local operator-only `tachi card list/show` diagnostic exposes the
      static profile fields; model-facing Task does not expose this JSON.
 
@@ -138,13 +140,14 @@ This model reuses what already exists instead of creating a parallel system.
      `skill/waza/skills/`.
    - `crates/tachi-server/src/builtins.rs` seeds them into the Hub on startup
      and registers skill tools.
-   - `tachi_skill(action="discover" | "run")` exposes the
-     skill surface.
+   - `tachi_skill(action="discover" | "run")` exposes the skill surface (the
+     retired `bundle`/`loadout`/`from_pattern` actions are deleted by #1690 C3).
 
 3. **Dispatch already produces evidence artifacts.**
-   - `crates/tachi-server/src/dispatch_ops/` writes `prompt.md`, `context.md`,
-     `capability_bundle.json`, `trajectory.jsonl`, `progress.jsonl`,
-     `status.json`, and `result.md` under `~/.tachi/runs/<dispatch_id>/`.
+   - `crates/tachi-server/src/dispatch_ops/` writes `plan.md`, `prompt.md`,
+     `context.md`, `trajectory.jsonl`, `progress.jsonl`,
+     `status.json`, and `result.md` under `~/.tachi/runs/<dispatch_id>/`
+     (the retired `capability_bundle.json` artifact was deleted by #1690 C1).
 
 4. **Card evolution pieces already exist.**
    - `dispatch_profile_card_overlays` namespace stores reviewed overlays.
@@ -162,8 +165,9 @@ self-evolving assets.
 | Waza | `tw93/Waza` | tactical working-method / move source |
 
 Tachi vendors selected skills into `skill/superpowers/...` and
-`skill/waza/...` and registers them as builtin skills. Tachi may evolve its own
-Card loadouts and local overlays, but the authoritative source text of an
+`skill/waza/...` and registers them as builtin skills. Tachi Card profiles carry
+static reviewed skill loadouts and local overlays (the loadout-evolution/MBIT
+machinery is retired by #1690 C3), but the authoritative source text of an
 upstream skill may change only through a reviewed upstream sync.
 
 Hard rules:
@@ -171,8 +175,10 @@ Hard rules:
 - Tachi must not silently rewrite Superpowers/Waza source text based on local
   task outcomes.
 - Local task evidence may propose an upstream issue/PR or a Tachi-local Card
-  loadout change.
-- Card loadouts can evolve inside Tachi.
+  profile change (skill loadouts are static reviewed data; the loadout-evolution
+  machinery is retired by #1690 C3).
+- Card loadouts do not evolve automatically — profile changes go through the
+  reviewed change path (loadout evolution is retired by #1690 C3).
 - Upstream skill snapshots update only through reviewed sync.
 - External skills discovered from the web/registry must go through inspect +
   scan + review before becoming approved moves.
@@ -180,7 +186,7 @@ Hard rules:
 Use this rule:
 
 ```text
-Local evidence can change Tachi Card loadouts.
+Local evidence can propose Tachi Card profile changes; skill loadouts are static reviewed data (loadout evolution retired by #1690 C3).
 Upstream-managed skill sources change through upstream sync or upstream contribution.
 ```
 
@@ -307,49 +313,40 @@ Guardrails:
 
 ## Card Schema
 
-A Card is exposed as a JSON object that extends the existing
-`DispatchProfileDef` runtime view. New fields are additive only.
+A Card is the `DispatchProfileDef` runtime JSON view
+(`profile_json_for_server` in `crates/tachi-server/src/dispatch_profile/cards.rs`,
+wrapping the static shape builder in `crates/tachi-dispatch/src/profiles.rs`).
+It exposes only **static reviewed profile / loadout / evidence fields** — there
+is no personality, metrics, or evolution projection at head.
 
 ```yaml
-id: poke
+name: poke
 display_name: Poke
-archetype: poke
+backend: <resolved backend>       # capability profile, not a hardcoded model name
 role: product_probe
 stage: probe
+card_archetype: poke              # statically derived from role/stage
+model: <resolved model>
+tool_profile: delegate
 
-authority:
-  write_code: false
-  merge: false
-  github_write: false
-  can_dispatch_followup: false
+mcp_access:
+  inject_tachi_mcp: true
+  allowed_facades: [...]
+  github_read: false
+  write_actions: false
 
-guidance:
-  superpowers:
-    - skill:superpowers-verification-before-completion
+credential_profiles: []
 
-moves:
-  waza:
+skill_loadout:                    # static reviewed baseline
+  common_skills:
     - skill:waza-health
     - skill:waza-check
     - skill:waza-tachi
-  external: []
-
-strengths:
-  - black_box_probe
-  - workflow_smoke
-  - artifact_check
-  - agent_facing_ux_regression
-
-weaknesses:
-  - deep_code_fix
-  - architecture_design
-  - large_refactor
-
-personality:
-  curiosity: 95
-  caution: 75
-  speed: 80
-  risk_control: 85
+  signature_skills: []
+  passive_traits: []
+  forbidden_skills: []
+  projection:
+    status: baseline
 
 evidence_contract:
   required:
@@ -357,18 +354,18 @@ evidence_contract:
     - expected_vs_observed
     - artifacts
     - repro_steps
+  projection:
+    status: baseline
 
-metrics:
-  task_count: 0
-  success_rate: null
-  false_positive_rate: null
-  avg_latency_ms: null
-  avg_cost_usd: null
-  human_override_rate: null
+weak_against:
+  - deep_code_fix
+  - architecture_design
+  - large_refactor
 
-evolution:
-  status: starter
-  proposals: []
+# RETIRED by #1690 C3: the `mbit_card` projection (`archetype`/`stats`/
+# `evolution`), `personality`, and `metrics` fields do not exist in the profile
+# JSON; profile data is static reviewed data and eval outcomes never
+# auto-mutate a Card.
 ```
 
 ## Backend Is a Capability Requirement, Not a Model Name
@@ -394,7 +391,7 @@ The execution backend is one layer below Card selection.
 ```text
 Tachi task / issue
   -> Card authority + Guidance + Moves + evidence contract
-  -> Tachi-generated prompt.md / context.md / capability_bundle.json
+  -> Tachi-generated plan.md / prompt.md / context.md
   -> execution_backend
   -> raw transport events
   -> Tachi-owned trajectory.jsonl / progress.jsonl / status.json / result.md
@@ -522,43 +519,52 @@ Discover via web/search/registry
   -> normalize into Tachi move metadata
   -> register disabled or review-required
   -> bind to a Card only after approval
-  -> track outcomes and downgrade/promote over time
+  -> outcome evidence feeds human review (auto downgrade/promote of a
+     Card loadout is retired by #1690 C3)
 ```
 
 Do not directly install and execute arbitrary skills from the web.
 
-## Card Evolution Loop
+## Card Evolution Loop (retired machinery)
 
-Cards evolve from evidence, but default Card changes must be reviewed before
-taking effect.
+> **Retired by #1690 C3.** The eval-driven loadout/card evolution machinery this
+> section used to describe — performance summaries feeding evolution proposals
+> that promote skills into the default loadout, mutate `weak_against`, or
+> auto-update a Card — is retired end-to-end. Profiles and skill loadouts are
+> **static reviewed data**; the eval-informed future belongs to #1675, never to
+> auto-minted loadout/profile projections. This section is retained as
+> historical record.
+
+What survives is evidence informing **human** review through the reviewed
+change path (see "Hard rules" above):
 
 ```text
 Task run
-  -> card_id + skills_used + outcome + evidence
-  -> eval row / evidence ledger
-  -> card performance summary
-  -> evolution proposal
-  -> human/main-assistant review
-  -> approved card update
+  -> outcome + evidence
+  -> local task evidence may propose an upstream issue/PR, or a Tachi Card
+     profile change through the reviewed change path
+  -> human review
+  -> reviewed change (or rejection)
 ```
 
-Examples:
+Surviving proposal surfaces:
 
-- SCV repeatedly succeeds on bugfixes when `waza/hunt` is present -> propose
-  promoting `waza/hunt` to default.
-- Raven misses UI regressions -> add `weak_against: ux_review` or propose a
-  specialized future card.
-- Poke produces too many false positives in one probe -> downgrade that probe
-  or tighten its evidence contract.
-- SCV expands scope too often -> tighten authority and required scope report.
+- Route-policy and evidence-contract proposals
+  (`tachi_tune(action="route_proposals"|"route_review"|"route_apply")`): human
+  approval is required before any durable rule is persisted, and a rule is
+  honored only when its evidence source is the decision-fact ledger.
+- A Card profile change is a reviewed data change (`weak_against` and other
+  profile fields are the static reviewed baseline; the legacy
+  `add_weak_against` overlay projection is retired by #1690).
 
-Evolution rules:
+Retired mechanics, kept for the record:
 
-- Observations may be automatic.
-- Proposals may be automatic.
-- Default card changes must be reviewed before taking effect.
+- Promoting a skill (e.g. `waza/hunt`) into the default loadout — loadout
+  evolution is retired by #1690 C3.
+- Automatic Card update from an evolution proposal — retired by #1690 C3.
+- `weak_against` mutation from eval outcomes — retired by #1690 C3.
 
-## Public Facade Rule
+## Public Facade Rule — `tachi_task cancel` retired; `tachi_staff cancel` active
 
 Tachikoma features must stay inside existing domain facades. Do not add new
 public facades such as `tachi_card` or `tachi_deck` while an existing facade can
@@ -568,11 +574,11 @@ carry the workflow.
 |---|---|---|
 | operator list/show diagnostics | `tachi card list` / `tachi card show <id>` | implemented; operator-only |
 | read-only Card CLI convenience | `tachi card list` / `tachi card show <id>` | starter implemented |
-| skill discovery / execution | `tachi_skill(action="discover" \| "run")` | implemented |
+| skill discovery / run | `tachi_skill(action="discover" \| "run")` | implemented (retired `bundle`/`loadout` actions deleted by #1690 C3) |
 | upstream source status | `tachi skill-surface sources` | implemented |
 | upstream source sync planning | `tachi skill-surface sync-plan` | starter implemented |
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |
-| dispatch backend status/cancel | `tachi_task(action="status", dispatch_id=...)  (the retired `cancel` action is not a live Task action; cancellation goes through tachi_staff/poke surfaces)` | starter implemented |
+| dispatch backend status/cancel | status: `tachi_task(action="status", dispatch_id=...)`; cancel: `tachi_staff(action="cancel", dispatch_id=..., expected_status_revision=...)` | starter implemented |
 | Poke smoke suite | `tachi poke run --suite smoke` | starter implemented |
 | Card evolution proposals | `tachi_tune(action="route_proposals" \| "route_apply")` (moved off `tachi_task` in #1426) | implemented |
 
@@ -603,7 +609,7 @@ Initial probes:
 3. **Shell artifact probe**: run a local shell/flow action in a safe temp
    project, verify `instruction.md`, `status.json`, and injected SOP artifact.
 4. **Dispatch mock probe**: run no-op/mock dispatch path where possible,
-   verify `prompt.md`, `context.md`, `capability_bundle.json`,
+   verify `plan.md`, `prompt.md`, `context.md`,
    `trajectory.jsonl`, and `status.json`.
 5. **Verification ledger probe**: write/read a small verification item, ensure
    unrelated flow evidence is not treated as current proof.
@@ -665,8 +671,11 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - Add static Card definitions for Poke, SCV, Raven, and Medic mode metadata.
 - Add `skill/superpowers/manifest.yaml` and `skill/waza/manifest.yaml` with
   upstream repo/path/ref/sha mappings.
-- Extend the existing `mbit_card` JSON view with `authority`, `guidance`,
-  `moves`, and `personality` fields.
+- Map the proposed `authority` / `guidance` / `moves` concepts onto the
+  surviving static profile JSON view (`mcp_access` / `tool_profile` /
+  `skill_loadout` / `evidence_contract`); the retired `mbit_card` view —
+  `archetype`/`stats`/`evolution`, `personality`, `metrics` — was deleted by
+  #1690 C3.
 - Add a read-only `tachi card list` / `tachi card show` CLI convenience that
   calls the existing facade.
 - Optionally add a read-only `tachi skill-sources status` report.
@@ -678,15 +687,17 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - Keep probes local and isolated.
 - Do not run broad Rust gates by default.
 
-### Phase 3: acpx execution backend skeleton
+### Phase 3: acpx execution backend skeleton — Task cancel retired; Staff cancel active
 
 - Add an opt-in acpx execution backend through `harness_transport="acpx"`.
 - Build acpx commands from dispatch params and Card authority in one adapter.
 - Run one-shot execution from Tachi-generated `prompt.md`.
 - Optionally run named sessions with `TACHI_ACPX_RUN_MODE=session` and store
   status/cancel control argv in run metadata.
-- Route `tachi_task(action="status")` through (the retired `cancel` action is not routed) dispatch-scoped acpx
-  status/cancel controls when the run used acpx session mode.
+- Route `tachi_task(action="status", dispatch_id=...)` and
+  `tachi_staff(action="cancel", dispatch_id=..., expected_status_revision=...)`
+  through dispatch-scoped acpx status/cancel controls when the run used acpx
+  session mode.
 - Persist raw JSON/ACP output as `acpx_events.jsonl`.
 - Map basic events into existing trajectory/progress/status/result artifacts.
 - Detect missing acpx/Node prerequisites with actionable errors.
@@ -694,9 +705,11 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 
 ### Phase 4: Card evaluation summary
 
-- Aggregate recent eval/dispatch rows by card.
+- Aggregate recent eval/dispatch rows by card (read-only reporting via
+  `aggregate_live` / `route_simulate`).
 - Show metrics and failure patterns.
-- Generate review-required evolution proposals.
+- Generate review-required route-policy / evidence-contract proposals through
+  `tachi_tune` (loadout-evolution proposals are retired by #1690 C3).
 
 ### Phase 5: Skill slot intake
 
@@ -719,7 +732,7 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - [x] Superpowers are modeled as development guidance, not just ordinary moves.
 - [x] Waza and approved external skills are modeled as moves/techniques.
 - [x] Poke smoke suite has a local isolated starter implementation.
-- [x] Card evolution produces proposals, not silent automatic mutations.
+- [x] Card evolution produces proposals, not silent automatic mutations (the loadout-evolution machinery is retired by #1690 C3; the surviving proposal surface is `tachi_tune` route-policy / evidence-contract review).
 - [x] External skill intake requires inspection/scanning/review before approval.
 - [x] Upstream Superpowers/Waza sources are tracked, pinned, and documented as
       upstream-managed corpora.

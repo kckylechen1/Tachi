@@ -3,7 +3,6 @@ use super::*;
 pub(super) struct DispatchStart {
     pub(super) dispatch_id: String,
     pub(super) request: tachi_params::StaffAssignmentRequest,
-    pub(super) legacy_auto_capability_bundle: Option<bool>,
     pub(super) requested_skills: Vec<String>,
     pub(super) context_query: Option<String>,
     pub(super) tool_profile: Option<String>,
@@ -84,7 +83,6 @@ pub(super) fn resolve_dispatch_start(
         completion_predicate: legacy_projection.completion_predicate.clone(),
         recommendation_ref: None,
     };
-    let legacy_auto_capability_bundle = legacy_projection.auto_capability_bundle;
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);
 
@@ -159,7 +157,6 @@ pub(super) fn resolve_dispatch_start(
     Ok(DispatchStart {
         dispatch_id,
         request,
-        legacy_auto_capability_bundle,
         requested_skills: params.skills.clone(),
         context_query: params.context_query.clone(),
         tool_profile: params.tool_profile.clone(),
@@ -264,7 +261,6 @@ pub(super) fn resolve_staff_dispatch_start(
     Ok(DispatchStart {
         dispatch_id: dispatch_id.clone(),
         request,
-        legacy_auto_capability_bundle: Some(resolved_profile.auto_capability_bundle),
         requested_skills: mechanics.skills.clone(),
         context_query: None,
         tool_profile: resolved_profile.tool_profile.clone(),

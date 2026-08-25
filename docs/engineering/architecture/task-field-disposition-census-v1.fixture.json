@@ -2,7 +2,7 @@
   "schema_version": "task_field_disposition.v1",
   "issue": 1319,
   "generated_from": "crates/tachi-params/src/facade/task.rs::TachiTaskParams + crates/tachi-server/src/tools/task_router.rs",
-  "total_fields": 87,
+  "total_fields": 86,
   "fields": {
     "action": {
       "used_by_actions": [
@@ -540,14 +540,6 @@
       "disposition": "operator_only_internal",
       "rationale": "Dispatch-only execution knob (child-agent tool surface); hidden from the census reader set after [1319-C2]. Kept schema-public per [1319-C2] hide list scope."
     },
-    "auto_capability_bundle": {
-      "used_by_actions": [
-        "brief"
-      ],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Read by brief to inject the capability bundle into the briefing context (feature_briefing/dispatch.rs); stays in the public schema after [1319-C2]."
-    },
     "mcp_access": {
       "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
@@ -714,7 +706,7 @@
   },
   "disposition_summary": {
     "keep_task_ledger": 3,
-    "keep_task_shared": 48,
+    "keep_task_shared": 47,
     "defer_1467": 7,
     "move_to_staff": 8,
     "operator_only_internal": 21

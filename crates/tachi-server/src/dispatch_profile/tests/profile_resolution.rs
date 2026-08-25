@@ -1,5 +1,5 @@
 use super::*;
-use crate::skill_policy::{CODING_ARCHITECTURE_DECISION, SUPERPOWER_WRITING_PLANS, WAZA_THINK};
+use crate::skill_policy::{CODING_ARCHITECTURE_DECISION, SUPERPOWER_WRITING_PLANS};
 
 /// #1814 discriminator: the typed Staff boundary must retain the server
 /// resolver's profile semantics without constructing a flat dispatch carrier.
@@ -134,7 +134,6 @@ fn dispatch_profile_selects_backend_and_mcp_contract() {
         resolved.mcp_access.issue_refs,
         vec!["kckylechen1/tachi#194".to_string()]
     );
-    assert!(resolved.auto_capability_bundle);
     assert!(params
         .skills
         .iter()
@@ -151,15 +150,6 @@ fn dispatch_profile_selects_backend_and_mcp_contract() {
     );
     let profile_payload = profile_json(resolve_dispatch_profile("claude_plan").unwrap());
     assert_eq!(profile_payload["card_archetype"], json!("raven"));
-    assert_eq!(profile_payload["authority"]["write_code"], json!(false));
-    assert_eq!(
-        profile_payload["guidance"]["superpowers"][0],
-        json!(SUPERPOWER_WRITING_PLANS)
-    );
-    assert!(profile_payload["moves"]["waza"]
-        .as_array()
-        .expect("waza moves")
-        .contains(&json!(WAZA_THINK)));
     assert_eq!(
         profile_json(resolve_dispatch_profile("glm_51_impl").unwrap())["card_archetype"],
         json!("scv")
@@ -167,6 +157,13 @@ fn dispatch_profile_selects_backend_and_mcp_contract() {
     assert_eq!(
         profile_json(resolve_dispatch_profile("deepseek_explore").unwrap())["card_archetype"],
         json!("poke")
+    );
+    // #1690 slice B: the MBIT/card-personality projection is retired end-to-end —
+    // the card assembly keeps the static top-level content (card_archetype,
+    // weak_against, skill_loadout, evidence_contract) and no mbit_card mirror.
+    assert!(
+        profile_payload.get("mbit_card").is_none(),
+        "profile card must not carry the retired mbit_card: {profile_payload}"
     );
 }
 
@@ -206,46 +203,47 @@ fn credentialed_dispatch_profile_applies_default_credential_profiles() {
 }
 
 #[test]
-fn review_stage_profiles_disable_capability_bundle_by_default() {
-    const EXPLANATION: &str = "auto_capability_bundle disabled by default for review-stage dispatch (#457); pass auto_capability_bundle=true to override";
-
+fn review_stage_profiles_resolve_with_review_evidence_contract() {
+    // #1690 C3: the auto_capability_bundle defaulting this test used to guard
+    // (#457) is retired end-to-end. What survives is the review profile
+    // resolution itself: codex_55_review resolves with its review-stage
+    // evidence contract and no skill-intelligence projection.
     let mut review_params = params();
     review_params.profile = Some("codex_55_review".to_string());
     review_params.stage = None;
-    review_params.auto_capability_bundle = None;
     let resolved_review = resolve_and_apply_dispatch_profile(&mut review_params).unwrap();
-    assert_eq!(review_params.auto_capability_bundle, Some(false));
-    assert!(!resolved_review.auto_capability_bundle);
+    assert_eq!(
+        resolved_review.selected_profile.as_deref(),
+        Some("codex_55_review")
+    );
+    assert_eq!(
+        resolved_review.evidence_required,
+        vec![
+            "findings_by_severity".to_string(),
+            "file_refs".to_string(),
+            "verification_advice".to_string()
+        ]
+    );
     assert!(resolved_review
         .route_explanation
         .iter()
-        .any(|line| line == EXPLANATION));
-    assert!(
-        !resolve_dispatch_profile("codex_55_review")
-            .expect("codex review profile")
-            .auto_capability_bundle
-    );
-
-    let mut explicit_review_params = params();
-    explicit_review_params.profile = Some("codex_55_review".to_string());
-    explicit_review_params.auto_capability_bundle = Some(true);
-    let resolved_explicit =
-        resolve_and_apply_dispatch_profile(&mut explicit_review_params).unwrap();
-    assert_eq!(explicit_review_params.auto_capability_bundle, Some(true));
-    assert!(resolved_explicit.auto_capability_bundle);
+        .any(|line| line.contains("selected DispatchProfile 'codex_55_review'")));
 
     let mut execute_params = params();
-    execute_params.profile = Some("glm_51_impl".to_string());
+    execute_params.profile = Some("glm_impl".to_string());
     execute_params.stage = None;
-    execute_params.auto_capability_bundle = None;
     let resolved_execute = resolve_and_apply_dispatch_profile(&mut execute_params).unwrap();
-    assert_eq!(execute_params.auto_capability_bundle, Some(true));
-    assert!(resolved_execute.auto_capability_bundle);
-
-    assert!(
-        !resolve_dispatch_profile("kimi_ux")
-            .expect("kimi ux profile")
-            .auto_capability_bundle
+    assert_eq!(
+        resolved_execute.selected_profile.as_deref(),
+        Some("glm_impl")
+    );
+    assert_eq!(
+        resolved_execute.evidence_required,
+        vec![
+            "diff".to_string(),
+            "tests_run".to_string(),
+            "files_changed".to_string()
+        ]
     );
 }
 

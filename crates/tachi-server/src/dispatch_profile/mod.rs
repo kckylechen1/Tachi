@@ -4,11 +4,6 @@
 
 #[cfg(test)]
 use crate::agent_eval::CompletionStatus;
-// tachi#1675 PR4: `aggregate_subagent_scores` left with the recommendation
-// path's evidence flip — the decision-fact ledger has no subagent-role rollup
-// to aggregate. `load_live_eval_rows`/`aggregate_performance_matrix` stay for
-// the profile CARD surface (`cards::profile_eval_feedback_json`), which reads
-// `/eval` entries as human-readable feedback, not as routing evidence.
 use crate::agent_eval::{AgentPerformanceMatrixRow, EvalRow};
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
@@ -80,10 +75,9 @@ use self::routing::*;
 #[cfg(test)]
 pub(crate) use self::cards::profile_evidence_required;
 pub(crate) use self::cards::{
-    profile_demotion_targets, profile_evidence_contract_json_for_server,
-    profile_evidence_required_for_server, profile_json, profile_json_for_server,
-    profile_required_skill_ids, profile_required_skill_ids_for_server,
-    profile_skill_loadout_json_for_server, profile_weak_against_for_server,
+    profile_evidence_contract_json_for_server, profile_evidence_required_for_server, profile_json,
+    profile_json_for_server, profile_required_skill_ids, profile_required_skill_ids_for_server,
+    profile_skill_loadout_json_for_server,
 };
 pub(crate) use self::policy::{route_simulation_caveats, simulate_route_policy};
 #[cfg(test)]
@@ -100,7 +94,6 @@ pub(crate) fn resolve_and_apply_staff_assignment_profile_for_server(
         request,
         |profile| profile_required_skill_ids_for_server(server, profile),
         |profile| profile_evidence_required_for_server(server, profile),
-        |profile| profile_json_for_server(server, profile),
         |server_url| crate::dispatch_ops::harness_server_attach_ready(server_url),
     )
 }

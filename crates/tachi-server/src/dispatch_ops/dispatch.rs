@@ -30,9 +30,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tachi_credential_profile::{
-    apply_credential_materialization, credential_materialize_report_json, default_credentials_dir,
-    find_credential_profile, plan_credential_materialization_with_run_dir, profile_secret_names,
-    CredentialApplyOptions, CredentialMaterializeReport,
+    apply_credential_materialization, cleanup_ephemeral_credential_materializations,
+    credential_materialize_report_json, default_credentials_dir, find_credential_profile,
+    plan_credential_materialization_with_run_dir, profile_secret_names, CredentialApplyOptions,
+    CredentialMaterializeReport,
 };
 use tachi_params::StaffAssignmentRequest;
 
@@ -97,7 +98,7 @@ fn opencode_sop_label(agent_norm: &str, request: &StaffAssignmentRequest) -> Opt
     if agent_norm != "opencode" {
         return None;
     }
-    let route = crate::copilot_ops::build_task_brief_routing(&request.task, &[]);
+    let route = crate::copilot_ops::build_task_brief_routing(&request.task);
     let selected = route
         .selected_sops
         .iter()
@@ -120,6 +121,39 @@ pub(crate) struct DispatchResult {
     pub observed_model: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManagedControlOrigin {
+    DirectHandle,
+    StaffFacade,
+}
+
+type ManagedControlRegistration = (
+    tokio::sync::mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
+    crate::managed_run_control::ManagedRunGuard,
+);
+
+fn managed_custom_control_required(
+    origin: ManagedControlOrigin,
+    managed_custom_eligible: bool,
+) -> bool {
+    managed_custom_eligible && origin == ManagedControlOrigin::StaffFacade
+}
+
+/// The only dispatch production doorway that may create managed cancellation
+/// control. Eligibility is prepared by the concrete backend; the Staff facade
+/// is the only caller that owns the resulting child lifecycle.
+fn register_managed_custom_control(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    origin: ManagedControlOrigin,
+    managed_custom_eligible: bool,
+) -> Result<Option<ManagedControlRegistration>, String> {
+    if !managed_custom_control_required(origin, managed_custom_eligible) {
+        return Ok(None);
+    }
+    server.managed_run_controls.register(dispatch_id).map(Some)
+}
+
 mod artifacts;
 mod authority;
 mod backend;
@@ -129,7 +163,13 @@ mod credentials;
 mod dedupe;
 mod execution;
 #[cfg(test)]
+pub(crate) use self::managed_materialization_barrier::install_managed_credential_materialization_barrier;
+#[cfg(test)]
 pub(crate) use execution::background_dispatch_cleanup_complete;
+#[cfg(test)]
+pub(crate) use execution::install_managed_credential_cleanup_failure;
+#[cfg(test)]
+pub(crate) use execution::install_managed_timeout_override;
 mod flow_setup;
 mod harness_preflight;
 mod plan_stage;
@@ -137,6 +177,142 @@ mod recovery;
 mod response_helpers;
 mod start;
 mod workspace_setup;
+
+#[cfg(test)]
+mod managed_materialization_barrier {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{mpsc, Mutex, OnceLock};
+
+    struct Barrier {
+        entered: mpsc::SyncSender<PathBuf>,
+        release: mpsc::Receiver<()>,
+    }
+
+    pub(crate) struct Guard(PathBuf);
+
+    static BARRIERS: OnceLock<Mutex<HashMap<PathBuf, Barrier>>> = OnceLock::new();
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Some(barriers) = BARRIERS.get() {
+                barriers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&self.0);
+            }
+        }
+    }
+
+    pub(crate) fn install_managed_credential_materialization_barrier(
+        run_root: &Path,
+    ) -> (Guard, mpsc::Receiver<PathBuf>, mpsc::SyncSender<()>) {
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let key = run_root.to_path_buf();
+        let previous = BARRIERS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                key.clone(),
+                Barrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            );
+        assert!(
+            previous.is_none(),
+            "materialization barrier already installed for run root"
+        );
+        (Guard(key), entered_rx, release_tx)
+    }
+
+    pub(crate) fn pause_after_managed_credential_materialization(workspace_dir: &Path) {
+        let Some(run_root) = workspace_dir.parent() else {
+            return;
+        };
+        let barrier = BARRIERS.get().and_then(|barriers| {
+            barriers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(run_root)
+        });
+        if let Some(barrier) = barrier {
+            let _ = barrier.entered.send(workspace_dir.to_path_buf());
+            let _ = barrier.release.recv();
+        }
+    }
+}
+
+#[cfg(test)]
+static MANAGED_RESULT_PERSIST_FAILURES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<(PathBuf, PathBuf)>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct ManagedResultPersistFailureGuard {
+    key: (PathBuf, PathBuf),
+}
+
+#[cfg(test)]
+impl Drop for ManagedResultPersistFailureGuard {
+    fn drop(&mut self) {
+        if let Some(failures) = MANAGED_RESULT_PERSIST_FAILURES.get() {
+            failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_managed_result_persist_failure(
+    home: &Path,
+    run_root: &Path,
+) -> ManagedResultPersistFailureGuard {
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    assert!(MANAGED_RESULT_PERSIST_FAILURES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key.clone()));
+    ManagedResultPersistFailureGuard { key }
+}
+
+#[cfg(test)]
+fn managed_result_persist_failure_injected() -> bool {
+    let Some(home) = std::env::var_os("TACHI_HOME") else {
+        return false;
+    };
+    let Some(run_root) = std::env::var_os("TACHI_RUN_ROOT") else {
+        return false;
+    };
+    let key = (PathBuf::from(home), PathBuf::from(run_root));
+    let Some(failures) = MANAGED_RESULT_PERSIST_FAILURES.get() else {
+        return false;
+    };
+    failures
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&key)
+}
+
+pub(super) fn persist_dispatch_result_artifact(
+    path: &Path,
+    body: &[u8],
+    managed_ephemeral_credential_cleanup: bool,
+) -> Result<(), String> {
+    #[cfg(not(test))]
+    let _ = managed_ephemeral_credential_cleanup;
+    #[cfg(test)]
+    if managed_ephemeral_credential_cleanup && managed_result_persist_failure_injected() {
+        return Err("injected managed result persistence failure".to_string());
+    }
+    crate::utils::write_owner_only_file_atomic(path, body)
+        .map_err(|error| format!("persist dispatch result {}: {error}", path.display()))
+}
 
 #[cfg(test)]
 mod tests;
@@ -155,7 +331,10 @@ use self::credential_apply::{
 };
 use self::credentials::*;
 use self::dedupe::*;
-use self::execution::{spawn_background_dispatch, BackgroundDispatchContext, DispatchExecution};
+use self::execution::{
+    spawn_background_dispatch, BackgroundDispatchContext, DispatchExecution,
+    ManagedEphemeralCredentialCleanupObligation,
+};
 use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
 use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
 use self::plan_stage::{run_v2_plan_stage, PlanStageInputs};
@@ -258,6 +437,7 @@ enum PostInitDispatchOutcome {
 /// carried out of the guarded `async` block in one bundle.
 struct ReadyDispatch {
     execution: DispatchExecution,
+    managed_custom_eligible: bool,
     execution_backend_name: Option<&'static str>,
     execution_backend_metadata: Option<Value>,
     acpx_enabled: bool,
@@ -275,7 +455,7 @@ pub(crate) async fn handle_tachi_dispatch(
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(params.execution_level)?;
     let start = resolve_dispatch_start(server, &mut params, Utc::now(), execution_level)?;
-    launch_canonical_dispatch(server, start).await
+    launch_canonical_dispatch(server, start, ManagedControlOrigin::DirectHandle).await
 }
 
 fn enforce_dispatch_depth(server: &MemoryServer) -> Result<(), String> {
@@ -312,13 +492,13 @@ fn enforce_dispatch_depth(server: &MemoryServer) -> Result<(), String> {
 async fn launch_canonical_dispatch(
     server: &MemoryServer,
     start: DispatchStart,
+    managed_control_origin: ManagedControlOrigin,
 ) -> Result<String, String> {
     let (host_profile, _) =
         crate::host_profile::authorize_dispatch(start.resolved_assignment.execution_level)?;
     let DispatchStart {
         dispatch_id,
         request,
-        legacy_auto_capability_bundle,
         requested_skills,
         context_query,
         tool_profile,
@@ -509,10 +689,9 @@ async fn launch_canonical_dispatch(
     // the request, resolved assignment, execution grant, and private start
     // owners — no prompt/artifact/plan dependency.
     // `v2` is not yet decided (that needs the resolved request stage, which IS already
-    // resolved) so compute it early too; capability_bundle/feedback_rules
-    // are not known yet (they come from `assemble_prompt_with_trace` /
-    // `write_dispatch_artifacts` below) and are seeded as neutral
-    // "pending" placeholders here, then overwritten by the existing
+    // resolved) so compute it early too; feedback_rules are not known yet
+    // (they come from `write_dispatch_artifacts` below) and are seeded as a
+    // neutral "pending" placeholder here, then overwritten by the existing
     // post-artifacts `write_status_json` call once real values exist.
     let harness_server_url =
         infer_harness_server_url(&requested_harness_server_url, &command, &harness_transport);
@@ -543,7 +722,6 @@ async fn launch_canonical_dispatch(
             "host_profile": host_profile.name(),
             "execution_level": serde_json::to_value(resolved_assignment.execution_level)
                 .unwrap_or(Value::Null),
-            "capability_bundle": Value::Null,
             "feedback_rules": Value::Null,
             "timeout_secs": timeout_secs_for_status,
             // #894 S2d: the authority receipt — compiled workspace authority,
@@ -601,7 +779,6 @@ async fn launch_canonical_dispatch(
         &resolved_profile,
         &effective_skills_for_files,
         stage_instruction.as_deref(),
-        legacy_auto_capability_bundle,
         context_query.as_deref(),
         inject_card,
     )
@@ -613,8 +790,6 @@ async fn launch_canonical_dispatch(
         prompt_md_path,
         context_md_path,
         trajectory_path,
-        capability_bundle_file,
-        capability_bundle_card,
         feedback_rules_trace,
     } = write_dispatch_artifacts(DispatchArtifactInputs {
         workspace_dir: &workspace_dir,
@@ -630,8 +805,8 @@ async fn launch_canonical_dispatch(
     })
     .await?;
 
-    // Enrich status.json now that capability_bundle / feedback_rules are
-    // known. Same call shape as the original single seed — now the SECOND
+    // Enrich status.json now that feedback_rules are known. Same call shape
+    // as the original single seed — now the SECOND
     // write, not the first (receipt-first seed above is the first).
     write_status_json(
         &workspace_dir,
@@ -657,7 +832,6 @@ async fn launch_canonical_dispatch(
             "host_profile": host_profile.name(),
             "execution_level": serde_json::to_value(resolved_assignment.execution_level)
                 .unwrap_or(Value::Null),
-            "capability_bundle": capability_bundle_card.clone(),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,
             // #894 S2d: same authority receipt as the receipt-first seed above
@@ -709,8 +883,6 @@ async fn launch_canonical_dispatch(
         prompt_md_path: &prompt_md_path,
         context_md_path: &context_md_path,
         trajectory_path: &trajectory_path,
-        capability_bundle_card: &capability_bundle_card,
-        capability_bundle_file: &capability_bundle_file,
     })
     .await?;
 
@@ -746,8 +918,6 @@ async fn launch_canonical_dispatch(
             context_md_path: &context_md_path,
             trajectory_path: &trajectory_path,
             workspace_dir: &workspace_dir,
-            capability_bundle_card: &capability_bundle_card,
-            capability_bundle_file: &capability_bundle_file,
             feedback_rules_trace: &feedback_rules_trace,
             v2_decision,
         })
@@ -777,6 +947,7 @@ async fn launch_canonical_dispatch(
         // 5. Build execution backend
         let PreparedDispatchBackend {
             mut execution,
+            managed_custom_eligible,
             execution_backend_name,
             execution_backend_metadata,
             acpx_enabled,
@@ -799,7 +970,6 @@ async fn launch_canonical_dispatch(
             plan_duration_ms,
             harness_transport: &harness_transport,
             harness_server_url: &harness_server_url,
-            capability_bundle_card: &capability_bundle_card,
             timeout_secs_for_status,
         })?;
 
@@ -832,7 +1002,6 @@ async fn launch_canonical_dispatch(
                 execution_backend_metadata: &execution_backend_metadata,
                 acpx_enabled,
                 native_acp_enabled,
-                capability_bundle_card: &capability_bundle_card,
                 timeout_secs_for_status,
             },
             &mut execution,
@@ -857,7 +1026,6 @@ async fn launch_canonical_dispatch(
             execution_backend_metadata: &execution_backend_metadata,
             acpx_enabled,
             native_acp_enabled,
-            capability_bundle_card: &capability_bundle_card,
             timeout_secs_for_status,
             project: request.project.as_deref(),
         })?;
@@ -867,6 +1035,7 @@ async fn launch_canonical_dispatch(
 
         Ok(PostInitDispatchOutcome::Ready(Box::new(ReadyDispatch {
             execution,
+            managed_custom_eligible,
             execution_backend_name,
             execution_backend_metadata,
             acpx_enabled,
@@ -881,6 +1050,7 @@ async fn launch_canonical_dispatch(
 
     let ReadyDispatch {
         execution,
+        managed_custom_eligible,
         execution_backend_name,
         execution_backend_metadata,
         acpx_enabled,
@@ -906,6 +1076,98 @@ async fn launch_canonical_dispatch(
         }
     };
 
+    #[cfg(test)]
+    managed_materialization_barrier::pause_after_managed_credential_materialization(&workspace_dir);
+
+    // Register managed-custom control before task scheduling.
+    let managed_ephemeral_credential_cleanup =
+        managed_custom_control_required(managed_control_origin, managed_custom_eligible)
+            .then_some(ManagedEphemeralCredentialCleanupObligation::Required);
+    let managed_registration = match register_managed_custom_control(
+        server,
+        &dispatch_id,
+        managed_control_origin,
+        managed_custom_eligible,
+    ) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let _ = server.with_global_store(|store| {
+                cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+            });
+            release_flow_dispatch_slot(flow_dispatch_slot);
+            close_kanban_row_on_early_exit(
+                server,
+                &dispatch_id,
+                "managed-custom control registration",
+                request.project.as_deref(),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let (execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
+        if let Err(error) =
+            crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
+        {
+            let result = format!("managed custom classification failed: {error}");
+            let result_persist_error = persist_dispatch_result_artifact(
+                &workspace_dir.join("result.md"),
+                result.as_bytes(),
+                true,
+            )
+            .err();
+            let _ = write_status_json(
+                &workspace_dir,
+                &dispatch_id,
+                v2,
+                plan_generated_at.as_deref(),
+                None,
+                if v2 { "approved" } else { "n/a" },
+                None,
+                plan_duration_ms,
+                None,
+                plan_duration_ms,
+                Some(json!({
+                    "agent": resolved_assignment.selected_worker,
+                    "state": "TASK_STATE_FAILED",
+                    "updated_at": Utc::now().to_rfc3339(),
+                    "result_written": result_persist_error.is_none(),
+                    "result_persist_error": result_persist_error,
+                    "classification_error": error,
+                })),
+            );
+            let _ = server.with_global_store(|store| {
+                cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+            });
+            release_flow_dispatch_slot(flow_dispatch_slot);
+            close_kanban_row_on_early_exit(
+                server,
+                &dispatch_id,
+                "managed-custom control classification",
+                request.project.as_deref(),
+            )
+            .await;
+            crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                server,
+                &dispatch_id,
+                "managed_custom_classification",
+                Some(resolved_assignment.selected_worker.as_str()),
+                request.project.as_deref(),
+            );
+            drop(guard);
+            return Err(error);
+        }
+        let execution = match execution {
+            DispatchExecution::Subprocess(command) => {
+                DispatchExecution::ManagedCustom(command, receiver)
+            }
+            _ => unreachable!("managed custom eligibility requires a subprocess execution"),
+        };
+        (execution, Some(guard))
+    } else {
+        (execution, None)
+    };
+
     // 8. Spawn background task with Watchdog
     let workspace_dir_for_response = workspace_dir.clone();
     spawn_background_dispatch(BackgroundDispatchContext {
@@ -921,7 +1183,6 @@ async fn launch_canonical_dispatch(
         plan_duration_ms,
         timeout_secs: timeout_secs_for_status,
         timeout,
-        capability_bundle_card: capability_bundle_card.clone(),
         feedback_rules_trace: feedback_rules_trace.clone(),
         harness_transport: harness_transport.clone(),
         harness_server_url: harness_server_url.clone(),
@@ -931,6 +1192,8 @@ async fn launch_canonical_dispatch(
         execution,
         flow_dispatch_slot,
         mcp_config_path,
+        managed_run_guard,
+        managed_ephemeral_credential_cleanup,
     });
 
     // 9. Immediately return — main agent is unblocked!
@@ -941,8 +1204,6 @@ async fn launch_canonical_dispatch(
         resolved_profile: &resolved_profile,
         authority: &authority_receipt,
         credential_reports_json: &credentials.reports_json,
-        capability_bundle_card: &capability_bundle_card,
-        capability_bundle_file: &capability_bundle_file,
         feedback_rules_trace: &feedback_rules_trace,
         harness_transport: &harness_transport,
         harness_server_url: &harness_server_url,
@@ -982,6 +1243,6 @@ pub(crate) async fn launch_staff_assignment(
     let start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
     let assignment = start.resolved_assignment.clone();
     let recommendation = start.resolved_recommendation.clone();
-    let raw = launch_canonical_dispatch(server, start).await?;
+    let raw = launch_canonical_dispatch(server, start, ManagedControlOrigin::StaffFacade).await?;
     Ok((raw, assignment, recommendation))
 }

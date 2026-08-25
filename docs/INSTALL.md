@@ -574,11 +574,11 @@ not a model-facing Memory action and is not hidden inside `save`.
 
 ### Handoff
 
-`tachi_handoff(action='promote_issue')` — the only surviving handoff action (#1099 retired `handoff_leave`/`handoff_check`; use `tachi_a2a(action='respond')` for same-host responses and `tachi_task` for durable task continuity).
+`tachi_handoff(action='promote_issue')` — the only surviving handoff action. #1099 retired `handoff_leave`/`handoff_check`; use `tachi_a2a(action='respond')` instead. The retired `tachi_orchestrator` handoff route is no longer available.
 
-### Kanban (Inter-Agent)
+### Retired Kanban (Inter-Agent)
 
-Kanban state is internal; model-facing task state uses `tachi_task(action='status'|'board')`.
+The `post_card`, `check_inbox`, and `update_card` tools are retired.
 
 ### Vault (Encrypted Secrets)
 
@@ -668,9 +668,11 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, `sandbox_exec_audit`
 
-### Recommendations
+### Retired Recommendations
 
-Use `tachi_skill(action='discover'|'run')` for reviewed static skills and `tachi_tune(action='route_simulate')` for operator routing analysis.
+The public `tachi_dispatch(action='recommend')` surface is retired. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
+
+*These APIs are retired and deleted by #1690 C3: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `skill_evolve`. The router rejects them as unknown tools.*
 
 ### Facade & Delegation
 

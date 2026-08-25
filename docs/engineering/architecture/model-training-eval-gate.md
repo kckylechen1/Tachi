@@ -6,8 +6,10 @@ Related: GitHub issue #262, `sft-memory-eval-playbook.md`,
 `subagent-eval-system.md`, `dispatch-policy-learning-spec.md`
 
 This record defines the gate for any future Tachi model training, fine-tune, or
-local classifier work. The current production system is the dispatch profile /
-MBIT / live `/eval` policy layer. A trained model may assist that layer only
+local classifier work. The current production system is the static dispatch
+profile baseline plus DecisionFactLedger-fed recommendation (the MBIT / live
+`/eval` policy layer is retired by #1690 C3; #1675 owns the eval-informed
+future). A trained model may assist that layer only
 after it beats the current policy on an isolated benchmark and passes an
 artifact promotion review.
 
@@ -35,7 +37,7 @@ Not allowed by default:
 - importing raw SFT rows into ordinary memory or wiki recall;
 - loading SFT data into the production vector DB for normal recall;
 - treating model-training datasets, checkpoints, or weights as wiki/docs;
-- replacing DispatchProfile / MBIT route scoring with a trained classifier;
+- replacing DispatchProfile route scoring with a trained classifier (the MBIT fit is retired by #1690 C3);
 - applying model-driven route/profile changes without reviewed eval evidence.
 
 ## Artifact Classes
@@ -63,8 +65,8 @@ against a hand-picked prompt baseline.
 Baseline:
 
 - deterministic risk classification;
-- built-in DispatchProfile / MBIT fit;
-- live `/eval` weighted recommendation;
+- built-in static DispatchProfile fit (the MBIT fit is retired by #1690 C3);
+- DecisionFactLedger-fed recommendation (live `/eval` weighted recommendation is retired by #1690 C3 — the no-evidence path abstains; `aggregate_live` remains a read-only reporting surface);
 - reviewed route-policy and profile-card overlays;
 - `route_simulate` variants when applicable.
 
