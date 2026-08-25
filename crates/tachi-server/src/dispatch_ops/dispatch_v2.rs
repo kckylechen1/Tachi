@@ -528,17 +528,6 @@ impl StatusJsonTarget {
         }
     }
 
-    fn lock(&self) -> Arc<Mutex<()>> {
-        match self {
-            Self::Path(path) => status_json_lock_for(
-                path.parent()
-                    .expect("status.json path is always constructed beneath a run directory"),
-            ),
-            #[cfg(unix)]
-            Self::Anchored(status) => status.lock(),
-        }
-    }
-
     fn status_path(&self) -> std::path::PathBuf {
         match self {
             Self::Path(path) => path.clone(),
@@ -694,7 +683,11 @@ fn write_status_json_inner(
             ));
         }
     };
-    let lock = target.lock();
+    let lock = match &target {
+        StatusJsonTarget::Path(_) => status_json_lock_for(run_dir),
+        #[cfg(unix)]
+        StatusJsonTarget::Anchored(status) => status.lock(),
+    };
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut obj = serde_json::Map::new();
     obj.insert("dispatch_id".into(), Value::String(dispatch_id.to_string()));
