@@ -263,6 +263,7 @@ async fn chat_lane_waits_for_temporarily_unavailable_pool_key() {
 
 #[tokio::test]
 async fn chat_lane_records_success_usage_to_vault_db() {
+    let _lock = crate::test_support::global_test_lock().lock();
     use axum::{routing::post, Json, Router};
 
     let app = Router::new().route(
@@ -405,6 +406,7 @@ async fn chat_lane_records_success_usage_to_vault_db() {
 /// values past the 64-character cap must be bounded before that durable write.
 #[tokio::test]
 async fn chat_lane_success_usage_bounds_the_caller_supplied_model_override() {
+    let _lock = crate::test_support::global_test_lock().lock();
     use axum::{routing::post, Json, Router};
 
     let app = Router::new().route(
