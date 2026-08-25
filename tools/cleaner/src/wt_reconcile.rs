@@ -60,9 +60,18 @@ pub enum BranchPrState {
     Error(String),
 }
 
-pub fn check_branch_pr_state(repo_root: &str, branch: &str, registered_pr: Option<&str>) -> BranchPrState {
+pub fn check_branch_pr_state(
+    repo_root: &str,
+    branch: &str,
+    registered_pr: Option<&str>,
+) -> BranchPrState {
     let clean_branch = branch.trim_start_matches("refs/heads/");
-    if clean_branch.is_empty() || clean_branch == "HEAD" || clean_branch == "main" || clean_branch == "master" || clean_branch == "trunk" {
+    if clean_branch.is_empty()
+        || clean_branch == "HEAD"
+        || clean_branch == "main"
+        || clean_branch == "master"
+        || clean_branch == "trunk"
+    {
         return BranchPrState::NotFound;
     }
 
@@ -331,8 +340,12 @@ mod tests {
         ];
 
         let fake_checker = |_repo: &str, branch: &str, _pr: Option<&str>| match branch {
-            "feat/open" => BranchPrState::Open { pr_number: Some("1".to_string()) },
-            "feat/merged" => BranchPrState::TerminalMerged { pr_number: Some("2".to_string()) },
+            "feat/open" => BranchPrState::Open {
+                pr_number: Some("1".to_string()),
+            },
+            "feat/merged" => BranchPrState::TerminalMerged {
+                pr_number: Some("2".to_string()),
+            },
             _ => BranchPrState::NotFound,
         };
 

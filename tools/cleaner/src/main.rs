@@ -452,7 +452,11 @@ fn run_wt_reconcile(args: Vec<String>) -> Result<(), String> {
                 return Ok(());
             }
             _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
-            _ => return Err("wt-reconcile accepts only options (--force, --dry-run, --json)".to_string()),
+            _ => {
+                return Err(
+                    "wt-reconcile accepts only options (--force, --dry-run, --json)".to_string(),
+                )
+            }
         }
     }
 

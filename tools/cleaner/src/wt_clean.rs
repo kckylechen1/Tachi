@@ -180,7 +180,11 @@ fn plan_wt_remove(
     // freeze boundary 3: a scrapped tree may only reopen under a NEW
     // branch + NEW path).
     report.branch = current_branch(&worktree_root).ok();
-    if report.branch.as_deref().map_or(true, |b| b == "HEAD" || b.is_empty()) {
+    if report
+        .branch
+        .as_deref()
+        .is_none_or(|b| b == "HEAD" || b.is_empty())
+    {
         if let Ok(Some(entry)) = registry::find_registry_entry(&worktree_root) {
             if !entry.branch.is_empty() {
                 report.branch = Some(entry.branch);
@@ -402,9 +406,9 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
                         }
                     }
                     Err(err) => {
-                        report.warnings.push(format!(
-                            "local branch deletion failed for {branch}: {err}"
-                        ));
+                        report
+                            .warnings
+                            .push(format!("local branch deletion failed for {branch}: {err}"));
                     }
                     _ => {}
                 }
@@ -1291,11 +1295,19 @@ mod tests {
             &|_| crate::work_claim::DbHolderEvidence::Clear,
             &|_| HolderEvidence::Clear,
         );
-        assert!(report.allowed, "clean worktree must be allowed: {:?}", report.errors);
+        assert!(
+            report.allowed,
+            "clean worktree must be allowed: {:?}",
+            report.errors
+        );
         assert_eq!(report.branch.as_deref(), Some(branch));
 
         let report = execute_wt_remove(report);
-        assert!(report.removed, "worktree should be removed: {:?}", report.errors);
+        assert!(
+            report.removed,
+            "worktree should be removed: {:?}",
+            report.errors
+        );
         assert!(!worktree.exists(), "worktree directory must be gone");
 
         // Verify local branch was deleted
@@ -1304,7 +1316,9 @@ mod tests {
             .output()
             .unwrap();
         assert!(
-            String::from_utf8_lossy(&branches_after.stdout).trim().is_empty(),
+            String::from_utf8_lossy(&branches_after.stdout)
+                .trim()
+                .is_empty(),
             "local branch must be deleted after wt-remove"
         );
 
@@ -1321,4 +1335,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
-

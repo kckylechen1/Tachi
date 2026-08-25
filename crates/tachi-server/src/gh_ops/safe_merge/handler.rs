@@ -596,28 +596,30 @@ async fn reclaim_worktree_after_merge(
     // via PR head_ref against the worktree registry (Refs #1118).
     let resolved_path: Option<String> = match worktree.map(str::trim).filter(|s| !s.is_empty()) {
         Some(w) => Some(w.to_string()),
-        None => {
-            head_ref.and_then(|target_branch| {
-                let target = target_branch.trim_start_matches("refs/heads/");
-                match tachi_clean::registry::list_registered_worktrees() {
-                    Ok(registered) => registered
-                        .into_iter()
-                        .find(|wt| wt.branch.trim_start_matches("refs/heads/") == target)
-                        .map(|wt| wt.path),
-                    Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            target_branch = target,
-                            "safe_merge: failed to read worktree registry during auto-resolution"
-                        );
-                        None
-                    }
+        None => head_ref.and_then(|target_branch| {
+            let target = target_branch.trim_start_matches("refs/heads/");
+            match tachi_clean::registry::list_registered_worktrees() {
+                Ok(registered) => registered
+                    .into_iter()
+                    .find(|wt| wt.branch.trim_start_matches("refs/heads/") == target)
+                    .map(|wt| wt.path),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        target_branch = target,
+                        "safe_merge: failed to read worktree registry during auto-resolution"
+                    );
+                    None
                 }
-            })
-        }
+            }
+        }),
     };
 
-    let Some(worktree_path) = resolved_path.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(worktree_path) = resolved_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         return json!({
             "attempted": false,
             "reclaimed": false,
