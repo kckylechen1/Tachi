@@ -753,7 +753,16 @@ fn persist_resolved_completion_receipt_at_with_admission(
     reviewed: bool,
     admission: Option<(&MemoryServer, u64)>,
 ) -> Result<(), String> {
-    let status_lock = target.lock();
+    let status_lock = match target {
+        CompletionStatusTarget::Path(path) => {
+            let run_dir = path
+                .parent()
+                .expect("completion status path has a run directory parent");
+            crate::dispatch_ops::status_json_lock_for(run_dir)
+        }
+        #[cfg(unix)]
+        CompletionStatusTarget::Anchored(anchor) => anchor.lock(),
+    };
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -880,7 +889,16 @@ fn persist_pending_completion_recovery_receipt_at(
     reviewed: bool,
     dispatch_outcome: &Value,
 ) -> Result<(), String> {
-    let status_lock = target.lock();
+    let status_lock = match target {
+        CompletionStatusTarget::Path(path) => {
+            let run_dir = path
+                .parent()
+                .expect("completion status path has a run directory parent");
+            crate::dispatch_ops::status_json_lock_for(run_dir)
+        }
+        #[cfg(unix)]
+        CompletionStatusTarget::Anchored(anchor) => anchor.lock(),
+    };
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
