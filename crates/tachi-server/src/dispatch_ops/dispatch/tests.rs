@@ -35,7 +35,6 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
         pr_ref: None,
         flow_id: None,
         tool_profile: None,
-        auto_capability_bundle: None,
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
         verbose: None,
@@ -1125,9 +1124,8 @@ async fn canonical_external_staffing_start_and_terminal_receipt_share_one_run_di
 
 /// tachi#1173 item 1 discriminator: on origin/main (pre-#1173) the dispatch
 /// response always embeds the full routing card (`profile` — the whole
-/// `ResolvedDispatchProfile` including its own nested `mbit_card` and
-/// `identity_receipt` — plus top-level `identity_receipt` and
-/// `dispatch_profile` duplicating the same mbit_card again), so this
+/// `ResolvedDispatchProfile` including its own identity receipt — plus a
+/// top-level `identity_receipt` and `dispatch_profile` projection), so this
 /// assertion is RED before the fix (those keys are always present) and GREEN
 /// after (they're absent by default). The default receipt must still carry
 /// the four fields the issue names: dispatch_id, state, run_dir,
@@ -1174,7 +1172,7 @@ async fn dispatch_response_default_omits_fat_routing_card() {
     );
     assert!(
         response.get("dispatch_profile").is_none(),
-        "default dispatch response must not carry the mbit_card dispatch_profile: {response}"
+        "default dispatch response must not carry the retired dispatch_profile projection: {response}"
     );
     assert!(
         !dispatch_response.contains("mbit_card"),
@@ -1196,9 +1194,8 @@ async fn dispatch_response_default_omits_fat_routing_card() {
     );
 }
 
-/// tachi#1173 item 1 discriminator (verbose escape hatch): verbose=true must
-/// restore the exact pre-#1173 full routing card so no information is lost,
-/// only deferred behind an explicit opt-in.
+/// tachi#1173 item 1 discriminator: verbose=true restores the profile and
+/// identity receipt, but the retired profile-card projection stays absent.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn dispatch_response_verbose_true_restores_full_routing_card() {
@@ -1228,20 +1225,16 @@ async fn dispatch_response_verbose_true_restores_full_routing_card() {
         "verbose=true must carry the full routing card: {response}"
     );
     assert!(
-        response["profile"]["profile_card"].is_object(),
-        "verbose=true's `profile` is the full ResolvedDispatchProfile, which nests its own profile_card: {response}"
-    );
-    assert!(
         response["identity_receipt"].is_object(),
         "verbose=true must carry identity_receipt: {response}"
     );
     assert!(
-        response["dispatch_profile"].is_object(),
-        "verbose=true must carry the dispatch_profile: {response}"
+        response.get("dispatch_profile").is_none(),
+        "verbose=true must not resurrect the retired dispatch_profile projection: {response}"
     );
-    assert_eq!(
-        response["profile"]["profile_card"], response["dispatch_profile"],
-        "self-nested profile_card copies must be the exact same value: {response}"
+    assert!(
+        !dispatch_response.contains("mbit_card"),
+        "{dispatch_response}"
     );
 }
 

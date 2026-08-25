@@ -1317,8 +1317,6 @@ pub(crate) async fn handle_tachi_complete(
                 "kanban_update": "skipped (canonical outcome pending)",
                 "continuity_events": "skipped (canonical outcome pending)",
                 "pattern_feedback": "skipped (canonical outcome pending)",
-                "distill_trajectory": "skipped (canonical outcome pending)",
-                "skill_evolve": "skipped (canonical outcome pending)",
                 "post_complete_hooks": "skipped (canonical outcome pending)",
             });
             let response = shape_complete_response(
@@ -1366,8 +1364,6 @@ pub(crate) async fn handle_tachi_complete(
         "dispatch_outcome": dispatch_outcome_status,
         "adjudication": adjudication_status,
         "kanban_update": "skipped (no dispatch_id)",
-        "distill_trajectory": "skipped (automatic distillation retired)",
-        "skill_evolve": "skipped",
         "continuity_events": "pending",
         "post_complete_hooks": "pending",
     });
@@ -3121,9 +3117,6 @@ mod tests {
     /// silently turn a partial + exit 0 into COMPLETED.
     #[test]
     fn resolved_completion_receipt_write_failure_is_loud() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temporary receipt parent");
         let non_directory = temp.path().join("not-a-run-directory");
         std::fs::write(&non_directory, "not a directory").expect("seed blocking file");
@@ -3168,9 +3161,6 @@ mod tests {
 
     #[test]
     fn pending_completion_recovery_receipt_is_idempotent_and_not_terminal() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().expect("temporary receipt parent");
         let dispatch_id = "20260719T000003Z-recovery-receipt";
         let run_dir = temp.path().join(dispatch_id);
@@ -3254,7 +3244,6 @@ mod tests {
             "the resolved-completion writer advances after the recovery writer"
         );
     }
-
     /// Completion receipts pause after their stale read while holding the same
     /// canonical per-run mutex as lifecycle and route writers. The lifecycle
     /// writer uses an existing `run/../run` spelling: a raw-path registry or a

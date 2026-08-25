@@ -34,6 +34,7 @@ pub(super) fn canonical_skill_name(cap: &Value) -> Option<String> {
     let normalized = trimmed.trim().to_ascii_lowercase();
     (!normalized.is_empty()).then_some(normalized)
 }
+
 pub(super) fn discover_local_host_skills(query: &str, limit: usize) -> Vec<Value> {
     if limit == 0 {
         return Vec::new();

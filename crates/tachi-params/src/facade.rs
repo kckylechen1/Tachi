@@ -248,7 +248,7 @@ pub struct TachiEventParams {
     pub projection_hints: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=emit|promote] Domain payload. For promote, supports force, skip_wiki_draft, skip_skill_candidate, and skip_agent_profile_proposal."
+        description = "[action=emit|promote] Domain payload. For promote, supports force, skip_wiki_draft, and skip_agent_profile_proposal."
     )]
     pub payload: Option<serde_json::Value>,
     #[serde(default)]
@@ -494,7 +494,7 @@ pub struct TachiComponentParams {
     pub repo: Option<String>,
 }
 
-// ─── Facade: skill (discover / run / bundle / loadout) ───────────────────────
+// ─── Facade: skill (discover / run) ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiSkillParams {

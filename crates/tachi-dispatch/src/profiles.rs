@@ -16,9 +16,8 @@ use tachi_params::{DispatchMcpAccessParams, StaffAssignmentRequest, TachiDispatc
 pub const DISPATCH_POLICY_PROPOSAL_NS: &str = "dispatch_route_policy_proposals";
 pub const ROUTE_POLICY_RULE_NS: &str = "dispatch_route_policy_rules";
 pub const PROFILE_CARD_OVERLAY_NS: &str = "dispatch_profile_card_overlays";
+pub const MIN_EVOLUTION_SAMPLES: u32 = 10;
 pub const MIN_ROUTE_POLICY_RULE_SAMPLES: u32 = 2;
-pub const MIN_LOADOUT_EVOLUTION_SAMPLES: u32 = 10;
-pub const MIN_CARD_RISK_EVOLUTION_SAMPLES: u32 = 3;
 pub const ROUTE_POLICY_RULE_SCORE_BONUS: f64 = 35.0;
 
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +38,6 @@ pub struct DispatchProfileDef {
     pub inject_hub_mcps: bool,
     pub github_read: bool,
     pub write_actions: bool,
-    pub auto_capability_bundle: bool,
     pub allowed_facades: &'static [&'static str],
     pub allowed_mcp_servers: &'static [&'static str],
     pub credential_profiles: &'static [&'static str],
@@ -67,7 +65,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_wiki", "tachi_task"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -96,7 +93,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: false,
         write_actions: true,
-        auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_task"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -138,7 +134,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: false,
         write_actions: true,
-        auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_task"],
         allowed_mcp_servers: &[],
         credential_profiles: &["opencode_shared"],
@@ -176,7 +171,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: false,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_wiki", "tachi_task"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -210,7 +204,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: false,
         write_actions: false,
-        auto_capability_bundle: false,
         allowed_facades: &["tachi_memory", "tachi_event"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -236,7 +229,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_wiki"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -262,7 +254,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: false,
         write_actions: false,
-        auto_capability_bundle: false,
         allowed_facades: &["tachi_memory", "tachi_event"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -288,7 +279,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: false,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_task", "tachi_wiki"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
@@ -348,7 +338,6 @@ pub struct ResolvedDispatchProfile {
     pub harness_server_url: Option<String>,
     pub role: Option<String>,
     pub tool_profile: Option<String>,
-    pub auto_capability_bundle: bool,
     pub mcp_access: DispatchMcpAccessParams,
     #[serde(skip_serializing)]
     pub required_skills: Vec<String>,
@@ -357,7 +346,6 @@ pub struct ResolvedDispatchProfile {
     pub credential_profiles: Vec<String>,
     pub route_explanation: Vec<String>,
     pub host_adapter: Option<String>,
-    pub profile_card: Option<Value>,
     /// Frozen at resolution; runtime consumers copy this receipt instead of
     /// reconstructing identity from profiles that may later change.
     pub identity_receipt: crate::DispatchIdentityReceipt,
@@ -475,18 +463,16 @@ pub fn recommendation_identity_receipt(
     )
 }
 
-pub fn resolve_and_apply_dispatch_profile<F, S, E, C>(
+pub fn resolve_and_apply_dispatch_profile<F, S, E>(
     params: &mut TachiDispatchParams,
     mut profile_required_skills: S,
     mut profile_evidence_required: E,
-    profile_card: C,
     mut harness_attach_ready: F,
 ) -> Result<ResolvedDispatchProfile, String>
 where
     F: FnMut(&str) -> bool,
     S: FnMut(&DispatchProfileDef) -> Result<Vec<String>, String>,
     E: FnMut(&DispatchProfileDef) -> Result<Vec<String>, String>,
-    C: FnMut(&DispatchProfileDef) -> Result<Value, String>,
 {
     let mut route_explanation = Vec::new();
     let identity_requested = crate::DispatchIdentityRequest {
@@ -577,18 +563,6 @@ where
         }
         if params.inject_hub_mcps.is_none() {
             params.inject_hub_mcps = Some(profile.inject_hub_mcps);
-        }
-        if params.auto_capability_bundle.is_none() {
-            let effective_stage = params.stage.as_deref().or(profile.stage);
-            if matches!(effective_stage, Some("review" | "review_light")) {
-                params.auto_capability_bundle = Some(false);
-                route_explanation.push(
-                    "auto_capability_bundle disabled by default for review-stage dispatch (#457); pass auto_capability_bundle=true to override"
-                        .to_string(),
-                );
-            } else {
-                params.auto_capability_bundle = Some(profile.auto_capability_bundle);
-            }
         }
         if params.skills.is_empty() {
             params.skills = profile_required_skills(profile)?;
@@ -733,7 +707,6 @@ where
         harness_server_url: params.harness_server_url.clone(),
         role: profile.map(|p| p.role.to_string()),
         tool_profile: params.tool_profile.clone(),
-        auto_capability_bundle: params.auto_capability_bundle.unwrap_or(false),
         mcp_access,
         required_skills: params.skills.clone(),
         evidence_required,
@@ -741,7 +714,6 @@ where
         credential_profiles,
         route_explanation,
         host_adapter: profile.and_then(profile_host_adapter).map(str::to_string),
-        profile_card: profile.map(profile_card).transpose()?,
         identity_receipt,
     })
 }
@@ -749,18 +721,16 @@ where
 /// Resolve a model-facing Staff assignment without constructing the legacy
 /// flat dispatch facade. The returned profile carries every profile-owned
 /// launch default needed by the server-owned canonical launch kernel.
-pub fn resolve_and_apply_staff_assignment_profile<F, S, E, C>(
+pub fn resolve_and_apply_staff_assignment_profile<F, S, E>(
     request: &mut StaffAssignmentRequest,
     mut profile_required_skills: S,
     mut profile_evidence_required: E,
-    profile_card: C,
     mut harness_attach_ready: F,
 ) -> Result<ResolvedDispatchProfile, String>
 where
     F: FnMut(&str) -> bool,
     S: FnMut(&DispatchProfileDef) -> Result<Vec<String>, String>,
     E: FnMut(&DispatchProfileDef) -> Result<Vec<String>, String>,
-    C: FnMut(&DispatchProfileDef) -> Result<Value, String>,
 {
     let mut route_explanation = Vec::new();
     let requested_profile = request
@@ -960,18 +930,6 @@ where
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "agent or profile is required for dispatch".to_string())?;
     let agent = crate::normalize_dispatch_agent_name(&worker).unwrap_or(worker);
-    let auto_capability_bundle = if matches!(
-        request.stage.as_deref(),
-        Some("review" | "review_light")
-    ) {
-        route_explanation.push(
-            "auto_capability_bundle disabled by default for review-stage dispatch (#457); pass auto_capability_bundle=true to override"
-                .to_string(),
-        );
-        false
-    } else {
-        profile.is_some_and(|profile| profile.auto_capability_bundle)
-    };
     let fallback_chain = crate::fallback_chain(&agent)
         .iter()
         .map(|value| (*value).to_string())
@@ -1014,7 +972,6 @@ where
         harness_server_url,
         role: profile.map(|profile| profile.role.to_string()),
         tool_profile: profile.map(|profile| profile.tool_profile.to_string()),
-        auto_capability_bundle,
         mcp_access,
         required_skills,
         evidence_required,
@@ -1022,7 +979,6 @@ where
         credential_profiles,
         route_explanation,
         host_adapter,
-        profile_card: profile.map(profile_card).transpose()?,
         identity_receipt,
     })
 }
@@ -1134,23 +1090,6 @@ pub fn profile_required_skill_ids(profile: &DispatchProfileDef) -> Vec<String> {
     skills
 }
 
-pub fn profile_required_skill_ids_with_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let mut skills = profile
-        .common_skills
-        .iter()
-        .chain(profile.signature_skills.iter())
-        .map(|skill| skill.to_string())
-        .collect::<Vec<_>>();
-    skills.extend(profile_projected_signature_skills_from_overlay(
-        profile, overlay,
-    ));
-    dedupe_preserve_order(&mut skills);
-    skills
-}
-
 pub fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value {
     json!({
         "common_skills": profile.common_skills,
@@ -1161,44 +1100,6 @@ pub fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value {
         "forbidden_skills": profile.forbidden_skills,
         "projection": {
             "status": "baseline",
-        },
-    })
-}
-
-pub fn profile_skill_loadout_json_with_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Value {
-    let projected_signature_skills =
-        profile_projected_signature_skills_from_overlay(profile, overlay);
-    let projected_passive_traits = profile_projected_passive_traits_from_overlay(profile, overlay);
-    let mut signature_skills = profile
-        .signature_skills
-        .iter()
-        .map(|skill| skill.to_string())
-        .collect::<Vec<_>>();
-    signature_skills.extend(projected_signature_skills.iter().cloned());
-    dedupe_preserve_order(&mut signature_skills);
-    let mut passive_traits = profile
-        .passive_traits
-        .iter()
-        .map(|trait_id| trait_id.to_string())
-        .collect::<Vec<_>>();
-    passive_traits.extend(projected_passive_traits.iter().cloned());
-    dedupe_preserve_order(&mut passive_traits);
-    let source_proposal_ids = overlay_source_proposal_ids(overlay);
-    json!({
-        "common_skills": profile.common_skills,
-        "signature_skills": signature_skills,
-        "projected_signature_skills": projected_signature_skills,
-        "passive_traits": passive_traits,
-        "projected_passive_traits": projected_passive_traits,
-        "forbidden_skills": profile.forbidden_skills,
-        "projection": {
-            "status": if overlay.is_some() { "applied_overlay" } else { "baseline" },
-            "namespace": PROFILE_CARD_OVERLAY_NS,
-            "key": profile.name,
-            "source_proposal_ids": source_proposal_ids,
         },
     })
 }
@@ -1231,18 +1132,6 @@ pub fn profile_weak_against(profile: &DispatchProfileDef) -> Vec<String> {
         .iter()
         .map(|item| item.to_string())
         .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut weak);
-    weak
-}
-
-pub fn profile_weak_against_with_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let mut weak = profile_weak_against(profile);
-    weak.extend(profile_projected_weak_against_from_overlay(
-        profile, overlay,
-    ));
     dedupe_preserve_order(&mut weak);
     weak
 }
@@ -1284,19 +1173,18 @@ pub fn profile_json(profile: &DispatchProfileDef) -> Value {
         profile_skill_loadout_json(profile),
         profile_evidence_contract_json(profile),
         profile_weak_against(profile),
-        Vec::new(),
-        Vec::new(),
     )
 }
 
 pub fn profile_json_with_overlay(profile: &DispatchProfileDef, overlay: Option<&Value>) -> Value {
     profile_json_with_loadout_and_evidence_contract(
         profile,
-        profile_skill_loadout_json_with_overlay(profile, overlay),
+        // #1690 B1/C3: the loadout is the STATIC reviewed baseline only. The
+        // legacy skill/passive/weakness overlay projections are inert history;
+        // only the evidence contract remains enforceable at this boundary.
+        profile_skill_loadout_json(profile),
         profile_evidence_contract_json_with_overlay(profile, overlay),
-        profile_weak_against_with_overlay(profile, overlay),
-        profile_projected_weak_against_from_overlay(profile, overlay),
-        profile_demotion_targets_from_overlay(profile, overlay),
+        profile_weak_against(profile),
     )
 }
 
@@ -1305,12 +1193,7 @@ pub fn profile_json_with_loadout_and_evidence_contract(
     skill_loadout: Value,
     evidence_contract: Value,
     weak_against: Vec<String>,
-    projected_weak_against: Vec<String>,
-    demotion_targets: Vec<String>,
 ) -> Value {
-    let authority = profile_card_authority_json(profile);
-    let guidance = profile_card_guidance_json(&skill_loadout);
-    let moves = profile_card_moves_json(&skill_loadout);
     let archetype = profile_card_archetype(profile);
     let model_card = profile
         .model_alias
@@ -1337,15 +1220,6 @@ pub fn profile_json_with_loadout_and_evidence_contract(
             })
         })
         .collect::<Vec<_>>();
-    let card_projection = json!({
-        "status": if projected_weak_against.is_empty() && demotion_targets.is_empty() {
-            "baseline"
-        } else {
-            "applied_overlay"
-        },
-        "namespace": PROFILE_CARD_OVERLAY_NS,
-        "key": profile.name,
-    });
     json!({
         "name": profile.name,
         "display_name": profile.display_name,
@@ -1374,15 +1248,6 @@ pub fn profile_json_with_loadout_and_evidence_contract(
         "skill_loadout": skill_loadout,
         "evidence_contract": evidence_contract,
         "weak_against": weak_against,
-        "projected_weak_against": projected_weak_against,
-        "demotion_targets": demotion_targets,
-        "authority": authority,
-        "guidance": guidance,
-        "moves": moves,
-        "auto_capability_bundle": profile.auto_capability_bundle,
-        "evolution": {
-            "projection": card_projection,
-        },
     })
 }
 
@@ -1392,52 +1257,6 @@ fn overlay_source_proposal_ids(overlay: Option<&Value>) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
-}
-
-pub fn profile_projected_signature_skills_from_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let Some(overlay) = overlay else {
-        return Vec::new();
-    };
-    let forbidden = profile.forbidden_skills.iter().collect::<HashSet<_>>();
-    let mut skills = overlay
-        .get("add_signature_skills")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|skill| !skill.is_empty())
-        .filter(|skill| !forbidden.contains(skill))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut skills);
-    skills
-}
-
-pub fn profile_projected_passive_traits_from_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let Some(overlay) = overlay else {
-        return Vec::new();
-    };
-    let baseline = profile.passive_traits.iter().collect::<HashSet<_>>();
-    let mut traits = overlay
-        .get("add_passive_traits")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|trait_id| !trait_id.is_empty())
-        .filter(|trait_id| !baseline.contains(trait_id))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut traits);
-    traits
 }
 
 pub fn profile_projected_evidence_required_from_overlay(
@@ -1463,54 +1282,6 @@ pub fn profile_projected_evidence_required_from_overlay(
     evidence
 }
 
-pub fn profile_projected_weak_against_from_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let Some(overlay) = overlay else {
-        return Vec::new();
-    };
-    let baseline = profile.weak_against.iter().collect::<HashSet<_>>();
-    let mut weak = overlay
-        .get("add_weak_against")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|weakness_id| !weakness_id.is_empty())
-        .filter(|weakness_id| !baseline.contains(weakness_id))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut weak);
-    weak
-}
-
-pub fn profile_demotion_targets_from_overlay(
-    profile: &DispatchProfileDef,
-    overlay: Option<&Value>,
-) -> Vec<String> {
-    let Some(overlay) = overlay else {
-        return Vec::new();
-    };
-    let known_skills = profile_required_skill_ids(profile)
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let mut targets = overlay
-        .get("demotion_targets")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|skill_id| !skill_id.is_empty())
-        .filter(|skill_id| known_skills.contains(*skill_id))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut targets);
-    targets
-}
-
 pub fn profile_card_archetype(profile: &DispatchProfileDef) -> &'static str {
     let stage = profile.stage.unwrap_or_default();
     if profile.role == "explore" || stage == "explore" || stage == "probe" {
@@ -1520,72 +1291,6 @@ pub fn profile_card_archetype(profile: &DispatchProfileDef) -> &'static str {
     } else {
         "raven"
     }
-}
-
-pub fn profile_card_authority_json(profile: &DispatchProfileDef) -> Value {
-    json!({
-        "write_code": profile.write_actions,
-        "merge": false,
-        "github_read": profile.github_read,
-        "github_write": false,
-        "can_dispatch_followup": false,
-        "credential_profiles": profile.credential_profiles,
-        "tool_profile": profile.tool_profile,
-    })
-}
-
-pub fn profile_card_guidance_json(skill_loadout: &Value) -> Value {
-    json!({
-        "superpowers": profile_card_skills_by_prefix(skill_loadout, "skill:superpowers-"),
-    })
-}
-
-pub fn profile_card_moves_json(skill_loadout: &Value) -> Value {
-    let skills = profile_card_skill_ids_from_loadout(skill_loadout);
-    let mut tachi_native = skills
-        .iter()
-        .filter(|skill| {
-            skill.starts_with("skill:")
-                && !skill.starts_with("skill:superpowers-")
-                && !skill.starts_with("skill:waza-")
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut tachi_native);
-    json!({
-        "waza": profile_card_skills_by_prefix(skill_loadout, "skill:waza-"),
-        "external": [],
-        "tachi_native": tachi_native,
-    })
-}
-
-pub fn profile_card_skills_by_prefix(skill_loadout: &Value, prefix: &str) -> Vec<String> {
-    let mut skills = profile_card_skill_ids_from_loadout(skill_loadout)
-        .into_iter()
-        .filter(|skill| skill.starts_with(prefix))
-        .collect::<Vec<_>>();
-    dedupe_preserve_order(&mut skills);
-    skills
-}
-
-pub fn profile_card_skill_ids_from_loadout(skill_loadout: &Value) -> Vec<String> {
-    let mut skills = Vec::new();
-    for key in [
-        "common_skills",
-        "signature_skills",
-        "projected_signature_skills",
-    ] {
-        let Some(items) = skill_loadout.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        for item in items {
-            if let Some(skill) = item.as_str() {
-                skills.push(skill.to_string());
-            }
-        }
-    }
-    dedupe_preserve_order(&mut skills);
-    skills
 }
 
 pub fn dedupe_preserve_order(items: &mut Vec<String>) {
@@ -1673,7 +1378,6 @@ mod tests {
             pr_ref: None,
             flow_id: None,
             tool_profile: None,
-            auto_capability_bundle: None,
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,
@@ -1686,7 +1390,6 @@ mod tests {
             params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
             |_| false,
         )
         .expect("route resolves")
@@ -1708,48 +1411,6 @@ mod tests {
     }
 
     #[test]
-    fn overlay_projection_preserves_profile_card_payload_shape() {
-        let profile = resolve_dispatch_profile("opencode_builder").expect("profile");
-        let overlay = json!({
-            "add_signature_skills": ["skill:custom-fast-fix", "skill:custom-fast-fix"],
-            "add_passive_traits": ["evidence_backed_change_control"],
-            "add_evidence_required": ["regression_tests"],
-            "add_weak_against": ["research_request"],
-            "demotion_targets": [SUPERPOWER_EXECUTING_PLANS, "skill:not-in-profile"],
-            "source_proposal_ids": ["proposal-a"],
-        });
-
-        let loadout = profile_skill_loadout_json_with_overlay(profile, Some(&overlay));
-        assert_eq!(
-            loadout["projected_signature_skills"],
-            json!(["skill:custom-fast-fix"])
-        );
-        assert_eq!(
-            loadout["projection"]["source_proposal_ids"],
-            json!(["proposal-a"])
-        );
-
-        let evidence = profile_evidence_contract_json_with_overlay(profile, Some(&overlay));
-        assert_eq!(evidence["projected_required"], json!(["regression_tests"]));
-        assert_eq!(evidence["projection"]["status"], json!("applied_overlay"));
-
-        let card = profile_json_with_overlay(profile, Some(&overlay));
-        assert_eq!(
-            card["weak_against"],
-            json!([
-                "ambiguous_architecture",
-                "unbounded_refactor",
-                "research_request"
-            ])
-        );
-        assert_eq!(card["projected_weak_against"], json!(["research_request"]));
-        assert_eq!(
-            card["demotion_targets"],
-            json!([SUPERPOWER_EXECUTING_PLANS])
-        );
-    }
-
-    #[test]
     fn glm_profile_alias_resolves_to_current_model_card_profile() {
         let _lock = env_lock();
         let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
@@ -1766,7 +1427,6 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect("compat alias should resolve");
@@ -1803,7 +1463,6 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect("same-lineage override");
@@ -1829,7 +1488,6 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect_err("cross-lineage override must fail closed");
@@ -1928,7 +1586,6 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect("same-family override on a model-less profile must be allowed");
@@ -1946,7 +1603,6 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect_err("cross-family override must fail closed");
@@ -2064,7 +1720,6 @@ mod tests {
             &mut params,
             |profile| Ok(profile_required_skill_ids(profile)),
             |profile| Ok(profile_evidence_required(profile)),
-            |profile| Ok(profile_json(profile)),
             |_| false,
         )
         .expect("opencode builder should resolve");

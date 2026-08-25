@@ -344,7 +344,13 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
 }
 
 #[tokio::test]
-async fn tachi_complete_does_not_auto_distill_stringified_trajectory() {
+async fn tachi_complete_accepts_stringified_trajectory_array() {
+    // #1690 C3 re-anchor: the auto-distill-on-completion fan-out (which this
+    // test used to seed a mock distiller for) is retired end-to-end. What
+    // survives and is guarded here: (a) a stringified trajectory wire is
+    // stored as an array in the eval entry, and (b) the completion pipeline
+    // still indexes the trajectory through the surviving continuity path
+    // (`emit_task_completion_events`) instead of the deleted distill spawn.
     let server = make_server();
 
     let resp = server
@@ -373,7 +379,7 @@ async fn tachi_complete_does_not_auto_distill_stringified_trajectory() {
             pr_ref: None,
             evidence_refs: Vec::new(),
             tests_run: vec![
-                "cargo test -p tachi-server tachi_complete_does_not_auto_distill_stringified_trajectory"
+                "cargo test -p tachi-server tachi_complete_accepts_stringified_trajectory_array"
                     .to_string(),
             ],
             diff_present: None,
@@ -389,45 +395,15 @@ async fn tachi_complete_does_not_auto_distill_stringified_trajectory() {
         .expect("tachi_complete should accept stringified trajectory");
     let bundle: Value = serde_json::from_str(&resp).expect("complete response JSON");
     assert_eq!(
-        bundle["pipeline"]["distill_trajectory"],
-        json!("skipped (automatic distillation retired)")
+        bundle["pipeline"]["continuity_events"],
+        json!("saved"),
+        "completion must persist trajectory-derived continuity events (the surviving memory-indexing path): {}",
+        bundle["pipeline"]
     );
-
-    let count_auto_skills = |store: &mut memcore::MemoryStore| {
-        store
-            .hub_list(Some("skill"), true)
-            .map(|caps| {
-                caps.into_iter()
-                    .filter(|cap| {
-                        serde_json::from_str::<Value>(&cap.definition)
-                            .ok()
-                            .and_then(|definition| {
-                                definition
-                                    .get("source")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_owned)
-                            })
-                            .as_deref()
-                            == Some("distill_trajectory")
-                    })
-                    .count()
-            })
-            .map_err(|error| error.to_string())
-    };
-    let global_auto_skill_count = server
-        .with_global_store_read(count_auto_skills)
-        .expect("list global skills");
-    let project_auto_skill_count = if server.has_project_db() {
-        server
-            .with_project_store_read(count_auto_skills)
-            .expect("list project skills")
-    } else {
-        0
-    };
-    let auto_skill_count = global_auto_skill_count + project_auto_skill_count;
-    assert_eq!(
-        auto_skill_count, 0,
-        "completion must not create a trajectory-distilled skill"
+    assert!(
+        bundle["pipeline"].get("distill_trajectory").is_none(),
+        "retired auto-distill marker must be absent from the completion pipeline: {}",
+        bundle["pipeline"]
     );
 
     let eval_id = bundle["eval_entry"]["id"]

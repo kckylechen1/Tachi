@@ -55,7 +55,6 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
             pr_ref: None,
             flow_id: None,
             tool_profile: None,
-            auto_capability_bundle: None,
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,

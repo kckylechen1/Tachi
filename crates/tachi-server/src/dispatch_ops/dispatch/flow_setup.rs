@@ -14,8 +14,6 @@ pub(super) struct FlowSetupInputs<'a> {
     pub(super) prompt_md_path: &'a Path,
     pub(super) context_md_path: &'a Path,
     pub(super) trajectory_path: &'a Path,
-    pub(super) capability_bundle_card: &'a Value,
-    pub(super) capability_bundle_file: &'a str,
 }
 
 pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<(), String> {
@@ -26,11 +24,6 @@ pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<
         inputs.assignment,
         inputs.grant,
         inputs.resolved_profile,
-        if inputs.capability_bundle_card["source"] == "unset" {
-            None
-        } else {
-            inputs.capability_bundle_card["requested"].as_bool()
-        },
         Some(&inputs.plan_path.to_string_lossy()),
     )
     .await?;
@@ -56,8 +49,6 @@ pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<
                 "context_file": inputs.context_md_path.to_string_lossy(),
                 "trajectory_file": inputs.trajectory_path.to_string_lossy(),
                 "plan_file": inputs.plan_path.to_string_lossy(),
-                "capability_bundle": inputs.capability_bundle_card.clone(),
-                "capability_bundle_file": inputs.capability_bundle_file,
                 "evidence_required": inputs.assignment.evidence_required,
                 "route_explanation": inputs.assignment.route_explanation,
                 "identity_receipt": inputs.assignment.identity_receipt,

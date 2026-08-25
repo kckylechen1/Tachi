@@ -120,31 +120,18 @@ and final prompt composition.
 
 ## Layer 2: Capability
 
-This is the missing “librarian brain” layer.
+This layer was the “librarian brain” — **retired by #1690 C3** (delete list: "skill recommendation and auto-selection", "automatic capability-bundle injection"; the "second model brain" tool family is deleted end-to-end). The questions it once answered now resolve from static reviewed content only:
 
-It should answer:
+- which skill is best for this task → the dispatch's explicit `skills` param plus the profile's STATIC reviewed skill list; no automatic selection
+- which host tools are appropriate → the static tool-profile bundles (`observe` / `delegate` / …)
+- which toolchain has worked before → no longer machine-scored (retired with the MBIT/evolution machinery)
+- which pack or extension should be activated → capability bundles are retired
 
-- which skill is best for this task
-- which host tools are appropriate
-- which toolchain has worked before
-- which pack or extension should be activated
+These APIs are retired and rejected by the router as unknown tools: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, `skill_evolve`.
 
-Candidate APIs:
+The public `tachi_dispatch(action='recommend')` surface is retired. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
 
-- `tachi_skill(action="discover"|"run")`
-
-Status:
-
-- `tachi_skill(action="discover")` searches static Hub/Pack skills, and `tachi_skill(action="run")` executes them
-- current implementation is deterministic and Hub/Pack-aware
-
-This layer does not execute the host’s tools directly. It selects and orchestrates them using:
-
-- memory
-- tooluse history
-- host constraints
-- prior outcomes
-- profile and policy
+This layer never executed the host's tools directly; nothing in the surviving kernel executes them either — the host owns execution.
 
 ## Layer 3: Runtime
 
@@ -255,7 +242,8 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 - `tachi_memory(action="get")`; native `get_memory` is retired (not routable at all)
 - `list_memories`
 - `memory_stats`
-- `tachi_skill(action="discover")`
+
+*(`recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `tachi_skill(action="bundle")` / `prepare_capability_bundle` were dropped from `observe` in #1690 C3 — the "second model brain" recommend family and capability-bundle assembly are deleted end-to-end, not just removed from this bundle.)*
 
 (`memory_graph` / `get_edges` were dropped (retired) from `observe` in #757 — internalized
 off the MCP surface entirely, not just this bundle.)

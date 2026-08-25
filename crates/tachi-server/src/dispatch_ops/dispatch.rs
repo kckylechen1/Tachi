@@ -98,7 +98,7 @@ fn opencode_sop_label(agent_norm: &str, request: &StaffAssignmentRequest) -> Opt
     if agent_norm != "opencode" {
         return None;
     }
-    let route = crate::copilot_ops::build_task_brief_routing(&request.task, &[]);
+    let route = crate::copilot_ops::build_task_brief_routing(&request.task);
     let selected = route
         .selected_sops
         .iter()
@@ -499,7 +499,6 @@ async fn launch_canonical_dispatch(
     let DispatchStart {
         dispatch_id,
         request,
-        legacy_auto_capability_bundle,
         requested_skills,
         context_query,
         tool_profile,
@@ -690,10 +689,9 @@ async fn launch_canonical_dispatch(
     // the request, resolved assignment, execution grant, and private start
     // owners — no prompt/artifact/plan dependency.
     // `v2` is not yet decided (that needs the resolved request stage, which IS already
-    // resolved) so compute it early too; capability_bundle/feedback_rules
-    // are not known yet (they come from `assemble_prompt_with_trace` /
-    // `write_dispatch_artifacts` below) and are seeded as neutral
-    // "pending" placeholders here, then overwritten by the existing
+    // resolved) so compute it early too; feedback_rules are not known yet
+    // (they come from `write_dispatch_artifacts` below) and are seeded as a
+    // neutral "pending" placeholder here, then overwritten by the existing
     // post-artifacts `write_status_json` call once real values exist.
     let harness_server_url =
         infer_harness_server_url(&requested_harness_server_url, &command, &harness_transport);
@@ -724,7 +722,6 @@ async fn launch_canonical_dispatch(
             "host_profile": host_profile.name(),
             "execution_level": serde_json::to_value(resolved_assignment.execution_level)
                 .unwrap_or(Value::Null),
-            "capability_bundle": Value::Null,
             "feedback_rules": Value::Null,
             "timeout_secs": timeout_secs_for_status,
             // #894 S2d: the authority receipt — compiled workspace authority,
@@ -782,7 +779,6 @@ async fn launch_canonical_dispatch(
         &resolved_profile,
         &effective_skills_for_files,
         stage_instruction.as_deref(),
-        legacy_auto_capability_bundle,
         context_query.as_deref(),
         inject_card,
     )
@@ -794,8 +790,6 @@ async fn launch_canonical_dispatch(
         prompt_md_path,
         context_md_path,
         trajectory_path,
-        capability_bundle_file,
-        capability_bundle_card,
         feedback_rules_trace,
     } = write_dispatch_artifacts(DispatchArtifactInputs {
         workspace_dir: &workspace_dir,
@@ -811,8 +805,8 @@ async fn launch_canonical_dispatch(
     })
     .await?;
 
-    // Enrich status.json now that capability_bundle / feedback_rules are
-    // known. Same call shape as the original single seed — now the SECOND
+    // Enrich status.json now that feedback_rules are known. Same call shape
+    // as the original single seed — now the SECOND
     // write, not the first (receipt-first seed above is the first).
     write_status_json(
         &workspace_dir,
@@ -838,7 +832,6 @@ async fn launch_canonical_dispatch(
             "host_profile": host_profile.name(),
             "execution_level": serde_json::to_value(resolved_assignment.execution_level)
                 .unwrap_or(Value::Null),
-            "capability_bundle": capability_bundle_card.clone(),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,
             // #894 S2d: same authority receipt as the receipt-first seed above
@@ -890,8 +883,6 @@ async fn launch_canonical_dispatch(
         prompt_md_path: &prompt_md_path,
         context_md_path: &context_md_path,
         trajectory_path: &trajectory_path,
-        capability_bundle_card: &capability_bundle_card,
-        capability_bundle_file: &capability_bundle_file,
     })
     .await?;
 
@@ -927,8 +918,6 @@ async fn launch_canonical_dispatch(
             context_md_path: &context_md_path,
             trajectory_path: &trajectory_path,
             workspace_dir: &workspace_dir,
-            capability_bundle_card: &capability_bundle_card,
-            capability_bundle_file: &capability_bundle_file,
             feedback_rules_trace: &feedback_rules_trace,
             v2_decision,
         })
@@ -981,7 +970,6 @@ async fn launch_canonical_dispatch(
             plan_duration_ms,
             harness_transport: &harness_transport,
             harness_server_url: &harness_server_url,
-            capability_bundle_card: &capability_bundle_card,
             timeout_secs_for_status,
         })?;
 
@@ -1014,7 +1002,6 @@ async fn launch_canonical_dispatch(
                 execution_backend_metadata: &execution_backend_metadata,
                 acpx_enabled,
                 native_acp_enabled,
-                capability_bundle_card: &capability_bundle_card,
                 timeout_secs_for_status,
             },
             &mut execution,
@@ -1039,7 +1026,6 @@ async fn launch_canonical_dispatch(
             execution_backend_metadata: &execution_backend_metadata,
             acpx_enabled,
             native_acp_enabled,
-            capability_bundle_card: &capability_bundle_card,
             timeout_secs_for_status,
             project: request.project.as_deref(),
         })?;
@@ -1197,7 +1183,6 @@ async fn launch_canonical_dispatch(
         plan_duration_ms,
         timeout_secs: timeout_secs_for_status,
         timeout,
-        capability_bundle_card: capability_bundle_card.clone(),
         feedback_rules_trace: feedback_rules_trace.clone(),
         harness_transport: harness_transport.clone(),
         harness_server_url: harness_server_url.clone(),
@@ -1219,8 +1204,6 @@ async fn launch_canonical_dispatch(
         resolved_profile: &resolved_profile,
         authority: &authority_receipt,
         credential_reports_json: &credentials.reports_json,
-        capability_bundle_card: &capability_bundle_card,
-        capability_bundle_file: &capability_bundle_file,
         feedback_rules_trace: &feedback_rules_trace,
         harness_transport: &harness_transport,
         harness_server_url: &harness_server_url,

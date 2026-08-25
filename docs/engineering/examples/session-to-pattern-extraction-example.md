@@ -4,7 +4,7 @@
 **Participants:** user + Kimi Code CLI
 **Artifact produced:** [`tachi-continuity-memory-architecture.md`](../architecture/tachi-continuity-memory-architecture.md)
 **Purpose:** demonstrate how a real design conversation maps into the continuity memory pipeline.
-**Implementation note:** as of the first implementation slice, projected patterns can be searched with `tachi_search scope=patterns`, attached to wiki metadata with `include_patterns=true`, and turned into disabled/pending skill candidates via `tachi_event action=promote`.
+**Implementation note:** as of the first implementation slice, projected patterns could be searched with `tachi_search scope=patterns` and attached to wiki metadata with `include_patterns=true`. The `tachi_skill` retired `from_pattern` action once produced disabled/pending skill candidates; #1690 C3 deleted it, so patterns never mint skill candidates and promotion creates reviewed wiki/runbook artifacts only.
 
 ---
 
@@ -195,7 +195,7 @@ pattern memory = "we identified structure Y that predicts Z"
 
 ### Pattern 5: `crystallization_pipeline`
 
-**Statement:** Raw sessions are distilled into patterns, which are reviewed and promoted into wiki pages, which are further crystallized into executable skills.
+**Statement:** Raw sessions are distilled into patterns, which are reviewed and promoted into wiki pages, which are further crystallized into executable skills — the skill-crystallization leg is **retired by #1690 C3** (patterns never mint skill candidates; the surviving promotion target is reviewed wiki/runbook artifacts plus agent-profile proposals).
 
 **Instances in this session:**
 - Karpathy LLM Wiki flow: Raw Sources → Wiki → Schema
@@ -212,14 +212,13 @@ pattern candidate (/user/patterns/*)
 wiki draft (/wiki/drafts/patterns/*)
     ↓ approve
 wiki page (/wiki/decision/ or /wiki/runbook/)
-    ↓ executable化
-skill:<name> (Hub)
+    (the skill:<name> leg is retired by #1690 C3 — no skill is ever minted)
 ```
 
 **Counters:**
 - `seen`: 1 session
 - `hit`: 1
-- `confidence`: medium (matches existing Tachi skill system + Karpathy reference, but promotion gate not yet exercised)
+- `confidence`: medium (historical: the skill leg this pattern described is retired by #1690 C3; the surviving promotion target is reviewed wiki/runbook artifacts plus agent-profile proposals)
 
 **Authority:** `CollectOnly`.
 
@@ -272,7 +271,7 @@ With `TACHI_CONTINUITY_PIPELINE=1`, the distill lane can emit five candidate eve
     ],
     "open_questions": [
       "Does this alignment-bridge pattern generalize beyond this user?",
-      "What is the exact promotion threshold from pattern to wiki/skill?"
+      "What is the exact promotion threshold from pattern to wiki/runbook?"
     ]
   }
 }
@@ -369,7 +368,13 @@ Do not treat memory as a "remember more" cache or as a way to make the model mor
 
 ### Skill candidate generated from pattern
 
-Current implementation path: promotion reports for mature patterns generate candidates via `tachi_event(action="promote")`. The generated Hub capability starts `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`; promotion to `listed` remains a human/maturity-gated step.
+Retired historical implementation path (as of the 2026-06-23 slice): `tachi_skill` used the retired `from_pattern` action with `query` and `args` to generate a Hub capability with `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`. #1690 C3 deleted `from_pattern`; this section records historical behavior, not a current API.
+
+Historical implementation path: projection reports for mature patterns include
+review artifacts for a wiki draft and an agent-profile proposal (the pending
+skill-candidate artifact is retired by #1690 C3). The runtime still does not
+execute those artifacts automatically, and maturity gates do not yet require
+external-validation, timeline-depth, or cold-seat checks before promotion.
 
 ```json
 {
@@ -413,9 +418,10 @@ To verify these patterns are real and not session-specific hallucinations:
    - Monitor whether pattern memory predicts future instances better than content memory alone.
 
 5. **crystallization_pipeline**
-   - Try to generate a skill from this pattern and see if it is useful in a future session.
-   - Verify that a future maturity gate can generate a wiki draft and a pending skill
-     candidate without listing the skill automatically.
+   - The skill-generation leg is retired by #1690 C3 (patterns never mint skill
+     candidates). Verify instead that a future maturity gate can generate a wiki
+     draft review artifact (promotion produces reviewed wiki/runbook artifacts
+     and agent-profile proposals only).
 
 ---
 
@@ -433,8 +439,9 @@ If the continuity memory system cannot capture and crystallize this session, it 
 
 Current code-alignment note: capture, projection, pattern search, wiki pattern
 references, explicit pattern feedback, `tachi_task(action="complete")` evidence-ref feedback,
-`close_loop` pattern hit feedback, promotion review artifacts, and pending skill
-generation exist. `tachi_event action=promote` can execute conservative review
+`tachi_gh(action="close_loop")` pattern hit feedback, and promotion review artifacts (wiki draft +
+agent-profile proposal; the pending skill candidate is retired by #1690 C3)
+exist. `tachi_event action=promote` can execute conservative review
 artifact creation, and `tachi_event action=context` exposes first-slice
 `timeline[]` / `bonding[]` read models. Automatic Agent MD writes,
 briefing/context hit/miss decisions, enforced TimelineEntry/SharedLexicon schemas,

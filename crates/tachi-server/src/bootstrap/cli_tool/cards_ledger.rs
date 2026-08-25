@@ -1706,8 +1706,7 @@ aliases: [codex-cli, codex-app-server]
             "agent": "codex",
             "profile": "reviewed-seat",
             "task": "review the bounded change",
-            "staffing_reason": "explicit_user_request",
-            "auto_capability_bundle": false
+            "staffing_reason": "explicit_user_request"
         }))
         .unwrap();
         let prompt = crate::dispatch_ops::assemble_prompt(&server, &params).await;

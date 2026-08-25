@@ -1,14 +1,18 @@
 use super::*;
 
+/// #1690 C3 re-anchor: the below-threshold gate pins the surviving
+/// evidence-contract family — the retired loadout/skill-evolution proposals
+/// are gone entirely, so the discriminator asserts the evidence-contract
+/// proposal for the profile does NOT mint below the 10-sample threshold.
 #[tokio::test]
-async fn tachi_task_proposals_requires_loadout_evolution_sample_threshold() {
+async fn tachi_task_proposals_requires_evidence_contract_sample_threshold() {
     let server = make_server();
 
     for idx in 0..9 {
         server
             .tachi_complete(Parameters(TachiCompleteParams {
-                task_id: Some(format!("loadout-proposal-below-threshold-{idx}")),
-                task: "Plan a dispatch loadout evolution slice".to_string(),
+                task_id: Some(format!("evidence-contract-below-threshold-{idx}")),
+                task: "Plan a dispatch evidence-contract slice".to_string(),
                 agent: "claude".to_string(),
                 outcome: "success".to_string(),
                 task_type: Some("plan_request".to_string()),
@@ -22,14 +26,14 @@ async fn tachi_task_proposals_requires_loadout_evolution_sample_threshold() {
                 cost_tokens: Some(1200),
                 cost_usd: Some(0.03),
                 quality_score: Some(0.92),
-                notes: Some("Seed below-threshold loadout proposal fixture.".to_string()),
+                notes: Some("Seed below-threshold evidence-contract fixture.".to_string()),
                 trajectory: None,
                 diff: None,
                 worktree: None,
                 subagents: Vec::new(),
                 feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
-                flow_id: Some("flow-loadout-evolution-threshold".to_string()),
+                flow_id: Some("flow-evidence-contract-threshold".to_string()),
                 issue_ref: Some("kckylechen1/tachi#194".to_string()),
                 pr_ref: None,
                 evidence_refs: vec![
@@ -46,7 +50,7 @@ async fn tachi_task_proposals_requires_loadout_evolution_sample_threshold() {
                 eval_run_ids: Vec::new(),
             }))
             .await
-            .expect("seed below-threshold loadout eval row");
+            .expect("seed below-threshold evidence-contract eval row");
     }
 
     let mut proposal_params = tune_params("route_proposals");
@@ -58,10 +62,10 @@ async fn tachi_task_proposals_requires_loadout_evolution_sample_threshold() {
     let proposal_items = proposals["proposals"].as_array().expect("proposal list");
     assert!(
         !proposal_items.iter().any(|proposal| {
-            proposal["kind"] == json!("loadout_evolution")
+            proposal["kind"] == json!("evidence_contract")
                 && proposal["profile"] == json!("claude_plan")
-                && proposal["skill_id"] == json!("skill:planning-ux-review")
+                && proposal["operation"] == json!("add_evidence_contract_required")
         }),
-        "loadout evolution proposal should require at least 10 profile samples: {proposal_items:?}"
+        "evidence-contract proposals should require at least 10 profile samples: {proposal_items:?}"
     );
 }

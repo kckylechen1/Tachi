@@ -81,9 +81,6 @@ pub(super) fn suggested_feature_handoff(
     {
         context.insert("risk".to_string(), json!(risk));
     }
-    if let Some(true) = params.auto_capability_bundle {
-        context.insert("auto_capability_bundle".to_string(), json!(true));
-    }
     json!({
         "mechanism": "harness_native_subagent",
         "context": context,

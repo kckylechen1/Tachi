@@ -37,7 +37,6 @@ fn params() -> TachiDispatchParams {
         pr_ref: None,
         flow_id: Some("flow-194".to_string()),
         tool_profile: None,
-        auto_capability_bundle: None,
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
         verbose: None,

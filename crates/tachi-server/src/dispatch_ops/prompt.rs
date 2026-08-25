@@ -11,7 +11,6 @@ pub(crate) use types::PromptAssembly;
 
 use crate::tool_params::SearchMemoryParams;
 use crate::MemoryServer;
-use serde_json::{json, Value};
 use tachi_params::{ExecutionGrant, ResolvedStaffAssignment, StaffAssignmentRequest};
 
 use crate::dispatch_profile::ResolvedDispatchProfile;
@@ -51,7 +50,6 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
     profile: &ResolvedDispatchProfile,
     effective_skills: &[String],
     stage_instruction: Option<&str>,
-    auto_capability_bundle: Option<bool>,
     context_query: Option<&str>,
     inject_card: bool,
 ) -> PromptAssembly {
@@ -70,7 +68,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
         parts.push(overlay);
     }
 
-    let route = crate::copilot_ops::build_task_brief_routing(&request.task, &[]);
+    let route = crate::copilot_ops::build_task_brief_routing(&request.task);
     parts.push(render_task_route_overlay(&route));
 
     if assignment.selected_profile.is_some()
@@ -122,130 +120,6 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
         parts.push(section);
     }
     let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
-
-    let capability_requested = profile.auto_capability_bundle;
-    let capability_source = if auto_capability_bundle.is_some() {
-        "params"
-    } else {
-        "unset"
-    };
-    let mut capability_bundle = json!({
-        "status": if capability_requested { "requested" } else { "disabled" },
-        "requested": capability_requested,
-        "disabled": !capability_requested,
-        "injected": false,
-        "host": agent,
-        "query": request.task,
-        "source": capability_source,
-        "primary_skill": Value::Null,
-        "supporting_capabilities": [],
-        "packs": [],
-        "host_tools": [],
-        "activation_steps": [],
-        "rationale": Value::Null,
-        "section": Value::Null,
-        "error": Value::Null,
-        "reason": if capability_requested {
-            "auto_capability_bundle=true"
-        } else {
-            "auto_capability_bundle=false"
-        },
-    });
-    if capability_requested {
-        match crate::capability_ops::handle_prepare_capability_bundle(
-            server,
-            crate::tool_params::PrepareCapabilityBundleParams {
-                query: request.task.clone(),
-                host: Some(agent.to_string()),
-                skill_limit: 2,
-                capability_limit: 2,
-                include_section: true,
-            },
-        )
-        .await
-        {
-            Ok(raw) => match serde_json::from_str::<Value>(&raw) {
-                Ok(value) => {
-                    let block = value
-                        .get("bundle")
-                        .and_then(|bundle| bundle.get("section"))
-                        .and_then(|section| section.get("block"))
-                        .and_then(|block| block.as_str());
-                    if let Some(block) = block {
-                        parts.push(block.to_string());
-                    }
-                    capability_bundle = json!({
-                        "status": if block.is_some() { "injected" } else { "prepared" },
-                        "requested": true,
-                        "disabled": false,
-                        "injected": block.is_some(),
-                        "host": value.get("host").cloned().unwrap_or_else(|| json!(agent)),
-                        "query": value.get("query").cloned().unwrap_or_else(|| json!(request.task)),
-                        "source": capability_source,
-                        "primary_skill": value.pointer("/bundle/primary_skill").cloned().unwrap_or(Value::Null),
-                        "supporting_capabilities": value.pointer("/bundle/supporting_capabilities").cloned().unwrap_or_else(|| json!([])),
-                        "packs": value.pointer("/bundle/packs").cloned().unwrap_or_else(|| json!([])),
-                        "host_tools": value.pointer("/bundle/host_tools").cloned().unwrap_or_else(|| json!([])),
-                        "activation_steps": value.pointer("/bundle/activation_steps").cloned().unwrap_or_else(|| json!([])),
-                        "rationale": value.pointer("/bundle/rationale").cloned().unwrap_or(Value::Null),
-                        "section": value.pointer("/bundle/section").cloned().unwrap_or(Value::Null),
-                        "error": Value::Null,
-                        "reason": if block.is_some() {
-                            "capability bundle section injected into prompt"
-                        } else {
-                            "capability bundle prepared without section block"
-                        },
-                    });
-                }
-                Err(error) => {
-                    capability_bundle = json!({
-                        "status": "failed",
-                        "requested": true,
-                        "disabled": false,
-                        "injected": false,
-                        "host": agent,
-                        "query": request.task,
-                        "source": capability_source,
-                        "primary_skill": Value::Null,
-                        "supporting_capabilities": [],
-                        "packs": [],
-                        "host_tools": [],
-                        "activation_steps": [],
-                        "rationale": Value::Null,
-                        "section": Value::Null,
-                        "error": {
-                            "kind": "parse_error",
-                            "message": error.to_string(),
-                        },
-                        "reason": "capability bundle JSON parse failed",
-                    });
-                }
-            },
-            Err(error) => {
-                capability_bundle = json!({
-                    "status": "failed",
-                    "requested": true,
-                    "disabled": false,
-                    "injected": false,
-                    "host": agent,
-                    "query": request.task,
-                    "source": capability_source,
-                    "primary_skill": Value::Null,
-                    "supporting_capabilities": [],
-                    "packs": [],
-                    "host_tools": [],
-                    "activation_steps": [],
-                    "rationale": Value::Null,
-                    "section": Value::Null,
-                    "error": {
-                        "kind": "prepare_error",
-                        "message": error,
-                    },
-                    "reason": "capability bundle preparation failed",
-                });
-            }
-        }
-    }
 
     // 1. Context from memory/wiki (v2: default query = task if none provided)
     let context_query = context_query.unwrap_or(&request.task).to_string();
@@ -393,7 +267,8 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
         }
     }
 
-    // 2. Skill invocation contract (effective = explicit + stage/intent defaults)
+    // 2. Skill invocation contract (effective = explicit param + profile static
+    // skills; stage/task-derived defaults retired in #1690 C3 S1)
     let mut skill_sections = Vec::new();
     for skill_id in effective_skills {
         let section = if let Ok(cap) = server.get_capability(skill_id) {
@@ -539,7 +414,6 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
 
     PromptAssembly {
         prompt,
-        capability_bundle,
         feedback_rules: feedback_rules_trace,
     }
 }
@@ -629,11 +503,6 @@ pub(crate) async fn assemble_prompt_with_trace(
         &profile,
         &effective_skills,
         stage_instruction.as_deref(),
-        assignment
-            .selected_profile
-            .as_ref()
-            .map(|_| profile.auto_capability_bundle)
-            .or(params.auto_capability_bundle),
         params.context_query.as_deref(),
         params.inject_card != Some(false),
     )
@@ -691,7 +560,6 @@ mod tests {
             pr_ref: None,
             flow_id: None,
             tool_profile: None,
-            auto_capability_bundle: Some(false),
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,
@@ -835,7 +703,6 @@ mod tests {
             pr_ref: None,
             flow_id: None,
             tool_profile: None,
-            auto_capability_bundle: Some(false),
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,

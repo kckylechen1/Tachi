@@ -43,7 +43,6 @@ pub(crate) fn serialize_daily_json_section(value: &Value) -> Result<String, Stri
 pub(crate) fn render_daily_report_markdown(
     report: &DailyPipelineReport,
     health_section: &str,
-    skill_section: &str,
     truth_section: &str,
     routing_section: &str,
 ) -> String {
@@ -59,10 +58,6 @@ pub(crate) fn render_daily_report_markdown(
         report.truth_maintenance.summary
     ));
     out.push_str(&format!(
-        "- Skill Evolution: {}\n",
-        report.skill_evolution.summary
-    ));
-    out.push_str(&format!(
         "- Routing Analysis: {}\n\n",
         report.routing_analysis.summary
     ));
@@ -70,11 +65,6 @@ pub(crate) fn render_daily_report_markdown(
     out.push_str("## Health Check\n\n");
     out.push_str("```json\n");
     out.push_str(health_section);
-    out.push_str("\n```\n\n");
-
-    out.push_str("## Skill Evolution\n\n");
-    out.push_str("```json\n");
-    out.push_str(skill_section);
     out.push_str("\n```\n\n");
 
     out.push_str("## Truth Maintenance\n\n");
@@ -749,14 +739,12 @@ mod tests {
             report_path: None,
             health_check: stage("healthy"),
             truth_maintenance: stage("1 expected exclusion"),
-            skill_evolution: stage("none"),
             routing_analysis: stage("none"),
         };
 
         let markdown = render_daily_report_markdown(
             &report,
             "{}",
-            &serialize_daily_json_section(&report.skill_evolution.details).unwrap(),
             &serialize_daily_json_section(&report.truth_maintenance.details).unwrap(),
             "{}",
         );

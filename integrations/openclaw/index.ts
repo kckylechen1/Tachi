@@ -1095,23 +1095,20 @@ export const memoryHybridBridgePlugin = {
       // only in-repo reference to the raw names). Leaving the passthroughs
       // registered here would advertise tools that always return `tool not
       // found`, mirroring the ghost_whisper/ghost_listen precedent above.
-      // Removed — agents that want same-host advisory delivery should use
-      // tachi_a2a(action='respond'); structured task handoff uses
-      // tachi_task(action='handoff').
-      registerTachiPassthrough(
-        "tachi_run_skill",
-        "run_skill",
-        "Run a Tachi skill.",
-      );
+      // Removed — agents that want a handoff-style memo should use
+      // tachi_a2a(action='respond') instead.
+      // NOTE (#1690): `tachi_run_skill` / `tachi_recommend_toolchain` were
+      // the same stale-passthrough pattern — they forwarded to the server-side
+      // `run_skill` / `recommend_toolchain` routes, which slice A retired with
+      // the "second model brain" surface. Leaving them registered would
+      // advertise tools that always return `tool not found`, mirroring the
+      // ghost_whisper/ghost_listen and handoff precedents above. Removed —
+      // skill runs are served by tachi_skill(action='discover'|'run'), and
+      // capability discovery stays via tachi_hub_discover below.
       registerTachiPassthrough(
         "tachi_hub_discover",
         "hub_discover",
         "Discover available Tachi hub capabilities.",
-      );
-      registerTachiPassthrough(
-        "tachi_recommend_toolchain",
-        "recommend_toolchain",
-        "Recommend a Tachi toolchain for the current task.",
       );
     }
 

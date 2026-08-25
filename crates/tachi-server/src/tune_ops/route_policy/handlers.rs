@@ -1,22 +1,19 @@
 use crate::agent_eval::{aggregate_performance_matrix, load_live_eval_rows};
 use crate::dispatch_profile::{
-    classify_dispatch_risk, profile_demotion_targets, profile_evidence_required_for_server,
-    profile_json, profile_required_skill_ids_for_server, profile_skill_loadout_json_for_server,
-    profile_weak_against_for_server, resolve_dispatch_profile, route_simulation_caveats,
-    simulate_route_policy, DispatchProfileDef, DISPATCH_POLICY_PROPOSAL_NS,
-    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
+    classify_dispatch_risk, profile_evidence_required_for_server, profile_json,
+    resolve_dispatch_profile, route_simulation_caveats, simulate_route_policy, DispatchProfileDef,
+    DISPATCH_POLICY_PROPOSAL_NS, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
 };
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tachi_dispatch::policy::{
-    build_loadout_evolution_proposals, build_route_policy_proposals, canonical_json,
-    canonical_json_eq, loadout_evolution_v3_apply_payload, loadout_evolution_v3_identity_payload,
-    route_policy_v3_identity_payload, LoadoutEvalEntry, ProfileCardRiskInputs,
-    ProfilePositiveEvolutionInputs, LOADOUT_EVOLUTION_PROPOSAL_KIND,
-    LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION, LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION,
-    LOADOUT_EVOLUTION_PROPOSAL_TARGET, ROUTE_POLICY_PROPOSAL_KIND,
+    build_evidence_contract_evolution_proposals_all, build_route_policy_proposals, canonical_json,
+    canonical_json_eq, evidence_contract_v3_apply_payload, evidence_contract_v3_identity_payload,
+    route_policy_v3_identity_payload, EVIDENCE_CONTRACT_PROPOSAL_KIND,
+    EVIDENCE_CONTRACT_PROPOSAL_POLICY_VERSION, EVIDENCE_CONTRACT_PROPOSAL_SCHEMA_VERSION,
+    EVIDENCE_CONTRACT_PROPOSAL_TARGET, ROUTE_POLICY_PROPOSAL_KIND,
     ROUTE_POLICY_PROPOSAL_POLICY_VERSION, ROUTE_POLICY_PROPOSAL_SCHEMA_VERSION,
     ROUTE_POLICY_PROPOSAL_TARGET,
 };
@@ -96,9 +93,9 @@ pub(super) fn route_policy_v3_proposal_id(identity_payload: &Value) -> String {
     format!("route_policy:v3:{}", content_digest_hex(identity_payload))
 }
 
-pub(super) fn loadout_evolution_v3_proposal_id(identity_payload: &Value) -> String {
+pub(super) fn evidence_contract_v3_proposal_id(identity_payload: &Value) -> String {
     format!(
-        "loadout_evolution:v3:{}",
+        "evidence_contract:v3:{}",
         content_digest_hex(identity_payload)
     )
 }
@@ -114,11 +111,11 @@ fn is_v3_proposal(value: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn is_v3_loadout_evolution_proposal(value: &Value) -> bool {
+fn is_v3_evidence_contract_proposal(value: &Value) -> bool {
     value
         .get("schema_version")
         .and_then(Value::as_u64)
-        .map(|version| version == LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION)
+        .map(|version| version == EVIDENCE_CONTRACT_PROPOSAL_SCHEMA_VERSION)
         .unwrap_or(false)
 }
 
@@ -150,10 +147,11 @@ pub(crate) fn route_policy_source_revision(rows: &[memcore::db::StateRow]) -> St
     content_digest_hex(&Value::Array(snapshot))
 }
 
-/// Canonical revision of the complete effective source a loadout proposal is
-/// reviewed against: the built-in profile definition plus the exact durable
-/// overlay row content and version (or an explicit absent-row sentinel).
-pub(super) fn loadout_evolution_source_revision(
+/// Canonical revision of the complete effective source an evidence-contract
+/// proposal is reviewed against: the built-in profile definition plus the
+/// exact durable overlay row content and version (or an explicit absent-row
+/// sentinel).
+pub(super) fn evidence_contract_source_revision(
     profile: &DispatchProfileDef,
     overlay: Option<&(String, u32)>,
 ) -> String {
@@ -274,10 +272,11 @@ pub(super) fn validate_route_policy_proposal(
 }
 
 /// Return the specific display surface that diverged from the digest-bound
-/// loadout identity. The apply payload is reconstructed through the dispatch
-/// crate's one shared shape, then compared with the same canonical equality
-/// used for the digest; a reviewer never approves a mutable display copy.
-pub(super) fn loadout_evolution_display_drift(
+/// evidence-contract identity. The apply payload is reconstructed through the
+/// dispatch crate's one shared shape, then compared with the same canonical
+/// equality used for the digest; a reviewer never approves a mutable display
+/// copy.
+pub(super) fn evidence_contract_display_drift(
     value: &Value,
     identity_payload: &Value,
 ) -> Option<&'static str> {
@@ -289,7 +288,7 @@ pub(super) fn loadout_evolution_display_drift(
         .get("evidence_review")
         .cloned()
         .unwrap_or(Value::Null);
-    if !canonical_json_eq(&loadout_evolution_v3_apply_payload(value), &apply_payload) {
+    if !canonical_json_eq(&evidence_contract_v3_apply_payload(value), &apply_payload) {
         return Some("apply_payload");
     }
     let evidence = value.get("evidence").cloned().unwrap_or(Value::Null);
@@ -299,31 +298,31 @@ pub(super) fn loadout_evolution_display_drift(
     None
 }
 
-pub(super) fn validate_loadout_evolution_proposal(
+pub(super) fn validate_evidence_contract_proposal(
     proposal_id: &str,
     value: &Value,
     live_source_revision: Option<&str>,
 ) -> Result<Value, String> {
-    if !is_v3_loadout_evolution_proposal(value) {
+    if !is_v3_evidence_contract_proposal(value) {
         return Err(format!(
-            "legacy_unbound_proposal: loadout_evolution proposal {proposal_id} predates the v3 content-addressed identity; regenerate with tachi_tune(action='route_proposals') to mint a fresh pending v3 proposal"
+            "legacy_unbound_proposal: evidence_contract proposal {proposal_id} predates the v3 content-addressed identity; regenerate with tachi_tune(action='route_proposals') to mint a fresh pending v3 proposal"
         ));
     }
-    if value.get("kind").and_then(Value::as_str) != Some(LOADOUT_EVOLUTION_PROPOSAL_KIND) {
+    if value.get("kind").and_then(Value::as_str) != Some(EVIDENCE_CONTRACT_PROPOSAL_KIND) {
         return Err(format!(
-            "kind_mismatch: loadout_evolution proposal {proposal_id} is not the current {LOADOUT_EVOLUTION_PROPOSAL_KIND} kind"
+            "kind_mismatch: evidence_contract proposal {proposal_id} is not the current {EVIDENCE_CONTRACT_PROPOSAL_KIND} kind"
         ));
     }
     if value.get("policy_version").and_then(Value::as_str)
-        != Some(LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION)
+        != Some(EVIDENCE_CONTRACT_PROPOSAL_POLICY_VERSION)
     {
         return Err(format!(
-            "current_policy_mismatch: loadout_evolution proposal {proposal_id} does not use current policy version {LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION}; regenerate before review or apply"
+            "current_policy_mismatch: evidence_contract proposal {proposal_id} does not use current policy version {EVIDENCE_CONTRACT_PROPOSAL_POLICY_VERSION}; regenerate before review or apply"
         ));
     }
-    if value.get("target").and_then(Value::as_str) != Some(LOADOUT_EVOLUTION_PROPOSAL_TARGET) {
+    if value.get("target").and_then(Value::as_str) != Some(EVIDENCE_CONTRACT_PROPOSAL_TARGET) {
         return Err(format!(
-            "target_mismatch: loadout_evolution proposal {proposal_id} does not target {LOADOUT_EVOLUTION_PROPOSAL_TARGET}"
+            "target_mismatch: evidence_contract proposal {proposal_id} does not target {EVIDENCE_CONTRACT_PROPOSAL_TARGET}"
         ));
     }
 
@@ -331,16 +330,16 @@ pub(super) fn validate_loadout_evolution_proposal(
         .get("identity_payload")
         .cloned()
         .unwrap_or(Value::Null);
-    if identity_payload.get("kind").and_then(Value::as_str) != Some(LOADOUT_EVOLUTION_PROPOSAL_KIND)
+    if identity_payload.get("kind").and_then(Value::as_str) != Some(EVIDENCE_CONTRACT_PROPOSAL_KIND)
         || identity_payload
             .get("policy_version")
             .and_then(Value::as_str)
-            != Some(LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION)
+            != Some(EVIDENCE_CONTRACT_PROPOSAL_POLICY_VERSION)
         || identity_payload.get("target").and_then(Value::as_str)
-            != Some(LOADOUT_EVOLUTION_PROPOSAL_TARGET)
+            != Some(EVIDENCE_CONTRACT_PROPOSAL_TARGET)
     {
         return Err(format!(
-            "current_policy_mismatch: loadout_evolution proposal {proposal_id} identity payload does not bind the current kind, policy version, and target"
+            "current_policy_mismatch: evidence_contract proposal {proposal_id} identity payload does not bind the current kind, policy version, and target"
         ));
     }
     let bound_source_revision = identity_payload
@@ -348,12 +347,12 @@ pub(super) fn validate_loadout_evolution_proposal(
         .and_then(Value::as_str)
         .ok_or_else(|| {
             format!(
-                "legacy_unbound_proposal: loadout_evolution proposal {proposal_id} has no bound profile/overlay source revision; regenerate a fresh pending proposal"
+                "legacy_unbound_proposal: evidence_contract proposal {proposal_id} has no bound profile/overlay source revision; regenerate a fresh pending proposal"
             )
         })?;
     if value.get("source_revision").and_then(Value::as_str) != Some(bound_source_revision) {
         return Err(format!(
-            "source_revision_mismatch: loadout_evolution proposal {proposal_id} display revision does not match its bound source revision"
+            "source_revision_mismatch: evidence_contract proposal {proposal_id} display revision does not match its bound source revision"
         ));
     }
     let stored_digest = value
@@ -363,27 +362,27 @@ pub(super) fn validate_loadout_evolution_proposal(
     let recomputed = content_digest_hex(&identity_payload);
     if stored_digest.is_empty() || recomputed != stored_digest {
         return Err(format!(
-            "content_digest_mismatch: loadout_evolution proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing unreviewed content"
+            "content_digest_mismatch: evidence_contract proposal {proposal_id} stored digest {stored_digest:?} does not match recomputed {recomputed}; refusing unreviewed content"
         ));
     }
-    let expected_id = loadout_evolution_v3_proposal_id(&identity_payload);
+    let expected_id = evidence_contract_v3_proposal_id(&identity_payload);
     if proposal_id != expected_id.as_str()
         || value.get("proposal_id").and_then(Value::as_str) != Some(expected_id.as_str())
     {
         return Err(format!(
-            "proposal_id_mismatch: loadout_evolution proposal {proposal_id} does not match digest-bound id {expected_id}; regenerate before review or apply"
+            "proposal_id_mismatch: evidence_contract proposal {proposal_id} does not match digest-bound id {expected_id}; regenerate before review or apply"
         ));
     }
     if let Some(live_source_revision) = live_source_revision {
         if live_source_revision != bound_source_revision {
             return Err(format!(
-                "source_state_drift: loadout_evolution proposal {proposal_id} was generated against profile/overlay source revision {bound_source_revision}, but the effective source is now {live_source_revision}; regenerate and re-review"
+                "source_state_drift: evidence_contract proposal {proposal_id} was generated against profile/overlay source revision {bound_source_revision}, but the effective source is now {live_source_revision}; regenerate and re-review"
             ));
         }
     }
-    if let Some(field) = loadout_evolution_display_drift(value, &identity_payload) {
+    if let Some(field) = evidence_contract_display_drift(value, &identity_payload) {
         return Err(format!(
-            "display_copy_drift: loadout_evolution proposal {proposal_id} top-level `{field}` does not match its digest-bound identity_payload copy; refusing content that diverged from what was reviewed"
+            "display_copy_drift: evidence_contract proposal {proposal_id} top-level `{field}` does not match its digest-bound identity_payload copy; refusing content that diverged from what was reviewed"
         ));
     }
     Ok(identity_payload)
@@ -454,20 +453,16 @@ pub(crate) fn handle_route_policy_proposals(
         &generated_at,
         &source_revision,
     );
-    let eval_entries = load_live_eval_entries(server, limit.max(1))?
-        .into_iter()
-        .map(|entry| LoadoutEvalEntry {
-            path: entry.path,
-            metadata: entry.metadata,
-        })
-        .collect::<Vec<_>>();
-    proposals.extend(build_loadout_evolution_proposals(
+    // #1690 C3: the loadout/skill-evolution proposals are retired end-to-end
+    // (issue delete list: "skill generation/promotion/evolution pipelines").
+    // The surviving proposal family mined from the same live eval matrix is
+    // the evidence-contract one — what evidence a packet must carry — which
+    // is enforcement and is kept under its own kind.
+    proposals.extend(build_evidence_contract_evolution_proposals_all(
         &performance_matrix,
-        &eval_entries,
         limit.max(1),
         &generated_at,
-        |profile| profile_card_risk_inputs(server, profile),
-        |profile| profile_positive_evolution_inputs(server, profile),
+        |profile| profile_existing_evidence_required_for_server(server, profile),
     )?);
 
     server.with_global_store(|store| {
@@ -512,37 +507,37 @@ pub(crate) fn handle_route_policy_proposals(
                         )
                     }
                 },
-                Some("loadout_evolution") => {
+                Some("evidence_contract") => {
                     let profile_name = proposal
                         .get("profile")
                         .and_then(Value::as_str)
                         .ok_or_else(|| {
-                            "loadout_evolution proposal missing profile for source binding"
+                            "evidence_contract proposal missing profile for source binding"
                                 .to_string()
                         })?;
                     let profile = resolve_dispatch_profile(profile_name).ok_or_else(|| {
                         format!(
-                            "loadout_evolution proposal references unknown profile: {profile_name}"
+                            "evidence_contract proposal references unknown profile: {profile_name}"
                         )
                     })?;
                     let overlay = store
                         .get_state_kv(PROFILE_CARD_OVERLAY_NS, profile.name)
                         .map_err(|e| format!("load profile/card overlay for proposal mint: {e}"))?;
                     let source_revision =
-                        loadout_evolution_source_revision(profile, overlay.as_ref());
-                    let apply_payload = loadout_evolution_v3_apply_payload(&proposal);
+                        evidence_contract_source_revision(profile, overlay.as_ref());
+                    let apply_payload = evidence_contract_v3_apply_payload(&proposal);
                     let evidence_review =
                         proposal.get("evidence").cloned().unwrap_or(json!({}));
                     next["schema_version"] =
-                        json!(LOADOUT_EVOLUTION_PROPOSAL_SCHEMA_VERSION);
-                    next["policy_version"] = json!(LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION);
-                    next["target"] = json!(LOADOUT_EVOLUTION_PROPOSAL_TARGET);
+                        json!(EVIDENCE_CONTRACT_PROPOSAL_SCHEMA_VERSION);
+                    next["policy_version"] = json!(EVIDENCE_CONTRACT_PROPOSAL_POLICY_VERSION);
+                    next["target"] = json!(EVIDENCE_CONTRACT_PROPOSAL_TARGET);
                     next["source_revision"] = json!(source_revision.clone());
-                    loadout_evolution_v3_identity_payload(
+                    evidence_contract_v3_identity_payload(
                         &apply_payload,
                         &evidence_review,
-                        LOADOUT_EVOLUTION_PROPOSAL_POLICY_VERSION,
-                        LOADOUT_EVOLUTION_PROPOSAL_TARGET,
+                        EVIDENCE_CONTRACT_PROPOSAL_POLICY_VERSION,
+                        EVIDENCE_CONTRACT_PROPOSAL_TARGET,
                         &source_revision,
                     )
                 }
@@ -551,16 +546,16 @@ pub(crate) fn handle_route_policy_proposals(
             let content_digest = content_digest_hex(&identity_payload);
             let id = match kind {
                 Some("route_policy") => route_policy_v3_proposal_id(&identity_payload),
-                Some("loadout_evolution") => loadout_evolution_v3_proposal_id(&identity_payload),
+                Some("evidence_contract") => evidence_contract_v3_proposal_id(&identity_payload),
                 _ => legacy_id.clone(),
             };
 
-            if kind == Some("loadout_evolution") {
+            if kind == Some("evidence_contract") {
                 next["identity_payload"] = identity_payload.clone();
             }
             next["proposal_id"] = json!(id);
             next["legacy_proposal_id"] = json!(legacy_id);
-            if matches!(kind, Some("route_policy" | "loadout_evolution")) {
+            if matches!(kind, Some("route_policy" | "evidence_contract")) {
                 next["content_digest"] = json!(content_digest);
             }
 
@@ -624,10 +619,12 @@ pub(crate) fn handle_route_policy_proposals(
         value["updated_at"] = json!(row.updated_at);
         // Legacy current-kind proposals remain listable but their review/apply
         // paths refuse loudly; surface the marker so a caller can see why
-        // before they hit the refusal.
-        if (value.get("kind").and_then(Value::as_str) == Some("loadout_evolution")
-            && !is_v3_loadout_evolution_proposal(&value))
-            || (value.get("kind").and_then(Value::as_str) != Some("loadout_evolution")
+        // before they hit the refusal. #1690 C3: rows minted under the retired
+        // `loadout_evolution` kind are inert history — still listed with the
+        // marker, never reviewable or applicable.
+        if (value.get("kind").and_then(Value::as_str) == Some("evidence_contract")
+            && !is_v3_evidence_contract_proposal(&value))
+            || (value.get("kind").and_then(Value::as_str) != Some("evidence_contract")
                 && !is_v3_proposal(&value))
         {
             value["legacy_unbound_proposal"] = json!(true);
@@ -645,7 +642,7 @@ pub(crate) fn handle_route_policy_proposals(
     serde_json::to_string(&json!({
         "action": "route_proposals",
         "kind": "dispatch_policy",
-        "proposal_kinds": ["route_policy", "loadout_evolution"],
+        "proposal_kinds": ["route_policy", "evidence_contract"],
         "read_only": false,
         "requires_human_approval": true,
         "generated_from": {
@@ -668,14 +665,14 @@ pub(crate) fn handle_route_policy_proposals(
             "required_evidence_source": tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
             "skip_reason_on_recommend": tachi_dispatch::RETIRED_EVIDENCE_SOURCE_SKIP_REASON,
             "since": "kckylechen1/tachi#1675 PR4",
-            "note": "applying an approved route_policy proposal writes the rule row and is fully audited, but recommend skips it as retired_evidence_source:live_memory_eval; loadout_evolution proposals are unaffected (they never fed routing scores)",
+            "note": "applying an approved route_policy proposal writes the rule row and is fully audited, but recommend skips it as retired_evidence_source:live_memory_eval; evidence_contract proposals are unaffected (they never fed routing scores and never will — #1690 C3 retired the loadout-evolution half that did)",
         },
         "count": out.len(),
         "proposals": out,
         "next_actions": [
             "tachi_tune(action='route_review', proposal_id=..., review_status='approved')",
             "tachi_tune(action='route_apply', proposal_id=..., confirm=true) for approved route_policy rules",
-            "tachi_tune(action='route_apply', proposal_id=..., confirm=true) for approved loadout_evolution proposals to project reviewed profile/card loadout overlays"
+            "tachi_tune(action='route_apply', proposal_id=..., confirm=true) for approved evidence_contract proposals to project reviewed evidence requirements into profile/card overlays"
         ],
     }))
     .map_err(|e| format!("serialize route policy proposals: {e}"))
@@ -732,9 +729,18 @@ pub(crate) fn handle_route_policy_review(
                 "legacy_unbound_proposal: {proposal_id} predates the v3 content-addressed identity and cannot be reviewed; regenerate with tachi_tune(action='route_proposals') to mint a fresh pending v3 proposal"
             ));
         }
-        if kind == "loadout_evolution" && !is_v3_loadout_evolution_proposal(&value) {
+        if kind == "evidence_contract" && !is_v3_evidence_contract_proposal(&value) {
             return Err(format!(
-                "legacy_unbound_proposal: loadout_evolution proposal {proposal_id} predates the v3 content-addressed identity and cannot be reviewed; regenerate with tachi_tune(action='route_proposals') to mint a fresh pending v3 proposal"
+                "legacy_unbound_proposal: evidence_contract proposal {proposal_id} predates the v3 content-addressed identity and cannot be reviewed; regenerate with tachi_tune(action='route_proposals') to mint a fresh pending v3 proposal"
+            ));
+        }
+        // #1690 C3: rows minted under the retired `loadout_evolution` kind (or
+        // any other unknown kind) are inert history — listable, but never
+        // reviewable. Refuse loudly rather than letting an old approval cover
+        // a payload this branch no longer knows how to validate.
+        if !matches!(kind, "route_policy" | "evidence_contract") {
+            return Err(format!(
+                "unsupported_proposal_kind: {proposal_id} is kind {kind:?}, which was retired by #1690 C3 (the loadout/skill-evolution proposal family); it stays listable for audit but cannot be reviewed or applied"
             ));
         }
         // Re-validate the persisted content_digest against the identity_payload
@@ -750,32 +756,28 @@ pub(crate) fn handle_route_policy_review(
                 .map_err(|e| format!("list active route policy rules for review: {e}"))?;
             let live_source_revision = route_policy_source_revision(&source_rows);
             validate_route_policy_proposal(proposal_id, &value, Some(&live_source_revision))?;
-        } else if kind == "loadout_evolution" {
+        } else if kind == "evidence_contract" {
             let identity_payload =
-                validate_loadout_evolution_proposal(proposal_id, &value, None)?;
+                validate_evidence_contract_proposal(proposal_id, &value, None)?;
             let profile_name = identity_payload
                 .get("apply_payload")
                 .and_then(|payload| payload.get("profile"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
                     format!(
-                        "invalid_loadout_payload: loadout_evolution proposal {proposal_id} has no bound profile"
+                        "invalid_evidence_payload: evidence_contract proposal {proposal_id} has no bound profile"
                     )
                 })?;
             let profile = resolve_dispatch_profile(profile_name).ok_or_else(|| {
                 format!(
-                    "unknown_profile: loadout_evolution proposal {proposal_id} references {profile_name}"
+                    "unknown_profile: evidence_contract proposal {proposal_id} references {profile_name}"
                 )
             })?;
             let overlay = tx.get_state(PROFILE_CARD_OVERLAY_NS, profile.name)
                 .map_err(|e| format!("load profile/card overlay for review: {e}"))?;
             let live_source_revision =
-                loadout_evolution_source_revision(profile, overlay.as_ref());
-            validate_loadout_evolution_proposal(
-                proposal_id,
-                &value,
-                Some(&live_source_revision),
-            )?;
+                evidence_contract_source_revision(profile, overlay.as_ref());
+            validate_evidence_contract_proposal(proposal_id, &value, Some(&live_source_revision))?;
         }
         // Review only permits pending -> approved | rejected. A terminal
         // (rejected/applied) row cannot be resurrected, and an already-approved
@@ -826,63 +828,16 @@ pub(crate) fn handle_route_policy_review(
     .map_err(|e| format!("serialize route policy review response: {e}"))
 }
 
-fn load_live_eval_entries(
-    server: &MemoryServer,
-    limit: usize,
-) -> Result<Vec<memcore::MemoryEntry>, String> {
-    let limit = limit.max(1);
-    let mut entries = server.with_global_store_read(|store| {
-        store
-            .list_by_path("/eval", limit, false)
-            .map_err(|e| format!("list global eval entries: {e}"))
-    })?;
-    if server.has_project_db() {
-        let mut project_entries = server.with_project_store_read(|store| {
-            store
-                .list_by_path("/eval", limit, false)
-                .map_err(|e| format!("list project eval entries: {e}"))
-        })?;
-        entries.append(&mut project_entries);
-    }
-    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    entries.truncate(limit);
-    Ok(entries)
-}
-
-fn profile_card_risk_inputs(
+/// #1690 C3: the surviving evidence-contract proposal family needs only the
+/// profile's existing evidence requirements (what a packet must already
+/// carry) to decide what to propose adding. The retired loadout-evolution
+/// family additionally read the profile's required skills for its observed-
+/// skill mining; that mining is gone, so this is the whole positive input.
+fn profile_existing_evidence_required_for_server(
     server: &MemoryServer,
     profile: &DispatchProfileDef,
-) -> Result<ProfileCardRiskInputs, String> {
-    Ok(ProfileCardRiskInputs {
-        existing_weak_against: profile_weak_against_for_server(server, profile)?
-            .into_iter()
-            .collect(),
-        existing_demotion_targets: profile_demotion_targets(server, profile)?
-            .into_iter()
-            .collect(),
-        profile_required_skills: profile_required_skill_ids_for_server(server, profile)?,
-    })
-}
-
-fn profile_positive_evolution_inputs(
-    server: &MemoryServer,
-    profile: &DispatchProfileDef,
-) -> Result<ProfilePositiveEvolutionInputs, String> {
-    Ok(ProfilePositiveEvolutionInputs {
-        profile_required_skills: profile_required_skill_ids_for_server(server, profile)?,
-        existing_passive_traits: profile_skill_loadout_json_for_server(server, profile)
-            .map(|loadout| {
-                loadout
-                    .get("passive_traits")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
-            })?
-            .into_iter()
-            .filter_map(|value| value.as_str().map(str::to_string))
-            .collect(),
-        existing_evidence_required: profile_evidence_required_for_server(server, profile)?
-            .into_iter()
-            .collect(),
-    })
+) -> Result<std::collections::HashSet<String>, String> {
+    Ok(profile_evidence_required_for_server(server, profile)?
+        .into_iter()
+        .collect())
 }

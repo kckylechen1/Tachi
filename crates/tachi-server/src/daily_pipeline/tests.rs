@@ -290,7 +290,6 @@ fn sample_pipeline_report(date: &str) -> DailyPipelineReport {
         report_path: None,
         health_check: stage_report("health", json!({"overall_health":"good","marker":"health"})),
         truth_maintenance: stage_report("truth", json!({"ok":true})),
-        skill_evolution: stage_report("skill", json!({"ok":true})),
         routing_analysis: stage_report(
             "routing",
             json!({
@@ -317,13 +316,8 @@ fn sample_report_artifacts(
         .expect("health section");
     let routing_section = serialize_daily_json_section_for_tests(&report.routing_analysis.details)
         .expect("routing section");
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     (report, health_section, routing_section, markdown)
 }
 
@@ -381,13 +375,8 @@ async fn provider_fallback_persists_actual_serving_identity_not_configured_prima
     let report = sample_pipeline_report("2026-08-06");
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 1);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
@@ -433,13 +422,8 @@ async fn health_and_routing_receipts_are_independently_named_in_sidecar() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar_path = daily_report_generation_sidecar_path_for_tests(&report_path, 1);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
@@ -494,13 +478,8 @@ async fn injected_failure_between_payload_and_sidecar_leaves_neither_success_pai
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -597,7 +576,6 @@ async fn replacement_cannot_pair_new_payload_with_old_receipt() {
         report_path: None,
         health_check: stage_report("old", old_health.clone()),
         truth_maintenance: stage_report("truth", json!({})),
-        skill_evolution: stage_report("skill", json!({})),
         routing_analysis: stage_report("routing", old_routing.clone()),
     };
     let old_health_section = serialize_daily_json_section_for_tests(&old_health).unwrap();
@@ -605,7 +583,6 @@ async fn replacement_cannot_pair_new_payload_with_old_receipt() {
     let old_markdown = render_daily_report_markdown_for_tests(
         &old_report,
         &old_health_section,
-        "{}",
         "{}",
         &old_routing_section,
     );
@@ -638,7 +615,6 @@ async fn replacement_cannot_pair_new_payload_with_old_receipt() {
         report_path: None,
         health_check: stage_report("new", new_health.clone()),
         truth_maintenance: stage_report("truth", json!({})),
-        skill_evolution: stage_report("skill", json!({})),
         routing_analysis: stage_report("routing", new_routing.clone()),
     };
     let new_health_section = serialize_daily_json_section_for_tests(&new_health).unwrap();
@@ -646,7 +622,6 @@ async fn replacement_cannot_pair_new_payload_with_old_receipt() {
     let new_markdown = render_daily_report_markdown_for_tests(
         &new_report,
         &new_health_section,
-        "{}",
         "{}",
         &new_routing_section,
     );
@@ -704,13 +679,8 @@ async fn serialized_artifact_provenance_is_secret_negative() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -781,13 +751,8 @@ async fn sidecar_declares_immutable_revision_payload() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -831,13 +796,8 @@ async fn mismatched_sidecar_is_rejected_without_legacy_fallback() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        "{}",
-        &routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -1030,7 +990,6 @@ async fn late_generation_cannot_hide_newer_committed_generation() {
             &report,
             &health_section,
             "{}",
-            "{}",
             &routing_section,
         );
         let sidecar = build_daily_sidecar_for_tests(
@@ -1078,13 +1037,8 @@ async fn generation_collision_does_not_overwrite_existing_sidecar() {
     let health_section = "{\"marker\":\"health\"}";
     let routing_section = "{\"routing_proposals\":[]}";
     let report = sample_pipeline_report("2026-08-06");
-    let markdown = render_daily_report_markdown_for_tests(
-        &report,
-        health_section,
-        "{}",
-        "{}",
-        routing_section,
-    );
+    let markdown =
+        render_daily_report_markdown_for_tests(&report, health_section, "{}", routing_section);
     let sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -1121,13 +1075,8 @@ async fn precommit_failure_preserves_prior_valid_generation() {
         serialize_daily_json_section_for_tests(&report.health_check.details).unwrap();
     let routing_section =
         serialize_daily_json_section_for_tests(&report.routing_analysis.details).unwrap();
-    let first_markdown = render_daily_report_markdown_for_tests(
-        &report,
-        &health_section,
-        "{}",
-        "{}",
-        &routing_section,
-    );
+    let first_markdown =
+        render_daily_report_markdown_for_tests(&report, &health_section, "{}", &routing_section);
     let first_sidecar = build_daily_sidecar_for_tests(
         "2026-08-06",
         1,
@@ -1429,68 +1378,27 @@ async fn concurrent_publishers_commit_distinct_bound_generations() {
     assert!(latest.ends_with("2026-08-06.r2.md"), "latest={latest}");
 }
 
-#[tokio::test]
-async fn skill_evolution_excludes_retired_global_and_project_tombstones() {
-    let (server, _project_db) =
-        crate::tests::make_server_with_project_fixture("retired-trajectory-evolution");
-    let mut global = memcore::HubCapability {
-        id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
-        cap_type: "skill".to_string(),
-        name: "trajectory-distiller".to_string(),
-        version: 1,
-        description: "Historical global trajectory writer omitted from evolution".to_string(),
-        definition: serde_json::json!({
-            "prompt": "Run historical trajectory distiller",
-            "content": "Historical retired skill",
-            "policy": { "visibility": "listed" }
-        })
-        .to_string(),
-        enabled: true,
-        review_status: "approved".to_string(),
-        health_status: "healthy".to_string(),
-        last_error: None,
-        last_success_at: None,
-        last_failure_at: None,
-        fail_streak: 0,
-        active_version: None,
-        exposure_mode: "direct".to_string(),
-        uses: 0,
-        successes: 0,
-        failures: 0,
-        avg_rating: 0.0,
-        last_used: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-    global.health_status = "unhealthy".to_string();
-    global.fail_streak = 99;
-    let mut project = global.clone();
-    project.description = "Historical project trajectory writer omitted from evolution".to_string();
-    server
-        .with_global_store(|store| {
-            store
-                .hub_register(&global)
-                .map_err(|error| error.to_string())
-        })
-        .expect("inject retired global evolution row");
-    server
-        .with_project_store(|store| {
-            store
-                .hub_register(&project)
-                .map_err(|error| error.to_string())
-        })
-        .expect("inject retired project evolution row");
-
-    let report = run_skill_evolution_stage(&server).await;
-    let output = serde_json::to_string(&report.details).expect("evolution details JSON");
-    assert!(
-        !output.contains(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID),
-        "retired tombstone must not appear in evolution output: {output}"
-    );
-    assert!(
-        !report
-            .summary
-            .contains(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID),
-        "retired tombstone must not appear in evolution summary"
-    );
+#[test]
+fn skill_evolution_stage_and_retired_tombstone_stay_absent() {
+    for (name, source) in [
+        ("daily_pipeline.rs", include_str!("../daily_pipeline.rs")),
+        ("daily_pipeline/health.rs", include_str!("health.rs")),
+        (
+            "daily_pipeline/maintenance.rs",
+            include_str!("maintenance.rs"),
+        ),
+        ("daily_pipeline/report.rs", include_str!("report.rs")),
+        ("daily_pipeline/routing.rs", include_str!("routing.rs")),
+        ("daily_pipeline/schedule.rs", include_str!("schedule.rs")),
+        ("daily_pipeline/types.rs", include_str!("types.rs")),
+    ] {
+        assert!(
+            !source.contains("run_skill_evolution_stage"),
+            "retired skill-evolution stage must stay absent from {name}"
+        );
+        assert!(
+            !source.contains("RETIRED_TRAJECTORY_DISTILLER_ID"),
+            "retired trajectory tombstone must stay absent from {name}"
+        );
+    }
 }

@@ -16,8 +16,6 @@ pub(super) struct PlanStageInputs<'a> {
     pub(super) context_md_path: &'a Path,
     pub(super) trajectory_path: &'a Path,
     pub(super) workspace_dir: &'a Path,
-    pub(super) capability_bundle_card: &'a Value,
-    pub(super) capability_bundle_file: &'a str,
     pub(super) feedback_rules_trace: &'a Value,
     pub(super) v2_decision: V2Decision,
 }
@@ -69,10 +67,7 @@ pub(super) async fn run_v2_plan_stage(
                     None,
                     None,
                     None,
-                    Some(json!({
-                        "error": e,
-                        "capability_bundle": inputs.capability_bundle_card.clone(),
-                    })),
+                    Some(json!({ "error": e })),
                 );
                 // #971: the kanban row now exists before this stage runs
                 // (BOARD-FIRST) — a plan failure must close it, not leave it
@@ -120,10 +115,7 @@ pub(super) async fn run_v2_plan_stage(
                     None,
                     None,
                     None,
-                    Some(json!({
-                        "error": e,
-                        "capability_bundle": inputs.capability_bundle_card.clone(),
-                    })),
+                    Some(json!({ "error": e })),
                 );
                 // #971: same as above — plan-stage TIMEOUT must also close
                 // the kanban row (this branch previously had no kanban row
@@ -182,9 +174,7 @@ pub(super) async fn run_v2_plan_stage(
                 plan_duration_ms,
                 None,
                 plan_duration_ms,
-                Some(json!({
-                    "capability_bundle": inputs.capability_bundle_card.clone(),
-                })),
+                None,
             );
             append_trajectory_event(
                 inputs.trajectory_path,
@@ -243,15 +233,11 @@ pub(super) async fn run_v2_plan_stage(
                 "profile": inputs.profile_payload,
                 "selected_profile": inputs.assignment.selected_profile,
                 "tool_access": inputs.resolved_profile.mcp_access,
-                "dispatch_profile": inputs.resolved_profile.profile_card,
                 "route_explanation": inputs.assignment.route_explanation,
                 "fallback_chain": inputs.assignment.fallback_chain,
                 "issue_ref": inputs.request.issue_ref,
                 "pr_ref": inputs.request.pr_ref,
                 "flow_id": inputs.request.flow_id,
-                "auto_capability_bundle": inputs.resolved_profile.auto_capability_bundle,
-                "capability_bundle": inputs.capability_bundle_card,
-                "capability_bundle_file": inputs.capability_bundle_file,
                 "feedback_rules": inputs.feedback_rules_trace.clone(),
                 "v2": true,
                 "plan_review_status": "pending_review",

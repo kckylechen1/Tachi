@@ -20,8 +20,10 @@ Issue or task
   -> feature flow intake
   -> feature briefing
   -> deterministic risk classification
-  -> DispatchProfile and MBIT card recommendation
-  -> capability and skill loadout resolution
+  -> DispatchProfile recommendation (the MBIT-card recommendation step is
+     retired by #1690 C3)
+  -> static skill loadout resolution (reviewed baseline; capability-bundle
+     resolution is retired by #1690 C3)
   -> freeze required guarantees and choose an admitted execution owner
   -> host-native worker by default; qualified external assignment only when
      native candidates cannot satisfy the frozen boundary requirement
@@ -55,7 +57,9 @@ invent calls that are not exposed yet.
 | external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (`tachi_task(action="dispatch")` retired and deleted in #1319-C2) | implemented; not ordinary delegation |
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` | implemented |
-| skill discovery / execution | `tachi_skill(action="discover"|"run")` | implemented |
+| performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
+| skill bundle/loadout | `tachi_skill(action="discover"\|"run")` serves reviewed static skills; the retired `bundle`/`loadout` actions are gone (#1690 C3) | implemented (surviving set) |
+| PR gate preview | `tachi_gh(action="pr_status")` | implemented |
 | release and closure | `tachi_gh(action="release_note")` / `tachi_gh(action="close_loop")` | implemented |
 
 Do not add new public facades such as `tachi_mbit`, `tachi_policy`, or
@@ -92,6 +96,13 @@ Legacy `agent` dispatch remains supported, but lifecycle agents should prefer
 
 ## MBIT Card
 
+> **Retired by #1690 C3.** The MBIT-card machinery (card assembly, stats/
+> personality projection, card-risk and passive-trait evolution pipelines) is
+> retired end-to-end. The surviving surfaces are the static reviewed profile
+> baseline, the evidence contract (what a packet must carry), and human-gated
+> route-policy/evidence-contract proposals; the eval-informed future belongs to
+> #1675. This section is retained as historical record.
+
 > **Authority pointer (2026-08-10).** Owner ruling #1202 governs what an MBIT
 > card *is*: see `dispatch-lifecycle.md` §4.2 "Storage split — three layers,
 > never merged" (declaration / evidence / projection). MBIT and other
@@ -103,23 +114,24 @@ Legacy `agent` dispatch remains supported, but lifecycle agents should prefer
 > ledger, and a candidate with no usable ledger row resolves to **abstain**,
 > never to a `baseline_mbit_fit`.
 
-MBIT means Model Behavior Identity Tag. It is the machine-usable card attached
-to a dispatch profile. It is allowed to be lightweight and memorable, but it is
-not cosmetic.
+MBIT means Model Behavior Identity Tag. It was the machine-usable card attached
+to a dispatch profile. It was allowed to be lightweight and memorable, but it
+was not cosmetic.
 
-Each card should expose:
+Each card exposed:
 
 - display name;
 - type or role tags;
-- strong and weak match surfaces;
-- skill loadout;
-- evidence contract;
-- capability bundle preference;
-- evolution rules or proposal hooks when enough eval evidence exists.
+- strong and weak match surfaces (retained as static profile fields);
+- skill loadout (retained as the static reviewed baseline);
+- evidence contract (the surviving projection family);
+- capability bundle preference (retired by #1690 C3);
+- evolution rules or proposal hooks when enough eval evidence exists (retired
+  by #1690 C3).
 
-MBIT data feeds route explanations, fallback chains, prompt envelope selection,
+MBIT data fed route explanations, fallback chains, prompt envelope selection,
 and scorecard display — as a rendered projection over the reviewed declaration
-plus recorded evidence (#1202), not as an independent routing authority. It is
+plus recorded evidence (#1202), never an independent routing authority. It was
 not a scoring input to the route decision: routing evidence is the decision-fact
 ledger, and the absence of ledger evidence is answered with `abstain`, not with
 a card-fit score.
@@ -139,10 +151,9 @@ worker.
 Resolution order:
 
 ```text
-DispatchProfile
-  -> MBIT card
-  -> skill loadout
-  -> capability bundle
+DispatchProfile (static reviewed baseline)
+  -> static reviewed skill set (the MBIT-card and
+     capability-bundle resolution steps were retired by #1690 C3)
   -> prompt/context pack
   -> backend command
 ```
@@ -193,16 +204,28 @@ Ordinary recall excludes this evidence. `tachi_agent_eval(action="aggregate_live
 reads the live eval rows and produces aggregate scores and the performance
 matrix.
 
-Route simulation and profile-card policy consume that matrix. Matching telemetry can:
+Recommendation consumes the **DecisionFactLedger**, not the live /eval matrix.
+Scoring against usable ledger rows (terminal-reconciled, rubric-scored,
+independently adjudicated) can:
 
-- penalize failures;
-- penalize human overrides;
-- penalize repeated retries;
-- penalize slow or expensive profiles;
-- reward low-cost, high-quality matches when the evidence is strong enough.
+- penalize failures — rows that complete without verification, or never
+  complete, count against the profile (`live_eval_failures`);
+- reward completed, verification-backed matches when the evidence is strong
+  enough.
 
-When live samples are missing, route simulation should say so and fall back to
-deterministic MBIT/risk fit rather than pretending the policy is learned.
+Human-override, retry, latency, and cost aggregates are not synthesized: the
+ledger path passes no `/eval`-derived rollups, so recommendation never invents
+statistics the ledger did not record. Without a usable ledger row in the
+window, `decision` **abstains** — the reported profile is the deterministic
+admission/role fit only, labeled `no_ledger_evidence`, never a matrix-learned
+fit. Route simulation (`tachi_tune(action="route_simulate")`) is a read-only
+replay over recent live eval rows (`read_only: true`, `source:
+live_memory_eval`) that never feeds routing; it says so rather than pretending
+the policy is learned.
+(#1690 C3 retired the MBIT/card and loadout-evolution machinery this section
+used to describe; static profiles are the reviewed baseline, and the eval
+future belongs to the #1675 context-bound evaluation, not to auto-minted
+profile projections.)
 
 ## Feature Workflow UX
 
@@ -211,7 +234,11 @@ Every substantial policy-learning slice should be able to pass this workflow:
 1. `tachi_task(action="intake", issue_ref=...)`
 2. `tachi_task(action="brief", flow_id=...)`
 3. `tachi_task(action="status", flow_id=...)` (the cycle view is nested under `status.cycle`)
-4. Operator-only static diagnostics (`tachi card list/show`) and `tachi_tune(action="route_simulate")` are separate surfaces when needed; the model-facing Task facade does not inspect profile/card projections.
+4. Operator-only static diagnostics (`tachi card list/show`) are a separate
+   surface when needed; the model-facing Task facade does not inspect
+   profile/card projections. (`tachi_skill(action="loadout")` is retired by
+   #1690 C3; `tachi_skill(action="discover"|"run")` is the surviving static
+   surface.)
 6. launch the host harness's native subagent with the frozen packet; use the
    admin/operator external staffing exception only when a proven boundary
    requirement exceeds host-native guarantees
@@ -233,29 +260,32 @@ can guide an agent from issue to durable closure without relying on chat memory.
 As of 2026-06-28, the baseline includes:
 
 - feature-scoped `tachi_task(action="brief")`;
-- built-in dispatch profiles and MBIT-like profile cards;
+- built-in dispatch profiles and their static profile/card overlays (the
+  MBIT-like card machinery behind them is retired by #1690 C3);
 - profile recommendation with deterministic risk classification;
-- live eval performance matrix consumption by recommendation;
+- recommendation consuming the **DecisionFactLedger** (live /eval matrix
+  consumption is retired by #1690 C3 S2 — the no-evidence path abstains;
+  #1675 owns the eval-informed future);
 - read-only route simulation over recent live eval rows for `current`,
   `cost_sensitive`, and `quality_first` policy variants;
 - route-policy proposal lifecycle through `tachi_tune(action="route_proposals")`,
   `review_proposal`, and `apply_proposals`, with human approval required before
   durable route-policy rules are persisted;
 - sensitive file-context risk escalation;
-- skill loadout fields on profiles;
-- `tachi_skill(action="discover"|"run")` maps worker tasks to sparse skill discovery and execution;
-- capability bundle auto-injection is visible in dispatch prompt artifacts and
-  can be disabled per dispatch;
-- `tachi_tune(action="route_simulate")` includes live `/eval` feedback summaries,
-  sample thresholds, and guidance before any loadout evolution proposal is made;
+- skill loadout fields on profiles (static reviewed baseline only);
+- `tachi_skill(action="discover"|"run")` serves reviewed static skills; the
+  retired `bundle`/`loadout`/`from_pattern` actions and capability-bundle
+  auto-injection are gone (#1690 C3 delete list: "bundle / loadout /
+  from_pattern intelligence", "automatic capability-bundle injection");
 - `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` includes
-  human-reviewed `loadout_evolution` proposals once profile samples,
-  verification, and observed skill usage pass the evidence thresholds, then
-  projects approved signature-skill, passive-trait, and evidence-contract
-  changes into durable profile/card overlays;
-- MBIT cards include stats plus reviewed card-risk projections for learned
-  weakness markers and skill demotion targets, and merged weak-against signals
-  affect route recommendation scoring;
+  human-reviewed evidence-contract proposals once profile samples and
+  verification pass the evidence thresholds, then projects approved
+  evidence-requirement changes into durable profile/card overlays — the
+  skill-generation/promotion/evolution pipelines that used to ride this
+  surface are retired end-to-end by #1690 C3, and any eval-informed skill
+  future belongs to #1675, never to auto-minted loadout/profile projections;
+- MBIT-card and loadout-evolution machinery is retired (#1690 C3); the static
+  reviewed profile baseline is what routing and prompts consume;
 - credentialed `opencode_builder` profile;
 - feature lifecycle: `tachi_task` owns `intake` / `status` (cycle view);
   `tachi_gh` owns `close_loop` (including its dry-run reference/promotion
@@ -277,8 +307,9 @@ projection hardening:
 
 - harden route-policy replay and regression coverage across larger live eval
   fixtures;
-- continue expanding card parsing and projection tests as new MBIT fields are
-  added.
+- continue expanding evidence-contract and route-policy projection tests as
+  profile/card overlay coverage grows (the MBIT-field parsing target is
+  retired with the MBIT machinery, #1690 C3).
 
 Implemented route-policy loader:
 
@@ -306,7 +337,10 @@ Implemented route-policy loader:
 - Do not store raw worker transcripts in normal memory.
 - Do not create a second unmanaged live JSONL eval ledger.
 - Do not force every task through a multi-agent pipeline.
-- Do not let MBIT cards become flavor text disconnected from routing.
+- Do not let MBIT cards become flavor text disconnected from routing. (MBIT
+  cards are retired by #1690 C3; the surviving form of this non-goal applies
+  to the static profile/card overlays — they must stay connected to routing,
+  not become decoration.)
 - Do not widen the public facade surface unless an existing domain facade cannot
   carry the capability.
 
@@ -314,9 +348,13 @@ Implemented route-policy loader:
 
 Issue #194 can close when:
 
-- profile dispatch, MBIT cards, risk classification, skill loadouts, and route
-  recommendation are available through the existing task/skill facades;
-- recommendation consumes live eval performance evidence and explains fallbacks;
+- profile dispatch, MBIT cards (retired by #1690 C3 — the static reviewed
+  profile baseline stands in for the card criterion), risk classification,
+  skill loadouts, and route recommendation are available through the existing
+  task/skill facades;
+- recommendation consumes DecisionFactLedger evidence and explains fallbacks
+  (live /eval matrix consumption retired by #1690 C3 S2; the no-evidence path
+  abstains and reports only the deterministic admission fit);
 - dispatch writes flow-visible worker state and evidence requirements;
 - at least one end-to-end feature flow proves intake, briefing, recommend,
   dispatch, board, verification, PR status, release note, and close-loop;

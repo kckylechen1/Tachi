@@ -241,13 +241,13 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub flow_id: Option<String>,
 
-    /// tachi#1675 PR1 Seam B: the `recommendation_id` a prior
-    /// `tachi_dispatch(action='recommend')` call returned, when this start
-    /// was placed on that advice. Optional and start-only — absence is
-    /// itself evidence (`assignment_mode` records `unadvised`, never a
-    /// fabricated advisory). Typed Staff resolution validates it before
-    /// acceptance: an unknown or stale reference is refused with zero claim,
-    /// workspace artifact, or route-decision evidence.
+    /// tachi#1675 PR1 Seam B: the `recommendation_id` of a persisted internal
+    /// route-recommendation fact, when this start was placed on that advice.
+    /// Optional and start-only — absence is itself evidence (`assignment_mode`
+    /// records `unadvised`, never a fabricated advisory). Typed Staff
+    /// resolution validates it before acceptance: an unknown or stale
+    /// reference is refused with zero claim, workspace artifact, or
+    /// route-decision evidence.
     #[serde(default)]
     pub recommendation_ref: Option<String>,
 }
