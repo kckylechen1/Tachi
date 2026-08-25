@@ -159,6 +159,8 @@ struct ManagedCompletionLease {
     generation: u64,
     #[cfg(unix)]
     status_anchor: crate::managed_run_control::AnchoredRunStatus,
+    #[cfg(unix)]
+    owns_retained_status_anchor: bool,
 }
 
 fn admit_managed_completion(
@@ -176,12 +178,18 @@ fn admit_managed_completion(
     let target = {
         #[cfg(unix)]
         if persist_admission {
-            let anchor = crate::managed_run_control::AnchoredRunStatus::open(&run_dir)
-                .map_err(|error| {
+            let anchor = if let Some(anchor) = server
+                .managed_run_controls
+                .accepted_status_anchor(dispatch_id)
+            {
+                anchor
+            } else {
+                crate::managed_run_control::AnchoredRunStatus::open(&run_dir).map_err(|error| {
                     format!(
                         "cannot anchor managed completion status for dispatch_id={dispatch_id}: {error:?}"
                     )
-                })?;
+                })?
+            };
             CompletionStatusTarget::anchored(&anchor)
         } else {
             CompletionStatusTarget::for_path(&run_dir)
@@ -265,10 +273,13 @@ fn admit_managed_completion(
         status_anchor.clone(),
     );
     #[cfg(unix)]
-    server
-        .managed_run_controls
-        .retain_accepted_status_anchor(dispatch_id, status_anchor)
-        .map_err(|reason| format!("retain managed completion status anchor: {reason}"))?;
+    {
+        let owns_retained_status_anchor = server
+            .managed_run_controls
+            .retain_accepted_status_anchor(dispatch_id, status_anchor)
+            .map_err(|reason| format!("retain managed completion status anchor: {reason}"))?;
+        lease.owns_retained_status_anchor = owns_retained_status_anchor;
+    }
     object.insert(
         "completion_recovery".to_string(),
         json!({ "status": "completion_admitted" }),
@@ -338,6 +349,12 @@ fn revoke_managed_completion_admission(
             .write_atomic(&body)
             .map_err(|error| format!("persist managed completion admission rollback: {error}"))?;
     }
+    #[cfg(unix)]
+    if lease.owns_retained_status_anchor {
+        server
+            .managed_run_controls
+            .clear_accepted_status_anchor(dispatch_id, &lease.status_anchor);
+    }
     server
         .managed_run_controls
         .release_completion_lease(dispatch_id, lease.generation);
@@ -353,6 +370,8 @@ struct ManagedCompletionLeaseAcquisitionGuard {
     generation: Option<u64>,
     #[cfg(unix)]
     status_anchor: crate::managed_run_control::AnchoredRunStatus,
+    #[cfg(unix)]
+    owns_retained_status_anchor: bool,
 }
 
 impl ManagedCompletionLeaseAcquisitionGuard {
@@ -368,6 +387,8 @@ impl ManagedCompletionLeaseAcquisitionGuard {
             generation: Some(generation),
             #[cfg(unix)]
             status_anchor,
+            #[cfg(unix)]
+            owns_retained_status_anchor: false,
         }
     }
 
@@ -379,6 +400,8 @@ impl ManagedCompletionLeaseAcquisitionGuard {
                 .expect("completion lease is transferred once"),
             #[cfg(unix)]
             status_anchor: self.status_anchor.clone(),
+            #[cfg(unix)]
+            owns_retained_status_anchor: self.owns_retained_status_anchor,
         }
     }
 }
@@ -386,6 +409,12 @@ impl ManagedCompletionLeaseAcquisitionGuard {
 impl Drop for ManagedCompletionLeaseAcquisitionGuard {
     fn drop(&mut self) {
         if let Some(generation) = self.generation.take() {
+            #[cfg(unix)]
+            if self.owns_retained_status_anchor {
+                self.server
+                    .managed_run_controls
+                    .clear_accepted_status_anchor(&self.dispatch_id, &self.status_anchor);
+            }
             self.server
                 .managed_run_controls
                 .release_completion_lease(&self.dispatch_id, generation);

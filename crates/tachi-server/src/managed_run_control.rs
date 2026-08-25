@@ -508,7 +508,7 @@ impl ManagedRunControlRegistry {
         &self,
         dispatch_id: &str,
         status_anchor: AnchoredRunStatus,
-    ) -> Result<(), &'static str> {
+    ) -> Result<bool, &'static str> {
         let mut entries = self
             .entries
             .lock()
@@ -517,11 +517,11 @@ impl ManagedRunControlRegistry {
             return Err("absent_same_daemon_handle");
         };
         match entry.status_anchor.as_ref() {
-            Some(accepted) if accepted.same_physical_directory(&status_anchor) => Ok(()),
+            Some(accepted) if accepted.same_physical_directory(&status_anchor) => Ok(false),
             Some(_) => Err("accepted_status_anchor_mismatch"),
             None => {
                 entry.status_anchor = Some(status_anchor);
-                Ok(())
+                Ok(true)
             }
         }
     }
