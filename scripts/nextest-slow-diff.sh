@@ -76,11 +76,12 @@ if grep -q '^ *FAIL \[' "${INPUT}"; then
   echo "nextest-slow-diff: INCOMPLETE_RUN — nextest reported a failed test" >&2
   exit 2
 fi
-if ! grep -q '^ *Summary \[' "${INPUT}"; then
-  echo "nextest-slow-diff: INCOMPLETE_RUN — terminal nextest Summary missing" >&2
+terminal_record="$(awk 'NF { record = $0 } END { print record }' "${INPUT}")"
+if [[ ! "${terminal_record}" =~ ^[[:space:]]*Summary[[:space:]]\[ ]]; then
+  echo "nextest-slow-diff: INCOMPLETE_RUN — final nonblank record is not a nextest Summary" >&2
   exit 2
 fi
-if grep '^ *Summary \[' "${INPUT}" | grep -qiE '([0-9]+ failed|[0-9]+ cancelled|[0-9]+ canceled|timed out)'; then
+if grep -qiE '([0-9]+ failed|[0-9]+ cancelled|[0-9]+ canceled|timed out)' <<<"${terminal_record}"; then
   echo "nextest-slow-diff: INCOMPLETE_RUN — terminal nextest Summary is not green" >&2
   exit 2
 fi

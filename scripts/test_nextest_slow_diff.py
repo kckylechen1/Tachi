@@ -58,14 +58,22 @@ class NextestSlowDiffTests(unittest.TestCase):
             "PASS [ 0.010s] crate tests::first\n"
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("Summary missing", result.stderr)
+        self.assertIn("final nonblank record", result.stderr)
 
     def test_truncated_capture_with_slow_line_is_refused(self) -> None:
         result = run_gate(
             f"SLOW [ 35.000s] (1/2) {ROSTERED}\n"
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("Summary missing", result.stderr)
+        self.assertIn("final nonblank record", result.stderr)
+
+    def test_content_after_an_old_green_summary_is_refused(self) -> None:
+        result = run_gate(
+            "     Summary [ 0.020s] 1 test run: 1 passed\n"
+            "Cancelling due to external interruption\n"
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("final nonblank record", result.stderr)
 
     def test_complete_green_run_accepts_rostered_slow(self) -> None:
         result = run_gate(
