@@ -136,7 +136,7 @@ generate_mcp_config → writes child env TACHI_PROFILE=delegate
    │  (dispatch_ops/mcp_config.rs#L29-L30)
    ▼
 worker boot → parse_tool_profile("delegate") = ToolProfile::delegate()
-   │  (profiles/matching.rs#L21: "delegate"|"worker"|"subagent" are aliases)
+   │  (crates/tachi-hub/src/tool_profiles/matching.rs#L18: "delegate"|"worker"|"subagent" are aliases)
    ▼
 DELEGATE_MINIMAL_TOOL_PATTERNS (source-owned allow-list) filters worker's visible tools
 ```

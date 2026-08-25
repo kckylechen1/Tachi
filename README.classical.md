@@ -81,8 +81,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0
 | 令旗 | 用途 |
 |------|------|
 | `standard` | IDE 灵核之默认，日常 Agent 意图面。 |
-| `coordinate` | 主尊调度，兼掌 handoff / workflow / orchestrator / task / verify；`approve_merge` 已退役。 |
-| `operate` | 运行时适配与 OpenClaw，兼掌 Foundry / Vault 会话。 |
+| `coordinate` | 叠于尚行之 `remember` 令旗/bundle（非已退役之原生 `remember` 工具别名），主尊调度，兼掌 handoff / workflow / orchestrator / task / verify；`approve_merge` 已退役。 |
+| `operate` | 同叠于尚行之 `remember` 令旗/bundle（非已退役之原生工具别名），用于运行时适配与 OpenClaw，兼掌 Foundry / Vault 会话。 |
 | `delegate` | 小弟偏师，精简工具面，无派发、无交接。 |
 | `admin` | 维护治理，全量法器。 |
 
