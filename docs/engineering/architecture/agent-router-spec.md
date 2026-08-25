@@ -1,6 +1,6 @@
-# Agent Router Spec: Unified Multi-Agent Dispatch for Tachi
+# Agent Router Spec: Unified Multi-Agent Dispatch for Tachi (historical record)
 
-**Status:** Draft  
+**Status:** Draft — historical record (the `tachi_dispatch` era it specifies is retired; current dispatch = `tachi_staff`)
 **Date:** 2026-06-03  
 **Author:** kckylechen  
 **Related:** `tachi_dispatch` tool, `ClaudePool`, `DispatchOps`  
@@ -25,7 +25,7 @@ Tachi dispatch uses a **four-agent fleet** (`claude`, `codex`, `grok`, `kimi`) p
 
 ---
 
-## 2. Non-Goals
+## 2. Non-Goals (historical record)
 
 - **Extra CLI agents** (gemini, qwen, copilot, droid, …) — not part of the Phase 1 fleet; see [`agent-fleet.md`](agent-fleet.md).
 - **GUI agents** (Cursor, Trae, Cline, etc.) are out of scope for Phase 1. They may be added later via MCP server interface or HTTP API.
@@ -43,7 +43,7 @@ Inspired by [UltraCode-Shim](https://github.com/OnlyTerp/UltraCode-Shim/)'s prox
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Tachi Memory Server                           │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │tachi_staff │  │tachi_briefing│  │tachi_memory │  │tachi_task │  │
+│  │tachi_staff │  │tachi_briefing (RETIRED)│  │tachi_memory │  │tachi_task │  │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘  │
 │         └─────────────────┴─────────────────┴───────────────┘       │
 │                                 │                                   │
@@ -273,7 +273,7 @@ Based on the Phase 1 active agent fleet:
 
 ## 5. Dispatch Interface
 
-### 5.1 Tool Schema (`tachi_dispatch`)
+### 5.1 Tool Schema (`tachi_dispatch`, retired)
 
 Extend the existing `tachi_dispatch` tool parameters:
 
@@ -502,7 +502,7 @@ Output format: {output_format}
 Rules:
 - Always use the specified output format.
 - When calling tools, follow the exact JSON schema.
-- If you need more context, use tachi_briefing or tachi_memory tools.
+- If you need more context, use tachi_memory(action="briefing") or tachi_task(action="brief") tools. (tachi_briefing RETIRED)
 - Do not hallucinate file contents — read them via tools.
 ```
 
@@ -801,7 +801,7 @@ pub async fn dispatch_droid_mission(
 
 Option 1 is simpler and aligns with "all CLI agents are Workers" philosophy.
 
-### 7.6 Qwen Secretary (Auxiliary Role)
+### 7.6 Qwen Secretary (Auxiliary Role) (historical)
 
 **New role alongside Orchestrator/Worker:** The **Secretary** is not a task executor — it is a lightweight background helper that handles administrative, formatting, and extraction work.
 
@@ -838,7 +838,7 @@ pub fn default_role_config(role: DispatchRole) -> RoleConfig {
 ```
 
 **Secretary integration points:**
-- `tachi_complete` → auto-check eval completeness (missing cost? missing diff?)
+- `tachi_complete` (RETIRED) → auto-check eval completeness (missing cost? missing diff?)  (use tachi_task(action="complete"))
 - `tachi_wiki_write` → auto-extract `references` from content if empty
 - `tachi_dispatch` → pre-flight cost heuristic, post-flight format normalization
 - Kanban → auto-suggest label/priority from card title/body
@@ -1437,7 +1437,7 @@ tool_rejection_repair = true
 
 ## 14. Implementation Phases
 
-### Phase 1: Agent Registry + Extended Dispatch (2-3 days)
+### Phase 1: Agent Registry + Extended Dispatch (2-3 days) (historical — the `tachi_dispatch` it extends is retired)
 
 **Goal:** Support the Phase 1 CLI fleet with `tachi_dispatch`.
 
@@ -1459,7 +1459,7 @@ tachi dispatch grok "Hello world"  # works
 tachi dispatch kimi "你好"         # works
 ```
 
-### Phase 2: Auto-Select + Concurrent Execution + Classifier (2-3 days)
+### Phase 2: Auto-Select + Concurrent Execution + Classifier (2-3 days) (historical)
 
 **Goal:** `agent="auto"`, classifier router, concurrent dispatch, basic strategies.
 
@@ -1504,7 +1504,7 @@ tachi dispatch auto "Build a REST API" --strategy orchestrator-worker \
 # Claude plans, Kimi implements, Claude reviews
 ```
 
-### Phase 4: Production Hardening (2-3 days)
+### Phase 4: Production Hardening (2-3 days) (historical)
 
 **Goal:** Observability, rate limiting, circuit breaker, integration tests.
 

@@ -317,7 +317,7 @@ pub async fn extract_references_from_text(text: &str) -> Vec<String> {
 ```
 
 **Integration points:**
-- `tachi_complete` → auto-extract from `notes`/`diff` → append to eval entry
+- `tachi_task(action="complete")` → auto-extract from `notes`/`diff` → append to eval entry
 - `handle_tachi_wiki_write` → if `references` is empty, run extractor on `text` → suggest
 - `dispatch_ops` → agent stdout/stderr → extractor → auto-update kanban card context
 
@@ -352,5 +352,5 @@ Text:
 | Duplicate references in same entry — allow or dedup? | **Allow** (simplest) | — |
 | Max reference count per entry? | **None** (unlimited) | — |
 | Reference description/label (e.g. `[label](url)`)? | **Out of scope** (just raw strings) | — |
-| Should `save_memory` also get `references`? | **Yes** — reuse same validator, add to `TachiMemoryParams` save action | Done |
+| Should `save_memory` (retired name; now `tachi_memory(action="save")`) also get `references`? | **Yes** — reuse same validator, add to `TachiMemoryParams` save action | Done |
 | Auto-extract references from agent output via Qwen secretary? | **Phase 2** — `qwen_secretary::ref_extractor` auto-fills `references[]` from raw text | #150 |

@@ -25,7 +25,7 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 - **持久记忆**，支持混合语义 + 词法 + 图谱检索
 - **层级命名空间**（`/user/preferences`、`/project/architecture`）
 - **因果图谱边**，连接记忆、实体与决策
-- **域标签存储**——每条记忆自带自由文本 `domain` 字段，`save_memory`/`search_memory` 可按域过滤
+- **域标签存储**——每条记忆自带自由文本 `domain` 字段，`tachi_memory(action="save")`/`tachi_memory(action="search")` 可按域过滤
 - **本地加密保险库**，用于 API 密钥与机密
 - **Agent 协调**：交接令牌、看板、发布订阅（幽灵低语）
 - **技能包与能力中心**：一次注册，各 Agent 共用
@@ -115,10 +115,11 @@ tachi --version
 以下示例展示传给 MCP 工具的 JSON 参数。门面工具暴露的字段与其底层原生工具一致；完整 schema 见 `crates/tachi-params/src/facade.rs` 及其 `facade/` 子模块。
 
 ```json
-// tachi_save —— 结构化记忆
+// tachi_memory(action="save") —— 结构化记忆
 {
-  "tool": "tachi_save",
+  "tool": "tachi_memory",
   "arguments": {
+    "action": "save",
     "text": "前端必须使用 Vite，严禁 Webpack。允许 Tailwind。",
     "path": "/project/frontend",
     "importance": 0.8,
@@ -240,20 +241,20 @@ graph TD
 - **RRF 融合** —— 互惠排名融合汇总各通道，向量余弦再加权，减少高语义查询的排名倒置。
 
 ### 3. 因果图谱
-图谱引擎创建并遍历因果、时序和实体关系。`save_memory` 可自动为共享实体的记忆建立链接（`auto_link`）。`add_edge` / `get_edges` / `memory_graph` 是内部 `MemoryStore` 原语，已不在 MCP 曲面上（#757）；Agent 通过 `tachi_save`/`tachi_memory` 自动链接和召回的图谱激活蔓延通道（见上文第 2 节）触达图谱能力——没有独立的图谱遍历动作。
+图谱引擎创建并遍历因果、时序和实体关系。`tachi_memory(action="save")` 可自动为共享实体的记忆建立链接（`auto_link`）。`add_edge` / `get_edges` / `memory_graph` 是内部 `MemoryStore` 原语，已不在 MCP 曲面上（#757）；Agent 通过 `tachi_memory`(旧名 `tachi_save` 已退役) 自动链接和召回的图谱激活蔓延通道（见上文第 2 节）触达图谱能力——没有独立的图谱遍历动作。
 
 ### 4. 域标签存储
-每条记忆自带自由文本 `domain` 字段（如 `"code-review"`、`"personal"`）。`save_memory` 和 `search_memory` 可按域过滤。不存在独立的域注册表——域只是记忆行上的临时标签，不是需要配置的资源。
+每条记忆自带自由文本 `domain` 字段（如 `"code-review"`、`"personal"`）。`tachi_memory(action="save")` 和 `tachi_memory(action="search")` 可按域过滤。不存在独立的域注册表——域只是记忆行上的临时标签，不是需要配置的资源。
 
 ### 5. 加密保险库（Vault）
 本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。项目内 Agent 可通过 `.tachi/vault.env` 别名解析 Vault 密钥。`tachi vault exec --require NAME -- <cmd>` 可在子进程中注入 Vault 凭证运行命令（Vault 只补全调用方未设置的环境变量）；默认情况下，若 Vault 不可用则拒绝派生无凭证的子进程，`--allow-unauthenticated` 可显式选择回退为继承当前环境运行。详见 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
 ### 6. Tachi Hub 与技能包
-一次注册 MCP 服务器、技能和工作流，所有已连接 Agent 都能发现并调用。`pack_register` / `pack_project` 安装 curated 技能集合并投射到 Claude、Cursor、Codex、Gemini、OpenCode 等格式。`tachi_skill(action="discover"|"run")` 是 canonical 技能门面；独立 `run_skill` 和面向技能发现的 `hub_discover` 仍作为旧客户端兼容入口保留。
+一次注册 MCP 服务器、技能和工作流，所有已连接 Agent 都能发现并调用。`pack_register` / `pack_project` 安装 curated 技能集合并投射到 Claude、Cursor、Codex、Gemini、OpenCode 等格式。`tachi_skill(action="discover"|"run")` 是 canonical 技能门面；旧名 `run_skill` 已退役(由 #1690/#757);`hub_discover` 仍是 Hub 发现路由。
 
 ### 7. 跨 Agent 协调
 - **幽灵低语** —— Agent 间持久化主题发布/订阅（`ghost_publish`、`ghost_subscribe`、`ghost_ack`、`ghost_reflect`、`ghost_promote`）。
-- **看板** —— 跨 Agent 卡片，支持 `ack` / `progress` / `result` 状态（`post_card`、`check_inbox`、`update_card`）。
+- **看板** —— 跨 Agent 卡片，支持 `ack` / `progress` / `result` 状态（旧名 `post_card`/`check_inbox`/`update_card` 已退役——看板经 `tachi_task` 看板动作/内部处理器触达）。
 - **交接 Issue 晋升** —— 从已有交接备忘录创建/关联 GitHub issue（`tachi_handoff(action='promote_issue')`）。#1099:旧的 `handoff_leave`/`handoff_check` 备忘录传递路由已退役——同机 advisory 消息用 `tachi_a2a(action='respond')`,结构化任务交接用 `tachi_task(action='handoff')`。
 
 > 幽灵与看板工具属于 `admin` Profile 的原生门面（未纳入 `standard`/`coordinate` bundle）。大多数 Agent 通过 `tachi_handoff`、`tachi_gh(action='close_loop')`、`tachi_task` 门面进行协调。
@@ -281,10 +282,10 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
-| `standard` | 日常 Agent 意图面：`tachi_save`、`tachi_memory`、`tachi_task` 的非派发动作、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`peer_query`、Vault 会话/状态工具，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。`tachi_staff` 和手工 eval intake 不暴露。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity；普通委派使用宿主原生 subagent。 |
-| `coordinate` | `remember` + `coordinate` bundles：增加高级 handoff/workflow/agents/staff 工具；Tachi 自有 worker launch（`tachi_staff(action='start', task='审阅 API 边界，并把发现写入 result.md。', staffing_reason='native_subagent_unavailable')`）仍是显式例外，不是默认执行器。 | 高级协调与适配器工作流，不替代宿主原生 subagent。 |
-| `operate` | `remember` + `operate` bundles：增加 Foundry 生命周期、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
-| `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_web_search`、`tachi_wiki(action='search'|'browse'|'read')`、`tachi_unstick`、`tachi_task`、`tachi_skill(action='discover'|'run')` 和只读 `peer_query`。 | 由显式准入的 admin 派发产生的工作 Agent；无递归派发、无交接、无技能候选注册。 |
+| `standard` | 日常 Agent 意图面：`tachi_a2a`、`tachi_memory`、`tachi_task` 的非派发动作、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`peer_query`、Vault 会话/状态工具，以及 `runtime_info`、`tachi_status` 和 `tachi_tools`。`tachi_staff` 和手工 eval intake 不暴露。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity；普通委派使用宿主原生 subagent。 |
+| `coordinate` | coordinate bundle 叠加在仍在线的 `remember` Profile/bundle 上（不要与已退役的原生 `remember` 工具别名混淆）：增加高级 handoff/workflow/agents/staff 工具；Tachi 自有 worker launch（`tachi_staff(action='start', task='审阅 API 边界，并把发现写入 result.md。', staffing_reason='native_subagent_unavailable')`）仍是显式例外，不是默认执行器。 | 高级协调与适配器工作流，不替代宿主原生 subagent。 |
+| `operate` | operate bundle 同样叠加在仍在线的 `remember` Profile/bundle 上（不是已退役的原生工具别名）：增加 Foundry 生命周期、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
+| `delegate` | 精选 worker 工具面：`tachi_a2a`、`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_web_search`、`tachi_wiki(action='search'|'browse'|'read')`、`tachi_unstick`、`tachi_task`、`tachi_skill(action='discover'|'run')` 和只读 `peer_query`。 | 由显式准入的 admin 派发产生的工作 Agent；无递归派发、无交接、无技能候选注册。 |
 | `admin` | 完整目录，包括有类型理由的 durable/remote Tachi worker 例外。 | 维护、开发、治理和 operator 批准的执行例外。 |
 
 宿主别名自动解析：`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`。
