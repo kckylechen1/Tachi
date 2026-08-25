@@ -731,6 +731,7 @@ fn write_status_json_inner(
         managed_finalization_requested
     );
     let mut managed_terminal = None;
+    let mut terminal_cancellation_reconciled = false;
 
     let path = target.status_path();
     let previous_status = target.read_json().ok().flatten();
@@ -771,10 +772,11 @@ fn write_status_json_inner(
                 .and_then(Value::as_str)
                 == Some("completion_admitted");
             if proposed_terminal && managed_finalization.is_none() {
-                let _ = crate::managed_run_control::reconcile_pending_cancellation_unavailable(
-                    &mut previous,
-                    "completion_or_timeout_winner",
-                );
+                terminal_cancellation_reconciled |=
+                    crate::managed_run_control::reconcile_pending_cancellation_unavailable(
+                        &mut previous,
+                        "completion_or_timeout_winner",
+                    );
             }
             if managed_finalization.is_none()
                 && crate::managed_run_control::cancellation_blocks_terminal_writer(&previous)
@@ -821,10 +823,11 @@ fn write_status_json_inner(
                 }
             }
             if proposed_terminal && managed_finalization.is_none() {
-                let _ = crate::managed_run_control::reconcile_pending_cancellation_unavailable(
-                    &mut obj,
-                    "completion_or_timeout_winner",
-                );
+                terminal_cancellation_reconciled |=
+                    crate::managed_run_control::reconcile_pending_cancellation_unavailable(
+                        &mut obj,
+                        "completion_or_timeout_winner",
+                    );
             }
             if let Some(finalization) = managed_finalization.as_ref() {
                 let expected = finalization
@@ -896,7 +899,7 @@ fn write_status_json_inner(
         eprintln!("[dispatch-v2] refusing status write: {error}");
         return None;
     }
-    if managed_terminal.is_some() {
+    if managed_terminal.is_some() || terminal_cancellation_reconciled {
         let committed_revision = obj.get("status_revision").cloned().unwrap_or(Value::Null);
         if let Some(cancellation) = obj.get_mut("cancellation").and_then(Value::as_object_mut) {
             cancellation.insert("observed_status_revision".to_string(), committed_revision);

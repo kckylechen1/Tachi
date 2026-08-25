@@ -264,6 +264,11 @@ fn admit_managed_completion(
         #[cfg(unix)]
         status_anchor.clone(),
     );
+    #[cfg(unix)]
+    server
+        .managed_run_controls
+        .retain_accepted_status_anchor(dispatch_id, status_anchor)
+        .map_err(|reason| format!("retain managed completion status anchor: {reason}"))?;
     object.insert(
         "completion_recovery".to_string(),
         json!({ "status": "completion_admitted" }),
@@ -3025,6 +3030,28 @@ mod tests {
             .expect("authoritative completion receipt remains on admitted A");
         admission.disarm();
 
+        let retained_terminal_anchor = server
+            .managed_run_controls
+            .accepted_status_anchor(dispatch_id)
+            .expect("completion admission retains the terminal writer anchor");
+        crate::dispatch_ops::write_status_json_with_managed_anchor(
+            &run_a,
+            dispatch_id,
+            false,
+            None,
+            None,
+            "n/a",
+            Some(0),
+            None,
+            Some(1),
+            Some(1),
+            Some(json!({
+                "state": "TASK_STATE_COMPLETED",
+                "result_written": true,
+            })),
+            &retained_terminal_anchor,
+        );
+
         let a_after: Value = serde_json::from_slice(
             &std::fs::read(parked_a.join("status.json")).expect("completed A status"),
         )
@@ -3032,6 +3059,10 @@ mod tests {
         assert_eq!(
             a_after["resolved_completion"]["state"], "TASK_STATE_COMPLETED",
             "authoritative completion must remain on the admitted physical A"
+        );
+        assert_eq!(
+            a_after["state"], "TASK_STATE_COMPLETED",
+            "the later background terminal writer must remain on admitted physical A"
         );
         assert_eq!(
             std::fs::read(run_a.join("status.json")).expect("replacement B after completion"),

@@ -504,6 +504,29 @@ impl ManagedRunControlRegistry {
     }
 
     #[cfg(unix)]
+    pub(crate) fn retain_accepted_status_anchor(
+        &self,
+        dispatch_id: &str,
+        status_anchor: AnchoredRunStatus,
+    ) -> Result<(), &'static str> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = entries.get_mut(dispatch_id) else {
+            return Err("absent_same_daemon_handle");
+        };
+        match entry.status_anchor.as_ref() {
+            Some(accepted) if accepted.same_physical_directory(&status_anchor) => Ok(()),
+            Some(_) => Err("accepted_status_anchor_mismatch"),
+            None => {
+                entry.status_anchor = Some(status_anchor);
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(unix)]
     pub(crate) fn install_accepted_status_anchor(
         &self,
         dispatch_id: &str,
@@ -516,10 +539,11 @@ impl ManagedRunControlRegistry {
         let Some(entry) = entries.get_mut(dispatch_id) else {
             return Err("absent_same_daemon_handle");
         };
-        if entry.status_anchor.is_some() {
-            return Err("duplicate_cancellation");
+        match entry.status_anchor.as_ref() {
+            Some(accepted) if accepted.same_physical_directory(&status_anchor) => {}
+            Some(_) => return Err("accepted_status_anchor_mismatch"),
+            None => entry.status_anchor = Some(status_anchor),
         }
-        entry.status_anchor = Some(status_anchor);
         Ok(entry.sender.clone())
     }
 
