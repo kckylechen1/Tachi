@@ -498,6 +498,37 @@ fn copy_template_db(dest: &std::path::Path) {
     std::fs::copy(template_db_path(), dest).expect("seed test db from template fixture");
 }
 
+/// Restore the deterministic seed timestamps that a copied, pre-seeded
+/// template used to provide before constructor-owned rows were stripped.
+///
+/// The published template must remain schema-only for `hub_capabilities` and
+/// `sandbox_policies`: otherwise a project-store copy can shadow freshly
+/// seeded global definitions. Each fixture server therefore seeds those rows
+/// on its own global store. Normalize only the seed metadata after startup so
+/// byte-for-byte alias/canonical response contracts do not depend on which
+/// fresh server happened to initialize a few milliseconds first.
+fn normalize_fixture_seed_timestamps(global_db: &std::path::Path) {
+    const FIXTURE_SEED_TIMESTAMP: &str = "2000-01-01T00:00:00.000Z";
+
+    let mut conn = rusqlite::Connection::open(global_db)
+        .expect("open global test db fixture for seed timestamp normalization");
+    let tx = conn
+        .transaction()
+        .expect("begin test seed timestamp normalization");
+    tx.execute(
+        "UPDATE hub_capabilities SET created_at = ?1, updated_at = ?1",
+        params![FIXTURE_SEED_TIMESTAMP],
+    )
+    .expect("normalize builtin hub capability timestamps");
+    tx.execute(
+        "UPDATE sandbox_policies SET created_at = ?1, updated_at = ?1",
+        params![FIXTURE_SEED_TIMESTAMP],
+    )
+    .expect("normalize builtin sandbox policy timestamps");
+    tx.commit()
+        .expect("commit test seed timestamp normalization");
+}
+
 const TEMPLATE_CACHE_ROOT_ENV: &str = "TACHI_TEST_TEMPLATE_CACHE_ROOT";
 const TEMPLATE_GUARD_HELPER_ENV: &str = "TACHI_TEST_TEMPLATE_GUARD_HELPER";
 const TEMPLATE_GUARD_OUTPUT_ENV: &str = "TACHI_TEST_TEMPLATE_GUARD_OUTPUT";
@@ -1669,9 +1700,11 @@ fn make_test_server(project_name: Option<&str>) -> (TestServer, Option<std::path
             .expect("save fixture manifest");
         project_db_path
     });
+    let global_db_path = db_path.clone();
     let server =
         MemoryServer::new_with_home_for_test(db_path, project_db_path.clone(), fixture_home)
             .expect("failed to create test server");
+    normalize_fixture_seed_timestamps(&global_db_path);
     (
         TestServer {
             server: Some(server),
