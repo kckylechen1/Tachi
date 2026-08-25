@@ -52,16 +52,16 @@ The target split is:
 - `observe`
   - capability recommendation
   - read-only memory and graph inspection
-- `remember` (retired name; canonical `tachi_memory(action="save")`)
+- `remember` (live additive profile/bundle; distinct from the retired native `remember` tool alias)
   - `observe` +
   - `save_memory` (retired name; canonical `tachi_memory(action="save")`)
   - `extract_facts`
   - `tachi_skill(action="run")`; standalone `run_skill` is retired by #1690
 - `coordinate`
-  - `remember` (retired name) +
+  - `remember` (not retired; live profile) +
   - kanban / ghost / handoff collaboration tools
 - `operate`
-  - `remember` (retired name) +
+  - `remember` (not retired; live profile) +
   - runtime hook primitives (`recall_context`, `capture_session`, `compact_*`, `section_build`)
   - routed execution helpers (`hub_call`, `hub_disconnect`, `archive_memory`, `find_similar_memory`, `get_pipeline_status`, `sync_memories`, `wiki_lint`, `vault_unlock`/`vault_lock`/`vault_status`) — the proposal queue/review/project tools and `agent_register` this bundle used to route were retired under #757, superseded by the memory-line promotion path (#950, #534)
 - `admin`
@@ -70,7 +70,7 @@ The target split is:
 There are also two curated minimal profiles for common hosts:
 
 - `standard` — default for IDE agents. Intersects the bundles with a daily agent-intent surface. `tachi_task(action='dispatch')` is removed from its advertised schema and denied at call time; ordinary delegation uses the host harness's native subagent. `tachi_arena` and `tachi_agent_eval` are no longer standard tools because mission persistence and native lifecycle/eval intake belong to internal/adapter surfaces. `tachi_web_search` remains because some hosts lack native search. The canonical list is `STANDARD_MINIMAL_TOOL_PATTERNS` in `crates/tachi-hub/src/tool_profiles/patterns.rs`.
-- `delegate` — for worker subagents spawned via the explicitly admitted staffing surface `tachi_staff(action='start')`. An 11-tool surface with no recursive dispatch and no handoff.
+- `delegate` — for worker subagents spawned via the explicitly admitted staffing surface `tachi_staff(action='start')`. Its canonical source-owned surface has no recursive dispatch and no handoff.
 
 Selection paths:
 

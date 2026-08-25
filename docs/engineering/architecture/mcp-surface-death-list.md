@@ -42,10 +42,10 @@ is a staffing projection census, not a census of unrelated lifecycle/GitHub
 writes into the shared flow directory; none of these stores is an additional
 authority.
 
-- `standard` is a 16-tool allow-list in `STANDARD_MINIMAL_TOOL_PATTERNS` after
-  removing `tachi_arena` and `tachi_agent_eval`; its `tachi_task` schema also
-  omits operator-only `dispatch`.
-- `delegate` is an 11-tool allow-list in `DELEGATE_MINIMAL_TOOL_PATTERNS`.
+- `standard` is the curated allow-list in `STANDARD_MINIMAL_TOOL_PATTERNS`;
+  its `tachi_task` schema also omits operator-only `dispatch`.
+- `delegate` is the worker-safe allow-list in `DELEGATE_MINIMAL_TOOL_PATTERNS`;
+  source, rather than this historical document, owns its exact count.
 - `admin` is not a curated management profile. `tool_visible()` returns true
   immediately for admin, so admin exposes the full native catalog plus any
   directly exposed proxy/skill tools.
@@ -101,9 +101,9 @@ otherwise.
 | `vault_status` | safe credential readiness | Read-only status only; write/get vault tools stay out of daily profiles. |
 | `tachi_gh` | GitHub/evidence facade | Keep if GitHub remains part of ship/evidence workflows; move duplicated task PR actions here. |
 
-`tachi_save` and `tachi_briefing` were convenience shorthands (both retired since), not separate
-capabilities. Keep them only if dogfood shows the shorthand materially reduces
-friction; otherwise fold them into `tachi_memory`.
+`tachi_save` and `tachi_briefing` were convenience shorthands, both retired
+and removed from current profile allow-lists. Their canonical replacements are
+`tachi_memory(action="save")` and `tachi_memory(action="briefing")`.
 
 ## Historical Death List
 
@@ -166,8 +166,8 @@ to the correct facade, then deleting duplicate action aliases.
 | `tachi_task` PR actions | **DONE under open #757 — PR-action slice only:** removed from `tachi_task` enum/router; canonical only on `tachi_gh`. Shared lifecycle handlers remain under `task_lifecycle` for `tachi_gh` / ship. | `tachi_gh` for PR/GitHub work. | Deleted dual entry. | — |
 | `tachi_task` tuning actions | **DONE under #1426:** `route_simulate` (all retired)/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
 | `tachi_memory` tuning actions | **DONE under #1426:** `recall_simulate`/`recall_proposals`/`review_recall_proposal`/`apply_recall_proposals` are gone from `TACHI_MEMORY_ACTIONS`, the action schema, and the router; the handlers moved to `tune_ops/recall_*`. | `tachi_tune(action='recall_simulate'\|'recall_proposals'\|'recall_review'\|'recall_apply')`, admin-only. | Extracted. | — |
-| `tachi_save` shorthand (retired) | Standard allow-list includes it at `patterns.rs:130`. | `tachi_memory(action="save")`. | Retired (executed). | Dogfood decision after Batch A. |
-| `tachi_briefing` shorthand | Standard allow-list includes it at `patterns.rs:128`; separate briefing also exists in `tachi_memory` and the feature-scoped `tachi_task(action="brief")`. | `tachi_memory(action="briefing")`. | Retired (executed). | Dogfood decision after action-level profile design. |
+| `tachi_save` shorthand (retired) | Absent from current profile allow-lists and the live router. | `tachi_memory(action="save")`. | Retired (executed). | — |
+| `tachi_briefing` shorthand (retired) | Absent from current profile allow-lists and the live router; canonical briefing remains on `tachi_memory` and feature-scoped `tachi_task(action="brief")`. | `tachi_memory(action="briefing")`. | Retired (executed). | — |
 
 ### Batch E: Admin Quarantine, Not Immediate Deletion
 
