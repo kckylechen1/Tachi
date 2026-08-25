@@ -503,9 +503,9 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 
 ### Core Memory
 
-`save_memory`, `search_memory`, `get_memory`, `list_memories`, `archive_memory`, `memory_stats`, `remember`, `find_similar_memory`
+(the legacy direct names `save_memory`, `search_memory`, `get_memory`, `remember`, and `find_similar_memory` are retired; `list_memories`, `archive_memory`, and `memory_stats` remain live native routes)
 
-`get_memory` remains available in the full admin/backcompat catalog. Daily
+the legacy direct names were retired; there is no backcompat catalog entry. Daily
 agent profiles should use `tachi_memory(action="get")` instead. The canonical
 owners for permanent deletion and garbage collection are now the operator CLI:
 
@@ -523,12 +523,12 @@ action.
 
 ### Knowledge Graph & Domains
 
-Graph primitives (`add_edge`, `get_edges`, `memory_graph`) were internalized
+Graph primitives (`add_edge`, `get_edges`, `memory_graph`) were retired/internalized
 off the MCP surface in #757 — no live tool call reaches them anymore; the
 tachi-server facade helper layer that used to wrap them was deleted outright
 once #913 found zero remaining in-crate callers, so only the
 `memcore::MemoryStore` boundary remains. Agents get graph behavior through
-`tachi_save`/`tachi_memory` auto-linking and recall's graph-spreading-activation
+`tachi_memory` auto-linking (`tachi_save` is a retired shorthand) and recall's graph-spreading-activation
 channel — there is no standalone graph-traversal action.
 
 The domain registry (`register_domain`, `get_domain`, `list_domains`,
@@ -537,7 +537,7 @@ MCP concept; there is no replacement action.
 
 ### State & Config
 
-State primitives (`set_state`, `get_state`) were internalized off the MCP
+State primitives (`set_state`, `get_state`) were retired/internalized off the MCP
 surface in #757 for the same reason — there is no facade equivalent for raw
 KV state.
 
@@ -574,11 +574,11 @@ not a model-facing Memory action and is not hidden inside `save`.
 
 ### Handoff
 
-`tachi_handoff(action='promote_issue')` — the only surviving handoff action (#1099 retired `handoff_leave`/`handoff_check`; use `tachi_a2a(action='respond')` or `tachi_orchestrator(action='handoff_write'|'handoff_read')` instead).
+`tachi_handoff(action='promote_issue')` — the only surviving handoff action. #1099 retired `handoff_leave`/`handoff_check`; use `tachi_a2a(action='respond')` instead. The retired `tachi_orchestrator` handoff route is no longer available.
 
-### Kanban (Inter-Agent)
+### Retired Kanban (Inter-Agent)
 
-`post_card`, `check_inbox`, `update_card`
+The `post_card`, `check_inbox`, and `update_card` tools are retired.
 
 ### Vault (Encrypted Secrets)
 
@@ -668,21 +668,21 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, `sandbox_exec_audit`
 
-### Recommendations
+### Retired Recommendations
 
-`tachi_dispatch(action='recommend')` — deterministic dispatch-profile recommendation from the DecisionFactLedger; the no-evidence path abstains.
+The public `tachi_dispatch(action='recommend')` surface is retired. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
 
-*(`recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, `skill_evolve` — the retired "second model brain" tool family — are deleted by #1690 C3 and rejected by the router as unknown tools.)*
+*These APIs are retired and deleted by #1690 C3: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `skill_evolve`. The router rejects them as unknown tools.*
 
 ### Facade & Delegation
 
-`tachi_memory`, `tachi_web_search`, `tachi_save`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_verify`, `tachi_complete`
+`tachi_memory`, `tachi_web_search`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_verify`
 
 *(Compatibility/read-only helpers are kept behind the admin profile; daily agent surfaces should use the facade tools above.)*
 
 ### Wiki System
 
-`wiki_lint`, `tachi_wiki`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_search`, `tachi_browse`
+`wiki_lint`, `tachi_wiki`, `tachi_wiki_write`, `tachi_wiki_search`, `tachi_browse`
 
 ### Utilities
 
@@ -701,10 +701,10 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 
 | Profile | Exposed surface | Best for |
 |---|---|---|
-| `standard` | Daily agent-intent surface: `tachi_save`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. `tachi_staff` and manual native-eval intake are hidden. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). Ordinary delegation uses the host's native subagent. |
-| `coordinate` | `remember` + `coordinate` bundles: adds advanced handoff/workflow/orchestrator/agents/staff tools. Tachi-owned staffing (`tachi_staff(action='start', task='review the API surface and write findings to result.md', staffing_reason='native_subagent_unavailable')`) remains operator-only. | Advanced coordination and adapter workflows. |
-| `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
-| `delegate` | Curated 11-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`, and read-only `peer_query`. Standalone `run_skill` is a legacy compatibility route outside the default delegate profile. | Worker subagents spawned via `tachi_staff(action='start')`. |
+| `standard` | Daily agent-intent surface: `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, and `tachi_tools`. `tachi_staff` and manual native-eval intake are hidden. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). Ordinary delegation uses the host's native subagent. |
+| `coordinate` | the coordinate bundle layered on the live `remember` profile/bundle (not the retired native `remember` tool alias): adds advanced handoff/workflow/agents/staff tools. Tachi-owned staffing (`tachi_staff(action='start', task='review the API surface and write findings to result.md', staffing_reason='native_subagent_unavailable')`) remains operator-only. | Advanced coordination and adapter workflows. |
+| `operate` | the operate bundle layered on the live `remember` profile/bundle (not the retired native `remember` tool alias): adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
+| `delegate` | Curated worker surface: `tachi_a2a`, `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_wiki(action='search'|'browse'|'read')`, `tachi_unstick`, `tachi_task`, `tachi_skill(action='discover'|'run')`, and read-only `peer_query`. | Worker subagents spawned via `tachi_staff(action='start')`. |
 | `admin` | Full catalog, including explicitly justified durable/remote Tachi dispatch. | Maintenance, development, and operator-approved execution exceptions. |
 
 Host aliases:
@@ -735,7 +735,7 @@ not by itself disable reuse of an existing compatible daemon.
 |---|---|
 | `tachi: command not found` | Run `brew tap kckylechen1/tachi && brew install tachi`, then verify PATH |
 | MCP tools not appearing | Check your agent's MCP config file path and JSON syntax |
-| `save_memory` fails | Ensure `VOYAGE_API_KEY` is set (required for embedding) |
+| `tachi_memory(action="save")` fails | Ensure `VOYAGE_API_KEY` is set (required for embedding) |
 | Search returns no results | Memory store is empty — save some memories first |
 | Database locked errors | Only one Tachi instance should access each database file |
 | Profile blocks a needed tool | Set `TACHI_PROFILE=admin` temporarily, or add the tool name to `TACHI_EXTRA_TOOLS` |

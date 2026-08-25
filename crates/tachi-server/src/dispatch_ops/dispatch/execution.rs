@@ -4,9 +4,17 @@ use super::super::acp_native::{
 use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
 #[cfg(test)]
 use super::super::dispatch_v2::stamp_route_decision_id;
-use super::super::dispatch_v2::{append_trajectory_event, status_json_lock_for, write_status_json};
+#[cfg(test)]
+use super::super::dispatch_v2::write_status_json;
+use super::super::dispatch_v2::{
+    append_trajectory_event, status_json_lock_for, write_status_json_for_terminal,
+    ManagedTerminalStatusAnchor,
+};
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
-use super::super::subprocess::{run_agent_subprocess, run_opencode_sop_subprocess, tail_chars};
+use super::super::subprocess::{
+    run_agent_subprocess, run_managed_custom_subprocess_outcome, run_opencode_sop_subprocess,
+    tail_chars,
+};
 use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
 use crate::{MemoryServer, SaveMemoryParams};
@@ -28,9 +36,75 @@ use tokio::process::Command;
 
 const WATCHDOG_STATUS_MAX_BYTES: usize = 1024 * 1024;
 
+fn read_status_json_for_terminal(
+    workspace_dir: &Path,
+    status_path: &Path,
+    managed_anchor: &ManagedTerminalStatusAnchor,
+) -> Result<Option<Value>, String> {
+    #[cfg(unix)]
+    if let ManagedTerminalStatusAnchor::Anchored(anchor) = managed_anchor {
+        let lock = anchor.lock();
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        return anchor.read_json();
+    }
+    #[cfg(not(unix))]
+    let _ = managed_anchor;
+
+    let Some(raw) = crate::dispatch_ops::read_text_file_within(
+        workspace_dir,
+        status_path,
+        WATCHDOG_STATUS_MAX_BYTES,
+    )?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str::<Value>(&raw)
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "completion status artifact {} is not valid JSON: {error}",
+                status_path.display()
+            )
+        })
+}
+
+fn managed_terminal_status_anchor(
+    registry: &crate::managed_run_control::ManagedRunControlRegistry,
+    dispatch_id: &str,
+    managed_cancellation: Option<&crate::managed_run_control::ManagedCancelCommand>,
+) -> ManagedTerminalStatusAnchor {
+    #[cfg(unix)]
+    {
+        if let Some(command) = managed_cancellation {
+            return ManagedTerminalStatusAnchor::Anchored(command.status_anchor.clone());
+        }
+        if let Some(anchor) = registry.accepted_status_anchor(dispatch_id) {
+            return ManagedTerminalStatusAnchor::Anchored(anchor);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = registry;
+        let _ = dispatch_id;
+        let _ = managed_cancellation;
+    }
+    ManagedTerminalStatusAnchor::Missing
+}
+
 pub(super) enum DispatchExecution {
     Subprocess(Command),
+    ManagedCustom(
+        Command,
+        tokio::sync::mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
+    ),
     NativeAcp(NativeAcpRunSpec),
+}
+
+/// Private lifecycle evidence that this registered Staff-managed run owns only
+/// its own run-scoped ephemeral materializations. It is established before
+/// background handoff and is independent of process exit or completion state.
+pub(super) enum ManagedEphemeralCredentialCleanupObligation {
+    Required,
 }
 
 pub(super) struct BackgroundDispatchContext {
@@ -59,6 +133,157 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) execution: DispatchExecution,
     pub(super) flow_dispatch_slot: Option<PathBuf>,
     pub(super) mcp_config_path: Option<PathBuf>,
+    pub(super) managed_run_guard: Option<crate::managed_run_control::ManagedRunGuard>,
+    pub(super) managed_ephemeral_credential_cleanup:
+        Option<ManagedEphemeralCredentialCleanupObligation>,
+}
+
+/// Covers an unwind before the ordinary background terminal path reaches its
+/// explicit cleanup. It is declared after the managed authority guard so this
+/// Drop releases credentials and the dispatch slot before authority vanishes.
+struct BackgroundEarlyExitCleanup {
+    server: MemoryServer,
+    workspace_dir: PathBuf,
+    flow_dispatch_slot: Option<PathBuf>,
+    armed: bool,
+}
+
+impl BackgroundEarlyExitCleanup {
+    fn new(
+        server: MemoryServer,
+        workspace_dir: PathBuf,
+        flow_dispatch_slot: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            server,
+            workspace_dir,
+            flow_dispatch_slot,
+            armed: true,
+        }
+    }
+
+    fn complete(&mut self) {
+        release_flow_dispatch_slot(self.flow_dispatch_slot.take());
+        self.armed = false;
+    }
+}
+
+impl Drop for BackgroundEarlyExitCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self.server.with_global_store(|store| {
+            cleanup_ephemeral_credential_materializations(store, &self.workspace_dir, false)
+        });
+        release_flow_dispatch_slot(self.flow_dispatch_slot.take());
+    }
+}
+
+#[cfg(test)]
+static MANAGED_TIMEOUT_OVERRIDES: OnceLock<
+    Mutex<std::collections::HashMap<(PathBuf, PathBuf), std::time::Duration>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+static MANAGED_CREDENTIAL_CLEANUP_FAILURES: OnceLock<Mutex<HashSet<(PathBuf, PathBuf)>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct ManagedCredentialCleanupFailureGuard {
+    key: (PathBuf, PathBuf),
+}
+
+#[cfg(test)]
+impl Drop for ManagedCredentialCleanupFailureGuard {
+    fn drop(&mut self) {
+        if let Some(failures) = MANAGED_CREDENTIAL_CLEANUP_FAILURES.get() {
+            failures
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_managed_credential_cleanup_failure(
+    home: &std::path::Path,
+    run_root: &std::path::Path,
+) -> ManagedCredentialCleanupFailureGuard {
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    assert!(MANAGED_CREDENTIAL_CLEANUP_FAILURES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.clone()));
+    ManagedCredentialCleanupFailureGuard { key }
+}
+
+#[cfg(test)]
+fn managed_credential_cleanup_failure_injected() -> bool {
+    let Some(home) = std::env::var_os("TACHI_HOME") else {
+        return false;
+    };
+    let Some(run_root) = std::env::var_os("TACHI_RUN_ROOT") else {
+        return false;
+    };
+    MANAGED_CREDENTIAL_CLEANUP_FAILURES
+        .get()
+        .is_some_and(|failures| {
+            failures
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&(PathBuf::from(home), PathBuf::from(run_root)))
+        })
+}
+
+#[cfg(test)]
+pub(crate) struct ManagedTimeoutOverrideGuard {
+    key: (PathBuf, PathBuf),
+}
+
+#[cfg(test)]
+impl Drop for ManagedTimeoutOverrideGuard {
+    fn drop(&mut self) {
+        if let Some(overrides) = MANAGED_TIMEOUT_OVERRIDES.get() {
+            overrides
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_managed_timeout_override(
+    home: &std::path::Path,
+    run_root: &std::path::Path,
+    timeout: std::time::Duration,
+) -> ManagedTimeoutOverrideGuard {
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    assert!(MANAGED_TIMEOUT_OVERRIDES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.clone(), timeout)
+        .is_none());
+    ManagedTimeoutOverrideGuard { key }
+}
+
+#[cfg(test)]
+fn managed_timeout_override() -> Option<std::time::Duration> {
+    let key = (
+        PathBuf::from(std::env::var_os("TACHI_HOME")?),
+        PathBuf::from(std::env::var_os("TACHI_RUN_ROOT")?),
+    );
+    MANAGED_TIMEOUT_OVERRIDES.get().and_then(|overrides| {
+        overrides
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+            .copied()
+    })
 }
 
 pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
@@ -73,8 +298,18 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let v2_for_spawn = ctx.v2;
     let plan_generated_at_for_spawn = ctx.plan_generated_at;
     let plan_duration_ms_for_spawn = ctx.plan_duration_ms;
-    let timeout_secs_for_spawn = ctx.timeout_secs;
-    let timeout = ctx.timeout;
+    let (timeout_secs_for_spawn, timeout) = {
+        #[cfg(test)]
+        {
+            managed_timeout_override()
+                .map(|override_timeout| (override_timeout.as_secs().max(1), override_timeout))
+                .unwrap_or((ctx.timeout_secs, ctx.timeout))
+        }
+        #[cfg(not(test))]
+        {
+            (ctx.timeout_secs, ctx.timeout)
+        }
+    };
     let feedback_rules_trace_for_spawn = ctx.feedback_rules_trace;
     let harness_transport_for_spawn = ctx.harness_transport;
     let harness_server_url_for_spawn = ctx.harness_server_url;
@@ -84,9 +319,21 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let execution_for_spawn = ctx.execution;
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
     let mcp_config_path = ctx.mcp_config_path;
+    let managed_run_guard = ctx.managed_run_guard;
+    let managed_ephemeral_credential_cleanup = ctx.managed_ephemeral_credential_cleanup;
 
     tokio::task::spawn(async move {
+        // Keep the registry entry and its sender alive for the entire
+        // background lifecycle. Binding this outside the async move drops the
+        // guard as soon as scheduling returns and makes the child observe a
+        // closed cancellation receiver before it can spawn.
+        let _managed_run_guard = managed_run_guard;
         let _mcp_cleanup = McpCleanup(mcp_config_path);
+        let mut early_exit_cleanup = BackgroundEarlyExitCleanup::new(
+            server_clone.clone(),
+            workspace_dir_for_spawn.clone(),
+            flow_dispatch_slot_for_spawn,
+        );
 
         // execute_started — Stage 2 (or, in V1, the only stage).
         let execute_started_at = Utc::now();
@@ -106,30 +353,61 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }),
         );
 
-        let result = match execution_for_spawn {
-            DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => {
-                run_opencode_sop_subprocess(
-                    cmd,
-                    timeout,
-                    opencode_sop_label_for_spawn
-                        .as_deref()
-                        .unwrap_or("opencode_sop"),
-                )
-                .await
-            }
-            DispatchExecution::Subprocess(cmd) => run_agent_subprocess(cmd, timeout).await,
-            DispatchExecution::NativeAcp(spec) => {
-                run_native_acp_dispatch(
-                    spec,
-                    &workspace_dir_for_spawn,
-                    &traj_path_for_spawn,
-                    &d_id,
-                    &agent_for_watchdog,
-                    timeout,
-                )
-                .await
-            }
-        };
+        let (result, mut managed_cancellation, managed_termination_proof) =
+            match execution_for_spawn {
+                DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => (
+                    run_opencode_sop_subprocess(
+                        cmd,
+                        timeout,
+                        opencode_sop_label_for_spawn
+                            .as_deref()
+                            .unwrap_or("opencode_sop"),
+                    )
+                    .await,
+                    None,
+                    None,
+                ),
+                DispatchExecution::Subprocess(cmd) => {
+                    (run_agent_subprocess(cmd, timeout).await, None, None)
+                }
+                DispatchExecution::ManagedCustom(cmd, receiver) => {
+                    let managed_run_dir = workspace_dir_for_spawn.clone();
+                    let outcome = match tokio::spawn(async move {
+                        run_managed_custom_subprocess_outcome(
+                            cmd,
+                            timeout,
+                            receiver,
+                            &managed_run_dir,
+                        )
+                        .await
+                    })
+                    .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => super::super::subprocess::ManagedSubprocessOutcome::plain(
+                            Err(format!("managed subprocess panicked: {error}")),
+                        ),
+                    };
+                    (
+                        outcome.result,
+                        outcome.cancellation,
+                        outcome.termination_proof,
+                    )
+                }
+                DispatchExecution::NativeAcp(spec) => (
+                    run_native_acp_dispatch(
+                        spec,
+                        &workspace_dir_for_spawn,
+                        &traj_path_for_spawn,
+                        &d_id,
+                        &agent_for_watchdog,
+                        timeout,
+                    )
+                    .await,
+                    None,
+                    None,
+                ),
+            };
         let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
         // CLI subprocesses intentionally never acknowledge a receipt: they
@@ -228,11 +506,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         }
 
         // Save full output to result.md for orchestrator eval
-        {
+        let result_persist_error = {
             let result_path = workspace_dir.join("result.md");
-            if let Err(err) =
-                crate::utils::write_owner_only_file_atomic(&result_path, full_output.as_bytes())
-            {
+            let error = super::persist_dispatch_result_artifact(
+                &result_path,
+                full_output.as_bytes(),
+                managed_ephemeral_credential_cleanup.is_some(),
+            )
+            .err();
+            if let Some(err) = error.as_ref() {
                 tracing::warn!(
                     dispatch_id = %d_id,
                     path = %result_path.display(),
@@ -250,7 +532,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     }),
                 );
             }
-        }
+            error
+        };
 
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
         // Poll for kanban state instead of a fixed sleep to avoid race conditions
@@ -259,9 +542,55 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         let mut pending_completion_recovery = false;
         let mut receipt_read_error = None;
         let mut kanban_state = None;
+        // A runner that has reaped the managed group and returned its
+        // cancellation proof already owns the terminal classification.  Do
+        // not feed that result through the ordinary watchdog path: it would
+        // synthesize a failure eval/outcome before the terminal writer has
+        // persisted the cancellation receipt.
+        let managed_cancellation_confirmed =
+            matches!(&result, Err(error) if error == "managed_cancelled");
+        if managed_cancellation_confirmed {
+            receipt_terminal_state = Some("TASK_STATE_CANCELED");
+        }
+        if !managed_cancellation_confirmed {
+            match completion_receipt_state_after_admission(
+                &workspace_dir_for_spawn,
+                watchdog_interval,
+                &server_clone.managed_run_controls,
+                &d_id,
+                managed_cancellation.as_ref(),
+            )
+            .await
+            {
+                Ok(CompletionReceiptState::Terminal(receipt_state)) => {
+                    receipt_terminal_state = Some(receipt_state);
+                }
+                Ok(CompletionReceiptState::PendingRecovery) => pending_completion_recovery = true,
+                Ok(CompletionReceiptState::Open) => {}
+                Ok(CompletionReceiptState::AdmissionInProgress) => {
+                    unreachable!("admission wait resolves")
+                }
+                Err(error) => receipt_read_error = Some(error),
+            }
+        }
         for _ in 0..watchdog_polls {
+            if managed_cancellation_confirmed
+                || receipt_terminal_state.is_some()
+                || pending_completion_recovery
+                || receipt_read_error.is_some()
+            {
+                break;
+            }
             tokio::time::sleep(watchdog_interval).await;
-            match completion_receipt_state(&workspace_dir_for_spawn) {
+            match completion_receipt_state_after_admission(
+                &workspace_dir_for_spawn,
+                watchdog_interval,
+                &server_clone.managed_run_controls,
+                &d_id,
+                managed_cancellation.as_ref(),
+            )
+            .await
+            {
                 Ok(CompletionReceiptState::Terminal(receipt_state)) => {
                     receipt_terminal_state = Some(receipt_state);
                     break;
@@ -269,6 +598,9 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 Ok(CompletionReceiptState::PendingRecovery) => {
                     pending_completion_recovery = true;
                     break;
+                }
+                Ok(CompletionReceiptState::AdmissionInProgress) => {
+                    unreachable!("admission wait resolves")
                 }
                 Ok(CompletionReceiptState::Open) => {}
                 Err(error) => {
@@ -290,11 +622,22 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             && !pending_completion_recovery
             && receipt_read_error.is_none()
         {
-            match completion_receipt_state(&workspace_dir_for_spawn) {
+            match completion_receipt_state_after_admission(
+                &workspace_dir_for_spawn,
+                watchdog_interval,
+                &server_clone.managed_run_controls,
+                &d_id,
+                managed_cancellation.as_ref(),
+            )
+            .await
+            {
                 Ok(CompletionReceiptState::Terminal(receipt_state)) => {
                     receipt_terminal_state = Some(receipt_state)
                 }
                 Ok(CompletionReceiptState::PendingRecovery) => pending_completion_recovery = true,
+                Ok(CompletionReceiptState::AdmissionInProgress) => {
+                    unreachable!("admission wait resolves")
+                }
                 Ok(CompletionReceiptState::Open) => {}
                 Err(error) => receipt_read_error = Some(error),
             }
@@ -302,6 +645,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         let polled_terminal_state = canonical_terminal_state(kanban_state.as_deref());
         let is_closed = !pending_completion_recovery
             && (receipt_terminal_state.is_some() || polled_terminal_state.is_some());
+        if receipt_terminal_state == Some("TASK_STATE_FAILED") {
+            crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                &server_clone,
+                &d_id,
+                "termination_unconfirmed",
+                Some(agent_for_watchdog.as_str()),
+                project_for_watchdog.as_deref(),
+            );
+        }
         // #1250: terminal accounting in the final `status.json` rewrite must
         // reflect the resolved predicate verdict, NOT the raw process exit
         // code. The watchdog branch below is the only path that actually
@@ -492,12 +844,73 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }
         }
 
-        let should_cleanup = match &result {
-            Ok(r) if !pending_completion_recovery => {
-                should_cleanup_run(r.exit_code, kanban_state.as_deref())
-            }
-            Err(_) => false,
-            Ok(_) => false,
+        let should_cleanup = managed_ephemeral_credential_cleanup.is_some()
+            || match &result {
+                Ok(r) if !pending_completion_recovery => {
+                    should_cleanup_run(r.exit_code, kanban_state.as_deref())
+                }
+                Err(_) => false,
+                Ok(_) => false,
+            };
+        // A managed cancellation is confirmed only if its ephemeral
+        // credentials are already gone.  The cleanup result is therefore an
+        // input to the one canonical terminal write below, never a later
+        // downgrade of a committed confirmation.
+        let credential_cleanup_failed = if should_cleanup {
+            let credential_cleanup = {
+                #[cfg(test)]
+                if managed_credential_cleanup_failure_injected() {
+                    Err("injected managed credential cleanup failure".to_string())
+                } else {
+                    server_clone.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(
+                            store,
+                            &workspace_dir_for_spawn,
+                            false,
+                        )
+                    })
+                }
+                #[cfg(not(test))]
+                {
+                    server_clone.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(
+                            store,
+                            &workspace_dir_for_spawn,
+                            false,
+                        )
+                    })
+                }
+            };
+            let failed = match &credential_cleanup {
+                Ok(report) => !report.errors.is_empty(),
+                Err(_) => true,
+            };
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "credentials_cleanup",
+                    "dispatch_id": d_id,
+                    "agent": agent_for_watchdog,
+                    "report": credential_cleanup
+                        .as_ref()
+                        .map(|report| serde_json::to_value(report).unwrap_or_else(|_| json!({"error": "serialize cleanup report"})))
+                        .unwrap_or_else(|err| json!({"errors": [err]})),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "workspace_retained",
+                    "dispatch_id": d_id,
+                    "reason": "run_dir is retained so board/status links remain valid",
+                    "run_dir": workspace_dir.to_string_lossy(),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            failed
+        } else {
+            false
         };
 
         // Final audit: dispatch_finished + status.json refresh.
@@ -526,25 +939,19 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // Preserve dispatch-time contract fields across the final status rewrite
         // so complete/watchdog can still evaluate the #878-A predicate after exit.
         let status_path = workspace_dir_for_spawn.join("status.json");
-        let (prev_status, final_status_read_error) =
-            match crate::dispatch_ops::read_text_file_within(
-                &workspace_dir_for_spawn,
-                &status_path,
-                WATCHDOG_STATUS_MAX_BYTES,
-            ) {
-                Ok(Some(raw)) => match serde_json::from_str::<Value>(&raw) {
-                    Ok(status) => (Some(status), None),
-                    Err(error) => (
-                        None,
-                        Some(format!(
-                            "completion status artifact {} is not valid JSON: {error}",
-                            status_path.display()
-                        )),
-                    ),
-                },
-                Ok(None) => (None, None),
-                Err(error) => (None, Some(error)),
-            };
+        let managed_terminal_anchor = managed_terminal_status_anchor(
+            &server_clone.managed_run_controls,
+            &d_id,
+            managed_cancellation.as_ref(),
+        );
+        let (prev_status, final_status_read_error) = match read_status_json_for_terminal(
+            &workspace_dir_for_spawn,
+            &status_path,
+            &managed_terminal_anchor,
+        ) {
+            Ok(status) => (status, None),
+            Err(error) => (None, Some(error)),
+        };
         let preserved_predicate = prev_status
             .as_ref()
             .and_then(|v| v.get("completion_predicate").cloned())
@@ -569,7 +976,18 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 d_id, error
             );
         }
-        let final_status_state = if pending_completion_recovery {
+        let final_status_state = if result_persist_error.is_some() {
+            "TASK_STATE_FAILED"
+        } else if matches!(&result, Err(error) if error == "managed_cancelled")
+            && credential_cleanup_failed
+        {
+            "TASK_STATE_FAILED"
+        } else if matches!(&result, Err(error) if error == "managed_cancelled") {
+            "TASK_STATE_CANCELED"
+        } else if matches!(&result, Err(error) if error == "termination_unconfirmed" || error.starts_with("managed cancellation child probe failed"))
+        {
+            "TASK_STATE_FAILED"
+        } else if pending_completion_recovery {
             pending_recovery_status_state(prev_status.as_ref())
         } else if artifact_read_error.is_some() {
             "TASK_STATE_FAILED"
@@ -581,7 +999,21 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 final_exit_code,
             )
         };
-        write_status_json(
+        // A dequeued managed cancellation is finalized by this background
+        // owner, after the result artifact and all terminal accounting have
+        // been chosen. The runner only owns process lifetime; it never wakes
+        // the caller with a speculative receipt.
+        let managed_finalization = managed_cancellation.as_ref().map(|command| {
+            json!({
+                "expected_status_revision": command.expected_status_revision,
+                "runner_error": result.as_ref().err(),
+                "termination_proof": managed_termination_proof,
+                "credential_cleanup_failed": credential_cleanup_failed,
+                "result_persist_failed": result_persist_error.is_some(),
+            })
+        });
+
+        let managed_cancel_completion = write_status_json_for_terminal(
             &workspace_dir_for_spawn,
             &d_id,
             v2_for_spawn,
@@ -598,7 +1030,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "closure_kind": terminal_closure_kind(final_status_state),
                 "updated_at": Utc::now().to_rfc3339(),
                 "run_dir": workspace_dir_for_spawn.to_string_lossy(),
-                "result_written": true,
+                "result_written": result_persist_error.is_none(),
+                "result_persist_error": result_persist_error,
                 "artifact_read_error": artifact_read_error,
                 "completion_predicate": preserved_predicate,
                 "cwd": preserved_cwd,
@@ -625,42 +1058,76 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "acpx_events": acpx_event_summary_json,
                 "feedback_rules": feedback_rules_trace_for_spawn,
                 "timeout_secs": timeout_secs_for_spawn,
+                "managed_cancellation_finalization": managed_finalization,
             })),
+            managed_terminal_anchor,
         );
 
-        if should_cleanup {
-            let credential_cleanup = server_clone.with_global_store(|store| {
-                cleanup_ephemeral_credential_materializations(
-                    store,
-                    &workspace_dir_for_spawn,
-                    false,
-                )
-            });
-            append_trajectory_event(
-                &traj_path_for_spawn,
-                json!({
-                    "event": "credentials_cleanup",
-                    "dispatch_id": d_id,
-                    "agent": agent_for_watchdog,
-                    "report": credential_cleanup
-                        .as_ref()
-                        .map(|report| serde_json::to_value(report).unwrap_or_else(|_| json!({"error": "serialize cleanup report"})))
-                        .unwrap_or_else(|err| json!({"errors": [err]})),
-                    "timestamp": Utc::now().to_rfc3339(),
-                }),
-            );
-            append_trajectory_event(
-                &traj_path_for_spawn,
-                json!({
-                    "event": "workspace_retained",
-                    "dispatch_id": d_id,
-                    "reason": "run_dir is retained so board/status links remain valid",
-                    "run_dir": workspace_dir.to_string_lossy(),
-                    "timestamp": Utc::now().to_rfc3339(),
-                }),
-            );
+        if matches!(
+            managed_cancel_completion,
+            Some(crate::managed_run_control::CancelCompletion::Confirmed { .. })
+        ) {
+            if let Err(error) = update_kanban_state(
+                &server_clone,
+                &d_id,
+                "TASK_STATE_CANCELED",
+                None,
+                Some(false),
+            )
+            .await
+            {
+                eprintln!(
+                    "[watchdog] failed to mark cancelled dispatch {}: {}",
+                    d_id, error
+                );
+            }
         }
-        release_flow_dispatch_slot(flow_dispatch_slot_for_spawn);
+        if let Some(crate::managed_run_control::CancelCompletion::Unavailable(reason)) =
+            managed_cancel_completion.as_ref()
+        {
+            if *reason == "credential_cleanup_failed"
+                || *reason == "persist_failed"
+                || *reason == "result_persist_failed"
+            {
+                if let Err(error) = update_kanban_state(
+                    &server_clone,
+                    &d_id,
+                    "TASK_STATE_FAILED",
+                    None,
+                    Some(false),
+                )
+                .await
+                {
+                    eprintln!(
+                        "[watchdog] failed to mark managed terminal failure {}: {}",
+                        d_id, error
+                    );
+                }
+                crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                    &server_clone,
+                    &d_id,
+                    reason,
+                    Some(agent_for_watchdog.as_str()),
+                    project_for_watchdog.as_deref(),
+                );
+            }
+        }
+        early_exit_cleanup.complete();
+        // The response itself is a lifecycle receipt: it is released only
+        // once credential cleanup, slot release, and registry removal are all
+        // complete. No detached responder can outlive this owner.
+        drop(_managed_run_guard);
+        if let Some(command) = managed_cancellation.take() {
+            #[cfg(test)]
+            let mut command = command;
+            #[cfg(test)]
+            if let Some(observation) = command.test_observation.take() {
+                observation.complete(&workspace_dir_for_spawn, managed_cancel_completion.as_ref());
+            }
+            if let Some(completion) = managed_cancel_completion {
+                let _ = command.response.send(completion);
+            }
+        }
         #[cfg(test)]
         mark_background_dispatch_cleanup_complete(&d_id);
     });
@@ -814,6 +1281,7 @@ fn persist_acp_model_acknowledgement(
         serde_json::to_value(receipt)
             .map_err(|error| format!("serialize ACP identity receipt: {error}"))?,
     );
+    crate::managed_run_control::advance_status_revision(status_object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|error| format!("serialize {}: {error}", status_path.display()))?;
     crate::utils::write_owner_only_file_atomic(&status_path, &body)
@@ -904,12 +1372,14 @@ fn terminal_status_state(
 enum CompletionReceiptState {
     Terminal(&'static str),
     PendingRecovery,
+    AdmissionInProgress,
     Open,
 }
 
 /// Read a handler-written completion receipt from the dispatch run. A pending
 /// canonical-outcome recovery takes precedence over any stale terminal data:
 /// it is an explicit barrier until tachi_complete reconciles the outcome row.
+#[cfg(test)]
 fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionReceiptState, String> {
     let Some(raw_status) = crate::dispatch_ops::read_text_file_within(
         run_dir,
@@ -925,8 +1395,57 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
             run_dir.join("status.json").display()
         )
     })?;
-    if status.get("completion_recovery").is_some() {
-        return Ok(CompletionReceiptState::PendingRecovery);
+    completion_receipt_state_from_status(&status)
+}
+
+fn completion_receipt_state_for_terminal(
+    run_dir: &std::path::Path,
+    managed_anchor: &ManagedTerminalStatusAnchor,
+) -> Result<CompletionReceiptState, String> {
+    let status_path = run_dir.join("status.json");
+    let Some(status) = read_status_json_for_terminal(run_dir, &status_path, managed_anchor)? else {
+        return Ok(CompletionReceiptState::Open);
+    };
+    completion_receipt_state_from_status(&status)
+}
+
+fn completion_receipt_state_from_status(status: &Value) -> Result<CompletionReceiptState, String> {
+    if let Some(recovery_status) = status
+        .get("completion_recovery")
+        .and_then(Value::as_object)
+        .and_then(|recovery| recovery.get("status"))
+        .and_then(Value::as_str)
+    {
+        return Ok(if recovery_status == "completion_admitted" {
+            // A handler holding the private registry lease owns all
+            // irreversible completion writes. The terminal owner waits for
+            // that lease to resolve instead of racing an eval/outcome receipt.
+            CompletionReceiptState::AdmissionInProgress
+        } else {
+            CompletionReceiptState::PendingRecovery
+        });
+    }
+    if status
+        .get("cancellation")
+        .and_then(Value::as_object)
+        .is_some_and(|receipt| {
+            matches!(
+                receipt.get("receipt").and_then(Value::as_str),
+                Some("termination_unconfirmed")
+            ) || (receipt.get("receipt").and_then(Value::as_str) == Some("cancellation_confirmed")
+                && matches!(
+                    receipt.get("termination_proof").and_then(Value::as_str),
+                    Some("spawn_suppressed" | "unix_process_group_absent")
+                ))
+        })
+    {
+        return Ok(CompletionReceiptState::Terminal(
+            if status["cancellation"]["receipt"] == "termination_unconfirmed" {
+                "TASK_STATE_FAILED"
+            } else {
+                "TASK_STATE_CANCELED"
+            },
+        ));
     }
     let Some(receipt) = status.get("resolved_completion").and_then(Value::as_object) else {
         return Ok(CompletionReceiptState::Open);
@@ -963,13 +1482,32 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
     })
 }
 
+async fn completion_receipt_state_after_admission(
+    run_dir: &std::path::Path,
+    poll_interval: Duration,
+    registry: &crate::managed_run_control::ManagedRunControlRegistry,
+    dispatch_id: &str,
+    managed_cancellation: Option<&crate::managed_run_control::ManagedCancelCommand>,
+) -> Result<CompletionReceiptState, String> {
+    loop {
+        let managed_anchor =
+            managed_terminal_status_anchor(registry, dispatch_id, managed_cancellation);
+        match completion_receipt_state_for_terminal(run_dir, &managed_anchor)? {
+            CompletionReceiptState::AdmissionInProgress => tokio::time::sleep(poll_interval).await,
+            state => return Ok(state),
+        }
+    }
+}
+
 #[cfg(test)]
 fn resolved_completion_terminal_state(
     run_dir: &std::path::Path,
 ) -> Result<Option<&'static str>, String> {
     Ok(match completion_receipt_state(run_dir)? {
         CompletionReceiptState::Terminal(state) => Some(state),
-        CompletionReceiptState::PendingRecovery | CompletionReceiptState::Open => None,
+        CompletionReceiptState::PendingRecovery
+        | CompletionReceiptState::AdmissionInProgress
+        | CompletionReceiptState::Open => None,
     })
 }
 
@@ -1101,6 +1639,10 @@ mod tests {
         assert_eq!(status["state"], "TASK_STATE_COMPLETED");
         assert_eq!(status["result_written"], true);
         assert_eq!(status["route_decision_id"], "route-fast-terminal");
+        assert_eq!(
+            status["status_revision"], 3,
+            "base status, route evidence, and ACP acknowledgement each advance the shared revision"
+        );
         assert_eq!(
             read_receipt(temp.path())
                 .observed
@@ -1685,5 +2227,18 @@ mod tests {
             "TASK_STATE_WORKING",
             "the finalizer must retain a non-terminal state while recovery is pending"
         );
+    }
+}
+
+#[cfg(test)]
+mod issue_1825_credential_cleanup_tests {
+    use super::ManagedEphemeralCredentialCleanupObligation;
+
+    #[test]
+    fn managed_terminal_failures_always_select_ephemeral_credential_cleanup() {
+        let managed = Some(ManagedEphemeralCredentialCleanupObligation::Required);
+        let non_managed: Option<ManagedEphemeralCredentialCleanupObligation> = None;
+        assert!(managed.is_some());
+        assert!(non_managed.is_none());
     }
 }

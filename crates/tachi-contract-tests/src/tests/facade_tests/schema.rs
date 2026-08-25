@@ -320,14 +320,62 @@ fn tachi_skill_action_schema_declares_only_discover_and_run() {
 }
 
 #[test]
-fn tachi_staff_schema_exposes_only_start_and_status() {
+fn tachi_staff_schema_exposes_start_status_and_cancel() {
     let schema = rmcp::schemars::schema_for!(tachi_params::TachiStaffParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
     let properties = value["properties"].as_object().expect("staff properties");
     let actions = properties["action"]["enum"]
         .as_array()
         .expect("staff action enum");
-    assert_eq!(actions, &vec![json!("start"), json!("status")]);
+    assert_eq!(
+        actions,
+        &vec![json!("start"), json!("status"), json!("cancel")],
+        "tachi_staff must expose exactly its canonical start/status/cancel actions"
+    );
+
+    // The facade stays flat for MCP compatibility, so start-only task/reason
+    // fields coexist with the cancellation request shape. Apart from action
+    // selection and response formatting, the only cancellation-control inputs
+    // are the canonical dispatch id and its optimistic-concurrency revision.
+    let non_cancel_fields = [
+        "action",
+        "format",
+        "task",
+        "staffing_reason",
+        "flow_id",
+        "issue_ref",
+        "pr_ref",
+        "profile",
+        "project",
+        "recommendation_ref",
+        "stage",
+        "worker",
+    ];
+    let mut cancellation_control_fields = properties
+        .keys()
+        .filter(|name| !non_cancel_fields.contains(&name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    cancellation_control_fields.sort();
+    assert_eq!(
+        cancellation_control_fields,
+        vec!["dispatch_id", "expected_status_revision"],
+        "cancel must expose only dispatch_id plus expected_status_revision as control inputs"
+    );
+
+    let cancel = serde_json::from_value::<tachi_params::TachiStaffParams>(json!({
+        "action": "cancel",
+        "dispatch_id": "20260804T000000Z-claude-deadbeef",
+        "expected_status_revision": 7,
+    }))
+    .expect("canonical cancel request deserializes");
+    assert_eq!(cancel.action, "cancel");
+    assert_eq!(
+        cancel.dispatch_id.as_deref(),
+        Some("20260804T000000Z-claude-deadbeef")
+    );
+    assert_eq!(cancel.expected_status_revision, Some(7));
+
     // staffing_reason is present as a top-level property (the flat struct
     // surfaces it) but is NOT in the schema-level `required` list — it is
     // OPTIONAL at the schema level precisely so `action='status'` (a read-only
@@ -342,11 +390,39 @@ fn tachi_staff_schema_exposes_only_start_and_status() {
         !required.iter().any(|r| r == "staffing_reason"),
         "staffing_reason must NOT be schema-level required (status must be able to omit it); required={required:?}"
     );
-    // No execution-shaped fields leak through the boundary.
-    for removed in ["cwd", "command", "transport", "sandbox", "allowed_tools"] {
+    // No execution- or model-control fields leak through the boundary. These
+    // must be rejected by the same deny-unknown-fields facade used by cancel,
+    // rather than merely omitted from a documentation list.
+    for removed in [
+        "pid",
+        "pgid",
+        "process_group",
+        "signal",
+        "command",
+        "cwd",
+        "env",
+        "credentials",
+        "tools",
+        "allowed_tools",
+        "transport",
+        "timeout",
+        "process",
+        "result",
+        "sandbox",
+    ] {
         assert!(
             !properties.contains_key(removed),
             "staff schema must not expose execution field {removed}"
+        );
+        let rejected = serde_json::from_value::<tachi_params::TachiStaffParams>(json!({
+            "action": "cancel",
+            "dispatch_id": "20260804T000000Z-claude-deadbeef",
+            "expected_status_revision": 7,
+            removed: "forbidden",
+        }));
+        assert!(
+            rejected.is_err(),
+            "cancel must reject leaked execution field {removed}"
         );
     }
 }

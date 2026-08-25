@@ -7,59 +7,59 @@
     "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738); environment exposure override unset"
   },
   "provisional_budgets": {
-    "status": "provisional",
     "profiles": {
-      "standard": {
-        "max_visible_tools": 17,
-        "max_total_input_schema_bytes": 59270,
-        "max_total_tool_definition_bytes": 68922,
-        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
-      },
-      "delegate": {
-        "max_visible_tools": 12,
-        "max_total_input_schema_bytes": 60881,
-        "max_total_tool_definition_bytes": 66361,
-        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
+      "admin": {
+        "max_total_input_schema_bytes": 137053,
+        "max_total_tool_definition_bytes": 167986,
+        "max_visible_tools": 82,
+        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
       },
       "coordinate": {
-        "max_visible_tools": 36,
-        "max_total_input_schema_bytes": 123271,
-        "max_total_tool_definition_bytes": 140370,
-        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
+        "max_total_input_schema_bytes": 91938,
+        "max_total_tool_definition_bytes": 105428,
+        "max_visible_tools": 29,
+        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
+      },
+      "delegate": {
+        "max_total_input_schema_bytes": 38713,
+        "max_total_tool_definition_bytes": 43273,
+        "max_visible_tools": 10,
+        "rationale": "Exact live observed #1691 census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "operate": {
-        "max_visible_tools": 46,
-        "max_total_input_schema_bytes": 117807,
-        "max_total_tool_definition_bytes": 135337,
-        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
+        "max_total_input_schema_bytes": 85511,
+        "max_total_tool_definition_bytes": 99232,
+        "max_visible_tools": 39,
+        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
-      "admin": {
-        "max_visible_tools": 96,
-        "max_total_input_schema_bytes": 177633,
-        "max_total_tool_definition_bytes": 212783,
-        "rationale": "Exact live observed #1690 C3 slice C after retiring auto_capability_bundle, capability_ops, skill_evolve, distill_trajectory, and the tachi_skill bundle/loadout/from_pattern actions (any regrowth requires explicit adjudication)."
+      "standard": {
+        "max_total_input_schema_bytes": 56795,
+        "max_total_tool_definition_bytes": 65811,
+        "max_visible_tools": 15,
+        "rationale": "Exact live observed #1691 census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
       }
     },
+    "status": "provisional",
     "surfaces": {
-      "standard.tachi_task": {
+      "admin.tachi_task": {
+        "max_input_schema_bytes": 25735,
         "max_top_level_properties": 65,
-        "max_input_schema_bytes": 24481,
-        "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
-      },
-      "standard.tachi_memory": {
-        "max_top_level_properties": 43,
-        "max_input_schema_bytes": 7736,
-        "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
+        "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
       },
       "standard.tachi_gh": {
-        "max_top_level_properties": 57,
         "max_input_schema_bytes": 11983,
+        "max_top_level_properties": 57,
         "rationale": "Exact live observed #1713 tachi_gh schema after close_loop relocation; zero headroom."
       },
-      "admin.tachi_task": {
+      "standard.tachi_memory": {
+        "max_input_schema_bytes": 7736,
+        "max_top_level_properties": 43,
+        "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
+      },
+      "standard.tachi_task": {
+        "max_input_schema_bytes": 24481,
         "max_top_level_properties": 65,
-        "max_input_schema_bytes": 25735,
-        "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
+        "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
       }
     }
   },
@@ -125,16 +125,6 @@
           "search"
         ]
       },
-      "tachi_orchestrator": {
-        "action_count": 5,
-        "actions": [
-          "handoff_read",
-          "handoff_write",
-          "recovery_briefing",
-          "todo_list",
-          "todo_update"
-        ]
-      },
       "tachi_skill": {
         "action_count": 2,
         "actions": [
@@ -143,8 +133,9 @@
         ]
       },
       "tachi_staff": {
-        "action_count": 2,
+        "action_count": 3,
         "actions": [
+          "cancel",
           "start",
           "status"
         ]
@@ -178,10 +169,11 @@
         ]
       },
       "tachi_verify": {
-        "action_count": 4,
+        "action_count": 5,
         "actions": [
           "board",
           "record",
+          "run",
           "start",
           "status"
         ]
@@ -198,22 +190,19 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 177611,
-        "total_tool_definition_bytes": 212761,
-        "visible_tool_count": 96,
+        "total_input_schema_bytes": 137053,
+        "total_tool_definition_bytes": 167986,
+        "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",
           "capture_session",
           "chain_skills",
-          "check_inbox",
           "compact_context",
           "compact_rollup",
           "compact_session_memory",
           "dlq_list",
           "dlq_retry",
           "extract_facts",
-          "find_similar_memory",
-          "get_memory",
           "get_pipeline_status",
           "hub_call",
           "hub_disconnect",
@@ -231,9 +220,7 @@
           "list_memories",
           "memory_stats",
           "peer_query",
-          "post_card",
           "recall_context",
-          "remember",
           "runtime_info",
           "sandbox_check",
           "sandbox_exec_audit",
@@ -241,17 +228,13 @@
           "sandbox_list_policies",
           "sandbox_set_policy",
           "sandbox_set_rule",
-          "save_memory",
-          "search_memory",
           "section_build",
           "sync_memories",
           "tachi_a2a",
           "tachi_agent_eval",
           "tachi_agents",
           "tachi_audit_log",
-          "tachi_briefing",
           "tachi_browse",
-          "tachi_complete",
           "tachi_component",
           "tachi_domain_adapter",
           "tachi_event",
@@ -259,16 +242,13 @@
           "tachi_handoff",
           "tachi_init_project_db",
           "tachi_memory",
-          "tachi_orchestrator",
           "tachi_research",
           "tachi_sandbox",
-          "tachi_save",
           "tachi_search",
           "tachi_skill",
           "tachi_staff",
           "tachi_status",
           "tachi_task",
-          "tachi_task_brief",
           "tachi_tools",
           "tachi_tune",
           "tachi_unstick",
@@ -279,7 +259,6 @@
           "tachi_wiki_organize",
           "tachi_wiki_search",
           "tachi_wiki_write",
-          "update_card",
           "vault_get",
           "vault_init",
           "vault_lease_api_key",
@@ -296,14 +275,13 @@
           "vc_list",
           "vc_register",
           "vc_resolve",
-          "wiki_lint",
-          "wiki_search"
+          "wiki_lint"
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 123249,
-        "total_tool_definition_bytes": 140348,
-        "visible_tool_count": 36,
+        "total_input_schema_bytes": 91938,
+        "total_tool_definition_bytes": 105428,
+        "visible_tool_count": 29,
         "visible_tools": [
           "extract_facts",
           "hub_discover",
@@ -315,18 +293,12 @@
           "tachi_a2a",
           "tachi_agent_eval",
           "tachi_agents",
-          "tachi_briefing",
           "tachi_browse",
-          "tachi_complete",
-          "tachi_component",
           "tachi_domain_adapter",
-          "tachi_event",
           "tachi_gh",
           "tachi_handoff",
           "tachi_memory",
-          "tachi_orchestrator",
           "tachi_research",
-          "tachi_save",
           "tachi_search",
           "tachi_skill",
           "tachi_staff",
@@ -339,33 +311,30 @@
           "tachi_wiki",
           "tachi_wiki_ingest",
           "tachi_wiki_search",
-          "tachi_wiki_write",
-          "wiki_search"
+          "tachi_wiki_write"
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 60859,
-        "total_tool_definition_bytes": 66339,
-        "visible_tool_count": 12,
+        "total_input_schema_bytes": 38713,
+        "total_tool_definition_bytes": 43273,
+        "visible_tool_count": 10,
         "visible_tools": [
           "peer_query",
           "runtime_info",
           "tachi_a2a",
-          "tachi_browse",
-          "tachi_complete",
-          "tachi_event",
           "tachi_memory",
           "tachi_skill",
           "tachi_task",
           "tachi_tools",
           "tachi_unstick",
-          "tachi_web_search"
+          "tachi_web_search",
+          "tachi_wiki"
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 117785,
-        "total_tool_definition_bytes": 135315,
-        "visible_tool_count": 46,
+        "total_input_schema_bytes": 85511,
+        "total_tool_definition_bytes": 99232,
+        "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -373,7 +342,6 @@
           "compact_rollup",
           "compact_session_memory",
           "extract_facts",
-          "find_similar_memory",
           "get_pipeline_status",
           "hub_call",
           "hub_disconnect",
@@ -388,15 +356,10 @@
           "sync_memories",
           "tachi_a2a",
           "tachi_agent_eval",
-          "tachi_briefing",
           "tachi_browse",
-          "tachi_complete",
-          "tachi_component",
           "tachi_domain_adapter",
-          "tachi_event",
           "tachi_memory",
           "tachi_research",
-          "tachi_save",
           "tachi_search",
           "tachi_skill",
           "tachi_status",
@@ -411,22 +374,19 @@
           "vault_lock",
           "vault_status",
           "vault_unlock",
-          "wiki_lint",
-          "wiki_search"
+          "wiki_lint"
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 59270,
-        "total_tool_definition_bytes": 68922,
-        "visible_tool_count": 17,
+        "total_input_schema_bytes": 56795,
+        "total_tool_definition_bytes": 65811,
+        "visible_tool_count": 15,
         "visible_tools": [
           "peer_query",
           "runtime_info",
           "tachi_a2a",
-          "tachi_briefing",
           "tachi_gh",
           "tachi_memory",
-          "tachi_save",
           "tachi_skill",
           "tachi_status",
           "tachi_task",
@@ -441,20 +401,17 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 96,
+      "tool_count": 82,
       "tools": [
         "archive_memory",
         "capture_session",
         "chain_skills",
-        "check_inbox",
         "compact_context",
         "compact_rollup",
         "compact_session_memory",
         "dlq_list",
         "dlq_retry",
         "extract_facts",
-        "find_similar_memory",
-        "get_memory",
         "get_pipeline_status",
         "hub_call",
         "hub_disconnect",
@@ -472,9 +429,7 @@
         "list_memories",
         "memory_stats",
         "peer_query",
-        "post_card",
         "recall_context",
-        "remember",
         "runtime_info",
         "sandbox_check",
         "sandbox_exec_audit",
@@ -482,17 +437,13 @@
         "sandbox_list_policies",
         "sandbox_set_policy",
         "sandbox_set_rule",
-        "save_memory",
-        "search_memory",
         "section_build",
         "sync_memories",
         "tachi_a2a",
         "tachi_agent_eval",
         "tachi_agents",
         "tachi_audit_log",
-        "tachi_briefing",
         "tachi_browse",
-        "tachi_complete",
         "tachi_component",
         "tachi_domain_adapter",
         "tachi_event",
@@ -500,16 +451,13 @@
         "tachi_handoff",
         "tachi_init_project_db",
         "tachi_memory",
-        "tachi_orchestrator",
         "tachi_research",
         "tachi_sandbox",
-        "tachi_save",
         "tachi_search",
         "tachi_skill",
         "tachi_staff",
         "tachi_status",
         "tachi_task",
-        "tachi_task_brief",
         "tachi_tools",
         "tachi_tune",
         "tachi_unstick",
@@ -520,7 +468,6 @@
         "tachi_wiki_organize",
         "tachi_wiki_search",
         "tachi_wiki_write",
-        "update_card",
         "vault_get",
         "vault_init",
         "vault_lease_api_key",
@@ -537,8 +484,7 @@
         "vc_list",
         "vc_register",
         "vc_resolve",
-        "wiki_lint",
-        "wiki_search"
+        "wiki_lint"
       ]
     },
     "schema_surfaces": {
@@ -572,39 +518,13 @@
               "work_claim_id"
             ]
           },
-          "tachi_orchestrator": {
-            "input_schema_bytes": 1548,
-            "property_count": 21,
-            "property_names": [
-              "action",
-              "agent",
-              "blocked_reason",
-              "commands_run",
-              "completed_steps",
-              "current_state",
-              "files_touched",
-              "issue_ref",
-              "known_blockers",
-              "newest_user_instruction",
-              "next_action",
-              "objective",
-              "parent_todo_id",
-              "references",
-              "remaining_steps",
-              "task_id",
-              "tests_run",
-              "todo_content",
-              "todo_id",
-              "todo_status",
-              "verification"
-            ]
-          },
           "tachi_staff": {
-            "input_schema_bytes": 3418,
-            "property_count": 13,
+            "input_schema_bytes": 3568,
+            "property_count": 14,
             "property_names": [
               "action",
               "dispatch_id",
+              "expected_status_revision",
               "flow_id",
               "format",
               "issue_ref",
@@ -719,39 +639,13 @@
               "work_claim_id"
             ]
           },
-          "tachi_orchestrator": {
-            "input_schema_bytes": 1548,
-            "property_count": 21,
-            "property_names": [
-              "action",
-              "agent",
-              "blocked_reason",
-              "commands_run",
-              "completed_steps",
-              "current_state",
-              "files_touched",
-              "issue_ref",
-              "known_blockers",
-              "newest_user_instruction",
-              "next_action",
-              "objective",
-              "parent_todo_id",
-              "references",
-              "remaining_steps",
-              "task_id",
-              "tests_run",
-              "todo_content",
-              "todo_id",
-              "todo_status",
-              "verification"
-            ]
-          },
           "tachi_staff": {
-            "input_schema_bytes": 3418,
-            "property_count": 13,
+            "input_schema_bytes": 3568,
+            "property_count": 14,
             "property_names": [
               "action",
               "dispatch_id",
+              "expected_status_revision",
               "flow_id",
               "format",
               "issue_ref",
@@ -851,11 +745,6 @@
             "text",
             "ttl_days"
           ]
-        },
-        "tachi_briefing": {
-          "input_schema_bytes": 33,
-          "property_count": 0,
-          "property_names": []
         },
         "tachi_gh": {
           "input_schema_bytes": 11983,
@@ -969,36 +858,8 @@
             "valid_until"
           ]
         },
-        "tachi_save": {
-          "input_schema_bytes": 3583,
-          "property_count": 23,
-          "property_names": [
-            "category",
-            "domain",
-            "entities",
-            "files",
-            "force",
-            "format",
-            "id",
-            "importance",
-            "keywords",
-            "kind",
-            "metadata",
-            "path",
-            "project",
-            "references",
-            "retention_policy",
-            "scope",
-            "source",
-            "summary",
-            "text",
-            "title",
-            "topic",
-            "valid_from",
-            "valid_until"
-          ]
-        },
         "tachi_skill": {
+          "input_schema_bytes": 529,
           "property_count": 7,
           "property_names": [
             "action",
@@ -1008,8 +869,7 @@
             "limit",
             "query",
             "skill_id"
-          ],
-          "input_schema_bytes": 529
+          ]
         },
         "tachi_status": {
           "input_schema_bytes": 621,
@@ -1095,11 +955,12 @@
           "property_names": []
         },
         "tachi_verify": {
-          "input_schema_bytes": 3477,
-          "property_count": 17,
+          "input_schema_bytes": 4608,
+          "property_count": 19,
           "property_names": [
             "action",
             "check_id",
+            "check_kind",
             "checks",
             "command",
             "commands",
@@ -1114,7 +975,8 @@
             "pr_ref",
             "required",
             "status",
-            "summary"
+            "summary",
+            "timeout_secs"
           ]
         },
         "tachi_web_search": {
@@ -1130,7 +992,7 @@
           ]
         },
         "tachi_wiki": {
-          "input_schema_bytes": 2873,
+          "input_schema_bytes": 2883,
           "property_count": 24,
           "property_names": [
             "action",

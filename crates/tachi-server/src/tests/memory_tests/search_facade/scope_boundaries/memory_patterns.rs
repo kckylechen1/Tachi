@@ -438,7 +438,7 @@ async fn tachi_complete_records_pattern_hit_from_evidence_ref() {
         parsed["pipeline"]["pattern_feedback"]["saved_count"],
         json!(1)
     );
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    crate::tests::wait_for_distinct_utc_second().await;
     let replay = server
         .tachi_complete(Parameters(params))
         .await

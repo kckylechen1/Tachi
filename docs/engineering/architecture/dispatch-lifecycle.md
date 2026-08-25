@@ -146,7 +146,7 @@ The load-bearing rule underneath all three: **reviewers never self-fix their own
 
 **Adjudication + merge authority.** Merging is the adjudicator's act, performed *after reading the diff personally*. Implementers open PRs and STOP. Per-goal integration branches (`goal/<issue>`) can bound integration without transferring merge authority; exactly one reviewed PR goes `goal/* → main`. PRs `Refs`/`Related`, never `Closes`, umbrella and no-close issues.
 
-**What gets recorded on complete.** `tachi_task(action="complete")` / `tachi_complete` writes a per-dispatch eval row under `/eval/YYYY-MM-DD/<task_id>` (`category="eval"`, excluded from ordinary recall) — mechanical facts extracted deterministically (test counts, CI conclusion, rework rounds, reviewer OK/CONCERN/BUG tally, wall-clock) plus a judgment distillation (signature classification, per-axis scores, counter-clause proposals) authored by a reasoning seat reading the adjudication trace. This is recorded *even on failure* — a failed dispatch is a labeled training row, not wasted effort. Lore trailers on the merge commit (`Constraint:`, `Rejected:`, `Confidence:`, `Tested:`/`Not-tested:`) are decision records the diff cannot carry.
+**What gets recorded on complete.** `tachi_task(action="complete")` writes a per-dispatch eval row under `/eval/YYYY-MM-DD/<task_id>` (`category="eval"`, excluded from ordinary recall) — mechanical facts extracted deterministically (test counts, CI conclusion, rework rounds, reviewer OK/CONCERN/BUG tally, wall-clock) plus a judgment distillation (signature classification, per-axis scores, counter-clause proposals) authored by a reasoning seat reading the adjudication trace. This is recorded *even on failure* — a failed dispatch is a labeled training row, not wasted effort. Lore trailers on the merge commit (`Constraint:`, `Rejected:`, `Confidence:`, `Tested:`/`Not-tested:`) are decision records the diff cannot carry.
 
 ---
 
@@ -197,7 +197,7 @@ One diagram. Each arrow is annotated **[code]** (exists at HEAD with an anchor i
    incident (a live dispatch failure or success)
         │  [doctrine] leader runs the T2 loop
         ▼
-    adjudication trace  ──[code] tachi_complete writes /eval row──►  eval evidence (SQLite, append-only)
+    adjudication trace  ──[code] tachi_task(action=complete) writes /eval row──►  eval evidence (SQLite, append-only)
          │                                                                    │
          │ [code] distill a typed error_signature                            │ [code] aggregate_live →
          ▼                                                                    ▼  performance matrix (reporting only)
@@ -251,12 +251,12 @@ zeroclaw (the Rust agent runtime behind Quant and RomanBath) adopts this loop by
 - the **signature taxonomy** (the frozen signature ids + counter-clauses + severities).
 
 **(b) Tachi-owned MACHINERY — zeroclaw consumes via the MCP facade, does not reimplement.** Tachi is the control plane for memory, evidence, and projection (host-adapter-lifecycle-v1.md §Intent); zeroclaw is an execution plane that calls in:
-- the **evidence store** (`/eval` append-only rows via `tachi_complete`);
+- the **evidence store** (`/eval` append-only rows via `tachi_task(action="complete")`);
 - the **projection** (card overlay / counter-clause assembly);
 - the **eval ledger + performance matrix** (`aggregate_live`);
 - **recommend** (profile choice consuming the DecisionFactLedger — evidence-backed, abstains without sufficient evidence; see §2.2).
 
-zeroclaw reaches these through the same `tachi_task` / `tachi_skill` / `tachi_complete` facades any host uses — the host-adapter lifecycle hooks (`before_prompt`, `after_session`) are the neutral wiring.
+zeroclaw reaches these through the same `tachi_task` / `tachi_skill` facades any host uses — the host-adapter lifecycle hooks (`before_prompt`, `after_session`) are the neutral wiring.
 
 **(c) What zeroclaw implements NATIVELY.** Its own worker spawning, process transport, sandboxing, and reliability layer (retry / idle-timeout / tool-rejection repair) — the agent-router-spec machinery is Tachi's; zeroclaw has its own equivalents and keeps them. Tachi never spawns zeroclaw's workers.
 

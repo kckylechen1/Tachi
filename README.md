@@ -25,7 +25,7 @@ Tachi is a single-binary, local-first memory and coordination backend for AI age
 - **Persistent memory** with hybrid semantic + lexical + graph retrieval
 - **Hierarchical namespaces** (`/user/preferences`, `/project/architecture`)
 - **Causal graph edges** between memories, entities, and decisions
-- **Domain-tagged storage** — free-text `domain` field on every memory, filterable via `save_memory`/`search_memory`
+- **Domain-tagged storage** — free-text `domain` field on every memory, filterable via `tachi_memory(action="save")`/`tachi_memory(action="search")`
 - **Encrypted local vault** for API keys and secrets
 - **Agent coordination** via handoff, kanban, and pub/sub (Ghost Whispers)
 - **Skill packs and capability hub** — register once, use from any agent
@@ -166,10 +166,11 @@ The server also loads `.env` from the project root automatically. Copy `.env.exa
 These examples show the JSON arguments you would pass to the MCP tools. Facade tools expose the same fields as their underlying native tools; the full schemas live in `crates/tachi-params/src/facade.rs` and its `facade/` submodules.
 
 ```json
-// tachi_save — structured memory
+// tachi_memory(action="save") — structured memory
 {
-  "tool": "tachi_save",
+  "tool": "tachi_memory",
   "arguments": {
+    "action": "save",
     "text": "Frontend must use Vite, never Webpack. Tailwind is allowed.",
     "path": "/project/frontend",
     "importance": 0.8,
@@ -195,7 +196,7 @@ These examples show the JSON arguments you would pass to the MCP tools. Facade t
 {
   "tool": "tachi_task",
   "arguments": {
-    "action": "briefing",
+    "action": "brief",
     "task": "Review the API boundary and identify compatibility risks."
   }
 }
@@ -284,16 +285,16 @@ Memories are stored under `path` namespaces (e.g. `/user/preferences`, `/project
 - **RRF fusion** — reciprocal rank fusion blends all channels, with vector cosine weighted in to reduce rank inversions on highly semantic queries.
 
 ### 3. Causal Graph
-The graph engine creates and traverses causal, temporal, and entity relationships. `save_memory` can automatically link entries sharing entities (`auto_link`). `add_edge` / `get_edges` / `memory_graph` are internal `MemoryStore` primitives — not on the MCP surface (#757); agents reach graph behavior through `tachi_save`/`tachi_memory` auto-linking and recall's graph-spreading-activation channel (§2 above) — there is no standalone graph-traversal action.
+The graph engine creates and traverses causal, temporal, and entity relationships. `tachi_memory(action="save")` can automatically link entries sharing entities (`auto_link`). `add_edge` / `get_edges` / `memory_graph` are internal `MemoryStore` primitives — retired from the MCP surface (#757); agents reach graph behavior through `tachi_memory` auto-linking and recall's graph-spreading-activation channel (§2 above) — there is no standalone graph-traversal action.
 
 ### 4. Domain-Tagged Storage
-Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"personal"`). `save_memory` and `search_memory` can filter by domain. There is no separate domain registry — domains are ad-hoc tags on memory rows, not a configured resource.
+Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"personal"`). `tachi_memory(action="save")` and `tachi_memory(action="search")` can filter by domain. There is no separate domain registry — domains are ad-hoc tags on memory rows, not a configured resource.
 
 ### 5. Encrypted Vault
 Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. `tachi vault exec --require NAME -- <cmd>` runs a child process with Vault-delivered credentials (Vault only fills env names the caller did not already set); by default it refuses to spawn a credential-less child if the Vault is unavailable, and `--allow-unauthenticated` opts back into running with the inherited environment. See [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### 6. Tachi Hub & Skill Packs
-Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `tachi_skill(action="discover"|"run")` is the canonical skill facade; standalone `run_skill` and skill-focused `hub_discover` calls remain compatibility routes for older clients.
+Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `tachi_skill(action="discover"|"run")` is the canonical skill facade; standalone `run_skill` is retired (by #1690/#757); `hub_discover` remains the hub discovery route.
 
 Read-only diagnostics help keep those surfaces aligned:
 
@@ -306,7 +307,7 @@ tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
 
 ### 7. Agent Coordination
 - **Ghost Whispers** — persistent topic-based pub/sub between agents (`ghost_publish`, `ghost_subscribe`, `ghost_ack`, `ghost_reflect`, `ghost_promote`).
-- **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (`post_card`, `check_inbox`, `update_card`).
+- **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (the legacy `post_card`/`check_inbox`/`update_card` routes are retired — kanban is reached through `tachi_task` board actions / internal handlers).
 - **Handoff issue promotion** — create/link a GitHub issue from an existing handoff memo (`tachi_handoff(action='promote_issue')`). #1099: the older `handoff_leave`/`handoff_check` memo-passing routes are retired — use `tachi_a2a(action='respond')` for same-host advisory messaging, or `tachi_task(action='handoff')` for a structured task baton.
 
 > Ghost and Kanban tools are native `admin`-profile surfaces (not bundled into `standard`/`coordinate`). Most agents coordinate through the `tachi_handoff`, `tachi_gh(action='close_loop')`, and `tachi_task` facades instead.
@@ -362,10 +363,10 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 
 | Profile | What is exposed | Best for |
 |---------|-----------------|----------|
-| `standard` | Daily agent-intent surface: `tachi_save`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. `tachi_staff` and manual native-eval intake are adapter/internal surfaces, not ordinary agent tools. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. Ordinary delegation uses the host's native subagent. |
-| `coordinate` | `remember` + `coordinate` bundles: adds `tachi_handoff`, `tachi_agents`, `tachi_gh`, `tachi_staff`, and `tachi_verify`. GitHub closure uses `tachi_gh(action='close_loop')`; `tachi_staff(action='start', task='review the API surface and write findings to result.md', staffing_reason='native_subagent_unavailable')` remains an explicit durable/remote exception, not the default worker launcher. | Advanced coordination and adapter workflows; not a replacement for host-native subagents. |
-| `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters, OpenClaw, ops automation. |
-| `delegate` | Curated worker surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_wiki(action='search'|'browse'|'read')`, `tachi_unstick`, `tachi_task`, `tachi_skill(action='discover'|'run')`, and read-only `peer_query`. | Worker subagents spawned by an explicitly admitted admin dispatch. No recursive dispatch, no handoff, no skill candidate registration. |
+| `standard` | Daily agent-intent surface: `tachi_a2a`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, and `tachi_tools` (`tachi_save`/`tachi_briefing` are retired shorthands). `tachi_staff` and manual native-eval intake are adapter/internal surfaces, not ordinary agent tools. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. Ordinary delegation uses the host's native subagent. |
+| `coordinate` | the coordinate bundle layered on the live `remember` (retired native alias) profile/bundle: adds `tachi_handoff`, `tachi_agents`, `tachi_gh`, `tachi_staff`, and `tachi_verify`. GitHub closure uses `tachi_gh(action='close_loop')`; `tachi_staff(action='start', task='review the API surface and write findings to result.md', staffing_reason='native_subagent_unavailable')` remains an explicit durable/remote exception, not the default worker launcher. | Advanced coordination and adapter workflows; not a replacement for host-native subagents. |
+| `operate` | the operate bundle layered on the live `remember` (retired native alias) profile/bundle: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters, OpenClaw, ops automation. |
+| `delegate` | Curated worker surface: `tachi_a2a`, `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_wiki(action='search'|'browse'|'read')`, `tachi_unstick`, `tachi_task`, `tachi_skill(action='discover'|'run')`, and read-only `peer_query`. | Worker subagents spawned by an explicitly admitted admin dispatch. No recursive dispatch, no handoff, no skill candidate registration. |
 | `admin` | Full catalog, including explicitly justified durable/remote Tachi dispatch. | Maintenance, development, governance, and operator-approved execution exceptions. |
 
 Host aliases are resolved automatically: `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`.

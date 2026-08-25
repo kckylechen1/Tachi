@@ -138,6 +138,7 @@ mod hub_ops;
 mod kanban;
 pub mod kernel_policy_adapter;
 pub mod lesson_forge_ops;
+mod managed_run_control;
 mod manifest;
 mod mcp_connection;
 mod mcp_pool;

@@ -56,7 +56,7 @@ Constants live in `crates/tachi-server/src/session_identity.rs`:
 
 Read allow-list (representative; source of truth is `explicit_project_can_cross_binding`):
 
-- Legacy: `search_memory`, `get_memory`, `list_memories`, `find_similar_memory`, `tachi_search` (`memory_graph` / `get_edges` dropped from this list in #757 — internalized off the MCP surface, so there's no tool call left to cross-binding-check)
+- Retired compatibility reader names: `search_memory`, `get_memory`, and `find_similar_memory`. Live native readers: `list_memories` and `tachi_search`. The retired `memory_graph` / `get_edges` routes were dropped from this list in #757 and internalized off the MCP surface, so there is no tool call left to cross-binding-check.
 - `tachi_memory` actions: `search`, `get`, `ask`, `briefing`, `alerts`, `consolidate`
 - `tachi_wiki`: `browse`, `read`, `search`
 - `tachi_event`: `metrics`, `query`

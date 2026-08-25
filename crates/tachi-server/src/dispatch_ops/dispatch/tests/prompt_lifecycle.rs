@@ -88,7 +88,6 @@ pub(super) fn typed_context() -> (
         harness_server_url: None,
         role: Some("implementer".to_string()),
         tool_profile: Some("typed-tool-profile".to_string()),
-        auto_capability_bundle: true,
         mcp_access: mcp_access(&["profile-mcp"], false),
         required_skills: vec!["typed-skill".to_string()],
         evidence_required: vec!["profile evidence".to_string()],
@@ -96,7 +95,6 @@ pub(super) fn typed_context() -> (
         credential_profiles: Vec::new(),
         route_explanation: vec!["profile route".to_string()],
         host_adapter: None,
-        profile_card: Some(json!({"card": "typed-profile"})),
         identity_receipt: identity,
     };
 
@@ -125,7 +123,6 @@ pub(super) async fn typed_prompt(
         profile,
         effective_skills,
         None,
-        Some(profile.auto_capability_bundle),
         Some("typed context query"),
         true,
     )
@@ -211,11 +208,6 @@ async fn typed_prompt_from_pre_projection_snapshot(
         &profile,
         &skills,
         stage_instruction.as_deref(),
-        assignment
-            .selected_profile
-            .as_ref()
-            .map(|_| profile.auto_capability_bundle)
-            .or(params.auto_capability_bundle),
         params.context_query.as_deref(),
         params.inject_card != Some(false),
     )
@@ -231,16 +223,11 @@ async fn p2_unpoisoned_legacy_adapter_matches_typed_snapshot_then_diverges() {
     legacy.issue_ref = Some("#1817".to_string());
     legacy.pr_ref = Some("#1817".to_string());
     legacy.flow_id = Some("parity-flow".to_string());
-    legacy.auto_capability_bundle = None;
     let snapshot = legacy.clone();
 
     let legacy_baseline = crate::dispatch_ops::assemble_prompt_with_trace(&server, &legacy).await;
     let typed_baseline = typed_prompt_from_pre_projection_snapshot(&server, &snapshot).await;
     assert_eq!(legacy_baseline.prompt, typed_baseline.prompt);
-    assert_eq!(
-        legacy_baseline.capability_bundle,
-        typed_baseline.capability_bundle
-    );
     assert_eq!(
         legacy_baseline.feedback_rules,
         typed_baseline.feedback_rules
@@ -253,10 +240,6 @@ async fn p2_unpoisoned_legacy_adapter_matches_typed_snapshot_then_diverges() {
     assert_ne!(legacy_baseline.prompt, legacy_after.prompt);
     assert!(legacy_after.prompt.contains("legacy-only poisoned task"));
     assert_eq!(typed_baseline.prompt, typed_after.prompt);
-    assert_eq!(
-        typed_baseline.capability_bundle,
-        typed_after.capability_bundle
-    );
     assert_eq!(typed_baseline.feedback_rules, typed_after.feedback_rules);
 }
 
@@ -285,7 +268,6 @@ async fn p2_typed_prompt_contexts_ignore_poisoned_legacy_projection() {
     assert_ne!(baseline.prompt, legacy_after.prompt);
 
     assert_eq!(baseline.prompt, after_poison.prompt);
-    assert_eq!(baseline.capability_bundle, after_poison.capability_bundle);
     assert_eq!(baseline.feedback_rules, after_poison.feedback_rules);
     assert!(baseline.prompt.contains("typed prompt lifecycle task"));
     assert!(baseline.prompt.contains("launch-mcp"));
@@ -347,7 +329,6 @@ async fn p2_typed_prompt_contexts_ignore_poisoned_legacy_projection() {
     private_profile.selected_profile = Some("ignored-private-profile-alias".to_string());
     private_profile.tool_profile = Some("private-mutant-tool-profile".to_string());
     private_profile.mcp_access = mcp_access(&["private-mutant-mcp"], false);
-    private_profile.auto_capability_bundle = false;
     let private_prompt = typed_prompt(
         &server,
         &request,
@@ -365,55 +346,6 @@ async fn p2_typed_prompt_contexts_ignore_poisoned_legacy_projection() {
         .prompt
         .contains("ignored-private-profile-alias"));
     assert_ne!(baseline.prompt, private_prompt.prompt);
-}
-
-#[tokio::test]
-async fn p2_admitted_empty_skills_and_raw_bundle_ingress_stay_distinct() {
-    let server = crate::tests::make_server();
-    let (request, assignment, grant, mut profile, skills) = typed_context();
-    profile.auto_capability_bundle = false;
-
-    // This models the authority compiler admitting none of the explicit or
-    // default candidates. Prompt assembly must consume that empty mount as-is,
-    // rather than resolving the original defaults a second time.
-    let empty_mount = crate::dispatch_ops::assemble_resolved_prompt_with_trace(
-        &server,
-        &request,
-        &assignment,
-        &grant,
-        &profile,
-        &[],
-        Some("exact pre-resolved stage instruction"),
-        None,
-        Some("typed context query"),
-        true,
-    )
-    .await;
-    assert!(!empty_mount.prompt.contains(&skills[0]));
-    assert!(empty_mount
-        .prompt
-        .contains("exact pre-resolved stage instruction"));
-    assert_eq!(empty_mount.capability_bundle["source"], json!("unset"));
-    assert_eq!(empty_mount.capability_bundle["requested_raw"], Value::Null);
-    assert_eq!(empty_mount.capability_bundle["requested"], json!(false));
-
-    // The typed carrier records whether it received an effective capability
-    // decision without serializing a second raw diagnostic projection.
-    let explicit_false = crate::dispatch_ops::assemble_resolved_prompt_with_trace(
-        &server,
-        &request,
-        &assignment,
-        &grant,
-        &profile,
-        &[],
-        None,
-        Some(false),
-        Some("typed context query"),
-        true,
-    )
-    .await;
-    assert_eq!(explicit_false.capability_bundle["source"], json!("params"));
-    assert_eq!(explicit_false.capability_bundle["requested"], json!(false));
 }
 
 #[tokio::test]
@@ -475,8 +407,6 @@ async fn p2_typed_artifacts_keep_receipt_first_and_flow_failure_observable() {
         prompt_md_path: &artifacts.prompt_md_path,
         context_md_path: &artifacts.context_md_path,
         trajectory_path: &artifacts.trajectory_path,
-        capability_bundle_card: &artifacts.capability_bundle_card,
-        capability_bundle_file: &artifacts.capability_bundle_file,
     })
     .await
     .expect("typed kanban initialization");
@@ -495,7 +425,6 @@ fn p2_typed_response_keeps_profile_mcp_and_slim_verbose_shape() {
     let (request, assignment, _grant, profile, _skills) = typed_context();
     let authority = json!({"authority": "typed"});
     let reports = Vec::new();
-    let empty = Value::Null;
     let no_server_url = None;
     let no_backend_metadata = None;
     let profile_payload = json!({"profile": "typed-profile"});
@@ -507,9 +436,7 @@ fn p2_typed_response_keeps_profile_mcp_and_slim_verbose_shape() {
             resolved_profile: &profile,
             authority: &authority,
             credential_reports_json: &reports,
-            capability_bundle_card: &empty,
-            capability_bundle_file: "bundle.json",
-            feedback_rules_trace: &empty,
+            feedback_rules_trace: &Value::Null,
             harness_transport: "cli",
             harness_server_url: &no_server_url,
             execution_backend_name: None,
@@ -554,7 +481,6 @@ fn response_for(
 ) -> String {
     let authority = json!({"authority": "typed"});
     let reports = Vec::new();
-    let empty = Value::Null;
     let no_server_url = None;
     let no_backend_metadata = None;
     let profile_payload = json!({"profile": "typed-profile"});
@@ -565,9 +491,7 @@ fn response_for(
         resolved_profile: profile,
         authority: &authority,
         credential_reports_json: &reports,
-        capability_bundle_card: &empty,
-        capability_bundle_file: "bundle.json",
-        feedback_rules_trace: &empty,
+        feedback_rules_trace: &Value::Null,
         harness_transport: "cli",
         harness_server_url: &no_server_url,
         execution_backend_name: None,
@@ -595,11 +519,11 @@ fn p2_response_slim_and_verbose_serialization_are_exact_goldens() {
 
     assert_eq!(
         slim,
-        r##"{"acp_native":null,"acpx":null,"agent":"codex","authority":{"authority":"typed"},"auto_capability_bundle":true,"capability_bundle":null,"capability_bundle_file":"bundle.json","context_file":"context.md","credentials":[],"dispatch_id":"typed-dispatch","duration_ms_plan":null,"execution_backend":null,"fallback_chain":["typed-fallback"],"feedback_rules":null,"flow_id":"missing-flow","harness_server_url":null,"harness_transport":"cli","host_adapter":null,"issue_ref":"#1817","message":"Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.","plan_file":"plan.md","plan_review_status":"n/a","pr_ref":"#1817","prompt_file":"prompt.md","route_explanation":["typed assignment route"],"run_dir":"run","selected_profile":"typed-profile","state":"TASK_STATE_WORKING","suggested_complete_command":{"arguments":{"action":"complete","agent":"codex","diff_present":null,"dispatch_id":"typed-dispatch","evidence_refs":[],"flow_id":"missing-flow","issue_ref":"#1817","outcome":"success|failure|partial|aborted","pr_ref":"#1817","profile":"typed-profile","task":"typed prompt lifecycle task","tests_run":[]},"tool":"tachi_task"},"task":{"id":"typed-dispatch","status":{"state":"TASK_STATE_WORKING"}},"tool_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"trajectory_file":"trajectory.jsonl","v2":false,"verbose":false}"##
+        r##"{"acp_native":null,"acpx":null,"agent":"codex","authority":{"authority":"typed"},"context_file":"context.md","credentials":[],"dispatch_id":"typed-dispatch","duration_ms_plan":null,"execution_backend":null,"fallback_chain":["typed-fallback"],"feedback_rules":null,"flow_id":"missing-flow","harness_server_url":null,"harness_transport":"cli","host_adapter":null,"issue_ref":"#1817","message":"Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.","plan_file":"plan.md","plan_review_status":"n/a","pr_ref":"#1817","prompt_file":"prompt.md","route_explanation":["typed assignment route"],"run_dir":"run","selected_profile":"typed-profile","state":"TASK_STATE_WORKING","suggested_complete_command":{"arguments":{"action":"complete","agent":"codex","diff_present":null,"dispatch_id":"typed-dispatch","evidence_refs":[],"flow_id":"missing-flow","issue_ref":"#1817","outcome":"success|failure|partial|aborted","pr_ref":"#1817","profile":"typed-profile","task":"typed prompt lifecycle task","tests_run":[]},"tool":"tachi_task"},"task":{"id":"typed-dispatch","status":{"state":"TASK_STATE_WORKING"}},"tool_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"trajectory_file":"trajectory.jsonl","v2":false,"verbose":false}"##
     );
     assert_eq!(
         verbose,
-        r##"{"acp_native":null,"acpx":null,"agent":"codex","authority":{"authority":"typed"},"auto_capability_bundle":true,"capability_bundle":null,"capability_bundle_file":"bundle.json","context_file":"context.md","credentials":[],"dispatch_id":"typed-dispatch","dispatch_profile":{"card":"typed-profile"},"duration_ms_plan":null,"execution_backend":null,"fallback_chain":["typed-fallback"],"feedback_rules":null,"flow_id":"missing-flow","harness_server_url":null,"harness_transport":"cli","host_adapter":null,"identity_receipt":{"planned":"typed"},"issue_ref":"#1817","message":"Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.","plan_file":"plan.md","plan_review_status":"n/a","pr_ref":"#1817","profile":{"profile":"typed-profile"},"prompt_file":"prompt.md","route_explanation":["typed assignment route"],"run_dir":"run","selected_profile":"typed-profile","state":"TASK_STATE_WORKING","suggested_complete_command":{"arguments":{"action":"complete","agent":"codex","diff_present":null,"dispatch_id":"typed-dispatch","evidence_refs":[],"flow_id":"missing-flow","issue_ref":"#1817","outcome":"success|failure|partial|aborted","pr_ref":"#1817","profile":"typed-profile","task":"typed prompt lifecycle task","tests_run":[]},"tool":"tachi_task"},"task":{"id":"typed-dispatch","status":{"state":"TASK_STATE_WORKING"}},"tool_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"trajectory_file":"trajectory.jsonl","v2":false,"verbose":true}"##
+        r##"{"acp_native":null,"acpx":null,"agent":"codex","authority":{"authority":"typed"},"context_file":"context.md","credentials":[],"dispatch_id":"typed-dispatch","duration_ms_plan":null,"execution_backend":null,"fallback_chain":["typed-fallback"],"feedback_rules":null,"flow_id":"missing-flow","harness_server_url":null,"harness_transport":"cli","host_adapter":null,"identity_receipt":{"planned":"typed"},"issue_ref":"#1817","message":"Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.","plan_file":"plan.md","plan_review_status":"n/a","pr_ref":"#1817","profile":{"profile":"typed-profile"},"prompt_file":"prompt.md","route_explanation":["typed assignment route"],"run_dir":"run","selected_profile":"typed-profile","state":"TASK_STATE_WORKING","suggested_complete_command":{"arguments":{"action":"complete","agent":"codex","diff_present":null,"dispatch_id":"typed-dispatch","evidence_refs":[],"flow_id":"missing-flow","issue_ref":"#1817","outcome":"success|failure|partial|aborted","pr_ref":"#1817","profile":"typed-profile","task":"typed prompt lifecycle task","tests_run":[]},"tool":"tachi_task"},"task":{"id":"typed-dispatch","status":{"state":"TASK_STATE_WORKING"}},"tool_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"trajectory_file":"trajectory.jsonl","v2":false,"verbose":true}"##
     );
 }
 
@@ -773,27 +697,13 @@ async fn p2_grant_and_private_profile_prompt_matrix_is_one_owner() {
     assert!(launch.prompt.contains("grant-launch-only"));
     assert!(!launch.prompt.contains("launch-mcp"));
 
-    let mut filtered_profile = profile.clone();
-    filtered_profile.auto_capability_bundle = false;
-    let filtered = typed_prompt(
-        &server,
-        &request,
-        &assignment,
-        &grant,
-        &filtered_profile,
-        &[],
-    )
-    .await;
+    let filtered = typed_prompt(&server, &request, &assignment, &grant, &profile, &[]).await;
     assert!(!filtered.prompt.contains("typed-skill"));
-    assert_eq!(filtered.capability_bundle["requested"], json!(false));
-    assert_eq!(filtered.capability_bundle["source"], json!("params"));
 
     let mut private = profile.clone();
     private.tool_profile = Some("private-tool-only".into());
     private.mcp_access = mcp_access(&["private-profile-mcp-only"], false);
-    private.profile_card = Some(json!({"card": "private-card-only"}));
     private.role = Some("private-profile-role-only".into());
-    private.auto_capability_bundle = false;
     let mut request_stage_only = request.clone();
     request_stage_only.stage = Some("request-stage-only".into());
     let mut selected_model_only = assignment.clone();
@@ -811,15 +721,10 @@ async fn p2_grant_and_private_profile_prompt_matrix_is_one_owner() {
     assert!(private_prompt.prompt.contains("private-tool-only"));
     assert!(private_prompt.prompt.contains("private-profile-mcp-only"));
     assert!(!private_prompt.prompt.contains("typed-tool-profile"));
-    assert_eq!(private_prompt.capability_bundle["requested"], json!(false));
 
     let private_response: Value =
         serde_json::from_str(&response_for(&request, &assignment, &private, true))
             .expect("private response");
-    assert_eq!(
-        private_response["dispatch_profile"],
-        json!({"card": "private-card-only"})
-    );
     assert_eq!(
         private_response["tool_access"]["allowed_mcp_servers"],
         json!(["private-profile-mcp-only"])
@@ -833,8 +738,7 @@ fn normalize_dynamic_bytes(bytes: String, root: &str) -> String {
 #[tokio::test]
 async fn p2_artifact_flow_and_kanban_metadata_are_exact_after_named_normalization() {
     let server = crate::tests::make_server();
-    let (request, assignment, grant, mut profile, skills) = typed_context();
-    profile.auto_capability_bundle = false;
+    let (request, assignment, grant, profile, skills) = typed_context();
     let assembly = typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
     let workspace = tempfile::tempdir().expect("typed lifecycle workspace");
     let trajectory = workspace.path().join("trajectory.jsonl");
@@ -871,42 +775,10 @@ async fn p2_artifact_flow_and_kanban_metadata_are_exact_after_named_normalizatio
         &root,
     );
     let expected_context = format!(
-        "# Dispatch Context: typed-dispatch\n\nAgent: codex\n\nDispatch profile: typed-profile\n\nTool profile: typed-tool-profile\n\nFlow: missing-flow\n\nIssue: #1817\n\nPR: #1817\n\nStage: implementation\n\nV2: false\n\nSkills: [\"typed-skill\"]\n\nCapability bundle: status=disabled requested=false injected=false artifact=<RUN>/capability_bundle.json\n\n\n\n{}",
+        "# Dispatch Context: typed-dispatch\n\nAgent: codex\n\nDispatch profile: typed-profile\n\nTool profile: typed-tool-profile\n\nFlow: missing-flow\n\nIssue: #1817\n\nPR: #1817\n\nStage: implementation\n\nV2: false\n\nSkills: [\"typed-skill\"]\n\n\n\n{}",
         assembly.prompt,
     );
     assert_eq!(context, expected_context);
-
-    let bundle = normalize_dynamic_bytes(
-        std::fs::read_to_string(workspace.path().join("capability_bundle.json"))
-            .expect("bundle bytes"),
-        &root,
-    );
-    assert_eq!(
-        bundle,
-        r#"{
-  "activation_steps": [],
-  "disabled": true,
-  "error": null,
-  "feedback_rules": {
-    "count": 0,
-    "rules": [],
-    "status": "none"
-  },
-  "host": "codex",
-  "host_tools": [],
-  "injected": false,
-  "packs": [],
-  "primary_skill": null,
-  "query": "typed prompt lifecycle task",
-  "rationale": null,
-  "reason": "auto_capability_bundle=false",
-  "requested": false,
-  "section": null,
-  "source": "params",
-  "status": "disabled",
-  "supporting_capabilities": []
-}"#
-    );
 
     init_kanban_and_flow(FlowSetupInputs {
         server: &server,
@@ -920,8 +792,6 @@ async fn p2_artifact_flow_and_kanban_metadata_are_exact_after_named_normalizatio
         prompt_md_path: &artifacts.prompt_md_path,
         context_md_path: &artifacts.context_md_path,
         trajectory_path: &artifacts.trajectory_path,
-        capability_bundle_card: &artifacts.capability_bundle_card,
-        capability_bundle_file: &artifacts.capability_bundle_file,
     })
     .await
     .expect("board-first initialization");
@@ -955,7 +825,7 @@ async fn p2_artifact_flow_and_kanban_metadata_are_exact_after_named_normalizatio
     assert_eq!(
         events,
         r##"{"dispatch_id":"typed-dispatch","event":"dispatch_received","timestamp":"FIXED"}
-{"agent":"codex","allowed_mcp_servers":["launch-mcp"],"auto_capability_bundle":false,"capability_bundle":{"artifact_file":"<RUN>/capability_bundle.json","disabled":true,"error":null,"host":"codex","host_tools_count":0,"injected":false,"packs_count":0,"primary_skill":null,"query":"typed prompt lifecycle task","reason":"auto_capability_bundle=false","requested":false,"source":"params","status":"disabled","supporting_capabilities_count":0},"dispatch_id":"typed-dispatch","event":"dispatch_started","feedback_rules":{"count":0,"rules":[],"status":"none"},"flow_id":"missing-flow","issue_ref":"#1817","mcp_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"pr_ref":"#1817","profile":"typed-profile","stage":"implementation","timestamp":"<TIMESTAMP>","tool_profile":"typed-tool-profile","v2":false}
+{"agent":"codex","allowed_mcp_servers":["launch-mcp"],"dispatch_id":"typed-dispatch","event":"dispatch_started","feedback_rules":{"count":0,"rules":[],"status":"none"},"flow_id":"missing-flow","issue_ref":"#1817","mcp_access":{"allowed_facades":["typed-facade"],"allowed_mcp_servers":["profile-mcp"],"fallback":"typed-fallback","github_read":true,"inject_hub_mcps":false,"inject_tachi_mcp":false,"issue_refs":["#1817"],"pr_refs":["#1817"],"write_actions":false},"pr_ref":"#1817","profile":"typed-profile","stage":"implementation","timestamp":"<TIMESTAMP>","tool_profile":"typed-tool-profile","v2":false}
 {"dispatch_id":"typed-dispatch","error":"Invalid flow_id: 'missing-flow'. Expected a safe id starting with 'flow_' and containing only ASCII letters, numbers, '_' or '-'. Example: flow_20260609T014037Z_tachi_dispatch_ux_smoke","event":"flow_dispatch_marker_failed","flow_id":"missing-flow","timestamp":"<TIMESTAMP>"}"##
     );
 }
@@ -1062,8 +932,7 @@ async fn p2_real_plan_stage_matrix_is_board_first_and_receipt_bound() {
         };
         crate::dispatch_ops::dispatch_v2::set_plan_stage_test_override(case.planner.clone());
         let server = crate::tests::make_server();
-        let (request, assignment, grant, mut profile, skills) = typed_context();
-        profile.auto_capability_bundle = false;
+        let (request, assignment, grant, profile, skills) = typed_context();
         let assembly =
             typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
         let workspace = tempfile::tempdir().expect(case.name);
@@ -1093,8 +962,6 @@ async fn p2_real_plan_stage_matrix_is_board_first_and_receipt_bound() {
             prompt_md_path: &artifacts.prompt_md_path,
             context_md_path: &artifacts.context_md_path,
             trajectory_path: &artifacts.trajectory_path,
-            capability_bundle_card: &artifacts.capability_bundle_card,
-            capability_bundle_file: &artifacts.capability_bundle_file,
         })
         .await
         .expect(case.name);
@@ -1121,8 +988,6 @@ async fn p2_real_plan_stage_matrix_is_board_first_and_receipt_bound() {
                 context_md_path: &artifacts.context_md_path,
                 trajectory_path: &artifacts.trajectory_path,
                 workspace_dir: workspace.path(),
-                capability_bundle_card: &artifacts.capability_bundle_card,
-                capability_bundle_file: &artifacts.capability_bundle_file,
                 feedback_rules_trace: &artifacts.feedback_rules_trace,
                 v2_decision: if case.v2 {
                     crate::dispatch_ops::dispatch_v2::V2Decision::Enabled
@@ -1193,10 +1058,9 @@ async fn p2_flow_card_preserves_assignment_evidence_without_legacy_projection() 
     let run_root = tempfile::tempdir().expect("flow root");
     let _run_root = EnvRestore::set_path("TACHI_RUN_ROOT", run_root.path());
     let server = crate::tests::make_server();
-    let (mut request, mut assignment, grant, mut profile, skills) = typed_context();
+    let (mut request, mut assignment, grant, profile, skills) = typed_context();
     request.flow_id = Some("flow_20260822T000000Z_prompt_evidence".into());
     assignment.evidence_required = vec!["evidence-only-a".into(), "evidence-only-b".into()];
-    profile.auto_capability_bundle = false;
     let assembly = typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
     let workspace = tempfile::tempdir().expect("workspace");
     let artifacts = write_dispatch_artifacts(DispatchArtifactInputs {
@@ -1225,8 +1089,6 @@ async fn p2_flow_card_preserves_assignment_evidence_without_legacy_projection() 
         prompt_md_path: &artifacts.prompt_md_path,
         context_md_path: &artifacts.context_md_path,
         trajectory_path: &artifacts.trajectory_path,
-        capability_bundle_card: &artifacts.capability_bundle_card,
-        capability_bundle_file: &artifacts.capability_bundle_file,
     })
     .await
     .expect("flow marker");
@@ -1272,7 +1134,6 @@ async fn p2_model_and_private_role_select_the_matching_vaccination_overlay() {
     assignment.selected_backend.clear();
     profile.agent.clear();
     profile.role = Some("implementer".into());
-    profile.auto_capability_bundle = false;
     assignment.selected_model = Some("gpt-5.6-terra".into());
     let codex = typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
     assignment.selected_model = Some("claude-4".into());

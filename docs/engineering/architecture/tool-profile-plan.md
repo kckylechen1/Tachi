@@ -29,12 +29,12 @@ The target split is:
 2. Runtime hooks stay explicit.
    - `recall_context`, `capture_session`, and later `compact_context` are runtime/adapter APIs, not part of the ordinary IDE default
 3. Capability selection is **retired as a first-class layer** (#1690 C3 delete list: "skill recommendation and auto-selection").
-   - `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `skill_evolve` are deleted end-to-end — the router rejects them as unknown tools
+   - These APIs are retired and deleted end-to-end: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `skill_evolve`; the router rejects them as unknown tools
    - `tachi_skill(action="discover"|"run")` is the canonical skill workflow; `bundle`/`loadout`/`from_pattern` actions are retired
-   - a dispatch's skills resolve ONLY from the explicit `skills` param plus the profile's STATIC reviewed skill list; `tachi_dispatch(action='recommend')` is the surviving deterministic recommendation surface (DecisionFactLedger-fed, abstains on no evidence)
+   - a dispatch's skills resolve only from the explicit `skills` parameter plus the profile's static reviewed skill list; internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when no usable evidence exists
    - raw hub / pack / vc governance tools should not leak into ordinary agent surfaces
 4. Workflow tools are not kernel primitives.
-   - `ghost_*`, `post_card`, `check_inbox`, `update_card`, proposal review/project tools stay hidden unless a host or profile explicitly asks for them
+   - `ghost_*` stays hidden; all retired routes — `post_card`, `check_inbox`, `update_card`, and the proposal review/project routes — cannot be revived by selecting a host or profile
 5. Filtering must only reduce exposure.
    - Effective surface is the intersection of:
      - built-in surface bundle selection
@@ -51,18 +51,18 @@ The target split is:
 `Tachi` now understands additive surface bundles instead of mutually exclusive profiles:
 
 - `observe`
-  - capability recommendation
+  - static reviewed skill discovery
   - read-only memory and graph inspection
-- `remember`
+- `remember` (live additive profile/bundle; distinct from the retired native `remember` tool alias)
   - `observe` +
-  - `save_memory`
+  - `save_memory` (retired name; canonical `tachi_memory(action="save")`)
   - `extract_facts`
-  - `tachi_skill(action="run")`; standalone `run_skill` remains for compatibility
+  - `tachi_skill(action="run")`; standalone `run_skill` is retired by #1690
 - `coordinate`
-  - `remember` +
+  - `remember` (not retired; live profile) +
   - kanban / ghost / handoff collaboration tools
 - `operate`
-  - `remember` +
+  - `remember` (not retired; live profile) +
   - runtime hook primitives (`recall_context`, `capture_session`, `compact_*`, `section_build`)
   - routed execution helpers (`hub_call`, `hub_disconnect`, `archive_memory`, `find_similar_memory`, `get_pipeline_status`, `sync_memories`, `wiki_lint`, `vault_unlock`/`vault_lock`/`vault_status`) — the proposal queue/review/project tools and `agent_register` this bundle used to route were retired under #757, superseded by the memory-line promotion path (#950, #534)
 - `admin`
@@ -71,7 +71,7 @@ The target split is:
 There are also two curated minimal profiles for common hosts:
 
 - `standard` — default for IDE agents. Intersects the bundles with a daily agent-intent surface. `tachi_task(action='dispatch')` is removed from its advertised schema and denied at call time; ordinary delegation uses the host harness's native subagent. `tachi_arena` and `tachi_agent_eval` are no longer standard tools because mission persistence and native lifecycle/eval intake belong to internal/adapter surfaces. `tachi_web_search` remains because some hosts lack native search. The canonical list is `STANDARD_MINIMAL_TOOL_PATTERNS` in `crates/tachi-hub/src/tool_profiles/patterns.rs`.
-- `delegate` — for worker subagents spawned via the explicitly admitted staffing surface `tachi_staff(action='start')`. An 11-tool surface with no recursive dispatch and no handoff.
+- `delegate` — for worker subagents spawned via the explicitly admitted staffing surface `tachi_staff(action='start')`. Its canonical source-owned surface has no recursive dispatch and no handoff.
 
 Selection paths:
 
@@ -97,7 +97,7 @@ The OpenClaw plugin now keeps its default Tachi-facing model tool surface focuse
 - `memory_save`
 - `memory_get`
 
-`memory_graph` was dropped from the plugin's registered tools (and from the
+`memory_graph` was dropped (retired) from the plugin's registered tools (and from the
 Tachi MCP surface entirely — internalized in #757; the underlying graph
 engine remains, just not tool-callable).
 
@@ -141,9 +141,7 @@ Today this is a typed MCP/runtime primitive, not an OpenClaw hook integration ye
 
 The first-pass capability layer — `recommend_capability`, `recommend_skill`, `recommend_toolchain` — was **deleted end-to-end** in #1690 C3 (the "second model brain" tool family; the router rejects these tools as unknown).
 
-Historical behavior (deterministic ranking over Hub capabilities, visibility/callability aware, host-aware scoring, Pack/projection-aware toolchain suggestions, simple host-tool inference) is kept for record only. The surviving recommendation surface is `tachi_dispatch(action='recommend')`: deterministic dispatch-profile recommendation from the DecisionFactLedger, abstaining when no usable evidence exists.
-
-OpenClaw does not expose these directly to the model yet. They are part of the kernel surface for direct MCP hosts and future adapter orchestration.
+Historical behavior (deterministic ranking over Hub capabilities, visibility/callability-aware and host-aware scoring, Pack/projection-aware toolchain suggestions, and host-tool inference) is kept for record only. The surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when no usable evidence exists.
 
 ## Why This Split
 
@@ -151,7 +149,7 @@ This keeps the model-facing surface small while preserving a rich kernel for:
 
 - OpenClaw hooks
 - IDE integrations
-- capability recommendation and bundle preparation
+- static reviewed skill discovery and enforcement
 - section / compaction artifacts
 - operator and workflow tooling
 

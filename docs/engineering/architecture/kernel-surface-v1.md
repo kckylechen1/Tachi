@@ -43,7 +43,7 @@ Examples:
 - `memory_search`
 - `memory_save`
 - `memory_get`
-- `memory_graph`
+- `memory_graph`(已退役)
 - `section.build`
 - `compact.rollup`
 - `compact.session_memory`
@@ -98,7 +98,8 @@ remain proposed unless a later issue adds executable emission and projection
 tests for them.
 
 This boundary is deliberately smaller than Tachi's full MCP surface. A consumer
-that only wants memory should not need `tachi_gh`, `tachi_task` dispatch,
+that only wants memory should not need `tachi_gh`, the retired `tachi_task`
+dispatch action,
 `ship`, release notes, or GitHub PR lifecycle actions.
 
 ### Memory Ontology
@@ -126,9 +127,9 @@ This layer was the “librarian brain” — **retired by #1690 C3** (delete lis
 - which toolchain has worked before → no longer machine-scored (retired with the MBIT/evolution machinery)
 - which pack or extension should be activated → capability bundles are retired
 
-Retired APIs (rejected by the router as unknown tools): `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, `skill_evolve`.
+These APIs are retired and rejected by the router as unknown tools: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, `skill_evolve`.
 
-Surviving recommendation surface: `tachi_dispatch(action='recommend')` — deterministic dispatch-profile recommendation from the DecisionFactLedger; the no-evidence path abstains.
+The public `tachi_dispatch(action='recommend')` surface is retired. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
 
 This layer never executed the host's tools directly; nothing in the surviving kernel executes them either — the host owns execution.
 
@@ -237,32 +238,32 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 
 ### `observe`
 
-- `search_memory`
-- `tachi_memory(action="get")`; native `get_memory` is admin/backcompat only
+- `search_memory` (retired name; canonical `tachi_memory(action="search")`)
+- `tachi_memory(action="get")`; native `get_memory` is retired (not routable at all)
 - `list_memories`
 - `memory_stats`
 
 *(`recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `tachi_skill(action="bundle")` / `prepare_capability_bundle` were dropped from `observe` in #1690 C3 — the "second model brain" recommend family and capability-bundle assembly are deleted end-to-end, not just removed from this bundle.)*
 
-(`memory_graph` / `get_edges` were dropped from `observe` in #757 — internalized
+(`memory_graph` / `get_edges` were dropped (retired) from `observe` in #757 — internalized
 off the MCP surface entirely, not just this bundle.)
 
-### `remember`
+### `remember` (live profile/bundle; native `remember` tool alias retired)
 
 - `observe` +
-- `save_memory`
+- `save_memory` (retired name; canonical `tachi_memory(action="save")`)
 - `extract_facts`
-- `tachi_skill(action="run")`; native `run_skill` is backcompat only
+- `tachi_skill(action="run")`; native `run_skill` is retired by #1690
 
 ### `coordinate`
 
-- `remember` +
+- live `remember` profile/bundle (native `remember` tool alias retired) +
 - `ghost_*`
 - kanban / delegation / handoff
 
 ### `operate`
 
-- `remember` +
+- live `remember` profile/bundle (native `remember` tool alias retired) +
 - `recall_context`
 - `capture_session`
 - `compact_context`

@@ -78,7 +78,7 @@ So the spec's job is **codifying prose/cross-domain patterns into one canonical 
   lower ACT-R decay than raw/consolidated memories.
 - **Weight:** projection metadata currently stores `seen / hit / miss / confidence /
   last_seen`. Explicit feedback updates counters; pattern search records `seen`;
-  `tachi_complete` can consume `pattern:<id>` evidence refs; `close_loop` records
+  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; `tachi_gh(action="close_loop")` records
   reviewed attached patterns as `hit`. Briefing/context runtime still does not decide
   hit/miss automatically.
 - **Recall:** existing hybrid search supports pattern scope. Session-start preload is
@@ -91,7 +91,7 @@ discovered, defended, revised, and externally validated. Timeline memory answers
 "why is this conclusion trustworthy?" rather than "what did we discuss on which day?".
 - **Evolution chain:** append-only `tachi_events` plus `ProjectionKind::Timeline`
   projections exist. Explicit causal edges with existing memory-id endpoints persist
-  through `add_edge`; natural-language endpoint resolution remains a target.
+  through `add_edge` (retired/internalized, not MCP-facing); natural-language endpoint resolution remains a target.
 - **Generation:** `capture_session` emits `session.captured`; the optional continuity
   pipeline can emit candidates and `session.outcome`. Context output now carries a
   `TimelineEntry` schema marker and typed metadata; enforced Rust validation is still
@@ -267,7 +267,7 @@ machinery gets exercised on validated signals while the conversation labeler cal
 in parallel. Four wiring leaves (all substrate exists; issues open at dispatch time):
 
 - **Leaf A — outcome wiring:** review REFUTED → `miss` on attached patterns;
-  merged + dogfooded → `hit`. Rails half-exist: `tachi_complete` consumes
+  merged + dogfooded → `hit`. Rails half-exist: `tachi_task(action="complete")` consumes
   `pattern:<id>` evidence refs; `close_loop` records reviewed hits. Extend the ship
   pipeline (#516 P2) to attach pattern refs so every ship feeds counters automatically.
 - **Leaf B — capture sources:** emit `tachi_event` candidates at the three outcome-
@@ -292,7 +292,7 @@ Implemented substrate:
 - `tachi_status` surfaces read-only continuity metrics, including `challenge_rate`.
 - `capture_session` emits a raw `session.captured` event and can optionally run a
   disabled-by-default continuity pipeline with `TACHI_CONTINUITY_PIPELINE=1`.
-- `tachi_complete` bridges the existing subagent eval path into `task.outcome` and
+- `tachi_task(action="complete")` bridges the existing subagent eval path into `task.outcome` and
   `subagent.evaluated` events while keeping the eval ledger as the source of truth.
 - The optional distill lane produces candidate `timeline` / `worldbook` projections
   with `CollectOnly` authority. The optional reasoning lane produces a read-only
@@ -329,7 +329,7 @@ Implemented substrate:
   `target_event_id` or `session_id`.
 - A held-out label-eval smoke fixture exercises that harness before `challenge_rate`
   is treated as an over-fit signal.
-- `save_memory` can opt into `memory.saved` events with `emit_continuity=true`.
+- the internal save path (the retired standalone `save_memory`) can opt into `memory.saved` events with `emit_continuity=true`; the public `tachi_memory(action="save")` facade intentionally does not expose that knob.
 - `tachi_search scope="patterns"` searches projected `/user/patterns` rows without
   mixing them into ordinary memory recall.
 - `tachi_wiki_write include_patterns=true` persists reviewed `pattern_refs` and emits
@@ -343,7 +343,7 @@ Implemented substrate:
   include external-validation / cold-seat-review gate status.
 - The daemon runs a background continuity projection loop. Projection reports expose
   `projected_count`, `skipped_count`, `promotion_candidate_count`, and review
-  artifacts for wiki drafts, skill candidates, and agent-profile proposals.
+  artifacts for wiki drafts and agent-profile proposals.
 
 Still missing:
 
@@ -357,7 +357,7 @@ Still missing:
 - Label-quality calibration is not complete; the harness and smoke fixture exist, but
   it still needs a larger reviewed held-out corpus.
 - Runtime recall feedback is partial: pattern search and context emit `seen`, supplied
-  callbacks update counters, `tachi_complete` consumes `pattern:<id>` evidence refs,
+  callbacks update counters, `tachi_task(action="complete")` consumes `pattern:<id>` evidence refs,
   and `close_loop` records reviewed attached patterns as `hit`; ordinary briefing use
   and outcome-backed automatic hit/miss classification are still missing.
 - ~~The `miss` counter is stored but inert on read~~ — LANDED 2026-07-05 (`25b484b`):

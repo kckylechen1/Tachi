@@ -17,10 +17,6 @@ use crate::copilot_ops::{
 use crate::event_ops::handle_tachi_event;
 use crate::gh_ops::handle_tachi_gh;
 use crate::hub_ops::{handle_hub_discover, handle_run_skill};
-use crate::kanban::{
-    handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
-    UpdateCardParams,
-};
 use crate::tool_params::*;
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{

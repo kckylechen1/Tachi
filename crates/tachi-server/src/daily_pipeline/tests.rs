@@ -1378,68 +1378,27 @@ async fn concurrent_publishers_commit_distinct_bound_generations() {
     assert!(latest.ends_with("2026-08-06.r2.md"), "latest={latest}");
 }
 
-#[tokio::test]
-async fn skill_evolution_excludes_retired_global_and_project_tombstones() {
-    let (server, _project_db) =
-        crate::tests::make_server_with_project_fixture("retired-trajectory-evolution");
-    let mut global = memcore::HubCapability {
-        id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
-        cap_type: "skill".to_string(),
-        name: "trajectory-distiller".to_string(),
-        version: 1,
-        description: "Historical global trajectory writer omitted from evolution".to_string(),
-        definition: serde_json::json!({
-            "prompt": "Run historical trajectory distiller",
-            "content": "Historical retired skill",
-            "policy": { "visibility": "listed" }
-        })
-        .to_string(),
-        enabled: true,
-        review_status: "approved".to_string(),
-        health_status: "healthy".to_string(),
-        last_error: None,
-        last_success_at: None,
-        last_failure_at: None,
-        fail_streak: 0,
-        active_version: None,
-        exposure_mode: "direct".to_string(),
-        uses: 0,
-        successes: 0,
-        failures: 0,
-        avg_rating: 0.0,
-        last_used: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-    global.health_status = "unhealthy".to_string();
-    global.fail_streak = 99;
-    let mut project = global.clone();
-    project.description = "Historical project trajectory writer omitted from evolution".to_string();
-    server
-        .with_global_store(|store| {
-            store
-                .hub_register(&global)
-                .map_err(|error| error.to_string())
-        })
-        .expect("inject retired global evolution row");
-    server
-        .with_project_store(|store| {
-            store
-                .hub_register(&project)
-                .map_err(|error| error.to_string())
-        })
-        .expect("inject retired project evolution row");
-
-    let report = run_skill_evolution_stage(&server).await;
-    let output = serde_json::to_string(&report.details).expect("evolution details JSON");
-    assert!(
-        !output.contains(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID),
-        "retired tombstone must not appear in evolution output: {output}"
-    );
-    assert!(
-        !report
-            .summary
-            .contains(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID),
-        "retired tombstone must not appear in evolution summary"
-    );
+#[test]
+fn skill_evolution_stage_and_retired_tombstone_stay_absent() {
+    for (name, source) in [
+        ("daily_pipeline.rs", include_str!("../daily_pipeline.rs")),
+        ("daily_pipeline/health.rs", include_str!("health.rs")),
+        (
+            "daily_pipeline/maintenance.rs",
+            include_str!("maintenance.rs"),
+        ),
+        ("daily_pipeline/report.rs", include_str!("report.rs")),
+        ("daily_pipeline/routing.rs", include_str!("routing.rs")),
+        ("daily_pipeline/schedule.rs", include_str!("schedule.rs")),
+        ("daily_pipeline/types.rs", include_str!("types.rs")),
+    ] {
+        assert!(
+            !source.contains("run_skill_evolution_stage"),
+            "retired skill-evolution stage must stay absent from {name}"
+        );
+        assert!(
+            !source.contains("RETIRED_TRAJECTORY_DISTILLER_ID"),
+            "retired trajectory tombstone must stay absent from {name}"
+        );
+    }
 }

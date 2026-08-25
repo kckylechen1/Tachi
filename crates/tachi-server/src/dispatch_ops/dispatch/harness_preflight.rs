@@ -135,7 +135,6 @@ mod tests {
         let private_url = None;
         let private_env = HashMap::new();
         let private_metadata = None;
-        let private_bundle = Value::Null;
         let err = run_harness_preflight(HarnessPreflightInputs {
             server: &server,
             harness_transport: "opencode_serve",
@@ -155,7 +154,6 @@ mod tests {
             execution_backend_metadata: &private_metadata,
             acpx_enabled: false,
             native_acp_enabled: false,
-            capability_bundle_card: &private_bundle,
             timeout_secs_for_status: 5,
         })
         .expect_err("missing private harness URL must fail the typed preflight branch");

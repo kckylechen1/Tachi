@@ -231,7 +231,7 @@ still unverified.
 
 #### Existing partial and missing product wire
 
-`tachi_task_brief` already accepts a natural-language task and returns memory/wiki
+`tachi_task(action="brief")` accepts a natural-language task and returns memory/wiki
 hits, a coarse intent, SOPs, tool plan, skills, and routing suggestions. This is
 an input-side machine brief, not yet the full contract above. Missing pieces are:
 
@@ -267,7 +267,7 @@ Timeline memory stores the **credibility history** of a judgment or pattern. It 
 The timeline is an evolution chain: discovered → defended → revised → externally validated. Each transition is a causal edge with temporal validity. The depth of adversarial testing and external verification is itself evidence for the conclusion's reliability.
 
 Current storage: append-only `tachi_events` plus `ProjectionKind::Timeline` projections under `/timeline/<domain>/<hash>`. The projector preserves a first typed metadata slice at `metadata.timeline`: `discoveries`, `decisions`, `open_threads`, `evolution`, `causal_edges`, `external_validations`, and temporal validity fields.
-Current surface: `tachi_event action=context` returns a dedicated `timeline[]` read-model section with a `TimelineEntry` schema marker when timeline projections are available. Explicit causal edges with existing memory-id endpoints persist through `add_edge`; natural-language endpoint resolution and fully enforced Rust `TimelineEntry` / `JudgmentEvolution` validation remain design targets.
+Current surface: `tachi_event action=context` returns a dedicated `timeline[]` read-model section with a `TimelineEntry` schema marker when timeline projections are available. Explicit causal edges with existing memory-id endpoints persist through `add_edge` (retired/internalized, not MCP-facing); natural-language endpoint resolution and fully enforced Rust `TimelineEntry` / `JudgmentEvolution` validation remain design targets.
 
 ### 2.3 Bonding layer — shared communication protocol
 
@@ -304,9 +304,9 @@ Pattern memory is already stored in the memory DB under `/user/patterns/*`. It u
 Ordinary memory recall excludes `/user/patterns/`, `/user/affect/`, `/timeline/`, `/lorebook/`, and other continuity projection rows by default, while `tachi_search scope="patterns"` reads projected pattern rows explicitly.
 
 Integration direction:
-- Ordinary public save facades do not emit `memory.saved`; admitted internal callers can opt into the internal `save_memory` continuity event path.
+- Ordinary public save facades do not emit `memory.saved`; admitted internal callers can opt into the internal save path (the retired standalone `save_memory`'s crate-internal route; the public `tachi_memory(action="save")` facade intentionally does not expose continuity emission).
 - The distill lane can consume `memory.saved` events to discover or update patterns.
-- Internal completion and workflow-closure pattern use is recorded through a crate-private append-only evidence seam. Each admitted event carries a real flow id, a source revision, an evidence digest, the exact pattern id, the `seen` / `hit` / `miss` / `stale` outcome, and a deterministic idempotency key. The fixed `tachi.pattern_evidence.v1` adapter writes `CollectOnly` + `EffectScope::None` events with no projection hints, so these receipts never project, promote, or update pattern counters. `tachi_complete` and `close_loop` are admitted only with a non-empty flow id from their owning operational path. A missing identity is a typed skip, never a query/domain/comment fallback. The model-facing `tachi_search scope="patterns"` and `tachi_event action=context` surfaces remain read-only even when a caller supplies session text. There is no model-facing pattern-feedback workflow. Concrete instance memories under `/memory/instances/<pattern_id>/` are still a target.
+- Internal completion and workflow-closure pattern use is recorded through a crate-private append-only evidence seam. Each admitted event carries a real flow id, a source revision, an evidence digest, the exact pattern id, the `seen` / `hit` / `miss` / `stale` outcome, and a deterministic idempotency key. The fixed `tachi.pattern_evidence.v1` adapter writes `CollectOnly` + `EffectScope::None` events with no projection hints, so these receipts never project, promote, or update pattern counters. `tachi_task(action="complete")` and `tachi_gh(action="close_loop")` are admitted only with a non-empty flow id from their owning operational path. A missing identity is a typed skip, never a query/domain/comment fallback. The model-facing `tachi_search scope="patterns"` and `tachi_event action=context` surfaces remain read-only even when a caller supplies session text. There is no model-facing pattern-feedback workflow. Concrete instance memories under `/memory/instances/<pattern_id>/` are still a target.
 
 ### 3.2 Wiki — pattern promotion path
 
@@ -330,7 +330,7 @@ Skill **was** the executable crystallization of patterns; that crystallization l
 The two integration modes once planned here are both retired:
 
 1. **Recommendation signal** (low risk): **RETIRED by #1690 C3** — `recommend_skill` is deleted; no skill matching consumes pattern context.
-2. **Skill generation** (higher risk): **RETIRED by #1690 C3** — `tachi_skill(action="from_pattern")` is deleted; patterns never mint skill candidates. Mature patterns promote to reviewed wiki/runbook artifacts only.
+2. **Skill generation** (higher risk): `tachi_skill(action="from_pattern")` is **RETIRED by #1690 C3**; patterns never mint skill candidates. Mature patterns promote to reviewed wiki/runbook artifacts only.
 
 This mirrors the Karpathy LLM Wiki flow:
 
@@ -346,7 +346,7 @@ Notes / memory / session → /user/patterns/* → /wiki/drafts/patterns/* → re
 
 ### 3.4 Eval — the credibility loop
 
-Eval records (`/eval/...`) and `tachi_complete` outcomes feed the continuity ledger. `session.outcome` labels are the conversation-domain substitute for quant's `fwd_return`.
+Eval records (`/eval/...`) and `tachi_task(action="complete")` outcomes feed the continuity ledger. `session.outcome` labels are the conversation-domain substitute for quant's `fwd_return`.
 
 `challenge_rate = ai_corrected / eligible_outcomes` is surfaced in `tachi_status`. Label-quality calibration (`tachi_event action=label_eval`) must pass before the over-fit brake can be trusted.
 
@@ -422,10 +422,10 @@ Next session start / explicit context request
 Implemented integration slice:
 
 ```
-save_memory emit_continuity=true → memory.saved event
+internal save path (the retired standalone `save_memory`, now the crate-internal save route) with emit_continuity=true → memory.saved event — note: the public `tachi_memory(action="save")` facade intentionally does NOT expose emit_continuity
 tachi_search scope=patterns      → explicit read-only /user/patterns recall
 tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
-tachi_skill action=discover|run  → static reviewed skill surface only (from_pattern is deleted by #1690 C3; no skill candidate is ever minted from a pattern)
+tachi_skill action=discover|run  → static reviewed skill surface only (the retired from_pattern action was deleted by #1690 C3; no skill candidate is ever minted from a pattern)
 tachi_event action=promote       → wiki draft + agent-profile proposal review artifacts (the disabled skill-candidate artifact is retired by #1690 C3)
 tachi_domain_adapter lorebook_import → repo lorebook shape → world_book events
 tachi_event action=context       → read-only local context bundle; caller session text is not evidence admission
@@ -484,7 +484,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `tachi-server` `tachi_event` facade with eight actions: `emit`, `query`, `metrics`, `project`, `promote`, `context`, `a2a`, `label_eval`.
 - `tachi_status` surfaces `challenge_rate` as a read-only continuity metric.
 - `capture_session` emits `session.captured`; optional continuity pipeline emits candidates and `session.outcome`.
-- `tachi_complete` bridges subagent eval into `task.outcome` / `subagent.evaluated` events.
+- `tachi_task(action="complete")` bridges subagent eval into `task.outcome` / `subagent.evaluated` events.
 - `tachi_event action=project` idempotently materializes events into stable projections.
 - `tachi_event action=context` returns projected memories plus `patterns`, `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, local `a2a`, and `host_lifecycle` read-model sections. It is read-only and never treats its model-supplied `session_id` as internal evidence admission.
 - Pattern/bonding projections retain their legacy `seen / hit / miss / confidence / last_seen` fields for historical readability. New admitted internal pattern-evidence receipts do not update those counters or grant projection/promotion authority.
@@ -494,7 +494,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - Affect projections carry explicit guardrails plus local rule-based signals for language switches, known markers, input/output length, and IO ratio.
 - `tachi_event action=label_eval` provides a label-quality harness.
 - A held-out label-eval smoke fixture covers `session.outcome` vs `session.outcome.review` matching before `challenge_rate` is used as an over-fit signal.
-- `save_memory` supports explicit `emit_continuity=true`, appending a `memory.saved` event with path/category-derived projection hints.
+- the internal save path (the retired standalone `save_memory`) supports explicit `emit_continuity=true`, appending a `memory.saved` event with path/category-derived projection hints.
 - `tachi_search` supports `scope="patterns"` and excludes continuity projection rows from ordinary `memory` recall.
 - `tachi_wiki_write` supports `include_patterns=true`, persisting active pattern references in wiki metadata.
 - `tachi_wiki_write` emits `wiki.saved` continuity events for reviewed wiki writes.
@@ -510,8 +510,8 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 2. **Agent MD crystallization is only first-slice**: the `tachi_profile` tool that used to import/render/context profile packs and target `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Cursor, and OpenClaw files was retired from the MCP surface under #757, superseded by the memory-line promotion path (#950, #534). `tachi_event action="promote"` can emit an `agent_profile.proposal` event for a mature pattern, but it does not yet render or write host Agent MD files.
 3. **No cross-process A2A transport**: a local read-only `a2a` evidence bundle and `action=a2a` poll surface exist, but there is no daemon pub/sub API, no independent cold-seat host profile, and no transport-level evidence/open-question feed.
 4. **Label-quality calibration incomplete**: harness and smoke fixture exist, but calibration still needs a larger reviewed held-out corpus, thresholds, and an operator-visible calibration status.
-5. **Maturity gates are partially implemented**: projection reports and `tachi_event action="promote"` expose external-validation / cold-seat-review gate status. The gate still does not auto-promote drafts/candidates to final wiki or Agent MD writes (the listed-skill promotion leg is **retired by #1690 C3** — no generated skills exist, so there is no listed-skill target to promote).
-6. **Pattern evidence is append-only but downstream interpretation remains partial**: `tachi_complete` can consume `pattern:<id>` evidence refs when it has a real flow id, and `close_loop` can append `hit` evidence for reviewed attached patterns when it has a real flow id. Missing flow identity produces a typed skip. `tachi_search scope="patterns"` and `tachi_event action=context` are read-only. These internal receipts do not project or change counters. The explicit legacy feedback action can still emit counter-mutating `hit` / `miss` / `stale` signals. Ordinary briefing/context use still does not automatically decide hit/miss without downstream outcome evidence.
+5. **Maturity gates are partially implemented**: projection reports and `tachi_event action="promote"` expose external-validation / cold-seat-review gate status. The gate still does not auto-promote drafts or proposals to final wiki or Agent MD writes (the listed-skill promotion leg is **retired by #1690 C3** — no generated skills exist, so there is no listed-skill target to promote).
+6. **Pattern evidence is append-only but downstream interpretation remains partial**: `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs when it has a real flow id, and `tachi_gh(action="close_loop")` can append `hit` evidence for reviewed attached patterns when it has a real flow id. Missing flow identity produces a typed skip. `tachi_search scope="patterns"` and `tachi_event action=context` are read-only. These internal receipts do not project or change counters. The explicit legacy feedback action can still emit counter-mutating `hit` / `miss` / `stale` signals. Ordinary briefing/context use still does not automatically decide hit/miss without downstream outcome evidence.
 7. **Timeline graph is partially wired**: timeline projections expose a typed `metadata.timeline` / `timeline[]` read-model slice with a `TimelineEntry` schema marker, and explicit causal edges with existing memory-id endpoints persist to `memory_edges`. Natural-language causal edges, typed `JudgmentEvolution`, and automatic endpoint resolution are still missing.
 8. **Bonding privacy migration is unbuilt**: current `/user/patterns/bonding/*` projections are not physically partitioned by `(user trust domain, agent_identity_id)`, and current local A2A bundles expose bonding refs. Migrate to the private relationship partition, bind identity, exclude all bonding refs/content from A2A/workers/cold seats, and add migration/leakage goldens. The current `SharedLexicon` shape also lacks a standalone Rust domain type.
 9. **Rule-based affect detector is first-slice**: affect projections extract language switch, known markers, IO ratio, and length signals, but response-latency-like signals are not yet available without host timing input.
@@ -537,7 +537,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 1. Done: `scope="patterns"` exists on `tachi_search`.
 2. Done: `tachi_event action=context` returns a dedicated `patterns` section.
-3. Done: `save_memory` can emit `memory.saved` when `emit_continuity=true`.
+3. Done: the internal save path (the retired standalone `save_memory`) can emit `memory.saved` when `emit_continuity=true` — the public `tachi_memory(action="save")` facade does not expose this knob.
 4. Done: `tachi_event action=context` returns `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, local `a2a`, and `host_lifecycle` read-model sections.
 5. Done: `tachi_wiki_write` can recall and reference active patterns with `include_patterns=true`.
 6. Done: `tachi_wiki_write` emits `wiki.saved` continuity events with reviewed `pattern_refs`.
@@ -594,13 +594,13 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - **File:** `crates/tachi-server/src/continuity_ops/feedback.rs`
 - **Current behavior:** normalizes `pattern:<id>` / `pattern-hit:<id>` / `pattern-miss:<id>` / `pattern-stale:<id>` evidence refs into continuity feedback events.
 - **File:** `crates/tachi-server/src/complete_ops/handler.rs`
-- **Current behavior:** `tachi_complete` records pattern feedback from `evidence_refs`; success defaults to `hit`, failure to `miss`, and partial/aborted to `seen`.
+- **Current behavior:** `tachi_task(action="complete")` records pattern feedback from `evidence_refs`; success defaults to `hit`, failure to `miss`, and partial/aborted to `seen`.
 - **File:** `crates/tachi-server/src/workflow_closure.rs`
 - **Current behavior:** `close_loop` writes wiki entries with `include_patterns=true` and records attached reviewed patterns as `hit`.
 
 ### 8.3 Memory save emits continuity event when requested
 
-- **File:** `crates/tachi-server/src/memory_search_ops/save_memory/handler.rs`
+- **File:** `crates/tachi-server/src/memory_search_ops/save_memory/handler.rs` (the internal save path; the standalone `save_memory` tool name is retired)
 - **Function:** `handle_save_memory`
 - **Current behavior:** after `upsert_save_entry`, `emit_continuity=true` calls `emit_memory_saved_event`.
 - **File:** `crates/tachi-server/src/continuity_ops/emit.rs`

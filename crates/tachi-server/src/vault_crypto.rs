@@ -224,6 +224,19 @@ pub fn derive_verified_key_from_stored_config(
     let salt = B64
         .decode(&config.salt)
         .map_err(|err| StoredVaultKeyDerivationError::InvalidSalt(err.to_string()))?;
+
+    #[cfg(test)]
+    if config.kdf_params == cheap_kdf_params_json() {
+        let key =
+            derive_cheap(password, &salt).map_err(StoredVaultKeyDerivationError::Derivation)?;
+        let matches = verify_password(key.bytes(), &config.verifier)
+            .map_err(StoredVaultKeyDerivationError::CorruptVerifier)?;
+        if !matches {
+            return Err(StoredVaultKeyDerivationError::WrongPassword);
+        }
+        return Ok(key);
+    }
+
     let params = parse_stored_kdf_params(&config.kdf_params)
         .map_err(StoredVaultKeyDerivationError::KdfParamsFormat)?;
     let key = DerivedVaultKey::derive_with_params(password, &salt, &params)

@@ -20,7 +20,7 @@ Use SFT in four lanes:
 
 | Lane | Purpose | Storage | Recall rule |
 |---|---|---|---|
-| Prompt exemplar | Show answer shape and verification discipline | `/sft/...` memory rows | `tachi_dispatch` may inject 1-2 compact examples |
+| Prompt exemplar | Show answer shape and verification discipline | `/sft/...` memory rows | (retired route) `tachi_dispatch` may inject 1-2 compact examples |
 | Memory card | One reusable rule, failure mode, command, or model behavior | `/agent/...` or `/scratch/...` after human distillation | Normal recall only after conversion |
 | Wiki draft | Stable runbook or architecture rule | `/wiki/drafts/...` pending review | Human promotion required |
 | Eval fixture | Score model-role routing quality | JSONL fixture or `/eval/...` production ledger | Do not mix fixture rows with live eval rows |
@@ -126,7 +126,7 @@ model, bounded task slice, task type, outcome, latency, evaluator, usefulness,
 verification impact, plan delta, retry count, and failure mode. Do not store
 prompts, chain-of-thought, or uncompressed logs in memory.
 
-Live eval records are memory-first. `tachi_complete` writes them under
+Live eval records are memory-first. `tachi_task(action="complete")` writes them under
 `/eval/...` with `category="eval"`, and ordinary memory search should exclude
 them unless the caller explicitly scopes to `/eval`. Use
 `tachi_agent_eval(action="aggregate_live")` to aggregate production eval memory;
@@ -146,7 +146,7 @@ Leader workflow:
    challenges risks, verifier checks completion evidence.
 3. Integrate child outputs into the final decision; the leader owns the patch.
 4. Run the real verification gate.
-5. Call `tachi_complete` with `subagents=[...]`.
+5. Call `tachi_task(action="complete", subagents=[...])`.
 6. Inspect `tachi_agent_eval(action="aggregate_live")` as read-only reporting.
    Routing policy consumes the **DecisionFactLedger**, not the live /eval matrix
    (#1690 C3 S2: matrix consumption retired with the MBIT/evolution machinery;

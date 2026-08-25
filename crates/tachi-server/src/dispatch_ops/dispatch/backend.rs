@@ -44,6 +44,10 @@ fn build_custom_command_from_launch_spec(
 
 pub(super) struct PreparedDispatchBackend {
     pub(super) execution: DispatchExecution,
+    /// Control eligibility derives from the concrete prepared branch, not the
+    /// assignment label. ACpx and native ACP can route a custom assignment but
+    /// own their own lifecycle and must never receive a subprocess control slot.
+    pub(super) managed_custom_eligible: bool,
     pub(super) execution_backend_name: Option<&'static str>,
     pub(super) execution_backend_metadata: Option<serde_json::Value>,
     pub(super) acpx_enabled: bool,
@@ -198,6 +202,11 @@ pub(super) fn prepare_dispatch_backend(
     };
 
     Ok(PreparedDispatchBackend {
+        managed_custom_eligible: matches!(&execution, DispatchExecution::Subprocess(_))
+            && ctx.custom_launch_spec.is_some()
+            && !is_opencode_serve_transport(ctx.harness_transport)
+            && !acpx_enabled
+            && !native_acp_enabled,
         execution,
         execution_backend_name,
         execution_backend_metadata,
@@ -272,12 +281,11 @@ mod tests {
             plan_duration_ms: None,
             harness_transport: "cli",
             harness_server_url: &None,
-            capability_bundle_card: &Value::Null,
             timeout_secs_for_status: 5,
         })?;
         match prepared.execution {
             DispatchExecution::Subprocess(command) => Ok(command),
-            DispatchExecution::NativeAcp(_) => {
+            DispatchExecution::NativeAcp(_) | DispatchExecution::ManagedCustom(_, _) => {
                 Err("cli transport must prepare a subprocess".to_string())
             }
         }
@@ -406,5 +414,98 @@ mod tests {
             None,
             "the adapter must not turn an absent cwd into '.'"
         );
+    }
+
+    #[test]
+    fn custom_launch_spec_control_eligibility_follows_the_concrete_execution_branch() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _acpx_command = crate::test_support::EnvRestore::set("TACHI_ACPX_COMMAND", "/bin/echo");
+        let _acpx_agent =
+            crate::test_support::EnvRestore::set("TACHI_ACPX_AGENT", "test-acp-agent");
+        let _native_acp_command =
+            crate::test_support::EnvRestore::set("TACHI_ACP_NATIVE_COMMAND", "/bin/echo");
+        fn prepare(transport: &str) -> PreparedDispatchBackend {
+            let temp = tempfile::tempdir().expect("backend branch tempdir");
+            let server = crate::tests::make_server();
+            let request = tachi_params::StaffAssignmentRequest::new(
+                tachi_params::TachiDispatchReason::ExplicitUserRequest,
+                "exercise the concrete custom execution branch",
+            );
+            let assignment = assignment("custom-worker", "custom", None);
+            let grant = grant(temp.path().to_str().expect("UTF-8 tempdir"));
+            let command = if transport == "acp-native" {
+                vec!["/bin/echo".to_string()]
+            } else {
+                vec!["poisoned-ingress-command".to_string()]
+            };
+            let launch_spec = super::super::mint_custom_launch_spec(
+                &assignment,
+                &grant,
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "exit 0".to_string(),
+                ],
+                "custom branch discriminator",
+                transport,
+                &None,
+            )
+            .expect("server mints the custom launch spec");
+            prepare_dispatch_backend(DispatchBackendContext {
+                server: &server,
+                trajectory_path: &temp.path().join("trajectory.jsonl"),
+                workspace_dir: temp.path(),
+                dispatch_id: "custom-branch-discriminator",
+                request: &request,
+                assignment: &assignment,
+                grant: &grant,
+                command: &command,
+                prompt: "task",
+                custom_launch_spec: Some(&launch_spec),
+                prompt_md_path: &temp.path().join("prompt.md"),
+                mcp_config_path: None,
+                v2: false,
+                plan_generated_at: None,
+                plan_duration_ms: None,
+                harness_transport: transport,
+                harness_server_url: &None,
+                timeout_secs_for_status: grant.timeout_secs,
+            })
+            .expect("concrete backend preparation")
+        }
+
+        let cli = prepare("cli");
+        assert!(matches!(cli.execution, DispatchExecution::Subprocess(_)));
+        assert!(cli.managed_custom_eligible);
+        assert_eq!(cli.execution_backend_name, None);
+        assert_eq!(cli.execution_backend_metadata, None);
+
+        let serve = prepare("serve");
+        assert!(matches!(serve.execution, DispatchExecution::Subprocess(_)));
+        assert!(
+            !serve.managed_custom_eligible,
+            "typed OpenCode serve transport owns an attached client lifecycle"
+        );
+        assert_eq!(serve.execution_backend_name, None);
+        assert_eq!(serve.execution_backend_metadata, None);
+
+        let acpx = prepare("acpx");
+        assert!(matches!(acpx.execution, DispatchExecution::Subprocess(_)));
+        assert!(!acpx.managed_custom_eligible);
+        assert!(acpx.acpx_enabled);
+        assert_eq!(acpx.execution_backend_name, Some("acpx"));
+        assert!(acpx.execution_backend_metadata.is_some());
+
+        let native_acp = prepare("acp-native");
+        assert!(matches!(
+            native_acp.execution,
+            DispatchExecution::NativeAcp(_)
+        ));
+        assert!(!native_acp.managed_custom_eligible);
+        assert!(native_acp.native_acp_enabled);
+        assert_eq!(native_acp.execution_backend_name, Some("acp_native"));
+        assert!(native_acp.execution_backend_metadata.is_some());
     }
 }

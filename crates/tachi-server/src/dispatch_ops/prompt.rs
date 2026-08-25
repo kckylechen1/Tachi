@@ -50,7 +50,6 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
     profile: &ResolvedDispatchProfile,
     effective_skills: &[String],
     stage_instruction: Option<&str>,
-    _auto_capability_bundle: Option<bool>,
     context_query: Option<&str>,
     inject_card: bool,
 ) -> PromptAssembly {
@@ -69,7 +68,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
         parts.push(overlay);
     }
 
-    let route = crate::copilot_ops::build_task_brief_routing(&request.task, &[]);
+    let route = crate::copilot_ops::build_task_brief_routing(&request.task);
     parts.push(render_task_route_overlay(&route));
 
     if assignment.selected_profile.is_some()
@@ -504,7 +503,6 @@ pub(crate) async fn assemble_prompt_with_trace(
         &profile,
         &effective_skills,
         stage_instruction.as_deref(),
-        None,
         params.context_query.as_deref(),
         params.inject_card != Some(false),
     )

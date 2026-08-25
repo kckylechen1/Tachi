@@ -51,12 +51,12 @@ It answers three questions raised during a facade review:
 1. **PR lifecycle dual entry (resolved #757).** `link_pr` / `pr_status` / `pr_handoff` / `release_note`
    now live only on `tachi_gh`. The previous `tachi_task` compatibility aliases were deleted so agents
    no longer guess which entry point to call.
-2. **`merge` was semantically split, then resolved (#1683 C1a).** `tachi_task(merge)` used to mean
+2. **`merge` was semantically split, then resolved — the `tachi_task` `merge` action was retired (#1683 C1a).** It used to mean
    local worktree merge, distinct from `tachi_gh(safe_merge)`'s GitHub PR merge — same word, different
    machine. `tachi_task(merge)` is retired; `tachi_gh(safe_merge)` is now the only `merge` on either facade.
-3. **Briefing still appears in three surfaces** — `tachi_briefing` (standalone),
+3. **Briefing then appeared in three surfaces** (historical) — `tachi_briefing` (standalone, since retired),
    `tachi_memory(briefing)`, and the feature-scoped `tachi_task(brief)`. `save` is duplicated
-   across `tachi_save` and `tachi_memory(save)`.
+   across `tachi_save` (retired shorthand) and `tachi_memory(save)`.
 4. **Self-tuning actions were interleaved with execution (resolved #1426).** Eight of the nine —
    `route_simulate` / `proposals` / `review_proposal` / `apply_proposals` (task side) and
    `recall_simulate` / `recall_proposals` / `review_recall_proposal` / `apply_recall_proposals`
@@ -101,11 +101,11 @@ short-circuits to true only for admin/full profiles.
 ## 3. ToolProfile status — mostly hollowed out
 
 There are two unrelated "profile" concepts. This section is about **`ToolProfile`** (tool-surface
-trimming), defined in [`profiles/types.rs`](../../../crates/tachi-server/src/profiles/types.rs).
+trimming), defined in [`tool_profiles/types.rs`](../../../crates/tachi-hub/src/tool_profiles/types.rs).
 
 The early design had five additive bundles: `observe / remember / coordinate / operate / admin`.
-But v1.0 introduced the facade surface and, with it, `standard_minimal` — a hard-coded 14-tool
-allow-list ([`profiles/patterns.rs`](../../../crates/tachi-server/src/profiles/patterns.rs) → `STANDARD_MINIMAL_TOOL_PATTERNS`).
+But v1.0 introduced the facade surface and, with it, `standard_minimal` — a curated
+allow-list ([`tool_profiles/patterns.rs`](../../../crates/tachi-hub/src/tool_profiles/patterns.rs) → `STANDARD_MINIMAL_TOOL_PATTERNS`).
 The net effect:
 
 - **default = `standard` = the hard allow-list**, bypassing bundles
@@ -117,10 +117,12 @@ someone hand-types `--profile observe+coordinate`. That is dead design.
 
 ### The deeper problem: facades broke tool-level filtering
 
-`ToolProfile` trims by **tool name** via glob matching
-([`profiles/matching.rs#L77-L112`](../../../crates/tachi-server/src/profiles/matching.rs)).
-But a facade packs many capabilities behind one name (`tachi_task` = 10 actions), so a profile can
-only allow or deny the *entire* `tachi_task` — it cannot deny just `dispatch`.
+`ToolProfile` first trims by **tool name** via glob matching
+([`tool_profiles/matching.rs`](../../../crates/tachi-hub/src/tool_profiles/matching.rs)).
+Facades still pack many capabilities behind one name, but the server now applies a second,
+action-level gate ([`action_policy.rs`](../../../crates/tachi-hub/src/tool_profiles/action_policy.rs)).
+That gate lets a profile expose selected `tachi_task` actions without reviving the retired
+`dispatch` action.
 
 ## 4. Case study: the `delegate`/worker surface proves the mismatch
 
@@ -134,9 +136,9 @@ generate_mcp_config → writes child env TACHI_PROFILE=delegate
    │  (dispatch_ops/mcp_config.rs#L29-L30)
    ▼
 worker boot → parse_tool_profile("delegate") = ToolProfile::delegate()
-   │  (profiles/matching.rs#L21: "delegate"|"worker"|"subagent" are aliases)
+   │  (crates/tachi-hub/src/tool_profiles/matching.rs#L18: "delegate"|"worker"|"subagent" are aliases)
    ▼
-DELEGATE_MINIMAL_TOOL_PATTERNS (7-tool allow-list) filters worker's visible tools
+DELEGATE_MINIMAL_TOOL_PATTERNS (source-owned allow-list) filters worker's visible tools
 ```
 
 Two important nuances:
@@ -150,13 +152,14 @@ Two important nuances:
 | codex_55_review | `standard` (needs to see more) |
 | kimi_arch / deepseek_explore / kimi_ux | `observe` (read-only review/exploration) |
 
-**The `delegate` allow-list deliberately omits `tachi_task`.** Including it would hand `dispatch` to
-the worker (recursive dispatch). The cost: workers cannot use `complete` or `status` from the
-facade, and must fall back to standalone legacy tools (`tachi_complete`, `tachi_unstick`) that never
-moved into a facade.
-
-> This is the smoking gun: **`delegate` still needs a pile of un-faceted legacy tools precisely because
-> the facade is too coarse for `ToolProfile` to deny `dispatch` alone.**
+**The `delegate` allow-list once omitted `tachi_task` entirely.** Historical tool-name-only
+filtering could not expose task completion without also exposing the then-present worker-launch
+action. Today `DELEGATE_MINIMAL_TOOL_PATTERNS` includes `tachi_task`, and
+`delegate_facade_action_allowed` admits exactly `complete`/`status`/`board`/`brief`. The typed
+`TachiTaskAction` inventory no longer contains the retired `dispatch` action, so workers use those
+four canonical task actions directly without gaining a recursive worker-launch path.
+`tachi_unstick` remains a separate self-rescue tool; the retired direct `tachi_complete` route is no
+longer required as a completion escape hatch.
 
 ## 4b. `handoff_ops` deprecated — memo vs. baton split (resolved #1016)
 
