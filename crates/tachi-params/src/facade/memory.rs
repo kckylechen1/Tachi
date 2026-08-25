@@ -464,7 +464,7 @@ pub struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(
         schema_with = "super::save_kind_schema",
-        description = "[action=save] Kind hint: memory, note, wiki, facts, or extract_facts. If omitted, tachi_memory defaults to memory unless scope='note'; title and kind are handled directly by tachi_memory."
+        description = "[action=save] Kind hint: memory, note, wiki, facts, or extract_facts. If omitted, tachi_memory defaults to memory unless scope='note'; title and kind remain handled by tachi_memory."
     )]
     pub kind: Option<String>,
     #[serde(default)]
