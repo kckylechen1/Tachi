@@ -283,8 +283,8 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
 | `standard` | 日常 Agent 意图面：`tachi_memory`、`tachi_task` 的非派发动作、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`peer_query`、Vault 会话/状态工具，以及 `runtime_info`、`tachi_status` 和 `tachi_tools`。`tachi_staff` 和手工 eval intake 不暴露。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity；普通委派使用宿主原生 subagent。 |
-| `coordinate` | coordinate bundle(旧名 `remember` 已退役,现归入 `tachi_memory(action="save")`)：增加高级 handoff/workflow/agents/staff 工具；Tachi 自有 worker launch（`tachi_staff(action='start', task='审阅 API 边界，并把发现写入 result.md。', staffing_reason='native_subagent_unavailable')`）仍是显式例外，不是默认执行器。 | 高级协调与适配器工作流，不替代宿主原生 subagent。 |
-| `operate` | operate bundle(同退役注记)：增加 Foundry 生命周期、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
+| `coordinate` | coordinate bundle 叠加在仍在线的 `remember` Profile/bundle 上（不要与已退役的原生 `remember` 工具别名混淆）：增加高级 handoff/workflow/agents/staff 工具；Tachi 自有 worker launch（`tachi_staff(action='start', task='审阅 API 边界，并把发现写入 result.md。', staffing_reason='native_subagent_unavailable')`）仍是显式例外，不是默认执行器。 | 高级协调与适配器工作流，不替代宿主原生 subagent。 |
+| `operate` | operate bundle 同样叠加在仍在线的 `remember` Profile/bundle 上（不是已退役的原生工具别名）：增加 Foundry 生命周期、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
 | `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_web_search`、`tachi_wiki(action='search'|'browse'|'read')`、`tachi_unstick`、`tachi_task`、`tachi_skill(action='discover'|'run')` 和只读 `peer_query`。 | 由显式准入的 admin 派发产生的工作 Agent；无递归派发、无交接、无技能候选注册。 |
 | `admin` | 完整目录，包括有类型理由的 durable/remote Tachi worker 例外。 | 维护、开发、治理和 operator 批准的执行例外。 |
 

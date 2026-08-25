@@ -80,10 +80,10 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0
 
 | 令旗 | 用途 |
 |------|------|
-| `standard` | IDE 灵核之默认，14 器门面集。 |
+| `standard` | IDE 灵核之默认，日常 Agent 意图面。 |
 | `coordinate` | 主尊调度，兼掌 handoff / workflow / orchestrator / task / verify；`approve_merge` 已退役。 |
 | `operate` | 运行时适配与 OpenClaw，兼掌 Foundry / Vault 会话。 |
-| `delegate` | 小弟偏师，极简 9 器，无派发、无交接。 |
+| `delegate` | 小弟偏师，精简工具面，无派发、无交接。 |
 | `admin` | 维护治理，全量法器。 |
 
 未设令旗者，自 v1.0.1 起默认 `standard`。
