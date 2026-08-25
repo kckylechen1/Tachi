@@ -8,6 +8,7 @@ const INSTRUCTION_MANIFEST_SCHEMA: &str = "tachi.instruction_surfaces.v1";
 const CLEAN_STATUS: &str = "clean";
 const MISSING_STATUS: &str = "missing";
 const NON_CLEAN_STATUS: &str = "non_clean";
+const UNREADABLE_STATUS: &str = "unreadable";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -158,6 +159,23 @@ pub(super) struct InstructionManifestStatus {
     pub(super) status: String,
     pub(super) required_sources: Vec<String>,
     pub(super) sources: Vec<InstructionSourceStatus>,
+    /// Declared sources/targets whose file could not be read, parsed, or
+    /// validated (#1710): unlike a fully-inspected `InstructionSourceStatus`,
+    /// these never had a successful `inspect_declared_file` result, so they
+    /// carry only what the manifest JSON itself declared plus the read
+    /// error. Scanning continues past these; only a manifest that cannot be
+    /// parsed/opened at all still aborts `scan_instruction_manifest`.
+    pub(super) unreadable: Vec<UnreadableManifestEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(super) struct UnreadableManifestEntry {
+    pub(super) surface_id: String,
+    /// `"source"` or `"target"`.
+    pub(super) role: String,
+    pub(super) declared_path: String,
+    pub(super) carrier: Option<String>,
+    pub(super) error: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -271,7 +289,9 @@ pub(super) fn scan_instruction_manifest(
     }
 
     for required in &manifest.required_sources {
-        resolve_declared_path(&root, required, "required source")?;
+        let lexical_path = resolve_declared_path(&root, required, "required source")?;
+        ensure_existing_symlinks_within_root(&root, &lexical_path, "required source")?;
+        let _ = resolve_missing_declared_path(&root, &lexical_path, "required source")?;
     }
 
     manifest.required_sources.sort();
@@ -297,12 +317,48 @@ pub(super) fn scan_instruction_manifest(
 
     let mut sources = Vec::with_capacity(manifest.surfaces.len());
     let mut target_owners = BTreeMap::new();
+    // #1710: a declared source/target the tool cannot read, parse, or
+    // validate becomes a finding instead of aborting the whole scan. A
+    // manifest that itself cannot be opened/parsed/validated is still a
+    // hard `?` abort above this loop -- that class has no known surface
+    // list to continue over and is a bad invocation, not a finding.
+    let mut unreadable: Vec<UnreadableManifestEntry> = Vec::new();
     for surface in manifest.surfaces {
-        let source_status =
-            inspect_declared_file(&root, &surface.source, &format!("source '{}'", surface.id))?;
+        // #1710 F1: an unreadable source must not take its declared targets
+        // down with it. Record the source's own unreadable finding, but
+        // fall through with a degraded (exists=false, status=unreadable,
+        // no hash/bytes) placeholder status instead of `continue`-ing past
+        // the whole surface -- targets don't need the source's *content* to
+        // be inspected, so they keep flowing through the normal
+        // `sources[].targets` shape (and, downstream, the normal
+        // per-target checks) instead of vanishing silently.
+        let source_status = match inspect_declared_file(
+            &root,
+            &surface.source,
+            &format!("source '{}'", surface.id),
+        ) {
+            Ok(status) => status,
+            Err(error) => {
+                unreadable.push(UnreadableManifestEntry {
+                    surface_id: surface.id.clone(),
+                    role: "source".to_string(),
+                    declared_path: surface.source.clone(),
+                    carrier: None,
+                    error,
+                });
+                DeclaredFileStatus {
+                    resolved_path: root.join(&surface.source),
+                    exists: false,
+                    status: UNREADABLE_STATUS,
+                    hash: None,
+                    bytes: None,
+                    content: None,
+                }
+            }
+        };
         let mut targets = Vec::with_capacity(surface.targets.len());
         for target in surface.targets {
-            let target_status = inspect_declared_file(
+            let target_status = match inspect_declared_file(
                 &root,
                 &target.path,
                 &format!(
@@ -310,7 +366,19 @@ pub(super) fn scan_instruction_manifest(
                     target.carrier.as_str(),
                     surface.id
                 ),
-            )?;
+            ) {
+                Ok(status) => status,
+                Err(error) => {
+                    unreadable.push(UnreadableManifestEntry {
+                        surface_id: surface.id.clone(),
+                        role: "target".to_string(),
+                        declared_path: target.path.clone(),
+                        carrier: Some(target.carrier.as_str().to_string()),
+                        error,
+                    });
+                    continue;
+                }
+            };
             let resolved_target = target_status.resolved_path.clone();
             if let Some((previous_surface, previous_declared_path)) = target_owners.insert(
                 resolved_target.clone(),
@@ -357,13 +425,14 @@ pub(super) fn scan_instruction_manifest(
         });
     }
 
-    let all_clean = sources.iter().all(|source| {
-        source.status == CLEAN_STATUS
-            && source
-                .targets
-                .iter()
-                .all(|target| target.status == CLEAN_STATUS)
-    });
+    let all_clean = unreadable.is_empty()
+        && sources.iter().all(|source| {
+            source.status == CLEAN_STATUS
+                && source
+                    .targets
+                    .iter()
+                    .all(|target| target.status == CLEAN_STATUS)
+        });
 
     Ok(InstructionManifestStatus {
         schema_version: INSTRUCTION_MANIFEST_SCHEMA.to_string(),
@@ -377,6 +446,7 @@ pub(super) fn scan_instruction_manifest(
         },
         required_sources: manifest.required_sources,
         sources,
+        unreadable,
     })
 }
 
@@ -812,6 +882,20 @@ mod tests {
     }
 
     #[test]
+    fn required_source_must_not_escape_the_declared_root() {
+        let (root, manifest_path) = fixture("required-source-escape");
+        let mut manifest = base_manifest();
+        manifest["required_sources"] = json!(["../AGENTS.md"]);
+        write_manifest(&manifest_path, &manifest);
+
+        let error = scan_instruction_manifest(&manifest_path).expect_err("escape must fail");
+        assert!(error.contains("required source"), "{error}");
+        assert!(error.contains("escapes outside declared root"), "{error}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn v1_manifest_defaults_missing_adapter_and_projection() {
         let (root, manifest_path) = fixture("v1-compat");
         std::fs::write(root.join("AGENTS.md"), "public\n").expect("source");
@@ -864,7 +948,13 @@ mod tests {
     }
 
     #[test]
-    fn malformed_duplicate_unknown_and_escape_declarations_fail_loudly() {
+    fn malformed_duplicate_unknown_declarations_fail_loudly() {
+        // These are whole-manifest structural failures -- JSON schema
+        // violations that prevent even deserializing a trustworthy surface
+        // list -- so they stay hard aborts under #1710. A single declared
+        // source/target whose *path* is bad (absolute, escapes root) is a
+        // per-surface read failure instead; see
+        // `bad_source_path_becomes_unreadable_finding_and_scan_continues`.
         let (root, manifest_path) = fixture("invalid");
         let mut manifest = base_manifest();
 
@@ -899,26 +989,164 @@ mod tests {
             "{error}"
         );
 
-        manifest = base_manifest();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn source_declared_as_absolute_path_becomes_unreadable_finding_not_abort() {
+        // Frozen (#1710): an input the tool cannot read or validate --
+        // including a declared path rejected before any fs::read -- becomes
+        // a finding in `unreadable`, and the scan continues over the
+        // remaining (healthy) surfaces instead of aborting the whole
+        // `harness status --manifest` invocation.
+        let (root, manifest_path) = fixture("absolute-source-continues");
+        std::fs::write(root.join("AGENTS.md"), "public\n").expect("source");
+        std::fs::write(root.join("CLAUDE.md"), "private\n").expect("source");
+        std::fs::create_dir_all(root.join("targets/claude")).expect("target dir");
+        std::fs::create_dir_all(root.join("targets/codex")).expect("target dir");
+        std::fs::create_dir_all(root.join("targets/cursor")).expect("target dir");
+        std::fs::write(root.join("targets/claude/CLAUDE.md"), "private\n").expect("target");
+        std::fs::write(root.join("targets/codex/private.md"), "private target\n").expect("target");
+        std::fs::write(root.join("targets/cursor/AGENTS.md"), "public target\n").expect("target");
+
+        let mut manifest = base_manifest();
         manifest["surfaces"][0]["source"] = json!("/etc/passwd");
         write_manifest(&manifest_path, &manifest);
-        let error = scan_instruction_manifest(&manifest_path).unwrap_err();
-        assert!(error.contains("absolute"), "{error}");
 
-        manifest = base_manifest();
+        let report = scan_instruction_manifest(&manifest_path)
+            .expect("scan continues past an unreadable source instead of aborting");
+        assert_eq!(report.status, "non_clean");
+        assert_eq!(report.unreadable.len(), 1, "{:?}", report.unreadable);
+        assert_eq!(report.unreadable[0].surface_id, "z-private");
+        assert_eq!(report.unreadable[0].role, "source");
+        assert!(
+            report.unreadable[0].error.contains("absolute"),
+            "{:?}",
+            report.unreadable[0]
+        );
+        // The healthy surface still produced a full status -- the scan did
+        // not abort, it continued over the remaining surfaces. The broken
+        // surface (#1710 F1) also still produces a degraded status row --
+        // exists=false, status=unreadable -- and, crucially, its two
+        // declared targets are not dropped along with it.
+        assert_eq!(report.sources.len(), 2, "{:?}", report.sources);
+        let healthy = report
+            .sources
+            .iter()
+            .find(|source| source.id == "a-public")
+            .expect("healthy surface present");
+        assert_eq!(healthy.status, "clean");
+        let broken = report
+            .sources
+            .iter()
+            .find(|source| source.id == "z-private")
+            .expect("broken surface still produces a status row");
+        assert_eq!(broken.status, "unreadable");
+        assert!(!broken.exists);
+        assert_eq!(broken.hash, None);
+        assert_eq!(broken.targets.len(), 2, "{:?}", broken.targets);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unreadable_source_still_surfaces_its_declared_targets() {
+        // Regression (#1710 F1): the source-level `continue` used to skip
+        // the *entire* target loop for that surface, so none of its
+        // declared targets -- readable or not -- ever appeared in the
+        // report. Targets don't need the source's content to be inspected,
+        // so they must keep showing up. Three entries are expected here: a
+        // source-unreadable finding, a target-unreadable finding, and a
+        // normal, healthy status row for the surface's other target.
+        let (root, manifest_path) = fixture("unreadable-source-keeps-targets");
+        std::fs::write(root.join("AGENTS.md"), "public\n").expect("source");
+        std::fs::create_dir(root.join("CLAUDE.md")).expect("CLAUDE.md is a directory: unreadable");
+        std::fs::create_dir_all(root.join("targets/claude")).expect("target dir");
+        std::fs::create_dir_all(root.join("targets/codex")).expect("target dir");
+        std::fs::create_dir_all(root.join("targets/cursor")).expect("target dir");
+        std::fs::write(root.join("targets/claude/CLAUDE.md"), "private\n")
+            .expect("readable target");
+        std::fs::create_dir(root.join("targets/codex/private.md"))
+            .expect("unreadable target: a directory");
+        std::fs::write(root.join("targets/cursor/AGENTS.md"), "public target\n").expect("target");
+
+        let manifest = base_manifest();
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_instruction_manifest(&manifest_path)
+            .expect("scan continues past an unreadable source and keeps its targets");
+
+        let source_unreadable: Vec<_> = report
+            .unreadable
+            .iter()
+            .filter(|entry| entry.role == "source")
+            .collect();
+        assert_eq!(source_unreadable.len(), 1, "{:?}", report.unreadable);
+        assert_eq!(source_unreadable[0].surface_id, "z-private");
+
+        let target_unreadable: Vec<_> = report
+            .unreadable
+            .iter()
+            .filter(|entry| entry.role == "target")
+            .collect();
+        assert_eq!(target_unreadable.len(), 1, "{:?}", report.unreadable);
+        assert_eq!(target_unreadable[0].surface_id, "z-private");
+        assert_eq!(target_unreadable[0].carrier.as_deref(), Some("codex"));
+
+        let broken_source = report
+            .sources
+            .iter()
+            .find(|source| source.id == "z-private")
+            .expect("the unreadable source still produces a status row");
+        assert_eq!(broken_source.status, "unreadable");
+        assert!(!broken_source.exists);
+        assert_eq!(
+            broken_source.targets.len(),
+            1,
+            "{:?}",
+            broken_source.targets
+        );
+        assert_eq!(broken_source.targets[0].carrier, "claude");
+        assert_eq!(broken_source.targets[0].status, "clean");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn source_path_escaping_root_becomes_unreadable_finding_not_abort() {
+        let (root, manifest_path) = fixture("escape-source-continues");
+        std::fs::write(root.join("AGENTS.md"), "public\n").expect("source");
+        std::fs::create_dir_all(root.join("targets/claude")).expect("target dir");
+        std::fs::create_dir_all(root.join("targets/codex")).expect("target dir");
+        std::fs::create_dir_all(root.join("targets/cursor")).expect("target dir");
+        std::fs::write(root.join("targets/claude/CLAUDE.md"), "private\n").expect("target");
+        std::fs::write(root.join("targets/codex/private.md"), "private target\n").expect("target");
+        std::fs::write(root.join("targets/cursor/AGENTS.md"), "public target\n").expect("target");
+
+        let mut manifest = base_manifest();
         manifest["surfaces"][0]["source"] = json!("../outside.md");
         write_manifest(&manifest_path, &manifest);
-        let error = scan_instruction_manifest(&manifest_path).unwrap_err();
-        assert!(error.contains("outside declared root"), "{error}");
 
-        manifest = base_manifest();
-        manifest["required_sources"] = json!(["../AGENTS.md"]);
-        write_manifest(&manifest_path, &manifest);
-        let error = scan_instruction_manifest(&manifest_path).unwrap_err();
+        let report = scan_instruction_manifest(&manifest_path)
+            .expect("scan continues past a root-escaping source instead of aborting");
+        assert_eq!(report.unreadable.len(), 1, "{:?}", report.unreadable);
+        assert_eq!(report.unreadable[0].surface_id, "z-private");
         assert!(
-            error.contains("required source") && error.contains("outside declared root"),
-            "{error}"
+            report.unreadable[0].error.contains("outside declared root"),
+            "{:?}",
+            report.unreadable[0]
         );
+        // #1710 F1: the broken surface still produces a status row, and its
+        // two declared (and, in this fixture, healthy) targets are not
+        // dropped along with the unreadable source.
+        assert_eq!(report.sources.len(), 2, "{:?}", report.sources);
+        let broken = report
+            .sources
+            .iter()
+            .find(|source| source.id == "z-private")
+            .expect("broken surface still produces a status row");
+        assert_eq!(broken.status, "unreadable");
+        assert_eq!(broken.targets.len(), 2, "{:?}", broken.targets);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1138,8 +1366,18 @@ mod tests {
         let Some(manifest_path) = std::env::var_os("TACHI_INSTRUCTION_MANIFEST_FIFO_CHILD") else {
             return;
         };
-        let error = scan_instruction_manifest(Path::new(&manifest_path)).unwrap_err();
-        assert!(error.contains("non-regular file"), "{error}");
+        // Frozen (#1710): a declared target that is a FIFO is unreadable,
+        // not a whole-scan abort -- it lands in `unreadable`, without
+        // blocking on or opening the FIFO.
+        let report = scan_instruction_manifest(Path::new(&manifest_path))
+            .expect("FIFO target becomes a finding, not an abort");
+        assert_eq!(report.unreadable.len(), 1, "{:?}", report.unreadable);
+        assert_eq!(report.unreadable[0].role, "target");
+        assert!(
+            report.unreadable[0].error.contains("non-regular file"),
+            "{:?}",
+            report.unreadable[0]
+        );
     }
 
     #[cfg(unix)]
@@ -1244,25 +1482,44 @@ mod tests {
     }
 
     #[test]
-    fn declared_directory_and_invalid_utf8_are_loud_read_errors() {
+    fn declared_directory_and_invalid_utf8_become_unreadable_findings_not_aborts() {
+        // Frozen (#1710): these no longer kill the whole invocation -- they
+        // land in `unreadable` and the scan continues (surfaces[0],
+        // "z-private", is untouched by either mutation and still gets a
+        // normal, non-Err status even though its own declared CLAUDE.md
+        // does not exist on disk in this fixture -- "missing" is a status,
+        // not a read error).
         let (root, manifest_path) = fixture("invalid-declared-file");
         let manifest = base_manifest();
 
         std::fs::create_dir(root.join("AGENTS.md")).expect("declared directory");
         write_manifest(&manifest_path, &manifest);
-        let error = scan_instruction_manifest(&manifest_path).unwrap_err();
+        let report = scan_instruction_manifest(&manifest_path)
+            .expect("scan continues past a directory-as-source instead of aborting");
+        assert_eq!(report.unreadable.len(), 1, "{:?}", report.unreadable);
+        assert_eq!(report.unreadable[0].surface_id, "a-public");
         assert!(
-            error.contains("read declared source") && error.contains("directory"),
-            "{error}"
+            report.unreadable[0].error.contains("directory"),
+            "{:?}",
+            report.unreadable[0]
+        );
+        assert!(
+            report.sources.iter().any(|source| source.id == "z-private"),
+            "{:?}",
+            report.sources
         );
 
         std::fs::remove_dir(root.join("AGENTS.md")).expect("declared directory cleanup");
         std::fs::write(root.join("AGENTS.md"), [0xff, 0xfe]).expect("invalid UTF-8 file");
         write_manifest(&manifest_path, &manifest);
-        let error = scan_instruction_manifest(&manifest_path).unwrap_err();
+        let report = scan_instruction_manifest(&manifest_path)
+            .expect("scan continues past invalid UTF-8 instead of aborting");
+        assert_eq!(report.unreadable.len(), 1, "{:?}", report.unreadable);
+        assert_eq!(report.unreadable[0].surface_id, "a-public");
         assert!(
-            error.contains("read declared source") && error.contains("invalid UTF-8"),
-            "{error}"
+            report.unreadable[0].error.contains("invalid UTF-8"),
+            "{:?}",
+            report.unreadable[0]
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -1270,7 +1527,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_escape_is_refused_before_reading_the_declared_file() {
+    fn symlink_escape_becomes_an_unreadable_finding_not_an_abort() {
         let (root, manifest_path) = fixture("symlink");
         let outside = root.parent().expect("fixture parent").join(format!(
             "instruction-manifest-outside-{}",
@@ -1282,8 +1539,15 @@ mod tests {
         let mut manifest = base_manifest();
         manifest["surfaces"][0]["source"] = json!("escape.md");
         write_manifest(&manifest_path, &manifest);
-        let error = scan_instruction_manifest(&manifest_path).unwrap_err();
-        assert!(error.contains("outside declared root"), "{error}");
+        let report = scan_instruction_manifest(&manifest_path)
+            .expect("scan continues past a symlink-escaped source instead of aborting");
+        assert_eq!(report.unreadable.len(), 1, "{:?}", report.unreadable);
+        assert_eq!(report.unreadable[0].surface_id, "z-private");
+        assert!(
+            report.unreadable[0].error.contains("outside declared root"),
+            "{:?}",
+            report.unreadable[0]
+        );
 
         let outside_dir = root.parent().expect("fixture parent").join(format!(
             "instruction-manifest-outside-dir-{}",
@@ -1294,8 +1558,14 @@ mod tests {
             .expect("directory escape symlink");
         manifest["surfaces"][0]["source"] = json!("escape-dir/missing.md");
         write_manifest(&manifest_path, &manifest);
-        let error = scan_instruction_manifest(&manifest_path).unwrap_err();
-        assert!(error.contains("outside declared root"), "{error}");
+        let report = scan_instruction_manifest(&manifest_path)
+            .expect("scan continues past a symlinked-ancestor escape instead of aborting");
+        assert_eq!(report.unreadable.len(), 1, "{:?}", report.unreadable);
+        assert!(
+            report.unreadable[0].error.contains("outside declared root"),
+            "{:?}",
+            report.unreadable[0]
+        );
 
         let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&outside_dir);

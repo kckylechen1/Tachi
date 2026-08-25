@@ -441,13 +441,25 @@ fn print_harness_report(report: &HarnessStatusReport) {
         println!("Instruction drift sentinel:");
         println!("  status: {}", instruction_drift.status);
         println!(
-            "  findings: {} (incomplete {}, parity {}, density {}, audience_leak {})",
+            "  findings: {} (incomplete {}, parity {}, density {}, audience_leak {}, unreadable_inputs {})",
             instruction_drift.summary.findings,
             instruction_drift.summary.incomplete,
             instruction_drift.summary.parity_drift,
             instruction_drift.summary.density_overrun,
-            instruction_drift.summary.audience_leak
+            instruction_drift.summary.audience_leak,
+            instruction_drift.summary.unreadable_inputs
         );
+        for finding in &instruction_drift.manifest_findings {
+            println!(
+                "  - [manifest] surface={} role={} check={}",
+                finding.surface_id, finding.role, finding.check_kind
+            );
+            println!("    declared_path: {}", finding.declared_path);
+            if let Some(carrier) = &finding.carrier {
+                println!("    carrier: {carrier}");
+            }
+            println!("    evidence: {}", finding.evidence_span);
+        }
         for finding in &instruction_drift.findings {
             println!(
                 "  - [{}] source={} revision={} check={}",
