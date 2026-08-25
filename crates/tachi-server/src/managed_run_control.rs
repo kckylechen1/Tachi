@@ -196,6 +196,118 @@ mod cancellation_receipt_regression_tests {
             status["status_revision"]
         );
     }
+
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn managed_custom_cancel_rejects_a_symlinked_run_directory_outside_runs_root() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("home");
+        let outside = tempfile::tempdir().expect("outside run target");
+        let runs_root = home.path().join("runs");
+        std::fs::create_dir_all(&runs_root).expect("runs root");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &runs_root);
+        let dispatch_id = "20260825T182601Z-symlink-escape";
+        let escaped_run_dir = outside.path().join(dispatch_id);
+        std::fs::create_dir_all(&escaped_run_dir).expect("escaped run directory");
+        let escaped_status_path = escaped_run_dir.join("status.json");
+        std::fs::write(
+            &escaped_status_path,
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 7,
+                "execution_classification": "managed_custom",
+                "lifecycle_owner": "memory_server_managed_custom",
+            })
+            .to_string(),
+        )
+        .expect("escaped status");
+        let escaped_status_before =
+            std::fs::read(&escaped_status_path).expect("read escaped status before cancel");
+        std::os::unix::fs::symlink(&escaped_run_dir, runs_root.join(dispatch_id))
+            .expect("symlink escaped run directory");
+
+        let server = MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+        let (mut receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("register same-daemon control");
+
+        let response: Value = serde_json::from_str(
+            &request_managed_custom_cancel(&server, dispatch_id, 7)
+                .await
+                .expect("escaped run cancellation response"),
+        )
+        .expect("response JSON");
+        assert_eq!(response["receipt"], "cancellation_unavailable");
+        assert_eq!(response["reason"], "run_directory_outside_runs_root");
+        assert_eq!(
+            std::fs::read(&escaped_status_path).expect("read escaped status after cancel"),
+            escaped_status_before,
+            "an escaped target must not receive a cancellation mutation"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "an escaped target must not enqueue or send a cancellation command"
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn managed_custom_cancel_remains_explicitly_unavailable_on_non_unix() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("home");
+        let runs_root = home.path().join("runs");
+        let dispatch_id = "20260825T182602Z-non-unix";
+        let run_dir = runs_root.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("run directory");
+        let status_path = run_dir.join("status.json");
+        std::fs::write(
+            &status_path,
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 7,
+                "execution_classification": "managed_custom",
+                "lifecycle_owner": "memory_server_managed_custom",
+            })
+            .to_string(),
+        )
+        .expect("status");
+        let status_before = std::fs::read(&status_path).expect("read status before cancel");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &runs_root);
+        let server = MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+        let (mut receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("register same-daemon control");
+
+        let response: Value = serde_json::from_str(
+            &request_managed_custom_cancel(&server, dispatch_id, 7)
+                .await
+                .expect("non-Unix cancellation response"),
+        )
+        .expect("response JSON");
+        assert_eq!(response["receipt"], "cancellation_unavailable");
+        assert_eq!(response["reason"], "unsupported_platform");
+        assert_eq!(
+            std::fs::read(&status_path).expect("read status after cancel"),
+            status_before,
+            "unsupported cancellation must not mutate status"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "unsupported cancellation must not enqueue a command"
+        );
+    }
 }
 
 struct Entry {
@@ -433,7 +545,51 @@ pub(crate) async fn request_managed_custom_cancel(
                 "invalid_dispatch_identity",
             ));
         }
-        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
+        let runs_root = crate::dispatch_ops::dispatch_runs_root();
+        let canonical_runs_root = match runs_root.canonicalize() {
+            Ok(root) if root.is_dir() => root,
+            _ => {
+                return Ok(unavailable(
+                    dispatch_id,
+                    expected,
+                    None,
+                    "absent_same_daemon_handle",
+                ));
+            }
+        };
+        let candidate_run_dir = runs_root.join(dispatch_id);
+        let canonical_run_dir = match candidate_run_dir.canonicalize() {
+            Ok(run_dir) => run_dir,
+            Err(_) => {
+                return Ok(unavailable(
+                    dispatch_id,
+                    expected,
+                    None,
+                    "absent_same_daemon_handle",
+                ));
+            }
+        };
+        if !crate::dispatch_ops::canonical_dir_is_within(&canonical_run_dir, &canonical_runs_root) {
+            return Ok(unavailable(
+                dispatch_id,
+                expected,
+                None,
+                "run_directory_outside_runs_root",
+            ));
+        }
+        if !canonical_run_dir.is_dir() {
+            return Ok(unavailable(
+                dispatch_id,
+                expected,
+                None,
+                "absent_same_daemon_handle",
+            ));
+        }
+        // The canonical path is deliberately retained for every subsequent
+        // lock/read/write and the cancellation wait. The caller-visible
+        // spelling may be a symlink, so reusing it after the gate would reopen
+        // the path-confinement race this check is meant to close.
+        let run_dir = canonical_run_dir;
         let lock = crate::dispatch_ops::status_json_lock_for(&run_dir);
         let (sender, observed) = {
             let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
