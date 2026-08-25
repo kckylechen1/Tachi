@@ -1,7 +1,7 @@
 //! Report-only instruction drift / density sentinel (#1304).
 //!
-//! Consumes [`scan_instruction_manifest`] status plus re-reads of declared
-//! paths. Never writes sources, projections, approvals, or promotions.
+//! Consumes the immutable content snapshot from [`scan_instruction_manifest`].
+//! Never re-reads or writes sources, projections, approvals, or promotions.
 
 #[cfg(test)]
 use super::instruction_manifest::scan_instruction_manifest;
@@ -22,7 +22,6 @@ const CHECK_PARITY_DRIFT: &str = "parity_drift";
 const CHECK_MISSING_TARGET: &str = "missing_target";
 const CHECK_TARGET_ALIASES_SOURCE: &str = "target_aliases_source";
 const CHECK_STALE_TARGET: &str = "stale_target";
-const CHECK_UNREADABLE_TARGET: &str = "unreadable_target";
 const CHECK_WRONG_CARRIER: &str = "wrong_carrier";
 const CHECK_DUPLICATE_BLOCK: &str = "duplicate_block";
 const CHECK_CONTRADICTION: &str = "mechanical_contradiction";
@@ -31,6 +30,17 @@ const CHECK_DATED_CASE_BODY: &str = "dated_case_body";
 const CHECK_AUDIENCE_LEAK: &str = "audience_carrier_leak";
 const CHECK_INCOMPLETE_COVERAGE: &str = "incomplete_coverage";
 const CHECK_UNREADABLE_MANIFEST_ENTRY: &str = "unreadable_manifest_entry";
+
+// OpenCode co-hosts the current Claude/OpenCode private manual but is not a
+// projection Carrier enum member.
+const PRIVATE_MARKER_CARRIERS: &[&str] = &[
+    "Codex",
+    "Claude",
+    "OpenCode",
+    "Gemini",
+    "Antigravity",
+    "Cursor",
+];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(super) struct InstructionDriftFinding {
@@ -136,24 +146,13 @@ pub(super) fn build_instruction_drift_report(
 
     let mut source_contents: BTreeMap<String, String> = BTreeMap::new();
     let mut claimed_sources: BTreeSet<String> = BTreeSet::new();
+    let mut resolved_sources: BTreeSet<String> = BTreeSet::new();
 
     for source in &status.sources {
         claimed_sources.insert(normalize_declared_path(&source.source));
-        if source.exists && source.status == CLEAN_STATUS {
-            match std::fs::read_to_string(&source.resolved_path) {
-                Ok(text) => {
-                    source_contents.insert(source.id.clone(), text);
-                }
-                Err(error) => {
-                    findings.push(finding_for_source(
-                        source,
-                        None,
-                        None,
-                        CHECK_UNREADABLE_TARGET,
-                        format!("source '{}': unreadable ({error})", source.resolved_path),
-                    ));
-                }
-            }
+        resolved_sources.insert(source.resolved_path.clone());
+        if let Some(text) = source.content.as_ref() {
+            source_contents.insert(source.id.clone(), text.clone());
         }
     }
 
@@ -169,7 +168,7 @@ pub(super) fn build_instruction_drift_report(
         }
 
         evaluate_source_content_checks(source, source_contents.get(&source.id), &mut findings);
-        evaluate_target_checks(source, &claimed_sources, &source_contents, &mut findings);
+        evaluate_target_checks(source, &resolved_sources, &source_contents, &mut findings);
     }
 
     evaluate_required_sources(status, &claimed_sources, &mut findings);
@@ -330,7 +329,7 @@ fn evaluate_source_content_checks(
 
 fn evaluate_target_checks(
     source: &InstructionSourceStatus,
-    claimed_sources: &BTreeSet<String>,
+    resolved_sources: &BTreeSet<String>,
     source_contents: &BTreeMap<String, String>,
     findings: &mut Vec<InstructionDriftFinding>,
 ) {
@@ -349,7 +348,7 @@ fn evaluate_target_checks(
             ));
         }
 
-        if claimed_sources.contains(&normalize_declared_path(&target.path)) {
+        if resolved_sources.contains(&target.resolved_path) {
             findings.push(finding_for_source(
                 source,
                 Some(target),
@@ -386,23 +385,13 @@ fn evaluate_target_checks(
             ));
         }
 
-        let target_text = match std::fs::read_to_string(&target.resolved_path) {
-            Ok(text) => text,
-            Err(error) => {
-                findings.push(finding_for_source(
-                    source,
-                    Some(target),
-                    target.hash.clone(),
-                    CHECK_UNREADABLE_TARGET,
-                    format!("target '{}': unreadable ({error})", target.resolved_path),
-                ));
-                continue;
-            }
+        let Some(target_text) = target.content.as_deref() else {
+            continue;
         };
 
         if target.projection == "exact" {
             if let Some(source_text) = source_text {
-                if source_text != &target_text {
+                if source_text != target_text {
                     findings.push(finding_for_source(
                         source,
                         Some(target),
@@ -418,13 +407,24 @@ fn evaluate_target_checks(
         }
 
         if source.audience == "public" {
-            for (start, end, matched) in carrier_mechanism_spans(&target_text) {
+            for (start, end, matched) in carrier_mechanism_spans(target_text) {
                 findings.push(finding_for_source(
                     source,
                     Some(target),
                     target.hash.clone(),
                     CHECK_AUDIENCE_LEAK,
                     format!("bytes {start}..{end}: carrier mechanism '{matched}'"),
+                ));
+            }
+            for (start, end, matched) in private_contract_spans(target_text) {
+                findings.push(finding_for_source(
+                    source,
+                    Some(target),
+                    target.hash.clone(),
+                    CHECK_CONTRADICTION,
+                    format!(
+                        "bytes {start}..{end}: public target contains private marker '{matched}'"
+                    ),
                 ));
             }
         }
@@ -708,9 +708,10 @@ fn carrier_mechanism_spans(text: &str) -> Vec<(usize, usize, String)> {
 fn private_contract_spans(text: &str) -> Vec<(usize, usize, String)> {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?i)(?:This file is .+?-only|Claude/OpenCode-only|carrier-private manual)",
-        )
+        let carriers = PRIVATE_MARKER_CARRIERS.join("|");
+        regex::Regex::new(&format!(
+            r"(?i)(?:This file is (?:{carriers})-only\b|Claude/OpenCode-only\b|carrier-private manual\b)"
+        ))
         .expect("private marker regex")
     });
     re.find_iter(text)
@@ -946,6 +947,29 @@ mod tests {
             "{check_kinds:?}"
         );
         assert!(!check_kinds.contains(&"extra_target"), "{check_kinds:?}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_target_aliasing_a_source_is_reported() {
+        let (root, manifest_path) = fixture("target-symlink-alias");
+        write_clean_tree(&root);
+        std::fs::remove_file(root.join("targets/cursor/AGENTS.md")).expect("remove target");
+        std::os::unix::fs::symlink("../../AGENTS.md", root.join("targets/cursor/AGENTS.md"))
+            .expect("source alias symlink");
+        write_manifest(&manifest_path, &clean_manifest());
+
+        let report = scan_drift_for_test(&manifest_path).expect("symlink alias scan");
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.check_kind == CHECK_TARGET_ALIASES_SOURCE
+                    && finding.target_path.as_deref() == Some("targets/cursor/AGENTS.md")
+            }),
+            "{:?}",
+            report.findings
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1217,6 +1241,59 @@ mod tests {
     }
 
     #[test]
+    fn generic_read_only_prose_is_not_a_private_marker() {
+        let (root, manifest_path) = fixture("private-marker-boundary");
+        write_clean_tree(&root);
+        std::fs::write(root.join("AGENTS.md"), "This file is read-only.\n")
+            .expect("generic source");
+        std::fs::write(
+            root.join("targets/cursor/AGENTS.md"),
+            "This file is read-only.\n",
+        )
+        .expect("generic target");
+        write_manifest(&manifest_path, &clean_manifest());
+
+        let report = scan_drift_for_test(&manifest_path).expect("generic marker scan");
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.check_kind == CHECK_CONTRADICTION),
+            "{:?}",
+            report.findings
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_marker_on_public_target_is_reported() {
+        let (root, manifest_path) = fixture("public-target-private-marker");
+        write_clean_tree(&root);
+        std::fs::write(
+            root.join("targets/cursor/AGENTS.md"),
+            "This file is Claude-only.\n",
+        )
+        .expect("private marker target");
+        let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["targets"][0]["projection"] = json!("carrier-adapted");
+        manifest["surfaces"][0]["targets"][0]["ownership_mode"] = json!("carrier-owned");
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("private marker scan");
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.check_kind == CHECK_CONTRADICTION
+                    && finding.target_path.as_deref() == Some("targets/cursor/AGENTS.md")
+            }),
+            "{:?}",
+            report.findings
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn unregistered_required_source_is_incomplete_coverage() {
         let (root, manifest_path) = fixture("unregistered");
         write_clean_tree(&root);
@@ -1252,6 +1329,33 @@ mod tests {
 
         let after = snapshot_tree(&root);
         assert_eq!(before, after);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn report_uses_the_scanned_content_snapshot() {
+        let (root, manifest_path) = fixture("snapshot-content");
+        write_clean_tree(&root);
+        write_manifest(&manifest_path, &clean_manifest());
+        let status = scan_instruction_manifest(&manifest_path).expect("status snapshot");
+
+        std::fs::write(root.join("AGENTS.md"), "mutated source\n").expect("mutate source");
+        std::fs::write(
+            root.join("targets/cursor/AGENTS.md"),
+            "different mutated target\n",
+        )
+        .expect("mutate target");
+
+        let report = build_instruction_drift_report(&status).expect("snapshot report");
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.check_kind == CHECK_PARITY_DRIFT),
+            "{:?}",
+            report.findings
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
