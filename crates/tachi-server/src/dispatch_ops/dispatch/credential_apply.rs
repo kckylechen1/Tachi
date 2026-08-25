@@ -17,7 +17,7 @@ pub(super) fn inject_legacy_vault_env(
     let legacy_vault_env_count = legacy_vault_env.len();
     if legacy_vault_env_count > 0 {
         match execution {
-            DispatchExecution::Subprocess(cmd) => {
+            DispatchExecution::Subprocess(cmd) | DispatchExecution::ManagedCustom(cmd, _) => {
                 for (name, value) in &legacy_vault_env {
                     cmd.env(name, value);
                 }
@@ -130,7 +130,7 @@ pub(super) fn apply_materialized_credentials(
     };
     for (name, value) in &dispatch_credentials.env {
         match execution {
-            DispatchExecution::Subprocess(cmd) => {
+            DispatchExecution::Subprocess(cmd) | DispatchExecution::ManagedCustom(cmd, _) => {
                 cmd.env(name, value);
             }
             DispatchExecution::NativeAcp(spec) => {

@@ -534,9 +534,10 @@ pub(crate) fn auto_register_or_heartbeat_claim(server: &MemoryServer, input: &Cl
 /// forever and the briefing 工位表 keeps showing a session that is gone.
 ///
 /// Same non-fatal discipline as the auto-register hook: a storage error here
-/// must never fail `tachi_complete`/`tachi_task(action='cancel')`, so this
-/// degrades to a `tracing::warn!` no-op rather than propagating. A no-op when
-/// `dispatch_id` is empty — nothing to release.
+/// must never fail `tachi_complete` or
+/// `tachi_staff(action='cancel', dispatch_id, expected_status_revision)`, so
+/// this degrades to a `tracing::warn!` no-op rather than propagating. A no-op
+/// when `dispatch_id` is empty — nothing to release.
 pub(crate) fn release_claim_for_dispatch(server: &MemoryServer, dispatch_id: &str, reason: &str) {
     if dispatch_id.trim().is_empty() {
         return;

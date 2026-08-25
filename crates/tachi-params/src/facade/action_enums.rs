@@ -80,8 +80,8 @@ impl FromStr for TachiVerifyAction {
 /// Actions accepted by `tachi_task`.
 ///
 /// GitHub PR lifecycle (`link_pr` / `pr_status` / `pr_handoff` / `release_note`)
-/// is **not** accepted here — use `tachi_gh` (#757). Worker launch/wait/cancel
-/// left Task in #1319-C2; use `tachi_staff(action='start'|'status')` instead.
+/// is **not** accepted here — use `tachi_gh` (#757). Worker launch/wait left
+/// Task in #1319-C2; cancellation uses `tachi_staff(action='cancel')`.
 /// Route tuning left Task in #1426; use `tachi_tune` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -234,10 +234,13 @@ impl FromStr for TachiTaskAction {
                     "Invalid tachi_task action '{s}'. This Task action was retired by #1683 C1a; use the surviving tachi_task primary actions or the owning facade for that workflow."
                 ))
             }
-            // #1319-C2: dispatch/wait/cancel left Task (worker launch moved to
+            // #1319-C2: dispatch/wait left Task (worker launch moved to
             // tachi_staff). Point callers at the canonical worker surface.
-            "dispatch" | "wait" | "cancel" => Err(format!(
-                "Invalid tachi_task action '{s}'. Worker launch/wait/cancel left Task in #1319-C2; use tachi_staff(action='start') to launch a worker and tachi_task(action='status') to read its state."
+            "dispatch" | "wait" => Err(format!(
+                "Invalid tachi_task action '{s}'. Worker launch/wait left Task in #1319-C2; use tachi_staff(action='start') to launch a worker and tachi_task(action='status') to read its state."
+            )),
+            "cancel" => Err(format!(
+                "Invalid tachi_task action '{s}'. Cancellation uses tachi_staff(action='cancel'); provide dispatch_id and expected_status_revision."
             )),
             // #1426: route tuning moved behind the admin/operator tachi_tune
             // surface. Keep typed rejects explicit so old callers get the new
@@ -401,5 +404,16 @@ mod tests {
                 "error for {retired} should point at tachi_tune {target}, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn f1833_task_cancel_rejection_text_is_pinned_to_staff_cancel() {
+        let error = "cancel"
+            .parse::<TachiTaskAction>()
+            .expect_err("retired cancel action must not parse as tachi_task action");
+        assert_eq!(
+            error,
+            "Invalid tachi_task action 'cancel'. Cancellation uses tachi_staff(action='cancel'); provide dispatch_id and expected_status_revision."
+        );
     }
 }

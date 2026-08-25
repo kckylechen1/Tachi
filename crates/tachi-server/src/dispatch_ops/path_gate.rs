@@ -2,8 +2,9 @@
 //!
 //! tachi#1173 board autopsy (codex cold-review of uc-u-k2-board-autopsy,
 //! eb473fd0) found `board::runs::collect_run_task_by_id` joining a
-//! caller-controlled `dispatch_id` (from `tachi_task(action='wait'|'status'|
-//! 'cancel')`) directly onto `runs_dir` with no validation -- a
+//! caller-controlled `dispatch_id` (from `tachi_task(action='status')` or
+//! `tachi_staff(action='cancel', dispatch_id, expected_status_revision)`)
+//! directly onto `runs_dir` with no validation -- a
 //! `../../../../etc/passwd`-shaped id could read arbitrary files outside
 //! `~/.tachi/runs`. The follow-up grep sweep (tachi#1173 k2 fix, this module)
 //! found the identical join-with-no-validation shape reused at three more

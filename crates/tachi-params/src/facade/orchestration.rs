@@ -180,7 +180,7 @@ pub struct TachiVerifyParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TachiStaffParams {
-    /// Action: "start" | "status"
+    /// Action: "start" | "status" | "cancel"
     #[schemars(schema_with = "tachi_staff_action_schema")]
     pub action: String,
 
@@ -192,6 +192,10 @@ pub struct TachiStaffParams {
     /// status; ignored for start.
     #[serde(default)]
     pub dispatch_id: Option<String>,
+
+    // Canonical receipt revision required by action=cancel.
+    #[serde(default)]
+    pub expected_status_revision: Option<u64>,
 
     /// Task description / prompt for the worker. Required for `start`
     /// (the route validates non-empty); ignored for `status`.
@@ -249,11 +253,45 @@ pub struct TachiStaffParams {
 }
 
 impl TachiStaffParams {
+    pub fn cancel_request(&self) -> Result<(String, u64), String> {
+        let dispatch_id = self
+            .dispatch_id
+            .clone()
+            .ok_or_else(|| "tachi_staff: action='cancel' requires a `dispatch_id`".to_string())?;
+        let expected_status_revision = self.expected_status_revision.ok_or_else(|| {
+            "tachi_staff: action='cancel' requires `expected_status_revision`".to_string()
+        })?;
+        for (name, present) in [
+            ("task", self.task.is_some()),
+            ("staffing_reason", self.staffing_reason.is_some()),
+            ("profile", self.profile.is_some()),
+            ("worker", self.worker.is_some()),
+            ("project", self.project.is_some()),
+            ("stage", self.stage.is_some()),
+            ("issue_ref", self.issue_ref.is_some()),
+            ("pr_ref", self.pr_ref.is_some()),
+            ("flow_id", self.flow_id.is_some()),
+            ("recommendation_ref", self.recommendation_ref.is_some()),
+        ] {
+            if present {
+                return Err(format!(
+                    "tachi_staff: action='cancel' rejects start-only field `{name}`"
+                ));
+            }
+        }
+        Ok((dispatch_id, expected_status_revision))
+    }
+
     pub fn to_assignment_request(&self) -> Result<crate::facade::StaffAssignmentRequest, String> {
         if self.dispatch_id.is_some() {
             return Err(
                 "dispatch_id is minted by the kernel and cannot be specified when action='start'"
                     .to_string(),
+            );
+        }
+        if self.expected_status_revision.is_some() {
+            return Err(
+                "expected_status_revision is accepted only when action='cancel'".to_string(),
             );
         }
         let staffing_reason = self
@@ -811,5 +849,85 @@ mod tests {
             err.contains("dispatch_id is minted by the kernel"),
             "action='start' must reject caller-supplied dispatch_id: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod issue_1825_cancel_tests {
+    use super::TachiStaffParams;
+
+    #[test]
+    fn tachi_staff_cancel_schema_and_effect_contract() {
+        let accepted: TachiStaffParams = serde_json::from_value(serde_json::json!({
+            "action": "cancel",
+            "dispatch_id": "20260823T010101Z-custom-deadbeef",
+            "expected_status_revision": 7,
+            "format": "json",
+        }))
+        .expect("the frozen cancel fields deserialize");
+        assert_eq!(
+            accepted.cancel_request().expect("cancel fields validate"),
+            ("20260823T010101Z-custom-deadbeef".to_string(), 7)
+        );
+        for field in [
+            "task",
+            "staffing_reason",
+            "profile",
+            "worker",
+            "project",
+            "stage",
+            "issue_ref",
+            "pr_ref",
+            "flow_id",
+            "recommendation_ref",
+        ] {
+            let mut raw = serde_json::json!({
+                "action": "cancel",
+                "dispatch_id": "20260823T010101Z-custom-deadbeef",
+                "expected_status_revision": 7,
+            });
+            raw[field] = match field {
+                "staffing_reason" => serde_json::json!("explicit_user_request"),
+                "stage" => serde_json::json!("plan"),
+                _ => serde_json::json!("forged-authority"),
+            };
+            let params: TachiStaffParams = serde_json::from_value(raw)
+                .expect("flat schema admits the field for action validation");
+            assert!(
+                params.cancel_request().is_err(),
+                "cancel must reject {field}"
+            );
+        }
+        let schema = serde_json::to_value(rmcp::schemars::schema_for!(TachiStaffParams))
+            .expect("Staff schema serializes");
+        let properties = schema["properties"]
+            .as_object()
+            .expect("Staff schema properties");
+        for field in [
+            "pid",
+            "pgid",
+            "command",
+            "cwd",
+            "env",
+            "credentials",
+            "signal",
+        ] {
+            let mut raw = serde_json::json!({
+                "action": "cancel",
+                "dispatch_id": "20260823T010101Z-custom-deadbeef",
+                "expected_status_revision": 7,
+            });
+            raw[field] = serde_json::json!("hostile-process-authority");
+            let error = serde_json::from_value::<TachiStaffParams>(raw)
+                .expect_err("control field must fail Staff deserialization");
+            assert!(
+                error.to_string().contains("unknown field") && error.to_string().contains(field),
+                "Staff deserialization must reject control field {field}: {error}"
+            );
+            assert!(
+                !properties.contains_key(field),
+                "Staff's generated MCP schema must not advertise control field {field}"
+            );
+        }
     }
 }

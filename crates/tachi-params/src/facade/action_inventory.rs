@@ -151,7 +151,7 @@ pub const TACHI_SKILL_ACTIONS: &[&str] = &["discover", "run"];
 /// `tachi_staff` facade actions. Single source for
 /// `orchestration::tachi_staff_action_schema` and #1098's `action_effect`
 /// completeness test.
-pub const TACHI_STAFF_ACTIONS: &[&str] = &["start", "status"];
+pub const TACHI_STAFF_ACTIONS: &[&str] = &["start", "status", "cancel"];
 
 /// Internal orchestrator actions (retired from MCP router; retained for
 /// internal hard_state TODOs and handoffs accounting).
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn f0_skill_and_staff_and_wiki_and_a2a_counts() {
         assert_eq!(TACHI_SKILL_ACTIONS, &["discover", "run"]);
-        assert_eq!(TACHI_STAFF_ACTIONS, &["start", "status"]);
+        assert_eq!(TACHI_STAFF_ACTIONS, &["start", "status", "cancel"]);
         assert_eq!(TACHI_WIKI_ACTIONS, &["search", "browse", "read", "write"]);
         assert_eq!(TACHI_A2A_ACTIONS, &["respond", "status"]);
         assert_eq!(

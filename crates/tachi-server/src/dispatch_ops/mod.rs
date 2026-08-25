@@ -23,15 +23,31 @@ pub(crate) use dispatch::apply_unlocked_vault_env;
 pub(crate) use dispatch::background_dispatch_cleanup_complete;
 pub(crate) use dispatch::dispatch_runs_root;
 pub(crate) use dispatch::handle_tachi_dispatch;
+#[cfg(test)]
+pub(crate) use dispatch::install_managed_credential_cleanup_failure;
+#[cfg(test)]
+pub(crate) use dispatch::install_managed_credential_materialization_barrier;
+#[cfg(test)]
+pub(crate) use dispatch::install_managed_result_persist_failure;
+#[cfg(test)]
+pub(crate) use dispatch::install_managed_timeout_override;
 pub(crate) use dispatch::launch_staff_assignment;
 #[cfg(test)]
 pub(crate) use dispatch::new_dispatch_id;
 pub(crate) use dispatch::recover_orphaned_dispatch_runs;
 pub(crate) use dispatch::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
+#[cfg(test)]
+pub(crate) use dispatch_v2::fail_next_managed_terminal_status_write;
 pub(crate) use dispatch_v2::stamp_route_decision_id;
 pub(crate) use dispatch_v2::status_json_lock_for;
+#[cfg(unix)]
+pub(crate) use dispatch_v2::status_json_lock_for_identity;
 #[cfg(test)]
 pub(crate) use dispatch_v2::write_status_json;
+#[cfg(all(test, unix))]
+pub(crate) use dispatch_v2::write_status_json_with_managed_anchor;
+#[cfg(test)]
+pub(crate) use dispatch_v2::{write_status_json_for_terminal, ManagedTerminalStatusAnchor};
 pub(crate) use harness::{
     harness_server_attach_ready, probe_harness_server_status, probe_harness_server_status_with_env,
 };
@@ -43,6 +59,12 @@ pub(crate) use kanban_helpers::update_kanban_state;
 pub(crate) use prompt::seat_card::{
     card_kind_participates_in_seat_projection, complete_counter_clause_projection,
     resolve_exact_seat_card_readiness,
+};
+#[cfg(test)]
+pub(crate) use subprocess::{
+    install_managed_before_select_barrier, install_managed_cancel_dequeue_barrier,
+    install_managed_panic_after_spawn_for_run_root, install_managed_pre_spawn_barrier,
+    ManagedCancelTryWaitObservation,
 };
 // tachi#1173 k2 fix: shared dispatch-id path-traversal gate (allowlist +
 // canonicalize-and-confine), consumed by `board::runs`, `dispatch::dedupe`,

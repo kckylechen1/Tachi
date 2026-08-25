@@ -144,6 +144,156 @@ fn p3_downstream_production_consumers_cannot_reintroduce_flat_dispatch_params() 
     }
 }
 
+#[test]
+fn shared_status_revision_increment_rejects_invalid_and_overflowed_receipts() {
+    let mut status = serde_json::Map::new();
+    status.insert("status_revision".to_string(), serde_json::json!(41));
+    assert_eq!(
+        crate::managed_run_control::advance_status_revision(&mut status)
+            .expect("valid revision increments"),
+        42
+    );
+    status.insert("status_revision".to_string(), serde_json::json!(u64::MAX));
+    assert!(
+        crate::managed_run_control::advance_status_revision(&mut status).is_err(),
+        "overflow must fail before a writer can wrap the monotonic revision"
+    );
+}
+
+#[test]
+fn managed_custom_registration_uses_prepared_execution_eligibility() {
+    let server = crate::tests::make_server();
+    for (name, origin, prepared_eligible, admitted) in [
+        (
+            "staff-eligible",
+            ManagedControlOrigin::StaffFacade,
+            true,
+            true,
+        ),
+        (
+            "staff-ineligible",
+            ManagedControlOrigin::StaffFacade,
+            false,
+            false,
+        ),
+        (
+            "direct-eligible",
+            ManagedControlOrigin::DirectHandle,
+            true,
+            false,
+        ),
+        (
+            "direct-ineligible",
+            ManagedControlOrigin::DirectHandle,
+            false,
+            false,
+        ),
+    ] {
+        let dispatch_id = format!("20260824T000000Z-managed-registration-{name}");
+        let registration =
+            register_managed_custom_control(&server, &dispatch_id, origin, prepared_eligible)
+                .expect("managed control admission");
+        assert_eq!(
+            registration.is_some(),
+            admitted,
+            "{name} must register only when prepared backend eligibility and Staff ownership agree"
+        );
+        assert_eq!(
+            server.managed_run_controls.contains(&dispatch_id),
+            admitted,
+            "{name} registry membership must match the admission result"
+        );
+        if let Some((_receiver, guard)) = registration {
+            drop(guard);
+            assert!(
+                !server.managed_run_controls.contains(&dispatch_id),
+                "{name} managed control guard must release registry ownership"
+            );
+        }
+    }
+    assert!(
+        !managed_custom_control_required(ManagedControlOrigin::DirectHandle, true),
+        "direct custom execution must remain outside Staff lifecycle ownership"
+    );
+    let backend = include_str!("../backend.rs");
+    for concrete_branch_guard in [
+        "matches!(&execution, DispatchExecution::Subprocess(_))",
+        "ctx.custom_launch_spec.is_some()",
+        "!acpx_enabled",
+        "!native_acp_enabled",
+    ] {
+        assert!(
+            backend.contains(concrete_branch_guard),
+            "prepared eligibility is missing {concrete_branch_guard}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
+async fn direct_custom_operator_dispatch_is_not_managed_cancelable() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let cwd = tempfile::tempdir().expect("dispatch cwd");
+    let release_worker = cwd.path().join("release-worker");
+    let server = crate::tests::make_server();
+    let mut params = test_dispatch_params(Some("custom"), "direct custom remains operator-owned");
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]);\nwhile not p.exists(): time.sleep(0.01)"
+            .to_string(),
+        release_worker.to_string_lossy().to_string(),
+    ];
+    params.cwd = Some(cwd.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
+
+    let raw = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("direct custom dispatch starts");
+    let response: Value = serde_json::from_str(&raw).expect("response JSON");
+    let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+    let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run dir"));
+    let mut cleanup = ReleaseWorkerCleanup::arm(&release_worker, run_dir.clone());
+    let accepted_status: Value = serde_json::from_slice(
+        &std::fs::read(run_dir.join("status.json")).expect("accepted status"),
+    )
+    .expect("accepted status JSON");
+    assert!(accepted_status.get("execution_classification").is_none());
+    assert!(!server.managed_run_controls.contains(dispatch_id));
+    let cancellation: Value = serde_json::from_str(
+        &crate::managed_run_control::request_managed_custom_cancel(
+            &server,
+            dispatch_id,
+            accepted_status["status_revision"]
+                .as_u64()
+                .expect("status revision"),
+        )
+        .await
+        .expect("operator cancellation probe"),
+    )
+    .expect("cancellation JSON");
+    assert_eq!(cancellation["receipt"], json!("cancellation_unavailable"));
+    assert_eq!(
+        cancellation["reason"],
+        json!("non_managed_custom_execution")
+    );
+    assert!(
+        !release_worker.exists(),
+        "unavailable operator cancellation must not signal the direct child"
+    );
+
+    std::fs::write(&release_worker, b"release").expect("release direct child");
+    assert_eq!(
+        cleanup.worker.wait_for_terminal().await["state"],
+        json!("TASK_STATE_COMPLETED")
+    );
+    cleanup.disarm();
+}
+
 /// Releases the fake Claude subprocess even when an assertion panics. The
 /// real handler owns generated MCP-config cleanup, so the explicit path
 /// asserts cleanup while Drop only performs the bounded best-effort wait.
@@ -212,6 +362,34 @@ impl Drop for FakeClaudeCleanup {
 /// process-wide test environment alive until its terminal receipt exists.
 struct TerminalWorkerCleanup {
     run_dir: std::path::PathBuf,
+}
+
+struct ReleaseWorkerCleanup {
+    release: std::path::PathBuf,
+    worker: TerminalWorkerCleanup,
+    armed: bool,
+}
+
+impl ReleaseWorkerCleanup {
+    fn arm(release: &std::path::Path, run_dir: std::path::PathBuf) -> Self {
+        Self {
+            release: release.to_path_buf(),
+            worker: TerminalWorkerCleanup::new(run_dir),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReleaseWorkerCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::write(&self.release, b"release");
+        }
+    }
 }
 
 impl TerminalWorkerCleanup {
