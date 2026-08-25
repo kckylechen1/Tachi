@@ -9,3 +9,4 @@ mod test_support;
 pub mod work_claim;
 pub mod wt_clean;
 pub mod wt_open;
+pub mod wt_reconcile;

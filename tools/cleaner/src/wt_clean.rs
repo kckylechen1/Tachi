@@ -20,32 +20,27 @@ pub struct WtRemoveOptions {
 }
 
 #[derive(Debug, serde::Serialize)]
-struct WtRemoveReport {
-    action: &'static str,
-    path: String,
-    canonical_path: Option<String>,
-    repo_root: Option<String>,
+pub(crate) struct WtRemoveReport {
+    pub(crate) action: &'static str,
+    pub(crate) path: String,
+    pub(crate) canonical_path: Option<String>,
+    pub(crate) repo_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    branch: Option<String>,
-    dry_run: bool,
-    removed: bool,
-    allowed: bool,
+    pub(crate) branch: Option<String>,
+    pub(crate) dry_run: bool,
+    pub(crate) removed: bool,
+    pub(crate) allowed: bool,
     /// #1605: this close has no directory left to remove and only reconciles a
     /// stale registry row. Nothing destructive runs — no `git worktree
     /// remove`, no scrap-ledger record — so the field is load-bearing for the
     /// execute step, not just for the report reader.
-    registry_only: bool,
-    warnings: Vec<String>,
-    errors: Vec<String>,
+    pub(crate) registry_only: bool,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) errors: Vec<String>,
 }
 
 pub fn run_wt_remove(options: WtRemoveOptions) -> Result<(), String> {
-    let report = plan_wt_remove(
-        &options.path,
-        !options.force,
-        &work_claim::probe_worktree_holder,
-        &holder::probe_holders,
-    );
+    let report = plan_wt_remove_default(&options.path, !options.force);
     let report = if options.force && report.allowed {
         execute_wt_remove(report)
     } else {
@@ -58,6 +53,19 @@ pub fn run_wt_remove(options: WtRemoveOptions) -> Result<(), String> {
     } else {
         Err(report.errors.join("; "))
     }
+}
+
+pub(crate) fn plan_wt_remove_default(path: &Path, dry_run: bool) -> WtRemoveReport {
+    plan_wt_remove(
+        path,
+        dry_run,
+        &work_claim::probe_worktree_holder,
+        &holder::probe_holders,
+    )
+}
+
+pub(crate) fn execute_wt_remove_planned(report: WtRemoveReport) -> WtRemoveReport {
+    execute_wt_remove(report)
 }
 
 /// Core close-predicate planning logic, parameterized over the holder
@@ -172,6 +180,13 @@ fn plan_wt_remove(
     // freeze boundary 3: a scrapped tree may only reopen under a NEW
     // branch + NEW path).
     report.branch = current_branch(&worktree_root).ok();
+    if report.branch.as_deref().map_or(true, |b| b == "HEAD" || b.is_empty()) {
+        if let Ok(Some(entry)) = registry::find_registry_entry(&worktree_root) {
+            if !entry.branch.is_empty() {
+                report.branch = Some(entry.branch);
+            }
+        }
+    }
 
     // Durable WorkClaim evidence is a separate precondition from OS process
     // evidence.  Clear and legacy NotApplicable may proceed; every other
@@ -361,6 +376,45 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
         Ok(out) if out.status.success() => {
             report.removed = true;
             report.dry_run = false;
+
+            // 1. Clean up stale worktree registrations
+            let _ = Command::new("git")
+                .args(["-C", &repo_root, "worktree", "prune"])
+                .output();
+
+            // 2. Delete local branch (Fix #1118)
+            if !branch.is_empty()
+                && branch != "HEAD"
+                && branch != "main"
+                && branch != "master"
+                && branch != "trunk"
+            {
+                match Command::new("git")
+                    .args(["-C", &repo_root, "branch", "-D", &branch])
+                    .output()
+                {
+                    Ok(out) if !out.status.success() => {
+                        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                        if !stderr.is_empty() {
+                            report.warnings.push(format!(
+                                "local branch deletion failed for {branch}: {stderr}"
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        report.warnings.push(format!(
+                            "local branch deletion failed for {branch}: {err}"
+                        ));
+                    }
+                    _ => {}
+                }
+
+                // 3. Delete remote branch (best-effort, don't fail if already gone or no remote)
+                let _ = Command::new("git")
+                    .args(["-C", &repo_root, "push", "origin", "--delete", &branch])
+                    .output();
+            }
+
             // Round-2 cross-vendor review (FIX 2): the old canonicalizing
             // `remove_registry_entry` re-canonicalized both sides on every
             // call — a path just vacated by `git worktree remove` above can
@@ -1212,4 +1266,59 @@ mod tests {
         let _ = std::fs::remove_file(&closing_stored_path);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn execute_wt_remove_prunes_worktree_and_deletes_local_branch() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-branch-del");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let repo = root.join("repo");
+        let branch = "feature/holder-test";
+
+        // Verify branch exists in git repo before removal
+        let branches_before = Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "branch", "--list", branch])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branches_before.stdout).contains(branch),
+            "branch must exist before removal"
+        );
+
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(report.allowed, "clean worktree must be allowed: {:?}", report.errors);
+        assert_eq!(report.branch.as_deref(), Some(branch));
+
+        let report = execute_wt_remove(report);
+        assert!(report.removed, "worktree should be removed: {:?}", report.errors);
+        assert!(!worktree.exists(), "worktree directory must be gone");
+
+        // Verify local branch was deleted
+        let branches_after = Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "branch", "--list", branch])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branches_after.stdout).trim().is_empty(),
+            "local branch must be deleted after wt-remove"
+        );
+
+        // Verify worktree registration in git was pruned
+        let wt_list = Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "worktree", "list"])
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&wt_list.stdout).contains(worktree.to_str().unwrap()),
+            "git worktree list must not contain the removed worktree"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
+

@@ -9,6 +9,7 @@ mod test_support;
 mod work_claim;
 mod wt_clean;
 mod wt_open;
+mod wt_reconcile;
 
 use std::path::PathBuf;
 
@@ -18,6 +19,7 @@ use tachi_clean::TachiCleanOptions;
 use target_clean::TargetCleanOptions;
 use wt_clean::{OutputFormat, WtRemoveOptions};
 use wt_open::{CargoTargetPolicy, OpenOptions};
+use wt_reconcile::WtReconcileOptions;
 
 fn main() {
     let code = match run() {
@@ -46,8 +48,9 @@ fn run() -> Result<(), String> {
         "wt-remove" => run_wt_remove(args),
         "wt-open" => run_wt_open(args),
         "wt-list" => run_wt_list(args),
+        "wt-reconcile" | "reconcile" => run_wt_reconcile(args),
         _ => Err(format!(
-            "unknown command '{command}'. Expected: sweep, tachi, target, wt-register, wt-remove, wt-open, or wt-list"
+            "unknown command '{command}'. Expected: sweep, tachi, target, wt-register, wt-remove, wt-open, wt-list, or wt-reconcile"
         )),
     }
 }
@@ -436,9 +439,42 @@ fn run_wt_list(args: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+fn run_wt_reconcile(args: Vec<String>) -> Result<(), String> {
+    let mut force = false;
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--force" => force = true,
+            "--dry-run" => force = false,
+            "--json" => json = true,
+            "-h" | "--help" => {
+                print_wt_reconcile_help();
+                return Ok(());
+            }
+            _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
+            _ => return Err("wt-reconcile accepts only options (--force, --dry-run, --json)".to_string()),
+        }
+    }
+
+    wt_reconcile::run_wt_reconcile(WtReconcileOptions {
+        force,
+        output: if json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Text
+        },
+    })
+}
+
 fn print_help() {
     println!(
-        "tachi-clean\n\nUsage:\n  tachi-clean sweep [--root <path>] [--max-age-days <days>] [--dry-run|--force] [--json]\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n  tachi-clean target [path] [--dry-run|--force] [--json]\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n  tachi-clean wt-open --repo <repo-root> [--branch <name>] [--base <ref>] [--task <id>] [--role <name>] [--path <path>] [--dry-run] [--json]\n  tachi-clean wt-list [--json]\n"
+        "tachi-clean\n\nUsage:\n  tachi-clean sweep [--root <path>] [--max-age-days <days>] [--dry-run|--force] [--json]\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n  tachi-clean target [path] [--dry-run|--force] [--json]\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n  tachi-clean wt-reconcile [--dry-run|--force] [--json]\n  tachi-clean wt-open --repo <repo-root> [--branch <name>] [--base <ref>] [--task <id>] [--role <name>] [--path <path>] [--dry-run] [--json]\n  tachi-clean wt-list [--json]\n"
+    );
+}
+
+fn print_wt_reconcile_help() {
+    println!(
+        "Reconcile registered Tachi-managed worktrees against terminal GitHub PRs.\n\nUsage:\n  tachi-clean wt-reconcile [--dry-run|--force] [--json]\n\nOptions:\n  --dry-run  Preview only (default)\n  --force    Actually remove worktrees whose PRs are MERGED or CLOSED\n  --json     Print machine-readable JSON\n"
     );
 }
 
