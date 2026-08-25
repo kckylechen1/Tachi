@@ -17,7 +17,7 @@
 //! `detect-and-reject` and never a claim of prevention.
 
 /// Can the parent still see a live process from this worker's tree?
-pub trait DescendantLiveness {
+pub trait DescendantLiveness: Send + Sync {
     /// `Ok(true)` = at least one process of the worker's tree is still alive.
     /// `Err` = the probe could not answer, which callers MUST treat as
     /// fail-closed (never as "nothing alive").
@@ -94,5 +94,19 @@ impl DescendantLiveness for ProcessGroupLiveness {
 
     fn describe(&self) -> String {
         format!("process group {}", self.pgid)
+    }
+}
+
+/// A probe that reports all descendants reaped (used when the runner has reaped the child process).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReapedLiveness;
+
+impl DescendantLiveness for ReapedLiveness {
+    fn any_alive(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn describe(&self) -> String {
+        "worker tree reaped".to_string()
     }
 }

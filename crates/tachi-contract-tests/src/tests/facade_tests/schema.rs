@@ -342,6 +342,7 @@ fn tachi_staff_schema_exposes_start_status_and_cancel() {
         "format",
         "task",
         "staffing_reason",
+        "declared_file_scope",
         "flow_id",
         "issue_ref",
         "pr_ref",

@@ -1553,3 +1553,164 @@ unsafe fn set_xattr_raw(
 ) -> libc::c_int {
     libc::lsetxattr(path, name, value, size, 0)
 }
+
+// ─── #1322 wiring unit tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_compile_postflight_applicability() {
+    use crate::exec_env_postflight::{compile_postflight_applicability, PostflightApplicability};
+    use tachi_dispatch::authority::WorkspaceAuthority;
+
+    assert_eq!(
+        compile_postflight_applicability(WorkspaceAuthority::ReadOnly, None),
+        PostflightApplicability::Required(WriteContract::DetectAndReject)
+    );
+    assert_eq!(
+        compile_postflight_applicability(
+            WorkspaceAuthority::ReadOnly,
+            Some(&["crates/foo.rs".into()])
+        ),
+        PostflightApplicability::Required(WriteContract::DetectAndReject)
+    );
+
+    assert_eq!(
+        compile_postflight_applicability(
+            WorkspaceAuthority::WorkspaceWrite,
+            Some(&["src/main.rs".into(), "Cargo.toml".into()])
+        ),
+        PostflightApplicability::Required(WriteContract::DeclaredScope {
+            paths: vec!["src/main.rs".to_string(), "Cargo.toml".to_string()],
+        })
+    );
+    assert_eq!(
+        compile_postflight_applicability(WorkspaceAuthority::WorkspaceWrite, None),
+        PostflightApplicability::NotApplicable
+    );
+    let empty_scope: Vec<String> = vec![];
+    assert_eq!(
+        compile_postflight_applicability(WorkspaceAuthority::WorkspaceWrite, Some(&empty_scope)),
+        PostflightApplicability::NotApplicable
+    );
+
+    assert_eq!(
+        compile_postflight_applicability(
+            WorkspaceAuthority::DangerFullAccess,
+            Some(&["anything".into()])
+        ),
+        PostflightApplicability::NotApplicable
+    );
+}
+
+#[tokio::test]
+async fn test_daemon_quarantine_sink_fences_resource() {
+    use crate::exec_env_postflight::DaemonQuarantineSink;
+    use crate::server_state::MemoryServer;
+
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("test_global.sqlite");
+    let server = MemoryServer::new(db_path, None).expect("server");
+
+    let env_id = "env_test_1322";
+    let res_id = "res_test_1322";
+
+    // Setup exec_env resource and binding in db
+    server
+        .with_global_store(|store| {
+            let conn = store.connection();
+            conn.execute(
+                "INSERT INTO exec_env_resources (resource_id, kind, path, bytes, measured_at, state, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
+                rusqlite::params![res_id, "worktree", "/path/to/tree", 0, "2026-08-25T00:00:00Z", "2026-08-25T00:00:00Z"],
+            ).map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO exec_env_resource_bindings (binding_id, env_id, resource_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["bind_1", env_id, res_id, "2026-08-25T00:00:00Z"],
+            ).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("setup db");
+
+    let lease = TempDir::new().expect("tempdir");
+    let lease_path = lease.path();
+    let preimage_dir = TempDir::new().expect("preimage dir");
+    let preimage_path = preimage_dir.path().join("preimage.json");
+    let file = lease_path.join("test.rs");
+    fs::write(&file, b"fn initial() {}\n").expect("write initial");
+
+    let gate = PostflightGate::new(
+        env_id,
+        lease_path,
+        &preimage_path,
+        WriteContract::DetectAndReject,
+    );
+    gate.capture_preimage().expect("preimage");
+
+    fs::write(&file, b"fn mutated() {}\n").expect("mutate");
+    let outcome = gate.run(&Reaped).expect("gate run");
+    assert!(outcome.lease_quarantine_required());
+
+    let sink = DaemonQuarantineSink {
+        server: server.clone(),
+        file_sink: None,
+    };
+    sink.quarantine(&outcome)
+        .expect("quarantine should succeed");
+
+    // Verify resource state in db is now 'quarantined'
+    server
+        .with_global_store(|store| {
+            let conn = store.connection();
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM exec_env_resources WHERE resource_id = ?1",
+                    rusqlite::params![res_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(state, "quarantined");
+            Ok(())
+        })
+        .expect("check db resource state");
+}
+
+#[test]
+fn test_declared_scope_permits_in_scope_and_rejects_out_of_scope() {
+    let lease = TempDir::new().expect("tempdir");
+    let lease_path = lease.path();
+    let preimage_dir = TempDir::new().expect("preimage dir");
+    let preimage_path = preimage_dir.path().join("preimage.json");
+
+    let in_scope_file = lease_path.join("in_scope.rs");
+    let out_of_scope_file = lease_path.join("out_of_scope.rs");
+    fs::write(&in_scope_file, b"fn in_scope() {}\n").expect("write in_scope");
+    fs::write(&out_of_scope_file, b"fn out_of_scope() {}\n").expect("write out_of_scope");
+
+    let gate = PostflightGate::new(
+        "env_scope_test",
+        lease_path,
+        &preimage_path,
+        WriteContract::DeclaredScope {
+            paths: vec!["in_scope.rs".to_string()],
+        },
+    );
+
+    gate.capture_preimage().expect("capture preimage");
+
+    // 1. Mutating in-scope file passes
+    fs::write(
+        &in_scope_file,
+        b"fn in_scope() { println!(\"mutated\"); }\n",
+    )
+    .expect("mutate in_scope");
+    let outcome = gate.run(&Reaped).expect("gate run");
+    assert!(matches!(outcome.verdict, GateVerdict::Clean { .. }));
+    assert!(outcome.artifacts_released());
+    assert!(!outcome.lease_quarantine_required());
+
+    // 2. Mutating out-of-scope file rejects
+    fs::write(&out_of_scope_file, b"fn out_of_scope() { mutated!(); }\n")
+        .expect("mutate out_of_scope");
+    let outcome_rej = gate.run(&Reaped).expect("gate run");
+    assert!(matches!(outcome_rej.verdict, GateVerdict::Rejected { .. }));
+    assert!(!outcome_rej.artifacts_released());
+    assert!(outcome_rej.lease_quarantine_required());
+}

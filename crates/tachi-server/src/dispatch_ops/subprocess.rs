@@ -388,7 +388,9 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                         ));
                     }
                     return ManagedSubprocessOutcome::plain(match status {
-                        Ok(status) => finish_managed_output(status, stdout_task, stderr_task).await,
+                        Ok(status) => {
+                            finish_managed_output(status, stdout_task, stderr_task, pid).await
+                        }
                         Err(error) => {
                             drain_managed_output(stdout_task, stderr_task).await;
                             Err(format!("Agent process error: {error}"))
@@ -499,7 +501,10 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                             observation.reap_result = "root_reaped";
                             observation.group_absent = group_absent;
                             let result = match status {
-                                Ok(status) => finish_managed_output(status, stdout_task, stderr_task).await,
+                                Ok(status) => {
+                                    finish_managed_output(status, stdout_task, stderr_task, pid)
+                                        .await
+                                }
                                 Err(error) => Err(format!("Agent process error: {error}")),
                             };
                             observation.runner_error = result.as_ref().err().cloned();
@@ -509,9 +514,14 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                         }
                         return ManagedSubprocessOutcome::dequeued(
                             match status {
-                                Ok(status) => finish_managed_output(status, stdout_task, stderr_task).await,
+                                Ok(status) => {
+                                    finish_managed_output(status, stdout_task, stderr_task, pid)
+                                        .await
+                                }
                                 Err(error) => Err(format!("Agent process error: {error}")),
-                            }, command);
+                            },
+                            command,
+                        );
                     }
                     let sigterm = process_group.signal(libc::SIGTERM);
                     #[cfg(test)]
@@ -734,6 +744,7 @@ async fn finish_managed_output(
     status: std::process::ExitStatus,
     stdout_task: tokio::task::JoinHandle<Vec<u8>>,
     stderr_task: tokio::task::JoinHandle<Vec<u8>>,
+    child_pid: Option<u32>,
 ) -> Result<DispatchResult, String> {
     let stdout = collect_pipe(stdout_task).await?;
     let stderr = collect_pipe(stderr_task).await?;
@@ -748,6 +759,7 @@ async fn finish_managed_output(
         output,
         exit_code: status.code(),
         observed_model: None,
+        child_pid,
     })
 }
 
@@ -1370,6 +1382,7 @@ async fn run_agent_subprocess_inner(
         output: output_text,
         exit_code,
         observed_model: None,
+        child_pid,
     })
 }
 
@@ -1481,12 +1494,12 @@ fn signal_process_group(child_pid: Option<u32>, signal: libc::c_int) -> ProcessG
 }
 
 #[cfg(unix)]
-fn terminate_process_group(child_pid: Option<u32>, signal: libc::c_int) {
+pub(crate) fn terminate_process_group(child_pid: Option<u32>, signal: libc::c_int) {
     let _ = signal_process_group(child_pid, signal);
 }
 
 #[cfg(not(unix))]
-fn terminate_process_group(_child_pid: Option<u32>, _signal: libc::c_int) {}
+pub(crate) fn terminate_process_group(_child_pid: Option<u32>, _signal: libc::c_int) {}
 
 pub(super) fn tail_chars(text: &str, max_chars: usize) -> String {
     tachi_dispatch::tail_chars(text, max_chars)

@@ -250,6 +250,10 @@ pub struct TachiStaffParams {
     /// route-decision evidence.
     #[serde(default)]
     pub recommendation_ref: Option<String>,
+
+    /// Optional declared file scope for workspace-write lanes (#894 S2e / #1322).
+    #[serde(default)]
+    pub declared_file_scope: Option<Vec<String>>,
 }
 
 impl TachiStaffParams {
@@ -272,6 +276,7 @@ impl TachiStaffParams {
             ("pr_ref", self.pr_ref.is_some()),
             ("flow_id", self.flow_id.is_some()),
             ("recommendation_ref", self.recommendation_ref.is_some()),
+            ("declared_file_scope", self.declared_file_scope.is_some()),
         ] {
             if present {
                 return Err(format!(
@@ -318,6 +323,7 @@ impl TachiStaffParams {
             project: self.project.clone(),
             completion_predicate: None,
             recommendation_ref: self.recommendation_ref.clone(),
+            declared_file_scope: self.declared_file_scope.clone(),
         })
     }
 }

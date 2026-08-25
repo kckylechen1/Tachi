@@ -9,16 +9,16 @@
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 137053,
-        "max_total_tool_definition_bytes": 167986,
+        "max_total_input_schema_bytes": 137233,
+        "max_total_tool_definition_bytes": 168166,
         "max_visible_tools": 82,
-        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff; any further regrowth requires explicit adjudication."
       },
       "coordinate": {
-        "max_total_input_schema_bytes": 91938,
-        "max_total_tool_definition_bytes": 105428,
+        "max_total_input_schema_bytes": 92118,
+        "max_total_tool_definition_bytes": 105608,
         "max_visible_tools": 29,
-        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff; any further regrowth requires explicit adjudication."
       },
       "delegate": {
         "max_total_input_schema_bytes": 38713,
@@ -190,8 +190,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 137053,
-        "total_tool_definition_bytes": 167986,
+        "total_input_schema_bytes": 137233,
+        "total_tool_definition_bytes": 168166,
         "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",
@@ -279,8 +279,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 91938,
-        "total_tool_definition_bytes": 105428,
+        "total_input_schema_bytes": 92118,
+        "total_tool_definition_bytes": 105608,
         "visible_tool_count": 29,
         "visible_tools": [
           "extract_facts",
@@ -519,10 +519,11 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3568,
-            "property_count": 14,
+            "input_schema_bytes": 3748,
+            "property_count": 15,
             "property_names": [
               "action",
+              "declared_file_scope",
               "dispatch_id",
               "expected_status_revision",
               "flow_id",
@@ -640,10 +641,11 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3568,
-            "property_count": 14,
+            "input_schema_bytes": 3748,
+            "property_count": 15,
             "property_names": [
               "action",
+              "declared_file_scope",
               "dispatch_id",
               "expected_status_revision",
               "flow_id",

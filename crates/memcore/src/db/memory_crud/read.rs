@@ -79,6 +79,7 @@ pub fn fetch_by_ids(
 /// Expansion results are the same kind of thing as search results: nobody
 /// asked for them by name, so there is no opt-in shape to honour and store
 /// identity decides alone.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn fetch_by_ids_excluding_store_internal(
     conn: &Connection,
     ids: &[String],

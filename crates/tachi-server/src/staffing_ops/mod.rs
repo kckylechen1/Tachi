@@ -593,6 +593,7 @@ pub(crate) mod tests {
             flow_id: Some("flow_1814_staff_e2e".to_string()),
             completion_predicate: None,
             recommendation_ref: None,
+            declared_file_scope: None,
         }
     }
 
@@ -1657,6 +1658,8 @@ pub(crate) mod tests {
         wait_for_staff_cleanup(result_failure_id).await;
         result_failure_guard.disarm();
         drop(_result_persist_failure);
+        let _ = std::fs::remove_file(&root_pid);
+        let _ = std::fs::remove_file(&descendant_pid);
 
         let mut request = staff_request("tachi");
         request.profile = Some("glm_impl".to_string());
@@ -2175,6 +2178,7 @@ pub(crate) mod tests {
             flow_id: Some("flow_xyz".to_string()),
             completion_predicate: None,
             recommendation_ref: Some("rec-xyz".to_string()),
+            declared_file_scope: None,
         };
         assert_eq!(
             request.staffing_reason,
@@ -2720,6 +2724,7 @@ pub(crate) mod tests {
                 flow_id: None,
                 completion_predicate: None,
                 recommendation_ref: Some("missing-recommendation".to_string()),
+                declared_file_scope: None,
             },
         )
         .await

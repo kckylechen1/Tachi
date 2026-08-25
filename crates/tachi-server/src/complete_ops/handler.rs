@@ -2162,6 +2162,7 @@ mod tests {
                 flow_id: Some("flow_1825_admission_terminal_interleave".to_string()),
                 completion_predicate: None,
                 recommendation_ref: None,
+                declared_file_scope: None,
             },
         )
         .await
@@ -2412,6 +2413,7 @@ mod tests {
                 flow_id: Some("flow_1825_admission_success_interleave".to_string()),
                 completion_predicate: None,
                 recommendation_ref: None,
+                declared_file_scope: None,
             },
         )
         .await

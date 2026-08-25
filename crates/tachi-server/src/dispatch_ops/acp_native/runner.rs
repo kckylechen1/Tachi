@@ -54,6 +54,7 @@ async fn run_native_acp_dispatch_inner(
     let mut child = cmd
         .spawn()
         .map_err(|err| format!("Failed to spawn native ACP adapter: {err}"))?;
+    let child_pid = child.id();
     let stdin = child
         .stdin
         .take()
@@ -192,5 +193,6 @@ async fn run_native_acp_dispatch_inner(
         output: outcome.output,
         exit_code: Some(0),
         observed_model: outcome.observed_model,
+        child_pid,
     })
 }

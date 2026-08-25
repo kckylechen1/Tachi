@@ -136,6 +136,7 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) managed_run_guard: Option<crate::managed_run_control::ManagedRunGuard>,
     pub(super) managed_ephemeral_credential_cleanup:
         Option<ManagedEphemeralCredentialCleanupObligation>,
+    pub(super) postflight_gate: Option<crate::exec_env_postflight::PostflightGate>,
 }
 
 /// Covers an unwind before the ordinary background terminal path reaches its
@@ -321,6 +322,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let mcp_config_path = ctx.mcp_config_path;
     let managed_run_guard = ctx.managed_run_guard;
     let managed_ephemeral_credential_cleanup = ctx.managed_ephemeral_credential_cleanup;
+    let postflight_gate_for_spawn = ctx.postflight_gate;
 
     tokio::task::spawn(async move {
         // Keep the registry entry and its sender alive for the entire
@@ -505,8 +507,106 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }
         }
 
-        // Save full output to result.md for orchestrator eval
-        let result_persist_error = {
+        // --- POSTFLIGHT GATE: verify write-contract and liveness (#894 S2e, #1322) ---
+        let postflight_outcome = if let Some(gate) = &postflight_gate_for_spawn {
+            let child_pid = match &result {
+                Ok(r) => r.child_pid,
+                Err(_) => None,
+            };
+            let liveness: Box<dyn crate::exec_env_postflight::DescendantLiveness + Send + Sync> =
+                match child_pid {
+                    Some(pid) => Box::new(
+                        crate::exec_env_postflight::ProcessGroupLiveness::for_worker_pid(pid),
+                    ),
+                    None => Box::new(crate::exec_env_postflight::ReapedLiveness),
+                };
+            let mut outcome = gate.run(liveness.as_ref());
+            for _ in 0..3 {
+                if !matches!(&outcome, Ok(o) if matches!(o.verdict, crate::exec_env_postflight::GateVerdict::Blocked { reason: crate::exec_env_postflight::BlockReason::DescendantsAlive, .. }))
+                {
+                    break;
+                }
+                if let Some(pid) = child_pid {
+                    crate::dispatch_ops::subprocess::terminate_process_group(
+                        Some(pid),
+                        libc::SIGTERM,
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    crate::dispatch_ops::subprocess::terminate_process_group(
+                        Some(pid),
+                        libc::SIGKILL,
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                outcome = gate.run(liveness.as_ref());
+            }
+            match outcome {
+                Ok(outcome) => {
+                    append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
+                    let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {
+                        server: server_clone.clone(),
+                        file_sink: Some(crate::exec_env_postflight::FileQuarantineSink {
+                            dir: workspace_dir_for_spawn.clone(),
+                        }),
+                    };
+                    let _ = crate::exec_env_postflight::apply_verdict(&outcome, &quarantine_sink);
+                    Some(outcome)
+                }
+                Err(err) => {
+                    tracing::error!(
+                        dispatch_id = %d_id,
+                        error = %err,
+                        "postflight gate execution failed"
+                    );
+                    append_trajectory_event(
+                        &traj_path_for_spawn,
+                        json!({
+                            "event": "exec_env_postflight",
+                            "dispatch_id": d_id,
+                            "timestamp": Utc::now().to_rfc3339(),
+                            "status": "error",
+                            "error": err,
+                        }),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let postflight_withheld_error = if postflight_gate_for_spawn.is_some() {
+            match &postflight_outcome {
+                Some(outcome) if !outcome.artifacts_released() => {
+                    Some(outcome.failure_message().unwrap_or_else(|| {
+                        "postflight gate withheld dispatch artifacts".to_string()
+                    }))
+                }
+                None => Some("postflight gate execution failed to resolve".to_string()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // Save full output to result.md for orchestrator eval (only if postflight permitted release)
+        let result_persist_error = if let Some(err) = postflight_withheld_error {
+            tracing::warn!(
+                dispatch_id = %d_id,
+                reason = %err,
+                "postflight gate withheld result artifact"
+            );
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "result_withheld_by_postflight",
+                    "dispatch_id": d_id,
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "reason": err,
+                }),
+            );
+            Some(err)
+        } else {
             let result_path = workspace_dir.join("result.md");
             let error = super::persist_dispatch_result_artifact(
                 &result_path,
@@ -1059,6 +1159,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "feedback_rules": feedback_rules_trace_for_spawn,
                 "timeout_secs": timeout_secs_for_spawn,
                 "managed_cancellation_finalization": managed_finalization,
+                "exec_env_postflight": postflight_outcome
+                    .as_ref()
+                    .map(|o| o.receipt())
+                    .unwrap_or_else(|| {
+                        json!({
+                            "gate": "exec_env_postflight",
+                            "status": "not_applicable"
+                        })
+                    }),
             })),
             managed_terminal_anchor,
         );

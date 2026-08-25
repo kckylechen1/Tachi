@@ -48,6 +48,7 @@ async fn empty_skills_dispatch_prompt_injects_no_auto_derived_stage_or_sop_skill
             allowed_mcp_servers: Vec::new(),
             verbose: None,
             inject_card: None,
+            declared_file_scope: None,
         },
     )
     .await;
@@ -109,6 +110,7 @@ async fn empty_skills_dispatch_prompt_injects_no_dispatch_stage_default_skills()
             allowed_mcp_servers: Vec::new(),
             verbose: None,
             inject_card: None,
+            declared_file_scope: None,
         },
     )
     .await;
@@ -168,6 +170,7 @@ async fn explicit_skills_still_render_in_dispatch_prompt() {
             allowed_mcp_servers: Vec::new(),
             verbose: None,
             inject_card: None,
+            declared_file_scope: None,
         },
     )
     .await;

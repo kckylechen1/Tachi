@@ -119,6 +119,8 @@ pub(crate) struct DispatchResult {
     /// it through its typed runtime config options. CLI subprocesses have no
     /// corresponding acknowledgement channel and leave this absent.
     pub observed_model: Option<String>,
+    /// Worker process group / child process ID for descendant liveness evidence (#1322).
+    pub child_pid: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1168,6 +1170,47 @@ async fn launch_canonical_dispatch(
         (execution, None)
     };
 
+    // 7b. Compile and initialize the ExecEnv postflight gate (#894 S2e, #1322).
+    // Pre-spawn preimage is captured in a parent-owned location outside the worker workspace.
+    // A required preimage failure fails closed immediately BEFORE spawning the worker.
+    let postflight_applicability = crate::exec_env_postflight::compile_postflight_applicability(
+        effective_contract.workspace_authority,
+        mechanics.declared_file_scope.as_deref(),
+    );
+    let postflight_gate = match postflight_applicability {
+        crate::exec_env_postflight::PostflightApplicability::Required(contract) => {
+            if let Some(lease_path) = status_cwd.as_deref().map(PathBuf::from) {
+                let preimage_dir = if lease_path.starts_with(crate::path_utils::tachi_home()) {
+                    std::env::temp_dir().join("tachi_postflight_preimages")
+                } else {
+                    crate::path_utils::tachi_home().join("postflight_preimages")
+                };
+                let _ = std::fs::create_dir_all(&preimage_dir);
+                let preimage_path = preimage_dir.join(format!("{dispatch_id}.json"));
+                let env_id_str = execution_grant.env_id.as_deref().unwrap_or("");
+                let gate = crate::exec_env_postflight::PostflightGate::new(
+                    env_id_str,
+                    &lease_path,
+                    &preimage_path,
+                    contract,
+                )
+                .with_build_artifacts_unhashed();
+                if let Err(error) = gate.capture_preimage() {
+                    if let Some(guard) = managed_run_guard {
+                        drop(guard);
+                    }
+                    return Err(format!(
+                        "handle_tachi_dispatch: postflight preimage capture failed: {error}; zero worker process was spawned"
+                    ));
+                }
+                Some(gate)
+            } else {
+                None
+            }
+        }
+        crate::exec_env_postflight::PostflightApplicability::NotApplicable => None,
+    };
+
     // 8. Spawn background task with Watchdog
     let workspace_dir_for_response = workspace_dir.clone();
     spawn_background_dispatch(BackgroundDispatchContext {
@@ -1194,6 +1237,7 @@ async fn launch_canonical_dispatch(
         mcp_config_path,
         managed_run_guard,
         managed_ephemeral_credential_cleanup,
+        postflight_gate,
     });
 
     // 9. Immediately return — main agent is unblocked!

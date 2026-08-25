@@ -10,6 +10,7 @@ mod acp_transport;
 mod board_first;
 mod c3_mbit_retirement;
 mod completion_eval;
+mod exec_env_postflight_dispatch;
 mod prompt_credentials_board;
 mod recommend_policy;
 mod signature_evidence;
@@ -50,6 +51,7 @@ fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
         allowed_mcp_servers: Vec::new(),
         verbose: None,
         inject_card: None,
+        declared_file_scope: None,
     }
 }
 

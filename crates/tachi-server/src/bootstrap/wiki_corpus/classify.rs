@@ -51,6 +51,7 @@ pub(crate) fn read_optional_string(
     row.get(index)
 }
 
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub(crate) fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize, bool), String> {
     if !memcore::db::table_exists(conn, "memories").map_err(|e| e.to_string())? {
         return Err("memories table is missing".to_string());

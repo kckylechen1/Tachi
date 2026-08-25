@@ -753,6 +753,53 @@ pub(crate) fn ensure_resource(
     Ok(resource_id)
 }
 
+/// Fence all active resources bound to a lease in the resource ledger (#894 S2a/S2c/S2e, #1322).
+///
+/// Looks up all active bindings for `env_id` in `exec_env_resource_bindings` and transitions
+/// each resource row to `quarantined` via [`memcore::quarantine_resource`].
+pub(crate) fn quarantine_lease_resources(
+    conn: &mut rusqlite::Connection,
+    env_id: &str,
+    reason: &str,
+) -> Result<Vec<String>, String> {
+    if env_id.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = "SELECT resource_id FROM exec_env_resource_bindings WHERE env_id = ?1 AND released_at IS NULL";
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let resource_ids: Vec<String> = stmt
+        .query_map(rusqlite::params![env_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    let mut quarantined = Vec::new();
+    for resource_id in resource_ids {
+        match memcore::quarantine_resource(conn, &resource_id, reason) {
+            Ok(
+                memcore::QuarantineOutcome::Quarantined { .. }
+                | memcore::QuarantineOutcome::AlreadyQuarantined { .. },
+            ) => {
+                quarantined.push(resource_id);
+            }
+            Ok(
+                memcore::QuarantineOutcome::NotFound
+                | memcore::QuarantineOutcome::AlreadyReclaimed { .. },
+            ) => {}
+            Err(err) => {
+                tracing::warn!(
+                    env_id = %env_id,
+                    resource_id = %resource_id,
+                    error = %err,
+                    "failed to quarantine resource for lease"
+                );
+            }
+        }
+    }
+    Ok(quarantined)
+}
+
 // Compatibility shim for old exec_env_ops::ensure_resource_allow_quarantined
 // path (#1702 carve 4). Body lives in tachi-build-broker.
 #[allow(unused_imports)]

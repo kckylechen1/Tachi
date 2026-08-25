@@ -1,17 +1,6 @@
-//! `detect-and-reject` postflight gate (#894 S2e) — ordered enforcement points
+//! `detect-and-reject` postflight gate (#894 S2e, wired under #1322) — ordered enforcement points
 //! 4 (parent-owned postflight manifest/diff gate) and 5 (quarantine/reclaim
 //! only after descendants terminate).
-//!
-//! # ⚠ NOT WIRED YET — see #894 S2 wiring slice
-//!
-//! **This gate is a mechanism with no callers.** Nothing in the dispatch path
-//! calls [`PostflightGate::capture_preimage`], [`PostflightGate::run`] or
-//! [`apply_verdict`] today, so **zero dispatches are currently gated by it** —
-//! landing this module changed the enforcement posture of exactly nothing.
-//! Wiring it into lease provisioning / teardown (capture before spawn, run after
-//! the worker is reaped, release artifacts only on a clean verdict) is the S2c /
-//! dispatch-surface slice. Do not read the tests below as evidence that any live
-//! dispatch is protected.
 //!
 //! # The name is the contract
 //!
@@ -38,15 +27,14 @@
 //! # Why a `git diff` is not the mechanism
 //!
 //! `git diff` is blind to ignored files, git metadata, xattrs, and
-//! mutate-then-restore. This gate walks the workspace itself — see
-//! [`manifest`], which fingerprints content (BLAKE2s-256), symlink targets,
-//! xattrs, mode/size/nlink, inode, mtime **and ctime**.
+//! mutate-then-restore. This gate uses a complete recursive manifest with
+//! SHA-256 content hashes, POSIX ctime tracking, symlink targets, and extended
+//! attributes.
 //!
-//! Two of those classes (mutate-then-restore; a same-size overwrite under an
-//! unhashed root) have **no witness except a timestamp**, so the pre-image is
-//! additionally **sealed with an observed capture-time clock barrier** before a
-//! worker is spawned, and [`PostflightGate::run`] refuses any pre-image that
-//! does not carry one. Without that, a write landing inside the capture's own
+//! # Clock barrier (#1440)
+//!
+//! The pre-image is sealed with an observed clock barrier strictly past every
+//! recorded ctime. Without that barrier, a mutate-then-restore within the same
 //! clock tick leaves every field equal and the gate certifies a mutated tree as
 //! clean — see the `manifest` module docs and #1440.
 //!
@@ -75,10 +63,44 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-pub use liveness::{DescendantLiveness, ProcessGroupLiveness};
+pub use liveness::{DescendantLiveness, ProcessGroupLiveness, ReapedLiveness};
 pub use manifest::{
     CaptureSpec, CtimeWitness, DeltaKind, FsTime, WorkspaceDelta, WorkspaceManifest,
 };
+
+/// The compile-time applicability of the postflight gate (#1322 / #894 S2e).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostflightApplicability {
+    /// Postflight is not required (e.g. unbounded workspace-write or full danger access).
+    NotApplicable,
+    /// Postflight is required with the compiled [`WriteContract`].
+    Required(WriteContract),
+}
+
+/// Compile postflight applicability from the effective workspace authority and optional declared scope.
+pub fn compile_postflight_applicability(
+    authority: tachi_dispatch::WorkspaceAuthority,
+    declared_scope: Option<&[String]>,
+) -> PostflightApplicability {
+    match authority {
+        tachi_dispatch::WorkspaceAuthority::ReadOnly => {
+            PostflightApplicability::Required(WriteContract::DetectAndReject)
+        }
+        tachi_dispatch::WorkspaceAuthority::WorkspaceWrite => {
+            if let Some(scope) = declared_scope {
+                if !scope.is_empty() {
+                    return PostflightApplicability::Required(WriteContract::DeclaredScope {
+                        paths: scope.to_vec(),
+                    });
+                }
+            }
+            PostflightApplicability::NotApplicable
+        }
+        tachi_dispatch::WorkspaceAuthority::DangerFullAccess => {
+            PostflightApplicability::NotApplicable
+        }
+    }
+}
 
 /// The vocabulary this gate is allowed (and forbidden) to describe itself with.
 pub mod naming {
@@ -1025,6 +1047,35 @@ impl QuarantineSink for FileQuarantineSink {
             "{}",
             rejection_log_message(outcome)
         );
+        Ok(())
+    }
+}
+
+/// Server-side quarantine sink: writes the forensic JSON receipt via [`FileQuarantineSink`]
+/// and fences the physical lease resources in the database (`exec_env_resources.state = 'quarantined'`).
+#[derive(Clone)]
+pub(crate) struct DaemonQuarantineSink {
+    pub(crate) server: crate::server_state::MemoryServer,
+    pub(crate) file_sink: Option<FileQuarantineSink>,
+}
+
+impl QuarantineSink for DaemonQuarantineSink {
+    fn quarantine(&self, outcome: &GateOutcome) -> Result<(), String> {
+        if let Some(file_sink) = &self.file_sink {
+            let _ = file_sink.quarantine(outcome);
+        }
+        if !outcome.env_id.is_empty() {
+            let reason = outcome
+                .failure_message()
+                .unwrap_or_else(|| format!("{} postflight rejection", naming::POSTURE));
+            let _ = self.server.with_global_store(|store| {
+                crate::exec_env_ops::quarantine_lease_resources(
+                    store.connection_mut(),
+                    &outcome.env_id,
+                    &reason,
+                )
+            });
+        }
         Ok(())
     }
 }
