@@ -97,7 +97,7 @@ path = "junit.xml"
 #   cargo nextest run -p tachi-server -p memory-server-runtime --locked \
 #     --final-status-level slow > /tmp/slow.txt 2>&1
 #   scripts/nextest-slow-diff.sh /tmp/slow.txt
-#   # (or with --profile ci; or a JUnit .xml file; or plain list of full test paths)
+#   # (or with --profile ci). The gate requires a successful terminal Summary;
+#   # failed, interrupted, and truncated captures are refused.
 [test-groups]
 known-deterministic-reds = { max-threads = "num-cpus" }
-

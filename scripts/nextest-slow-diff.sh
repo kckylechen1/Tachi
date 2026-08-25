@@ -7,18 +7,18 @@
 #   cargo nextest run -p tachi-server -p memory-server-runtime --locked \
 #     --final-status-level slow > /tmp/slow.txt 2>&1
 #   scripts/nextest-slow-diff.sh /tmp/slow.txt
-#   # (or with --profile ci; or a JUnit .xml file; or plain list of full test paths)
+#   # (or with --profile ci)
 #
 # Usage:
-#   scripts/nextest-slow-diff.sh <nextest-slow-output.txt | slow-list.txt | junit.xml>
+#   scripts/nextest-slow-diff.sh <nextest-slow-output.txt>
 #
 # Exact input format for nextest slow listing (the primary measurement path):
 #   Output captured from the --final-status-level slow run above.
 #   Contains lines of form (indented):
 #     SLOW [  35.999s] ( 590/3647) memory-server-runtime tests::issue_1588_...
 #   The script extracts the text after the final ") " as the full test path.
-#   (Also accepts a plain text file with one EXACT full test path per line,
-#    or a JUnit XML with time>20s.)
+#   A terminal successful Summary is required. Failed, interrupted, or
+#   truncated captures are refused rather than treated as zero-slow runs.
 #
 # Diffs the slow set against scripts/nextest-slow-roster.txt (exact match).
 # Exits nonzero on any slow test NOT in the roster (new creep).
@@ -50,7 +50,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INPUT="${1:-}"
 
 if [[ -z "${INPUT}" || ! -f "${INPUT}" ]]; then
-  echo "usage: $0 <slow-list.txt | junit.xml>" >&2
+  echo "usage: $0 <nextest-slow-output.txt>" >&2
   exit 2
 fi
 
@@ -68,61 +68,32 @@ trap 'rm -f "${SLOWS_FILE}" "${ROSTER_SORTED}" "${OUTSIDERS}"' EXIT
 # Normalize roster
 sort -u "${ROSTER_FILE}" > "${ROSTER_SORTED}"
 
-if [[ "${INPUT}" == *.xml ]]; then
-  # Parse JUnit: collect test names where time > 20s
-  python3 - "${INPUT}" "${SLOWS_FILE}" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
+# A slow roster is meaningful only for a completed successful measurement.
+# A FAIL line proves failure. Missing the terminal Summary proves truncation,
+# interruption, or the wrong input format. Both cases must fail closed before
+# we inspect SLOW lines, including when a partial capture already contains one.
+if grep -q '^ *FAIL \[' "${INPUT}"; then
+  echo "nextest-slow-diff: INCOMPLETE_RUN — nextest reported a failed test" >&2
+  exit 2
+fi
+if ! grep -q '^Summary \[' "${INPUT}"; then
+  echo "nextest-slow-diff: INCOMPLETE_RUN — terminal nextest Summary missing" >&2
+  exit 2
+fi
+if grep '^Summary \[' "${INPUT}" | grep -qiE '([0-9]+ failed|[0-9]+ cancelled|[0-9]+ canceled|timed out)'; then
+  echo "nextest-slow-diff: INCOMPLETE_RUN — terminal nextest Summary is not green" >&2
+  exit 2
+fi
 
-junit_path, slows_path = sys.argv[1], sys.argv[2]
-try:
-    root = ET.parse(junit_path).getroot()
-except Exception as err:
-    print(f"nextest-slow-diff: JUnit parse error: {err}", file=sys.stderr)
-    sys.exit(2)
-
-suites = list(root) if root.tag.endswith("testsuites") else (
-    [root] if root.tag.endswith("testsuite") else root.findall(".//testsuite")
-)
-slows = []
-for suite in suites:
-    suite_name = suite.get("name") or ""
-    for case in suite.findall("testcase"):
-        name = case.get("name") or ""
-        # nextest splits the binary into classname/testsuite; the roster (and
-        # nextest's own SLOW listing) names tests as "<binary> <name>".
-        classname = case.get("classname") or ""
-        binary = classname or suite_name
-        t = case.get("time") or "0"
-        try:
-            if float(t) > 20.0 and name:
-                slows.append(f"{binary} {name}".strip() if binary else name)
-        except ValueError:
-            pass
-with open(slows_path, "w", encoding="utf-8") as out:
-    for name in sorted(set(slows)):
-        out.write(name + "\n")
-PY
+# Extract test path: for "SLOW [  35.999s] ( 590/3647) <name>" take after ") ".
+if grep -q '^ *SLOW \[' "${INPUT}"; then
+  grep '^ *SLOW \[' "${INPUT}" | sed 's/.*) //' | sort -u > "${SLOWS_FILE}"
 else
-  # Nextest slow listing output (from --final-status-level slow) or plain list.
-  # Extract test path: for "SLOW [  35.999s] ( 590/3647) <name>" take after ") ".
-  # Captured nextest output with zero SLOW records (Summary/PASS/FAIL present) is a
-  # no-slow run, NOT a plain list. The one-name-per-line fallback applies only when
-  # neither SLOW lines nor captured-run markers exist.
-  if grep -q '^ *SLOW \[' "${INPUT}"; then
-    grep '^ *SLOW \[' "${INPUT}" | sed 's/.*) //' | sort -u > "${SLOWS_FILE}"
-  elif grep -qE '^(Summary \[| *FAIL \[| *PASS \[| *SLOW \[| *Starting [0-9]+ test)' "${INPUT}"; then
-    # Captured nextest run output with zero SLOW records: this is a run with
-    # no slow tests (the documented no-slow case), NOT a plain name list.
-    : > "${SLOWS_FILE}"
-  else
-    sort -u "${INPUT}" > "${SLOWS_FILE}"
-  fi
-  fi
+  : > "${SLOWS_FILE}"
+fi
 
-# C4: strip \r (CRLF) on input lines before comparison. Plain-list inputs
-# (e.g. from clipboard, cross-platform, or windows editors) must not
-# produce false outsiders due to trailing \r in test names.
+# C4: strip \r (CRLF) on captured lines before comparison. Cross-platform
+# capture transport must not produce false outsiders from trailing \r.
 tr -d '\r' < "${SLOWS_FILE}" | sort -u > "${SLOWS_FILE}.tmp" && mv "${SLOWS_FILE}.tmp" "${SLOWS_FILE}"
 
 if [[ ! -s "${SLOWS_FILE}" ]]; then

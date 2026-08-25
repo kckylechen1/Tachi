@@ -199,7 +199,7 @@ jobs:
         run: python3 scripts/check_release_versions.py
 
       - name: Test nextest census contracts
-        run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds
+        run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds scripts.test_nextest_slow_diff
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
