@@ -488,32 +488,40 @@ enum StatusJsonTarget {
     Anchored(crate::managed_run_control::AnchoredRunStatus),
 }
 
+enum ManagedTerminalStatusAnchor {
+    Missing,
+    #[cfg(unix)]
+    Anchored(crate::managed_run_control::AnchoredRunStatus),
+}
+
 impl StatusJsonTarget {
     fn for_run(
         run_dir: &std::path::Path,
         dispatch_id: &str,
         managed_finalization: bool,
+        managed_anchor: ManagedTerminalStatusAnchor,
     ) -> Result<Self, &'static str> {
         if !managed_finalization {
             return Ok(Self::Path(run_dir.join("status.json")));
         }
         #[cfg(unix)]
         {
-            return crate::managed_run_control::AnchoredRunStatus::open(run_dir)
-                .map(Self::Anchored)
-                .map_err(|error| {
+            return match managed_anchor {
+                ManagedTerminalStatusAnchor::Anchored(anchor) => Ok(Self::Anchored(anchor)),
+                ManagedTerminalStatusAnchor::Missing => {
                     tracing::warn!(
                         dispatch_id,
                         run_dir = %run_dir.display(),
-                        error = ?error,
-                        "managed terminal writer refused an unanchored status directory"
+                        "managed terminal writer refused finalization without the accepted run anchor"
                     );
-                    "managed_terminal_status_unreadable"
-                });
+                    Err("managed_terminal_status_anchor_missing")
+                }
+            };
         }
         #[cfg(not(unix))]
         {
             let _ = dispatch_id;
+            let _ = managed_anchor;
             Err("unsupported_platform")
         }
     }
@@ -568,20 +576,131 @@ pub(crate) fn write_status_json(
     total_duration_ms: Option<u64>,
     extra: Option<Value>,
 ) -> Option<crate::managed_run_control::CancelCompletion> {
+    write_status_json_inner(
+        run_dir,
+        dispatch_id,
+        v2,
+        plan_generated_at,
+        executed_at,
+        plan_review_status,
+        exit_code,
+        duration_ms_plan,
+        duration_ms_execute,
+        total_duration_ms,
+        extra,
+        ManagedTerminalStatusAnchor::Missing,
+        |object| crate::managed_run_control::advance_status_revision(object),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_status_json_for_terminal(
+    run_dir: &std::path::Path,
+    dispatch_id: &str,
+    v2: bool,
+    plan_generated_at: Option<&str>,
+    executed_at: Option<&str>,
+    plan_review_status: &str,
+    exit_code: Option<i32>,
+    duration_ms_plan: Option<u64>,
+    duration_ms_execute: Option<u64>,
+    total_duration_ms: Option<u64>,
+    extra: Option<Value>,
+    managed_command: Option<&crate::managed_run_control::ManagedCancelCommand>,
+) -> Option<crate::managed_run_control::CancelCompletion> {
+    #[cfg(unix)]
+    let managed_anchor = managed_command
+        .map(|command| ManagedTerminalStatusAnchor::Anchored(command.status_anchor.clone()))
+        .unwrap_or(ManagedTerminalStatusAnchor::Missing);
+    #[cfg(not(unix))]
+    let managed_anchor = {
+        let _ = managed_command;
+        ManagedTerminalStatusAnchor::Missing
+    };
+    write_status_json_inner(
+        run_dir,
+        dispatch_id,
+        v2,
+        plan_generated_at,
+        executed_at,
+        plan_review_status,
+        exit_code,
+        duration_ms_plan,
+        duration_ms_execute,
+        total_duration_ms,
+        extra,
+        managed_anchor,
+        |object| crate::managed_run_control::advance_status_revision(object),
+    )
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_status_json_with_managed_anchor(
+    run_dir: &std::path::Path,
+    dispatch_id: &str,
+    v2: bool,
+    plan_generated_at: Option<&str>,
+    executed_at: Option<&str>,
+    plan_review_status: &str,
+    exit_code: Option<i32>,
+    duration_ms_plan: Option<u64>,
+    duration_ms_execute: Option<u64>,
+    total_duration_ms: Option<u64>,
+    extra: Option<Value>,
+    managed_anchor: &crate::managed_run_control::AnchoredRunStatus,
+) -> Option<crate::managed_run_control::CancelCompletion> {
+    write_status_json_inner(
+        run_dir,
+        dispatch_id,
+        v2,
+        plan_generated_at,
+        executed_at,
+        plan_review_status,
+        exit_code,
+        duration_ms_plan,
+        duration_ms_execute,
+        total_duration_ms,
+        extra,
+        ManagedTerminalStatusAnchor::Anchored(managed_anchor.clone()),
+        |object| crate::managed_run_control::advance_status_revision(object),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_status_json_inner(
+    run_dir: &std::path::Path,
+    dispatch_id: &str,
+    v2: bool,
+    plan_generated_at: Option<&str>,
+    executed_at: Option<&str>,
+    plan_review_status: &str,
+    exit_code: Option<i32>,
+    duration_ms_plan: Option<u64>,
+    duration_ms_execute: Option<u64>,
+    total_duration_ms: Option<u64>,
+    extra: Option<Value>,
+    managed_anchor: ManagedTerminalStatusAnchor,
+    advance_revision: fn(&mut serde_json::Map<String, Value>) -> Result<u64, String>,
+) -> Option<crate::managed_run_control::CancelCompletion> {
     let managed_finalization_requested = extra
         .as_ref()
         .and_then(Value::as_object)
         .and_then(|extra| extra.get("managed_cancellation_finalization"))
         .is_some_and(|finalization| !finalization.is_null());
-    let target =
-        match StatusJsonTarget::for_run(run_dir, dispatch_id, managed_finalization_requested) {
-            Ok(target) => target,
-            Err(reason) => {
-                return Some(crate::managed_run_control::CancelCompletion::Unavailable(
-                    reason,
-                ));
-            }
-        };
+    let target = match StatusJsonTarget::for_run(
+        run_dir,
+        dispatch_id,
+        managed_finalization_requested,
+        managed_anchor,
+    ) {
+        Ok(target) => target,
+        Err(reason) => {
+            return Some(crate::managed_run_control::CancelCompletion::Unavailable(
+                reason,
+            ));
+        }
+    };
     let lock = target.lock();
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut obj = serde_json::Map::new();
@@ -787,7 +906,7 @@ pub(crate) fn write_status_json(
             }
         }
     }
-    if let Err(error) = crate::managed_run_control::advance_status_revision(&mut obj) {
+    if let Err(error) = advance_revision(&mut obj) {
         eprintln!("[dispatch-v2] refusing status write: {error}");
         return None;
     }
@@ -947,13 +1066,16 @@ impl PlanSections {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn managed_finalization_refuses_a_corrupt_prior_status_without_writing_canceled() {
         let temp = tempfile::tempdir().expect("temporary run directory");
         let path = temp.path().join("status.json");
         std::fs::write(&path, b"{not json").expect("write corrupt status");
+        let status_anchor = crate::managed_run_control::AnchoredRunStatus::open(temp.path())
+            .expect("anchor managed run");
 
-        let completion = write_status_json(
+        let completion = write_status_json_with_managed_anchor(
             temp.path(),
             "20260823T182599Z-corrupt-managed-terminal",
             false,
@@ -972,6 +1094,7 @@ mod tests {
                     "termination_proof": "unix_process_group_absent",
                 }
             })),
+            &status_anchor,
         );
 
         assert!(matches!(
@@ -986,6 +1109,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn managed_finalization_refuses_an_atomic_status_write_failure_without_confirmation() {
         let temp = tempfile::tempdir().expect("temporary run directory");
@@ -998,8 +1122,10 @@ mod tests {
         });
         std::fs::write(&status_path, initial.to_string()).expect("seed managed status");
         let _failure = fail_next_managed_terminal_status_write(temp.path());
+        let status_anchor = crate::managed_run_control::AnchoredRunStatus::open(temp.path())
+            .expect("anchor managed run");
 
-        let completion = write_status_json(
+        let completion = write_status_json_with_managed_anchor(
             temp.path(),
             "20260823T182520Z-managed-write-failure",
             false,
@@ -1018,6 +1144,7 @@ mod tests {
                     "termination_proof": "unix_process_group_absent",
                 }
             })),
+            &status_anchor,
         );
 
         match completion {

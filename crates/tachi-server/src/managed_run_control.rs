@@ -186,6 +186,8 @@ mod cancellation_receipt_regression_tests {
             .try_send(ManagedCancelCommand {
                 expected_status_revision: 0,
                 response: response_tx,
+                #[cfg(unix)]
+                status_anchor: AnchoredRunStatus::open(&run_dir).expect("anchor managed run"),
                 #[cfg(test)]
                 test_observation: None,
             })
@@ -328,6 +330,8 @@ struct Entry {
 pub(crate) struct ManagedCancelCommand {
     pub(crate) expected_status_revision: u64,
     pub(crate) response: oneshot::Sender<CancelCompletion>,
+    #[cfg(unix)]
+    pub(crate) status_anchor: AnchoredRunStatus,
     #[cfg(test)]
     pub(crate) test_observation: Option<crate::dispatch_ops::ManagedCancelTryWaitObservation>,
 }
@@ -691,6 +695,7 @@ pub(crate) async fn request_managed_custom_cancel(
             .try_send(ManagedCancelCommand {
                 expected_status_revision: expected,
                 response,
+                status_anchor: status_dir.clone(),
                 #[cfg(test)]
                 test_observation: None,
             })
@@ -874,43 +879,61 @@ pub(crate) fn record_termination_unconfirmed(
 /// Finalize a command that the managed subprocess dequeued. This is called by
 /// the sole background terminal writer after result persistence, never by the
 /// runner, so the waiter can observe only a canonical receipt.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn finalize_dequeued_managed_cancellation(
-    run_dir: &std::path::Path,
+    status_anchor: &AnchoredRunStatus,
     expected: u64,
     runner_error: Option<&str>,
     termination_proof: Option<&'static str>,
 ) -> CancelCompletion {
-    match runner_error {
-        Some("managed_cancelled") => {
-            let Some(termination_proof) = termination_proof else {
-                return match record_termination_unconfirmed(run_dir, expected) {
-                    Ok(()) => CancelCompletion::Unconfirmed,
-                    Err(_) => CancelCompletion::Unavailable("completion_or_timeout_winner"),
-                };
-            };
-            match confirm_managed_custom_cancellation(run_dir, expected, termination_proof) {
-                Ok(status_revision) => CancelCompletion::Confirmed {
-                    termination_proof,
-                    status_revision,
-                },
-                Err(_) => match record_termination_unconfirmed(run_dir, expected) {
-                    Ok(()) => CancelCompletion::Unconfirmed,
-                    Err(_) => CancelCompletion::Unavailable("completion_or_timeout_winner"),
-                },
-            }
-        }
+    let terminal_state = match runner_error {
+        Some("managed_cancelled") => "TASK_STATE_CANCELED",
         Some(error)
             if error == "termination_unconfirmed"
                 || error.starts_with("managed cancellation child probe failed") =>
         {
-            match record_termination_unconfirmed(run_dir, expected) {
-                Ok(()) => CancelCompletion::Unconfirmed,
-                Err(_) => CancelCompletion::Unavailable("completion_or_timeout_winner"),
-            }
+            "TASK_STATE_FAILED"
         }
-        _ => CancelCompletion::Unavailable("completion_or_timeout_winner"),
-    }
+        _ => return CancelCompletion::Unavailable("completion_or_timeout_winner"),
+    };
+    let dispatch_id = match status_anchor.read_json().ok().flatten().and_then(|status| {
+        status
+            .get("dispatch_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }) {
+        Some(dispatch_id) => dispatch_id,
+        None => return CancelCompletion::Unavailable("managed_terminal_status_unreadable"),
+    };
+    crate::dispatch_ops::write_status_json_with_managed_anchor(
+        status_anchor
+            .status_path()
+            .parent()
+            .expect("anchored status has a run directory"),
+        &dispatch_id,
+        false,
+        None,
+        None,
+        "n/a",
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "state": terminal_state,
+            "managed_cancellation_finalization": {
+                "expected_status_revision": expected,
+                "runner_error": runner_error,
+                "termination_proof": termination_proof,
+                "credential_cleanup_failed": false,
+                "result_persist_failed": false,
+            }
+        })),
+        status_anchor,
+    )
+    .unwrap_or(CancelCompletion::Unavailable(
+        "completion_or_timeout_winner",
+    ))
 }
 
 pub(crate) enum ManagedTerminalCancellation {
@@ -1480,6 +1503,7 @@ mod issue_1825_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn issue_1825_credential_cleanup_failure_is_not_returned_as_a_clean_confirmation() {
         let temp = tempfile::tempdir().expect("temporary managed run");
@@ -1498,7 +1522,8 @@ mod issue_1825_tests {
             .to_string(),
         )
         .expect("seed requested cancellation");
-        let completion = crate::dispatch_ops::write_status_json(
+        let status_anchor = AnchoredRunStatus::open(temp.path()).expect("anchor managed run");
+        let completion = crate::dispatch_ops::write_status_json_with_managed_anchor(
             temp.path(),
             dispatch_id,
             false,
@@ -1518,6 +1543,7 @@ mod issue_1825_tests {
                     "credential_cleanup_failed": true,
                 }
             })),
+            &status_anchor,
         );
         assert!(matches!(
             completion,
@@ -1577,6 +1603,7 @@ mod issue_1825_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn issue_1825_final_cancellation_write_failure_never_confirms_or_cancels() {
         let temp = tempfile::tempdir().expect("temporary managed run");
@@ -1584,7 +1611,8 @@ mod issue_1825_tests {
         std::fs::create_dir(temp.path().join("status.json"))
             .expect("inject atomic status write target failure");
 
-        let completion = crate::dispatch_ops::write_status_json(
+        let status_anchor = AnchoredRunStatus::open(temp.path()).expect("anchor managed run");
+        let completion = crate::dispatch_ops::write_status_json_with_managed_anchor(
             temp.path(),
             dispatch_id,
             false,
@@ -1604,6 +1632,7 @@ mod issue_1825_tests {
                     "credential_cleanup_failed": false,
                 }
             })),
+            &status_anchor,
         );
         assert!(matches!(
             completion,

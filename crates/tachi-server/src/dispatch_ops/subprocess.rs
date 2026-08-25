@@ -618,12 +618,16 @@ pub(crate) async fn run_managed_custom_subprocess(
 ) -> Result<DispatchResult, String> {
     let outcome = run_managed_custom_subprocess_outcome(cmd, timeout, cancellations, run_dir).await;
     if let Some(command) = outcome.cancellation {
+        #[cfg(unix)]
         let completion = crate::managed_run_control::finalize_dequeued_managed_cancellation(
-            run_dir,
+            &command.status_anchor,
             command.expected_status_revision,
             outcome.result.as_ref().err().map(String::as_str),
             outcome.termination_proof,
         );
+        #[cfg(not(unix))]
+        let completion =
+            crate::managed_run_control::CancelCompletion::Unavailable("unsupported_platform");
         let _ = command.response.send(completion);
     }
     outcome.result
@@ -1661,6 +1665,8 @@ mod tests {
             .send(crate::managed_run_control::ManagedCancelCommand {
                 expected_status_revision: 1,
                 response: reply,
+                status_anchor: crate::managed_run_control::AnchoredRunStatus::open(&run_dir)
+                    .expect("anchor managed run"),
                 test_observation: None,
             })
             .await
@@ -1742,6 +1748,8 @@ mod tests {
             .send(crate::managed_run_control::ManagedCancelCommand {
                 expected_status_revision: 1,
                 response: reply,
+                status_anchor: crate::managed_run_control::AnchoredRunStatus::open(&run_dir)
+                    .expect("anchor managed run"),
                 test_observation: None,
             })
             .await
@@ -1911,6 +1919,8 @@ mod issue_1825_cancel_tests {
             .send(crate::managed_run_control::ManagedCancelCommand {
                 expected_status_revision: 1,
                 response: reply,
+                status_anchor: crate::managed_run_control::AnchoredRunStatus::open(&run_dir)
+                    .expect("anchor managed run"),
                 test_observation: None,
             })
             .await

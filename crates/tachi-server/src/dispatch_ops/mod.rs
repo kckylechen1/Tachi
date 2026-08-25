@@ -44,6 +44,8 @@ pub(crate) use dispatch_v2::status_json_lock_for;
 pub(crate) use dispatch_v2::status_json_lock_for_identity;
 #[cfg(test)]
 pub(crate) use dispatch_v2::write_status_json;
+#[cfg(all(test, unix))]
+pub(crate) use dispatch_v2::write_status_json_with_managed_anchor;
 pub(crate) use harness::{
     harness_server_attach_ready, probe_harness_server_status, probe_harness_server_status_with_env,
 };

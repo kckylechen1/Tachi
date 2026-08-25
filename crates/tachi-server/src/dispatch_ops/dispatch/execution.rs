@@ -4,7 +4,11 @@ use super::super::acp_native::{
 use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
 #[cfg(test)]
 use super::super::dispatch_v2::stamp_route_decision_id;
-use super::super::dispatch_v2::{append_trajectory_event, status_json_lock_for, write_status_json};
+#[cfg(test)]
+use super::super::dispatch_v2::write_status_json;
+use super::super::dispatch_v2::{
+    append_trajectory_event, status_json_lock_for, write_status_json_for_terminal,
+};
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
 use super::super::subprocess::{
     run_agent_subprocess, run_managed_custom_subprocess_outcome, run_opencode_sop_subprocess,
@@ -30,6 +34,38 @@ use tachi_dispatch::{
 use tokio::process::Command;
 
 const WATCHDOG_STATUS_MAX_BYTES: usize = 1024 * 1024;
+
+fn read_status_json_for_terminal(
+    workspace_dir: &Path,
+    status_path: &Path,
+    managed_cancellation: Option<&crate::managed_run_control::ManagedCancelCommand>,
+) -> Result<Option<Value>, String> {
+    #[cfg(unix)]
+    if let Some(command) = managed_cancellation {
+        let lock = command.status_anchor.lock();
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        return command.status_anchor.read_json();
+    }
+    #[cfg(not(unix))]
+    let _ = managed_cancellation;
+
+    let Some(raw) = crate::dispatch_ops::read_text_file_within(
+        workspace_dir,
+        status_path,
+        WATCHDOG_STATUS_MAX_BYTES,
+    )?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str::<Value>(&raw)
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "completion status artifact {} is not valid JSON: {error}",
+                status_path.display()
+            )
+        })
+}
 
 pub(super) enum DispatchExecution {
     Subprocess(Command),
@@ -498,6 +534,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             match completion_receipt_state_after_admission(
                 &workspace_dir_for_spawn,
                 watchdog_interval,
+                managed_cancellation.as_ref(),
             )
             .await
             {
@@ -524,6 +561,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             match completion_receipt_state_after_admission(
                 &workspace_dir_for_spawn,
                 watchdog_interval,
+                managed_cancellation.as_ref(),
             )
             .await
             {
@@ -561,6 +599,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             match completion_receipt_state_after_admission(
                 &workspace_dir_for_spawn,
                 watchdog_interval,
+                managed_cancellation.as_ref(),
             )
             .await
             {
@@ -872,25 +911,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // Preserve dispatch-time contract fields across the final status rewrite
         // so complete/watchdog can still evaluate the #878-A predicate after exit.
         let status_path = workspace_dir_for_spawn.join("status.json");
-        let (prev_status, final_status_read_error) =
-            match crate::dispatch_ops::read_text_file_within(
-                &workspace_dir_for_spawn,
-                &status_path,
-                WATCHDOG_STATUS_MAX_BYTES,
-            ) {
-                Ok(Some(raw)) => match serde_json::from_str::<Value>(&raw) {
-                    Ok(status) => (Some(status), None),
-                    Err(error) => (
-                        None,
-                        Some(format!(
-                            "completion status artifact {} is not valid JSON: {error}",
-                            status_path.display()
-                        )),
-                    ),
-                },
-                Ok(None) => (None, None),
-                Err(error) => (None, Some(error)),
-            };
+        let (prev_status, final_status_read_error) = match read_status_json_for_terminal(
+            &workspace_dir_for_spawn,
+            &status_path,
+            managed_cancellation.as_ref(),
+        ) {
+            Ok(status) => (status, None),
+            Err(error) => (None, Some(error)),
+        };
         let preserved_predicate = prev_status
             .as_ref()
             .and_then(|v| v.get("completion_predicate").cloned())
@@ -952,7 +980,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             })
         });
 
-        let managed_cancel_completion = write_status_json(
+        let managed_cancel_completion = write_status_json_for_terminal(
             &workspace_dir_for_spawn,
             &d_id,
             v2_for_spawn,
@@ -1000,6 +1028,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "timeout_secs": timeout_secs_for_spawn,
                 "managed_cancellation_finalization": managed_finalization,
             })),
+            managed_cancellation.as_ref(),
         );
 
         if matches!(
@@ -1318,6 +1347,7 @@ enum CompletionReceiptState {
 /// Read a handler-written completion receipt from the dispatch run. A pending
 /// canonical-outcome recovery takes precedence over any stale terminal data:
 /// it is an explicit barrier until tachi_complete reconciles the outcome row.
+#[cfg(test)]
 fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionReceiptState, String> {
     let Some(raw_status) = crate::dispatch_ops::read_text_file_within(
         run_dir,
@@ -1333,6 +1363,22 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
             run_dir.join("status.json").display()
         )
     })?;
+    completion_receipt_state_from_status(&status)
+}
+
+fn completion_receipt_state_for_terminal(
+    run_dir: &std::path::Path,
+    managed_cancellation: Option<&crate::managed_run_control::ManagedCancelCommand>,
+) -> Result<CompletionReceiptState, String> {
+    let status_path = run_dir.join("status.json");
+    let Some(status) = read_status_json_for_terminal(run_dir, &status_path, managed_cancellation)?
+    else {
+        return Ok(CompletionReceiptState::Open);
+    };
+    completion_receipt_state_from_status(&status)
+}
+
+fn completion_receipt_state_from_status(status: &Value) -> Result<CompletionReceiptState, String> {
     if let Some(recovery_status) = status
         .get("completion_recovery")
         .and_then(Value::as_object)
@@ -1408,9 +1454,10 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
 async fn completion_receipt_state_after_admission(
     run_dir: &std::path::Path,
     poll_interval: Duration,
+    managed_cancellation: Option<&crate::managed_run_control::ManagedCancelCommand>,
 ) -> Result<CompletionReceiptState, String> {
     loop {
-        match completion_receipt_state(run_dir)? {
+        match completion_receipt_state_for_terminal(run_dir, managed_cancellation)? {
             CompletionReceiptState::AdmissionInProgress => tokio::time::sleep(poll_interval).await,
             state => return Ok(state),
         }

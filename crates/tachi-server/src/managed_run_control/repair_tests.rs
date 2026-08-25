@@ -295,3 +295,106 @@ async fn issue_1833_wait_loop_observes_the_opened_a_after_the_visible_path_becom
         "wait-loop observations must not follow the visible A path to B"
     );
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn issue_1833_terminal_finalization_stays_with_the_accepted_physical_run() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().expect("home");
+    let runs_root = home.path().join("runs");
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &runs_root);
+    let dispatch_a = "20260825T183306Z-terminal-a";
+    let run_a = runs_root.join(dispatch_a);
+    let parked_a = runs_root.join("parked-terminal-a");
+    write_managed_status(&run_a, dispatch_a, 7);
+    let server = MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    let (mut receiver, _guard) = server
+        .managed_run_controls
+        .register(dispatch_a)
+        .expect("register A control");
+
+    let request = request_managed_custom_cancel(&server, dispatch_a, 7);
+    tokio::pin!(request);
+    let command = tokio::select! {
+        command = receiver.recv() => command.expect("accepted A cancellation command"),
+        response = &mut request => panic!("request returned before command dequeue: {response:?}"),
+    };
+    let accepted: Value = serde_json::from_slice(
+        &std::fs::read(run_a.join("status.json")).expect("accepted A status"),
+    )
+    .expect("accepted A JSON");
+    assert_eq!(
+        accepted["cancellation"]["receipt"],
+        "cancellation_requested"
+    );
+
+    std::fs::rename(&run_a, &parked_a).expect("park accepted A");
+    std::fs::create_dir_all(&run_a).expect("install replacement A directory");
+    std::fs::write(
+        run_a.join("status.json"),
+        json!({
+            "dispatch_id": dispatch_a,
+            "state": "TASK_STATE_WORKING",
+            "status_revision": 8,
+            "execution_classification": "managed_custom",
+            "lifecycle_owner": "memory_server_managed_custom",
+            "cancellation": cancellation_receipt(
+                "cancellation_requested", dispatch_a, 7, 8, None, None
+            ),
+            "forged_replacement": true,
+        })
+        .to_string(),
+    )
+    .expect("install forged replacement A receipt");
+    let replacement_before =
+        std::fs::read(run_a.join("status.json")).expect("replacement A before finalization");
+
+    let completion = crate::dispatch_ops::write_status_json_with_managed_anchor(
+        &run_a,
+        dispatch_a,
+        false,
+        None,
+        None,
+        "n/a",
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "state": "TASK_STATE_CANCELED",
+            "managed_cancellation_finalization": {
+                "expected_status_revision": command.expected_status_revision,
+                "runner_error": "managed_cancelled",
+                "termination_proof": "unix_process_group_absent",
+                "credential_cleanup_failed": false,
+                "result_persist_failed": false,
+            }
+        })),
+        &command.status_anchor,
+    );
+    let _ = command
+        .response
+        .send(completion.expect("terminal completion receipt"));
+    let response: Value =
+        serde_json::from_str(&request.await.expect("anchored cancellation response"))
+            .expect("cancellation response JSON");
+
+    assert_eq!(response["receipt"], "cancellation_confirmed");
+    assert_eq!(
+        std::fs::read(run_a.join("status.json")).expect("replacement A after finalization"),
+        replacement_before,
+        "terminal finalization must not mutate a forged replacement A"
+    );
+    let original: Value = serde_json::from_slice(
+        &std::fs::read(parked_a.join("status.json")).expect("parked original A status"),
+    )
+    .expect("parked original A JSON");
+    assert_eq!(original["state"], "TASK_STATE_CANCELED");
+    assert_eq!(
+        original["cancellation"]["receipt"], "cancellation_confirmed",
+        "terminal finalization must remain durable on the accepted physical A"
+    );
+}

@@ -37,6 +37,7 @@ impl AnchoredRunStatusOpenError {
 /// status read and atomic replacement. The status mutex is keyed by the same
 /// opened directory's device/inode identity, so aliases share serialization
 /// while a replacement directory cannot inherit the original lock.
+#[derive(Clone)]
 pub(crate) struct AnchoredRunStatus {
     directory: Arc<File>,
     run_dir: PathBuf,
