@@ -76,11 +76,11 @@ if grep -q '^ *FAIL \[' "${INPUT}"; then
   echo "nextest-slow-diff: INCOMPLETE_RUN — nextest reported a failed test" >&2
   exit 2
 fi
-if ! grep -q '^Summary \[' "${INPUT}"; then
+if ! grep -q '^ *Summary \[' "${INPUT}"; then
   echo "nextest-slow-diff: INCOMPLETE_RUN — terminal nextest Summary missing" >&2
   exit 2
 fi
-if grep '^Summary \[' "${INPUT}" | grep -qiE '([0-9]+ failed|[0-9]+ cancelled|[0-9]+ canceled|timed out)'; then
+if grep '^ *Summary \[' "${INPUT}" | grep -qiE '([0-9]+ failed|[0-9]+ cancelled|[0-9]+ canceled|timed out)'; then
   echo "nextest-slow-diff: INCOMPLETE_RUN — terminal nextest Summary is not green" >&2
   exit 2
 fi

@@ -70,10 +70,19 @@ class NextestSlowDiffTests(unittest.TestCase):
     def test_complete_green_run_accepts_rostered_slow(self) -> None:
         result = run_gate(
             f"SLOW [ 35.000s] (1/1) {ROSTERED}\n"
-            "Summary [ 35.001s] 1 test run: 1 passed, 1 slow\n"
+            "     Summary [ 35.001s] 1 test run: 1 passed, 1 slow\n"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("all slow tests are in the roster", result.stdout)
+
+    def test_complete_green_flaky_run_is_still_a_valid_slow_measurement(self) -> None:
+        result = run_gate(
+            "TRY 1 FAIL [ 0.010s] crate tests::flaky\n"
+            "     FLAKY 2/2 [ 0.020s] crate tests::flaky\n"
+            "     Summary [ 0.030s] 1 test run: 1 passed (1 flaky)\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no slow tests", result.stdout)
 
     def test_complete_green_run_rejects_new_slow(self) -> None:
         result = run_gate(
