@@ -213,6 +213,91 @@ mod cancellation_receipt_regression_tests {
     #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
+    async fn cancel_reuses_the_accepted_anchor_after_visible_run_directory_replacement() {
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("home");
+        let runs = tempfile::tempdir().expect("runs");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
+        let dispatch_id = "20260825T182503Z-accepted-anchor";
+        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("accepted run directory");
+        let status_body = json!({
+            "dispatch_id": dispatch_id,
+            "state": "TASK_STATE_WORKING",
+            "status_revision": 1,
+            "execution_classification": "managed_custom",
+            "lifecycle_owner": "memory_server_managed_custom",
+        })
+        .to_string();
+        std::fs::write(run_dir.join("status.json"), &status_body).expect("accepted status");
+
+        let server =
+            Arc::new(MemoryServer::new(home.path().join("server.sqlite"), None).expect("server"));
+        let (mut receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("register control");
+        let accepted = AnchoredRunStatus::open(&run_dir).expect("open accepted anchor");
+        assert!(
+            server
+                .managed_run_controls
+                .retain_accepted_status_anchor(dispatch_id, accepted.clone())
+                .expect("retain accepted anchor"),
+            "the run registration must own the first accepted anchor"
+        );
+
+        let parked_run_dir = runs.path().join("parked-accepted-run");
+        std::fs::rename(&run_dir, &parked_run_dir).expect("park accepted run directory");
+        std::fs::create_dir_all(&run_dir).expect("replacement run directory");
+        std::fs::write(run_dir.join("status.json"), &status_body).expect("replacement status");
+        let replacement_before =
+            std::fs::read(run_dir.join("status.json")).expect("replacement status before cancel");
+
+        let request_server = Arc::clone(&server);
+        let request = tokio::spawn(async move {
+            request_managed_custom_cancel(&request_server, dispatch_id, 1).await
+        });
+        let command = receiver.recv().await.expect("receive cancellation command");
+        assert!(
+            command.status_anchor.same_opened_directory(&accepted),
+            "cancellation must reuse the descriptor authority accepted before replacement"
+        );
+        assert!(
+            command
+                .response
+                .send(CancelCompletion::Unavailable("test_unavailable"))
+                .is_ok(),
+            "return cancellation outcome"
+        );
+        let response: Value = serde_json::from_str(
+            &request
+                .await
+                .expect("join cancellation request")
+                .expect("cancellation response"),
+        )
+        .expect("response JSON");
+
+        let accepted_status: Value = serde_json::from_slice(
+            &std::fs::read(parked_run_dir.join("status.json"))
+                .expect("accepted status after cancel"),
+        )
+        .expect("accepted status JSON");
+        assert_eq!(response["receipt"], "cancellation_unavailable");
+        assert_eq!(response["reason"], "test_unavailable");
+        assert_eq!(accepted_status["cancellation"], response);
+        assert_eq!(
+            std::fs::read(run_dir.join("status.json")).expect("replacement status after cancel"),
+            replacement_before,
+            "the replacement run directory must remain untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
     async fn managed_custom_cancel_rejects_a_symlinked_run_directory_outside_runs_root() {
         let _serial = crate::utils::global_test_lock()
             .lock()
@@ -517,7 +602,7 @@ impl ManagedRunControlRegistry {
             return Err("absent_same_daemon_handle");
         };
         match entry.status_anchor.as_ref() {
-            Some(accepted) if accepted.same_physical_directory(&status_anchor) => Ok(false),
+            Some(accepted) if accepted.same_opened_directory(&status_anchor) => Ok(false),
             Some(_) => Err("accepted_status_anchor_mismatch"),
             None => {
                 entry.status_anchor = Some(status_anchor);
@@ -540,7 +625,7 @@ impl ManagedRunControlRegistry {
             return Err("absent_same_daemon_handle");
         };
         match entry.status_anchor.as_ref() {
-            Some(accepted) if accepted.same_physical_directory(&status_anchor) => {}
+            Some(accepted) if accepted.same_opened_directory(&status_anchor) => {}
             Some(_) => return Err("accepted_status_anchor_mismatch"),
             None => entry.status_anchor = Some(status_anchor),
         }
@@ -570,7 +655,7 @@ impl ManagedRunControlRegistry {
             if entry
                 .status_anchor
                 .as_ref()
-                .is_some_and(|accepted| accepted.same_physical_directory(status_anchor))
+                .is_some_and(|accepted| accepted.same_opened_directory(status_anchor))
             {
                 entry.status_anchor = None;
             }
@@ -638,16 +723,23 @@ pub(crate) async fn request_managed_custom_cancel(
                 "invalid_dispatch_identity",
             ));
         }
-        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
-        let status_dir = match AnchoredRunStatus::open(&run_dir) {
-            Ok(status_dir) => status_dir,
-            Err(error) => {
-                return Ok(unavailable(
-                    dispatch_id,
-                    expected,
-                    None,
-                    error.cancellation_reason(),
-                ));
+        let status_dir = if let Some(accepted) = server
+            .managed_run_controls
+            .accepted_status_anchor(dispatch_id)
+        {
+            accepted
+        } else {
+            let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
+            match AnchoredRunStatus::open(&run_dir) {
+                Ok(status_dir) => status_dir,
+                Err(error) => {
+                    return Ok(unavailable(
+                        dispatch_id,
+                        expected,
+                        None,
+                        error.cancellation_reason(),
+                    ));
+                }
             }
         };
         let lock = status_dir.lock();

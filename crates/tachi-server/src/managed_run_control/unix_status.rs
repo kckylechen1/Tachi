@@ -94,7 +94,10 @@ impl AnchoredRunStatus {
         Arc::clone(&self.lock)
     }
 
-    pub(crate) fn same_physical_directory(&self, other: &Self) -> bool {
+    /// True only for clones of the exact descriptor authority accepted into
+    /// the registry. This deliberately does not equate separately opened
+    /// descriptors by reusable device/inode metadata.
+    pub(crate) fn same_opened_directory(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.directory, &other.directory)
     }
 
